@@ -30,7 +30,8 @@ const IDENTITY_TXT: &str = "identity.txt";
 /// Test: `load_palace_missing_returns_not_found` pins which absences earn
 /// `NotFound`; `load_palace_propagates_an_unstattable_palace_json` pins that an
 /// undeterminable one earns `Io` instead. The #9274 format and backup arms are
-/// covered in palace_format_tests.rs and format_backup_tests.rs.
+/// covered in palace_format_tests.rs and format_backup_tests.rs; the #9918
+/// behind-format messages in `behind_format_refusals_tell_the_operator_what_to_do`.
 // #9274: `non_exhaustive` so later format arms are not a semver break.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -59,21 +60,26 @@ pub enum PalaceStoreError {
         found: u32,
         supported: u32,
     },
-    /// #9274 (ADR-0067 D3 rule 2): the palace is one format behind.
+    /// #9274 (ADR-0067 D3 rule 2): the palace is behind this binary's format.
+    /// #9918: any number of formats behind; the daemon's writer open migrates it.
     #[error(
-        "FormatNeedsMigration: palace {palace} is at format {found}, one behind the format \
-         {supported} this binary reads; start the trusty-memory daemon so it can migrate the palace"
+        "FormatNeedsMigration: palace {palace} is at format {found}, older than the format \
+         {supported} this binary reads; restart the daemon that owns the palace (the \
+         trusty-memory daemon, or `tm daemon run` for the Session Manager and portfolio \
+         palaces), which migrates it to format {supported} behind a verified backup, then \
+         retry; `trusty-memory doctor` lists palaces still awaiting migration"
     )]
     FormatNeedsMigration {
         palace: String,
         found: u32,
         supported: u32,
     },
-    /// #9274 (ADR-0067 D3 rule 2): the palace is two or more formats behind.
+    /// #9274 (ADR-0067 D3 rule 2): the palace is older than the oldest format
+    /// this binary migrates (#9918: `OLDEST_MIGRATABLE_FORMAT`).
     #[error(
-        "FormatTooOld: palace {palace} is at format {found}, more than one behind the format \
-         {supported} this binary reads; open it first with a release that reads format {}",
-        .found + 1
+        "FormatTooOld: palace {palace} is at format {found}, which this binary cannot migrate \
+         to format {supported}; install a trusty-memory release that migrates format {found}, \
+         start its daemon once so it migrates the palace, then retry with this release"
     )]
     FormatTooOld {
         palace: String,

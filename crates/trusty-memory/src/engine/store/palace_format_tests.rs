@@ -237,8 +237,10 @@ fn read_only_open_of_n_minus_1_is_refused_with_migration_hint() {
         ),
         "{err}"
     );
+    // #9918: the reworded hint; full text in `behind_format_refusals_tell_the_operator_what_to_do`.
     assert!(
-        err.to_string().contains("start the trusty-memory daemon"),
+        err.to_string()
+            .contains("restart the daemon that owns the palace"),
         "{err}"
     );
 }
@@ -422,6 +424,27 @@ fn check_format_classifies_every_distance() {
     assert_eq!(name(0), Some("FormatNeedsMigration"));
     let old = check_format_with("p", 0, 2, 1).expect_err("below the oldest");
     assert_eq!(old.variant_name(), "FormatTooOld", "{old}");
+}
+
+/// #9918: each behind-format refusal names what the operator does next.
+#[test]
+fn behind_format_refusals_tell_the_operator_what_to_do() {
+    let needs = check_format("p", 0, 2).expect_err("behind");
+    assert_eq!(
+        needs.to_string(),
+        "FormatNeedsMigration: palace p is at format 0, older than the format 2 this binary \
+         reads; restart the daemon that owns the palace (the trusty-memory daemon, or `tm daemon \
+         run` for the Session Manager and portfolio palaces), which migrates it to format 2 \
+         behind a verified backup, then retry; `trusty-memory doctor` lists palaces still \
+         awaiting migration"
+    );
+    let old = check_format_with("p", 0, 2, 1).expect_err("below the oldest");
+    assert_eq!(
+        old.to_string(),
+        "FormatTooOld: palace p is at format 0, which this binary cannot migrate to format 2; \
+         install a trusty-memory release that migrates format 0, start its daemon once so it \
+         migrates the palace, then retry with this release"
+    );
 }
 
 /// Every new arm reports its variant name first, so the MCP message names it.
