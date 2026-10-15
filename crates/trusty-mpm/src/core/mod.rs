@@ -424,7 +424,10 @@ pub mod trusty_tools_config;
 pub mod twin_arming;
 // #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
 pub mod architect_compat;
+// #8436: the Architect's fixed core and its composed prompt.
+pub mod architect_core;
 pub mod architect_launch;
+pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;
 // #8981: the Architect's conversation id, resumed by the next `tm fleet init`.
