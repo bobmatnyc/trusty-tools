@@ -341,11 +341,28 @@ fn vercel_path_overlay_is_the_pinned_program_dir_and_system_dirs() {
 const HOSTILE_CHILD: &str = "TRUSTY_SECRETS_TEST_9069_VERCEL_HOSTILE_CHILD";
 
 /// The hostile values the child inherits; none may reach `vercel`.
-const HOSTILE: [(&str, &str); 4] = [
+///
+/// #9069: D3, D4 — after the four `VERCEL_*` names, one name from each other
+/// stripped group: `NODE_`, `NOW_`, `npm_config_`, `NPM_CONFIG_`, the proxy
+/// names in both cases, and the `SSL_CERT_*` names.
+const HOSTILE: [(&str, &str); 14] = [
     ("VERCEL_ORG_ID", "team_hostile9069"),
     ("VERCEL_PROJECT_ID", "prj_hostile9069"),
     ("VERCEL_TOKEN", "tok_hostile9069"),
     ("VERCEL_SCOPE", "scope_hostile9069"),
+    ("NODE_OPTIONS", "--require=/hostile9069/node_options.js"),
+    ("NODE_EXTRA_CA_CERTS", "/hostile9069/node_ca.pem"),
+    ("NOW_TOKEN", "now_tok_hostile9069"),
+    (
+        "npm_config_registry",
+        "http://hostile9069.invalid/npm_lower",
+    ),
+    ("NPM_CONFIG_USERCONFIG", "/hostile9069/npmrc_upper"),
+    ("HTTPS_PROXY", "http://hostile9069.invalid:1/https_upper"),
+    ("https_proxy", "http://hostile9069.invalid:2/https_lower"),
+    ("NO_PROXY", "hostile9069-no-proxy-upper"),
+    ("SSL_CERT_FILE", "/hostile9069/ssl_cert_file.pem"),
+    ("SSL_CERT_DIR", "/hostile9069/ssl_cert_dir"),
 ];
 
 /// Why: V4, D7 — a checkout's `.vercel/project.json` and inherited
@@ -358,8 +375,23 @@ const HOSTILE: [(&str, &str); 4] = [
 /// Test: itself.
 #[test]
 fn vercel_child_runs_in_an_empty_dir_with_mapping_ids_and_no_inherited_vercel_env() {
-    let inherited =
-        ["HOME", "VERCEL_ENV", "PATH", "VERCEL_DEBUG", "NOT_VERCEL_X"].map(OsString::from);
+    let inherited = [
+        "HOME",
+        "VERCEL_ENV",
+        "PATH",
+        "VERCEL_DEBUG",
+        "NOT_VERCEL_X",
+        "NODE_PATH",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NOW_REGION",
+        "npm_config_cache",
+        "NPM_CONFIG_PREFIX",
+        "SSL_CERT_FILE",
+        "MY_NODE_X",
+        "npm_package_name",
+        "SSL_CERT_X",
+    ]
+    .map(OsString::from);
     let removed = steering_vars(inherited);
     for name in [
         "VERCEL_ORG_ID",
@@ -368,10 +400,33 @@ fn vercel_child_runs_in_an_empty_dir_with_mapping_ids_and_no_inherited_vercel_en
         "VERCEL_SCOPE",
         "VERCEL_ENV",
         "VERCEL_DEBUG",
+        "NODE_PATH",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NOW_REGION",
+        "npm_config_cache",
+        "NPM_CONFIG_PREFIX",
+        "SSL_CERT_FILE",
+        // Named without being inherited: removed from every run (D4).
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
     ] {
         assert!(removed.contains(&OsString::from(name)), "{name}");
     }
-    for kept in ["HOME", "PATH", "NOT_VERCEL_X"] {
+    for kept in [
+        "HOME",
+        "PATH",
+        "NOT_VERCEL_X",
+        "MY_NODE_X",
+        "npm_package_name",
+        "SSL_CERT_X",
+    ] {
         assert!(!removed.contains(&OsString::from(kept)), "{kept}");
     }
 
