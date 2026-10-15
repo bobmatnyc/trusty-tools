@@ -24,6 +24,20 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// #9271: the memory tests seed the engine's mock embedder, a trusty-memory test
+// feature since the engine moved there. Name the missing feature rather than
+// fail on a missing `seed_shared_embedder_with_mock`.
+#[cfg(all(
+    test,
+    any(feature = "sm-memory", feature = "manager-memory"),
+    not(feature = "memory-test-support")
+))]
+compile_error!(
+    "the `sm-memory` / `manager-memory` tests need the engine's mock embedder: \
+     add `memory-test-support`, e.g. \
+     `cargo test -p trusty-mpm --features sm-memory,manager-memory,memory-test-support`"
+);
+
 // ── Always-on library modules ────────────────────────────────────────────────
 
 /// Service manifest schema, discovery engine, and status types for `tm services`.

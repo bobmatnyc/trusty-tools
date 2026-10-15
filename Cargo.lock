@@ -11262,7 +11262,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.63.1"
+version = "0.64.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11281,7 +11281,6 @@ dependencies = [
  "clap",
  "colored 2.2.0",
  "crossterm",
- "dashmap 6.2.1",
  "dirs 5.0.1",
  "dotenvy",
  "fastembed",
@@ -11290,12 +11289,10 @@ dependencies = [
  "futures",
  "futures-util",
  "genco",
- "git2",
  "globset",
  "hex",
  "hf-hub 0.3.2",
  "hmac 0.12.1",
- "hnsw_rs",
  "image",
  "indexmap 2.14.0",
  "keyring",
@@ -11305,7 +11302,6 @@ dependencies = [
  "ort",
  "parking_lot",
  "petgraph 0.8.3",
- "postcard",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -11346,7 +11342,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
- "unicode-normalization",
  "url",
  "uuid",
  "walkdir",
@@ -11547,7 +11542,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11558,12 +11553,18 @@ dependencies = [
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",
+ "git2",
+ "hex",
+ "hnsw_rs",
+ "image",
  "libc",
  "lru 0.16.4",
  "open",
  "parking_lot",
+ "petgraph 0.8.3",
  "postcard",
  "redb 4.3.0",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -11583,6 +11584,8 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "trusty-mcp",
+ "trusty-memory",
+ "unicode-normalization",
  "uuid",
 ]
 

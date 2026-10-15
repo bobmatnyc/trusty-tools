@@ -1,0 +1,1171 @@
+//! `PalaceHandle` — per-palace storage handle with write/read operations.
+//!
+//! Why: Extracted from retrieval/mod.rs to keep each file under the 500-SLOC
+//! cap (#607). Owns the struct definition and all its `impl` methods.
+//! What: `PalaceHandle` struct plus `new`, `open`, `flush`, `remember`,
+//! `remember_with_options`, `forget`, `list_drawers`, `purge_expired`,
+//! `rebuild_closets`, `is_compacting`, `is_read_only` (`refresh_l1` is in
+//! `l1.rs`).
+//! Test: `registry_create_and_open`, `cli_remember_and_recall`, and
+//! the full retrieval test suite in retrieval::tests.
+
+// #4906: the deferred-embed lane — retry, then durably record what was lost.
+use super::deferred_embed;
+use super::types::{ForgetOutcome, RememberOptions};
+// #6366: the bounded write critical section this handle's `remember` runs in.
+use super::write_pipeline;
+use crate::engine::analytics::{RecallEvent, RecallLog, query_hash};
+use crate::engine::decay::DecayConfig;
+use crate::engine::dream::extract_keywords;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::format_migration;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::l1_cache::L1Cache;
+use crate::engine::store::palace_store::PalaceStore;
+use crate::engine::store::vector::{CompactionResult, UsearchStore, VectorStore};
+use crate::engine::timeouts;
+use anyhow::{Context, Result};
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use uuid::Uuid;
+
+const RECALL_LOG_FILENAME: &str = "recall.db";
+
+/// Sentinel `last_accessed` value meaning "never genuinely accessed".
+///
+/// Why (#7087): a disk open is bookkeeping, not use. Stamping "now" at open
+/// made a restart burst (`load_palaces_from_disk` opening every persisted
+/// palace) look like a burst of fresh recalls to `evict_idle`, so the idle
+/// sweep left every handle resident regardless of whether anything queried
+/// them afterward.
+/// What: the unix epoch (0). `idle_secs()` then reports the full time since
+/// boot, so an opened-but-never-touched handle reads as idle immediately —
+/// eligible for `evict_idle` on its very first sweep once unreferenced.
+/// Test: `registry_tests::open_does_not_reset_idle_clock`.
+const NEVER_ACCESSED: u64 = 0;
+
+tokio::task_local! {
+    /// Set while a cross-palace fan-out runs; [`PalaceHandle::touch`] is then a
+    /// no-op (#9299, ADR-0071 D2). Read by `touch`, set by
+    /// [`PalaceHandle::without_idle_touch`].
+    static IDLE_TOUCH_SUPPRESSED: ();
+}
+
+/// Current unix time in whole seconds, saturating to 0 before the epoch.
+///
+/// Why: `last_accessed` idle tracking (issue: idle-to-disk eviction) needs a
+/// cheap, monotonic-enough wall clock to stamp every recall / remember. Whole
+/// seconds are ample granularity for a multi-minute idle TTL and keep the
+/// stamp in a single lock-free `AtomicU64`.
+/// What: reads `SystemTime::now()` as seconds since the unix epoch.
+/// Test: exercised indirectly by `idle_evict` tests via `PalaceHandle::touch`.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Per-palace handle. Cheap to clone (all heavyweight state lives behind `Arc`).
+///
+/// Why: The registry hands out `Arc<PalaceHandle>` to many concurrent tasks;
+/// the handle owns the vector store, KG pool, the in-memory drawer table used
+/// by retrieval to map vector hits back to metadata, and the pre-cached L0/L1
+/// payloads.
+/// What: Bundles `PalaceId`, identity text, the live L1 in `l1_drawers`
+/// (an `Arc<RwLock<Vec<Drawer>>>` of the top `L1_CAP` (15)
+/// drawers, refreshed on every write, #9719), `Arc<UsearchStore>`,
+/// `Arc<KnowledgeGraph>`, and an `Arc<RwLock<Vec<Drawer>>>` for the in-memory
+/// drawer table.
+/// Test: See `l0_l1_always_present` (constructor + cache) and
+/// `l2_returns_relevant_drawer` (storage handles wired correctly).
+pub struct PalaceHandle {
+    pub id: PalaceId,
+    pub identity: String,
+    /// #9719: refreshed by every write path; see `l1.rs`.
+    pub l1_drawers: Arc<RwLock<Vec<Drawer>>>,
+    pub vector_store: Arc<UsearchStore>,
+    pub kg: Arc<KnowledgeGraph>,
+    pub drawers: Arc<RwLock<Vec<Drawer>>>,
+    /// Whether any persisted drawer row failed to load, so this handle is
+    /// serving a degraded (incomplete) view of the palace.
+    ///
+    /// Why: #6201 — `open_with_intent` deliberately fails open on drawer-load
+    /// trouble so the palace still opens instead of becoming unopenable. Two
+    /// paths degrade the corpus: the whole `DRAWERS` table failing to open
+    /// (empty fallback), and individual rows being skipped as unreadable while
+    /// the rest load (partial fallback — the more common corruption case). Both
+    /// left the resulting handle indistinguishable from a genuinely empty or
+    /// complete palace, so a caller had no signal it was missing corpus. This
+    /// flag is that signal.
+    /// What: `true` whenever a drawer row failed to load — the whole-table Err
+    /// arm OR a per-row skip (`load_drawers_with_skipped` reporting `skipped >
+    /// 0`) in `open_with_intent`. `false` on a fully successful load (a
+    /// legitimately empty table included) and for in-memory handles built via
+    /// `new`. The `warn!` logs on both paths are kept — this is the structured
+    /// twin, not a replacement.
+    /// Test: `drawer_load_degraded_true_on_corrupt_table_false_when_empty`
+    /// (whole-table) and `drawer_load_degraded_true_on_partial_row_corruption`
+    /// (per-row skip).
+    pub drawer_load_degraded: bool,
+    /// On-disk data directory for this palace (where palace.json,
+    /// identity.txt, l1_cache.json, the usearch index, and the KG redb
+    /// store all live). `None` for in-memory tests built via `new`.
+    pub data_dir: Option<std::path::PathBuf>,
+    /// Temporal decay configuration applied during L2/L3 ranking.
+    ///
+    /// Why: Old drawers should fade unless refreshed by access; baking the
+    /// config into the handle keeps retrieval calls free of extra parameters
+    /// while still allowing per-palace overrides later.
+    /// What: Defaults to `DecayConfig::default()` (90-day half-life, 0.05 floor).
+    /// Test: `decay_applied_in_l2_score` confirms an aged drawer ranks below a
+    /// fresh one of identical importance.
+    pub decay_config: DecayConfig,
+    /// Optional recall analytics log. When `Some`, each `recall` /
+    /// `recall_deep` call fires a fire-and-forget event per result (or a
+    /// single miss event when the query returned nothing).
+    ///
+    /// Why: Closes the feedback loop without blocking the request path.
+    /// What: `None` by default so existing tests don't need a log directory.
+    /// Test: `recall_logs_events_when_log_present` exercises the wiring.
+    pub recall_log: Option<Arc<RecallLog>>,
+    /// Closet pointer index: keyword -> drawer ids. Rebuilt during dream cycles.
+    ///
+    /// Why: Closets accelerate L2 by mapping topic keywords to candidate drawer
+    /// ids without touching the vector store. The map is updated by
+    /// `dream::Dreamer::dream_cycle` via NLP-only tokenization (no LLM calls).
+    /// NOT a hierarchy level (ADR-0027 D3): the palace model is
+    /// Palace -> Wing -> Room -> Drawer, and this index is many-to-many — one
+    /// drawer appears under every closet keyword its content contains, whereas
+    /// a level requires exactly one parent.
+    /// What: `Arc<RwLock<HashMap<String, Vec<Uuid>>>>` so reads can run
+    /// concurrently with the (rare) dream-time rebuild.
+    /// Test: `dream::tests::closet_refresh_builds_index`.
+    pub closets: Arc<RwLock<HashMap<String, Vec<Uuid>>>>,
+    /// Set to `true` for the duration of an in-flight `Dreamer::dream_cycle`.
+    ///
+    /// Why: The operator dashboard surfaces a per-palace "compacting / dreaming"
+    /// spinner so writers can see when consolidation is active. A shared
+    /// `AtomicBool` is the cheapest cross-task signal — readers (HTTP handlers)
+    /// poll it with `Relaxed` ordering and writers (the dream loop) flip it on
+    /// entry / exit via a guard so panics don't strand the flag.
+    /// What: `Arc<AtomicBool>` initialised to `false`. Flipped by
+    /// `CompactionGuard::new` (defined in `dream.rs`) at the start of every
+    /// `dream_cycle` and cleared on drop.
+    /// Test: `dream::tests::dream_cycle_toggles_is_compacting`.
+    pub is_compacting: Arc<AtomicBool>,
+    /// Serialises mutating ops (`remember_with_options`, `forget`) on this
+    /// palace so concurrent writers don't race on the L1 snapshot rename,
+    /// the vector store upsert, the KG redb record insert, or the in-memory
+    /// drawer table.
+    ///
+    /// Why: Issue #154 — under 20 concurrent HTTP `memory_remember` calls,
+    /// 30–60 % failed with "save L1 snapshot: io error … No such file or
+    /// directory". The root cause was multiple writers racing on the same
+    /// `l1_cache.json.tmp` file (fixed defensively in `L1Cache`), but the
+    /// broader hazard is that the `remember_with_options` pipeline
+    /// (embed → vector upsert → KG upsert → in-memory push → L1 snapshot)
+    /// has no per-palace ordering guarantee. A per-palace mutex serialises
+    /// those steps so the L1 snapshot always reflects a consistent
+    /// drawer-table state, without blocking reads or cross-palace writes.
+    /// What: `Arc<tokio::sync::Mutex<()>>`. Held only by the mutating
+    /// methods; readers (`recall`, `recall_deep`, `list_drawers`) never
+    /// touch it. Per-palace, not global, so distinct palaces still write
+    /// in parallel. Held across `.await` points, so we use the tokio mutex
+    /// rather than `parking_lot::Mutex` (which would deadlock the runtime).
+    /// Test: `remember_concurrent_does_not_lose_writes` in this module.
+    pub write_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Orders the durable-commit tail of one write against the next writer's,
+    /// independently of [`Self::write_mutex`] (#6366).
+    ///
+    /// Why: the #6366 bound releases `write_mutex` the moment a write exhausts
+    /// its budget, which is the whole point — the queue unblocks. But the
+    /// commit that write already dispatched does not stop: a `spawn_blocking`
+    /// redb transaction runs to completion whatever happens to the future that
+    /// awaited it. That left the next writer free to run its own Tier C
+    /// read-decide-write against a `DRAWERS_BY_FACT_KEY` index the abandoned
+    /// commit was still moving, and against an in-memory table the abandoned
+    /// commit had not yet mirrored into. Its incumbent lookup then took
+    /// `persist_with_retirement`'s "slot names a drawer absent from the
+    /// in-memory table" branch, wrote its newcomer without retiring anyone, and
+    /// left two drawer rows carrying one live `fact_key` — the two-claimant
+    /// state ADR-0028 D5 forbids.
+    /// What: `Arc<tokio::sync::Mutex<()>>`, taken by
+    /// `write_pipeline::run_pipeline` immediately before the commit and held —
+    /// as an owned guard moved into an uncancellable task — across
+    /// `persist_with_retirement` AND the in-memory mirror. It therefore
+    /// outlives `write_mutex` whenever a write is abandoned mid-commit, so the
+    /// next writer's incumbent read cannot begin until the previous commit has
+    /// landed in redb and in `drawers` both. Narrower than `write_mutex` by
+    /// design: it covers only the commit, never the embed.
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    pub commit_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Unix-seconds timestamp of the last genuine user access (recall / remember
+    /// / forget). Drives idle-to-disk eviction.
+    ///
+    /// Why: a long-lived daemon hydrates every palace's drawer table, HNSW
+    /// graph, and KG adjacency into RAM (~90 MB each) and — even with the LRU
+    /// cap — keeps up to `max_open` palaces resident regardless of whether
+    /// anyone is querying them, driving idle RSS to multiple GB. The
+    /// idle-evict ticker reads this stamp to drop the entire handle (freeing
+    /// all heavy fields) for palaces idle past `TRUSTY_MEMORY_IDLE_EVICT_SECS`;
+    /// the durable redb store is the source of truth and the next access
+    /// transparently re-opens from disk (`PalaceRegistry::open_palace`).
+    /// What: `Arc<AtomicU64>`. [`PalaceHandle::new`] (in-memory / test handles
+    /// with no disk-open step) still initialises it to "now". [`Self::open`] /
+    /// [`Self::open_with_intent`] (the disk-hydration path every real daemon
+    /// restart takes) initialise it to `NEVER_ACCESSED` instead (#7087): an
+    /// open is bookkeeping, not use, so a hydrated-but-never-queried handle
+    /// must read as idle since open rather than as freshly touched. Updated by
+    /// [`PalaceHandle::touch`] on every user recall/remember/forget;
+    /// suppressed during dream cycles (see `touch`) so internal consolidation
+    /// never resets the idle clock.
+    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
+    /// `registry_tests::open_does_not_reset_idle_clock`,
+    /// `registry_tests::touch_after_open_makes_handle_recent`.
+    pub last_accessed: Arc<AtomicU64>,
+    /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub(crate) fail_next_verify_record: Arc<AtomicBool>,
+}
+
+impl PalaceHandle {
+    /// Read the current compaction flag without acquiring a lock.
+    ///
+    /// Why: HTTP handlers that build `PalaceInfo` responses need the live
+    /// compaction status without taking any lock that the dream cycle holds;
+    /// a cheap `load(Relaxed)` keeps the path contention-free.
+    /// What: Returns the current value of `is_compacting`.
+    /// Test: `dream::tests::dream_cycle_toggles_is_compacting`.
+    pub fn is_compacting(&self) -> bool {
+        self.is_compacting.load(Ordering::Relaxed)
+    }
+
+    /// Whether this palace handle was opened against read-only snapshots of
+    /// its underlying redb files.
+    ///
+    /// Why: Issue #59 — when the HTTP daemon already holds the exclusive
+    /// `flock` on a palace's `kg.redb` and `index.usearch.redb`, a stdio
+    /// MCP client falls back to per-process snapshot copies so it can
+    /// still serve `recall`, `kg_query`, and `palace_info`. Write surfaces
+    /// (`remember`, `forget`, `kg_assert`, dream compaction) consult this
+    /// flag and return a clear "writes go through the HTTP daemon" error
+    /// instead of mutating the throw-away snapshot.
+    /// What: Returns `true` when either the KG store or the vector store
+    /// reports it is operating against a snapshot.
+    /// Test: `palace_handle_read_only_when_locked_by_another_process`.
+    pub fn is_read_only(&self) -> bool {
+        self.kg.is_read_only() || self.vector_store.is_read_only()
+    }
+
+    /// Return a clone of the write mutex for use in tests.
+    ///
+    /// Why: Tests that simulate a held write lock need access to the mutex so
+    /// they can acquire it in a background task before calling `remember`.
+    /// Exposing a test-only accessor rather than poking the field directly
+    /// keeps the field visibility flexible and makes intent explicit.
+    /// What: Returns `Arc::clone(&self.write_mutex)`.
+    /// Test: `write_lock_timeout_returns_error_when_held` in `timeout_tests`.
+    #[cfg(test)]
+    pub fn write_mutex_for_test(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.write_mutex)
+    }
+
+    /// The owned slice of this palace a detached durable commit needs (#6366).
+    ///
+    /// Why: the commit tail runs in a task the caller's timeout cannot cancel,
+    /// so it cannot borrow the handle. Every field it touches is already
+    /// behind an `Arc`, so the tail needs a bundle of clones rather than an
+    /// `Arc<PalaceHandle>` — which would force `remember_with_options` to take
+    /// `self: &Arc<Self>` and break the in-memory `PalaceHandle::new` callers.
+    /// What: clones the palace id, the KG handle, and the in-memory drawer
+    /// table into a [`tier_c::CommitCtx`].
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    pub(super) fn commit_ctx(&self) -> super::tier_c::CommitCtx {
+        super::tier_c::CommitCtx {
+            palace: self.id.clone(),
+            kg: Arc::clone(&self.kg),
+            drawers: Arc::clone(&self.drawers),
+            // Never stalled in production; a test opts in per commit.
+            #[cfg(test)]
+            commit_delay: None,
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::clone(&self.fail_next_verify_record),
+        }
+    }
+
+    /// #9390 test seam: the next slot write's verify record fails after its
+    /// drawer commits, as a failed KG write would.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn fail_next_verify_record_for_test(&self) {
+        self.fail_next_verify_record.store(true, Ordering::SeqCst);
+    }
+
+    /// Construct a new `PalaceHandle` with empty drawer table and L1 cache.
+    ///
+    /// Why: The registry creates handles eagerly when a palace is opened; the
+    /// drawer table and L1 cache are populated incrementally as memories are
+    /// loaded or written.
+    /// What: Wraps the storage handles in `Arc`s and initializes the drawer
+    /// table and L1 cache to empty.
+    /// Test: `make_handle` in tests round-trips through this constructor.
+    pub fn new(
+        id: PalaceId,
+        identity: String,
+        vector_store: UsearchStore,
+        kg: KnowledgeGraph,
+    ) -> Self {
+        Self {
+            id,
+            identity,
+            l1_drawers: Arc::default(),
+            vector_store: Arc::new(vector_store),
+            kg: Arc::new(kg),
+            drawers: Arc::new(RwLock::new(Vec::new())),
+            // #6201: an in-memory handle never loaded a persisted table, so it
+            // is empty-by-construction, not degraded.
+            drawer_load_degraded: false,
+            data_dir: None,
+            decay_config: DecayConfig::default(),
+            recall_log: None,
+            closets: Arc::new(RwLock::new(HashMap::new())),
+            is_compacting: Arc::new(AtomicBool::new(false)),
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
+        }
+    }
+
+    /// Record a genuine user access, resetting the idle clock.
+    ///
+    /// Why: idle-to-disk eviction must fire only for palaces no *user* has
+    /// touched in the TTL window. Internal dream-cycle consolidation (dedup /
+    /// prune / semantic passes) calls the same `remember`/`forget` methods, so
+    /// stamping unconditionally there would keep an actively-dreaming-but-idle
+    /// palace resident forever. The dream cycle sets `is_compacting` for its
+    /// whole duration (via `CompactionGuard`), so gating on that flag cleanly
+    /// suppresses maintenance-driven touches without threading a flag through
+    /// every pass.
+    /// What: stores `now` into `last_accessed` unless a dream cycle is in
+    /// flight (`is_compacting`) or the caller runs inside
+    /// [`Self::without_idle_touch`], in which case it is a no-op.
+    /// Test: `registry_tests::touch_suppressed_during_compaction`,
+    /// `registry_tests::touch_suppressed_inside_without_idle_touch`.
+    pub fn touch(&self) {
+        // #9299: a recall_all fan-out is not a user access (ADR-0071 D2).
+        if self.is_compacting.load(Ordering::Relaxed)
+            || IDLE_TOUCH_SUPPRESSED.try_with(|_| ()).is_ok()
+        {
+            return;
+        }
+        self.last_accessed
+            .store(now_epoch_secs(), Ordering::Relaxed);
+    }
+
+    /// Run `fut` with every [`Self::touch`] inside it suppressed.
+    ///
+    /// Why (#9299, ADR-0071 D2): `memory_recall_all` searches every resident
+    /// palace through the same `recall` path a targeted call uses, and that
+    /// path calls `touch`. A recall_all every few minutes would then keep the
+    /// whole resident set alive forever, so residency would follow the
+    /// fan-out instead of the operator's targeted use.
+    /// What: runs `fut` inside a task-local scope that `touch` checks. The
+    /// scope covers `fut` and everything it awaits on the same task, including
+    /// `join_all` fan-outs; work moved to another task via `tokio::spawn` is
+    /// outside it.
+    /// Test: `registry_tests::touch_suppressed_inside_without_idle_touch`.
+    pub async fn without_idle_touch<F: std::future::Future>(fut: F) -> F::Output {
+        IDLE_TOUCH_SUPPRESSED.scope((), fut).await
+    }
+
+    /// Seconds since the last genuine user access.
+    ///
+    /// Why: the idle-evict ticker compares this against its TTL threshold to
+    /// decide which handles to drop.
+    /// What: `now - last_accessed`, saturating at 0 (clock skew safe).
+    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`.
+    pub fn idle_secs(&self) -> u64 {
+        now_epoch_secs().saturating_sub(self.last_accessed.load(Ordering::Relaxed))
+    }
+
+    /// Open a palace from disk, hydrating identity.txt, the L1 snapshot, the
+    /// vector index, and the KG.
+    ///
+    /// Why: A long-lived daemon must reconstruct a palace from its on-disk
+    /// state every time the registry is asked for one that isn't yet loaded.
+    /// What: Creates the data directory if missing, loads identity.txt
+    /// (defaulting to empty), loads the L1 snapshot (defaulting to empty),
+    /// opens the usearch index at `<data_dir>/index.usearch` (384-d), and
+    /// opens the KG redb store at `<data_dir>/kg.redb`. The drawer table is
+    /// loaded from redb. Until the palace is stamped `drawers_authoritative`,
+    /// the L1 snapshot fills drawers missing from it (the #32 migration), and
+    /// the maintainer's open persists them and stamps the marker (#9722). L1
+    /// is selected from the merged table.
+    /// Test: `registry_create_and_open` creates a palace, drops the registry,
+    /// and re-opens it.
+    pub fn open(palace: &Palace) -> Result<Arc<PalaceHandle>> {
+        Self::open_with_intent(palace, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open a palace from disk with the caller's redb open intent.
+    ///
+    /// Why (issue #1487): the HTTP daemon is the sole writer and must open its
+    /// palaces with [`OpenIntent::Writer`] so a second daemon instance fails
+    /// loud (after the bounded handoff window) instead of silently opening a
+    /// read-only snapshot and rejecting every write for its lifetime. CLI,
+    /// stdio MCP, and test callers keep [`OpenIntent::ReadOnlyClient`] so they
+    /// can still serve reads from a snapshot while the daemon holds the lock.
+    /// What: Same hydration pipeline as [`PalaceHandle::open`], but passes
+    /// `intent` down to `UsearchStore::new_with_intent` and
+    /// `KnowledgeGraph::open_with_intent`. When `Writer` and a second live
+    /// daemon already holds the lock, this returns `Err` (no handle), so the
+    /// daemon process fails to start rather than serving in a broken state.
+    /// The returned handle's `last_accessed` starts at `NEVER_ACCESSED`, not
+    /// "now" (#7087) — see the field doc — so a restart's hydration burst
+    /// doesn't read as a burst of fresh use to `evict_idle`.
+    /// Test: `registry_create_and_open` (default read-only path),
+    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests, and
+    /// `registry_tests::open_does_not_reset_idle_clock`.
+    pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
+        Self::open_with_intent_purging(palace, intent, true)
+    }
+
+    /// [`Self::open_with_intent`], choosing whether the open-time TTL purge
+    /// deletes expired rows.
+    ///
+    /// Why (#8733): the purge is maintenance, which only the data root's
+    /// elected maintainer may run; `PalaceRegistry` passes `false` when this
+    /// process does not hold the `MaintenanceLease`.
+    /// What: with `purge_expired == false` expired drawers are still left out
+    /// of the in-memory table, but no row is deleted.
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    pub fn open_with_intent_purging(
+        palace: &Palace,
+        intent: OpenIntent,
+        purge_expired: bool,
+    ) -> Result<Arc<PalaceHandle>> {
+        let data_dir = &palace.data_dir;
+        // #9274: refuse a newer format, or migrate a format-0 palace (writer).
+        format_migration::open_gate(data_dir, palace.id.as_str(), intent)?;
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
+
+        let identity = PalaceStore::load_identity(data_dir)
+            .with_context(|| format!("load identity for {}", palace.id))?
+            .unwrap_or_default();
+
+        let snapshot = L1Cache::load_l1_cache(data_dir)
+            .with_context(|| format!("load L1 cache for {}", palace.id))?;
+
+        let vector_path = data_dir.join("index.usearch");
+        let vector_store = UsearchStore::new_with_intent(vector_path, 384, intent)
+            .with_context(|| format!("open vector store for {}", palace.id))?;
+
+        let kg_path = data_dir.join("kg.db");
+        let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
+            .with_context(|| format!("open KG for {}", palace.id))?;
+
+        // Load full drawer table from redb (the persistent source of truth).
+        // Fall back to an empty list on error so a corrupt table doesn't make
+        // the palace unopenable — the L1 snapshot still provides essentials.
+        // #6201: record the degrade on the handle so a caller can tell a
+        // corrupt-table fallback apart from a genuinely empty palace, instead
+        // of silently running L1-only. Both degrade paths set the flag: a
+        // whole-table Err (empty fallback) AND a partial load where individual
+        // rows were skipped as unreadable (`load_drawers_with_skipped` counts
+        // them; the per-row warns stay inside that call).
+        let mut drawer_load_degraded = false;
+        let persisted_drawers = match kg.load_drawers_with_skipped() {
+            Ok((d, skipped)) => {
+                if skipped > 0 {
+                    drawer_load_degraded = true;
+                    tracing::warn!(
+                        palace = %palace.id, skipped,
+                        "load_drawers skipped unreadable rows; corpus is degraded (partial)"
+                    );
+                }
+                d
+            }
+            Err(e) => {
+                drawer_load_degraded = true;
+                tracing::warn!(palace = %palace.id, "load_drawers failed, falling back to L1 only: {e:#}");
+                Vec::new()
+            }
+        };
+
+        // Merge: persisted is authoritative; L1 snapshot fills gaps for
+        // palaces created before drawer persistence existed (issue #32 migration).
+        // #9722: only until the drawer table is stamped authoritative.
+        let authority = kg.store().drawers_authoritative();
+        let mut all_drawers = persisted_drawers;
+        let gap_filled = if super::l1::gap_fill_needed(&authority, drawer_load_degraded, &palace.id)
+        {
+            super::l1::gap_fill(&mut all_drawers, &snapshot)
+        } else {
+            HashSet::new()
+        };
+
+        // Issue #61: prune expired session events at open. We delete the
+        // persistent row synchronously here (best-effort — failures are
+        // logged, never fatal) and drop the entry from the in-memory list
+        // so it never participates in recall. Vector tombstones are left
+        // for `palace_compact` since dropping them needs an async call.
+        //
+        // #4885: this sweep is reclamation, not enforcement. It cannot be the
+        // enforcement point because the daemon opens the palace once as
+        // `OpenIntent::Writer` and holds it for the process lifetime, so
+        // anything expiring afterwards is never reconsidered here. The
+        // retrieval layers filter on every read (ADR-0028 D4); this only keeps
+        // the store from accumulating. It shares `is_expired_at` with the read
+        // path so the two cannot disagree about what "expired" means.
+        //
+        // #4886: a Tier C fact is exempt. Its `expires_at` is the retirement
+        // condition D4 demanded at admission, not a lifetime — read-time expiry
+        // already stops it being served, and deleting the row would contradict
+        // D6's "demoted, never deleted". See `Drawer::is_tier_c`.
+        //
+        // #8314: the durable deletes are bounded — a reopen sharing a live
+        // handle's database must not wait forever on that handle's write.
+        let now = chrono::Utc::now();
+        let mut expired_ids = Vec::new();
+        all_drawers.retain(|d| {
+            let expired = d.is_expired_at(now) && !d.is_tier_c();
+            if expired {
+                expired_ids.push(d.id);
+            }
+            !expired
+        });
+        // #8733: only the data root's elected maintainer deletes the rows; a
+        // non-maintainer still hides them from this handle, as reads do, and
+        // writes no #8732 journal record because it deletes nothing.
+        // #9659: an observer's copy takes no write.
+        let pruned = if purge_expired && intent != OpenIntent::Observer {
+            super::open_sweep::reclaim_expired_rows(
+                kg.store(),
+                expired_ids,
+                &palace.id,
+                Some(data_dir.clone()),
+                super::open_sweep::OPEN_WRITE_BUDGET,
+            )
+        } else {
+            0
+        };
+        // #8732: `warn`, so the purge shows at the daemon's default filter.
+        crate::engine::maintenance_log::warn_removed(&palace.id, "open-time TTL purge", pruned);
+
+        // Surface orphaned vectors so operators can re-ingest if needed.
+        // #9275: a chunked drawer's rows count once; see `entry_count`.
+        let index_count = vector_store.entry_count().unwrap_or(0);
+        let drawer_count = all_drawers.len();
+        if index_count > drawer_count + 5 {
+            tracing::warn!(
+                palace = %palace.id,
+                index_vectors = index_count,
+                drawer_records = drawer_count,
+                "vector index has orphaned entries — consider re-ingesting"
+            );
+        }
+
+        // #9722: make the gap-fill durable, then retire it.
+        let maintainer = purge_expired && intent != OpenIntent::Observer;
+        super::l1::maybe_adopt(
+            &kg,
+            &authority,
+            maintainer,
+            drawer_load_degraded,
+            &all_drawers,
+            &gap_filled,
+            &palace.id,
+        );
+        // #9719: L1 is selected from the merged table, not the raw snapshot.
+        let l1_drawers = Arc::new(RwLock::new(super::l1::select_l1(&all_drawers)));
+        let drawers = Arc::new(RwLock::new(all_drawers));
+
+        // Attach a per-palace RecallLog at <data_dir>/recall.db so every disk-
+        // backed palace records hit/miss telemetry by default. A failure to
+        // open the log is non-fatal — log a warning and proceed without
+        // analytics so the palace remains usable.
+        //
+        // Why: Issue #53 — the MCP daemon (and CLI) previously opened palaces
+        // without a recall log, leaving `analytics show` permanently reporting
+        // "not configured". Wiring the log at open-time ensures every consumer
+        // of `PalaceRegistry::open_palace` gets logging for free.
+        // #9140 batch: shared, so a second open of a live palace in this
+        // process reuses the first handle's log instead of failing on redb's lock.
+        // #9659: an observer never opens, so never locks, the live recall.db.
+        let recall_log = match (intent != OpenIntent::Observer)
+            .then(|| RecallLog::open_shared(&data_dir.join(RECALL_LOG_FILENAME)))
+        {
+            None => None,
+            Some(Ok(log)) => Some(log),
+            Some(Err(e)) => {
+                tracing::warn!(palace = %palace.id, "open recall log failed, analytics disabled: {e:#}");
+                None
+            }
+        };
+
+        let handle = PalaceHandle {
+            id: palace.id.clone(),
+            identity,
+            l1_drawers,
+            vector_store: Arc::new(vector_store),
+            kg: Arc::new(kg),
+            drawers,
+            drawer_load_degraded,
+            data_dir: Some(data_dir.clone()),
+            decay_config: DecayConfig::default(),
+            recall_log,
+            closets: Arc::new(RwLock::new(HashMap::new())),
+            is_compacting: Arc::new(AtomicBool::new(false)),
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            // #7087: an on-disk open is not an access — see the field doc.
+            last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
+        };
+        Ok(Arc::new(handle))
+    }
+
+    /// Persist the L1 cache snapshot and identity.txt for this palace.
+    ///
+    /// Why: Mutating paths (drawer ingest, identity edits) must durably record
+    /// state so the next cold start sees up-to-date essentials.
+    /// What: Re-sorts the drawer table by importance descending, snapshots
+    /// the top-15 to `l1_cache.json`, and re-writes `identity.txt`. No-op when
+    /// `data_dir` is `None` (in-memory test handles).
+    /// Test: `registry_create_and_open` confirms identity survives a flush+reopen.
+    pub fn flush(&self) -> Result<()> {
+        let Some(data_dir) = self.data_dir.as_ref() else {
+            return Ok(());
+        };
+        // #9719: the live L1 follows the snapshot.
+        self.save_and_refresh_l1()
+            .with_context(|| format!("save L1 cache for {}", self.id))?;
+        PalaceStore::save_identity(&self.id, &self.identity, data_dir)
+            .with_context(|| format!("save identity for {}", self.id))?;
+        Ok(())
+    }
+
+    /// Attach a recall analytics log to this handle.
+    ///
+    /// Why: Recall logging is opt-in so simple tests don't need to manage a
+    /// redb file; production palaces wire one in at construction time.
+    /// What: Builder-style mutator returning `self`.
+    /// Test: `recall_logs_events_when_log_present` uses this to enable logging.
+    pub fn with_recall_log(mut self, log: Arc<RecallLog>) -> Self {
+        self.recall_log = Some(log);
+        self
+    }
+
+    /// Override the decay configuration for this palace.
+    pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
+        self.decay_config = config;
+        self
+    }
+
+    /// Append a drawer to the in-memory drawer table.
+    ///
+    /// Why: Retrieval needs to map vector hits back to drawer metadata; until
+    /// we have a persistent drawer table the in-memory `Vec<Drawer>` is the
+    /// source of truth.
+    /// What: Acquires the write lock on `drawers` and pushes `drawer`. Caller
+    /// is responsible for invoking `refresh_l1` if importance ranking might
+    /// have changed.
+    /// Test: `l0_l1_always_present` exercises this path.
+    pub fn add_drawer(&self, drawer: Drawer) {
+        let mut drawers = self.drawers.write();
+        drawers.push(drawer);
+    }
+
+    /// Store a new memory: embed, upsert to vector store, append to drawer
+    /// table, and persist the L1 snapshot.
+    ///
+    /// Why: First-class write path for CLI/MCP — keeps the embedding,
+    /// vector-store, drawer-table, and L1 snapshot in one transactional unit
+    /// so callers don't have to thread the steps themselves.
+    /// What: Builds a `Drawer` with a fresh UUID, embeds via `FastEmbedder`,
+    /// inserts the vector keyed by the drawer id, pushes onto the in-memory
+    /// drawer table, refreshes L1, and flushes the snapshot to disk.
+    /// Test: `cli_remember_and_recall` round-trips through this method.
+    pub async fn remember(
+        &self,
+        content: String,
+        room: RoomType,
+        tags: Vec<String>,
+        importance: f32,
+    ) -> Result<Uuid> {
+        self.remember_with_options(content, room, tags, importance, RememberOptions::default())
+            .await
+    }
+
+    /// Store a new memory with explicit filter / classification policy.
+    ///
+    /// Why: Issue #61 — `memory_remember` needs a `force` escape hatch and a
+    /// way for `memory_note` to bypass only the token-length gate (keeping
+    /// the noise patterns). Hoisting the policy into `RememberOptions` keeps
+    /// the surface explicit without forking three near-identical methods.
+    /// Issue #2520 (two-tier `force`): `force` is now a QUALITY-gate bypass
+    /// only (noise patterns, short-content, non-alphabetic ratio) — it no
+    /// longer implicitly disables secret detection. An automated writer that
+    /// always passes `force: true` (e.g. trusty-code's per-turn memory sink)
+    /// must still have raw credentials rejected; only the separate, explicit
+    /// `RememberOptions::allow_secret_like` opt-in bypasses the secret gate.
+    /// What: Applies the supplied `FilterConfig` (skipping it entirely when
+    /// `force == true`), THEN — unless `allow_secret_like == true` — always
+    /// runs [`crate::engine::filter::check_secret`] regardless of
+    /// `force`, classifies the content, sets the appropriate TTL when the
+    /// result is a `SessionEvent`, then
+    /// runs the original embed/upsert/persist pipeline under the default
+    /// write-pipeline ceiling.
+    ///
+    /// **An over-budget error does not mean the write did not land** — see
+    /// [`Self::remember_with_options_within`] for the retry contract (#6366).
+    /// Test: `remember_rejects_short_content`,
+    /// `remember_force_bypasses_filter`, `remember_classifies_session_events`,
+    /// `remember_force_still_blocks_secret`,
+    /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`.
+    pub async fn remember_with_options(
+        &self,
+        content: String,
+        room: RoomType,
+        tags: Vec<String>,
+        importance: f32,
+        opts: RememberOptions,
+    ) -> Result<Uuid> {
+        self.remember_with_options_within(
+            content,
+            room,
+            tags,
+            importance,
+            opts,
+            timeouts::write_pipeline_timeout(),
+        )
+        .await
+    }
+
+    /// Store a new memory under an explicit ceiling on the write critical
+    /// section (issue #6366).
+    ///
+    /// Why: issue #4002 bounded the two waits that happen BEFORE this palace's
+    /// write mutex is held; nothing bounded the pipeline that runs once it IS
+    /// held. A slow commit therefore held the mutex for as long as it took and
+    /// every other writer on the palace queued behind it — three `memory_note`
+    /// calls were aborted client-side after 1800 s while the daemon stayed
+    /// healthy and answered reads throughout. This entry point makes that
+    /// ceiling explicit and injectable, so a caller with its own SLA (and the
+    /// concurrency tests) can set it without mutating process env.
+    /// What: delegates to [`write_pipeline::remember_within`]. On expiry the
+    /// pipeline future is dropped, which releases the write mutex, and the
+    /// caller gets a named error.
+    ///
+    /// **An over-budget error does not mean the write did not land.** Once the
+    /// durable commit has been dispatched it runs to completion regardless of
+    /// the caller's budget — a dropped future cancels neither the
+    /// `spawn_blocking` redb transaction nor an op already queued to the KG
+    /// writer actor — so the drawer can become durable, and visible to
+    /// `recall`, after this call has already returned `Err`. Retrying blind
+    /// therefore DUPLICATES content that carries no `fact_key`; a slotted
+    /// (Tier C) write is idempotent per slot and safe to retry, because the
+    /// retry retires whatever the first attempt left. A caller that must not
+    /// duplicate should re-read before retrying rather than resubmit.
+    /// A write cancelled BEFORE the commit leaves at most an orphaned vector,
+    /// which `palace_compact` reclaims. Neither case loses data.
+    /// Test: `write_pipeline_tests`.
+    pub async fn remember_with_options_within(
+        &self,
+        content: String,
+        room: RoomType,
+        tags: Vec<String>,
+        importance: f32,
+        opts: RememberOptions,
+        pipeline_budget: std::time::Duration,
+    ) -> Result<Uuid> {
+        write_pipeline::remember_within(
+            self,
+            content,
+            room,
+            tags,
+            importance,
+            opts,
+            pipeline_budget,
+        )
+        .await
+    }
+
+    /// Reclaim orphaned vectors, serialised against the write pipeline.
+    ///
+    /// Why: #6208 — `remember_with_options` upserts a new drawer's vector
+    /// (line ~686) and only later pushes the drawer into `self.drawers`
+    /// (line ~708), both inside ONE `write_mutex` critical section. A compact
+    /// that snapshotted its valid-id set from `self.drawers` in that window saw
+    /// the vector row with no matching drawer and reclaimed it permanently —
+    /// silent data loss, DELETED_VECTORS=0, live-reproduced at 10/60 racing
+    /// drawers. Snapshotting under NO lock made "vector present, drawer absent"
+    /// an observable state.
+    /// What: acquires the same `write_mutex` `remember`/`forget` hold, THEN
+    /// snapshots `valid_ids` and runs the store's orphan reclamation — both
+    /// under the guard. Because a remember's upsert AND push are atomic w.r.t.
+    /// this guard, a compact here observes either the pre-remember state (no
+    /// vector, no drawer) or the post-remember state (vector present, drawer id
+    /// in `valid_ids`) — never the intermediate one — so an in-flight drawer's
+    /// vector cannot be reclaimed under any interleaving, not merely a narrowed
+    /// window. The bound is `remember`'s: reclamation runs on a blocking thread
+    /// but holds the guard for its duration, matching the existing write path.
+    /// Test: `remember_racing_compact_never_loses_a_vector`,
+    /// `compact_vector_orphans_still_reclaims_true_orphans`.
+    pub async fn compact_vector_orphans(&self) -> Result<CompactionResult> {
+        // #6208: hold the palace write mutex across BOTH the valid-id snapshot
+        // and the reclamation so a mid-flight remember (upsert done, drawer not
+        // yet pushed) cannot have its vector reclaimed as a false orphan.
+        let _write_guard = timeouts::lock_with_timeout(
+            &self.write_mutex,
+            timeouts::write_lock_timeout(),
+            self.id.as_str(),
+        )
+        .await?;
+        let valid_ids: HashSet<Uuid> = self.drawers.read().iter().map(|d| d.id).collect();
+        let vector_store = self.vector_store.clone();
+        tokio::task::spawn_blocking(move || vector_store.compact_orphans(&valid_ids))
+            .await
+            .context("join compact_vector_orphans")?
+    }
+
+    /// Background embed + vector-store backfill for a drawer written while the
+    /// shared embedder was cold (issue #1970).
+    ///
+    /// Why: `memory_remember` / `memory_note` / `task_add` must not block the
+    /// caller behind a 30-120 s CoreML/CUDA cold compile just to persist a
+    /// memory — the KG/redb write already completed synchronously by the time
+    /// this is called. #4906: it must also not LOSE the failure. This used to
+    /// end every failure branch in a `warn!` and a bare return, which is how 39
+    /// of 1,241 live drawers ended up durable and permanently unfindable.
+    /// What: hands the job to [`deferred_embed::spawn`], which retries transient
+    /// failures with backoff and records a durable ledger row when it gives up.
+    /// The write path is still asynchronous; only the failure handling changed.
+    /// Known limitation (unchanged): a drawer forgotten before the task finishes
+    /// leaves an orphaned vector, reclaimed by `palace_compact`.
+    /// Test: `permanent_failure_writes_a_ledger_row` and
+    /// `retry_succeeds_after_transient_failures` in `embed_repair_tests`.
+    pub(super) fn spawn_deferred_embed(&self, id: Uuid, content: String) {
+        deferred_embed::spawn(self.deferred_embed_ctx(), id, content);
+    }
+
+    /// The slice of this handle the background embed lane needs.
+    ///
+    /// Why: the spawned task outlives the `&self` borrow, so it takes owned
+    /// `Arc` clones rather than a reference.
+    /// What: palace id, vector store, drawer table, and data dir.
+    /// Test: exercised by every `embed_repair_tests` case.
+    pub(super) fn deferred_embed_ctx(&self) -> deferred_embed::DeferredEmbedCtx {
+        deferred_embed::DeferredEmbedCtx {
+            palace_id: self.id.clone(),
+            vector_store: self.vector_store.clone(),
+            drawers: self.drawers.clone(),
+            data_dir: self.data_dir.clone(),
+        }
+    }
+
+    /// Rebuild the closet keyword index from the current in-memory drawer table.
+    ///
+    /// Why: Keep the closet index current after every write so L2 tag-boosting
+    /// works without waiting for a dream cycle.
+    /// What: Rebuilds keyword -> Vec<drawer_id> map by tokenizing each drawer's
+    /// content via `extract_keywords` (whitespace + stop-word filter).
+    /// Test: `closet_updated_after_remember`.
+    pub fn rebuild_closets(&self) {
+        let snapshot: Vec<Drawer> = self.drawers.read().clone();
+        let mut new_index: HashMap<String, Vec<Uuid>> = HashMap::new();
+        for drawer in snapshot.iter() {
+            for kw in extract_keywords(drawer.content()) {
+                new_index.entry(kw).or_default().push(drawer.id);
+            }
+        }
+        let mut closets = self.closets.write();
+        *closets = new_index;
+    }
+
+    /// Remove a drawer by id, reporting whether one was actually there.
+    ///
+    /// Why: Surface forget as a first-class op so CLI/MCP can drop stale data
+    /// without leaking vectors in the HNSW index. #5231: the return value must
+    /// also distinguish a real delete from a no-op — `drawers.retain` silently
+    /// matches nothing for an id that was never stored, so an unconditional
+    /// `Ok(())` let a cleanup loop report N deletions having made zero.
+    /// What: Records whether the drawer table holds `id`, drops the persistent
+    /// metadata row, then the vector, then the KG triples, then the in-memory
+    /// row, and persists the L1 snapshot so the drop survives a restart.
+    /// #9735: then forgets every part of a split this drawer heads.
+    /// Returns [`ForgetOutcome::NotFound`] when no such drawer existed.
+    /// Test: `cli_forget_removes_drawer` asserts a recalled drawer disappears
+    /// after forget; `forget_reports_not_found_for_an_unknown_drawer` and
+    /// `forget_reports_deleted_and_the_drawer_stays_gone_after_reopen` cover
+    /// the reported outcome; `forget_head_removes_every_part` the #9735 cascade.
+    ///
+    /// # Errors
+    ///
+    /// Read-only handles, a write-lock timeout, a failed L1 snapshot write, or
+    /// — when the drawer did exist — a failed metadata delete. The last case is
+    /// an error rather than a warning because the redb drawer table is what
+    /// `open_with_intent` reloads from: a drawer whose row survives comes back
+    /// on the next open, so reporting it deleted would be the same lie #5231 is
+    /// about. Nothing else has been mutated at that point, so the drawer is
+    /// left wholly intact rather than half-deleted.
+    pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
+        let (removed, l1_saved) = self.forget_removing(id).await?;
+        // #9283: every user forget is journalled, hash only (#9172: a dedup
+        // survivor keeps its copy).
+        if let Some(drawer) = &removed {
+            crate::engine::maintenance_log::record_user_forget(self, drawer);
+        }
+        // #9735: a split head takes every part with it, each journalled.
+        let parts = self.forget_split_parts(id).await;
+        // #8729: journalled before the L1 error surfaces; the row is gone.
+        l1_saved?;
+        parts?;
+        Ok(if removed.is_some() {
+            ForgetOutcome::Deleted
+        } else {
+            ForgetOutcome::NotFound
+        })
+    }
+
+    /// [`Self::forget`] without the survivor journal; returns the removed row.
+    ///
+    /// Why (#9172): maintenance deletions journal their own record, and the
+    /// removed row is what a journal record copies.
+    /// What: the forget body; the row is `None` when no such drawer existed.
+    /// `Err` means nothing was deleted. #8729: the L1 snapshot save runs after
+    /// the redb delete, so its result comes back beside the row instead of
+    /// replacing it, and the caller can journal the copy before surfacing it.
+    /// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
+    /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
+    pub(crate) async fn forget_removing(&self, id: Uuid) -> Result<(Option<Drawer>, Result<()>)> {
+        // Idle-to-disk: a forget is a genuine user access. Suppressed during
+        // dream cycles (which forget merged/pruned drawers) via `touch`.
+        self.touch();
+
+        // Issue #59: short-circuit read-only handles so callers get a
+        // clean error instead of two best-effort warnings followed by a
+        // misleading "ok".
+        if self.is_read_only() {
+            return Err(anyhow::anyhow!(
+                "palace '{}' is read-only: HTTP daemon holds the write lock — \
+                 route forget through the daemon's HTTP API or stop the daemon \
+                 before retrying via stdio",
+                self.id
+            ));
+        }
+
+        // Issue #154: serialise with concurrent `remember_with_options`
+        // calls so the L1 snapshot rewritten below sees a consistent
+        // drawer-table state and so the vector / KG / in-memory removals
+        // can't interleave with an append. See `write_mutex` docs on
+        // `PalaceHandle`.
+        // Issue #906: bound the lock acquisition to avoid cascading hangs.
+        let _write_guard = timeouts::lock_with_timeout(
+            &self.write_mutex,
+            timeouts::write_lock_timeout(),
+            self.id.as_str(),
+        )
+        .await?;
+
+        // #5231: settle the outcome from the drawer table before mutating
+        // anything. Held under the write mutex acquired above, so no concurrent
+        // remember/forget can change the answer underneath the removals below.
+        let removed = self.drawers.read().iter().find(|d| d.id == id).cloned();
+        let existed = removed.is_some();
+
+        // Drop persistent metadata first so cold restart doesn't resurrect this
+        // drawer (issue #32). #5231: this runs before the other removals so a
+        // failure here leaves the drawer wholly intact instead of half-deleted.
+        if let Err(e) = self.kg.delete_drawer(id).await {
+            if existed {
+                return Err(e).with_context(|| {
+                    format!("forget {id}: drawer metadata delete failed, drawer NOT deleted")
+                });
+            }
+            // No drawer to lose: the delete was speculative cleanup for an id
+            // that isn't in the table anyway.
+            tracing::warn!(?id, "drawer metadata delete failed: {e:#}");
+        }
+
+        // Best-effort vector removal — usearch may legitimately not have the
+        // key (e.g. if remember failed mid-flight). A survivor is an orphaned
+        // vector, which `palace_compact` reclaims and which recall cannot
+        // resolve back to a drawer, so it does not make the delete a lie.
+        if let Err(e) = self.vector_store.remove(id).await {
+            tracing::warn!(?id, "vector remove failed: {e:#}");
+        }
+
+        // Issue #278 (cascade-delete): remove all KG triples whose subject is
+        // `drawer:<id>` — these are auto-extracted facts whose source drawer no
+        // longer exists. Best-effort for the same reason as the vector: the
+        // drawer itself is still gone, so survivors are leaked triples, not an
+        // undead drawer.
+        if let Err(e) = self.kg.cascade_delete_by_drawer(id).await {
+            tracing::warn!(?id, "kg cascade_delete_by_drawer failed: {e:#}");
+        }
+
+        {
+            let mut drawers = self.drawers.write();
+            drawers.retain(|d| d.id != id);
+        }
+
+        // #9719: the live L1 follows the forget too.
+        let l1_saved = self
+            .save_and_refresh_l1()
+            .context("save L1 snapshot after forget");
+
+        Ok((removed, l1_saved))
+    }
+
+    /// List drawers with optional room/tag filters, most important first.
+    ///
+    /// Why: CLI `list` and MCP introspection need a uniform read view over the
+    /// in-memory drawer table without exposing the lock semantics.
+    /// What: Snapshots the drawer table, applies filters, orders by
+    /// `drawer_listing_order`, and truncates to `limit`.
+    /// Test: `cli_list_filters_by_room` writes drawers in distinct rooms and
+    /// asserts the room filter narrows the list;
+    /// `list_drawers_keeps_the_newest_drawer_within_an_importance_tie` covers
+    /// what `limit` cuts when importance ties.
+    pub fn list_drawers(
+        &self,
+        room: Option<RoomType>,
+        tag: Option<String>,
+        limit: usize,
+    ) -> Vec<Drawer> {
+        // ADR-0027 D1.3: ids are read from the ROOMS table, never recomputed.
+        // Resolved BEFORE the drawer read guard is taken: this is a redb read
+        // transaction, and holding a lock across I/O would stall every writer
+        // (`remember` / `forget` take `drawers.write()`) for its duration.
+        let target_room_id = room
+            .as_ref()
+            .map(|r| crate::engine::store::rooms::resolve_room_filter_id(&self.kg, r));
+        let drawers = self.drawers.read();
+        let mut filtered: Vec<Drawer> = drawers
+            .iter()
+            .filter(|d| match &target_room_id {
+                Some(rid) => d.room_id == *rid,
+                None => true,
+            })
+            .filter(|d| match &tag {
+                Some(t) => d.tags.iter().any(|x| x == t),
+                None => true,
+            })
+            .cloned()
+            .collect();
+        drop(drawers);
+        // #4836: importance alone left `limit` cutting on drawer-UUID order.
+        filtered.sort_by(super::types::drawer_listing_order);
+        filtered.truncate(limit);
+        filtered
+    }
+
+    /// Drop every drawer whose `expires_at` has fallen into the past.
+    ///
+    /// Why: Issue #61 — `SessionEvent` drawers carry a 7-day TTL so palaces
+    /// don't permanently accumulate auto-capture noise. The sweep runs on
+    /// palace open (and may be invoked by future dream cycles); failures
+    /// are best-effort so a half-pruned palace still serves recalls.
+    /// What: Snapshots the drawer table, collects ids whose `expires_at`
+    /// is in the past, and routes each through `forget` so the vector
+    /// index and persistent metadata stay in sync. Returns the number of
+    /// drawers pruned. No-op on read-only handles.
+    ///
+    /// #4885: this is reclamation, not the enforcement point — recall filters
+    /// expired drawers on every read (`Drawer::is_expired_at`, ADR-0028 D4), so
+    /// a palace whose sweep never runs still never serves an expired drawer. It
+    /// remains worth calling because the read filter hides rows without freeing
+    /// the storage or the vector slot they occupy.
+    ///
+    /// #4886: Tier C drawers are skipped — for them `expires_at` is ADR-0028
+    /// D4's retirement condition rather than a lifetime, and D6 requires the
+    /// record survive its retirement. See `Drawer::is_tier_c`.
+    /// Test: `purge_expired_drops_only_past_ttl`,
+    /// `purge_expired_leaves_tier_c_drawers_alone`.
+    pub async fn purge_expired(&self) -> Result<usize> {
+        if self.is_read_only() {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now();
+        let expired_ids: Vec<Uuid> = self
+            .drawers
+            .read()
+            .iter()
+            .filter(|d| d.is_expired_at(now) && !d.is_tier_c())
+            .map(|d| d.id)
+            .collect();
+        // #5231: count what was actually removed, not what was attempted — a
+        // forget that failed or raced another writer used to inflate this.
+        let mut count = 0usize;
+        for id in expired_ids {
+            // #8732: recorded as a maintenance deletion, summarised at `warn`.
+            let reason = crate::engine::maintenance_log::DeletionReason::ExpiredPurge;
+            match self.forget_for_maintenance(id, reason, None).await {
+                Ok(outcome) if outcome.is_deleted() => count += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?id, "purge_expired: forget failed: {e:#}"),
+            }
+        }
+        crate::engine::maintenance_log::warn_removed(&self.id, "TTL purge", count);
+        Ok(count)
+    }
+
+    /// Fire-and-forget recall analytics.
+    ///
+    /// Why: Hit/miss telemetry must never block the request path; spawning a task
+    /// keeps logging off the critical path while still capturing every event.
+    /// What: If `handle.recall_log` is set, spawns a task that records one event
+    /// per non-L0 result, or a single miss event when `results` only contains the
+    /// L0 identity (no real recall hits). #9141: all of one recall's events go
+    /// in ONE `record_batch` commit, and a failed write is logged at `warn`
+    /// with the row count it lost — the recall itself still succeeds.
+    /// Test: `recall_logs_events_when_log_present`,
+    /// `log_recall_writes_every_hit_in_one_commit`,
+    /// `log_recall_reports_a_failed_write`.
+    pub(super) fn log_recall(&self, query: &str, results: &[super::types::RecallResult]) {
+        let Some(log) = self.recall_log.clone() else {
+            return;
+        };
+        let palace_id = self.id.as_str().to_string();
+        let query_hash = query_hash(query);
+        let occurred_at = chrono::Utc::now();
+        // Only count L1+ entries — the synthetic L0 identity is always present
+        // and would otherwise drown out genuine miss signals.
+        let mut events: Vec<RecallEvent> = results
+            .iter()
+            .filter(|r| r.layer > 0)
+            .map(|r| RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: r.layer,
+                drawer_id: Some(r.drawer.id),
+                score: r.score,
+                occurred_at,
+            })
+            .collect();
+        if events.is_empty() {
+            events.push(RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: 3,
+                drawer_id: None,
+                score: 0.0,
+                occurred_at,
+            });
+        }
+        tokio::spawn(async move {
+            let rows = events.len();
+            if let Err(e) = log.record_batch(events).await {
+                tracing::warn!(palace = %palace_id, rows, "recall log write failed: {e:#}");
+            }
+        });
+    }
+}

@@ -301,7 +301,7 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "trusty-common/src/memory_core/dream/tests.rs",
+        "trusty-memory/src/engine/dream/tests.rs",
         &[
             "consolidate_scoped_invalid_model_returns_err",
             "consolidate_scoped_no_inference_is_noop",
@@ -314,7 +314,7 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "trusty-common/src/memory_core/semantic_consolidation/mod.rs",
+        "trusty-memory/src/engine/semantic_consolidation/mod.rs",
         &[
             "inference_available_false_without_key",
             "resolve_openrouter_api_key_falls_back_to_env",

@@ -1,0 +1,530 @@
+//! `Dreamer` — background idle-time memory consolidation driver.
+//!
+//! Why: Extracted from dream.rs to keep each file under the 500-SLOC cap
+//! (#607). The Dreamer owns the idle clock, the optional injected
+//! SemanticConsolidator, and the background loop logic.
+//! What: `Dreamer` struct with `new`, `with_consolidator`, `touch`,
+//! `is_idle`, `start_with_shutdown`, and `dream_cycle`.
+//! Test: `dreamer_touch_resets_idle`, `dreamer_shutdown_terminates_loop`,
+//! `dream_cycle_merges_duplicates`, etc.
+
+use super::concurrency::{DreamCycleGauge, acquire_dream_permit};
+use super::config::{DreamConfig, DreamStats};
+use super::cycle::{
+    DedupOutcome, compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets,
+};
+use super::fading::detect_fading;
+use super::guard::CompactionGuard;
+use super::kg_compact::kg_compact_pass;
+use super::recall_benchmark::run_benchmark;
+use super::semantic::{SemanticPassOutcome, semantic_consolidation_pass};
+use super::settled;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::PalaceId;
+use crate::engine::registry::PalaceRegistry;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::semantic_consolidation::SemanticConsolidator;
+use anyhow::{Context, Result};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use super::helpers::now_secs;
+
+/// A callback run after each dream cycle that claimed its palace.
+///
+/// Why (#8246): a cycle rewrites drawer text (dedup merges) and adds drawers
+/// (semantic consolidation), but indexes this crate does not own — trusty-
+/// memory's BM25 lane — learn of it only if the cycle says so. A failed cycle
+/// must say so too: dedup persists each merge as it goes, so a cycle that
+/// errors later has still changed text.
+/// What: `Arc<dyn Fn(&PalaceId, Option<&DreamStats>)>`, installed with
+/// [`Dreamer::with_after_cycle`]. `Some(stats)` for a cycle that completed;
+/// `None` for one that failed, whose persisted changes are unknown.
+pub type AfterCycle = Arc<dyn Fn(&PalaceId, Option<&DreamStats>) + Send + Sync>;
+
+/// Background memory consolidator.
+///
+/// Why: We need a small, testable unit that owns the idle clock and the
+/// consolidation logic — separate from the daemon that schedules it.
+/// What: `last_activity` is a unix-seconds atomic touched on every recall /
+/// remember; `dream_cycle` runs synchronously and returns stats. The optional
+/// `consolidator` field allows tests to inject a `MockInference`-backed
+/// `SemanticConsolidator` without touching the real LLM.
+/// Test: `dreamer_touch_resets_idle` plus the cycle tests below.
+pub struct Dreamer {
+    pub config: DreamConfig,
+    pub(super) last_activity: Arc<AtomicU64>,
+    /// Injected semantic consolidator (used in tests via `with_consolidator`).
+    /// When `None`, `semantic_consolidation_pass` builds the consolidator from
+    /// `config` at runtime.
+    pub(super) consolidator: Option<Arc<SemanticConsolidator>>,
+    /// Set once the semantic-consolidation phase hits an unresolvable
+    /// model/provider combination (issue #2593). Once `true`,
+    /// `semantic_consolidation_pass` skips the phase entirely on every
+    /// subsequent cycle instead of rebuilding and retrying a known-bad
+    /// config forever. Only cleared by constructing a fresh `Dreamer` (i.e.
+    /// a config reload), matching "disabled until the config is fixed".
+    pub(super) semantic_consolidation_disabled: AtomicBool,
+    /// #8246: run after every cycle that claimed its palace; see [`AfterCycle`].
+    pub(super) after_cycle: Option<AfterCycle>,
+    /// #9391: the embedder the dedup pass and recall benchmark use. `None`
+    /// (every production dreamer) resolves the process-wide `shared_embedder`.
+    pub(super) embedder: Option<Arc<dyn Embedder + Send + Sync>>,
+}
+
+impl Dreamer {
+    /// Build a new dreamer with the given config and `last_activity = now`.
+    ///
+    /// Why: A fresh palace shouldn't immediately dream — start the idle clock
+    /// from "now" so the first cycle waits a full `idle_secs`.
+    /// What: Captures `SystemTime::now()` as unix seconds. The `consolidator`
+    /// field is `None`; the semantic phase will construct it lazily from config.
+    /// Test: `dreamer_touch_resets_idle`.
+    pub fn new(config: DreamConfig) -> Self {
+        Self {
+            config,
+            last_activity: Arc::new(AtomicU64::new(now_secs())),
+            consolidator: None,
+            semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
+            embedder: None,
+        }
+    }
+
+    /// Build a new dreamer with an injected `SemanticConsolidator`.
+    ///
+    /// Why: Tests need to supply a `MockInference`-backed consolidator so the
+    /// dream cycle can be verified without making real LLM calls. Production
+    /// code always uses `Dreamer::new`.
+    /// What: Stores the provided `Arc<SemanticConsolidator>` so
+    /// `semantic_consolidation_pass` uses it instead of building one from
+    /// config. The semantic phase is always attempted when the consolidator is
+    /// injected (ignoring `inference_available`).
+    /// Test: `dream_cycle_semantic_consolidation_with_mock`.
+    pub fn with_consolidator(config: DreamConfig, consolidator: Arc<SemanticConsolidator>) -> Self {
+        Self {
+            config,
+            last_activity: Arc::new(AtomicU64::new(now_secs())),
+            consolidator: Some(consolidator),
+            semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
+            embedder: None,
+        }
+    }
+
+    /// This dreamer, calling `hook` after every cycle that claims its palace.
+    ///
+    /// Why (#8246): see [`AfterCycle`].
+    /// What: replaces any earlier hook. A cycle that completes calls it with
+    /// `Some(stats)`; one that fails calls it with `None`. Only a cycle skipped
+    /// because another holds the palace does not call it.
+    /// Test: `the_after_cycle_hook_sees_every_cycle_that_ran`,
+    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
+    pub fn with_after_cycle(mut self, hook: AfterCycle) -> Self {
+        self.after_cycle = Some(hook);
+        self
+    }
+
+    /// This dreamer, embedding with `embedder` instead of the shared one.
+    ///
+    /// Why (#9391): a test must count the embed calls of one cycle, and the
+    /// process-wide `shared_embedder` is shared by every test in the binary.
+    #[cfg(test)]
+    pub(super) fn with_embedder(mut self, embedder: Arc<dyn Embedder + Send + Sync>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Record activity (call from recall / remember paths).
+    pub fn touch(&self) {
+        self.last_activity.store(now_secs(), Ordering::Relaxed);
+    }
+
+    /// Has the palace been idle longer than `idle_secs`?
+    pub fn is_idle(&self) -> bool {
+        let last = self.last_activity.load(Ordering::Relaxed);
+        now_secs().saturating_sub(last) >= self.config.idle_secs
+    }
+
+    /// Whether the semantic-consolidation phase is disabled due to a
+    /// misconfigured model/provider combination detected during a prior
+    /// cycle (issue #2593).
+    ///
+    /// Why: surfaces the "fail loud once, don't retry" state for callers
+    /// (tests, admin dashboards) without exposing the raw atomic field.
+    /// What: relaxed load of `semantic_consolidation_disabled`.
+    /// Test: `dream_cycle_semantic_consolidation_invalid_model_disables_once`.
+    pub fn is_semantic_consolidation_disabled(&self) -> bool {
+        self.semantic_consolidation_disabled.load(Ordering::Relaxed)
+    }
+
+    /// Spawn the background dream loop with a cooperative shutdown signal.
+    ///
+    /// Why: A long-running daemon needs to stop its background workers cleanly
+    /// on SIGTERM / Ctrl-C; otherwise the process can block on shutdown waiting
+    /// for an in-flight cycle, or worse, terminate mid-cycle and leave on-disk
+    /// state inconsistent. A `tokio::sync::watch` channel is the cheapest way
+    /// to fan out a single cancel signal to every spawned task.
+    /// What: Spawns a tokio task that races the inter-cycle sleep against the
+    /// shutdown signal. When `shutdown` flips to `true`, the loop logs and
+    /// exits cleanly. When the shutdown sender is dropped, the loop also
+    /// exits (treated as a cancel).
+    ///
+    /// `first_tick_stagger` is added to the FIRST sleep only; every sleep after
+    /// it is the plain `idle_secs` interval. Why (#7106): without it every
+    /// palace's loop starts its clock at the same daemon-startup instant, so
+    /// `idle_secs` later all of them fire in the same second — 61 loops on the
+    /// reference host, each holding its palace's corpus. Callers get the value
+    /// from [`super::concurrency::stagger_offset`]; `Duration::ZERO` reproduces
+    /// the pre-#7106 timing.
+    /// Test: `dreamer_shutdown_terminates_loop` — spawn the loop, flip the
+    /// shutdown flag, await the join handle. Stagger:
+    /// `concurrency_tests::a_dream_loop_waits_its_stagger_before_the_first_cycle`.
+    /// Maintenance lease (#8733):
+    /// `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
+    pub fn start_with_shutdown(
+        self: Arc<Self>,
+        registry: PalaceRegistry,
+        palace_id: PalaceId,
+        first_tick_stagger: Duration,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(self.config.idle_secs.max(1));
+            // #7106: the first wait carries the palace's phase offset; every
+            // later one is the bare interval, so the offset persists forever.
+            let mut wait = interval + first_tick_stagger;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => { wait = interval; }
+                    res = shutdown.changed() => {
+                        // Sender closed (`Err`) or value changed to true: shut down.
+                        if res.is_err() || *shutdown.borrow() {
+                            tracing::info!(palace = %palace_id, "dreamer shutting down");
+                            return;
+                        }
+                    }
+                }
+                if *shutdown.borrow() {
+                    tracing::info!(palace = %palace_id, "dreamer shutting down");
+                    return;
+                }
+                // #8733: only the data root's elected maintainer dreams. Asked
+                // every tick, so a non-holder takes over once the holder exits.
+                if !self.is_idle() || !registry.may_run_maintenance() {
+                    continue;
+                }
+                // Re-resolve without reopening; skip (do NOT rehydrate) a palace
+                // that has been idle-evicted to disk. This also unpins the
+                // handle so the LRU / idle-evict sweep can drop it between
+                // cycles — see `start`.
+                let Some(handle) = registry.peek(&palace_id) else {
+                    continue;
+                };
+                log_cycle_outcome(&palace_id, self.dream_cycle(&handle).await);
+            }
+        })
+    }
+
+    /// Run one synchronous dream cycle: dedup, prune, closet refresh, flush,
+    /// and optional inference-backed semantic consolidation.
+    ///
+    /// Why: Consolidation must happen as a single, bounded unit so we can
+    /// schedule it conservatively and report telemetry to the operator.
+    /// What:
+    ///   1. Content-prune: drop noise drawers matching the blocklist or below
+    ///      the minimum word count.
+    ///   2. Dedup near-duplicates by L3-searching each drawer; if the top
+    ///      neighbor's score >= `dedup_threshold`, persist the merge into the
+    ///      current drawer (#9172) and `forget` the loser.
+    ///   3. Prune drawers whose effective importance falls below
+    ///      `prune_importance` AND whose age exceeds 30 days.
+    ///   4. Compact orphaned vectors from the HNSW index.
+    ///   5. Rebuild the closet index (keyword -> drawer ids).
+    ///   6. (Optional) Semantic consolidation: when an inference backend is
+    ///      available, cluster near-duplicate drawers and canonicalize them via
+    ///      LLM. Original drawers are preserved; canonical drawers are added
+    ///      with a `superseded_by` link in the KG. Gracefully skipped when no
+    ///      inference backend is configured.
+    ///   7. Flush the L1 snapshot.
+    ///
+    /// #9172: a cycle that finds another one running on `handle` returns
+    /// `DreamStats::default()` without running any pass.
+    ///
+    /// #8246: every cycle that claims `handle` then calls the
+    /// [`AfterCycle`] hook, whether it returns `Ok` or `Err`.
+    ///
+    /// #9391: when the palace's drawer set matches the one a previous full
+    /// cycle left unchanged (see `settled`), steps 2 and 6 and the recall
+    /// benchmark are skipped, so the cycle does no embedding work. The other
+    /// passes still run, so age-based pruning continues on an idle palace. Only
+    /// a cycle that changed nothing, stayed in budget, completed every dedup
+    /// merge it attempted, and either finished the semantic pass or had it
+    /// disabled by config records the marker.
+    ///
+    /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
+    /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
+    /// `dream_cycle_semantic_consolidation_no_inference`,
+    /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`,
+    /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`,
+    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`,
+    /// `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`,
+    /// `settled_corpus_tests::a_failed_merge_persist_does_not_settle_the_palace`,
+    /// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`.
+    pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
+        // #7106: wait for a slot in the process-wide bound before doing any
+        // work. The daemon runs one loop per resident palace and they all woke
+        // together, so the peak footprint was one cycle's working set times
+        // however many palaces were resident. The permit releases on drop, so
+        // every `?` and early return below returns it.
+        let _permit = acquire_dream_permit().await;
+        // Mark the palace as compacting for the entirety of this cycle so the
+        // operator dashboard can render the dreaming spinner. The guard clears
+        // the flag on drop, which keeps it correct on early-return errors and
+        // panics alike.
+        // #9172: the claim is exclusive. A second cycle on this handle (the
+        // idle loop, the #9173 rotation, `dream_run`) skips instead of
+        // interleaving its deletions with the running cycle's merges.
+        let Some(_compaction_guard) = CompactionGuard::try_claim(handle.is_compacting.clone())
+        else {
+            tracing::info!(palace = %handle.id, "dream cycle skipped: one is already running");
+            return Ok(DreamStats::default());
+        };
+        // Counted independently of the permit on purpose — see `DreamCycleGauge`.
+        let _in_flight = DreamCycleGauge::enter();
+        let outcome = self.run_claimed_cycle(handle).await;
+        // #8246: report failed cycles too — dedup persists each merge before a
+        // later pass can fail, so an `Err` cycle may still have changed text.
+        if let Some(hook) = &self.after_cycle {
+            hook(&handle.id, outcome.as_ref().ok());
+        }
+        outcome
+    }
+
+    /// The passes of [`Self::dream_cycle`], run once the palace is claimed.
+    async fn run_claimed_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
+        let started = std::time::Instant::now();
+        let budget = Duration::from_millis(self.config.max_cycle_ms);
+
+        // ── Effectiveness metric: pre-cycle snapshot (issue #1530) ────────────
+        // Count drawers before any pass so we can compute the compression ratio.
+        let drawers_before = handle.drawers.read().len() as u64;
+
+        // #9391: skip the embedding passes on a corpus a full cycle already
+        // left unchanged. Taken BEFORE any pass, so a write that lands
+        // mid-cycle leaves the recorded marker stale and the next cycle runs.
+        let fingerprint = settled::corpus_fingerprint(handle, &self.config);
+        let unchanged = handle
+            .data_dir
+            .as_deref()
+            .is_some_and(|dir| settled::is_settled(dir, &fingerprint));
+        if unchanged {
+            tracing::debug!(
+                palace = %handle.id,
+                "dream cycle: corpus unchanged since its last settled cycle; \
+                 skipping dedup, recall benchmark and semantic consolidation"
+            );
+        }
+        let benchmark = self.config.recall_benchmark_enabled && !unchanged;
+
+        // Recall benchmark before consolidation — skip silently on failure or when disabled.
+        let recall_score_before = if benchmark {
+            run_benchmark(handle, self.embedder.clone()).await
+        } else {
+            None
+        };
+
+        let content_pruned = if self.config.content_prune_enabled {
+            content_prune_pass(handle, started, budget, self.config.content_prune_min_words)
+                .await
+                .context("dream content prune pass")?
+        } else {
+            0
+        };
+        let dedup = if unchanged {
+            DedupOutcome::default()
+        } else {
+            let embedder = self.embedder.clone();
+            dedup_pass(
+                handle,
+                started,
+                budget,
+                self.config.dedup_threshold,
+                embedder,
+            )
+            .await
+            .context("dream dedup pass")?
+        };
+        let pruned = prune_pass(handle, started, budget, self.config.prune_importance)
+            .await
+            .context("dream prune pass")?;
+        let compacted = compact_pass(handle, started, budget)
+            .await
+            .context("dream compact pass")?;
+        let closets_updated = refresh_closets(handle);
+
+        // ── Phase: Semantic consolidation (optional, inference-gated) ──────────
+        let semantic = if unchanged {
+            SemanticPassOutcome::SETTLED_NOOP
+        } else {
+            semantic_consolidation_pass(
+                handle,
+                &self.config,
+                self.consolidator.clone(),
+                &self.semantic_consolidation_disabled,
+            )
+            .await
+        };
+        // #9391: the completion gate. A budget-truncated pass did not examine
+        // the whole corpus, a failed merge left a duplicate pair behind, and a
+        // parked, failed or unfinished semantic pass consolidated nothing it
+        // could vouch for. None of them may settle the palace.
+        let passes_complete = started.elapsed() < budget && dedup.failed == 0 && semantic.settles;
+
+        // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
+        if let Err(e) = handle.flush() {
+            tracing::warn!("dream flush failed: {e:#}");
+        }
+
+        // ── Effectiveness metric: post-cycle snapshot (issue #1530) ───────────
+        let drawers_after = handle.drawers.read().len() as u64;
+
+        // ── Fading-memories resurface pass (issue #2352) ──────────────────────
+        // Detect (do NOT boost) high-value memories that have decayed below the
+        // resurface threshold, so operators/agents can touch or forget them.
+        // Runs after consolidation so the list reflects the post-cycle state.
+        let fading = detect_fading(handle, &self.config.fading);
+
+        // Recall benchmark after consolidation — skip silently on failure or when disabled.
+        let recall_score_after = if benchmark {
+            run_benchmark(handle, self.embedder.clone()).await
+        } else {
+            None
+        };
+
+        let mut stats = DreamStats {
+            merged: dedup.merged,
+            pruned,
+            closets_updated,
+            compacted,
+            content_pruned,
+            semantically_consolidated: semantic.consolidated,
+            semantic_llm_calls: semantic.llm_calls,
+            semantic_cache_hits: semantic.cache_hits,
+            duration_ms: started.elapsed().as_millis() as u64,
+            drawers_before,
+            drawers_after,
+            compression_ratio: 0.0, // populated below
+            recall_score_before,
+            recall_score_after,
+            kg_bytes_reclaimed: 0,
+            kg_bytes_after: 0,
+            kg_history_rows_pruned: 0,
+            fading,
+        };
+        stats.update_compression_ratio();
+        // #8732: the full stats line below `log_cycle_outcome` is `info`; a cycle
+        // that deleted drawers must also show at the daemon's default filter.
+        crate::engine::maintenance_log::warn_removed(
+            &handle.id,
+            "dream cycle",
+            stats.merged + stats.pruned + stats.content_pruned,
+        );
+
+        // ── Phase: kg.redb prune-and-compact (#6652) ──────────────────────────
+        // This replaces the `handle.kg.checkpoint()` call that used to sit here.
+        // That call was a documented no-op — redb manages its own write log —
+        // so the one step in the cycle whose stated job was bounding on-disk
+        // growth did nothing, and `kg.redb` only ever grew. A failure here is
+        // non-fatal: the rewrite leaves the live file untouched on every error
+        // path, so the cycle's other work still counts and the next cycle
+        // retries.
+        if self.config.compact {
+            match kg_compact_pass(handle, &self.config, false).await {
+                Ok(report) => {
+                    stats.kg_bytes_reclaimed = report.bytes_reclaimed();
+                    stats.kg_bytes_after = report.bytes_after;
+                    stats.kg_history_rows_pruned = report.history_rows_pruned;
+                    if report.ran() {
+                        tracing::info!(palace = %handle.id, "kg.redb: {}", report.summary());
+                    } else {
+                        tracing::debug!(palace = %handle.id, "kg.redb: {}", report.summary());
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    palace = %handle.id,
+                    "kg.redb compaction failed (non-fatal; the live file is unchanged): {e:#}"
+                ),
+            }
+        }
+
+        // Snapshot the run for the admin dashboard. Failures here are
+        // non-fatal — the cycle itself succeeded, we just couldn't record it.
+        if let Some(data_dir) = handle.data_dir.as_ref() {
+            use super::config::PersistedDreamStats;
+            let persisted = PersistedDreamStats {
+                last_run_at: chrono::Utc::now(),
+                stats: stats.clone(),
+            };
+            if let Err(e) = persisted.save(data_dir) {
+                tracing::warn!(palace = %handle.id, "persist dream_stats.json failed: {e:#}");
+            }
+            // #9391: a full, complete cycle that changed nothing settles the
+            // corpus it started from; the next cycle on it skips embedding.
+            if !unchanged
+                && passes_complete
+                && changed_nothing(&stats)
+                && let Err(e) = settled::record_settled(data_dir, &fingerprint)
+            {
+                tracing::warn!(palace = %handle.id, "persist dream_settled.json failed: {e:#}");
+            }
+        }
+        Ok(stats)
+    }
+}
+
+/// Whether a cycle left its palace's drawer set as it found it (#9391).
+fn changed_nothing(stats: &DreamStats) -> bool {
+    [
+        stats.merged,
+        stats.pruned,
+        stats.content_pruned,
+        stats.compacted,
+        stats.semantically_consolidated,
+    ]
+    .iter()
+    .all(|n| *n == 0)
+}
+
+/// Emit the standard per-cycle telemetry for a dream loop.
+///
+/// Why: `start` and `start_with_shutdown` share the identical success/error
+/// logging block; hoisting it into one helper keeps them in lock-step and each
+/// well under the SLOC cap.
+/// What: on `Ok`, logs the full `DreamStats` field set at `info`; on `Err`,
+/// logs a `warn` naming the palace. Pure logging — no return value.
+/// Test: exercised by every dream-loop test that spawns `start_with_shutdown`.
+fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
+    match outcome {
+        Ok(stats) => tracing::info!(
+            palace = %palace_id,
+            merged = stats.merged,
+            pruned = stats.pruned,
+            content_pruned = stats.content_pruned,
+            compacted = stats.compacted,
+            closets_updated = stats.closets_updated,
+            semantically_consolidated = stats.semantically_consolidated,
+            semantic_llm_calls = stats.semantic_llm_calls,
+            duration_ms = stats.duration_ms,
+            kg_bytes_reclaimed = stats.kg_bytes_reclaimed,
+            kg_history_rows_pruned = stats.kg_history_rows_pruned,
+            drawers_before = stats.drawers_before,
+            drawers_after = stats.drawers_after,
+            compression_ratio = stats.compression_ratio,
+            fading = stats.fading.len(),
+            "dream cycle complete"
+        ),
+        Err(e) => tracing::warn!(palace = %palace_id, "dream cycle failed: {e:#}"),
+    }
+}

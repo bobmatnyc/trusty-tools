@@ -1,0 +1,1882 @@
+use super::*;
+use crate::engine::retrieval::seed_shared_embedder_with_mock;
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use tempfile::tempdir;
+
+fn make_handle(id: &str, dir: &std::path::Path) -> PalaceHandle {
+    let vs = UsearchStore::new(dir.join(format!("{id}.usearch")), 384).unwrap();
+    let kg = KnowledgeGraph::open(&dir.join(format!("{id}.db"))).unwrap();
+    PalaceHandle::new(PalaceId::new(id), format!("Identity for {id}"), vs, kg)
+}
+
+#[test]
+fn register_and_get_roundtrip() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    reg.register(make_handle("alpha", dir.path()));
+    let h = reg.get(&PalaceId::new("alpha")).expect("registered");
+    assert_eq!(h.id.as_str(), "alpha");
+}
+
+/// Why (issue #1487): a default registry must open palaces as a read-only
+/// client (preserving the snapshot fallback for CLI / stdio / tests),
+/// while a registry built with `with_writer_intent` must open as a writer
+/// (fail-loud on a held lock) — this is what the HTTP daemon relies on.
+/// What: Asserts the default `open_intent()` is `ReadOnlyClient` and that
+/// `with_writer_intent()` flips it to `Writer`.
+/// Test: this test.
+#[test]
+fn with_writer_intent_sets_writer_open_intent() {
+    let default_reg = PalaceRegistry::new();
+    assert_eq!(
+        default_reg.open_intent(),
+        OpenIntent::ReadOnlyClient,
+        "default registry must open palaces read-only (snapshot fallback)"
+    );
+
+    let writer_reg = PalaceRegistry::new().with_writer_intent();
+    assert_eq!(
+        writer_reg.open_intent(),
+        OpenIntent::Writer,
+        "with_writer_intent() must mark the registry as a writer"
+    );
+}
+
+/// Why: Issue #180 — palace deletion must invalidate the in-memory
+/// `PalaceRegistry` cache so a subsequent `open_palace` doesn't return
+/// the stale handle for an on-disk-deleted palace.
+/// What: Register a handle, set a gap entry, call `remove`, and assert
+/// both the handle and the gap cache entry are gone.
+/// Test: This test itself.
+#[test]
+fn registry_remove_clears_cached_handle() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    let id = PalaceId::new("doomed");
+    reg.register(make_handle("doomed", dir.path()));
+    reg.set_gaps(id.clone(), Vec::new());
+    assert!(reg.get(&id).is_some());
+    assert!(reg.get_gaps(&id).is_some());
+    reg.remove(&id);
+    assert!(reg.get(&id).is_none());
+    assert!(reg.get_gaps(&id).is_none());
+    // Calling remove again is a no-op.
+    reg.remove(&id);
+}
+
+#[test]
+fn registry_create_and_open() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+
+    let palace = Palace {
+        id: PalaceId::new("alpha"),
+        name: "Alpha".to_string(),
+        description: Some("test".to_string()),
+        created_at: Utc::now(),
+        data_dir: data_root.join("alpha"),
+    };
+
+    // Create through the registry.
+    {
+        let reg = PalaceRegistry::new();
+        let handle = reg
+            .create_palace(data_root, palace.clone())
+            .expect("create_palace");
+        assert_eq!(handle.id, PalaceId::new("alpha"));
+        // Persist a tiny identity directly (PalaceHandle.identity is set
+        // at open time so we mutate via PalaceStore for the test).
+        crate::engine::store::palace_store::PalaceStore::save_identity(
+            &handle.id,
+            "I am Alpha",
+            handle.data_dir.as_ref().expect("data_dir set"),
+        )
+        .expect("save identity");
+    }
+
+    // Drop the registry, reopen from disk.
+    let reg2 = PalaceRegistry::new();
+    let handle2 = reg2
+        .open_palace(data_root, &PalaceId::new("alpha"))
+        .expect("open_palace");
+    assert_eq!(handle2.id, PalaceId::new("alpha"));
+    assert_eq!(handle2.identity, "I am Alpha");
+
+    // list_palaces sees it too.
+    let palaces = PalaceRegistry::list_palaces(data_root).unwrap();
+    assert_eq!(palaces.len(), 1);
+    assert_eq!(palaces[0].name, "Alpha");
+}
+
+/// Why (issue #4911): eager hydration catches a per-palace open error, logs a
+/// WARN, and skips — so the palace is simply absent from the registry
+/// afterwards, indistinguishable from one that never existed. Once a read-only
+/// open of an incompatible-format store REFUSES instead of recreating it empty,
+/// that skip became the new way to lose a palace: the bytes survive, but nothing
+/// reports that the palace exists and cannot be read. Trading data destruction
+/// for data invisibility is not a fix.
+///
+/// Failing the whole `open` is the wrong surfacing — a multi-palace root would
+/// be bricked by one unrelated bad file, and the "one corrupt palace doesn't
+/// take the registry down" contract is what `SmMemory` / `PortfolioMemory` /
+/// trusty-agents construct against. So the palace is RETAINED as an observable
+/// unopenable entry instead.
+///
+/// What: persists a healthy palace, then hand-writes a SECOND palace this
+/// process never opens — a valid `palace.json` plus a DIRECTORY where the KG
+/// store file (`kg.redb`) belongs, which fails to open at the OS layer on every
+/// platform and redb version. Building it by hand matters: the store keeps a
+/// process-wide cache of open databases keyed by path, so a palace this process
+/// already opened would be served from cache and never read the corruption.
+/// Asserts (a) `open` still succeeds, (b) the healthy palace hydrated, (c) the
+/// broken one is NOT in the handle cache, and (d) it is nonetheless observable
+/// via `unopenable()` / `unopenable_reason()` with a non-empty reason. (c) and
+/// (d) together are the point: absent from the cache but not absent from the
+/// registry's account of what exists.
+/// Test: this is the test.
+#[test]
+fn open_keeps_an_unopenable_palace_observable() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+
+    {
+        let registry = PalaceRegistry::open(data_root).unwrap();
+        let palace = Palace {
+            id: PalaceId::new("healthy"),
+            name: "healthy".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("healthy"),
+        };
+        registry.create_palace(data_root, palace).unwrap();
+    }
+
+    let broken_dir = data_root.join("broken");
+    std::fs::create_dir_all(&broken_dir).unwrap();
+    std::fs::write(
+        broken_dir.join("palace.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "broken",
+            "name": "broken",
+            "description": serde_json::Value::Null,
+            "created_at": "2020-01-02T03:04:05Z",
+            "data_dir": broken_dir,
+            "schema_version": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(broken_dir.join("kg.redb")).expect("directory where the KG store belongs");
+
+    let registry = PalaceRegistry::open(data_root)
+        .expect("one unopenable palace must not fail the whole registry open");
+
+    assert!(
+        registry.get(&PalaceId::new("healthy")).is_some(),
+        "the healthy palace must still hydrate"
+    );
+    assert!(
+        registry.get(&PalaceId::new("broken")).is_none(),
+        "the unopenable palace cannot be in the handle cache — nothing opened it"
+    );
+
+    let reason = registry.unopenable_reason(&PalaceId::new("broken")).expect(
+        "a palace that exists on disk and could not be opened must stay observable, \
+             not silently vanish from the registry",
+    );
+    assert!(
+        !reason.is_empty(),
+        "the recorded reason must say why the palace could not be opened"
+    );
+
+    let ids: Vec<String> = registry
+        .unopenable()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["broken".to_string()],
+        "exactly the unopenable palace is recorded — the healthy one must not be"
+    );
+}
+
+/// Why (issue #4911): the daemon hydrates through its own walk
+/// (`AppState::load_palaces_from_disk`), not [`PalaceRegistry::open`], so it
+/// needs `record_unopenable` to file a skip. A record that outlived the
+/// condition would be worse than none — an operator would chase a palace that
+/// has been healthy since the next lazy open — so the clearing half is the
+/// property under test, not the insert.
+/// What: records a skip, asserts it is readable, then registers a real handle
+/// for that same id through `register_arc` (the sole success-path funnel) and
+/// asserts the record is gone.
+/// Test: this test itself.
+#[test]
+fn record_unopenable_is_cleared_by_a_later_success() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let id = PalaceId::new("flaky");
+
+    let registry = PalaceRegistry::new();
+    registry.record_unopenable(id.clone(), "EMFILE: too many open files".to_string());
+    assert_eq!(
+        registry.unopenable_reason(&id).as_deref(),
+        Some("EMFILE: too many open files"),
+        "a recorded skip must be readable back"
+    );
+
+    // The same palace opens fine on a later attempt — the record must not
+    // survive that.
+    registry
+        .create_palace(
+            data_root,
+            Palace {
+                id: id.clone(),
+                name: "flaky".to_string(),
+                description: None,
+                created_at: Utc::now(),
+                data_dir: data_root.join("flaky"),
+            },
+        )
+        .expect("create_palace");
+
+    assert!(
+        registry.unopenable_reason(&id).is_none(),
+        "a successful open must clear the skip record, not leave it to mislead"
+    );
+    assert!(
+        registry.unopenable().is_empty(),
+        "no unopenable palace remains"
+    );
+}
+
+/// Why: Issue #52 — payloads (drawer content) must survive a process
+/// restart. Open a registry, write a drawer with a known content string,
+/// drop everything, reopen via `PalaceRegistry::open(path)`, and assert the
+/// drawer content is still recoverable from the registered handle.
+/// What: Uses `PalaceHandle::remember` (the canonical write path) so the
+/// full persistence chain (kg drawer row + usearch vector + L1 snapshot)
+/// is exercised, not just metadata.
+/// Test: This test itself.
+#[tokio::test]
+async fn palace_payloads_survive_registry_restart() {
+    // Pre-seed mock embedder so no HuggingFace download is attempted. Issue #850.
+    seed_shared_embedder_with_mock();
+    use crate::engine::palace::{Palace, RoomType};
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+
+    // Phase 1: create palace + write a payload, then drop everything.
+    {
+        let registry = PalaceRegistry::open(data_root).unwrap();
+        let palace = Palace {
+            id: PalaceId::new("restart-test"),
+            name: "Restart".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("restart-test"),
+        };
+        let handle = registry.create_palace(data_root, palace).unwrap();
+        handle
+            .remember(
+                "the quokka is a small marsupial native to Western Australia".to_string(),
+                RoomType::Research,
+                vec!["wildlife".to_string()],
+                0.7,
+            )
+            .await
+            .expect("remember persists the drawer");
+    }
+
+    // Phase 2: reopen from disk, assert the payload is still there.
+    let registry = PalaceRegistry::open(data_root).unwrap();
+    assert_eq!(
+        registry.len(),
+        1,
+        "registry should have hydrated the persisted palace"
+    );
+    let handle = registry
+        .get(&PalaceId::new("restart-test"))
+        .expect("palace should be registered after open()");
+    let drawers = handle.drawers.read().clone();
+    assert!(
+        drawers
+            .iter()
+            .any(|d| d.content().contains("quokka") && d.tags.contains(&"wildlife".to_string())),
+        "persisted drawer content must survive restart; got {drawers:?}"
+    );
+}
+
+#[test]
+fn gaps_cache_round_trip() {
+    use crate::engine::community::KnowledgeGap;
+
+    let reg = PalaceRegistry::new();
+    let pid = PalaceId::new("gap-cache");
+
+    // Missing key returns None (not an error).
+    assert!(reg.get_gaps(&pid).is_none());
+
+    let gaps = vec![KnowledgeGap {
+        entities: vec!["alpha".to_string(), "beta".to_string()],
+        internal_density: 0.1,
+        external_bridges: 1,
+        suggested_exploration: "Explore connections between alpha and beta".to_string(),
+    }];
+    reg.set_gaps(pid.clone(), gaps.clone());
+
+    let read = reg.get_gaps(&pid).expect("cached value");
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].entities, gaps[0].entities);
+    assert!((read[0].internal_density - 0.1).abs() < 1e-6);
+
+    reg.clear_gaps(&pid);
+    assert!(reg.get_gaps(&pid).is_none());
+}
+
+#[test]
+fn list_contains_all_registered() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    reg.register(make_handle("a", dir.path()));
+    reg.register(make_handle("b", dir.path()));
+    let ids: Vec<_> = reg.list().into_iter().map(|p| p.0).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"a".to_string()));
+    assert!(ids.contains(&"b".to_string()));
+}
+
+/// Issue #463 — the LRU registry evicts the least-recently-used handle
+/// when the capacity ceiling is reached, bounding resident fd usage.
+///
+/// Why: With many palaces the daemon can exhaust file descriptors
+/// (EMFILE). This test proves that the eviction policy fires correctly:
+/// inserting a third handle into a capacity-2 registry evicts the LRU,
+/// and the two remaining entries are the ones accessed most recently.
+/// What: Creates a capacity-2 registry, registers "a" (LRU) then "b"
+/// (MRU), then registers "c" — expecting "a" to be evicted. Asserts
+/// "b" and "c" are present and "a" is gone.
+/// Test: This test itself (issue #463 regression guard).
+#[test]
+fn lru_evicts_least_recently_used() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::with_max_open(2);
+
+    // Insert "a" first (will become LRU) then "b".
+    reg.register(make_handle("a", dir.path()));
+    reg.register(make_handle("b", dir.path()));
+    assert_eq!(reg.len(), 2, "two handles registered");
+
+    // "a" was inserted before "b"; inserting "c" must evict "a" (LRU).
+    reg.register(make_handle("c", dir.path()));
+    assert_eq!(reg.len(), 2, "capacity-2 registry must stay at 2");
+    assert!(
+        reg.peek(&PalaceId::new("a")).is_none(),
+        "LRU handle 'a' must have been evicted"
+    );
+    assert!(
+        reg.peek(&PalaceId::new("b")).is_some(),
+        "MRU handle 'b' must survive"
+    );
+    assert!(
+        reg.peek(&PalaceId::new("c")).is_some(),
+        "newly inserted 'c' must be present"
+    );
+}
+
+/// Issue #1939 — a palace requested by an aliased name resolves to the
+/// alias target's on-disk store.
+///
+/// Why: trusty-mpm pins a session to the derived `owner-repo` palace, but the
+/// real data lives under the bare repo name. Registering the alias must make
+/// an `open_palace` for the (non-existent) `owner-repo` name transparently
+/// return the handle for the existing bare palace — the split-brain fix.
+/// What: creates palace `trusty-tools`, registers alias
+/// `bobmatnyc-trusty-tools -> trusty-tools`, then opens the alias name and
+/// asserts the returned handle's canonical id is `trusty-tools` (not the
+/// alias), proving both names share the one store.
+/// Test: this test itself (issue #1939 regression guard).
+#[test]
+fn open_palace_follows_alias() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use trusty_common::palace_alias::PalaceAliasStore;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    // The real (bare-repo) palace on disk.
+    let bare = Palace {
+        id: PalaceId::new("trusty-tools"),
+        name: "trusty-tools".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("trusty-tools"),
+    };
+    reg.create_palace(data_root, bare)
+        .expect("create bare palace");
+
+    // Register the palace-level alias (owner-repo -> bare).
+    PalaceAliasStore::register_alias(data_root, "bobmatnyc-trusty-tools", "trusty-tools")
+        .expect("register alias");
+
+    // Opening the aliased (non-existent) name must resolve to the bare store.
+    let handle = reg
+        .open_palace(data_root, &PalaceId::new("bobmatnyc-trusty-tools"))
+        .expect("alias must resolve to the existing palace");
+    assert_eq!(
+        handle.id,
+        PalaceId::new("trusty-tools"),
+        "aliased open must return the canonical target handle, not the alias id"
+    );
+}
+
+/// Issue #1939 — a stale alias whose target does not exist must NOT redirect;
+/// the original "metadata missing" error stands.
+///
+/// Why: if an alias points at a deleted palace we must fail on the ORIGINAL
+/// requested id rather than masking it, so operators see the name they asked
+/// for. Requiring the target to exist on disk enforces this.
+/// What: registers an alias to a non-existent target, opens the alias name,
+/// and asserts the open errors (no redirect happened).
+/// Test: this test itself.
+#[test]
+fn open_palace_ignores_alias_when_target_missing() {
+    use trusty_common::palace_alias::PalaceAliasStore;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    PalaceAliasStore::register_alias(data_root, "ghost", "does-not-exist").expect("register alias");
+
+    assert!(
+        reg.open_palace(data_root, &PalaceId::new("ghost")).is_err(),
+        "alias to a missing target must not redirect"
+    );
+}
+
+/// Issue #1939 — an alias must never shadow a real palace of the same name.
+///
+/// Why: if both an alias entry AND a real palace exist under the same name,
+/// the real palace wins (aliases only fill the "missing palace" gap).
+/// What: creates palace `dup`, registers a (mischievous) alias
+/// `dup -> other`, and asserts `open_palace("dup")` returns `dup` itself.
+/// Test: this test itself.
+#[test]
+fn open_palace_prefers_real_palace_over_alias() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use trusty_common::palace_alias::PalaceAliasStore;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    for id in ["dup", "other"] {
+        let p = Palace {
+            id: PalaceId::new(id),
+            name: id.to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join(id),
+        };
+        reg.create_palace(data_root, p).expect("create palace");
+    }
+    PalaceAliasStore::register_alias(data_root, "dup", "other").expect("register alias");
+
+    let handle = reg
+        .open_palace(data_root, &PalaceId::new("dup"))
+        .expect("real palace opens");
+    assert_eq!(
+        handle.id,
+        PalaceId::new("dup"),
+        "a real palace must win over an alias of the same name"
+    );
+}
+
+/// Issue #9544 — creating a palace under a live alias name is refused and the
+/// alias keeps resolving.
+///
+/// Why: a real palace always wins over an alias of the same name, so a create
+/// that succeeded would silently split that name off the palace it pointed at.
+/// What: creates `alias-target`, aliases `alias-name` to it, then asserts the
+/// create of `alias-name` fails with `LiveAliasError`, writes no `palace.json`,
+/// and an open of `alias-name` still reaches `alias-target`.
+/// Test: this test itself.
+#[test]
+fn palace_create_refuses_a_live_alias_name() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use trusty_common::palace_alias::{LiveAliasError, PalaceAliasStore};
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    let palace = |id: &str| Palace {
+        id: PalaceId::new(id),
+        name: id.to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join(id),
+    };
+    reg.create_palace(data_root, palace("alias-target"))
+        .expect("create target palace");
+    PalaceAliasStore::register_alias(data_root, "alias-name", "alias-target")
+        .expect("register alias");
+
+    let result = reg.create_palace(data_root, palace("alias-name"));
+    assert!(
+        result.is_err(),
+        "creating a live alias name must be refused"
+    );
+    assert!(
+        !data_root.join("alias-name").join("palace.json").exists(),
+        "a refused create must not write palace metadata"
+    );
+    let handle = reg
+        .open_palace(data_root, &PalaceId::new("alias-name"))
+        .expect("the alias still resolves");
+    assert_eq!(handle.id, PalaceId::new("alias-target"));
+    let err = result.err().expect("refused");
+    assert_eq!(
+        err.downcast_ref::<LiveAliasError>(),
+        Some(&LiveAliasError {
+            alias: "alias-name".to_string(),
+            target: "alias-target".to_string(),
+        }),
+        "the refusal is typed so callers can map it to a conflict: {err:#}"
+    );
+}
+
+/// Why (#9544): the live-alias guard must fail closed. A create that passes
+/// while the alias file cannot be read leaves a palace that shadows the alias
+/// for good once the read error clears.
+/// What: makes `palace_aliases.json` a directory, so reading it fails with
+/// EISDIR on every platform, then creates a fresh id. The create must fail and
+/// write no palace metadata.
+/// Test: this test itself.
+#[test]
+fn palace_create_fails_when_the_alias_file_is_unreadable() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    std::fs::create_dir(data_root.join("palace_aliases.json")).unwrap();
+    let reg = PalaceRegistry::new();
+    let result = reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("fresh"),
+            name: "fresh".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("fresh"),
+        },
+    );
+    assert!(
+        result.is_err(),
+        "an unreadable alias file must refuse the create"
+    );
+    assert!(
+        !data_root.join("fresh").join("palace.json").exists(),
+        "a refused create must not write palace metadata"
+    );
+}
+
+/// Issue #463 — a `get` call promotes the accessed handle to MRU,
+/// protecting it from immediate eviction.
+///
+/// Why: LRU eviction must respect actual access order, not insertion
+/// order. A handle that was inserted first but subsequently accessed
+/// should survive longer than one that was inserted more recently but
+/// never accessed.
+/// What: Creates a capacity-2 registry, inserts "a" then "b", accesses
+/// "a" (promoting it to MRU), inserts "c" — expects "b" to be evicted
+/// instead of "a".
+/// Test: This test itself (issue #463 regression guard).
+#[test]
+fn lru_get_promotes_to_mru() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::with_max_open(2);
+
+    reg.register(make_handle("a", dir.path()));
+    reg.register(make_handle("b", dir.path()));
+
+    // Access "a" — promotes it to MRU; "b" is now LRU.
+    let _ = reg.get(&PalaceId::new("a"));
+
+    // Inserting "c" must evict "b" (the new LRU), not "a".
+    reg.register(make_handle("c", dir.path()));
+    assert_eq!(reg.len(), 2);
+    assert!(
+        reg.peek(&PalaceId::new("b")).is_none(),
+        "'b' must be evicted — it was LRU after 'a' was promoted"
+    );
+    assert!(
+        reg.peek(&PalaceId::new("a")).is_some(),
+        "'a' must survive — it was promoted to MRU by get()"
+    );
+    assert!(
+        reg.peek(&PalaceId::new("c")).is_some(),
+        "'c' must be present"
+    );
+}
+
+/// Issue #463 — an evicted palace handle is transparently reopened on
+/// the next `open_palace` call.
+///
+/// Why: Eviction closes fds but must not lose data. The handle is only
+/// in-memory state; the authoritative store is always on disk. This test
+/// proves that after an eviction the palace can be reopened from disk
+/// without error and its metadata is intact.
+/// What: Creates a capacity-1 registry, creates palace "a", then
+/// registers "b" (evicting "a"), then calls `open_palace` for "a"
+/// (must reopen from disk successfully) and asserts the id matches.
+/// Test: This test itself (issue #463 regression guard).
+#[test]
+fn lru_evicted_handle_reopens() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::with_max_open(1);
+
+    // Create and persist "alpha" on disk.
+    let palace_a = Palace {
+        id: PalaceId::new("alpha"),
+        name: "Alpha".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("alpha"),
+    };
+    reg.create_palace(data_root, palace_a)
+        .expect("create alpha");
+    assert_eq!(reg.len(), 1, "'alpha' registered");
+
+    // Register "beta" directly — evicts "alpha" from the capacity-1 cache.
+    reg.register(make_handle("beta", data_root));
+    assert_eq!(reg.len(), 1, "capacity-1: only 'beta' remains");
+    assert!(
+        reg.peek(&PalaceId::new("alpha")).is_none(),
+        "'alpha' must have been evicted"
+    );
+
+    // Reopening "alpha" from disk must succeed.
+    let reopened = reg
+        .open_palace(data_root, &PalaceId::new("alpha"))
+        .expect("open_palace after eviction must succeed");
+    assert_eq!(reopened.id, PalaceId::new("alpha"), "reopened id matches");
+    assert!(
+        reg.peek(&PalaceId::new("alpha")).is_some(),
+        "'alpha' must be back in the cache after reopen"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Idle-to-disk eviction + configurable max-open (idle-evict feature)
+// ---------------------------------------------------------------------------
+
+/// Idle-to-disk config knob (Part 3): the LRU open-handle cap honours
+/// `TRUSTY_MEMORY_MAX_OPEN_PALACES`.
+///
+/// Why: operators tune resident-palace RAM via the env var; `from_env` must
+/// actually apply it.
+/// What: sets the env to 2, builds `from_env()`, registers three handles, and
+/// asserts the cap held the registry at 2 (LRU evicted the oldest). Restores
+/// the env immediately after construction. `#[serial]` guards the env mutation
+/// from parallel tests.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn from_env_respects_max_open_palaces_env() {
+    let dir = tempdir().unwrap();
+    // SAFETY: #[serial] ensures no other thread reads/writes this env var
+    // concurrently; removed immediately after `from_env` reads it.
+    unsafe {
+        std::env::set_var(MAX_OPEN_PALACES_ENV, "2");
+    }
+    let reg = PalaceRegistry::from_env();
+    unsafe {
+        std::env::remove_var(MAX_OPEN_PALACES_ENV);
+    }
+
+    reg.register(make_handle("a", dir.path()));
+    reg.register(make_handle("b", dir.path()));
+    reg.register(make_handle("c", dir.path()));
+    assert_eq!(
+        reg.len(),
+        2,
+        "from_env cap=2 must bound the registry to 2 handles"
+    );
+}
+
+/// Unset / invalid env falls back to the default cap.
+///
+/// Why: a misconfigured or absent env var must not silently drop the cap to an
+/// unusable value.
+/// What: with the env removed, `max_open_palaces_from_env` returns the default.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn max_open_palaces_from_env_defaults_when_unset() {
+    unsafe {
+        std::env::remove_var(MAX_OPEN_PALACES_ENV);
+    }
+    assert_eq!(max_open_palaces_from_env(), DEFAULT_MAX_OPEN_PALACES);
+}
+
+/// Idle-to-disk (Part 2): `evict_idle` drops a handle idle past the threshold
+/// AND referenced only by the cache.
+///
+/// Why: the core "idle to disk" behaviour — reclaim a cold palace's heavy RAM.
+/// What: registers a handle with `last_accessed` forced into the past, evicts
+/// with a 1 s threshold, and asserts it left the cache.
+/// Test: this test.
+#[test]
+fn evict_idle_drops_idle_unreferenced_handle() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    let h = make_handle("idle", dir.path());
+    h.last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    reg.register(h);
+    assert_eq!(reg.len(), 1);
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(1));
+    assert_eq!(evicted, 1, "an idle, unreferenced handle must be evicted");
+    assert!(
+        reg.get(&PalaceId::new("idle")).is_none(),
+        "evicted handle must be gone from the cache"
+    );
+}
+
+/// `evict_idle` must NOT drop a handle a live operation still references
+/// (`strong_count > 1`), even when it is idle.
+///
+/// Why: this is the correctness anchor — dropping an in-use handle could race
+/// the in-flight op and (under Writer intent) break the redb flock. The
+/// strong_count==1 guard prevents it.
+/// What: registers an idle handle, holds a second `Arc` clone (simulating an
+/// in-flight recall), and asserts `evict_idle` skips it.
+/// Test: this test.
+#[test]
+fn evict_idle_skips_referenced_handle() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    let h = make_handle("busy", dir.path());
+    h.last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    reg.register(h);
+    // Simulate an in-flight operation holding a clone of the handle.
+    let _in_flight = reg.get(&PalaceId::new("busy")).expect("registered");
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(1));
+    assert_eq!(evicted, 0, "a referenced handle must be skipped");
+    assert_eq!(reg.len(), 1);
+}
+
+/// `evict_idle` must skip a handle accessed within the TTL window and treat a
+/// zero threshold as disabled.
+///
+/// Why: only genuinely-idle palaces should be reclaimed; a zero TTL is the
+/// documented "disabled" value.
+/// What: a fresh handle (last_accessed == now) survives a 1 h threshold, and a
+/// zero threshold is a no-op even for an ancient handle.
+/// Test: this test.
+#[test]
+fn evict_idle_skips_recent_and_respects_zero_threshold() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new();
+    reg.register(make_handle("fresh", dir.path()));
+    assert_eq!(
+        reg.evict_idle(std::time::Duration::from_secs(3600)),
+        0,
+        "a recently-accessed handle must not be evicted"
+    );
+
+    let h = make_handle("ancient", dir.path());
+    h.last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    reg.register(h);
+    assert_eq!(
+        reg.evict_idle(std::time::Duration::from_secs(0)),
+        0,
+        "zero threshold disables eviction"
+    );
+    assert_eq!(reg.len(), 2, "no handle should have been evicted");
+}
+
+/// An on-disk open is not an access (#7087): `evict_idle` must be able to
+/// reclaim a handle that was opened but never genuinely touched, on its very
+/// first sweep.
+///
+/// Why: `PalaceHandle::open_with_intent` used to stamp `last_accessed` to the
+/// open time, so a restart burst (every persisted palace opened in a tight
+/// loop by `load_palaces_from_disk`) looked like a burst of fresh recalls to
+/// `evict_idle` and none of them were ever reclaimed — reintroducing the
+/// #6836 memory blowup even through the idle-evict fallback.
+/// What: opens two palaces via `create_palace` (the real disk-hydration path,
+/// not the in-memory `PalaceHandle::new` `make_handle` helper), drops the
+/// caller's reference to each so only the cache holds them
+/// (`Arc::strong_count == 1`), and asserts a 300 s `evict_idle` drops both
+/// immediately even though they were "just opened".
+/// Test: this test itself.
+#[test]
+fn open_does_not_reset_idle_clock() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    for name in ["alpha", "beta"] {
+        let palace = Palace {
+            id: PalaceId::new(name),
+            name: name.to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join(name),
+        };
+        let handle = reg.create_palace(data_root, palace).expect("create palace");
+        // Release the caller's clone so only the cache references it —
+        // matching the restart-hydration path, where nothing is ever held
+        // beyond `register_arc`.
+        drop(handle);
+    }
+    assert_eq!(reg.len(), 2, "both palaces opened");
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(300));
+    assert_eq!(
+        evicted, 2,
+        "an opened-but-never-accessed handle must read as idle since open"
+    );
+    assert_eq!(reg.len(), 0, "both must have been evicted");
+}
+
+/// A genuine access after open makes a handle recent again — `touch()` still
+/// overrides the "never accessed" open-time sentinel (#7087).
+///
+/// Why: the fix must not make every opened handle permanently look idle;
+/// `PalaceHandle::touch` (called by every real recall/remember/forget path)
+/// has to win over the open-time sentinel the moment a genuine access occurs.
+/// What: opens two palaces, calls `touch()` on only one immediately after
+/// open, and asserts a 300 s `evict_idle` reclaims only the untouched one.
+/// Test: this test itself.
+#[test]
+fn touch_after_open_makes_handle_recent() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+
+    let touched = Palace {
+        id: PalaceId::new("touched"),
+        name: "Touched".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("touched"),
+    };
+    let touched_handle = reg
+        .create_palace(data_root, touched)
+        .expect("create touched palace");
+    touched_handle.touch();
+    drop(touched_handle);
+
+    let untouched = Palace {
+        id: PalaceId::new("untouched"),
+        name: "Untouched".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("untouched"),
+    };
+    let untouched_handle = reg
+        .create_palace(data_root, untouched)
+        .expect("create untouched palace");
+    drop(untouched_handle);
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(300));
+    assert_eq!(
+        evicted, 1,
+        "only the untouched, merely-opened palace should be evicted"
+    );
+    assert!(
+        reg.get(&PalaceId::new("touched")).is_some(),
+        "a touched handle must survive the idle sweep"
+    );
+    assert!(
+        reg.get(&PalaceId::new("untouched")).is_none(),
+        "an untouched handle must not survive the idle sweep"
+    );
+}
+
+/// `PalaceHandle::touch` must be a no-op while a dream cycle holds
+/// `is_compacting`.
+///
+/// Why: internal consolidation calls the same remember/forget methods users
+/// do; stamping `last_accessed` there would keep an idle-but-dreaming palace
+/// resident forever, defeating idle-evict.
+/// What: forces the idle clock to 0, sets `is_compacting`, calls `touch`, and
+/// asserts the clock did not advance; then clears the flag and confirms `touch`
+/// advances it.
+/// Test: this test.
+#[test]
+fn touch_suppressed_during_compaction() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempdir().unwrap();
+    let h = make_handle("dreaming", dir.path());
+    h.last_accessed.store(0, Relaxed);
+    h.is_compacting.store(true, Relaxed);
+    h.touch();
+    assert_eq!(
+        h.last_accessed.load(Relaxed),
+        0,
+        "touch during compaction must not advance the idle clock"
+    );
+    h.is_compacting.store(false, Relaxed);
+    h.touch();
+    assert!(
+        h.last_accessed.load(Relaxed) > 0,
+        "touch after compaction must advance the idle clock"
+    );
+}
+
+/// Why (#9299, ADR-0071 D2): a recall_all fan-out must not reset the idle
+/// clock of the palaces it searches, including those reached through a
+/// `join_all` on the same task, which is how `recall_across_palaces` runs.
+/// What: inside `without_idle_touch`, a direct `touch` and one from a joined
+/// future both leave the clock at 0; outside the scope, `touch` advances it.
+/// Test: this test.
+#[tokio::test]
+async fn touch_suppressed_inside_without_idle_touch() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempdir().unwrap();
+    let h = make_handle("fanout", dir.path());
+    h.last_accessed.store(0, Relaxed);
+    PalaceHandle::without_idle_touch(async {
+        h.touch();
+        futures::future::join_all([async { h.touch() }]).await;
+    })
+    .await;
+    assert_eq!(h.last_accessed.load(Relaxed), 0, "suppressed scope touched");
+    h.touch();
+    assert!(h.last_accessed.load(Relaxed) > 0, "touch outside the scope");
+}
+
+/// Idle-to-disk rehydrate correctness (Part 2): after an idle-evict drops a
+/// palace, the next access transparently re-opens it from redb and recall
+/// returns the same drawer content — no data loss.
+///
+/// Why: eviction reclaims RAM only if reopening is lossless; this is the
+/// end-to-end proof that "idle to disk" round-trips through the durable store.
+/// What: creates a palace, remembers a drawer, snapshots the recall result,
+/// forces the palace idle and drops the handle so `strong_count == 1`, evicts
+/// it, then reopens via `open_palace` and asserts recall returns byte-for-byte
+/// the same drawer contents as before eviction.
+/// Test: this test.
+#[tokio::test]
+async fn evict_idle_then_reopen_preserves_recall() {
+    seed_shared_embedder_with_mock();
+    use crate::engine::palace::{Palace, RoomType};
+    use crate::engine::retrieval::recall_with_default_embedder;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    let palace = Palace {
+        id: PalaceId::new("evict-reopen"),
+        name: "Evict".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("evict-reopen"),
+    };
+    let handle = reg.create_palace(data_root, palace).unwrap();
+    handle
+        .remember(
+            "the quokka is a small marsupial native to Western Australia".to_string(),
+            RoomType::Research,
+            vec!["wildlife".to_string()],
+            0.7,
+        )
+        .await
+        .expect("remember persists the drawer");
+
+    // Snapshot recall BEFORE eviction.
+    let before = recall_with_default_embedder(&handle, "quokka", 5)
+        .await
+        .expect("pre-evict recall");
+    let before_contents: Vec<String> = before
+        .iter()
+        .map(|r| r.drawer.content().to_string())
+        .collect();
+    assert!(
+        before_contents.iter().any(|c| c.contains("quokka")),
+        "sanity: pre-evict recall must find the drawer"
+    );
+
+    // Make the palace idle and release our reference so strong_count == 1.
+    handle
+        .last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let id = handle.id.clone();
+    drop(handle);
+
+    // Idle-evict drops the whole handle — heavy fields freed.
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(1));
+    assert_eq!(evicted, 1, "idle palace must be evicted");
+    assert!(
+        reg.get(&id).is_none(),
+        "palace must be cold (absent from the registry) after eviction"
+    );
+
+    // Next access lazily rehydrates from the durable redb store.
+    let reopened = reg
+        .open_palace(data_root, &id)
+        .expect("reopen from disk after idle eviction");
+    let after = recall_with_default_embedder(&reopened, "quokka", 5)
+        .await
+        .expect("post-reopen recall");
+    let after_contents: Vec<String> = after
+        .iter()
+        .map(|r| r.drawer.content().to_string())
+        .collect();
+    assert_eq!(
+        before_contents, after_contents,
+        "recall after idle-evict + rehydrate must match pre-eviction results"
+    );
+}
+
+/// Why (issue #3992): reproduces the reported hang under REAL multi-writer
+/// contention, not a mocked one. `PalaceRegistry::open_palace` serialises
+/// concurrent opens of the SAME palace id behind a per-palace
+/// `open_lock: parking_lot::Mutex<()>` (see the `open_locks` field doc).
+/// Each individual `Database::create` retry inside `try_open_or_snapshot`
+/// IS already bounded (`WRITER_RETRY_ATTEMPTS` x `WRITER_RETRY_SLEEP_MS`,
+/// ~1.55s) — but a failed Writer open is never cached, so the NEXT caller
+/// repeats the same ~1.55s bounded dance from scratch. Under sustained
+/// contention (the redb file never becomes available), every caller queued
+/// behind `open_lock` pays its OWN ~1.55s bounded attempt AFTER waiting for
+/// every earlier queued caller's ~1.55s attempt to finish first — so the
+/// LAST caller's total wait scales with queue depth, not with any single
+/// constant. That is "unbounded" from any individual caller's point of
+/// view even though no single redb-open call exceeds ~1.55s. Live evidence
+/// before this fix: 5 concurrent openers against a genuinely held lock made
+/// the 5th caller wait 9.86s (and the pattern extrapolates linearly — this
+/// is exactly how a single `memory_remember` was observed to hang 1800s
+/// under sustained contention).
+/// What: holds a genuine flock conflict on the real backing file
+/// (`kg.redb` — `KnowledgeGraph::open_with_intent` translates the legacy
+/// `kg.db` path callers pass in), exactly like `concurrent_open::tests::
+/// writer_intent_fails_on_locked_file`, for the whole test. Uses
+/// `with_open_queue_timeout` to inject a short (2s) deadline instead of
+/// mutating the process-wide `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` env var (which
+/// would race any other test running in parallel with this one). Fires
+/// `WRITER_COUNT` concurrent `open_palace` calls at a `with_writer_intent`
+/// registry for the SAME palace id and records each caller's wall-clock
+/// wait; asserts every caller returns within one bounded window
+/// (queue-timeout + one ~1.55-2.1s redb attempt) regardless of queue depth.
+/// Test: this test.
+#[test]
+fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use redb::Database;
+
+    const WRITER_COUNT: usize = 5;
+    // Short enough that the test runs fast and deterministically; injected
+    // per-registry (not via env var) so it cannot race other parallel tests.
+    const OPEN_QUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace_id = PalaceId::new("contended");
+    let palace_dir = data_root.join(palace_id.as_str());
+    std::fs::create_dir_all(&palace_dir).unwrap();
+
+    // Persist palace.json so `open_palace` can load metadata.
+    let palace = Palace {
+        id: palace_id.clone(),
+        name: "Contended".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: palace_dir.clone(),
+    };
+    crate::engine::store::palace_store::PalaceStore::save_palace(&palace)
+        .expect("save palace metadata");
+
+    // Hold a REAL, permanent flock conflict on the actual redb file for the
+    // whole test — mirrors `writer_intent_fails_on_locked_file` exactly,
+    // just held longer. This process never releases it, so every Writer
+    // open attempt genuinely exhausts its bounded retry window and fails.
+    let kg_path = palace_dir.join("kg.redb");
+    let _lock_holder = Database::create(&kg_path).expect("hold kg.redb lock for the test");
+
+    let reg = std::sync::Arc::new(
+        PalaceRegistry::new()
+            .with_writer_intent()
+            .with_open_queue_timeout(OPEN_QUEUE_TIMEOUT),
+    );
+    eprintln!("registry open_intent = {:?}", reg.open_intent());
+    let start = std::time::Instant::now();
+    let handles: Vec<_> = (0..WRITER_COUNT)
+        .map(|i| {
+            let reg = reg.clone();
+            let data_root = data_root.to_path_buf();
+            let palace_id = palace_id.clone();
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let result = reg.open_palace(&data_root, &palace_id);
+                let elapsed = t0.elapsed();
+                match &result {
+                    Ok(h) => eprintln!(
+                        "writer {i}: elapsed={elapsed:?} ok=true is_read_only={} (since test start: {:?})",
+                        h.is_read_only(),
+                        start.elapsed()
+                    ),
+                    Err(e) => eprintln!(
+                        "writer {i}: elapsed={elapsed:?} ok=false err={e:#} (since test start: {:?})",
+                        start.elapsed()
+                    ),
+                }
+                (result.is_ok(), elapsed)
+            })
+        })
+        .collect();
+
+    let results: Vec<(bool, std::time::Duration)> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let total = start.elapsed();
+    let max_wait = results.iter().map(|(_, d)| *d).max().unwrap();
+    eprintln!(
+        "writer_open_queue_depth: {WRITER_COUNT} concurrent writers, total={total:?}, \
+         max_single_caller_wait={max_wait:?}"
+    );
+
+    // Every attempt must fail (the lock is held for the whole test) — never
+    // a silent snapshot degrade for Writer intent.
+    assert!(
+        results.iter().all(|(ok, _)| !ok),
+        "every writer-intent open must fail while the lock is held, never succeed silently"
+    );
+
+    // The bounded-fix assertion: no single caller may wait longer than the
+    // injected open-queue timeout plus one bounded writer-open attempt
+    // (~1.55-2.1s in practice), REGARDLESS of how many other callers are
+    // queued ahead of it for the same palace. Pre-fix, `open_lock.lock()`
+    // was unbounded and callers queued behind every earlier caller's own
+    // attempt in turn, so `max_wait` scaled with `WRITER_COUNT` (measured
+    // live: 9.86s for 5 callers against a genuinely held lock — see the
+    // test doc comment). Post-fix it stays pinned near
+    // `OPEN_QUEUE_TIMEOUT` regardless of `WRITER_COUNT`.
+    let slack = std::time::Duration::from_millis(2_500);
+    assert!(
+        max_wait < OPEN_QUEUE_TIMEOUT + slack,
+        "a queued caller must not wait longer than the open-queue timeout plus \
+         one bounded writer-open attempt, regardless of queue depth; got \
+         {max_wait:?} (bound {OPEN_QUEUE_TIMEOUT:?} + {slack:?} slack) for \
+         {WRITER_COUNT} concurrent callers (issue #3992)"
+    );
+}
+
+/// Why (issue #4002): the joint budget must be a ceiling on WAITING, never a
+/// new failure mode. An exhausted budget makes the open-queue acquisition
+/// non-blocking, and a non-blocking `try_lock_for` on an UNCONTENDED lock
+/// still succeeds — so the ordinary single-caller open must be unaffected. A
+/// fix that turned an exhausted budget into an unconditional error would break
+/// every write whose write-lock leg happened to consume the budget, which is
+/// worse than the additive wait it replaced.
+/// What: creates a palace, then opens it through `open_palace_within` with a
+/// zero-total (already spent) budget and asserts the handle comes back.
+/// `Duration::ZERO` makes `remaining()` exactly zero on any machine —
+/// `saturating_sub` can only move it down — so this needs no sleep and cannot
+/// flake on a slow host.
+/// Test: this test.
+#[test]
+fn open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace() {
+    use crate::engine::palace::Palace;
+    use crate::engine::timeouts::OpBudget;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace = Palace {
+        id: PalaceId::new("budgeted"),
+        name: "Budgeted".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("budgeted"),
+    };
+    {
+        let reg = PalaceRegistry::new();
+        reg.create_palace(data_root, palace).expect("create_palace");
+    }
+
+    let spent = OpBudget::start(std::time::Duration::ZERO);
+    assert_eq!(spent.remaining(), std::time::Duration::ZERO);
+
+    let reg = PalaceRegistry::new();
+    let handle = reg
+        .open_palace_within(data_root, &PalaceId::new("budgeted"), spent)
+        .expect("an exhausted budget must not fail an uncontended open");
+    assert_eq!(handle.id, PalaceId::new("budgeted"));
+}
+
+/// Why (issue #4002): the budget is a ceiling, not a replacement. A fix that
+/// handed `budget.remaining()` straight to `try_lock_for` would let a 60 s
+/// residual override a registry configured for a 100 ms queue wait — raising
+/// a bound the operator deliberately lowered.
+/// What: builds a registry with a 100 ms `open_queue_timeout` and a budget with
+/// far more left, then asserts the clamp itself resolves to the smaller of the
+/// two. This checks the arithmetic the open path applies, without needing to
+/// manufacture queue contention.
+/// Test: this test.
+#[test]
+fn open_palace_within_does_not_extend_the_configured_queue_bound() {
+    use crate::engine::timeouts::OpBudget;
+
+    let configured = std::time::Duration::from_millis(100);
+    let generous = OpBudget::start(std::time::Duration::from_secs(600));
+    assert_eq!(
+        generous.leg(configured),
+        configured,
+        "a large residual budget must not raise a small configured queue bound"
+    );
+}
+
+/// Restore a path's mode on drop, including while unwinding from a failed
+/// assertion, so a test can never leave `tempfile` an untraversable tree.
+///
+/// The mode is a field because the tests below lock two kinds of path: a
+/// regular `palace.json` (0o600) and the directory holding it (0o700), which a
+/// file's mode would leave untraversable.
+#[cfg(unix)]
+struct RestoreMode {
+    path: std::path::PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+    }
+}
+
+/// Why (#5549, ADR-0045): `open_palace` returns `anyhow::Error`, which flattens
+/// a genuine absence together with a denied read, a transient `EIO`/`ESTALE`,
+/// undecodable metadata, an open-queue timeout, and a redb lock conflict. Every
+/// caller that mapped `Err` to "not found" therefore told its client a palace
+/// it could not read does not exist. `open_error_is_absent` is what lets a
+/// caller keep the two apart, so if it answered `true` for a denied read the
+/// callers would be exactly where they started.
+/// What: creates a palace, evicts its cached handle so the next open reads
+/// disk, strips `palace.json` to mode 000, and asserts the resulting open error
+/// is NOT classified as absence — then asserts an id that was never created IS.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_absent_only_for_a_genuine_absence() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    // Drop the cached handle so the next open goes back to disk.
+    reg.remove(&PalaceId::new("alpha"));
+
+    let target = data_root.join("alpha").join("palace.json");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: target.clone(),
+        mode: 0o600,
+    };
+
+    // Root bypasses the mode bits outright and some filesystems ignore them,
+    // so confirm the denial actually took hold. A vacuous pass here would
+    // assert nothing at all.
+    match std::fs::read(&target) {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still readable at mode 000. Run this suite as a \
+             non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked palace.json to deny reads, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be read must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be read was classified as absent — that is the \
+         #5549 coercion, and the HTTP callers render it as 404 'palace not found': {denied:#}"
+    );
+
+    let missing = match reg.open_palace(data_root, &PalaceId::new("never-created")) {
+        Ok(_) => panic!("an id with no palace on disk must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        PalaceRegistry::open_error_is_absent(&missing),
+        "a genuinely absent palace must still classify as absence, or every 404 the callers \
+         owe becomes a 500: {missing:#}"
+    );
+}
+
+/// Why (#5549, #5574): the sibling test above locks the FILE, so the stat
+/// probe succeeds and the read under it fails. This one locks the DIRECTORY, so
+/// the probe itself fails — the shape #5574 changed from `NotFound` to `Io` at
+/// `load_palace`. Both halves live in this crate, so the claim that the
+/// classifier carries #5574's new `Io` through as "not absence" belongs here
+/// rather than only at the HTTP callers downstream.
+/// What: creates a palace, evicts its cached handle, strips the palace's own
+/// directory to mode 000, and asserts the resulting open error is NOT
+/// classified as absence. Panics rather than passing vacuously if the denial
+/// does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_palace_json() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    reg.remove(&PalaceId::new("alpha"));
+
+    let palace_dir = data_root.join("alpha");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be statted was classified as absent — #5574 made \
+         that an Io error at load_palace, and this classifier read it back as absence: {denied:#}"
+    );
+}
+
+/// Why (#5592): the two tests above reach `load_palace` under the id the caller
+/// asked for, so `load_palace`'s own #5574 guard decides the answer. An ALIASED
+/// open does not: `resolve_palace_alias` probes the target itself before any of
+/// that, and while that probe used `Path::exists()` a target it was DENIED to
+/// stat read as a target that is not there. The redirect was then dropped and
+/// `load_palace` ran against the alias id's own genuinely-absent directory,
+/// returning a truthful `NotFound` for the wrong palace — so a palace that
+/// exists and merely could not be verified still reported absence, and the HTTP
+/// callers still rendered 404. That is the same coercion #5549 exists to
+/// remove, one call earlier in the same function.
+/// What: creates palace `bare-repo`, aliases `owner-repo` to it, evicts the
+/// cached handle so the next open reads disk, strips `bare-repo`'s own
+/// directory to mode 000 (the probe itself is denied, not just the read), and
+/// asserts the error from opening the ALIAS is NOT classified as absence.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_alias_target() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+    use trusty_common::palace_alias::PalaceAliasStore;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("bare-repo"),
+            name: "bare-repo".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("bare-repo"),
+        },
+    )
+    .expect("create palace");
+    // `palace_aliases.json` sits in `data_root`, not inside the palace
+    // directory, so locking that directory below leaves the alias map readable.
+    PalaceAliasStore::register_alias(data_root, "owner-repo", "bare-repo").expect("register alias");
+    reg.remove(&PalaceId::new("bare-repo"));
+
+    let palace_dir = data_root.join("bare-repo");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5592: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("owner-repo")) {
+        Ok(_) => panic!("an alias whose target cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "an aliased palace whose target could not be statted was classified as absent — \
+         resolve_palace_alias dropped the redirect and load_palace then answered for the alias \
+         id's own empty directory, so the caller renders 404 for a palace that exists: {denied:#}"
+    );
+}
+
+/// Why (#7106): `release_if_unreferenced` is what lets a startup sweep hand a
+/// palace back to the LRU. Its whole safety argument is the `strong_count == 1`
+/// guard — without it the release could drop a handle out from under an
+/// in-flight recall or dream cycle.
+/// What: registers a palace, holds a second `Arc`, asserts the release refuses
+/// and the handle is still cached; drops the reference and asserts it then
+/// releases and the entry is gone.
+/// Test: this test.
+#[test]
+fn release_if_unreferenced_skips_a_referenced_handle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = PalaceRegistry::new();
+    let palace = Palace {
+        id: PalaceId::new("held".to_string()),
+        name: "held".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: tmp.path().join("held"),
+    };
+    let id = palace.id.clone();
+    let held = registry
+        .create_palace(tmp.path(), palace)
+        .expect("create palace");
+
+    assert!(
+        !registry.release_if_unreferenced(&id),
+        "a handle something still references must never be released"
+    );
+    assert!(registry.peek(&id).is_some());
+
+    drop(held);
+    assert!(
+        registry.release_if_unreferenced(&id),
+        "an unreferenced handle must release"
+    );
+    assert!(
+        registry.peek(&id).is_none(),
+        "the cache entry must be gone; redb remains the source of truth"
+    );
+}
+
+/// #8314 (critic round 2): the daemon's reopen path answers behind a stuck write.
+///
+/// Why: the red-first tests for #8314 opened `PalaceHandle` directly, but the
+/// daemon reopens through [`PalaceRegistry::open_palace`], which also runs the
+/// room backfill and default-wing seeding. Those write when a row is missing,
+/// and redb's `begin_write` waits without a bound for a live write
+/// transaction, so a palace holding a drawer in an unregistered room never
+/// finished reopening while any write was stuck.
+/// What: for a palace whose rooms are all registered and for one with a drawer
+/// in an unregistered room, a Writer-intent registry creates the palace,
+/// evicts it while a handle stays alive, holds a raw kg.redb write, and reopens
+/// from another thread. The reopen must answer inside 5 s. Once the write
+/// ends, the deferred room row must land.
+/// Test: itself.
+#[test]
+fn a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time() {
+    use crate::engine::palace::{Drawer, Palace};
+    use std::sync::Arc;
+
+    for missing_room in [false, true] {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path().to_path_buf();
+        let id = PalaceId::new(if missing_room { "room-gap" } else { "room-ok" });
+        let reg = Arc::new(PalaceRegistry::new().with_writer_intent());
+        let palace = Palace {
+            id: id.clone(),
+            name: "Stuck".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: data_root.join(id.as_str()),
+        };
+        let live = reg.create_palace(&data_root, palace).expect("create");
+        let room_id = uuid::Uuid::new_v4();
+        if missing_room {
+            // Upserted below the registry, so no ROOMS row names this room.
+            let drawer = Drawer::new(room_id, "a drawer in an unregistered room");
+            live.kg.upsert_drawer_sync(&drawer).unwrap();
+        }
+        reg.remove(&id); // the idle-evict shape: `live` keeps the kg shared
+
+        let store = live.kg.store();
+        let db = store.db_for_test();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let wtx = db.begin_write().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            drop(wtx);
+        });
+        held_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (reopen_reg, reopen_root, reopen_id) =
+            (Arc::clone(&reg), data_root.clone(), id.clone());
+        std::thread::spawn(move || {
+            let out = reopen_reg
+                .open_palace(&reopen_root, &reopen_id)
+                .map(drop)
+                .map_err(|e| format!("{e:#}"));
+            let _ = done_tx.send(out);
+        });
+        let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        stuck.join().unwrap();
+
+        outcome
+            .unwrap_or_else(|_| {
+                panic!("reopen (missing_room={missing_room}) blocked behind the stuck write")
+            })
+            .expect("reopen succeeds");
+        if missing_room {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while store.get_room(room_id).unwrap().is_none() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the deferred room row never landed after the write ended"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+/// #8733: the open-time TTL purge is maintenance, so a registry whose data
+/// root's maintenance lease is held by another process deletes no row. Once
+/// the holder is gone the same open reclaims the row. Pre-fix the first open
+/// already deleted it.
+#[test]
+fn a_non_maintainer_open_deletes_no_expired_row() {
+    use crate::engine::palace::Drawer;
+    let root = tempdir().unwrap();
+    let data_dir = root.path().join("ttl-palace");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let mut expired = Drawer::new(uuid::Uuid::new_v4(), "an expired drawer");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    let expired_id = expired.id;
+    {
+        let kg = KnowledgeGraph::open(&data_dir.join("kg.db")).unwrap();
+        kg.upsert_drawer_sync(&expired).unwrap();
+    }
+    let palace = Palace {
+        id: PalaceId::new("ttl-palace"),
+        name: "TTL".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir,
+    };
+
+    let holder = Arc::new(MaintenanceLease::new(root.path()));
+    assert!(holder.try_hold().is_held());
+    let non_maintainer =
+        PalaceRegistry::new().with_maintenance_lease(Arc::new(MaintenanceLease::new(root.path())));
+    {
+        let handle = non_maintainer.open_handle(&palace).expect("open");
+        assert!(
+            !handle.drawers.read().iter().any(|d| d.id == expired_id),
+            "the expired drawer is still hidden from the handle"
+        );
+        let rows = handle.kg.load_drawers().unwrap();
+        assert!(
+            rows.iter().any(|d| d.id == expired_id),
+            "a non-maintainer must not delete the expired row"
+        );
+    }
+
+    drop(holder);
+    let handle = non_maintainer.open_handle(&palace).expect("reopen");
+    let rows = handle.kg.load_drawers().unwrap();
+    assert!(
+        !rows.iter().any(|d| d.id == expired_id),
+        "the new maintainer reclaims the expired row"
+    );
+}
+
+/// Why (#9173): the dream scheduler reads the data root from the registry to
+/// reach palaces outside the handle cache; a registry built without one, or by
+/// the eager `open`, must answer accordingly.
+#[test]
+fn data_root_is_unset_by_default_and_named_by_open_and_the_builder() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(PalaceRegistry::new().data_root().is_none());
+    let named = PalaceRegistry::new().with_data_root(dir.path());
+    assert_eq!(named.data_root(), Some(dir.path()));
+    let opened = PalaceRegistry::open(dir.path()).unwrap();
+    assert_eq!(opened.data_root(), Some(dir.path()));
+}
+
+/// Why (#9140 batch, 2026-10-04 15:27Z): `palace.json` records an absolute
+/// `data_dir`, and `load_palace` trusted it. A palace root copied to a sandbox
+/// therefore listed and opened the ORIGINAL live palace files, so a bench
+/// pointed at the copy held the live daemon's redb locks.
+/// What: creates a palace under root A, copies only its `palace.json` (still
+/// naming A) to root B, then lists and opens it from B. The listed `data_dir`
+/// and the opened store must be under B, and A's directory must gain no file.
+/// Test: itself.
+#[test]
+fn a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir() {
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let id = PalaceId::new("copied");
+    let reg = PalaceRegistry::new();
+    let palace = Palace {
+        id: id.clone(),
+        name: "copied".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: a.path().join("copied"),
+    };
+    drop(reg.create_palace(a.path(), palace).unwrap());
+    reg.remove(&id);
+    drop(reg);
+
+    let src = a.path().join("copied");
+    let dst = b.path().join("copied");
+    std::fs::create_dir(&dst).unwrap();
+    std::fs::copy(src.join("palace.json"), dst.join("palace.json")).unwrap();
+    let names = |dir: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let a_before = names(&src);
+
+    let listed = PalaceRegistry::list_palaces(b.path()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].data_dir, dst,
+        "listing must use the palace's location"
+    );
+
+    let reg = PalaceRegistry::new();
+    let handle = reg.open_palace(b.path(), &id).unwrap();
+    assert_eq!(handle.data_dir.as_deref(), Some(dst.as_path()));
+    assert!(
+        dst.join("kg.redb").exists(),
+        "the copy's own store must be opened"
+    );
+    drop(handle);
+    reg.remove(&id);
+    assert_eq!(
+        names(&src),
+        a_before,
+        "the recorded data_dir must not be touched"
+    );
+}
+
+/// Releases an [`OpPark`] on drop, so a failed assertion cannot leave a
+/// blocking thread held and hang the runtime's shutdown (#9487).
+struct ReleaseOnDrop(Arc<crate::engine::store::hnsw_store::OpPark>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Why (#9487): a blocked HNSW call holds only the vector store, so every
+/// eviction path can drop its palace handle while the call stays blocked.
+/// What: for the LRU cap, `remove` and `release_if_unreferenced`, parks a
+/// `search`, aborts the task awaiting it, evicts the palace, and asserts
+/// `oldest_hnsw_op` still names it. The idle sweep is covered by
+/// `health_stays_wedged_after_the_blocked_palace_is_evicted` in trusty-memory.
+/// Test: this test.
+#[tokio::test]
+async fn a_blocked_hnsw_op_stays_reported_on_every_eviction_path() {
+    use crate::engine::store::hnsw_store::{HnswOpKind, OpPark};
+    use crate::engine::store::vector::VectorStore;
+    for path in ["lru-cap", "remove", "release-if-unreferenced"] {
+        let dir = tempdir().unwrap();
+        let reg = PalaceRegistry::with_max_open(1);
+        let id = PalaceId::new("blocked");
+        let handle = Arc::new(make_handle("blocked", dir.path()));
+        reg.register_arc(Arc::clone(&handle));
+        let park = OpPark::new();
+        let _release = ReleaseOnDrop(Arc::clone(&park));
+        handle
+            .vector_store
+            .set_hnsw_op_park(Some(Arc::clone(&park)));
+        let task = tokio::spawn(async move { handle.vector_store.search(&[1.0; 384], 1).await });
+        let entered = tokio::task::spawn_blocking(move || {
+            park.wait_entered(std::time::Duration::from_secs(30))
+        })
+        .await
+        .expect("park wait task");
+        task.abort();
+        let cancelled = task.await.expect_err("aborted").is_cancelled();
+        match path {
+            "lru-cap" => reg.register(make_handle("other", dir.path())),
+            "remove" => reg.remove(&id),
+            _ => assert!(reg.release_if_unreferenced(&id), "{path}: not released"),
+        }
+
+        let oldest = reg.oldest_hnsw_op();
+
+        assert!(entered, "{path}: the search never parked");
+        assert!(cancelled, "{path}: the awaiting future was dropped");
+        assert!(reg.peek(&id).is_none(), "{path}: the palace is evicted");
+        let (palace, op) =
+            oldest.unwrap_or_else(|| panic!("{path}: the blocked search went unreported"));
+        assert_eq!(palace, id, "{path}");
+        assert_eq!(op.kind, HnswOpKind::Search, "{path}");
+    }
+}
+
+/// #9659: a writer registry's hydration must never hand back a read-only
+/// snapshot of a palace whose `kg.redb` another holder has.
+///
+/// Why: the daemon builds its SM and portfolio registries the way this test
+/// does, `PalaceRegistry::open(..)` then `.with_writer_intent()`. Hydration ran
+/// under the default `ReadOnlyClient` intent, so with `tm sm serve` holding
+/// `kg.redb` it fell back to a snapshot, and every daemon write then failed
+/// "read-only" with only an INFO log.
+/// What: creates a current-format palace and drops it, holds `kg.redb` with a
+/// raw `create_palace_db`, then opens a registry the daemon's way. Passes when
+/// the open fails, or when the palace has no handle and is recorded unopenable.
+/// Test: this is the test.
+#[test]
+fn a_writer_registry_never_hydrates_read_only() {
+    use crate::engine::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace_id = PalaceId::new("held-by-sm-serve");
+    {
+        let registry = PalaceRegistry::new().with_writer_intent();
+        let palace = Palace {
+            id: palace_id.clone(),
+            name: "held-by-sm-serve".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join(palace_id.as_str()),
+        };
+        registry
+            .create_palace(data_root, palace)
+            .expect("create a current-format palace");
+    }
+
+    let kg_path = data_root.join(palace_id.as_str()).join("kg.redb");
+    let _holder = trusty_common::redb_cache::create_palace_db(&kg_path)
+        .expect("another holder takes kg.redb");
+
+    // The daemon's construction today (trusty-mpm core/sm/memory.rs).
+    let Ok(registry) = PalaceRegistry::open(data_root) else {
+        return;
+    };
+    let registry = registry.with_writer_intent();
+    if let Some(handle) = registry.get(&palace_id) {
+        panic!(
+            "a writer registry hydrated {palace_id} as a handle (read_only={}) while \
+             another holder has kg.redb",
+            handle.is_read_only()
+        );
+    }
+    assert!(
+        registry.unopenable_reason(&palace_id).is_some(),
+        "a palace a writer registry could not open must be recorded unopenable"
+    );
+}

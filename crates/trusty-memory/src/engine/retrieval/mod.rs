@@ -1,0 +1,151 @@
+//! 4-layer progressive retrieval: L0 (identity) -> L1 (essential) ->
+//! L2 (on-demand vector) -> L3 (deep search).
+//!
+//! Why: LLM context windows are precious. Always loading L0+L1 (~900 tokens)
+//! gives the agent baseline grounding; L2/L3 are paid only when the query
+//! demands them. This dramatically improves cost and latency vs. dumping the
+//! whole memory store into context.
+//! What: Thin re-export facade over submodules after the 830-SLOC (#607)
+//! split. All logic lives in `embedder`, `types`, `handle`, and `layers`.
+//! Test: `cargo test -p trusty-memory retrieval::`
+//! exercises L0/L1 cache and L2 vector retrieval end-to-end.
+
+// #4906: the deferred-embed lane (retry + durable failure ledger) and the
+// vector-coverage health/repair surface that answers "which drawers have no
+// vector" and re-embeds them.
+mod chunk_backfill;
+mod chunk_health;
+mod chunk_progress;
+// #9735: `pub(crate)` so the dream merge can refuse a split part.
+pub(crate) mod chunk_split;
+mod deferred_embed;
+mod embed_repair;
+mod embed_store;
+mod embedder;
+mod handle;
+// #9279: L2/L3 candidate scoring and the exact short-id token boost.
+mod candidates;
+mod id_tokens;
+// #9719/#9722: the live L1 cache and the open-time snapshot gap-fill.
+mod l1;
+mod layers;
+pub(crate) mod open_sweep;
+// #9390: the bounded refill past expired slots every recall lane shares.
+mod refill;
+// #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its
+// only length control.
+mod relevance;
+// ADR-0027 T9: room/wing recall scoping, shared by L2 and the list paths.
+mod scope;
+// ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
+mod tier_c;
+// #9390: a slot's re-verify command, stored as a `verify_with` KG triple.
+mod tier_c_verify;
+mod types;
+// #6366: the write critical section and its ceiling. Split out of `handle` so
+// the pipeline sits in one future a timeout can drop as a unit — and so
+// `handle.rs` stays under the 500-SLOC cap.
+mod write_pipeline;
+
+// #5902: `pub(crate)` only so `share::tests` can reuse this module's
+// always-failing `DeadEmbedder` instead of declaring its own.
+#[cfg(test)]
+pub(crate) mod embed_repair_tests;
+// #9433: `pub(crate)` so `tier_c_tests` can reuse its log `Capture`.
+// #9275: `{uuid}#n` chunk rows through `PalaceHandle`.
+#[cfg(test)]
+mod chunk_backfill_measure_tests;
+#[cfg(test)]
+mod chunk_backfill_tests;
+#[cfg(test)]
+mod chunk_health_tests;
+#[cfg(test)]
+mod chunk_key_tests;
+// #9735 PR 1b: the oversized-drawer split.
+#[cfg(test)]
+mod chunk_split_tests;
+#[cfg(test)]
+mod embed_store_tests;
+#[cfg(test)]
+mod l1_live_tests;
+#[cfg(test)]
+mod op_budget_remember_tests;
+#[cfg(test)]
+pub(crate) mod recall_log_tests;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod tier_c_tests;
+#[cfg(test)]
+mod tier_c_verify_tests;
+#[cfg(test)]
+mod timeout_tests;
+#[cfg(test)]
+mod write_pipeline_tests;
+
+// ── Public re-exports ────────────────────────────────────────────────────────
+
+// Shared embedder
+#[cfg(any(test, feature = "embedder-test-support"))]
+pub use embedder::{seed_shared_embedder_with, seed_shared_embedder_with_mock};
+pub use embedder::{shared_embedder, shared_embedder_initialized};
+
+// Core types
+// #9390: a committed slot whose verify command was not stored.
+pub use tier_c_verify::VerifyNotStored;
+pub use types::{
+    CrossPalaceRecall, CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult,
+    RememberOptions, RetrievalLayers,
+};
+
+// Palace handle
+pub use handle::PalaceHandle;
+
+// #4906: vector-coverage health and the repair backfill. `RetryPolicy` is
+// public because a caller choosing to run a longer policy than the write-path
+// default is a legitimate operator decision.
+pub use deferred_embed::RetryPolicy;
+// #9275: the chunk-count verdict on `EmbedHealth`, and the chunked embed
+// primitive trusty-memory's kuzu import writes a drawer's vectors with.
+pub use chunk_backfill::{ChunkCommitError, SliceBounds, SliceReport, SliceStop};
+pub use chunk_health::ChunkCheck;
+pub use chunk_progress::{
+    CHUNK_MARKER_FILE, ChunkMarker, ChunkProgress, ChunkState, MARKER_RESCAN_AFTER,
+};
+pub use embed_repair::{
+    AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
+    VectorBackfillOptions, VectorBackfillReport,
+};
+pub use embed_store::embed_chunks;
+// #9275: the dream merge and rebuild share the bounded chunked embed.
+pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_within};
+
+// Recall scoping (ADR-0027 T9)
+pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+// #9719: L0 + L1 under a recall scope; trusty-memory's warming lane uses it.
+pub use l1::retrieve_l0_l1_scoped;
+
+// #9390: the expired-slot refill bound. Public because trusty-memory's BM25
+// warming lane applies the same stop rule.
+pub use refill::next_refill_window;
+
+// #5037: relevance floor. Public because the consumer that must apply it —
+// trusty-memory's prompt-context injection — lives in another crate.
+pub use relevance::{DEFAULT_RELEVANCE_FLOOR, FloorOutcome, apply_relevance_floor};
+
+// ADR-0028 Tier C admission (#4886). The write half (`persist_with_retirement`)
+// stays crate-internal — every writer reaches it through
+// `PalaceHandle::remember_with_options`, which is the single enforcement point.
+pub use tier_c::{
+    FACT_KEY_MAX_LEN, TIER_C_DEFAULT_TTL_HOURS, TierCAdmission, TierCRefusal, admit_tier_c,
+    validate_fact_key,
+};
+
+// Layer functions
+pub use layers::{
+    dedup_extend, expand_query, recall, recall_across_palaces, recall_across_palaces_reporting,
+    recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
+    recall_deep_scoped, recall_deep_with_default_embedder, recall_in_room, recall_scoped,
+    recall_with_default_embedder, rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2,
+    retrieve_l2_scoped, retrieve_l3, retrieve_l3_scoped,
+};

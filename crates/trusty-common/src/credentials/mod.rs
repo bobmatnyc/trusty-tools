@@ -71,8 +71,9 @@ mod dotenv;
 // #3451: the single shared test-only `EnvVarGuard`, consolidated from three
 // prior copies (this module's `resolver::tests`, `memory_core::dream::tests`,
 // and `memory_core::semantic_consolidation::tests`).
-#[cfg(test)]
-pub(crate) mod env_guard;
+// #9271: `test-support` exposes it to the engine's tests in trusty-memory.
+#[cfg(any(test, feature = "test-support"))]
+pub mod env_guard;
 mod error;
 // #9311: the stdin-only runner every CLI-backed secrets integration uses.
 pub mod external_cli;

@@ -85,11 +85,6 @@ const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
         "src/inference/configurator/resolver.rs",
         "provider API keys",
     ),
-    ("src/memory_core/dream/tests.rs", "provider API keys"),
-    (
-        "src/memory_core/semantic_consolidation/mod.rs",
-        "provider API keys",
-    ),
     // Single-variable writers, one module each.
     (
         "src/daemon_guard.rs",
@@ -105,10 +100,6 @@ const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
         "OLLAMA_HOST, TRUSTY_LOCAL_API_KEY",
     ),
     ("src/local_probe.rs", "OLLAMA_HOST"),
-    (
-        "src/memory_core/registry_tests.rs",
-        "TRUSTY_MEMORY_MAX_OPEN_PALACES",
-    ),
     ("src/palace_resolve_tests.rs", "TRUSTY_MEMORY_PALACE"),
     ("src/uds/on_demand_tests.rs", "TRUSTY_ANALYZE_EXTERNAL"),
     (
@@ -177,8 +168,8 @@ const SERIAL_ATTRIBUTES: &[&str] = &["#[serial", "#[file_serial"];
 /// cross-file wrapper.
 ///
 /// Why `EnvVarGuard`: `credentials::env_guard` is the crate's one RAII env
-/// guard, and its users (`memory_core::dream::tests`,
-/// `memory_core::semantic_consolidation`) contain no raw `set_var` at all. A
+/// guard, and its users (`credentials::resolver::tests`; the engine's, now in
+/// trusty-memory, #9271) contain no raw `set_var` at all. A
 /// scan for the std calls alone would read those files as environment-free.
 const ENV_MUTATION_CALLS: &[&str] = &["set_var", "remove_var"];
 

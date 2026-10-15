@@ -161,7 +161,8 @@ name = "trusty-common"
 # 0.62.0 (Refs #9735): minor — backfill engine (PR 1 of #9735); 0.61.0 is live on crates.io.
 # 0.63.0 (Refs #9722, #9719): minor — accepted 0.x break: PalaceHandle::l1_drawers becomes Arc<RwLock<Vec<Drawer>>> and refresh_l1 takes &self; 0.61.0 is live on crates.io.
 # 0.63.1 (Refs #9282): patch — additive PalaceHandle::snapshot / restore_palace_snapshot and snapshot types; three items narrowed to crate-private; 0.63.0 is live on crates.io.
-version = "0.63.1"
+# 0.64.0 (Refs #9271): minor — breaking: the `memory_core` module moves to trusty-memory as `trusty_memory::engine`; `memory-core` becomes a no-op feature; `memory-core-test-support` is removed; hnsw_rs, git2, postcard, dashmap and unicode-normalization leave the dependency graph; adds `test-support`; subsumes the unpublished 0.63.1 (0.63.0 is live on crates.io).
+version = "0.64.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -197,11 +198,14 @@ lanes = [
     ] },
     { name = "core", features = [
         "knowledge-document",
-        "memory-core",
         "embedder-test-support",
-        # #9274: the format-0 palace fixture; the memory-core tests already
-        # compile it under `cfg(test)`, this lane compiles its feature form.
-        "memory-core-test-support",
+        # #9271: the test helpers trusty-memory's engine tests share; the unit
+        # tests already compile them under `cfg(test)`, this lane compiles the
+        # feature form.
+        "test-support",
+        # #9271: both reached this lane through `memory-core`, now a no-op.
+        "embedder-bundled-ort",
+        "redb-open",
         "embedder-client",
         "catchup",
         "monitor-tui",
@@ -274,6 +278,7 @@ exempt = [
     { feature = "embedder-cuda", reason = "Links ORT against a CUDA host runtime. Mutually exclusive with `embedder-bundled-ort`, which the `core` lane runs, and unbuildable on this workspace's macOS and ubuntu runners." },
     { feature = "embedder-load-dynamic", reason = "Selects ORT's load-dynamic linking for AL2023; gates no `cfg` site anywhere in `src/`, so it changes how `embedder` links and not what it does. `core` runs the embedder tests." },
     { feature = "embedder-coreml", reason = "Documented no-op alias for `embedder`, kept for backward compatibility; gates no `cfg` site anywhere in `src/`." },
+    { feature = "memory-core", reason = "No-op since #9271: the engine moved to `trusty_memory::engine`. Kept so a manifest that still names it resolves; it enables nothing and gates no `cfg` site." },
     { feature = "embedder-candle", reason = "Every test it gates is `#[ignore]`d — they download ~90 MB from HuggingFace. Run them deliberately: `cargo test -p trusty-common --features embedder-candle -- --ignored`." },
 ]
 
@@ -294,33 +299,9 @@ name = "tickets-mcp"
 path = "src/bin/tickets_mcp.rs"
 required-features = ["tickets"]
 
-# Task-drawer + dream-cycle integration test (spec-001 Phase 4, issue #1722).
-# Pre-existing gap fixed incidentally by #2401: this target references
-# `trusty_common::memory_core` and the `embedder-test-support`-gated
-# `seed_shared_embedder_with_mock` unconditionally, so `cargo test
-# -p trusty-common` with default (empty) features failed to compile it.
-# `required-features` tells cargo to skip building this test binary unless
-# both are enabled, matching the pattern already used for the
-# `candle_metal_bench` / `tickets-mcp` binaries above.
-[[test]]
-name = "memory_palace"
-path = "tests/memory_palace.rs"
-required-features = ["memory-core", "embedder-test-support"]
-
-# #9275 PR C: the chunked embed pipeline end to end. Its own process, so the
-# shared embedder is seeded with a chunking mock before any palace opens.
-[[test]]
-name = "chunked_embed_9275"
-path = "tests/chunked_embed_9275.rs"
-required-features = ["memory-core", "embedder-test-support"]
-
-# #7106 ratchet: no palace-scoped redb open may bypass the bounded page-cache
-# builder. Scans the memory-core sources, so it needs that feature on to be
-# meaningful (and to match the tree it is asserting about).
-[[test]]
-name = "redb_cache_bounds"
-path = "tests/redb_cache_bounds.rs"
-required-features = ["memory-core"]
+# #9271: the `memory_palace` and `chunked_embed_9275` suites moved to
+# trusty-memory with the engine; `redb_cache_bounds` now scans only this
+# crate's own redb modules, so it needs no feature and is auto-discovered.
 
 # Inference-foundation integration suite (issue #2402). References
 # `trusty_common::inference::{InferenceAdapter, Configurator, …}`, which only
@@ -444,23 +425,12 @@ proc-macro2 = { version = "1.0", optional = true }
 quote = { version = "1.0", optional = true }
 genco = { version = "0.19", optional = true }
 
-# Optional: enabled by the `memory-core` feature (formerly the
-# `trusty-memory-core` crate). Memory Palace storage engine — HNSW
-# vector index (pure-Rust `hnsw_rs`), redb-backed knowledge graph,
-# fastembed embeddings, git-history extraction, dream/decay analytics.
-# Heavy deps gated behind the feature so downstream crates that only
-# want chat / mcp / symgraph pay zero cost.
+# Optional: enabled by the `webhook-hmac` feature. (#9271: `hnsw_rs`, `git2`,
+# `postcard`, `dashmap` and `unicode-normalization` left with the engine.)
 hex = { workspace = true, optional = true }
 # Optional: enabled by the `webhook-hmac` feature (#5089 step 3). The GitHub
 # `X-Hub-Signature-256` verifier is the crate's only HMAC consumer.
 hmac = { workspace = true, optional = true }
-hnsw_rs = { workspace = true, optional = true }
-# Optional: enabled by the `memory-core` feature. NFC composition for
-# `memory_core::content_hash`'s normalization contract (#5902) — the only
-# consumer, so it is gated with the rest of the Memory Palace.
-unicode-normalization = { workspace = true, optional = true }
-git2 = { workspace = true, optional = true }
-dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 # Non-optional: the unconditional `log_buffer` module timestamps each captured
 # dashboard log line via `chrono::Local` (issue #846). It must be available in
@@ -468,7 +438,6 @@ futures = { workspace = true, optional = true }
 chrono = { workspace = true }
 regex = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
-postcard = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
 # base64 is used by the JIRA backend for Basic-auth encoding.
 base64 = { workspace = true, optional = true }
@@ -581,9 +550,6 @@ redb = { workspace = true }
 chrono = { workspace = true }
 # tokio: used by kg_store_snapshot_tests async test harness.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# postcard: used by `memory_palace` integration test to assert DrawerType
-# serialization indices are stable (issue #1722 backward-compat guarantee).
-postcard = { workspace = true }
 # wiremock: hermetic HTTP mock server for `search_client`'s `fetch_all`
 # regression test (#6382 — proves the dead `/communities` route is no longer
 # dialled).
@@ -761,16 +727,14 @@ embedder-coreml = ["embedder"]
 # integration tests can reuse it. It does NOT imply `embedder`: every item it
 # gates sits inside the `embedder` module, so on its own it compiles nothing
 # and pulls no ONNX. A crate can then list it in `[dev-dependencies]` and get
-# the mock only when one of its own features turns `embedder` or `memory-core`
-# on — trusty-mpm's `sm-memory` does (owner ruling 2026-09-27).
+# the mock only when one of its own features turns `embedder` on —
+# trusty-memory's `embedder-test-support` forwards to it (#9271).
 embedder-test-support = []
-# #9274: exposes `memory_core::store::format_v0_fixture`, a format-0 palace
-# written from the old on-disk shapes, so a `PalaceRegistry` consumer can test
-# that its existing palaces migrate. Like `embedder-test-support` it implies
-# nothing: the module sits inside `memory_core`, so it compiles only when the
-# consumer's own feature turns `memory-core` on. List it in
-# `[dev-dependencies]` only.
-memory-core-test-support = []
+# #9271: exposes the test helpers the engine's tests in trusty-memory share —
+# `log_buffer::capture_logs`, `atomic_file::test_support::ReadOnlyDir` and (with
+# `credentials`) `credentials::env_guard::EnvVarGuard`. Implies nothing and
+# pulls no dependency. List it in `[dev-dependencies]` only.
+test-support = []
 # Issue #54: opt-in Candle BERT backend (all-MiniLM-L6-v2 on Metal/CPU). Does
 # NOT replace the fastembed/ORT default — operators select it at runtime via
 # `TRUSTY_EMBEDDER=candle` on builds that compiled this feature in. The
@@ -821,51 +785,12 @@ symgraph-parser = [
     "dep:quote",
     "dep:genco",
 ]
-# Enables the `memory_core` module: Memory Palace storage engine
-# (formerly the `trusty-memory-core` crate). Pulls in usearch (HNSW
-# vector index), redb + postcard (knowledge graph + payload/chat stores),
-# git2 (git history extraction), and dashmap / chrono / regex /
-# lru / parking_lot / thiserror / uuid utilities. Requires the bundled-ORT
-# embedder variant by default so FastEmbedder is available; downstream
-# consumers can switch to the load-dynamic or CUDA variants by enabling
-# `embedder-load-dynamic` / `embedder-cuda` explicitly.
-#
-# Issue #47: rusqlite / r2d2 / r2d2_sqlite are no longer pulled in by this
-# feature — all stores migrated to redb (#44, #45, #46, #56, #57). The
-# migration-era `usearch-migrate` and `sqlite-kg` features have been removed
-# (issue #989) — all production palaces are confirmed migrated to redb.
-#
-# Issue #2401: implies `credentials` so `memory_core::filter::redact_token`
-# can delegate to the single canonical `credentials::redact_secret`
-# implementation without every `memory-core` consumer needing to opt in to
-# `credentials` separately — the two extra deps it pulls (`toml`, `dotenvy`)
-# are negligible next to memory-core's existing footprint.
 chat-attachments = ["dep:base64", "dep:image", "dep:thiserror"]
-memory-core = [
-    "chat-attachments",
-    "dep:hnsw_rs",
-    "dep:git2",
-    "dep:dashmap",
-    "dep:futures",
-    "dep:regex",
-    "dep:lru",
-    "dep:parking_lot",
-    "dep:thiserror",
-    # #6847: `uuid` is a mandatory dependency now, so no `dep:` entry here.
-    # #5063: the shared redb corruption classifier moved to the light
-    # `redb-open` feature; memory-core implies it so `memory_core::store` is
-    # unchanged for every existing consumer.
-    "redb-open",
-    "dep:postcard",
-    "dep:petgraph",
-    "dep:sha2",
-    "dep:hex",
-    # #5902: NFC for the content-hash normalization contract.
-    "dep:unicode-normalization",
-    "embedder",
-    "embedder-bundled-ort",
-    "credentials",
-]
+# #9271: a no-op kept for compatibility. The Memory Palace engine it enabled
+# moved to trusty-memory (`trusty_memory::engine`); depend on trusty-memory
+# instead. It implies nothing, so a consumer that relied on it for `embedder`,
+# `credentials`, `redb-open` or `chat-attachments` must name those itself.
+memory-core = []
 # Why (#5695): the `memory-core-kuzu` feature and its `memory_core::store::kuzu`
 # module were REMOVED. Nothing enabled the feature and no bindings were ever
 # wired in, so it only made `--all-features` — the path cargo-semver-checks
@@ -909,8 +834,7 @@ gh-cli = ["dep:thiserror"]
 # Deliberately LIGHT — it gates only `dep:redb`, nothing else. The classifier
 # used to live under `memory-core`, which drags in usearch, git2 and a bundled
 # ORT embedder; no consumer would enable that stack to reuse a four-arm `match`,
-# which is why five crates each kept their own copy. `memory-core` implies this
-# feature, so `memory_core::store::redb_open` keeps working unchanged.
+# which is why five crates each kept their own copy.
 redb-open = ["dep:redb"]
 # Enables the `intent_source` module: the shared intent-source resolver (ISR)
 # for the intent/method conformance gates (DOC-15, SPEC-CONFORMANCE-03, #1358).

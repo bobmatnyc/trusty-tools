@@ -1,0 +1,940 @@
+//! Palace metadata + identity.txt persistence.
+//!
+//! Why: Palaces are long-lived state on disk; without metadata persistence the
+//! CLI cannot list palaces across runs and there is no canonical place to store
+//! the palace identity (L0 baseline context).
+//! What: `PalaceStore` provides atomic save/load of `Palace` metadata as JSON
+//! at `<data_dir>/palace.json`, plus identity.txt read/write helpers and a
+//! registry-wide palace listing walker.
+//! Test: `palace_store_roundtrip` and `identity_txt_roundtrip` in this module
+//! cover serde + atomic writes; `registry_create_and_open` (in registry.rs)
+//! exercises the registry-level wiring.
+
+use crate::engine::palace::{Palace, PalaceId};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+/// Filename for serialized palace metadata.
+const PALACE_JSON: &str = "palace.json";
+/// Filename for the L0 identity blob.
+const IDENTITY_TXT: &str = "identity.txt";
+
+/// Errors raised by palace persistence operations.
+///
+/// Why: Library code returns `Result<_, PalaceStoreError>` so callers can
+/// distinguish missing metadata from genuine I/O failure.
+/// What: Wraps `std::io::Error` and `serde_json::Error` plus a "not found"
+/// variant for missing metadata files.
+/// Test: `load_palace_missing_returns_not_found` pins which absences earn
+/// `NotFound`; `load_palace_propagates_an_unstattable_palace_json` pins that an
+/// undeterminable one earns `Io` instead. The #9274 format and backup arms are
+/// covered in palace_format_tests.rs and format_backup_tests.rs.
+// #9274: `non_exhaustive` so later format arms are not a semver break.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum PalaceStoreError {
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("json error at {path}: {source}")]
+    Json {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("palace metadata missing at {0}")]
+    NotFound(PathBuf),
+    /// #9274 (ADR-0067 D3 rule 1): a marker names a format newer than ours.
+    #[error(
+        "FormatTooNew: palace {palace} is at format {found}, newer than the format {supported} \
+         this binary reads; upgrade trusty-memory to a release that reads format {found}"
+    )]
+    FormatTooNew {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D3 rule 2): the palace is one format behind.
+    #[error(
+        "FormatNeedsMigration: palace {palace} is at format {found}, one behind the format \
+         {supported} this binary reads; start the trusty-memory daemon so it can migrate the palace"
+    )]
+    FormatNeedsMigration {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D3 rule 2): the palace is two or more formats behind.
+    #[error(
+        "FormatTooOld: palace {palace} is at format {found}, more than one behind the format \
+         {supported} this binary reads; open it first with a release that reads format {}",
+        .found + 1
+    )]
+    FormatTooOld {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D1): the kg.redb marker and the palace.json mirror differ.
+    #[error(
+        "FormatMarkerMismatch: palace {palace} has kg.redb format {marker} but palace.json \
+         format {mirror}; refusing to open it"
+    )]
+    FormatMarkerMismatch {
+        palace: String,
+        marker: u32,
+        mirror: u32,
+    },
+    /// #9274: a format marker exists but could not be read; fail closed.
+    #[error("FormatMarkerUnreadable: palace {palace} format marker at {path}: {reason}")]
+    FormatMarkerUnreadable {
+        palace: String,
+        path: PathBuf,
+        reason: String,
+    },
+    /// #9274 (ADR-0067 D3 rule 3): a format-migration backup step failed.
+    #[error("BackupFailed: format-migration backup at {path}: {source}")]
+    BackupFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// #9274: a backup copy, or its source, did not hash to the expected value.
+    #[error("BackupVerifyMismatch: {file}: expected sha256 {expected}, got {actual}")]
+    BackupVerifyMismatch {
+        file: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    /// #9274 (ADR-0067 D3 rule 4): a migration step failed. The palace stays
+    /// refused; the next writer-intent open resumes from the files on disk.
+    #[error(
+        "FormatMigrationFailed: palace {palace} migration from format {from} to {to} failed: \
+         {reason}; the palace is refused until a writer open completes it"
+    )]
+    FormatMigrationFailed {
+        palace: String,
+        from: u32,
+        to: u32,
+        reason: String,
+    },
+    /// #9274: the backup filesystem lacks the 1.1x headroom the copy needs.
+    #[error(
+        "InsufficientSpace: format-migration backup at {path} needs {needed} bytes, \
+         {available} available"
+    )]
+    InsufficientSpace {
+        path: PathBuf,
+        needed: u64,
+        available: u64,
+    },
+}
+
+impl PalaceStoreError {
+    /// Whether this error refuses a palace over its on-disk format (#9274).
+    ///
+    /// Why: retry loops and the MCP error mapping must tell a refusal that no
+    /// wait can change from a transient failure.
+    /// What: `true` for the six `Format*` variants.
+    /// Test: `format_errors_are_not_retried`.
+    pub fn is_format_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::FormatTooNew { .. }
+                | Self::FormatNeedsMigration { .. }
+                | Self::FormatTooOld { .. }
+                | Self::FormatMarkerMismatch { .. }
+                | Self::FormatMarkerUnreadable { .. }
+                | Self::FormatMigrationFailed { .. }
+        )
+    }
+
+    /// The variant's name, for callers that report it on the wire (#9274).
+    ///
+    /// Test: `every_new_error_arm_names_its_variant`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "Io",
+            Self::Json { .. } => "Json",
+            Self::NotFound(_) => "NotFound",
+            Self::FormatTooNew { .. } => "FormatTooNew",
+            Self::FormatNeedsMigration { .. } => "FormatNeedsMigration",
+            Self::FormatTooOld { .. } => "FormatTooOld",
+            Self::FormatMarkerMismatch { .. } => "FormatMarkerMismatch",
+            Self::FormatMarkerUnreadable { .. } => "FormatMarkerUnreadable",
+            Self::FormatMigrationFailed { .. } => "FormatMigrationFailed",
+            Self::BackupFailed { .. } => "BackupFailed",
+            Self::BackupVerifyMismatch { .. } => "BackupVerifyMismatch",
+            Self::InsufficientSpace { .. } => "InsufficientSpace",
+        }
+    }
+
+    fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
+    fn json(path: impl Into<PathBuf>, source: serde_json::Error) -> Self {
+        Self::Json {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
+type Result<T> = std::result::Result<T, PalaceStoreError>;
+
+/// On-disk palace metadata format. Mirrors `Palace` but is its own type so we
+/// can evolve the on-disk schema independently if needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PalaceJson {
+    id: String,
+    name: String,
+    description: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    data_dir: PathBuf,
+    /// Schema version for forward compatibility.
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
+    /// #9274 (ADR-0067 D1): the palace-format mirror. Absent means format 0;
+    /// `save_palace` carries an existing value forward and never invents one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_version: Option<u32>,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl From<&Palace> for PalaceJson {
+    fn from(p: &Palace) -> Self {
+        Self {
+            id: p.id.0.clone(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            created_at: p.created_at,
+            data_dir: p.data_dir.clone(),
+            schema_version: 1,
+            format_version: None,
+        }
+    }
+}
+
+impl From<PalaceJson> for Palace {
+    fn from(j: PalaceJson) -> Self {
+        Self {
+            id: PalaceId(j.id),
+            name: j.name,
+            description: j.description,
+            created_at: j.created_at,
+            data_dir: j.data_dir,
+        }
+    }
+}
+
+/// Stateless namespace for palace persistence helpers.
+///
+/// Why: Palace metadata persistence has no state of its own — every operation
+/// is a pure function over a path. Grouping under a unit struct gives a stable
+/// import path while keeping the helpers `pub fn` rather than methods.
+/// What: `save_palace` / `load_palace` / `list_palaces` plus identity.txt
+/// helpers.
+/// Test: This module's tests cover roundtrip and listing.
+pub struct PalaceStore;
+
+impl PalaceStore {
+    /// Persist a palace's metadata to `<data_dir>/palace.json` atomically.
+    ///
+    /// Why: Crash-safety — if the daemon dies mid-write we must not leave a
+    /// half-written `palace.json` that cannot deserialize.
+    /// What: Creates `data_dir`, writes JSON to `palace.json.tmp`, fsyncs and
+    /// renames over `palace.json`. #9274: an existing `format_version` mirror
+    /// is written back unchanged, and a mirror newer than this binary's format
+    /// refuses the rewrite with `FormatTooNew`.
+    /// Test: `palace_store_roundtrip` save + load round-trips all fields;
+    /// `save_palace_keeps_the_format_mirror_and_refuses_a_newer_one`.
+    pub fn save_palace(palace: &Palace) -> Result<()> {
+        let data_dir = palace.data_dir.clone();
+        std::fs::create_dir_all(&data_dir).map_err(|e| PalaceStoreError::io(&data_dir, e))?;
+
+        let target = data_dir.join(PALACE_JSON);
+        let tmp = data_dir.join(format!("{PALACE_JSON}.tmp"));
+
+        let mut json: PalaceJson = palace.into();
+        // #9274: keep the format mirror, and refuse to rewrite a newer palace.
+        json.format_version =
+            super::palace_format::mirror_to_preserve(&data_dir, palace.id.as_str())?;
+        let bytes = serde_json::to_vec_pretty(&json)
+            .map_err(|e| PalaceStoreError::json(target.clone(), e))?;
+
+        std::fs::write(&tmp, &bytes).map_err(|e| PalaceStoreError::io(tmp.clone(), e))?;
+        std::fs::rename(&tmp, &target).map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        Ok(())
+    }
+
+    /// Load palace metadata from `<data_dir>/palace.json`.
+    ///
+    /// Why: Re-opening a palace requires reconstructing its `Palace` struct
+    /// before we can wire up storage handles.
+    /// What: Reads `palace.json`, deserializes into `Palace`. Returns
+    /// `NotFound` only when the file is genuinely absent; a probe that cannot
+    /// determine whether it is there propagates the underlying error instead
+    /// (ADR-0045). That distinction matters to `list_palaces`, whose caller
+    /// contract treats `NotFound` as "skip this one" — so a denial coerced to
+    /// `NotFound` here drops a real palace out of the listing the destructive
+    /// passes act on. The returned `data_dir` is always `data_dir` itself,
+    /// never the absolute path recorded in the file (#9140 batch).
+    /// Test: `palace_store_roundtrip` confirms fields survive a save+load;
+    /// `a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir`
+    /// pins the location rule;
+    /// `load_palace_missing_returns_not_found` pins the benign arm and
+    /// `load_palace_propagates_an_unstattable_palace_json` the error arm.
+    pub fn load_palace(data_dir: &Path) -> Result<Palace> {
+        let target = data_dir.join(PALACE_JSON);
+        // #5549: `exists()` reported a stat we are denied as "no metadata here".
+        let present = target
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        if !present {
+            return Err(PalaceStoreError::NotFound(target));
+        }
+        let bytes = std::fs::read(&target).map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        let json: PalaceJson =
+            serde_json::from_slice(&bytes).map_err(|e| PalaceStoreError::json(target, e))?;
+        let mut palace: Palace = json.into();
+        // #9140 batch: the directory the file was read from wins over the
+        // absolute `data_dir` recorded at creation. A palace root copied to a
+        // sandbox otherwise opened the ORIGINAL live files (2026-10-04 15:27Z).
+        if palace.data_dir != data_dir {
+            tracing::debug!(
+                recorded = %palace.data_dir.display(),
+                actual = %data_dir.display(),
+                "palace.json data_dir differs from its location; using its location"
+            );
+            palace.data_dir = data_dir.to_path_buf();
+        }
+        Ok(palace)
+    }
+
+    /// Walk `registry_dir` for palace subdirectories and return all loadable
+    /// palaces.
+    ///
+    /// Why: `palace list` and the daemon startup path both need to enumerate
+    /// every palace on disk, and the destructive passes (`purge_palaces`,
+    /// `rebuild_palaces`, `merge_palaces`) act on whatever this returns. A
+    /// short listing reads exactly like a complete one, so any palace dropped
+    /// here is one those passes skip while reporting a clean run.
+    /// What: For each immediate child directory holding a `palace.json`, loads
+    /// and pushes the `Palace`. A child that is genuinely not a palace is
+    /// skipped; a child that cannot be classified aborts the walk with the
+    /// underlying error, which names the offending path.
+    /// Test: `list_palaces_finds_saved_palaces`,
+    /// `list_palaces_missing_dir_is_empty`,
+    /// `list_palaces_propagates_an_unstattable_registry_dir`,
+    /// `list_palaces_propagates_an_unstattable_entry`,
+    /// `list_palaces_propagates_an_unstattable_palace_json` and
+    /// `list_palaces_propagates_an_undecodable_palace` — the first two pin the
+    /// benign arms, the other four the error arms.
+    ///
+    /// Absence and failure-to-determine stay distinct at every step, which is
+    /// why the guards are `try_exists` and `metadata` rather than `exists` and
+    /// `is_dir`: the latter are `fs::metadata(..).is_ok()`-shaped and coerce
+    /// *every* stat failure to `false`, so a path we are forbidden to stat
+    /// reads as a path that is not there. Only genuine absence still skips
+    /// silently — `Ok(false)`, a dangling symlink, an entry unlinked mid-walk,
+    /// or a subdirectory that simply holds no `palace.json`. A first run
+    /// against a data root that does not exist yet is normal and must not
+    /// error.
+    ///
+    /// Failing the whole walk on one corrupt palace and skipping it are both
+    /// bad, and this picks failing (#5543): the error names the broken path, so
+    /// an operator can repair or remove it in one step, whereas a silent skip
+    /// makes that palace permanently invisible with no diagnostic while the
+    /// destructive callers quietly pass over it. `bm25_backfill`'s private
+    /// enumeration already made the same call for the same reason.
+    pub fn list_palaces(registry_dir: &Path) -> Result<Vec<Palace>> {
+        // #5532: `exists()` reports a stat we are denied as "absent", silently
+        // turning an unreadable registry into an empty one.
+        let present = registry_dir
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(registry_dir, e))?;
+        if !present {
+            return Ok(Vec::new());
+        }
+        let read_dir =
+            std::fs::read_dir(registry_dir).map_err(|e| PalaceStoreError::io(registry_dir, e))?;
+
+        let mut palaces = Vec::new();
+        for entry in read_dir {
+            // #5543: an entry failing mid-enumeration truncated the walk.
+            let entry = entry.map_err(|e| PalaceStoreError::io(registry_dir, e))?;
+            let path = entry.path();
+
+            // #5543: `is_dir()` coerced a denied stat to "not a directory".
+            let meta = match std::fs::metadata(&path) {
+                Ok(m) => m,
+                // Unlinked mid-walk, or a dangling symlink: genuinely absent,
+                // the one arm `try_exists` also reports as `Ok(false)`.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(PalaceStoreError::io(&path, e)),
+            };
+            if !meta.is_dir() {
+                continue;
+            }
+
+            // #5543: `exists()` coerced a denied stat to "holds no metadata".
+            let metadata_path = path.join(PALACE_JSON);
+            let has_metadata = metadata_path
+                .try_exists()
+                .map_err(|e| PalaceStoreError::io(&metadata_path, e))?;
+            if !has_metadata {
+                continue;
+            }
+
+            match Self::load_palace(&path) {
+                Ok(p) => palaces.push(p),
+                // Raced away between the guard above and the read.
+                Err(PalaceStoreError::NotFound(_)) => continue,
+                // #5543: a denied read or an undecodable `palace.json` used to
+                // drop the palace and still report success.
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(palaces)
+    }
+
+    /// Whether `<data_dir>/palace.json` is present, distinguishing "absent"
+    /// from "cannot tell".
+    ///
+    /// Why (issue #4911): an open-or-create caller must only create when the
+    /// palace is genuinely absent. `create_palace` rewrites `palace.json`
+    /// unconditionally, so creating against a palace that merely could not be
+    /// OPENED destroys its `created_at`. Callers were each spelling this probe
+    /// as `data_dir.join("palace.json").exists()`, which carries the #5549 /
+    /// ADR-0045 defect in the direction that loses data: a stat we are DENIED
+    /// reports `false`, so an unreadable palace reads as absent and gets
+    /// overwritten. One entry point keeps that reasoning in a single place.
+    /// What: `try_exists()` on the metadata path. `Ok(false)` means genuinely
+    /// absent; `Ok(true)` means present; `Err` means the probe itself failed
+    /// and the caller must NOT infer absence from it.
+    /// Test: `metadata_present_distinguishes_absent_from_present`. The caller
+    /// contract this exists for is covered cross-crate, in
+    /// `crates/trusty-mpm/src/core/sm/memory_tests.rs`, by
+    /// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`
+    /// — named in prose because `scripts/check_test_pointers.sh` resolves a
+    /// cited name only within the citing crate.
+    pub fn metadata_present(data_dir: &Path) -> Result<bool> {
+        let target = data_dir.join(PALACE_JSON);
+        target
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(&target, e))
+    }
+
+    /// Persist the identity (L0) text for a palace.
+    ///
+    /// Why: L0 identity is read on every palace open; storing it as a plain
+    /// `identity.txt` keeps it human-editable.
+    /// What: Atomic write of `text` to `<data_dir>/identity.txt`.
+    /// Test: `identity_txt_roundtrip` saves and reloads.
+    pub fn save_identity(_palace_id: &PalaceId, text: &str, data_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(data_dir).map_err(|e| PalaceStoreError::io(data_dir, e))?;
+        let target = data_dir.join(IDENTITY_TXT);
+        let tmp = data_dir.join(format!("{IDENTITY_TXT}.tmp"));
+        std::fs::write(&tmp, text.as_bytes()).map_err(|e| PalaceStoreError::io(tmp.clone(), e))?;
+        std::fs::rename(&tmp, &target).map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        Ok(())
+    }
+
+    /// Read the identity (L0) text for a palace, if present.
+    ///
+    /// Why: Brand-new palaces may not have an identity yet — returning
+    /// `Ok(None)` lets callers fall back to a default without treating the
+    /// missing file as an error.
+    /// What: Reads `<data_dir>/identity.txt`. Returns `Ok(None)` on missing,
+    /// `Ok(Some(text))` on success.
+    /// Test: `identity_txt_roundtrip` covers the present case; missing returns
+    /// `None` is exercised by `load_identity_missing_returns_none`.
+    pub fn load_identity(data_dir: &Path) -> Result<Option<String>> {
+        let target = data_dir.join(IDENTITY_TXT);
+        // intentional fail-open (ADR-0045 decision 4): `exists()` reads a
+        // denied stat as "absent" here as everywhere, and that is the safe
+        // direction for this one. The only consumer treats `None` as "no
+        // identity yet" and falls back to a default prompt, so the worst case
+        // is a thinner prompt — nothing destructive, enumerating, or
+        // operator-reporting branches on this answer.
+        if !target.exists() {
+            return Ok(None);
+        }
+        let s = std::fs::read_to_string(&target)
+            .map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        Ok(Some(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn make_palace(id: &str, dir: &Path) -> Palace {
+        Palace {
+            id: PalaceId::new(id),
+            name: format!("Palace {id}"),
+            description: Some("test palace".to_string()),
+            created_at: Utc::now(),
+            data_dir: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn palace_store_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().join("alpha");
+        let palace = make_palace("alpha", &data_dir);
+
+        PalaceStore::save_palace(&palace).expect("save");
+        let loaded = PalaceStore::load_palace(&data_dir).expect("load");
+
+        assert_eq!(loaded.id, palace.id);
+        assert_eq!(loaded.name, palace.name);
+        assert_eq!(loaded.description, palace.description);
+        assert_eq!(loaded.data_dir, palace.data_dir);
+        // Timestamps should round-trip exactly through serde.
+        assert_eq!(loaded.created_at, palace.created_at);
+    }
+
+    #[test]
+    fn identity_txt_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let id = PalaceId::new("alpha");
+
+        let text = "I am an experienced Rust engineer.\nI prefer concise answers.\n";
+        PalaceStore::save_identity(&id, text, &data_dir).expect("save");
+
+        let got = PalaceStore::load_identity(&data_dir).expect("load");
+        assert_eq!(got.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn load_identity_missing_returns_none() {
+        let tmp = tempdir().unwrap();
+        let got = PalaceStore::load_identity(tmp.path()).expect("load");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn list_palaces_finds_saved_palaces() {
+        let tmp = tempdir().unwrap();
+        let registry = tmp.path();
+
+        for id in &["alpha", "beta"] {
+            let dir = registry.join(id);
+            let palace = make_palace(id, &dir);
+            PalaceStore::save_palace(&palace).unwrap();
+        }
+        // Add a non-palace subdirectory; it should be ignored.
+        std::fs::create_dir_all(registry.join("not-a-palace")).unwrap();
+
+        let palaces = PalaceStore::list_palaces(registry).unwrap();
+        let mut ids: Vec<String> = palaces.into_iter().map(|p| p.id.0).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn list_palaces_missing_dir_is_empty() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let palaces = PalaceStore::list_palaces(&missing).unwrap();
+        assert!(palaces.is_empty());
+    }
+
+    /// Restore a directory's mode on drop, including while unwinding.
+    ///
+    /// Why: the denial test below strips a directory to mode 000. If an
+    /// assertion panics before it is restored, `tempfile` cannot delete the
+    /// tree and the run leaks an undeletable directory.
+    #[cfg(unix)]
+    struct RestoreMode(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    /// Why (#5532): the absence guard used `Path::exists`, which is
+    /// `fs::metadata(..).is_ok()` and so reports *any* stat failure as "not
+    /// there". A registry we are forbidden to stat therefore returned
+    /// `Ok(vec![])`, and the propagation #5488/#5526 added one layer down (at
+    /// `read_dir`) never ran, because `read_dir` was never reached. The
+    /// destructive callers would report a clean empty run over data they never
+    /// read.
+    /// What: strips a PARENT of the registry dir to mode 000, so the failure
+    /// lands on `stat` rather than on `read_dir` — the arm the existing
+    /// regular-file/`ENOTDIR` harnesses cannot reach, since a regular file
+    /// stats just fine and only fails once enumeration starts. Asserts the
+    /// error propagates and carries the denial.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn list_palaces_propagates_an_unstattable_registry_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("locked");
+        let registry = parent.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        // Baseline: listable while the parent is traversable.
+        assert!(
+            PalaceStore::list_palaces(&registry).is_ok(),
+            "the registry must list cleanly before the parent is locked"
+        );
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(parent.clone());
+
+        // Root bypasses the mode bits outright, and some filesystems ignore
+        // them, so confirm the denial actually took hold. Asserting against a
+        // stat that still succeeds would pass without exercising anything, and
+        // a vacuous pass on a fail-open guard is worse than no test at all.
+        match std::fs::metadata(&registry) {
+            Ok(_) => panic!(
+                "cannot exercise #5532: stat of {} still succeeds at mode 000. \
+                 Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                registry.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked parent to deny stat, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::list_palaces(&registry)
+            .expect_err("a registry dir that cannot be stat'd must not report as empty");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, registry, "the error must name the registry dir");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
+    }
+
+    /// Why (#5543): the directory guard was `path.is_dir()`, which is
+    /// `fs::metadata(..)` with every error coerced to `false`. A child we are
+    /// forbidden to stat therefore read as "not a directory" and was skipped,
+    /// so the listing came back `Ok` and one palace shorter — which the
+    /// destructive callers cannot tell from a registry that never held it.
+    /// What: strips the registry itself to `r--`. Read permission keeps
+    /// `read_dir` enumerating names, while the missing execute bit denies stat
+    /// of any child. That isolates the per-entry stat from the registry-level
+    /// one `list_palaces_propagates_an_unstattable_registry_dir` already pins,
+    /// which a mode-000 registry could not do.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn list_palaces_propagates_an_unstattable_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let registry = tmp.path().join("registry");
+        let dir = registry.join("alpha");
+        PalaceStore::save_palace(&make_palace("alpha", &dir)).unwrap();
+
+        assert_eq!(
+            PalaceStore::list_palaces(&registry).unwrap().len(),
+            1,
+            "the palace must list cleanly before the registry is locked"
+        );
+
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let _restore = RestoreMode(registry.clone());
+
+        // Root bypasses the mode bits outright, and some filesystems ignore
+        // them, so confirm the denial actually took hold. A vacuous pass on a
+        // fail-open guard is worse than no test at all.
+        match std::fs::metadata(&dir) {
+            Ok(_) => panic!(
+                "cannot exercise #5543: stat of {} still succeeds with the registry at \
+                 mode 400. Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                dir.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the un-traversable registry to deny stat of its child, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::list_palaces(&registry)
+            .expect_err("an entry that cannot be stat'd must not drop out of the listing");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, dir, "the error must name the entry it could not stat");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
+    }
+
+    /// Why (#5543): the metadata guard was `path.join(PALACE_JSON).exists()`,
+    /// the same `is_ok()`-shaped coercion. A `palace.json` we are forbidden to
+    /// stat read as a subdirectory that simply holds no metadata, so a real
+    /// palace was silently reclassified as a stray directory.
+    /// What: leaves the registry traversable and strips the palace's own
+    /// directory to mode 000. Stat of the directory still succeeds, clearing
+    /// the entry guard above, while stat of `palace.json` inside it is denied —
+    /// so the failure lands on this site and not the previous one.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn list_palaces_propagates_an_unstattable_palace_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let registry = tmp.path().join("registry");
+        let dir = registry.join("alpha");
+        PalaceStore::save_palace(&make_palace("alpha", &dir)).unwrap();
+
+        assert_eq!(
+            PalaceStore::list_palaces(&registry).unwrap().len(),
+            1,
+            "the palace must list cleanly before its directory is locked"
+        );
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(dir.clone());
+
+        // The directory itself must still stat, or this would merely re-test
+        // the entry arm above instead of the metadata guard.
+        std::fs::metadata(&dir).expect("the palace dir itself must remain stattable");
+
+        let target = dir.join(PALACE_JSON);
+        match std::fs::metadata(&target) {
+            Ok(_) => panic!(
+                "cannot exercise #5543: stat of {} still succeeds with its parent at \
+                 mode 000. Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                target.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked palace dir to deny stat of its metadata, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::list_palaces(&registry)
+            .expect_err("a palace.json that cannot be stat'd must not read as a non-palace dir");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, target, "the error must name the metadata file");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
+    }
+
+    /// Why (#5543): `load_palace` failures were swallowed by `Err(_) =>
+    /// continue`, so a truncated or hand-edited `palace.json` dropped its
+    /// palace from the listing while the call still reported success.
+    /// `purge_palaces` and friends then ran over the remaining palaces and
+    /// reported a clean pass across data one member of which they never read.
+    /// What: writes one good palace beside one whose `palace.json` does not
+    /// decode, and asserts the walk fails rather than quietly returning just
+    /// the good one — the partial-listing case, not merely the empty one. Uses
+    /// no permission bits, so unlike its two siblings it exercises the arm
+    /// under any uid.
+    /// Test: This test.
+    #[test]
+    fn list_palaces_propagates_an_undecodable_palace() {
+        let tmp = tempdir().unwrap();
+        let registry = tmp.path().join("registry");
+
+        PalaceStore::save_palace(&make_palace("alpha", &registry.join("alpha"))).unwrap();
+
+        let broken = registry.join("beta");
+        std::fs::create_dir_all(&broken).unwrap();
+        let target = broken.join(PALACE_JSON);
+        std::fs::write(&target, b"{ this is not palace metadata").unwrap();
+
+        let err = PalaceStore::list_palaces(&registry)
+            .expect_err("an undecodable palace must not silently shorten the listing");
+
+        match err {
+            PalaceStoreError::Json { path, .. } => {
+                assert_eq!(path, target, "the error must name the undecodable file");
+            }
+            other => panic!("expected a Json error naming the broken palace, got {other:?}"),
+        }
+    }
+
+    /// Why (#5549): `load_palace`'s own guard was `target.exists()`, which is
+    /// `fs::metadata(..).is_ok()`, so a `palace.json` we are forbidden to stat
+    /// returned `NotFound` — the one error `list_palaces` treats as benign and
+    /// skips. The palace dropped out of the listing the destructive passes act
+    /// on, one layer beneath the per-entry guard #5545 hardened, and no caller
+    /// could tell "no palace here" from "could not find out whether there is
+    /// one".
+    /// What: strips the palace's own directory to mode 000, so the directory
+    /// still stats while stat of the `palace.json` inside it is denied — the
+    /// probe fails, and it fails at this call site rather than in a caller.
+    /// Asserts the denial arrives as `Io` and specifically NOT as `NotFound`;
+    /// the direction is the point, not merely that some error came back.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn load_palace_propagates_an_unstattable_palace_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().join("alpha");
+        PalaceStore::save_palace(&make_palace("alpha", &data_dir)).unwrap();
+
+        assert!(
+            PalaceStore::load_palace(&data_dir).is_ok(),
+            "the palace must load cleanly before its directory is locked"
+        );
+
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Declared after `tmp` so it drops first: the mode is restored before
+        // `TempDir` tries to delete the tree, including while unwinding from a
+        // failed assertion below.
+        let _restore = RestoreMode(data_dir.clone());
+
+        // Root bypasses the mode bits outright, and some filesystems ignore
+        // them, so confirm the denial actually took hold. A vacuous pass on a
+        // fail-open guard is worse than no test at all.
+        let target = data_dir.join(PALACE_JSON);
+        match std::fs::metadata(&target) {
+            Ok(_) => panic!(
+                "cannot exercise #5549: stat of {} still succeeds with its parent at \
+                 mode 000. Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                target.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked palace dir to deny stat of its metadata, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::load_palace(&data_dir)
+            .expect_err("a palace.json that cannot be stat'd must not load");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, target, "the error must name the metadata file");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            PalaceStoreError::NotFound(p) => panic!(
+                "a palace whose metadata cannot be stat'd was reported as absent at {} — \
+                 that is the #5549 coercion, and `list_palaces` skips silently on it",
+                p.display()
+            ),
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
+    }
+
+    /// Why (#5549): the guard above must not turn a genuine absence into an
+    /// error. `NotFound` keeps its benign behaviour (ADR-0045 decision 3) —
+    /// `list_palaces` skips on it, and a first run against a data root that
+    /// holds no palace yet is normal, so making absence loud has a wider blast
+    /// radius than the bug being fixed.
+    /// What: asserts both absence shapes still read as `NotFound`: a directory
+    /// that exists but holds no `palace.json`, and a directory that is not
+    /// there at all. Uses no permission bits, so it exercises the arm under any
+    /// uid.
+    /// Test: This test.
+    /// Why (issue #4911): this probe is what an open-or-create caller branches
+    /// on before it may run `create_palace`, and `create_palace` rewrites
+    /// `palace.json`. Only a definite `Ok(false)` may authorise that, so the
+    /// two definite answers have to be right.
+    /// What: asserts `Ok(false)` for a directory holding no `palace.json` and
+    /// for a directory that does not exist, and `Ok(true)` once metadata is
+    /// saved. The denied-stat arm is not exercised here — it needs permission
+    /// bits and is uid-dependent; `try_exists` is the primitive that carries it.
+    /// Test: This test.
+    #[test]
+    fn metadata_present_distinguishes_absent_from_present() {
+        let tmp = tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            !PalaceStore::metadata_present(&empty).expect("probe succeeds"),
+            "a directory with no palace.json holds no metadata"
+        );
+
+        let missing = tmp.path().join("does-not-exist");
+        assert!(
+            !PalaceStore::metadata_present(&missing).expect("probe succeeds"),
+            "a missing directory holds no metadata"
+        );
+
+        let palace = Palace {
+            id: PalaceId::new("probe"),
+            name: "Probe".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: tmp.path().join("probe"),
+        };
+        PalaceStore::save_palace(&palace).unwrap();
+        assert!(
+            PalaceStore::metadata_present(&palace.data_dir).expect("probe succeeds"),
+            "a saved palace must report its metadata as present"
+        );
+    }
+
+    #[test]
+    fn load_palace_missing_returns_not_found() {
+        let tmp = tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        match PalaceStore::load_palace(&empty).expect_err("a dir with no palace.json is absent") {
+            PalaceStoreError::NotFound(p) => assert_eq!(p, empty.join(PALACE_JSON)),
+            other => panic!("expected NotFound for a palace-less directory, got {other:?}"),
+        }
+
+        let missing = tmp.path().join("does-not-exist");
+        match PalaceStore::load_palace(&missing).expect_err("a missing dir is absent") {
+            PalaceStoreError::NotFound(p) => assert_eq!(p, missing.join(PALACE_JSON)),
+            other => panic!("expected NotFound for a missing directory, got {other:?}"),
+        }
+    }
+}

@@ -141,7 +141,10 @@ for pid in publishable:
     if not node:
         continue
     for dep_id in node.get("dependencies", []):
-        if dep_id in publishable:
+        # #9271: a crate's dev-dependency on ITSELF (trusty-memory turns its own
+        # test features on that way) is no ordering constraint — cargo publish
+        # strips a path-only dev-dependency — and would read as a cycle.
+        if dep_id in publishable and dep_id != pid:
             edges[pid].add(dep_id)
 
 # Kahn's algorithm: repeatedly emit any publishable crate whose remaining

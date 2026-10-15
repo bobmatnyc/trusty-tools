@@ -1,0 +1,187 @@
+//! In-memory petgraph adjacency cache for the KnowledgeGraph.
+//!
+//! Why: Extracted from store/kg.rs to keep each file under the 500-SLOC cap
+//! (#607). Centralises the mutable in-memory graph so reads/writes are
+//! gated by a single `RwLock`.
+//! What: `Adjacency` struct (private to the crate) with `ensure_node`,
+//! `edge_from_triple`, `upsert_edge`, `remove_edges`, `remove_edge_to`. Also
+//! `hydrate_adjacency` free function.
+//! Test: Indirect — exercised by every adjacency-related test in kg/tests.rs.
+
+use super::types::{KgEdge, Triple};
+use anyhow::{Context, Result};
+use petgraph::graph::NodeIndex;
+use petgraph::stable_graph::StableGraph;
+use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
+
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg_store::is_functional_predicate;
+
+/// In-memory adjacency cache backing the public graph API.
+///
+/// Why: Mutating the graph and its `node_index` lookup must happen atomically;
+/// holding them in a single struct lets a single `RwLock` guard cover both.
+/// What: `StableGraph` so removing an edge does not invalidate other
+/// `NodeIndex` values, plus the `String -> NodeIndex` lookup so callers can
+/// resolve an entity name to its node in O(1).
+/// Test: Indirect — exercised by every adjacency-related test.
+#[derive(Default)]
+pub(super) struct Adjacency {
+    pub(super) graph: StableGraph<String, KgEdge>,
+    pub(super) node_index: HashMap<String, NodeIndex<u32>>,
+    /// Monotonic write generation, bumped once per committed mutation (#7106).
+    ///
+    /// Why: `community_count` runs a full Louvain partition over this
+    /// adjacency, which the palace roster called once per palace on every
+    /// request — 94 partitions per `palaces_list`, recomputed from scratch each
+    /// time. Caching the answer needs a cheap, exact "has the graph changed
+    /// since I computed this" key. Node and edge counts are not one: a rewired
+    /// edge leaves both unchanged while changing the partition. A counter
+    /// bumped by the single mutation gate is.
+    /// What: `u64`, incremented by `KnowledgeGraph::sync_adjacency` after every
+    /// mutation it applies. Never decremented, never reset for a live handle;
+    /// a reopened palace starts at 0 with a cold cache, which is correct.
+    /// Test: `community_count_is_cached_until_the_graph_changes`.
+    pub(super) generation: u64,
+}
+
+impl Adjacency {
+    /// Why: Adding the same entity twice would create duplicate nodes; this
+    /// helper returns the existing node when the entity is already mapped.
+    /// What: Looks up `entity` in `node_index`; on miss adds a node and
+    /// records the new mapping.
+    /// Test: Indirect via `hydration_populates_graph` and `assert_adds_edge`.
+    pub(super) fn ensure_node(&mut self, entity: &str) -> NodeIndex<u32> {
+        if let Some(idx) = self.node_index.get(entity) {
+            return *idx;
+        }
+        let idx = self.graph.add_node(entity.to_string());
+        self.node_index.insert(entity.to_string(), idx);
+        idx
+    }
+
+    /// Why: Building a `KgEdge` from a `Triple` is needed both during
+    /// hydration and on every `assert`; centralise the conversion.
+    /// What: Copies the temporal / scoring metadata into a new `KgEdge`.
+    /// Test: Indirect via `hydration_populates_graph`.
+    pub(super) fn edge_from_triple(t: &Triple) -> KgEdge {
+        KgEdge {
+            predicate: t.predicate.clone(),
+            confidence: t.confidence,
+            provenance: t.provenance.clone(),
+            valid_from: t.valid_from,
+            valid_to: t.valid_to,
+        }
+    }
+
+    /// Why: `assert` must keep the graph in sync with the store; doing it
+    /// here keeps the lock-management in one place. #4810: the removal used to
+    /// drop EVERY edge from the subject carrying this predicate, regardless of
+    /// target. Since `hydrate_adjacency` replays each active triple through
+    /// here, a room's parallel `contains` edges collapsed back to one on every
+    /// palace open even once storage kept them — which is what left
+    /// `/kg/graph`, `kg_gaps`, and `expand_neighbors` under-reporting.
+    /// What: mirrors the storage split. For a functional predicate the prior
+    /// edge to any target is removed (one active object per subject); for a
+    /// multi-valued one only the edge to THIS target is, so parallel edges to
+    /// other targets survive. Nodes are created if absent.
+    /// Test: `assert_adds_edge`, `retract_removes_edge`,
+    /// `parallel_edges_survive_hydration`.
+    pub(super) fn upsert_edge(&mut self, triple: &Triple) {
+        let s_idx = self.ensure_node(&triple.subject);
+        let o_idx = self.ensure_node(&triple.object);
+        let functional = is_functional_predicate(&triple.predicate);
+        let to_remove: Vec<_> = self
+            .graph
+            .edges(s_idx)
+            .filter(|e| {
+                e.weight().predicate == triple.predicate && (functional || e.target() == o_idx)
+            })
+            .map(|e| e.id())
+            .collect();
+        for eid in to_remove {
+            self.graph.remove_edge(eid);
+        }
+        self.graph
+            .add_edge(s_idx, o_idx, Self::edge_from_triple(triple));
+    }
+
+    /// Why: `retract` closes the active interval at `(subject, predicate)`;
+    /// the in-memory graph should drop the corresponding edge so subsequent
+    /// `neighbors` calls do not see stale links. Nodes are intentionally
+    /// preserved because StableGraph indices stay stable and the entity may
+    /// be referenced by other edges.
+    /// What: Removes every edge from the subject's node whose predicate
+    /// matches `predicate`. Returns the number of edges dropped.
+    /// Test: `retract_removes_edge`.
+    pub(super) fn remove_edges(&mut self, subject: &str, predicate: &str) -> usize {
+        let Some(&s_idx) = self.node_index.get(subject) else {
+            return 0;
+        };
+        let to_remove: Vec<_> = self
+            .graph
+            .edges(s_idx)
+            .filter(|e| e.weight().predicate == predicate)
+            .map(|e| e.id())
+            .collect();
+        let n = to_remove.len();
+        for eid in to_remove {
+            self.graph.remove_edge(eid);
+        }
+        n
+    }
+
+    /// Drop only the edge `subject --predicate--> object` (#5396).
+    ///
+    /// Why: `retract_triple` closes one row and leaves its siblings live, so
+    /// the adjacency must lose exactly one edge. [`Adjacency::remove_edges`]
+    /// drops every edge at the pair, which would leave `neighbors` reporting
+    /// fewer targets than redb still holds.
+    /// What: filters the subject's outgoing edges on predicate AND target node,
+    /// removing the matches. Nodes are preserved for the same reason
+    /// `remove_edges` preserves them — StableGraph indices stay valid and the
+    /// entity may sit on other edges. Returns the number of edges dropped; 0
+    /// when either endpoint is unknown.
+    /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`.
+    pub(super) fn remove_edge_to(&mut self, subject: &str, predicate: &str, object: &str) -> usize {
+        let (Some(&s_idx), Some(&o_idx)) =
+            (self.node_index.get(subject), self.node_index.get(object))
+        else {
+            return 0;
+        };
+        let to_remove: Vec<_> = self
+            .graph
+            .edges(s_idx)
+            .filter(|e| e.weight().predicate == predicate && e.target() == o_idx)
+            .map(|e| e.id())
+            .collect();
+        let n = to_remove.len();
+        for eid in to_remove {
+            self.graph.remove_edge(eid);
+        }
+        n
+    }
+}
+
+/// Build the in-memory adjacency cache from every active triple in the store.
+///
+/// Why: On `open` the in-memory graph must reflect every triple already in
+/// redb so the first `neighbors` / `shortest_path` query is correct without
+/// any prior I/O. For typical palaces (≤10K triples) this completes in well
+/// under 50ms — `list_active` is a single redb table scan with no random
+/// disk seeks.
+/// What: Pulls every active triple via `KgStoreRedb::list_active` and
+/// inserts each as an edge in a fresh `Adjacency`.
+/// Test: `hydration_populates_graph` (and indirectly every neighbors test
+/// after reopening a palace).
+pub(super) fn hydrate_adjacency(store: &KgStoreRedb) -> Result<Adjacency> {
+    let mut adj = Adjacency::default();
+    let triples = store
+        .list_active(usize::MAX, 0)
+        .context("list active triples for adjacency hydration")?;
+    for t in &triples {
+        adj.upsert_edge(t);
+    }
+    Ok(adj)
+}
