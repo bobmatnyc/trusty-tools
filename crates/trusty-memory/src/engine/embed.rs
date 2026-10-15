@@ -1,13 +1,12 @@
-//! Embedding abstraction (re-export from `trusty-embedder`).
+//! Embedding abstraction (re-export from `trusty_common::embedder`).
 //!
 //! Why: This module historically owned the `Embedder` trait + `FastEmbedder`
-//! implementation. Both have moved to the shared `trusty-embedder` crate so
-//! trusty-memory and trusty-search ship the same code. This file now exists
-//! purely as a stable re-export surface — existing call sites importing
-//! `trusty_memory::engine::embed::{Embedder, FastEmbedder}` keep working.
-//! What: Re-exports the unified `Embedder` trait, `FastEmbedder`, and the
-//! `EMBED_DIM` constant from `trusty_common::embedder` (the absorbed embedder
-//! surface).
+//! implementation. Both moved to trusty-common so trusty-memory and
+//! trusty-search ship the same code. #9278 (A5, Q3) made the re-export
+//! crate-only: a caller outside the crate names `trusty_common::embedder`, the
+//! types' one path.
+//! What: Re-exports the unified `Embedder` trait and `FastEmbedder` for the
+//! crate's own `crate::engine::embed::*` call sites.
 //! Test: Covered upstream in the `embedder` module's own test suite.
 
-pub use trusty_common::embedder::{EMBED_DIM, Embedder, FastEmbedder, embed_one};
+pub(crate) use trusty_common::embedder::{Embedder, FastEmbedder};

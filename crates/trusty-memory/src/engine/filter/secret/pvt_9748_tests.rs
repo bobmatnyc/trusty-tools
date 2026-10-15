@@ -4,15 +4,17 @@
 //! Why: `memory_remember` and `memory_note` refused content naming a project
 //! (`PVT_…`) or project item (`PVTI_…`), and the refusal quoted the first four
 //! characters and the length of the token it flagged.
-//! What: drives the public gate (`check_secret`, `FilterConfig::apply`,
-//! `find_secret_spans`) only, so the file compiles against the pre-fix crate
-//! and each test can be run red there. Every fixture is synthetic.
+//! What: drives the gate (`check_secret`, `FilterConfig::apply`,
+//! `find_secret_spans`) only. Every fixture is synthetic. Wired in from
+//! `secret.rs`; #9278 made the gate crate-only, so the file moved here from
+//! `tests/secret_gate_pvt_9748.rs`.
 //! Test: this is the test file.
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use trusty_memory::engine::filter::{FilterConfig, check_secret, find_secret_spans};
+use super::{check_secret, find_secret_spans};
+use crate::engine::filter::FilterConfig;
 
 /// Synthetic ids of the measured shapes: `PVT_` + 16, `PVTI_` + 23, with each
 /// owner-kind header, and with `-`/`_` inside the tail.

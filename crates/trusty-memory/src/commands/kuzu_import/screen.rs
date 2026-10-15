@@ -13,7 +13,8 @@
 
 use std::collections::BTreeMap;
 
-pub use crate::engine::filter::SecretRule;
+// #9278 (A5): `SecretRule` is crate-only, so this re-export is too.
+pub(crate) use crate::engine::filter::SecretRule;
 use crate::engine::filter::{check_secret, find_secret_spans};
 
 /// Refusal counts by rule label.

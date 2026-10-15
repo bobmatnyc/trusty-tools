@@ -17,7 +17,6 @@ use super::config::DreamConfig;
 use super::cycle::{DREAM_EMBED_CHUNK, dedup_pass_with_embedder};
 use super::dreamer::Dreamer;
 use super::semantic::consolidate_scoped_within;
-use crate::engine::embed::{EMBED_DIM, Embedder};
 use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
 use crate::engine::semantic_consolidation::SemanticConsolidationConfig;
@@ -30,6 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use trusty_common::embedder::MockEmbedder;
+use trusty_common::embedder::{EMBED_DIM, Embedder};
 use uuid::Uuid;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────

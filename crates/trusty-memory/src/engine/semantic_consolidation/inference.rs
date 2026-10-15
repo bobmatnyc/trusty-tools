@@ -1,10 +1,10 @@
-//! `Inference` trait and production/mock backend implementations.
+//! `Inference` trait and the production backend implementations.
 //!
 //! Why: Isolates the trait definition and its concrete implementations from
 //! the types and consolidator so each file stays under the 500-SLOC cap.
 //! What: `Inference` trait, `OpenRouterInference` (OpenRouter REST API),
-//! `OllamaInference` (local OpenAI-compatible server), and `MockInference`
-//! (deterministic test fixture).
+//! and `OllamaInference` (local OpenAI-compatible server); the test double
+//! `MockInference` lives in `mock.rs` (#9278).
 //! Test: Unit coverage is via `MockInference`; live coverage requires
 //! `--include-ignored` integration tests.
 
@@ -49,7 +49,7 @@ Rules:
 /// returns a (possibly empty) list of `ConsolidationAction`s.
 /// Test: `MockInference` implements this trait for unit tests.
 #[async_trait]
-pub trait Inference: Send + Sync {
+pub(crate) trait Inference: Send + Sync {
     /// Human-readable backend name (used in tracing spans).
     fn name(&self) -> &str;
 
@@ -74,7 +74,7 @@ pub trait Inference: Send + Sync {
 /// a JSON array of `ConsolidationAction`s.
 /// Test: tested via `#[ignore]`'d live integration test; unit coverage is
 /// through `MockInference`.
-pub struct OpenRouterInference {
+pub(crate) struct OpenRouterInference {
     api_key: String,
     model: String,
 }
@@ -85,7 +85,7 @@ impl OpenRouterInference {
     /// Why: centralises the field assignment so callers avoid poking internals.
     /// What: stores `api_key` and `model` verbatim.
     /// Test: `openrouter_inference_new_stores_fields`.
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub(crate) fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             model: model.into(),
@@ -167,7 +167,7 @@ impl Inference for OpenRouterInference {
 /// targeting the local server's `/v1/chat/completions`.
 /// Test: tested via `#[ignore]`'d live integration test; unit coverage via
 /// `MockInference`.
-pub struct OllamaInference {
+pub(crate) struct OllamaInference {
     base_url: String,
     model: String,
 }
@@ -178,7 +178,7 @@ impl OllamaInference {
     /// Why: mirrors `OpenRouterInference::new` for uniform construction.
     /// What: stores `base_url` (no trailing slash) and `model` verbatim.
     /// Test: `ollama_inference_new_stores_fields`.
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+    pub(crate) fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
             model: model.into(),
@@ -244,62 +244,5 @@ impl Inference for OllamaInference {
             .unwrap_or_default();
 
         parse_consolidation_actions(&raw_content)
-    }
-}
-
-// ─── Mock inference (for tests) ─────────────────────────────────────────────
-
-/// Deterministic inference backend for unit and integration tests.
-///
-/// Why: real LLM calls must never run during `cargo test` (they hit the
-/// network, cost money, and are non-deterministic). `MockInference` returns
-/// pre-configured fixture actions so tests are fast and reproducible.
-/// What: constructed with a `Vec<ConsolidationAction>` that is cloned on
-/// every `consolidate` call, plus a call counter so tests can assert the
-/// right number of batches fired.
-/// Test: Used directly in `semantic_consolidation::tests` and
-/// `dream::tests::dream_cycle_semantic_consolidation_*`.
-pub struct MockInference {
-    /// Actions returned for every batch (regardless of batch content).
-    pub fixture_actions: Vec<ConsolidationAction>,
-    /// Counts how many `consolidate` calls have been made.
-    pub call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl MockInference {
-    /// Create a mock that always returns `fixture_actions`.
-    ///
-    /// Why: test setup: callers supply the desired output so assertions are
-    /// predictable.
-    /// What: stores the fixture list and initialises the call counter to 0.
-    /// Test: exercised by every test in `semantic_consolidation::tests`.
-    pub fn new(fixture_actions: Vec<ConsolidationAction>) -> Self {
-        Self {
-            fixture_actions,
-            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }
-    }
-
-    /// Create a mock that returns no actions (no-op consolidation).
-    ///
-    /// Why: integration tests that verify the dream cycle completes when
-    /// consolidation finds nothing to do.
-    /// What: constructs with an empty fixture list.
-    /// Test: `dream_cycle_semantic_consolidation_no_inference`.
-    pub fn no_op() -> Self {
-        Self::new(vec![])
-    }
-}
-
-#[async_trait]
-impl Inference for MockInference {
-    fn name(&self) -> &str {
-        "mock"
-    }
-
-    async fn consolidate(&self, _drawers: &[Drawer]) -> Result<Vec<ConsolidationAction>> {
-        self.call_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(self.fixture_actions.clone())
     }
 }

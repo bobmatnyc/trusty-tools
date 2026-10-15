@@ -12,8 +12,8 @@
 use chrono::Utc;
 use std::sync::Arc;
 use tempfile::tempdir;
+use trusty_common::embedder::Embedder;
 use trusty_common::embedder::{MockEmbedder, chunk_text};
-use trusty_memory::engine::embed::Embedder;
 use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
 use trusty_memory::engine::retrieval::{
     ChunkCheck, PalaceHandle, RememberOptions, VectorBackfillOptions, embed_chunks,

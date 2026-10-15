@@ -44,8 +44,10 @@
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path, a missing KEEP row, an
 #   out-of-scope path, a prefix that only shares a stem, an engine-root
-#   re-export stem, a DEPRECATE row not listed, malformed table rows, and the
-#   empty-listing and bad-argument errors.
+#   re-export stem, the A5 generic shapes (a lifetime-and-type generic fn, a
+#   nested trait bound, an async_trait method, a type alias), a DEPRECATE row
+#   not listed, malformed table rows, and the empty-listing and bad-argument
+#   errors.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); awk, sort, comm.
 
@@ -60,7 +62,10 @@ set -euo pipefail
 # `palace_emptiness`, plus the engine-root names `engine/mod.rs` re-exports
 # from them (`engine::PalaceHandle` is where the listing names the
 # PalaceHandle methods); `engine::Room` and `engine::Wing` stay listed so a
-# re-added root re-export of either is audited.
+# re-added root re-export of either is audited. A5 adds the remaining fifteen
+# engine modules and the 34 engine-root names `engine/mod.rs` re-exports from
+# them; a root name stays listed after its re-export goes, so a re-added one
+# is audited.
 SCOPE_PREFIXES='
 trusty_memory::engine::store
 trusty_memory::engine::retrieval
@@ -76,6 +81,55 @@ trusty_memory::engine::DrawerType
 trusty_memory::engine::RoomType
 trusty_memory::engine::Room
 trusty_memory::engine::Wing
+trusty_memory::engine::analytics
+trusty_memory::engine::community
+trusty_memory::engine::content_hash
+trusty_memory::engine::decay
+trusty_memory::engine::dream
+trusty_memory::engine::embed
+trusty_memory::engine::filter
+trusty_memory::engine::git
+trusty_memory::engine::maintenance_lease
+trusty_memory::engine::maintenance_log
+trusty_memory::engine::room_identity
+trusty_memory::engine::semantic_consolidation
+trusty_memory::engine::share
+trusty_memory::engine::timeouts
+trusty_memory::engine::wing_identity
+trusty_memory::engine::KnowledgeGap
+trusty_memory::engine::find_communities
+trusty_memory::engine::CONTENT_HASH_VERSION
+trusty_memory::engine::ContentHash
+trusty_memory::engine::memory_content_hash
+trusty_memory::engine::normalize_for_hash
+trusty_memory::engine::LeaseStatus
+trusty_memory::engine::MaintenanceLease
+trusty_memory::engine::DEFAULT_WING_ID
+trusty_memory::engine::canonical_room_key
+trusty_memory::engine::mint_room_id
+trusty_memory::engine::room_to_uuid
+trusty_memory::engine::ConsolidationAction
+trusty_memory::engine::ConsolidationProvider
+trusty_memory::engine::ConsolidationResult
+trusty_memory::engine::MockInference
+trusty_memory::engine::OllamaInference
+trusty_memory::engine::OpenRouterInference
+trusty_memory::engine::SemanticConsolidationConfig
+trusty_memory::engine::SemanticConsolidator
+trusty_memory::engine::inference_available
+trusty_memory::engine::resolve_consolidation_provider
+trusty_memory::engine::ImportOutcome
+trusty_memory::engine::ImportSummary
+trusty_memory::engine::SHARE_FORMAT_VERSION
+trusty_memory::engine::SharedMemoryRecord
+trusty_memory::engine::export_palace_jsonl
+trusty_memory::engine::export_palace_records
+trusty_memory::engine::import_palace_jsonl
+trusty_memory::engine::import_palace_records
+trusty_memory::engine::supersede_drawer
+trusty_memory::engine::DEFAULT_WING_LABEL
+trusty_memory::engine::canonical_wing_key
+trusty_memory::engine::mint_wing_id
 '
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

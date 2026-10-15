@@ -9,7 +9,8 @@
 pub mod chat_sessions;
 pub mod concurrent_open;
 // #4906: durable record of drawers whose embed permanently failed.
-pub mod embed_ledger;
+// #9278 (A5): crate-only; no public signature names `EmbedFailure` since A4.
+pub(crate) mod embed_ledger;
 pub mod format_backup;
 // #9274: the palace format N-1 -> N migration (1 -> 2 since #9275), run at a writer-intent open.
 pub(crate) mod format_migration;

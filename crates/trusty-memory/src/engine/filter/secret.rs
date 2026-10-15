@@ -25,11 +25,17 @@ pub(crate) use github_node_id::*;
 // #8623: span-level detection and the rule set, shared with trusty-memory.
 mod private_key;
 mod spans;
-pub use spans::{SECRET_FILTER_VERSION, SecretRule, SecretSpan, find_secret_spans};
+// #9278 (A5): the server's kuzu import and the filter tests are the callers.
+#[cfg(any(test, feature = "server"))]
+pub use spans::{SECRET_FILTER_VERSION, SecretSpan, find_secret_spans};
+// #9278: on every build — `FilterReject::PotentialSecret` names it (#9748).
+pub use spans::SecretRule;
 pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block, rule_of_flagged};
 // #8624: secret shape and the one marker builder, for the kuzu review export.
 mod mask;
-pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
+// #9278 (A5): the server's kuzu import and the filter tests are the callers.
+#[cfg(any(test, feature = "server"))]
+pub use mask::{MaskError, classify_secret, mask_content};
 
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly
@@ -82,6 +88,8 @@ pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
 /// `real_secrets_still_blocked_after_4312_backtick_split`,
 /// `bare_google_doc_ids_named_by_context_after_8589`,
 /// `unterminated_private_key_is_flagged`.
+// #9278: only the unit tests call it once `check_secret` reports offset and rule (#9748).
+#[cfg(test)]
 pub fn find_secret_token(content: &str) -> Option<String> {
     first_secret_hit(content).map(|(range, _)| redact_token(&content[range]))
 }
@@ -1715,6 +1723,12 @@ pub(crate) fn is_plausible_credential_charset(token: &str) -> bool {
 /// Test: `redact_token_masks_tail` (format stability); the masking
 /// implementation itself is tested in
 /// `credentials::redact::tests`.
+// #9278: its one production caller, `find_secret_token`, is test-only.
+#[cfg(test)]
 pub(crate) fn redact_token(token: &str) -> String {
     trusty_common::credentials::redact_secret(token)
 }
+
+// #9278: #9748's gate tests, moved in-crate once the gate became crate-only.
+#[cfg(test)]
+mod pvt_9748_tests;

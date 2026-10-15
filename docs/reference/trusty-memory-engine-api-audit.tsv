@@ -1,4 +1,35 @@
 path	kind	disposition	consumer_or_reason	batch
+trusty_memory::engine::CONTENT_HASH_VERSION	const	KEEP	re-export of content_hash::CONTENT_HASH_VERSION (KEEP)	A5
+trusty_memory::engine::ConsolidationAction	enum	KEEP	re-export of semantic_consolidation::ConsolidationAction (KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Alias	variant	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Alias::from	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Alias::to	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Flag	variant	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Flag::drawer_id	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Flag::reason	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Merge	variant	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Merge::canonical_content	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationAction::Merge::superseded_ids	field	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
+trusty_memory::engine::ConsolidationProvider	enum	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Local	variant	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Local::base_url	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Local::model	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::OpenRouter	variant	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::OpenRouter::api_key	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::OpenRouter::model	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Unavailable	variant	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Unavailable::provider	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationProvider::Unavailable::reason	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult	struct	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::aliases	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::cache_hits	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::canonical_drawers	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::flagged_ids	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::llm_calls	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ConsolidationResult::superseded_ids	field	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::ContentHash	struct	KEEP	re-export of content_hash::ContentHash (KEEP)	A5
+trusty_memory::engine::DEFAULT_WING_ID	const	KEEP	re-export of room_identity::DEFAULT_WING_ID (KEEP)	A5
+trusty_memory::engine::DEFAULT_WING_LABEL	const	KEEP	re-export of wing_identity::DEFAULT_WING_LABEL (KEEP)	A5
 trusty_memory::engine::Drawer	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Drawer::access_count	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::Drawer::completed_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
@@ -30,7 +61,44 @@ trusty_memory::engine::ExistingPalaces::Listed::shown	field	NARROW	removed: re-e
 trusty_memory::engine::ExistingPalaces::Listed::total	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::NotListed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::Unavailable	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ImportOutcome	enum	KEEP	re-export of share::ImportOutcome (KEEP)	A5
+trusty_memory::engine::ImportOutcome::Inserted	variant	KEEP	member of ImportOutcome (re-export of share::ImportOutcome, KEEP)	A5
+trusty_memory::engine::ImportOutcome::Merged	variant	KEEP	member of ImportOutcome (re-export of share::ImportOutcome, KEEP)	A5
+trusty_memory::engine::ImportOutcome::Skipped	variant	KEEP	member of ImportOutcome (re-export of share::ImportOutcome, KEEP)	A5
+trusty_memory::engine::ImportOutcome::Unchanged	variant	KEEP	member of ImportOutcome (re-export of share::ImportOutcome, KEEP)	A5
+trusty_memory::engine::ImportSummary	struct	KEEP	re-export of share::ImportSummary (KEEP)	A5
+trusty_memory::engine::ImportSummary::inserted	field	KEEP	member of ImportSummary (re-export of share::ImportSummary, KEEP)	A5
+trusty_memory::engine::ImportSummary::merged	field	KEEP	member of ImportSummary (re-export of share::ImportSummary, KEEP)	A5
+trusty_memory::engine::ImportSummary::skipped	field	KEEP	member of ImportSummary (re-export of share::ImportSummary, KEEP)	A5
+trusty_memory::engine::ImportSummary::unchanged	field	KEEP	member of ImportSummary (re-export of share::ImportSummary, KEEP)	A5
+trusty_memory::engine::KnowledgeGap	struct	KEEP	re-export of community::KnowledgeGap (KEEP)	A5
+trusty_memory::engine::KnowledgeGap::entities	field	KEEP	re-export of community::KnowledgeGap: tests/community_tests.rs	A5
+trusty_memory::engine::KnowledgeGap::external_bridges	field	NARROW	re-export; no consumer outside the library	A5
+trusty_memory::engine::KnowledgeGap::internal_density	field	KEEP	re-export of community::KnowledgeGap: tests/community_tests.rs	A5
+trusty_memory::engine::KnowledgeGap::suggested_exploration	field	KEEP	re-export of community::KnowledgeGap: tests/community_tests.rs	A5
+trusty_memory::engine::LeaseStatus	enum	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::LeaseStatus::Held	variant	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::LeaseStatus::HeldElsewhere	variant	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::LeaseStatus::HeldElsewhere::holder_pid	field	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::LeaseStatus::Unavailable	variant	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::LeaseStatus::Unavailable::reason	field	NARROW	re-export pub(crate); no consumer outside the library	A5
 trusty_memory::engine::MAX_LISTED_PALACES	const	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::MaintenanceLease	struct	NARROW	re-export pub(crate); no consumer outside the library	A5
+trusty_memory::engine::MockInference	struct	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::call_count	field	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::consolidate	trait_method	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::fixture_actions	field	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::name	trait_method	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::new	method	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::MockInference::no_op	method	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::OllamaInference	struct	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OllamaInference::consolidate	trait_method	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OllamaInference::name	trait_method	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OllamaInference::new	method	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OpenRouterInference	struct	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OpenRouterInference::consolidate	trait_method	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OpenRouterInference::name	trait_method	NARROW	re-export removed; no consumer outside the library	A5
+trusty_memory::engine::OpenRouterInference::new	method	NARROW	re-export removed; no consumer outside the library	A5
 trusty_memory::engine::Palace	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Palace::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Palace::data_dir	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
@@ -70,10 +138,378 @@ trusty_memory::engine::RoomType::Meetings	variant	NARROW	removed: one path per t
 trusty_memory::engine::RoomType::Planning	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::RoomType::Research	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::RoomType::Testing	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::SHARE_FORMAT_VERSION	const	KEEP	re-export of share::SHARE_FORMAT_VERSION (KEEP)	A5
+trusty_memory::engine::SemanticConsolidationConfig	struct	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig (KEEP)	A5
+trusty_memory::engine::SemanticConsolidationConfig::default	trait_method	KEEP	member of SemanticConsolidationConfig (re-export of semantic_consolidation::SemanticConsolidationConfig, KEEP)	A5
+trusty_memory::engine::SemanticConsolidationConfig::enabled	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::max_batch_size	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::max_calls_per_cycle	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::model	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::similarity_threshold	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig: deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
+trusty_memory::engine::SemanticConsolidator	struct	KEEP	re-export of semantic_consolidation::SemanticConsolidator (KEEP)	A5
+trusty_memory::engine::SemanticConsolidator::config	field	NARROW	re-export; no consumer outside the library	A5
+trusty_memory::engine::SemanticConsolidator::consolidate	method	NARROW	re-export; no consumer outside the library	A5
+trusty_memory::engine::SemanticConsolidator::new	method	NARROW	re-export; no consumer outside the library	A5
+trusty_memory::engine::SharedMemoryRecord	struct	KEEP	re-export of share::SharedMemoryRecord (KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::content	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::content_hash	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::created_at	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::drawer_type	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::format_version	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::hash_version	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::importance	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::room	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
+trusty_memory::engine::SharedMemoryRecord::tags	field	KEEP	member of SharedMemoryRecord (re-export of share::SharedMemoryRecord, KEEP)	A5
 trusty_memory::engine::Wing	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::id	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::name	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::palace_id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::analytics	mod	KEEP	path of RecallLog	A5
+trusty_memory::engine::analytics::RecallEvent	struct	KEEP	RecallLog::record signature (a deletion candidate)	A5
+trusty_memory::engine::analytics::RecallEvent::drawer_id	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallEvent::layer	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallEvent::occurred_at	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallEvent::palace_id	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallEvent::query_hash	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallEvent::score	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallLog	struct	KEEP	owner of the deletion-candidate RecallLog methods	A5
+trusty_memory::engine::analytics::RecallLog::hit_count	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::miss_rate	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::missed_queries	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::open	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallLog::open_shared	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallLog::record	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::record_batch	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::RecallLog::top_drawers	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::fnv1a_hash	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::normalize_query	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::analytics::query_hash	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::canonical_room_key	fn	KEEP	re-export of room_identity::canonical_room_key (KEEP)	A5
+trusty_memory::engine::canonical_wing_key	fn	KEEP	re-export of wing_identity::canonical_wing_key (KEEP)	A5
+trusty_memory::engine::community	mod	KEEP	path of find_communities	A5
+trusty_memory::engine::community::KnowledgeGap	struct	KEEP	engine::store::KnowledgeGraph::knowledge_gaps return type (A3a); tests/community_tests.rs	A5
+trusty_memory::engine::community::KnowledgeGap::entities	field	KEEP	tests/community_tests.rs	A5
+trusty_memory::engine::community::KnowledgeGap::external_bridges	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::community::KnowledgeGap::internal_density	field	KEEP	tests/community_tests.rs	A5
+trusty_memory::engine::community::KnowledgeGap::suggested_exploration	field	KEEP	tests/community_tests.rs	A5
+trusty_memory::engine::community::find_communities	fn	KEEP	tests/community_tests.rs	A5
+trusty_memory::engine::community::partition	fn	KEEP	tests/community_tests.rs	A5
+trusty_memory::engine::content_hash	mod	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::CONTENT_HASH_VERSION	const	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash	struct	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::UNSET	const	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::as_bytes	method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::default	trait_method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::deserialize	trait_method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::fmt	trait_method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::from_hex	method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::is_unset	method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::serialize	trait_method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHash::to_hex	method	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHashParseError	struct	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::ContentHashParseError::got	field	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::memory_content_hash	fn	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::content_hash::normalize_for_hash	fn	KEEP	ADR-0067 format helper: the memory content hash and its versioned normalization, docs/reference/shared-memory-identity.md (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::decay	mod	KEEP	path of DecayConfig	A5
+trusty_memory::engine::decay::DecayConfig	struct	KEEP	owner of DecayConfig::effective_confidence, a deletion candidate	A5
+trusty_memory::engine::decay::DecayConfig::access_boost	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::decay::DecayConfig::access_boost_cap	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::decay::DecayConfig::age_days	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::decay::DecayConfig::default	trait_method	KEEP	member of DecayConfig (Default impl)	A5
+trusty_memory::engine::decay::DecayConfig::effective_confidence	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::decay::DecayConfig::effective_importance	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::decay::DecayConfig::floor	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::decay::DecayConfig::half_life_days	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream	mod	KEEP	path of Dreamer	A5
+trusty_memory::engine::dream::AfterCycle	type	KEEP	Dreamer::with_after_cycle signature; tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::COMPACT_MIN_RECLAIM_PERCENT	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DEFAULT_DREAM_MAX_CONCURRENT	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DREAM_MAX_CONCURRENT_ENV	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamBusy	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamBusy::cap	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamBusy::in_flight	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamBusy::waited_secs	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamConfig	struct	KEEP	tests/task_mcp.rs (struct update syntax); fields stay public until A2 (Q4, Architect 05:16Z)	A5
+trusty_memory::engine::dream::DreamConfig::compact	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::compact_keep_backup	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::compact_min_bytes	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::content_prune_enabled	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::content_prune_min_words	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::dedup_threshold	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::default	trait_method	KEEP	member of DreamConfig (Default impl)	A5
+trusty_memory::engine::dream::DreamConfig::effective_prune_history_days	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamConfig::fading	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::idle_secs	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::local_model_enabled	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::max_cycle_ms	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::openrouter_api_key	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::prune_history_after_days	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::prune_importance	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::recall_benchmark_enabled	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamConfig::semantic	field	KEEP	member of DreamConfig: tests/task_mcp.rs struct update syntax needs every field (Q4)	A5
+trusty_memory::engine::dream::DreamCycleGauge	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamCycleGauge::drop	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamCycleGauge::enter	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamPermit	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats	struct	KEEP	Dreamer::dream_cycle return type and AfterCycle signature	A5
+trusty_memory::engine::dream::DreamStats::closets_updated	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::compacted	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::compression_ratio	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::content_pruned	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::drawers_after	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::drawers_before	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::duration_ms	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::fading	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::kg_bytes_after	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::kg_bytes_reclaimed	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::kg_history_rows_pruned	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::merged	field	KEEP	tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::DreamStats::pruned	field	KEEP	tests/task_mcp.rs	A5
+trusty_memory::engine::dream::DreamStats::recall_score_after	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::recall_score_before	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::semantic_cache_hits	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::semantic_llm_calls	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::semantically_consolidated	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::DreamStats::update_compression_ratio	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::Dreamer	struct	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::config	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::Dreamer::dream_cycle	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::is_idle	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::Dreamer::is_semantic_consolidation_disabled	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::dream::Dreamer::new	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::start_with_shutdown	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::Dreamer::touch	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller	A5
+trusty_memory::engine::dream::Dreamer::with_after_cycle	method	KEEP	tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::with_consolidator	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::dream::FadingMemory	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingMemory::age_days	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingMemory::base_importance	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingMemory::content_preview	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingMemory::drawer_id	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingMemory::effective_importance	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingParams	struct	KEEP	DreamConfig::fading field type (Q4)	A5
+trusty_memory::engine::dream::FadingParams::default	trait_method	KEEP	member of FadingParams (Default impl)	A5
+trusty_memory::engine::dream::FadingParams::resurface_boost_epsilon	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_min_base	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_threshold	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_top_n	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::KgCompactReport	struct	KEEP	owner of KgCompactReport::rows_copied, a deletion candidate	A5
+trusty_memory::engine::dream::KgCompactReport::backup	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::bytes_after	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::bytes_before	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::dry_run	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::history_rows_pruned	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::rows_copied	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
+trusty_memory::engine::dream::KgCompactReport::skipped	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::KgCompactReport::stats	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::MIN_PRUNE_HISTORY_DAYS	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats::FILE_NAME	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats::last_run_at	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats::load	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats::save	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::PersistedDreamStats::stats	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::RoomConsolidationStats	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::RoomConsolidationStats::facts_evicted	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::RoomConsolidationStats::summary_facts_created	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::acquire_dream_permit	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::acquire_dream_permit_within	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::consolidate_scoped	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::detect_fading	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::dream_cycles_in_flight	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::dream_cycles_peak_in_flight	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::dream::dream_max_concurrent	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::dream_semaphore	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::extract_keywords	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::kg_compact	mod	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport	struct	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::backup	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::bytes_after	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::bytes_before	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::bytes_reclaimed	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::dry_run	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::history_rows_pruned	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::ran	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::rows_copied	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::skipped	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::stats	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::KgCompactReport::summary	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::kg_compact_pass	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact::kg_compact_pass_with_hook	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::dream::kg_compact_pass	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::kg_compact_pass_with_hook	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::rank_fading	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::stagger_offset	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::embed	mod	NARROW	module pub(crate): callers outside the crate name trusty_common::embedder (Q3, Architect 05:16Z)	A5
+trusty_memory::engine::embed::EMBED_DIM	reexport	NARROW	re-export of trusty_common::embedder::EMBED_DIM removed: no caller; the item stays in trusty-common (Q3)	A5
+trusty_memory::engine::embed::Embedder	reexport	NARROW	re-export of trusty_common::embedder::Embedder; module pub(crate) (Q3)	A5
+trusty_memory::engine::embed::FastEmbedder	reexport	NARROW	re-export of trusty_common::embedder::FastEmbedder; module pub(crate) (Q3)	A5
+trusty_memory::engine::embed::embed_one	reexport	NARROW	re-export of trusty_common::embedder::embed_one removed: no caller; the item stays in trusty-common (Q3)	A5
+trusty_memory::engine::export_palace_jsonl	fn	KEEP	re-export of share::export_palace_jsonl (KEEP)	A5
+trusty_memory::engine::export_palace_records	fn	KEEP	re-export of share::export_palace_records (KEEP)	A5
+trusty_memory::engine::filter	mod	KEEP	path of FilterConfig	A5
+trusty_memory::engine::filter::BLOCKLIST_PATTERNS	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::DEFAULT_MIN_TOKENS	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterConfig	struct	KEEP	engine::retrieval::RememberOptions::filter field type (A4 KEEP)	A5
+trusty_memory::engine::filter::FilterConfig::apply	method	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterConfig::default	trait_method	KEEP	member of FilterConfig (Default impl)	A5
+trusty_memory::engine::filter::FilterConfig::max_non_alpha_ratio	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::filter::FilterConfig::min_tokens	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::filter::FilterConfig::reject_patterns	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::filter::FilterReject	enum	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::NoisePattern	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::NoisePattern::pattern	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::NonAlphabetic	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::NonAlphabetic::ratio	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::PotentialSecret	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::PotentialSecret::offset	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::PotentialSecret::rule	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::TooShort	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::TooShort::tokens	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::GIT_SHA_MAX_LEN	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::GIT_SHA_MIN_LEN	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MCP_MIN_TOKENS	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError	enum	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Empty	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Empty::index	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Empty::range	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::NotCharBoundary	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::NotCharBoundary::index	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::NotCharBoundary::range	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::OutOfBounds	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::OutOfBounds::index	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::OutOfBounds::len	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::OutOfBounds::range	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Unordered	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Unordered::index	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Unordered::prev_end	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::MaskError::Unordered::range	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SECRET_FILTER_VERSION	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule	enum	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::ALL	const	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::AwsKeyId	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::Base64Blob	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::Jwt	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::MixedCaseAlnum	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::PrivateKeyBlock	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::ProviderPrefix	variant	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretRule::label	method	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretShape	struct	NARROW	re-export removed: no caller outside filter::secret (Q6)	A5
+trusty_memory::engine::filter::SecretShape::cls	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretShape::ent_tenths	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretShape::len	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretSpan	struct	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretSpan::range	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::SecretSpan::rule	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::blocklist_match	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::check_secret	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::classify	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::classify_secret	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::count_meaningful_tokens	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::find_secret_spans	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::find_secret_token	fn	NARROW	re-export removed: no caller outside filter::secret (Q6)	A5
+trusty_memory::engine::filter::is_git_sha_like	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::mask_content	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::non_alphabetic_ratio	fn	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::find_communities	fn	KEEP	re-export of community::find_communities (KEEP)	A5
+trusty_memory::engine::git	mod	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities::co_authors	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities::file_paths	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities::issue_refs	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities::room_types	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::CommitEntities::symbols	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::ConventionalCommit	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::ConventionalCommit::breaking	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::ConventionalCommit::commit_type	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::ConventionalCommit::description	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::ConventionalCommit::scope	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitExtractor	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitExtractor::extract	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitExtractor::new	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::author	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::author_email	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::committed_at	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::conventional	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::entities	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::importance	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::narrative	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::sha	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitFact::to_drawer	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::build_narrative	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::classify_file_path	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::extract_entities	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::parse_conventional_commit	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::score_importance	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::import_palace_jsonl	fn	KEEP	re-export of share::import_palace_jsonl (KEEP)	A5
+trusty_memory::engine::import_palace_records	fn	KEEP	re-export of share::import_palace_records (KEEP)	A5
+trusty_memory::engine::inference_available	fn	KEEP	re-export of semantic_consolidation::inference_available (KEEP)	A5
+trusty_memory::engine::maintenance_lease	mod	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus	enum	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::Held	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::HeldElsewhere	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::HeldElsewhere::holder_pid	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::Unavailable	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::Unavailable::reason	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::LeaseStatus::is_held	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::MAINTENANCE_LOCK_FILE	const	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::MaintenanceLease	struct	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::MaintenanceLease::new	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::MaintenanceLease::path	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::MaintenanceLease::try_hold	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_lease::recorded_holder_pid	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log	mod	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason	enum	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::DreamContentPrune	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::DreamDedup	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::DreamPrune	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::ExpiredPurge	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::ExpiredPurgeAtOpen	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::ForgetOfMergedSurvivor	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::SemanticConsolidation	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::SplitOversized	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::UserForget	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::as_str	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::DeletionReason::fmt	trait_method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::JournalContents	struct	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::JournalContents::malformed	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::JournalContents::records	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MAINTENANCE_LOG_FILENAME	const	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MAINTENANCE_LOG_ROTATED_FILENAME	const	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion	struct	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::at	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::content_hash	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::drawer	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::drawer_id	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::new	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::palace	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::pid	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::reason	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::score	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::survivor_id	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::with_content_hash_of	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::with_drawer	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::MaintenanceDeletion::with_survivor	method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RecordOutcome	enum	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RecordOutcome::Journaled	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RecordOutcome::LoggedOnly	variant	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer	struct	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::content	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::created_at	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::fact_key	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::from	trait_method	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::importance	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::room_id	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::RemovedDrawer::tags	field	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::journal_path	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::read_journal	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::record	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::maintenance_log::warn_removed	fn	NARROW	no consumer outside the library; module pub(crate)	A5
+trusty_memory::engine::memory_content_hash	fn	KEEP	re-export of content_hash::memory_content_hash (KEEP)	A5
+trusty_memory::engine::mint_room_id	fn	KEEP	re-export of room_identity::mint_room_id (KEEP)	A5
+trusty_memory::engine::mint_wing_id	fn	KEEP	re-export of wing_identity::mint_wing_id (KEEP)	A5
+trusty_memory::engine::normalize_for_hash	fn	KEEP	re-export of content_hash::normalize_for_hash (KEEP)	A5
 trusty_memory::engine::palace	mod	KEEP	path of every kept palace item (trusty-mpm, tests/)	A4
 trusty_memory::engine::palace::Drawer	struct	KEEP	tests/ (engine_standalone.rs, bm25_alias_recall.rs); PalaceHandle::add_drawer signature	A4
 trusty_memory::engine::palace::Drawer::access_count	field	NARROW	no consumer outside the library	A4
@@ -251,6 +687,7 @@ trusty_memory::engine::registry::RenameOutcome::old	field	NARROW	no consumer out
 trusty_memory::engine::registry::RenameOutcome::resumed	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::RenameOutcome::trashed_target	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::max_open_palaces_from_env	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::resolve_consolidation_provider	fn	NARROW	re-export removed; no consumer outside the library	A5
 trusty_memory::engine::retrieval	mod	KEEP	path of every kept retrieval item (trusty-mpm, trusty-crate-contracts, tests/)	A4
 trusty_memory::engine::retrieval::AliasAudit	enum	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::AliasAudit::Measured	variant	NARROW	no consumer outside the library	A4
@@ -533,6 +970,167 @@ trusty_memory::engine::retrieval::scope_admits	fn	NARROW	no consumer outside the
 trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
 trusty_memory::engine::retrieval::shared_embedder_initialized	fn	KEEP	tests/verify_embedded_warmup_9275.rs, tests/recall_degraded_lane.rs	A4
 trusty_memory::engine::retrieval::validate_fact_key	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::room_identity	mod	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::DEFAULT_WING_ID	const	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::ROOM_NAMESPACE	const	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::canonical_room_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::default_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::fold_debug_repr	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::mint_room_id	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::parse_room_preserving_case	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::room_label	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::room_to_uuid	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::room_type_from_parts	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_identity::room_type_tag	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::room_to_uuid	fn	KEEP	re-export of room_identity::room_to_uuid (KEEP)	A5
+trusty_memory::engine::semantic_consolidation	mod	KEEP	path of SemanticConsolidationConfig	A5
+trusty_memory::engine::semantic_consolidation::CanonicalDrawer	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::CanonicalDrawer::canonical_for	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::CanonicalDrawer::content	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::CanonicalDrawer::importance	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::CanonicalDrawer::tags	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction	enum	KEEP	MockInference::new and MockInference::fixture_actions type (test-support, Q1); private_interfaces	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Alias	variant	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Alias::from	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Alias::to	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Flag	variant	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Flag::drawer_id	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Flag::reason	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Merge	variant	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Merge::canonical_content	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationAction::Merge::superseded_ids	field	KEEP	member of ConsolidationAction	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider	enum	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Local	variant	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Local::base_url	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Local::model	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::OpenRouter	variant	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::OpenRouter::api_key	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::OpenRouter::model	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Unavailable	variant	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Unavailable::provider	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationProvider::Unavailable::reason	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::aliases	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::cache_hits	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::canonical_drawers	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::flagged_ids	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::llm_calls	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::ConsolidationResult::superseded_ids	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::DEFAULT_LOCAL_BASE_URL	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::Inference	trait	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::Inference::consolidate	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::Inference::name	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::LOCAL_HOST_ENV	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::LOCAL_MODEL_PREFIXES	const	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::MockInference	struct	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::semantic_consolidation::MockInference::call_count	field	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::semantic_consolidation::MockInference::fixture_actions	field	HIDE	test-support: compiled only for tests and under memory-core-test-support (Q1, ruling D3)	A5
+trusty_memory::engine::semantic_consolidation::OllamaInference	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::OpenRouterInference	struct	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig	struct	KEEP	DreamConfig::semantic field type (Q4)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::enabled	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_batch_size	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_calls_per_cycle	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::model	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::similarity_threshold	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidator	struct	KEEP	Dreamer::with_consolidator signature (a deletion candidate)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidator::config	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::inference_available	trait_method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::semantic_consolidation::parse_consolidation_actions	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::resolve_consolidation_provider	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::resolve_openrouter_api_key	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::validate_ollama_model	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::share	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
+trusty_memory::engine::share::ImportOutcome	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportOutcome::Inserted	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportOutcome::Merged	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportOutcome::Skipped	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportOutcome::Unchanged	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportSummary	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportSummary::inserted	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportSummary::merged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::SUPERSEDED_BY	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::share::SharedMemoryRecord	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::content	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::content_hash	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::created_at	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::drawer_type	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::format_version	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::hash_version	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::importance	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::room	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::SharedMemoryRecord::tags	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::Supersession	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::Supersession::linked	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
+trusty_memory::engine::share::export	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
+trusty_memory::engine::share::export::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
+trusty_memory::engine::share::import::ImportOutcome	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportOutcome::Inserted	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportOutcome::Merged	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportOutcome::Skipped	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportOutcome::Unchanged	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary::changed_anything	method	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary::inserted	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary::merged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::import::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
+trusty_memory::engine::share::record::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::SharedMemoryRecord	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::content	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::content_hash	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::created_at	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::drawer_type	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::format_version	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::from_drawer	method	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::hash_version	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::importance	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::parsed_drawer_type	method	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::room	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::tags	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::record::SharedMemoryRecord::verify	method	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::supersede	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
+trusty_memory::engine::share::supersede::SUPERSEDED_BY	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::share::supersede::Supersession	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede::Supersession::linked	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
+trusty_memory::engine::share::supersede::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::store	mod	KEEP	path of every kept store item (trusty-agents, tests/)	A3b
 trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b
@@ -824,8 +1422,8 @@ trusty_memory::engine::store::concurrent_open::SnapshotGuard::drop	trait_method	
 trusty_memory::engine::store::concurrent_open::SnapshotGuard::noop	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::concurrent_open::try_open_or_snapshot	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::create_room	fn	NARROW	re-export; no consumer outside the library	A3b
-trusty_memory::engine::store::embed_ledger	mod	KEEP	path of EmbedFailure	A3b
-trusty_memory::engine::store::embed_ledger::EmbedFailure	struct	KEEP	engine::retrieval::EmbedHealth::recorded_failures signature (A4)	A3b
+trusty_memory::engine::store::embed_ledger	mod	NARROW	crate-only: no public signature names EmbedFailure since A4; module pub(crate) (A5 flip, Q5)	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure	struct	NARROW	crate-only: engine::retrieval::EmbedHealth::recorded_failures is pub(crate) since A4; module pub(crate) (A5 flip, Q5)	A3b
 trusty_memory::engine::store::embed_ledger::EmbedFailure::attempts	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::embed_ledger::EmbedFailure::drawer_id	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::embed_ledger::EmbedFailure::failed_at	field	NARROW	no consumer outside the library	A3b
@@ -1506,7 +2104,7 @@ trusty_memory::engine::store::rooms::resolve_room_filter_id	fn	NARROW	no consume
 trusty_memory::engine::store::rooms::resolve_room_selector	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::rooms_in_wing	fn	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::vector	mod	KEEP	tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
-trusty_memory::engine::store::vector::AliasScan	struct	KEEP	engine::retrieval::AliasAudit::from_scan signature (A4)	A3b
+trusty_memory::engine::store::vector::AliasScan	struct	NARROW	crate-only: engine::retrieval::AliasAudit::from_scan is pub(crate) since A4 (A5 flip, Q5)	A3b
 trusty_memory::engine::store::vector::AliasScan::aliased_drawer_ids	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::AliasScan::distinct_vector_ids	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::AliasScan::key_rows	field	NARROW	no consumer outside the library	A3b
@@ -1515,7 +2113,7 @@ trusty_memory::engine::store::vector::ChunkShape	struct	KEEP	return type of Usea
 trusty_memory::engine::store::vector::ChunkShape::is_complete	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::ChunkShape::max_index	field	KEEP	tests/chunked_embed_9275.rs	A3b
 trusty_memory::engine::store::vector::ChunkShape::rows	field	KEEP	tests/chunked_embed_9275.rs	A3b
-trusty_memory::engine::store::vector::CompactionResult	struct	KEEP	engine::PalaceHandle::compact_vector_orphans signature (A4)	A3b
+trusty_memory::engine::store::vector::CompactionResult	struct	NARROW	crate-only: PalaceHandle::compact_vector_orphans is pub(crate) since A4 (A5 flip, Q5)	A3b
 trusty_memory::engine::store::vector::CompactionResult::index_size_after	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::CompactionResult::index_size_before	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::CompactionResult::orphans_removed	field	NARROW	no consumer outside the library	A3b
@@ -1592,3 +2190,40 @@ trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::p
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::stage	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::store	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::palace_label	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::supersede_drawer	fn	KEEP	re-export of share::supersede_drawer (KEEP)	A5
+trusty_memory::engine::timeouts	mod	KEEP	path of OpBudget	A5
+trusty_memory::engine::timeouts::OpBudget	struct	KEEP	owner of OpBudget::start_default, a deletion candidate	A5
+trusty_memory::engine::timeouts::OpBudget::leg	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::OpBudget::remaining	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::OpBudget::start	method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::OpBudget::start_default	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller	A5
+trusty_memory::engine::timeouts::WriteTimeout	enum	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::LockWait	variant	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::LockWait::palace	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::LockWait::waited	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::PipelineBudget	variant	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::PipelineBudget::budget	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::PipelineBudget::elapsed	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::PipelineBudget::kg_redb_bytes	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::WriteTimeout::PipelineBudget::palace	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::cap_write_txn_deadline	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::chunked_embed_cap	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::dream_permit_wait_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::embed_batch_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::embedder_init_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::floor_write_pipeline	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::lock_with_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::open_queue_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::parse_secs_with	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::slow_write_warn_threshold	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::write_lock_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::write_op_budget	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::write_pipeline_timeout	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::timeouts::write_txn_deadline	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::wing_identity	mod	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::DEFAULT_WING_ID	const	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::DEFAULT_WING_LABEL	const	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::WING_NAMESPACE	const	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::canonical_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::default_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::wing_identity::mint_wing_id	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5

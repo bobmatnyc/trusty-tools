@@ -99,8 +99,9 @@ pub struct DreamStatusPayload {
     /// #2352). Populated from a per-palace snapshot via `From<PersistedDreamStats>`;
     /// left empty on the cross-palace aggregate endpoint (no single palace to
     /// attribute). `#[serde(default)]` keeps it omissible for older clients.
+    // #9278 (A5): crate-only like `FadingMemory`; the wire shape is unchanged.
     #[serde(default)]
-    pub fading: Vec<crate::engine::dream::FadingMemory>,
+    pub(crate) fading: Vec<crate::engine::dream::FadingMemory>,
 }
 
 impl From<PersistedDreamStats> for DreamStatusPayload {

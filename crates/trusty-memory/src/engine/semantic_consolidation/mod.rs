@@ -15,16 +15,27 @@
 
 mod consolidator;
 mod inference;
+// #9278 (A5, ruling D3): the test double is test-support, out of the ADR-0066
+// frozen surface.
+#[cfg(any(test, feature = "memory-core-test-support"))]
+mod mock;
 mod types;
 
+// #9278 (A5): `SemanticConsolidationConfig` is a `DreamConfig` field type,
+// `SemanticConsolidator` is in `Dreamer::with_consolidator`, and
+// `ConsolidationAction` is in `MockInference::new`; `inference_available` has
+// no non-test caller and stays for the owner's deletion call.
 pub use consolidator::SemanticConsolidator;
-pub use inference::{Inference, MockInference, OllamaInference, OpenRouterInference};
-pub use types::{
-    CanonicalDrawer, ConsolidationAction, ConsolidationProvider, ConsolidationResult,
-    DEFAULT_LOCAL_BASE_URL, LOCAL_HOST_ENV, LOCAL_MODEL_PREFIXES, SemanticConsolidationConfig,
-    inference_available, parse_consolidation_actions, resolve_consolidation_provider,
-    resolve_openrouter_api_key, validate_ollama_model,
+pub(crate) use inference::{Inference, OllamaInference, OpenRouterInference};
+#[cfg(any(test, feature = "memory-core-test-support"))]
+pub use mock::MockInference;
+pub use types::{ConsolidationAction, SemanticConsolidationConfig, inference_available};
+pub(crate) use types::{
+    ConsolidationProvider, ConsolidationResult, resolve_consolidation_provider,
+    validate_ollama_model,
 };
+#[cfg(test)]
+pub(crate) use types::{LOCAL_HOST_ENV, parse_consolidation_actions, resolve_openrouter_api_key};
 
 #[cfg(test)]
 mod tests {
