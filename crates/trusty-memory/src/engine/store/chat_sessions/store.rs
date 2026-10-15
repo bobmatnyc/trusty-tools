@@ -160,11 +160,13 @@ impl ChatSessionStore {
     /// What: Scans the SESSIONS table, decodes each row, projects to
     /// `ChatSessionMeta`, sorts by `updated_at` descending.
     /// Test: `list_sessions_returns_meta`.
-    pub fn list_sessions(&self) -> anyhow::Result<Vec<ChatSessionMeta>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn list_sessions(&self) -> anyhow::Result<Vec<ChatSessionMeta>> {
         let metas = self.list_sessions_inner()?;
         Ok(metas)
     }
 
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn list_sessions_inner(&self) -> Result<Vec<ChatSessionMeta>> {
         let rtx = self
             .db
@@ -235,10 +237,12 @@ impl ChatSessionStore {
     /// JSON history. Returns `Ok(None)` on miss.
     /// Test: `create_then_get_session_round_trips`,
     /// `delete_session_removes_row`.
-    pub fn get_session(&self, id: &str) -> anyhow::Result<Option<ChatSession>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn get_session(&self, id: &str) -> anyhow::Result<Option<ChatSession>> {
         Ok(self.get_session_inner(id)?)
     }
 
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn get_session_inner(&self, id: &str) -> Result<Option<ChatSession>> {
         let rtx = self
             .db
@@ -292,12 +296,14 @@ impl ChatSessionStore {
     /// with `title = None` and `created_at == updated_at == now`, matching
     /// the legacy SQLite `INSERT … ON CONFLICT` behaviour.
     /// Test: `upsert_session_overwrites_history`.
-    pub fn upsert_session(&self, id: &str, history: &[ChatMessage]) -> anyhow::Result<()> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn upsert_session(&self, id: &str, history: &[ChatMessage]) -> anyhow::Result<()> {
         self.validate_chat_attachments(id, history)?;
         self.upsert_session_inner(id, history)?;
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn upsert_session_inner(&self, id: &str, history: &[ChatMessage]) -> Result<()> {
         let history_json =
             serde_json::to_string(history).map_err(|e| ChatSessionStoreError::Json {
@@ -358,7 +364,12 @@ impl ChatSessionStore {
     /// What: Delegates to `append_messages` with a one-element vec.
     /// Test: `append_message_is_atomic_under_concurrency`,
     /// `append_message_creates_session_when_missing`.
-    pub fn append_message(&self, id: &str, message: ChatMessage) -> anyhow::Result<ChatSession> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn append_message(
+        &self,
+        id: &str,
+        message: ChatMessage,
+    ) -> anyhow::Result<ChatSession> {
         self.append_messages(id, vec![message])
     }
 
@@ -385,7 +396,8 @@ impl ChatSessionStore {
     /// session so callers don't need a second `get_session` round trip.
     /// Test: `append_message_is_atomic_under_concurrency`,
     /// `append_messages_appends_pair_in_order`.
-    pub fn append_messages(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn append_messages(
         &self,
         id: &str,
         messages: Vec<ChatMessage>,
@@ -394,6 +406,7 @@ impl ChatSessionStore {
         Ok(self.append_messages_inner(id, messages)?)
     }
 
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn append_messages_inner(&self, id: &str, messages: Vec<ChatMessage>) -> Result<ChatSession> {
         let now = Utc::now().to_rfc3339();
         let wtx = self
@@ -501,11 +514,13 @@ impl ChatSessionStore {
     /// Why: Mirrors the SQLite `DELETE … WHERE id = ?` idempotent contract.
     /// What: Removes the key from SESSIONS in a write transaction.
     /// Test: `delete_session_removes_row`.
-    pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         self.delete_session_inner(id)?;
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn delete_session_inner(&self, id: &str) -> Result<()> {
         let wtx = self
             .db

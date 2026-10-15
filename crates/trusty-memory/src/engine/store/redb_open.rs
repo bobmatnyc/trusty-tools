@@ -7,17 +7,18 @@
 //! ORT embedder. The shared items moved to [`trusty_common::redb_open`], behind the
 //! light `redb-open` feature that `memory-core` now implies.
 //!
-//! What: re-exports those items unchanged, so every existing path — including
-//! the public `trusty_memory::engine::store::redb_open::*` and the
-//! `memory_core::store` re-exports — resolves exactly as before. There is no
-//! second implementation here; this file is the alias and nothing else.
+//! What: re-exports those items unchanged for the engine's own call sites. The
+//! module is crate-only since #9278; a caller outside the library uses
+//! `trusty_common::redb_open` directly. There is no second implementation
+//! here; this file is the alias and nothing else.
 //!
 //! Test: the behaviour is pinned by trusty-common's own tests, in
 //! `crates/trusty-common/src/redb_open.rs` (#9271: a separate crate now).
 
 // #5063: one classifier for the whole workspace. Adding an implementation back
 // into this file re-creates the duplication the issue closed.
+#[cfg(feature = "server")]
+pub use trusty_common::redb_open::INCOMPATIBLE_SUFFIX;
 pub use trusty_common::redb_open::{
-    INCOMPATIBLE_SUFFIX, backup_incompatible_file, incompatible_backup_path,
-    is_incompatible_format, open_or_recreate,
+    backup_incompatible_file, is_incompatible_format, open_or_recreate,
 };

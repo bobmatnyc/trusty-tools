@@ -76,12 +76,12 @@ fn ledger_path(data_dir: &Path) -> PathBuf {
 /// Test: `embed_ledger_roundtrips_and_upserts_by_drawer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbedFailure {
-    pub drawer_id: Uuid,
-    pub failed_at: DateTime<Utc>,
+    pub(crate) drawer_id: Uuid,
+    pub(crate) failed_at: DateTime<Utc>,
     /// How many embed attempts were made before giving up.
-    pub attempts: u32,
+    pub(crate) attempts: u32,
     /// Last error text observed. Free-form; for humans, not for matching on.
-    pub reason: String,
+    pub(crate) reason: String,
 }
 
 /// Read the ledger, returning an empty vec when the palace has never recorded
@@ -96,7 +96,7 @@ pub struct EmbedFailure {
 /// a malformed one yields `[]` plus a `warn!` rather than an error.
 /// Test: `embed_ledger_load_is_empty_when_absent`,
 /// `embed_ledger_load_degrades_to_empty_on_malformed_json`.
-pub fn load(data_dir: &Path) -> Vec<EmbedFailure> {
+pub(crate) fn load(data_dir: &Path) -> Vec<EmbedFailure> {
     let target = ledger_path(data_dir);
     let Ok(bytes) = std::fs::read(&target) else {
         return Vec::new();
@@ -125,7 +125,7 @@ pub fn load(data_dir: &Path) -> Vec<EmbedFailure> {
 /// blocking-safe thread.
 /// Test: `embed_ledger_roundtrips_and_upserts_by_drawer`,
 /// `concurrent_ledger_records_keep_every_row`.
-pub fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
+pub(crate) fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
     let path = ledger_path(data_dir);
@@ -162,7 +162,7 @@ pub fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
 /// Test: `embed_ledger_clear_removes_only_named_rows`,
 /// `concurrent_clear_and_record_do_not_lose_each_other`,
 /// `clear_without_a_matching_row_never_writes`.
-pub fn clear(data_dir: &Path, ids: &HashSet<Uuid>) -> Result<()> {
+pub(crate) fn clear(data_dir: &Path, ids: &HashSet<Uuid>) -> Result<()> {
     let path = ledger_path(data_dir);
     if ids.is_empty() || !path.exists() {
         return Ok(());

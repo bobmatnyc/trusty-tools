@@ -249,7 +249,6 @@ sweep (#43–#56) removed the rusqlite/r2d2 and C++ usearch chains.
 | Legacy KG | **SQLite** (feature-gated) | `store/kg_sqlite.rs` | `#[cfg(feature = "sqlite-kg")]`, for #45 migration; #47 will remove. 🟡 |
 | Palace metadata | JSON | `store/palace_store.rs` | `palace.json` + `identity.txt` (L0 baseline), atomic writes. |
 | L1 cache | JSON snapshot | `store/l1_cache.json` (`l1_cache.rs`) | Top-N essential drawers; hydrated on open, refreshed lazily. |
-| External payloads | **redb** | `store/payload_store.rs` | Durable string-id↔uuid↔JSON map for open-mpm's `TrustyBackedMemoryStore` (#46/#52). |
 | Chat sessions | **redb** | `store/chat_sessions.rs` | Web-UI chat resume (#56). |
 | Recall analytics | **redb** | `engine/analytics.rs` | Hit/miss `RecallLog` (#57); one-shot SQLite→redb migration on first open. |
 | Multi-process reads | redb snapshot copy | `store/concurrent_open.rs` | Falls back to a tmp snapshot on `DatabaseAlreadyOpen` (#59). |
@@ -381,7 +380,7 @@ browser. ✅
 | `analytics.rs` | redb-backed `RecallLog` hit/miss tracking (#57). |
 | `git.rs` | Git-history fact extractor (rule-based NLP, zero LLM). |
 | `embed.rs` | Re-export shim for the unified `Embedder`/`FastEmbedder`. |
-| `store/` | All storage backends (see §4): `hnsw_store`, `vector`, `kg`/`kg_redb`/`kg_store`/`kg_writer`/`kg_sqlite`, `palace_store`, `l1_cache`, `payload_store`, `chat_sessions`, `kuzu`, `concurrent_open`. |
+| `store/` | All storage backends (see §4): `hnsw_store`, `vector`, `kg`/`kg_redb`/`kg_store`/`kg_writer`/`kg_sqlite`, `palace_store`, `l1_cache`, `chat_sessions`, `kuzu`, `concurrent_open`. |
 
 ---
 

@@ -24,7 +24,7 @@ use super::HnswStore;
 
 /// Which store call an in-flight entry belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HnswOpKind {
+pub(crate) enum HnswOpKind {
     /// `HnswStore::upsert`.
     Upsert,
     /// `HnswStore::search`.
@@ -35,9 +35,9 @@ pub enum HnswOpKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HnswOp {
     /// Which call is running.
-    pub kind: HnswOpKind,
+    pub(crate) kind: HnswOpKind,
     /// When the call registered, on its own blocking thread.
-    pub since: Instant,
+    pub(crate) since: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -138,7 +138,8 @@ impl HnswStore {
     /// wedged op, and it cannot fail.
     /// Test: `a_parked_search_is_reported_until_it_returns`,
     /// `a_dropped_future_leaves_its_blocking_op_registered`.
-    pub fn oldest_op(&self) -> Option<HnswOp> {
+    #[cfg(test)]
+    pub(crate) fn oldest_op(&self) -> Option<HnswOp> {
         self.ops.oldest()
     }
 

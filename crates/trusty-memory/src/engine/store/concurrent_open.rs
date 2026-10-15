@@ -146,7 +146,7 @@ pub(crate) const WRITER_RETRY_SLEEP_MS: [u64; 4] = [50, 100, 400, 1000];
 /// `Snapshot` means we hold a process-local copy.
 /// Test: `snapshot_fallback_when_locked`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenMode {
+pub(crate) enum OpenMode {
     /// Holds the exclusive file lock on the original path.
     ReadWrite,
     /// Operating against a process-local snapshot copy. Writes must be
@@ -165,7 +165,7 @@ impl OpenMode {
     /// Why: Lets callers branch with a method instead of pattern-matching.
     /// What: Returns `true` when the mode is `Snapshot`.
     /// Test: trivially covered by the snapshot fallback test.
-    pub fn is_read_only(self) -> bool {
+    pub(crate) fn is_read_only(self) -> bool {
         matches!(self, OpenMode::Snapshot)
     }
 
@@ -176,7 +176,8 @@ impl OpenMode {
     /// What: Returns `true` only for [`OpenMode::Recreated`].
     /// Test: `recreates_on_incompatible_format`.
     #[must_use]
-    pub fn was_recreated(self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn was_recreated(self) -> bool {
         matches!(self, OpenMode::Recreated)
     }
 }
@@ -191,7 +192,7 @@ impl OpenMode {
 /// logs a warning on failure.
 /// Test: `snapshot_guard_removes_file_on_drop`.
 #[derive(Debug)]
-pub struct SnapshotGuard {
+pub(crate) struct SnapshotGuard {
     path: Option<PathBuf>,
 }
 
@@ -210,7 +211,7 @@ impl SnapshotGuard {
     /// `Option` plumbing.
     /// What: Returns a guard with no path; drop is a no-op.
     /// Test: Indirect via `try_open_or_snapshot`.
-    pub fn noop() -> Self {
+    pub(crate) fn noop() -> Self {
         Self { path: None }
     }
 }
@@ -301,7 +302,7 @@ pub(super) fn snapshot_path_for(original: &Path) -> PathBuf {
 /// transient-conflict path, issue #1487), and
 /// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`
 /// (issue #4911).
-pub fn try_open_or_snapshot(
+pub(crate) fn try_open_or_snapshot(
     path: &Path,
     intent: OpenIntent,
 ) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
@@ -652,7 +653,7 @@ pub(crate) fn backoff_sleep_ms(ms: u64) {
 /// that deletes it on drop. Either way the live file is never written.
 /// Test: `read_only_open_never_writes_the_live_file`,
 /// `read_only_open_falls_back_to_a_snapshot_when_locked`.
-pub enum ReadOnlyRedb {
+pub(crate) enum ReadOnlyRedb {
     /// The live file, opened `O_RDONLY` under a shared lock.
     Live(redb::ReadOnlyDatabase),
     /// A throw-away copy, taken because a writer holds the live file.
@@ -666,7 +667,7 @@ impl ReadOnlyRedb {
     /// empty database — a measurement of a palace that is not there is a
     /// mistake to report, not a zero to print.
     /// Test: `read_only_open_never_writes_the_live_file`.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         if !path.exists() {
             anyhow::bail!("no redb file at {}", path.display());
         }
@@ -701,7 +702,7 @@ impl ReadOnlyRedb {
     /// Begin a read transaction against whichever variant is open.
     ///
     /// Test: `read_only_open_never_writes_the_live_file`.
-    pub fn begin_read(&self) -> Result<redb::ReadTransaction> {
+    pub(crate) fn begin_read(&self) -> Result<redb::ReadTransaction> {
         use redb::ReadableDatabase;
         match self {
             Self::Live(db) => db.begin_read().context("begin read-only txn (live)"),
@@ -714,7 +715,7 @@ impl ReadOnlyRedb {
     /// Why: a report built from a snapshot is a moment-in-time reading of a
     /// file another process is still writing, and the operator should be told.
     /// Test: `read_only_open_falls_back_to_a_snapshot_when_locked`.
-    pub fn is_snapshot(&self) -> bool {
+    pub(crate) fn is_snapshot(&self) -> bool {
         matches!(self, Self::Snapshot { .. })
     }
 }

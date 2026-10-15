@@ -213,7 +213,7 @@ dream/decay/analytics surfaces. Absorbed from `trusty-memory-core` (#5 phase 2d)
   (`retrieval.rs`); process-wide shared `FastEmbedder` `OnceCell` (#57).
 - **Stores (`store/`):** `palace_store` (redb rows), `vector`/`hnsw_store`
   (HNSW via hnsw_rs), `kg_redb`/`kg_store`/`kg_writer`/`kg` (KnowledgeGraph),
-  `kg_sqlite` (legacy read, `sqlite-kg`), `payload_store` (postcard),
+  `kg_sqlite` (legacy read, `sqlite-kg`),
   `chat_sessions` (redb, #56), `l1_cache`, `concurrent_open`.
 - **Analytics:** `analytics` (RecallLog, redb #57), `decay`, `dream`,
   `community` (Louvain on petgraph, #52), `semantic_consolidation`

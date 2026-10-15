@@ -4,7 +4,7 @@
 //! conversations after a refresh / restart. Issue #56 migrates the store from
 //! rusqlite + r2d2 to redb so the chat sidecar drops the heavy native
 //! dependency chain and lines up with the rest of the Memory Palace
-//! (`kg_redb.rs`, `payload_store.rs`, `palace_store.rs`). The public
+//! (`kg_redb.rs`, `palace_store.rs`). The public
 //! `ChatSessionStore` API is unchanged so `trusty-memory` and any trusty-agents
 //! consumers continue to work as drop-ins — callers still pass a path and
 //! get back a `ChatSessionStore`.
@@ -23,14 +23,16 @@
 //! was removed in issue #989 (all palaces confirmed migrated).
 
 mod assets;
-pub use assets::ChatImageAsset;
+#[cfg(feature = "server")]
+pub(crate) use assets::ChatImageAsset;
 // #9282: the snapshot copies every chat table by name.
 pub(crate) use assets::ASSETS as CHAT_ASSETS_TABLE;
 mod store;
 mod types;
 
 pub use store::ChatSessionStore;
-pub use types::{ChatMessage, ChatSession, ChatSessionMeta, ChatSessionStoreError};
+// #9278: only ChatMessage has a caller outside the library (trusty-agents).
+pub use types::ChatMessage;
 
 #[cfg(test)]
 mod tests {

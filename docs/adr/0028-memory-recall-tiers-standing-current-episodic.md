@@ -319,7 +319,7 @@ recall path a live session actually exercises.
 drawers inline, synchronously, on **every** palace open
 (`crates/trusty-common/src/memory_core/retrieval/handle.rs:325-347`, issue
 #61): it walks the drawer set, and for any drawer whose `expires_at` has
-fallen into the past it calls `delete_drawer_sync` and drops it before the
+fallen into the past it deletes the drawer from redb and drops it before the
 handle is handed back to the caller. A standalone `PalaceHandle::purge_expired`
 implementing the same sweep also exists
 (`retrieval/handle.rs:874-917`), covered by the test

@@ -155,7 +155,7 @@ impl HnswStore {
     /// `upsert_chunks_rejects_empty_and_over_cap`,
     /// `single_upsert_drops_stale_chunk_rows`,
     /// `replace_group_rejects_an_empty_or_hash_drawer_key`.
-    pub fn replace_group(&self, drawer: &str, vectors: &[Vec<f32>]) -> Result<Vec<u64>> {
+    pub(crate) fn replace_group(&self, drawer: &str, vectors: &[Vec<f32>]) -> Result<Vec<u64>> {
         let progress = OpProgress::default();
         self.replace_group_capped(drawer, vectors, MAX_CHUNKS_PER_DRAWER, &progress)
     }
@@ -281,7 +281,7 @@ impl HnswStore {
     /// Test: `remove_deletes_every_chunk_row_of_the_drawer`,
     /// `forget_removes_all_vector_rows_for_a_drawer`,
     /// `delete_group_rejects_an_empty_or_hash_drawer_key`.
-    pub fn delete_group(&self, drawer: &str) -> Result<usize> {
+    pub(crate) fn delete_group(&self, drawer: &str) -> Result<usize> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }

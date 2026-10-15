@@ -107,9 +107,16 @@ grep -v '::Store::open' "$TMP/base.api" > "$TMP/missing.api"
 run_case keep-missing 1 "MISSING $K::Store::open" "$TMP/missing.api"
 
 cp "$TMP/base.api" "$TMP/scope.api"
-echo 'pub fn trusty_memory::engine::store::kgx::other() -> u8' >> "$TMP/scope.api"
-echo 'pub struct trusty_memory::engine::store::kg_redb_old::Thing' >> "$TMP/scope.api"
+echo 'pub fn trusty_memory::engine::storex::other() -> u8' >> "$TMP/scope.api"
+echo 'pub struct trusty_memory::engine::store_old::Thing' >> "$TMP/scope.api"
 run_case out-of-scope 0 '6 audited path(s) match' "$TMP/scope.api"
+
+# A store-root item (a new submodule or re-export) with no row must fail.
+cp "$TMP/base.api" "$TMP/root.api"
+echo 'pub struct trusty_memory::engine::store::NewRootReexport' >> "$TMP/root.api"
+echo 'pub mod trusty_memory::engine::store::brand_new_mod' >> "$TMP/root.api"
+run_case store-root-unaudited 1 'UNAUDITED trusty_memory::engine::store::NewRootReexport' "$TMP/root.api"
+run_case store-root-new-mod 1 'UNAUDITED trusty_memory::engine::store::brand_new_mod' "$TMP/root.api"
 
 : > "$TMP/empty.api"
 run_case empty-listing 2 'empty listing' "$TMP/empty.api"

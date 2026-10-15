@@ -41,6 +41,7 @@ pub struct RoomPlanEntry {
 
 impl RoomPlanEntry {
     /// The label this room carries, or would be given.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub fn label(&self) -> String {
         match &self.action {
             RoomPlanAction::Insert { room, .. } => crate::engine::room_identity::room_label(room),

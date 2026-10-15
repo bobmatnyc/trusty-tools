@@ -62,7 +62,7 @@ pub enum WriteTxnError {
 /// What: the parent directory's final component, or the whole path when there
 /// is none (an in-tree relative file).
 /// Test: `the_palace_label_is_the_store_files_directory`.
-pub fn palace_label(store_path: &Path) -> Arc<str> {
+pub(crate) fn palace_label(store_path: &Path) -> Arc<str> {
     store_path
         .parent()
         .and_then(Path::file_name)
@@ -79,7 +79,7 @@ pub fn palace_label(store_path: &Path) -> Arc<str> {
 /// `open_table` and friends work unchanged at the call site.
 /// Test: `a_transaction_past_its_deadline_is_rolled_back_not_committed`,
 /// `a_transaction_inside_its_deadline_commits`.
-pub struct DeadlinedWrite {
+pub(crate) struct DeadlinedWrite {
     txn: WriteTransaction,
     palace: Arc<str>,
     store: &'static str,
@@ -98,7 +98,7 @@ impl DeadlinedWrite {
     /// one's — counting it would abort a healthy writer for a neighbour's stall.
     /// What: `db.begin_write()`, then starts the clock against `budget`.
     /// Test: `a_transaction_inside_its_deadline_commits`.
-    pub fn begin(
+    pub(crate) fn begin(
         db: &Database,
         palace: Arc<str>,
         store: &'static str,
@@ -126,7 +126,7 @@ impl DeadlinedWrite {
     /// [`WriteTxnError::DeadlineExceeded`].
     /// Test: `a_transaction_past_its_deadline_is_rolled_back_not_committed`,
     /// `a_stalled_commit_is_logged_with_the_palace_and_the_lock_hold`.
-    pub fn check(&self, stage: &'static str) -> Result<(), WriteTxnError> {
+    pub(crate) fn check(&self, stage: &'static str) -> Result<(), WriteTxnError> {
         let now = Instant::now();
         match self.deadline {
             Some(deadline) if now >= deadline => {
@@ -159,7 +159,7 @@ impl DeadlinedWrite {
     /// What: [`Self::check`]; on `Err`, `abort()`s explicitly (a failed abort
     /// is logged — nothing was committed either way) and returns the error.
     /// Test: `a_transaction_past_its_deadline_is_rolled_back_not_committed`.
-    pub fn check_before_commit(self) -> Result<WriteTransaction, WriteTxnError> {
+    pub(crate) fn check_before_commit(self) -> Result<WriteTransaction, WriteTxnError> {
         if let Err(err) = self.check("before commit") {
             if let Err(abort_err) = self.txn.abort() {
                 tracing::error!(

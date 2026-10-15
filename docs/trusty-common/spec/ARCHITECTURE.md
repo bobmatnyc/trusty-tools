@@ -225,7 +225,6 @@ store stack behind a single `PalaceHandle`:
      ├─ store/hnsw_store.rs    pure-Rust HNSW graph
      ├─ store/kg*.rs           KnowledgeGraph: kg_redb (current) / kg_sqlite
      │                         (legacy read, sqlite-kg) / kg_writer / kg_store
-     ├─ store/payload_store.rs large-payload sidecar (postcard)
      ├─ store/chat_sessions.rs chat-session log (redb, #56)
      ├─ store/l1_cache.rs      pre-cached L0/L1 layer
      └─ store/concurrent_open.rs  multi-process open coordination

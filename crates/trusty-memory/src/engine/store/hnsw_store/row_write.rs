@@ -3,12 +3,13 @@
 //!
 //! Moved out of `hnsw_store.rs` to keep it under the 500-SLOC cap (#9487).
 
+// #9278: `commit_vector_row` serves only the test-only `HnswStore::upsert`.
+#[cfg(test)]
 use redb::ReadableTable;
 
-use super::{
-    DELETED_VECTORS, HnswStore, HnswStoreError, Result, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
-    allocate_vector_id, quiet_insert, stranded,
-};
+#[cfg(test)]
+use super::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS, allocate_vector_id};
+use super::{HnswStore, HnswStoreError, Result, quiet_insert, stranded};
 
 impl HnswStore {
     /// Commit `vector` under `uuid` in one redb write transaction.
@@ -21,6 +22,7 @@ impl HnswStore {
     /// id and whether it replaced an earlier vector for the same uuid (#5171).
     /// Test: `upsert_and_search_round_trips`,
     /// `two_live_stores_over_one_file_never_alias_ids`.
+    #[cfg(test)]
     pub(super) fn commit_vector_row(&self, uuid: &str, vector: &[f32]) -> Result<(u64, bool)> {
         let encoded: Vec<u8> = postcard::to_allocvec(&vector.to_vec())?;
         let wtx = self.db.begin_write()?;

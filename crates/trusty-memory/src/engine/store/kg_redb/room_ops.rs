@@ -223,6 +223,7 @@ impl KgStoreRedb {
     /// Test: `rename_changes_no_drawer_rows`,
     /// `rename_rejects_a_key_owned_by_another_room`,
     /// `backfill_rename_survives_second_run`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn rename_room(
         &self,
         id: Uuid,

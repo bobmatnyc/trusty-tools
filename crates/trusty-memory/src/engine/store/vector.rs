@@ -182,7 +182,7 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
 #[derive(Debug, Clone)]
 pub struct VectorHit {
     pub drawer_id: Uuid,
-    pub score: f32,
+    pub(crate) score: f32,
 }
 
 /// One raw alias scan of a palace's `VECTOR_KEYS` table.
@@ -201,15 +201,15 @@ pub struct VectorHit {
 pub struct AliasScan {
     /// Rows in `VECTOR_KEYS` — one per stored vector; a chunked drawer has
     /// one per chunk (#9275).
-    pub key_rows: usize,
+    pub(crate) key_rows: usize,
     /// Distinct vector ids those rows point at. Below `key_rows` exactly when
     /// drawers share an id.
-    pub distinct_vector_ids: usize,
+    pub(crate) distinct_vector_ids: usize,
     /// Drawers caught in a collision group, each once.
-    pub aliased_drawer_ids: Vec<Uuid>,
+    pub(crate) aliased_drawer_ids: Vec<Uuid>,
     /// Keys in a collision group that are not valid uuids, so no drawer id can
     /// be reported for them. Non-empty means `aliased_drawer_ids` is short.
-    pub unnameable_keys: Vec<String>,
+    pub(crate) unnameable_keys: Vec<String>,
 }
 
 /// What one `unalias` run freed, including anything it could not name.
@@ -225,11 +225,11 @@ pub struct AliasScan {
 /// `unparsed_keys` means the worklist is incomplete.
 /// Test: `repair_aliases_never_reports_success_over_a_partial_repair`.
 #[derive(Debug, Clone, Default)]
-pub struct UnaliasOutcome {
+pub(crate) struct UnaliasOutcome {
     /// Drawer ids freed by this run — the re-embed worklist.
-    pub freed: Vec<Uuid>,
+    pub(crate) freed: Vec<Uuid>,
     /// Keys freed that are not valid uuids, so they have no drawer id.
-    pub unparsed_keys: Vec<String>,
+    pub(crate) unparsed_keys: Vec<String>,
 }
 
 /// Result summary returned by `UsearchStore::compact_orphans`.
@@ -242,11 +242,12 @@ pub struct UnaliasOutcome {
 /// rows: a chunked drawer contributes one per chunk (#9275).
 /// Test: `compact_orphans_removes_only_missing_ids` exercises the values.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct CompactionResult {
-    pub total_checked: usize,
-    pub orphans_removed: usize,
-    pub index_size_before: usize,
-    pub index_size_after: usize,
+    pub(crate) total_checked: usize,
+    pub(crate) orphans_removed: usize,
+    pub(crate) index_size_before: usize,
+    pub(crate) index_size_after: usize,
 }
 
 /// One drawer's chunk rows in the vector index (#9275).
@@ -265,7 +266,7 @@ pub struct ChunkShape {
 
 impl ChunkShape {
     /// Whether the rows are exactly chunks `0..expected`, with no gap.
-    pub fn is_complete(&self, expected: usize) -> bool {
+    pub(crate) fn is_complete(&self, expected: usize) -> bool {
         expected > 0 && self.rows == expected && self.max_index as usize == expected - 1
     }
 }
@@ -301,17 +302,10 @@ fn redb_path_for(usearch_path: &Path) -> PathBuf {
 /// while still satisfying the goal — no more C++ FFI dependency on the
 /// hot vector-search path.
 /// What: Owns an `Arc<Database>` (redb), an `Arc<HnswStore>` (the in-memory
-/// HNSW graph + redb-persisted vectors), the on-disk path of the
-/// _logical_ index (the legacy `.usearch` path, retained for diagnostics
-/// and migration), and the embedding dimension.
+/// HNSW graph + redb-persisted vectors) and the embedding dimension.
 /// Test: See module tests covering insert+search, remove, reload, and
 /// orphan compaction.
 pub struct UsearchStore {
-    /// Path to the legacy `.usearch` file. We never create this file
-    /// ourselves any more — it only exists when migrating an old palace.
-    /// Kept on the struct for diagnostics and so `compact_orphans` /
-    /// `reset` can report a meaningful location.
-    path: PathBuf,
     dim: usize,
     inner: Arc<HnswStore>,
     /// Held to keep the redb handle (and its snapshot guard, if any) alive
@@ -356,7 +350,7 @@ impl UsearchStore {
     /// read-write opens.
     /// Test: `persist_and_reload` (ReadOnlyClient default) and
     /// `writer_intent_open_fails_loud_on_locked_vector_file` (Writer path).
-    pub fn new_with_intent(path: PathBuf, dim: usize, intent: OpenIntent) -> Result<Self> {
+    pub(crate) fn new_with_intent(path: PathBuf, dim: usize, intent: OpenIntent) -> Result<Self> {
         // #9659: an observer never creates the palace directory.
         if intent != OpenIntent::Observer
             && let Some(parent) = path.parent()
@@ -389,7 +383,6 @@ impl UsearchStore {
         }
 
         Ok(Self {
-            path,
             dim,
             inner,
             db_state,
@@ -416,7 +409,8 @@ impl UsearchStore {
     /// (theoretically impossible) redb error so callers don't have to
     /// thread a `Result` through purely informational call sites.
     /// Test: Indirectly via `PalaceHandle::open` warnings.
-    pub fn index_size(&self) -> usize {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn index_size(&self) -> usize {
         self.try_index_size().unwrap_or(0)
     }
 
@@ -433,7 +427,8 @@ impl UsearchStore {
     /// Test: `try_index_size_surfaces_a_read_error_where_index_size_reports_zero`
     /// (trusty-memory's `cached_field_turns_a_read_error_into_unavailable_not_zero`
     /// exercises the caller-side contract this method exists to support).
-    pub fn try_index_size(&self) -> Result<usize> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn try_index_size(&self) -> Result<usize> {
         Ok(self.inner.len()?)
     }
 
@@ -449,7 +444,7 @@ impl UsearchStore {
     /// vector_keys, deleted_vectors) are wiped; the in-memory HNSW graph
     /// is rebuilt empty.
     /// Test: Indirectly via `dream_cycle_compacts_orphaned_vectors`.
-    pub fn reset(&self) -> Result<()> {
+    pub(crate) fn reset(&self) -> Result<()> {
         // Truncate the redb file by re-creating it. We have to drop our
         // own handle first so the OS releases it on platforms that lock
         // the file. The trick: build a parking lot around `inner`. To
@@ -488,7 +483,7 @@ impl UsearchStore {
     /// whole list unreadable.
     /// Test: `dream_cycle_compacts_orphaned_vectors`,
     /// `all_ids_returns_each_drawer_once`.
-    pub fn all_ids(&self) -> Vec<Uuid> {
+    pub(crate) fn all_ids(&self) -> Vec<Uuid> {
         match self.inner.all_keys() {
             Ok(keys) => drawer_ids(&keys),
             Err(e) => {
@@ -600,7 +595,7 @@ impl UsearchStore {
     /// them, which is why they are the authoritative signal.
     /// Test: `alias_audit_surfaces_a_collision`,
     /// `a_collision_whose_keys_do_not_parse_is_never_clean`.
-    pub fn alias_audit(&self) -> Result<AliasScan> {
+    pub(crate) fn alias_audit(&self) -> Result<AliasScan> {
         let audit = self
             .inner
             .audit_aliases()
@@ -644,7 +639,7 @@ impl UsearchStore {
     /// `repair_aliases_never_reports_success_over_a_partial_repair`,
     /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`,
     /// `unalias_reports_error_when_a_group_delete_fails`.
-    pub fn unalias(&self) -> Result<UnaliasOutcome> {
+    pub(crate) fn unalias(&self) -> Result<UnaliasOutcome> {
         let raw = self.inner.unalias().context("unalias: free aliased keys")?;
         let mut out = UnaliasOutcome::default();
         for key in raw {
@@ -676,7 +671,7 @@ impl UsearchStore {
     /// count, and the index size before/after.
     /// Test: `compact_orphans_removes_only_missing_ids`,
     /// `compact_orphans_reclaims_chunk_rows_of_a_deleted_drawer`.
-    pub fn compact_orphans(&self, valid_ids: &HashSet<Uuid>) -> Result<CompactionResult> {
+    pub(crate) fn compact_orphans(&self, valid_ids: &HashSet<Uuid>) -> Result<CompactionResult> {
         let index_size_before = self.inner.len().unwrap_or(0);
 
         let keys = self
@@ -721,19 +716,14 @@ impl UsearchStore {
         })
     }
 
-    /// Path of the logical index (the legacy `.usearch` path); useful for
-    /// diagnostics that want to print where the store lives.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Embedding dimension.
     pub fn dim(&self) -> usize {
         self.dim
     }
 
     /// #9487: the longest-running in-flight graph call; see [`HnswStore::oldest_op`].
-    pub fn oldest_hnsw_op(&self) -> Option<crate::engine::store::hnsw_store::HnswOp> {
+    #[cfg(test)]
+    pub(crate) fn oldest_hnsw_op(&self) -> Option<crate::engine::store::hnsw_store::HnswOp> {
         self.inner.oldest_op()
     }
 
