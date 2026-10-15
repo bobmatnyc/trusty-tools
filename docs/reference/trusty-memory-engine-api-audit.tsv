@@ -165,13 +165,13 @@ trusty_memory::engine::palace_not_found::ExistingPalaces::NotListed	variant	NARR
 trusty_memory::engine::palace_not_found::ExistingPalaces::Unavailable	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::MAX_LISTED_PALACES	const	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound	struct	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
-trusty_memory::engine::palace_not_found::PalaceNotFound::existing	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::existing	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound::fmt	trait_method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound::from_ids	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound::listed_absence	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound::listing	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::palace_not_found::PalaceNotFound::new	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
-trusty_memory::engine::palace_not_found::PalaceNotFound::palace	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::palace	method	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::registry	mod	KEEP	path of PalaceRegistry (trusty-mpm, tests/)	A4
 trusty_memory::engine::registry::DEFAULT_MAX_OPEN_PALACES	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::DEFAULT_RENAME_BUSY_WAIT	const	NARROW	no consumer outside the library	A4
