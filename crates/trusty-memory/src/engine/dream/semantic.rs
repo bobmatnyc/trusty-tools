@@ -38,9 +38,10 @@ use uuid::Uuid;
 /// added; `facts_evicted` is the number of superseded originals removed.
 /// Test: `consolidate_scoped_*` in `dream::tests`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RoomConsolidationStats {
-    pub summary_facts_created: usize,
-    pub facts_evicted: usize,
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct RoomConsolidationStats {
+    pub(crate) summary_facts_created: usize,
+    pub(crate) facts_evicted: usize,
 }
 
 /// Build the production semantic consolidator from config, resolving the
@@ -437,7 +438,8 @@ pub(super) async fn semantic_consolidation_pass(
 /// `consolidate_scoped_non_positive_age_is_noop`,
 /// `consolidate_scoped_invalid_model_returns_err` in `dream::tests`;
 /// `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
-pub async fn consolidate_scoped(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) async fn consolidate_scoped(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
     room: Option<RoomType>,
@@ -466,6 +468,7 @@ pub async fn consolidate_scoped(
 /// What: identical to [`consolidate_scoped`]; `permit_wait` replaces
 /// `timeouts::dream_permit_wait_timeout()`.
 /// Test: `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(super) async fn consolidate_scoped_within(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,

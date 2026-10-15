@@ -333,7 +333,8 @@ mcp-schema = ["dep:trusty-mcp"]
 # #9271: test-only seams of the engine, outside the ADR-0066 D1.4 frozen names.
 # `embedder-test-support` exposes `engine::retrieval::seed_shared_embedder_with_mock`
 # and the mock-embedder hooks; `memory-core-test-support` exposes the format-0
-# and format-1 palace fixtures under `engine::store`. Never enable them in a
+# and format-1 palace fixtures under `engine::store` and, since #9278 (A5),
+# `engine::semantic_consolidation::MockInference`. Never enable them in a
 # production build; list them in `[dev-dependencies]` or a test-only feature.
 embedder-test-support = ["trusty-common/embedder-test-support"]
 memory-core-test-support = []

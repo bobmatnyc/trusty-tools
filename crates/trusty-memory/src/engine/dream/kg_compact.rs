@@ -42,30 +42,31 @@ use crate::engine::timeouts;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct KgCompactReport {
-    pub stats: KgRedbStats,
-    pub dry_run: bool,
+    pub(crate) stats: KgRedbStats,
+    pub(crate) dry_run: bool,
     /// Why the rewrite did not run. `None` means it did.
-    pub skipped: Option<String>,
-    pub bytes_before: u64,
-    pub bytes_after: u64,
+    pub(crate) skipped: Option<String>,
+    pub(crate) bytes_before: u64,
+    pub(crate) bytes_after: u64,
     pub rows_copied: u64,
-    pub history_rows_pruned: u64,
-    pub backup: Option<PathBuf>,
+    pub(crate) history_rows_pruned: u64,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) backup: Option<PathBuf>,
 }
 
 impl KgCompactReport {
     /// Whether the rewrite ran and swapped the file.
-    pub fn ran(&self) -> bool {
+    pub(crate) fn ran(&self) -> bool {
         self.skipped.is_none() && !self.dry_run
     }
 
     /// Bytes returned to the filesystem; `0` when the rewrite did not run.
-    pub fn bytes_reclaimed(&self) -> u64 {
+    pub(crate) fn bytes_reclaimed(&self) -> u64 {
         self.bytes_before.saturating_sub(self.bytes_after)
     }
 
     /// A one-line summary for a CLI or an MCP response.
-    pub fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         match &self.skipped {
             Some(reason) => format!("skipped: {reason}"),
             None if self.dry_run => format!(
@@ -106,7 +107,7 @@ impl KgCompactReport {
 ///
 /// Test: `kg_compaction_shrinks_the_file_in_a_dream_cycle`,
 /// `dry_run_prepares_nothing_and_writes_no_bytes`.
-pub async fn kg_compact_pass(
+pub(crate) async fn kg_compact_pass(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
     dry_run: bool,
@@ -120,7 +121,7 @@ pub async fn kg_compact_pass(
 /// reliable way to fail an `fsync` or a `rename` on demand is an explicit hook.
 /// Test: `a_crash_before_the_rename_leaves_the_original_untouched`,
 /// `a_crash_between_rename_and_install_recovers_on_reopen`.
-pub async fn kg_compact_pass_with_hook(
+pub(crate) async fn kg_compact_pass_with_hook(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
     dry_run: bool,

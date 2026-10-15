@@ -198,7 +198,8 @@ pub struct VectorHit {
 /// the keys in those groups that could not be parsed into one.
 /// Test: `a_collision_whose_keys_do_not_parse_is_never_clean`.
 #[derive(Debug, Clone, Default)]
-pub struct AliasScan {
+// #9278 (A5): crate-only, as `AliasAudit::from_scan` is since A4.
+pub(crate) struct AliasScan {
     /// Rows in `VECTOR_KEYS` — one per stored vector; a chunked drawer has
     /// one per chunk (#9275).
     pub(crate) key_rows: usize,
@@ -243,7 +244,8 @@ pub(crate) struct UnaliasOutcome {
 /// Test: `compact_orphans_removes_only_missing_ids` exercises the values.
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
-pub struct CompactionResult {
+// #9278 (A5): crate-only, as `compact_vector_orphans` is since A4.
+pub(crate) struct CompactionResult {
     pub(crate) total_checked: usize,
     pub(crate) orphans_removed: usize,
     pub(crate) index_size_before: usize,

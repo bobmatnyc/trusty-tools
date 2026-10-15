@@ -50,6 +50,9 @@ pub const SUPERSEDED_BY: &str = "superseded_by";
 /// triple with confidence 1.0 and `provenance` naming the pass that decided it.
 /// Test: `supersede_mints_a_new_hash_and_links_the_original`,
 /// `assert_superseded_by_fails_loud_on_an_unwritable_kg`.
+// #9278 (A5, ruling D3): hidden; `tests/recall_support` is its only outside
+// caller.
+#[doc(hidden)]
 pub async fn assert_superseded_by(
     kg: &KnowledgeGraph,
     original: Uuid,

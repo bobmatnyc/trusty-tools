@@ -50,6 +50,7 @@ pub(crate) const DEFAULT_EMBED_CHUNKED_CAP_SECS: u64 = 600;
 /// alone is bounded at 120 s per palace, so two of them ahead in the queue can
 /// hold every slot for minutes. 30 s is long enough to absorb a cycle that is
 /// nearly finished and short enough that the caller gets an answer.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 const DEFAULT_DREAM_PERMIT_WAIT_SECS: u64 = 30;
 
 /// Default ceiling for per-palace write-mutex acquisition.
@@ -180,7 +181,7 @@ const _: () = assert!(
 /// recompiling.
 /// What: Reads the env var; falls back to `DEFAULT_EMBEDDER_INIT_SECS` (180).
 /// Test: `embedder_init_timeout_default`, `parse_secs_with_reads_custom_value`.
-pub fn embedder_init_timeout() -> Duration {
+pub(crate) fn embedder_init_timeout() -> Duration {
     parse_secs_env(
         "TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS",
         DEFAULT_EMBEDDER_INIT_SECS,
@@ -193,7 +194,7 @@ pub fn embedder_init_timeout() -> Duration {
 /// or GPU-backed deployments can tune the ceiling.
 /// What: Reads the env var; falls back to `DEFAULT_EMBED_BATCH_SECS` (30).
 /// Test: `embed_batch_timeout_default`.
-pub fn embed_batch_timeout() -> Duration {
+pub(crate) fn embed_batch_timeout() -> Duration {
     parse_secs_env("TRUSTY_EMBED_BATCH_TIMEOUT_SECS", DEFAULT_EMBED_BATCH_SECS)
 }
 
@@ -204,7 +205,7 @@ pub fn embed_batch_timeout() -> Duration {
 /// What: reads `TRUSTY_EMBED_CHUNKED_CAP_SECS`; falls back to
 /// `DEFAULT_EMBED_CHUNKED_CAP_SECS` (600).
 /// Test: `chunked_embed_timeout_honours_the_cap_env`.
-pub fn chunked_embed_cap() -> Duration {
+pub(crate) fn chunked_embed_cap() -> Duration {
     parse_secs_env(
         "TRUSTY_EMBED_CHUNKED_CAP_SECS",
         DEFAULT_EMBED_CHUNKED_CAP_SECS,
@@ -223,7 +224,8 @@ pub fn chunked_embed_cap() -> Duration {
 /// [`DEFAULT_DREAM_PERMIT_WAIT_SECS`] (30) when absent or malformed.
 /// Test: `dream_permit_wait_timeout_default`,
 /// `dream::concurrency_tests::an_interactive_dream_errors_when_the_dreamer_is_busy`.
-pub fn dream_permit_wait_timeout() -> Duration {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn dream_permit_wait_timeout() -> Duration {
     parse_secs_env(
         "TRUSTY_DREAM_PERMIT_WAIT_SECS",
         DEFAULT_DREAM_PERMIT_WAIT_SECS,
@@ -236,7 +238,7 @@ pub fn dream_permit_wait_timeout() -> Duration {
 /// unusually deep write queues on write-heavy deployments.
 /// What: Reads the env var; falls back to `DEFAULT_WRITE_LOCK_SECS` (60).
 /// Test: `write_lock_timeout_default`.
-pub fn write_lock_timeout() -> Duration {
+pub(crate) fn write_lock_timeout() -> Duration {
     parse_secs_env("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", DEFAULT_WRITE_LOCK_SECS)
 }
 
@@ -250,7 +252,7 @@ pub fn write_lock_timeout() -> Duration {
 /// unrelated write-mutex bound.
 /// What: Reads the env var; falls back to `DEFAULT_OPEN_QUEUE_SECS` (60).
 /// Test: `open_queue_timeout_default`.
-pub fn open_queue_timeout() -> Duration {
+pub(crate) fn open_queue_timeout() -> Duration {
     parse_secs_env("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS", DEFAULT_OPEN_QUEUE_SECS)
 }
 
@@ -264,7 +266,7 @@ pub fn open_queue_timeout() -> Duration {
 /// What: Reads the env var; falls back to `DEFAULT_WRITE_OP_BUDGET_SECS` (60).
 /// Test: `write_op_budget_default`; the default's relationship to the legs it
 /// replaces is a `const` assertion beside `DEFAULT_WRITE_OP_BUDGET_SECS`.
-pub fn write_op_budget() -> Duration {
+pub(crate) fn write_op_budget() -> Duration {
     parse_secs_env("TRUSTY_WRITE_OP_BUDGET_SECS", DEFAULT_WRITE_OP_BUDGET_SECS)
 }
 
@@ -279,7 +281,7 @@ pub fn write_op_budget() -> Duration {
 /// write transaction, via [`write_txn_deadline`]).
 /// Test: `write_pipeline_timeout_default`; its relationship to the embedder
 /// legs it contains is a `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`.
-pub fn write_pipeline_timeout() -> Duration {
+pub(crate) fn write_pipeline_timeout() -> Duration {
     let configured = parse_secs_env(
         "TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS",
         DEFAULT_WRITE_PIPELINE_SECS,
@@ -327,7 +329,7 @@ const _: () = assert!(
 /// Test: `a_zero_pipeline_override_is_clamped_to_the_default`,
 /// `an_override_below_the_embedder_legs_is_clamped`,
 /// `an_override_above_the_floor_is_honoured`.
-pub fn floor_write_pipeline(configured: Duration) -> Duration {
+pub(crate) fn floor_write_pipeline(configured: Duration) -> Duration {
     if configured > Duration::from_secs(WRITE_PIPELINE_FLOOR_SECS) {
         configured
     } else {
@@ -347,7 +349,7 @@ pub fn floor_write_pipeline(configured: Duration) -> Duration {
 /// Test: `write_txn_deadline_default`,
 /// `a_txn_deadline_outside_the_pipeline_ceiling_falls_back_to_the_default`,
 /// `a_txn_deadline_at_or_above_the_write_lock_wait_falls_back_to_the_default`.
-pub fn write_txn_deadline() -> Duration {
+pub(crate) fn write_txn_deadline() -> Duration {
     let configured = parse_secs_env("TRUSTY_WRITE_TXN_DEADLINE_SECS", DEFAULT_WRITE_TXN_SECS);
     let pipeline = write_pipeline_timeout();
     let lock_wait = write_lock_timeout();
@@ -381,7 +383,7 @@ pub fn write_txn_deadline() -> Duration {
 /// default, with the warning naming both values.
 /// Test: `a_txn_deadline_outside_the_pipeline_ceiling_falls_back_to_the_default`,
 /// `a_txn_deadline_at_or_above_the_write_lock_wait_falls_back_to_the_default`.
-pub fn cap_write_txn_deadline(
+pub(crate) fn cap_write_txn_deadline(
     configured: Duration,
     pipeline: Duration,
     lock_wait: Duration,
@@ -414,7 +416,7 @@ fn first_warning(flag: &AtomicBool) -> bool {
 /// are legitimately slow and the warning is only noise.
 /// What: Reads the env var; falls back to `SLOW_WRITE_WARN_SECS` (5).
 /// Test: `slow_write_warn_threshold_default`.
-pub fn slow_write_warn_threshold() -> Duration {
+pub(crate) fn slow_write_warn_threshold() -> Duration {
     parse_secs_env("TRUSTY_SLOW_WRITE_WARN_SECS", SLOW_WRITE_WARN_SECS)
 }
 
@@ -445,7 +447,7 @@ pub struct OpBudget {
 impl OpBudget {
     /// Stamp a budget of `total` starting now.
     #[must_use]
-    pub fn start(total: Duration) -> Self {
+    pub(crate) fn start(total: Duration) -> Self {
         Self {
             started: Instant::now(),
             total,
@@ -460,7 +462,7 @@ impl OpBudget {
 
     /// Time left in this budget, saturating at zero once it is spent.
     #[must_use]
-    pub fn remaining(&self) -> Duration {
+    pub(crate) fn remaining(&self) -> Duration {
         self.total.saturating_sub(self.started.elapsed())
     }
 
@@ -474,7 +476,7 @@ impl OpBudget {
     /// Test: `budget_clamps_a_leg_to_what_is_left`,
     /// `an_exhausted_budget_leaves_a_later_leg_nothing`.
     #[must_use]
-    pub fn leg(&self, configured: Duration) -> Duration {
+    pub(crate) fn leg(&self, configured: Duration) -> Duration {
         configured.min(self.remaining())
     }
 }
@@ -494,7 +496,7 @@ impl OpBudget {
 /// whose message names the palace label and the configured duration.
 /// Test: `write_lock_timeout_returns_error_when_held` in
 /// `memory_core::retrieval::timeout_tests` exercises this path end-to-end.
-pub async fn lock_with_timeout<'a>(
+pub(crate) async fn lock_with_timeout<'a>(
     mutex: &'a Arc<Mutex<()>>,
     duration: Duration,
     label: &str,
@@ -523,7 +525,7 @@ pub async fn lock_with_timeout<'a>(
 /// `a_writer_behind_a_stalled_commit_times_out_with_a_typed_error`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum WriteTimeout {
+pub(crate) enum WriteTimeout {
     /// Waiting for the palace write mutex ran out of time.
     #[error(
         "palace '{palace}' write-lock acquisition timed out after {waited:?} \
@@ -565,7 +567,7 @@ pub enum WriteTimeout {
 /// Test: `parse_secs_with_falls_back_on_bad_value`,
 ///       `parse_secs_with_reads_custom_value`,
 ///       `parse_secs_with_uses_default_when_absent`.
-pub fn parse_secs_with(
+pub(crate) fn parse_secs_with(
     lookup: impl Fn(&str) -> Option<String>,
     key: &str,
     default_secs: u64,

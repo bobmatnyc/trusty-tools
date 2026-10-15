@@ -26,8 +26,8 @@ use chrono::Duration;
 use recall_support::{backdate, create_palaces, fact_key, rank_of, recall, remember, supersede};
 use serde::Deserialize;
 use tempfile::TempDir;
+use trusty_common::embedder::Embedder;
 use trusty_memory::AppState;
-use trusty_memory::engine::embed::Embedder;
 use uuid::Uuid;
 
 /// Smallest corpus the gate accepts (#9281 acceptance criterion 1).

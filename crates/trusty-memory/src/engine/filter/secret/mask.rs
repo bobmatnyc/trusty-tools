@@ -10,6 +10,9 @@
 //! `text_outside_spans_passes_through_byte_for_byte`,
 //! `malformed_span_lists_are_errors_not_panics`.
 
+// #9278 (A5): crate-only; only the server's kuzu review export calls it.
+#![cfg_attr(not(feature = "server"), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;

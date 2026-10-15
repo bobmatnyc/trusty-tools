@@ -34,6 +34,7 @@ use super::{
 /// branch. The fingerprint test fails until the bump is made.
 /// Test: `secret_filter_version_pins_the_rule_inputs`.
 // #9748: 2 admits GitHub Projects v2 node ids.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub const SECRET_FILTER_VERSION: u32 = 2;
 
 /// Which detector rule flagged a span. Only the label is ever reported; the
@@ -48,6 +49,7 @@ pub const SECRET_FILTER_VERSION: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 // #8624: a new rule or field is not a breaking change for other crates.
 #[non_exhaustive]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub enum SecretRule {
     /// A provider key prefix (`sk-`, `ghp_`, …) at a token or delimiter start.
     ProviderPrefix,
@@ -63,6 +65,7 @@ pub enum SecretRule {
     MixedCaseAlnum,
 }
 
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl SecretRule {
     /// Every rule, in declaration order.
     pub const ALL: [SecretRule; 6] = [
@@ -97,6 +100,7 @@ impl SecretRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 // #8624: see `SecretRule`.
 #[non_exhaustive]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct SecretSpan {
     pub range: Range<usize>,
     pub rule: SecretRule,
@@ -146,6 +150,7 @@ pub(crate) fn inside_block(blocks: &[Range<usize>], token: &Range<usize>) -> boo
 /// `.`-separated base64url segments, the first two opening with `eyJ` (the
 /// encoding of `{"`). Two segments is an unsigned token whose trailing `.` the
 /// tokenizer trimmed.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 fn is_jwt_shaped(tok: &str) -> bool {
     let segments: Vec<&str> = tok.split('.').collect();
     (2..=3).contains(&segments.len())
@@ -167,6 +172,7 @@ fn is_jwt_shaped(tok: &str) -> bool {
 /// one of those symbols, or else a mixed-case run. A JWT is a mixed-case run
 /// relabelled. Total over flagged tokens: there is no "unknown" rule.
 /// #9748: also names the rule of [`super::check_secret`]'s refusal.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn rule_of_flagged(tok: &str) -> SecretRule {
     if carries_secret_prefix(&tok.to_ascii_lowercase()) {
         SecretRule::ProviderPrefix
@@ -190,6 +196,7 @@ pub(crate) fn rule_of_flagged(tok: &str) -> SecretRule {
 /// document-id skip, PEM blocks) are applied by [`find_secret_spans`], not here.
 /// Test: `each_rule_is_labelled_by_the_branch_that_fired`,
 /// `spans_match_check_secret_over_the_filter_corpus`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn classify_token(tok: &str) -> Option<SecretRule> {
     looks_like_secret(tok).then(|| rule_of_flagged(tok))
 }
@@ -209,6 +216,7 @@ pub(crate) fn classify_token(tok: &str) -> Option<SecretRule> {
 /// `spans_match_check_secret_over_generated_input`,
 /// `spans_are_ascending_char_boundary_ranges`, `private_key_block_is_one_span`,
 /// `jwt_is_labelled_jwt`, `bare_doc_id_named_by_context_is_not_a_span`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn find_secret_spans(content: &str) -> Vec<SecretSpan> {
     let blocks = private_key_blocks(content);
     let mut names_doc: Option<bool> = None;

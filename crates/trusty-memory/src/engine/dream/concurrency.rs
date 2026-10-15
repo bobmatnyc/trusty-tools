@@ -37,14 +37,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// [`dream_max_concurrent`]. Unset, empty, `0`, or unparsable keeps the
 /// default and logs a `warn` naming the rejected value.
 /// Test: `parse_max_concurrent_rejects_junk_and_zero`.
-pub const DREAM_MAX_CONCURRENT_ENV: &str = "TRUSTY_DREAM_MAX_CONCURRENT";
+pub(crate) const DREAM_MAX_CONCURRENT_ENV: &str = "TRUSTY_DREAM_MAX_CONCURRENT";
 
 /// Dream cycles allowed to run concurrently when nothing overrides it.
 ///
 /// Why: two keeps one slow palace from stalling every other palace's
 /// consolidation while holding the transient peak to twice one cycle's working
 /// set rather than sixty-one times it.
-pub const DEFAULT_DREAM_MAX_CONCURRENT: usize = 2;
+pub(crate) const DEFAULT_DREAM_MAX_CONCURRENT: usize = 2;
 
 /// The semaphore and its permit count, resolved once per process.
 static DREAM_LIMIT: OnceLock<(Arc<Semaphore>, usize)> = OnceLock::new();
@@ -104,7 +104,8 @@ fn limit() -> &'static (Arc<Semaphore>, usize) {
 /// What: the resolved [`DREAM_MAX_CONCURRENT_ENV`] value, read once per
 /// process. Always at least 1.
 /// Test: `the_default_cap_is_two`.
-pub fn dream_max_concurrent() -> usize {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn dream_max_concurrent() -> usize {
     limit().1
 }
 
@@ -117,7 +118,8 @@ pub fn dream_max_concurrent() -> usize {
 /// What: relaxed load of a process-wide counter that every cycle increments on
 /// entry and decrements on drop.
 /// Test: `the_in_flight_gauge_counts_a_held_cycle`.
-pub fn dream_cycles_in_flight() -> usize {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn dream_cycles_in_flight() -> usize {
     IN_FLIGHT.load(Ordering::SeqCst)
 }
 
@@ -163,7 +165,7 @@ pub(super) fn reset_dream_cycles_peak_in_flight_for_test() {
 /// What: wraps an [`OwnedSemaphorePermit`]; dropping it returns the permit.
 /// Test: `dream_permits_cap_concurrent_holders`.
 #[derive(Debug)]
-pub struct DreamPermit {
+pub(crate) struct DreamPermit {
     _permit: OwnedSemaphorePermit,
 }
 
@@ -176,7 +178,7 @@ pub struct DreamPermit {
 /// held. The returned [`DreamPermit`] releases on drop.
 /// Test: `dream_permits_cap_concurrent_holders`,
 /// `a_dream_cycle_waits_when_every_permit_is_held`.
-pub async fn acquire_dream_permit() -> DreamPermit {
+pub(crate) async fn acquire_dream_permit() -> DreamPermit {
     let permit = dream_semaphore()
         .acquire_owned()
         .await
@@ -201,13 +203,14 @@ pub async fn acquire_dream_permit() -> DreamPermit {
     "dreamer busy: {in_flight} dream cycle(s) in flight against a cap of {cap}; \
      no slot freed within {waited_secs}s — retry, or raise TRUSTY_DREAM_MAX_CONCURRENT"
 )]
-pub struct DreamBusy {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct DreamBusy {
     /// Concurrent cycles this process allows.
-    pub cap: usize,
+    pub(crate) cap: usize,
     /// Cycles running when the wait expired.
-    pub in_flight: usize,
+    pub(crate) in_flight: usize,
     /// How long the caller waited, in seconds.
-    pub waited_secs: f64,
+    pub(crate) waited_secs: f64,
 }
 
 /// Wait at most `wait` for a slot in the process-wide dream bound.
@@ -221,7 +224,8 @@ pub struct DreamBusy {
 /// and the live count when the wait expires. The permit, when granted, releases
 /// on drop exactly as [`acquire_dream_permit`]'s does.
 /// Test: `an_interactive_dream_errors_when_the_dreamer_is_busy`.
-pub async fn acquire_dream_permit_within(wait: Duration) -> Result<DreamPermit, DreamBusy> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) async fn acquire_dream_permit_within(wait: Duration) -> Result<DreamPermit, DreamBusy> {
     match tokio::time::timeout(wait, acquire_dream_permit()).await {
         Ok(permit) => Ok(permit),
         Err(_) => Err(DreamBusy {
@@ -239,7 +243,7 @@ pub async fn acquire_dream_permit_within(wait: Duration) -> Result<DreamPermit, 
 /// What: a clone of the `Arc` initialised on first use from
 /// [`DREAM_MAX_CONCURRENT_ENV`].
 /// Test: `dream_permits_cap_concurrent_holders`.
-pub fn dream_semaphore() -> Arc<Semaphore> {
+pub(crate) fn dream_semaphore() -> Arc<Semaphore> {
     Arc::clone(&limit().0)
 }
 
@@ -252,13 +256,13 @@ pub fn dream_semaphore() -> Arc<Semaphore> {
 /// What: increments on [`Self::enter`], updates the peak, decrements on drop.
 /// Test: `the_in_flight_gauge_counts_a_held_cycle`.
 #[derive(Debug)]
-pub struct DreamCycleGauge {
+pub(crate) struct DreamCycleGauge {
     _private: (),
 }
 
 impl DreamCycleGauge {
     /// Record that one more dream cycle is running.
-    pub fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
         Self { _private: () }
@@ -285,7 +289,8 @@ impl Drop for DreamCycleGauge {
 /// scheduler's comes from `PalaceRegistry::list()` — LRU-recency order, not a
 /// stable one. That only decides who goes first; the spread is the point.
 /// Test: `stagger_offsets_spread_first_ticks_across_the_interval`.
-pub fn stagger_offset(index: usize, total: usize, interval: Duration) -> Duration {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn stagger_offset(index: usize, total: usize, interval: Duration) -> Duration {
     if total <= 1 || index >= total {
         return Duration::ZERO;
     }

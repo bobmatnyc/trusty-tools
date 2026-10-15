@@ -21,13 +21,15 @@ pub mod community;
 pub mod content_hash;
 pub mod decay;
 pub mod dream;
-pub mod embed;
+// #9278 (A5, Q3): `Embedder` is trusty-common's; callers outside the crate
+// name `trusty_common::embedder`.
+pub(crate) mod embed;
 pub mod filter;
 pub mod git;
 // #8733: per-data-root election of the one process that runs maintenance.
-pub mod maintenance_lease;
+pub(crate) mod maintenance_lease;
 // #8732: durable trail of drawer deletions made by maintenance paths.
-pub mod maintenance_log;
+pub(crate) mod maintenance_log;
 #[cfg(test)]
 mod maintenance_log_tests;
 pub mod palace;
@@ -59,15 +61,18 @@ pub use community::{KnowledgeGap, find_communities};
 pub use content_hash::{
     CONTENT_HASH_VERSION, ContentHash, memory_content_hash, normalize_for_hash,
 };
-pub use maintenance_lease::{LeaseStatus, MaintenanceLease};
+#[cfg(feature = "server")]
+pub(crate) use maintenance_lease::{LeaseStatus, MaintenanceLease};
 // #9278 (ruling 2026-10-14): no root re-export of the palace types or the
 // handle, so each has one path before 1.0.
 pub use registry::PalaceRegistry;
 pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};
+// #9278 (A5): the crate-only consolidation items lose their root re-export;
+// `MockInference` is test-support (ruling D3).
+#[cfg(any(test, feature = "memory-core-test-support"))]
+pub use semantic_consolidation::MockInference;
 pub use semantic_consolidation::{
-    ConsolidationAction, ConsolidationProvider, ConsolidationResult, MockInference,
-    OllamaInference, OpenRouterInference, SemanticConsolidationConfig, SemanticConsolidator,
-    inference_available, resolve_consolidation_provider,
+    ConsolidationAction, SemanticConsolidationConfig, SemanticConsolidator, inference_available,
 };
 pub use share::{
     ImportOutcome, ImportSummary, SHARE_FORMAT_VERSION, SharedMemoryRecord, export_palace_jsonl,

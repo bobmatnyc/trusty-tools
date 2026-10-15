@@ -42,7 +42,8 @@ pub struct KnowledgeGap {
     /// see implementation for the convention).
     pub internal_density: f32,
     /// Number of edges leaving this community to other communities.
-    pub external_bridges: usize,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) external_bridges: usize,
     /// LLM prompt hint / template suggesting an exploration direction.
     pub suggested_exploration: String,
 }

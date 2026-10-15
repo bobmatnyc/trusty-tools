@@ -41,7 +41,7 @@ type ConsolidationCache = HashMap<String, Vec<ConsolidationAction>>;
 /// `consolidator_respects_call_budget`.
 pub struct SemanticConsolidator {
     inference: Arc<dyn Inference>,
-    pub config: SemanticConsolidationConfig,
+    pub(crate) config: SemanticConsolidationConfig,
     cache: parking_lot::Mutex<ConsolidationCache>,
 }
 
@@ -51,7 +51,7 @@ impl SemanticConsolidator {
     /// Why: constructor that bundles the inference backend with the config.
     /// What: stores both; cache starts empty.
     /// Test: exercised by all `SemanticConsolidator` tests.
-    pub fn new(inference: Arc<dyn Inference>, config: SemanticConsolidationConfig) -> Self {
+    pub(crate) fn new(inference: Arc<dyn Inference>, config: SemanticConsolidationConfig) -> Self {
         Self {
             inference,
             config,
@@ -78,7 +78,8 @@ impl SemanticConsolidator {
     /// 120 s request timeout — the every-two-minutes re-fire in #5188.
     /// Test: `consolidator_merges_cluster`, `consolidator_respects_call_budget`,
     /// `consolidator_parks_after_first_failed_batch`.
-    pub async fn consolidate(&self, drawers: &[Drawer]) -> ConsolidationResult {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn consolidate(&self, drawers: &[Drawer]) -> ConsolidationResult {
         self.consolidate_reporting(drawers).await.0
     }
 

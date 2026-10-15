@@ -40,7 +40,7 @@ const STOP_WORDS: &[&str] = &[
 /// Why: Two semantically equivalent queries should hash to the same bucket.
 /// What: Pure string transformation — no embeddings, no inference.
 /// Test: "The quick Brown Fox!" → "quick brown fox"
-pub fn normalize_query(text: &str) -> String {
+pub(crate) fn normalize_query(text: &str) -> String {
     let lower = text.to_lowercase();
     let no_punct: String = lower
         .chars()
@@ -64,7 +64,7 @@ pub fn normalize_query(text: &str) -> String {
 /// Why: We need a stable u64 key for query grouping without an extra crate.
 /// What: Standard FNV-1a algorithm over UTF-8 bytes.
 /// Test: same input yields same hash; different inputs differ.
-pub fn fnv1a_hash(text: &str) -> u64 {
+pub(crate) fn fnv1a_hash(text: &str) -> u64 {
     const OFFSET: u64 = 14695981039346656037;
     const PRIME: u64 = 1099511628211;
     let mut hash = OFFSET;
@@ -80,7 +80,7 @@ pub fn fnv1a_hash(text: &str) -> u64 {
 /// Why: Group semantically equivalent queries under one stable key.
 /// What: normalize_query then fnv1a_hash.
 /// Test: "The cat" and "a cat" both hash to fnv1a_hash("cat").
-pub fn query_hash(text: &str) -> u64 {
+pub(crate) fn query_hash(text: &str) -> u64 {
     fnv1a_hash(&normalize_query(text))
 }
 
@@ -96,13 +96,13 @@ pub fn query_hash(text: &str) -> u64 {
 /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallEvent {
-    pub palace_id: String,
-    pub query_hash: u64,
-    pub layer: u8,
+    pub(crate) palace_id: String,
+    pub(crate) query_hash: u64,
+    pub(crate) layer: u8,
     /// None = miss (query returned 0 results)
-    pub drawer_id: Option<Uuid>,
-    pub score: f32,
-    pub occurred_at: DateTime<Utc>,
+    pub(crate) drawer_id: Option<Uuid>,
+    pub(crate) score: f32,
+    pub(crate) occurred_at: DateTime<Utc>,
 }
 
 // ── RecallLog ────────────────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ impl RecallLog {
     /// succeed, then seeds the `next_id` counter from the highest existing key
     /// so monotonicity holds across reopens.
     /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         let redb_path = resolve_redb_path(path);
 
         if let Some(parent) = redb_path.parent()
@@ -233,7 +233,7 @@ impl RecallLog {
     /// cannot both open one file and an open of one file never waits on
     /// another's.
     /// Test: `second_open_of_a_live_palace_shares_its_recall_log`.
-    pub fn open_shared(path: &Path) -> Result<Arc<Self>> {
+    pub(crate) fn open_shared(path: &Path) -> Result<Arc<Self>> {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock, Weak};
         type Slot = Arc<Mutex<Weak<RecallLog>>>;
@@ -322,7 +322,7 @@ impl RecallLog {
     /// An empty batch writes nothing.
     /// Test: `log_recall_writes_every_hit_in_one_commit`,
     /// `log_recall_reports_a_failed_write`.
-    pub async fn record_batch(&self, events: Vec<RecallEvent>) -> Result<()> {
+    pub(crate) async fn record_batch(&self, events: Vec<RecallEvent>) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }

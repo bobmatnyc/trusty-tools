@@ -19,13 +19,13 @@ use std::path::Path;
 /// that pruned them after a day would delete the evidence an operator reaches
 /// for while a contradiction is still fresh. Seven days is the shortest window
 /// in which someone plausibly notices and investigates.
-pub const MIN_PRUNE_HISTORY_DAYS: i64 = 7;
+pub(crate) const MIN_PRUNE_HISTORY_DAYS: i64 = 7;
 
 /// Reclaimable share of the file below which a rewrite is not worth its cost.
 ///
 /// Why: the rewrite reads and writes the whole file and takes a same-size
 /// backup. Paying that to recover 2% is worse than leaving the slack alone.
-pub const COMPACT_MIN_RECLAIM_PERCENT: u64 = 10;
+pub(crate) const COMPACT_MIN_RECLAIM_PERCENT: u64 = 10;
 
 /// Tunables for the dream loop.
 ///
@@ -183,27 +183,27 @@ impl Default for DreamConfig {
 pub struct DreamStats {
     pub merged: usize,
     pub pruned: usize,
-    pub closets_updated: usize,
+    pub(crate) closets_updated: usize,
     /// Orphaned vectors removed from the HNSW index because no surviving
     /// drawer row references them (issue #33).
-    pub compacted: usize,
+    pub(crate) compacted: usize,
     /// Drawers dropped by the content-quality prune pass (issue #222):
     /// matches the blocklist or has fewer than `content_prune_min_words`
     /// words. Defaults to zero when the pass is disabled.
     #[serde(default)]
-    pub content_pruned: usize,
+    pub(crate) content_pruned: usize,
     /// Number of canonical drawers added by the semantic consolidation phase
     /// (issue #87). Zero when the phase is disabled or no inference backend
     /// is configured.
     #[serde(default)]
-    pub semantically_consolidated: usize,
+    pub(crate) semantically_consolidated: usize,
     /// Number of LLM calls made during the semantic consolidation phase.
     #[serde(default)]
-    pub semantic_llm_calls: usize,
+    pub(crate) semantic_llm_calls: usize,
     /// Number of LLM response cache hits in the semantic consolidation phase.
     #[serde(default)]
-    pub semantic_cache_hits: usize,
-    pub duration_ms: u64,
+    pub(crate) semantic_cache_hits: usize,
+    pub(crate) duration_ms: u64,
 
     // ── Effectiveness metrics (issue #1530) ──────────────────────────────────
     /// Total drawer count at the start of the dream cycle (before any passes).
@@ -213,7 +213,7 @@ pub struct DreamStats {
     /// What: Snapshot of `handle.drawers.read().len()` taken at cycle entry.
     /// Test: `dream_cycle_records_drawer_counts` asserts this > 0 after seeding.
     #[serde(default)]
-    pub drawers_before: u64,
+    pub(crate) drawers_before: u64,
 
     /// Total drawer count at the end of the dream cycle (after all passes).
     ///
@@ -221,7 +221,7 @@ pub struct DreamStats {
     /// What: Snapshot of `handle.drawers.read().len()` taken after all passes.
     /// Test: `dream_cycle_records_drawer_counts`.
     #[serde(default)]
-    pub drawers_after: u64,
+    pub(crate) drawers_after: u64,
 
     /// Fraction of drawers eliminated: `(before - after) / before`.
     ///
@@ -235,7 +235,7 @@ pub struct DreamStats {
     /// semantic consolidation phase adds canonical drawers.
     /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
     #[serde(default)]
-    pub compression_ratio: f64,
+    pub(crate) compression_ratio: f64,
 
     /// Mean top-3 retrieval score across the fixed benchmark query set,
     /// measured *before* the dream cycle ran any consolidation passes.
@@ -248,7 +248,7 @@ pub struct DreamStats {
     /// Test: `dream_recall_benchmark_empty_palace_returns_none`,
     /// `dream_recall_benchmark_returns_score_with_drawers`.
     #[serde(default)]
-    pub recall_score_before: Option<f64>,
+    pub(crate) recall_score_before: Option<f64>,
 
     /// Mean top-3 retrieval score across the fixed benchmark query set,
     /// measured *after* all dream consolidation passes completed.
@@ -258,7 +258,7 @@ pub struct DreamStats {
     /// What: Same semantics as `recall_score_before`. `None` on skip.
     /// Test: `dream_recall_benchmark_returns_score_with_drawers`.
     #[serde(default)]
-    pub recall_score_after: Option<f64>,
+    pub(crate) recall_score_after: Option<f64>,
 
     /// Bytes `kg.redb` shed in this cycle's copy-then-swap rewrite (#6652).
     ///
@@ -270,7 +270,7 @@ pub struct DreamStats {
     /// or skipped. `#[serde(default)]` keeps older `dream_stats.json` readable.
     /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
-    pub kg_bytes_reclaimed: u64,
+    pub(crate) kg_bytes_reclaimed: u64,
 
     /// `kg.redb` size after this cycle, for the doctor's growth check (#6652).
     ///
@@ -280,13 +280,13 @@ pub struct DreamStats {
     /// palace has no on-disk store.
     /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
-    pub kg_bytes_after: u64,
+    pub(crate) kg_bytes_after: u64,
 
     /// Stale `hist:` triple rows the rewrite dropped this cycle (#6652).
     ///
     /// Test: `dream_cycle_records_kg_compaction_stats`.
     #[serde(default)]
-    pub kg_history_rows_pruned: u64,
+    pub(crate) kg_history_rows_pruned: u64,
 
     /// Fading high-value memories detected this cycle (issue #2352).
     ///
@@ -301,7 +301,7 @@ pub struct DreamStats {
     /// Test: `dream::fading::tests` (detection/ranking) and the
     /// `palace_dream_response_includes_fading` MCP test in trusty-memory.
     #[serde(default)]
-    pub fading: Vec<FadingMemory>,
+    pub(crate) fading: Vec<FadingMemory>,
 }
 
 impl DreamConfig {
@@ -313,7 +313,7 @@ impl DreamConfig {
     /// bypass the floor.
     /// What: `max(prune_history_after_days, MIN_PRUNE_HISTORY_DAYS)`.
     /// Test: `history_prune_days_never_goes_below_the_floor`.
-    pub fn effective_prune_history_days(&self) -> i64 {
+    pub(crate) fn effective_prune_history_days(&self) -> i64 {
         self.prune_history_after_days.max(MIN_PRUNE_HISTORY_DAYS)
     }
 }
@@ -332,7 +332,7 @@ impl DreamStats {
     /// `tracing::warn!` is emitted so the growth is observable.
     /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`,
     /// `dream_compression_ratio_net_growth`.
-    pub fn update_compression_ratio(&mut self) {
+    pub(crate) fn update_compression_ratio(&mut self) {
         self.compression_ratio = if self.drawers_before == 0 {
             0.0
         } else {
@@ -359,15 +359,15 @@ impl DreamStats {
 /// `<palace_data_dir>/dream_stats.json` after every cycle.
 /// Test: `dream_stats_persisted_after_cycle`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedDreamStats {
-    pub last_run_at: chrono::DateTime<chrono::Utc>,
+pub(crate) struct PersistedDreamStats {
+    pub(crate) last_run_at: chrono::DateTime<chrono::Utc>,
     #[serde(flatten)]
-    pub stats: DreamStats,
+    pub(crate) stats: DreamStats,
 }
 
 impl PersistedDreamStats {
     /// File name used for the per-palace dream stats snapshot.
-    pub const FILE_NAME: &'static str = "dream_stats.json";
+    pub(crate) const FILE_NAME: &'static str = "dream_stats.json";
 
     /// Read the persisted snapshot from `<data_dir>/dream_stats.json`, if any.
     ///
@@ -376,7 +376,8 @@ impl PersistedDreamStats {
     /// What: Returns `Ok(None)` when the file is missing; surfaces I/O and JSON
     /// errors as `Err`.
     /// Test: `dream_stats_persisted_after_cycle` reads back the snapshot.
-    pub fn load(data_dir: &Path) -> Result<Option<Self>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn load(data_dir: &Path) -> Result<Option<Self>> {
         let path = data_dir.join(Self::FILE_NAME);
         if !path.exists() {
             return Ok(None);
@@ -399,7 +400,7 @@ impl PersistedDreamStats {
     /// Test: `failed_dream_stats_save_keeps_the_prior_snapshot`,
     /// `concurrent_dream_stats_reader_never_sees_a_partial_file`,
     /// `two_concurrent_dream_stats_writers_never_publish_a_partial_file`.
-    pub fn save(&self, data_dir: &Path) -> Result<()> {
+    pub(crate) fn save(&self, data_dir: &Path) -> Result<()> {
         let path = data_dir.join(Self::FILE_NAME);
         let raw = serde_json::to_string_pretty(self).context("serialize dream stats")?;
         // #8733: rename-publish so a concurrent reader never sees a truncated file.

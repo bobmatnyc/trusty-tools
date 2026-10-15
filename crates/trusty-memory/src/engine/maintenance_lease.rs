@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 /// File name of the lease inside a data root.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub const MAINTENANCE_LOCK_FILE: &str = "maintenance.lock";
 
 /// Sidecar lock that makes "lock taken" and "pid written" one step (#8733).
@@ -33,6 +34,7 @@ const PID_GATE_SUFFIX: &str = ".gate";
 ///
 /// A peer holds the gate only for a few syscalls, but a loaded host was
 /// measured delaying a thread by over 100 ms, so the bound leaves headroom.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 const PID_GATE_WAIT: Duration = Duration::from_millis(500);
 
 /// Poll interval while the pid gate is busy.
@@ -92,6 +94,7 @@ struct Inner {
 impl MaintenanceLease {
     /// A lease on `<data_root>/maintenance.lock`. Performs no I/O.
     #[must_use]
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub fn new(data_root: &Path) -> Self {
         Self {
             path: data_root.join(MAINTENANCE_LOCK_FILE),
@@ -110,6 +113,7 @@ impl MaintenanceLease {
 
     /// Path of the lock file this lease guards.
     #[must_use]
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub fn path(&self) -> &Path {
         &self.path
     }

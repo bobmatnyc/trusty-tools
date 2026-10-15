@@ -9,8 +9,9 @@
 #   a temp dir and runs the gate with `--api-file` and ENGINE_API_AUDIT_TSV.
 #   Failing cases: a NARROW row still listed, a HIDE row still listed, a listed
 #   path with no row (including one under an engine-root re-export stem, or a
-#   method on a generic type), a
-#   KEEP row that is not listed. Passing cases: a matching
+#   method on a generic type, and each A5 generic shape), a
+#   KEEP row that is not listed. The A5 shapes also pass against a matching
+#   table, so each cuts to its own path. Passing cases: a matching
 #   listing whose lines carry an attribute prefix, a generic fn, a field, a
 #   variant and an impl header; an out-of-scope path and a path that only
 #   shares a scope prefix's stem, both with no row. Errors: an empty listing,
@@ -136,6 +137,34 @@ echo "pub fn $K::Store<T>::generic_new(&self) -> u8" >> "$TMP/generic.api"
 echo "pub fn $K::Store<'a, Vec<T>>::lifetimed(&self) -> u8" >> "$TMP/generic.api"
 run_case generic-type-unaudited 1 "UNAUDITED $K::Store::generic_new" "$TMP/generic.api"
 run_case generic-type-nested-unaudited 1 "UNAUDITED $K::Store::lifetimed" "$TMP/generic.api"
+
+# A5: the generic shapes the A5 modules print. Each line must cut to its own
+# path: a lifetime-and-type generic fn, a trait-impl method whose bound nests a
+# lifetime, an async_trait method with a `where` tail, and a type alias whose
+# right side carries `(`, `<` and `&`. With a row per path the gate passes; a
+# wrong cut would show as UNAUDITED plus MISSING.
+E='trusty_memory::engine'
+cat > "$TMP/a5-generic.api" <<EOF
+pub async fn $E::timeouts::lock_with_timeout<'a, T>(&'a alloc::sync::Arc<tokio::sync::Mutex<T>>, core::time::Duration, &str) -> anyhow::Result<tokio::sync::MutexGuard<'a, T>>
+pub fn $E::content_hash::ContentHash::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+pub fn $E::semantic_consolidation::Inference::consolidate<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 [$E::palace::Drawer]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::Future<Output = anyhow::Result<alloc::vec::Vec<u8>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub type $E::dream::AfterCycle = alloc::sync::Arc<(dyn core::ops::function::Fn(&$E::palace::PalaceId, core::option::Option<&$E::dream::DreamStats>) + core::marker::Send + core::marker::Sync)>
+EOF
+{
+  printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch\n'
+  printf '%s::timeouts::lock_with_timeout\tfn\tKEEP\ttests/a.rs\tA5\n' "$E"
+  printf '%s::content_hash::ContentHash::deserialize\tmethod\tKEEP\ttests/a.rs\tA5\n' "$E"
+  printf '%s::semantic_consolidation::Inference::consolidate\tmethod\tKEEP\ttests/a.rs\tA5\n' "$E"
+  printf '%s::dream::AfterCycle\ttype\tKEEP\ttests/a.rs\tA5\n' "$E"
+} > "$TMP/a5-generic.tsv"
+cp "$TMP/a5-generic.tsv" "$TMP/case.tsv"
+run_case a5-generic-shapes-match 0 '4 audited path(s) match' "$TMP/a5-generic.api"
+head -n 1 "$TMP/a5-generic.tsv" > "$TMP/case.tsv"
+printf '%s::dream::Dreamer\tstruct\tKEEP\ttests/a.rs\tA5\n' "$E" >> "$TMP/case.tsv"
+run_case a5-generic-fn-unaudited 1 "UNAUDITED $E::timeouts::lock_with_timeout" "$TMP/a5-generic.api"
+run_case a5-trait-bound-unaudited 1 "UNAUDITED $E::content_hash::ContentHash::deserialize" "$TMP/a5-generic.api"
+run_case a5-async-trait-unaudited 1 "UNAUDITED $E::semantic_consolidation::Inference::consolidate" "$TMP/a5-generic.api"
+run_case a5-type-alias-unaudited 1 "UNAUDITED $E::dream::AfterCycle" "$TMP/a5-generic.api"
 
 : > "$TMP/empty.api"
 run_case empty-listing 2 'empty listing' "$TMP/empty.api"

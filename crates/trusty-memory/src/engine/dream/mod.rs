@@ -3,8 +3,8 @@
 //! Why: Split from the original monolithic `dream.rs` (1199 SLOC) to satisfy
 //! the 500-SLOC production file cap (#607). This `mod.rs` is a thin re-export
 //! facade; all logic lives in the focused submodules below.
-//! What: Re-exports every public symbol so callers of `memory_core::dream::*`
-//! see no change in the public API surface.
+//! What: Re-exports the submodules' items; most are crate-only since #9278
+//! narrowed the engine surface (the list below says which stay public).
 //! Test: Each submodule carries its own `Test:` doc annotations; the
 //! consolidated test suite lives in `tests.rs`.
 
@@ -17,7 +17,7 @@ mod fading;
 mod guard;
 mod helpers;
 // #6652: the kg.redb prune-and-compact phase.
-pub mod kg_compact;
+pub(crate) mod kg_compact;
 mod recall_benchmark;
 // #7106: the inference-backed half, split out of `cycle`.
 mod semantic;
@@ -45,17 +45,28 @@ mod tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────
 
-pub use concurrency::{
-    DEFAULT_DREAM_MAX_CONCURRENT, DREAM_MAX_CONCURRENT_ENV, DreamBusy, DreamCycleGauge,
-    DreamPermit, acquire_dream_permit, acquire_dream_permit_within, dream_cycles_in_flight,
-    dream_cycles_peak_in_flight, dream_max_concurrent, dream_semaphore, stagger_offset,
-};
-pub use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
-pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
+// #9278 (A5): public only what a caller outside the library names
+// (`tests/`), the `DreamConfig` field types (kept until A2) and the items with
+// no non-test caller, which stay for the owner's deletion call.
+pub use concurrency::dream_cycles_peak_in_flight;
+#[cfg(feature = "server")]
+pub(crate) use concurrency::{dream_max_concurrent, stagger_offset};
+#[cfg(feature = "server")]
+pub(crate) use config::PersistedDreamStats;
+#[cfg(test)]
+pub(crate) use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
+pub use config::{DreamConfig, DreamStats};
 pub use dreamer::{AfterCycle, Dreamer};
-pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
-pub use helpers::extract_keywords;
+pub use fading::FadingParams;
+#[cfg(feature = "server")]
+pub(crate) use fading::{FadingMemory, detect_fading};
+pub(crate) use helpers::extract_keywords;
 // #9279: recall's id-token match normalizes words the way closets do.
 pub(crate) use helpers::{MIN_KEYWORD_CHARS, normalize_keyword};
-pub use kg_compact::{KgCompactReport, kg_compact_pass, kg_compact_pass_with_hook};
-pub use semantic::{RoomConsolidationStats, consolidate_scoped};
+pub use kg_compact::KgCompactReport;
+#[cfg(feature = "server")]
+pub(crate) use kg_compact::kg_compact_pass;
+#[cfg(test)]
+pub(crate) use semantic::RoomConsolidationStats;
+#[cfg(feature = "server")]
+pub(crate) use semantic::consolidate_scoped;
