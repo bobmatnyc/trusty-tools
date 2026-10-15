@@ -65,6 +65,16 @@
 # ON-DEMAND: workflow_dispatch takes a crate name so a break can be checked
 # without cutting a release. `bash scripts/check_semver.sh --crate <crate>`
 # does the same thing locally.
+#
+# SURFACE PROFILES (#9278). Two steps run `check_semver.sh --profile`, the
+# feature-set comparison declared in scripts/semver-surface-profiles.tsv. The
+# profile selftest runs on the same cheap trigger as the other selftests. The
+# live trusty-memory `engine-nodefault` run happens only when trusty-memory is
+# under release (a bump PR, its tag, or a dispatch naming it). It is
+# INFORMATIONAL (Architect D4): a break is a warning annotation and stays green;
+# a fault fails the step. This job is not a required context, and the profile
+# leaves the `verdict` check name unchanged. See docs/reference/semver-gate.md,
+# "Surface profiles".
 name: SemVer checks
 
 on:
@@ -302,6 +312,15 @@ jobs:
         if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
         run: bash scripts/check_semver_types_selftest.sh
 
+      # #9278: the surface-profile arm of the gate (`check_semver.sh --profile`).
+      # Its cases stub cargo, rustc and the registry, so it takes the same cheap
+      # trigger as the selftests around it. It proves an informational profile
+      # still exits 3 on every fault, which is what lets the live step below
+      # fail closed without a continue-on-error.
+      - name: Surface-profile selftest (an informational profile must still fail closed)
+        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
+        run: bash scripts/check_semver_profile_selftest.sh
+
       # The build-acceleration resolver both scripts above source. It compiles
       # nothing and reaches no network, so it is gated only to keep the step list
       # consistent with its siblings, not for cost. Ungated by the toolchain step
@@ -431,6 +450,54 @@ jobs:
             echo "See [#5688](https://github.com/bobmatnyc/trusty-tools/issues/5688) for why this is spelled out."
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      # #9278 / ADR-0066 D4: the trusty-memory engine surface, built with
+      # --no-default-features and compared against the greatest stable release
+      # below the declared version. INFORMATIONAL (Architect D4, 2026-10-13): a
+      # computed break exits 0 and is reported as a warning annotation plus the
+      # step summary. Every fault still exits 3 and fails this step — no
+      # continue-on-error, because that would turn "never compared" into a green
+      # tick, the failure #5688 exists to prevent. The verdict is read from the
+      # `semver-gate-profile:` line's `result=`; exit 0 with no parsable result
+      # is treated as uncompared.
+      #
+      # have_work-gated because the toolchain, the pinned tool and the cache are.
+      # `!cancelled()` so a break on the Enforce run above does not hide this
+      # one. The padded contains() matches a whole crates/ directory name.
+      - name: SemVer surface profile — trusty-memory engine-nodefault (informational)
+        id: profile
+        if: ${{ !cancelled() && steps.crate.outputs.have_work == 'true' && contains(format(' {0} ', steps.crate.outputs.crates), ' trusty-memory ') }}
+        env:
+          SKIP_UI_BUILD: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          # REDIRECTED, NOT PIPED: the exit code is half the verdict.
+          bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault \
+            > "${RUNNER_TEMP}/profile.log" 2>&1 || rc=$?
+          cat "${RUNNER_TEMP}/profile.log"
+          line="$(grep -E '^semver-gate-profile:' "${RUNNER_TEMP}/profile.log" | tail -1 || true)"
+          result="$(printf '%s' "$line" | sed -nE 's/.*[[:space:]]result=([a-z-]+).*/\1/p')"
+          {
+            echo "## SemVer surface profile: trusty-memory/engine-nodefault (informational)"
+            echo
+            echo "\`\`\`"
+            echo "${line:-<no semver-gate-profile line>}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$rc" -eq 1 ]]; then
+            # Reachable only if the profile's TSV row is switched to blocking.
+            echo "::error title=SemVer profile break (blocking)::trusty-memory engine-nodefault has a breaking change against its baseline and its profile row is blocking. See the log."
+            exit 1
+          elif [[ "$rc" -ne 0 ]]; then
+            echo "::error title=SemVer profile fault::check_semver.sh --profile exited ${rc}. Informational covers a computed break only; a fault is NO VERDICT and is not a pass. See the log."
+            exit "$rc"
+          fi
+          case "$result" in
+            clean) echo "::notice title=SemVer profile::trusty-memory engine-nodefault: no breaking change against the baseline." ;;
+            break) echo "::warning title=SemVer profile break (informational)::trusty-memory engine-nodefault has a breaking change against its baseline. Not blocking (Architect D4). See the log." ;;
+            *) echo "::error title=SemVer profile printed no result::check_semver.sh exited 0 with no clean or break result on a semver-gate-profile line; treat it as uncompared."; exit 3 ;;
+          esac
 
       # #5311: the no-op path, and it must EXECUTE rather than be skipped —
       # `skipped` does not satisfy a required context. Nothing in this diff
