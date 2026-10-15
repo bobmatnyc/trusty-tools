@@ -1556,7 +1556,6 @@ trusty_memory::engine::store::kg::KgEdge::valid_from	field	NARROW	no consumer ou
 trusty_memory::engine::store::kg::KgEdge::valid_to	field	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg::KgError	enum	KEEP	error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs	T1a
 trusty_memory::engine::store::kg::KgError::AdjacencyDesync	variant	KEEP	member of KgError (error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs)	T1a
-trusty_memory::engine::store::kg::KgError::Closed	variant	KEEP	member of KgError (error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs)	T1a
 trusty_memory::engine::store::kg::KgError::Codec	variant	KEEP	member of KgError (error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs)	T1a
 trusty_memory::engine::store::kg::KgError::Other	variant	KEEP	member of KgError (error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs)	T1a
 trusty_memory::engine::store::kg::KgError::Palace	variant	KEEP	member of KgError (error type of the KgStoreRedb paths, rooms::resolve_or_create_room_sync and CompactFaultHook (#9278 T1a); tests/kg_error_contract_9278.rs)	T1a

@@ -391,6 +391,26 @@ fn format_errors_are_not_retried() {
     )));
 }
 
+/// #9278: a refusal behind a `KgError::Palace` is still a refusal, and only a
+/// refusal; `chain()` alone never reaches the transparent payload.
+#[test]
+fn format_refusal_is_seen_through_kg_error() {
+    use crate::engine::store::kg::KgError;
+    let too_new = PalaceStoreError::FormatTooNew {
+        palace: "p".into(),
+        found: 2,
+        supported: 1,
+    };
+    let wrapped = anyhow::Error::from(KgError::Palace(too_new)).context("open");
+    assert!(is_format_refusal(&wrapped), "{wrapped:#}");
+    let absent = PalaceStoreError::NotFound(PathBuf::from("p"));
+    assert!(!is_format_refusal(&anyhow::Error::from(KgError::Palace(
+        absent
+    ))));
+    let other = KgError::from_internal(anyhow::anyhow!("boom"));
+    assert!(!is_format_refusal(&anyhow::Error::from(other)));
+}
+
 /// Every distance from the supported format lands on its own arm.
 #[test]
 fn check_format_classifies_every_distance() {

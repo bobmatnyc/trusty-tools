@@ -372,9 +372,8 @@ fn count_palace(state: &AppState, id: &str) -> anyhow::Result<PalaceCounts> {
 
 /// Map a failure to count the source before the rename; nothing has moved.
 pub(crate) fn count_refusal(old: &str, e: anyhow::Error) -> RenameError {
-    let too_new = e
-        .chain()
-        .filter_map(|c| c.downcast_ref::<PalaceStoreError>())
+    // #9278 Q4: the shared walk also sees a refusal inside a `KgError::Palace`.
+    let too_new = crate::engine::store::palace_format::palace_store_errors(&e)
         .any(|c| matches!(c, PalaceStoreError::FormatTooNew { .. }));
     if too_new {
         RenameError::Refused(format!(

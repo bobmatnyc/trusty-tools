@@ -1,0 +1,2 @@
+Breaking
+- `engine::store::kg::KgError::Closed` is removed; it had no producer. The palace-format refusal check and the open-absence check now also recognise a `PalaceStoreError` carried by a `KgError::Palace`, so a refused or absent palace behind a typed KG error is no longer reported as an internal error. `KgError::{Storage, Codec, Other}` promise no source type ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
