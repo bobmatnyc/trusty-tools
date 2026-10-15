@@ -46,7 +46,7 @@ use crate::engine::store::kg::KnowledgeGraph;
 /// (§C7). 24 hours is the ADR's chosen floor: short enough that a forgotten
 /// fact stops being asserted within a day, long enough that a fact written at
 /// the start of a working session survives it.
-pub const TIER_C_DEFAULT_TTL_HOURS: i64 = 24;
+pub(crate) const TIER_C_DEFAULT_TTL_HOURS: i64 = 24;
 
 /// Upper bound on a `fact_key`'s encoded length.
 ///
@@ -54,7 +54,7 @@ pub const TIER_C_DEFAULT_TTL_HOURS: i64 = 24;
 /// caller-supplied key is an unbounded index entry; capping it keeps a
 /// pathological writer from bloating the slot index. 128 bytes is ~4x the
 /// longest key the ADR gives as an example.
-pub const FACT_KEY_MAX_LEN: usize = 128;
+pub(crate) const FACT_KEY_MAX_LEN: usize = 128;
 
 /// Why a Tier C write was refused the privileged tier.
 ///
@@ -67,7 +67,7 @@ pub const FACT_KEY_MAX_LEN: usize = 128;
 /// exactly today's behaviour.
 /// Test: `refuses_a_bare_unnamespaced_key`, `refuses_an_already_elapsed_ttl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TierCRefusal {
+pub(crate) enum TierCRefusal {
     /// The `fact_key` does not match the `<domain>:<id>/<aspect>` grammar.
     MalformedKey { key: String, detail: &'static str },
     /// An explicit `expires_at` that had already elapsed when the write ran.
@@ -101,7 +101,7 @@ impl std::fmt::Display for TierCRefusal {
 ///
 /// Test: the `admits_*` / `refuses_*` tests in this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TierCAdmission {
+pub(crate) enum TierCAdmission {
     /// No `fact_key` was supplied — this is not a Tier C write at all.
     NotRequested,
     /// Admitted, with the resolved slot and the resolved retirement instant.
@@ -116,7 +116,8 @@ pub enum TierCAdmission {
 impl TierCAdmission {
     /// `"C"` when admitted, `"E"` otherwise — the tier label for a response
     /// envelope.
-    pub fn tier_label(&self) -> &'static str {
+    #[cfg(test)]
+    pub(crate) fn tier_label(&self) -> &'static str {
         match self {
             Self::Admitted { .. } => "C",
             _ => "E",
@@ -138,7 +139,7 @@ impl TierCAdmission {
 /// `[A-Za-z0-9._-]`. Returns the reason on failure so the refusal can name it.
 /// Test: `accepts_the_adr_example_keys`, `refuses_a_bare_unnamespaced_key`,
 /// `refuses_keys_with_empty_segments`, `refuses_an_over_long_key`.
-pub fn validate_fact_key(key: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_fact_key(key: &str) -> Result<(), &'static str> {
     if key.is_empty() {
         return Err("is empty");
     }
@@ -190,7 +191,7 @@ pub fn validate_fact_key(key: &str) -> Result<(), &'static str> {
 /// `admits_an_explicit_future_expiry_unchanged`,
 /// `refuses_a_bare_unnamespaced_key`, `refuses_an_already_elapsed_ttl`,
 /// `no_fact_key_is_not_a_tier_c_request`.
-pub fn admit_tier_c(
+pub(crate) fn admit_tier_c(
     fact_key: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,

@@ -40,7 +40,8 @@ use super::handle::PalaceHandle;
 /// (every room that wing owns).
 /// Test: `scope_all_matches_everything`, `wing_scope_is_fail_closed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecallScope {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) enum RecallScope {
     /// No filter — byte-identical to the behaviour every caller had before
     /// wings existed.
     All,
@@ -55,7 +56,7 @@ impl RecallScope {
     ///
     /// Why: lets the pre-T9 `Option<RoomType>` signatures delegate to the
     /// scoped implementation without any caller changing.
-    pub fn from_room_filter(room: Option<RoomType>) -> Self {
+    pub(crate) fn from_room_filter(room: Option<RoomType>) -> Self {
         match room {
             Some(r) => RecallScope::Room(r),
             None => RecallScope::All,
@@ -70,7 +71,7 @@ impl RecallScope {
     /// `Some(empty)`, which means "this scope admits nothing" — collapsing the
     /// two would turn an unresolvable wing into an unfiltered read.
     /// Test: `scope_all_matches_everything`, `wing_scope_is_fail_closed`.
-    pub fn allowed_room_ids(&self, kg: &KnowledgeGraph) -> Option<HashSet<Uuid>> {
+    pub(crate) fn allowed_room_ids(&self, kg: &KnowledgeGraph) -> Option<HashSet<Uuid>> {
         match self {
             RecallScope::All => None,
             RecallScope::Room(room) => Some(HashSet::from([resolve_room_filter_id(kg, room)])),
@@ -88,7 +89,7 @@ impl RecallScope {
 ///
 /// Why: one predicate shared by `retrieve_l2` and `list_drawers_in_wing`, so a
 /// future scope variant cannot be honoured by one and ignored by the other.
-pub fn scope_admits(allowed: &Option<HashSet<Uuid>>, room_id: Uuid) -> bool {
+pub(crate) fn scope_admits(allowed: &Option<HashSet<Uuid>>, room_id: Uuid) -> bool {
     match allowed {
         Some(ids) => ids.contains(&room_id),
         None => true,
@@ -108,7 +109,8 @@ pub fn scope_admits(allowed: &Option<HashSet<Uuid>>, room_id: Uuid) -> bool {
 /// `list_drawers` uses.
 /// Test: `wing_scope_returns_only_that_wings_drawers`,
 /// `list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie`.
-pub fn list_drawers_in_wing(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn list_drawers_in_wing(
     handle: &PalaceHandle,
     wing_id: Uuid,
     tag: Option<String>,

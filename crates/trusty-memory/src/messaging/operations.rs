@@ -9,9 +9,8 @@
 //! Test: `round_trip_send_and_inbox`, `mark_read_is_atomic_under_concurrency`,
 //! `mark_read_is_idempotent`.
 
-use crate::engine::PalaceHandle;
 use crate::engine::palace::{Drawer, RoomType};
-use crate::engine::retrieval::RememberOptions;
+use crate::engine::retrieval::{PalaceHandle, RememberOptions};
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
@@ -43,7 +42,7 @@ pub async fn send_message_to_palace(
     content: String,
     creator: crate::attribution::CreatorInfo,
 ) -> Result<Uuid> {
-    let pid = crate::engine::PalaceId::new(to_palace);
+    let pid = crate::engine::palace::PalaceId::new(to_palace);
     let handle = registry
         .open_palace(data_root, &pid)
         .with_context(|| format!("open recipient palace {to_palace}"))?;

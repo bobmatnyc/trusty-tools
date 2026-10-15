@@ -16,8 +16,8 @@
 //! Test: `api_error_kind_maps_to_its_rpc_code`,
 //! `api_error_message_survives_the_conversion`.
 
-use crate::engine::PalaceNotFound;
 use crate::engine::palace::PalaceId;
+use crate::engine::palace_not_found::PalaceNotFound;
 use crate::engine::store::palace_format::is_format_refusal;
 #[cfg_attr(not(test), allow(unused_imports))]
 use trusty_common::uds::server::{
@@ -191,7 +191,7 @@ impl From<crate::service::ServiceError> for ApiError {
 pub fn open_handle(
     state: &AppState,
     id: &str,
-) -> Result<std::sync::Arc<crate::engine::PalaceHandle>, ApiError> {
+) -> Result<std::sync::Arc<crate::engine::retrieval::PalaceHandle>, ApiError> {
     state
         .registry
         .open_palace(&state.data_root, &PalaceId::new(id))

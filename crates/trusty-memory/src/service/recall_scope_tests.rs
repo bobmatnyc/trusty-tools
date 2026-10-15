@@ -15,8 +15,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::{Drawer, PalaceRegistry};
+use crate::engine::PalaceRegistry;
+use crate::engine::palace::{Drawer, Palace, PalaceId};
 use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;

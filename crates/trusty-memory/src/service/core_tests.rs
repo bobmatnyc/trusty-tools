@@ -305,10 +305,10 @@ async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
 /// Test: itself.
 #[tokio::test]
 async fn delete_palace_refuses_when_open_fails_or_load_is_degraded() {
+    use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::store::PalaceStore;
     use crate::engine::store::kg_redb::KgStoreRedb;
     use crate::engine::store::kg_store::DRAWERS;
-    use crate::engine::{Palace, PalaceId};
     let (svc, state) = service();
     for (name, degraded) in [("unopenable", false), ("degraded", true)] {
         // Persist the palace without opening it, so no handle holds kg.redb.
@@ -927,7 +927,9 @@ async fn create_and_evict(svc: &MemoryService, state: &AppState, id: &str) -> st
     svc.create_palace(palace_body(id), ActivitySource::Http)
         .await
         .expect("palace create must succeed");
-    state.registry.remove(&crate::engine::PalaceId::new(id));
+    state
+        .registry
+        .remove(&crate::engine::palace::PalaceId::new(id));
     state.data_root.join(id)
 }
 

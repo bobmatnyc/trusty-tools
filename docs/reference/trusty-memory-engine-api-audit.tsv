@@ -1,4 +1,538 @@
 path	kind	disposition	consumer_or_reason	batch
+trusty_memory::engine::Drawer	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::access_count	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::Drawer::completed_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::drawer_type	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::expires_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::fact_key	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::importance	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::last_accessed_at	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::Drawer::room_id	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::Drawer::source_file	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::Drawer::tags	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType	enum	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::AgentNote	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Commit	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Decision	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Reference	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Ruling	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::SessionEvent	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Status	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Task	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::ExistingPalaces	enum	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed::shown	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed::total	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::NotListed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Unavailable	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::MAX_LISTED_PALACES	const	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::Palace	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::data_dir	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::description	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::name	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::closets	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::commit_mutex	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::data_dir	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::decay_config	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::drawer_load_degraded	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::drawers	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::identity	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::kg	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::l1_drawers	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::last_accessed	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::recall_log	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::vector_store	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::write_mutex	field	NARROW	re-export; no consumer outside the library	A4
+trusty_memory::engine::PalaceId	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceNotFound	struct	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::PalaceRegistry	struct	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
+trusty_memory::engine::Room	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Room::id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Room::room_type	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Room::wing_id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::RoomType	enum	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Backend	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Configuration	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Custom	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Documentation	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Frontend	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::General	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Meetings	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Planning	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Research	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Testing	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Wing	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Wing::id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Wing::name	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::Wing::palace_id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace	mod	KEEP	path of every kept palace item (trusty-mpm, tests/)	A4
+trusty_memory::engine::palace::Drawer	struct	KEEP	tests/ (engine_standalone.rs, bm25_alias_recall.rs); PalaceHandle::add_drawer signature	A4
+trusty_memory::engine::palace::Drawer::access_count	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::accumulated_boost	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::completed_at	field	KEEP	tests/memory_palace.rs	A4
+trusty_memory::engine::palace::Drawer::content	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/core/sm/agent/mod.rs; tests/	A4
+trusty_memory::engine::palace::Drawer::content_hash	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::created_at	field	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::palace::Drawer::drawer_type	field	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::palace::Drawer::expires_at	field	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::palace::Drawer::fact_key	field	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::palace::Drawer::id	field	KEEP	tests/bm25_alias_recall.rs, tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
+trusty_memory::engine::palace::Drawer::importance	field	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::palace::Drawer::is_expired_at	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::is_tier_c	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::last_accessed_at	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::new	method	KEEP	tests/engine_standalone.rs, tests/bm25_alias_recall.rs, tests/kg_store_snapshot_tests.rs	A4
+trusty_memory::engine::palace::Drawer::record_access	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::palace::Drawer::refresh_content_hash	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::room_id	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::set_content	method	KEEP	tests/bm25_stale_edit_8246.rs	A4
+trusty_memory::engine::palace::Drawer::source_file	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Drawer::tags	field	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::palace::Drawer::with_type	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::DrawerType	enum	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::palace::DrawerType::AgentNote	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Commit	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Decision	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Reference	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Ruling	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::SessionEvent	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Status	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Task	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Turn	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::Unknown	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::UserFact	variant	KEEP	member of DrawerType	A4
+trusty_memory::engine::palace::DrawerType::as_str	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::DrawerType::from_tag	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::DrawerType::is_protected	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::DrawerType::parse_write_type	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Palace	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals); tests/palaces_list_poll_residency.rs	A4
+trusty_memory::engine::palace::Palace::created_at	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::Palace::data_dir	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::Palace::description	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::Palace::id	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::Palace::name	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::PalaceId	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::palace::PalaceId::as_str	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
+trusty_memory::engine::palace::PalaceId::fmt	trait_method	KEEP	member of PalaceId (Display impl)	A4
+trusty_memory::engine::palace::PalaceId::new	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::palace::ParseDrawerTypeError	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::ParseDrawerTypeError::name	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::palace::Room	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Room::id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Room::room_type	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Room::wing_id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::RoomType	enum	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::palace::RoomType::Backend	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Configuration	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Custom	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Documentation	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Frontend	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::General	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Meetings	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Planning	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Research	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::Testing	variant	KEEP	member of RoomType	A4
+trusty_memory::engine::palace::RoomType::parse	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace::Wing	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Wing::id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Wing::name	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace::Wing::palace_id	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::palace_emptiness	mod	KEEP	path of PalaceNotEmpty	A4
+trusty_memory::engine::palace_emptiness::LegacyProbe	type	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace_emptiness::PalaceNotEmpty	enum	KEEP	registry::PalaceRenameError::TargetNotEmpty field type	A4
+trusty_memory::engine::palace_emptiness::PalaceNotEmpty::ChatSessions	variant	KEEP	member of PalaceNotEmpty	A4
+trusty_memory::engine::palace_emptiness::PalaceNotEmpty::Drawers	variant	KEEP	member of PalaceNotEmpty	A4
+trusty_memory::engine::palace_emptiness::PalaceNotEmpty::LegacyData	variant	KEEP	member of PalaceNotEmpty	A4
+trusty_memory::engine::palace_emptiness::PalaceNotEmpty::Unconfirmed	variant	KEEP	member of PalaceNotEmpty	A4
+trusty_memory::engine::palace_emptiness::check_palace_empty	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace_emptiness::conservative_legacy_probe	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace_emptiness::count_chat_sessions	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace_not_found	mod	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces	enum	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed::shown	field	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed::total	field	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::NotListed	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Unavailable	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::MAX_LISTED_PALACES	const	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound	struct	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::existing	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::fmt	trait_method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::from_ids	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::listed_absence	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::listing	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::new	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::palace	method	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::registry	mod	KEEP	path of PalaceRegistry (trusty-mpm, tests/)	A4
+trusty_memory::engine::registry::DEFAULT_MAX_OPEN_PALACES	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::DEFAULT_RENAME_BUSY_WAIT	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::MAX_OPEN_PALACES_ENV	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::registry::PalaceRegistry::clear_gaps	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::registry::PalaceRegistry::create_palace	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/palace_backup_9282.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::data_root	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::default	trait_method	KEEP	member of PalaceRegistry (Default impl)	A4
+trusty_memory::engine::registry::PalaceRegistry::evict_idle	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::from_env	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::get	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::get_gaps	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::is_empty	method	KEEP	pairs the kept len (clippy::len_without_is_empty)	A4
+trusty_memory::engine::registry::PalaceRegistry::len	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::list	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::list_palaces	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::maintenance_lease	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::may_run_maintenance	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::new	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::oldest_hnsw_op	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::open	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open_error_is_absent	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::open_handle	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::open_intent	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open_palace	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/recall_support/mod.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open_palace_within	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::open_with_intent	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::peek	method	KEEP	tests/hnsw_abandoned_health_9487.rs, tests/recall_all_residency.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::record_unopenable	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::register	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::registry::PalaceRegistry::register_arc	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::release_if_unreferenced	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::remove	method	KEEP	tests/hnsw_abandoned_health_9487.rs, tests/recall_rulings_leg.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::rename_palace	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::set_gaps	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::unopenable	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::unopenable_reason	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::registry::PalaceRegistry::with_data_root	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::with_maintenance_lease	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::with_max_open	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::PalaceRegistry::with_open_queue_timeout	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::registry::PalaceRegistry::with_writer_intent	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A4
+trusty_memory::engine::registry::PalaceRenameError	enum	KEEP	service::rename::RenameError::Palace field type (server)	A4
+trusty_memory::engine::registry::PalaceRenameError::Busy	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Busy::detail	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Busy::palace	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::InvalidTarget	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::new	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::reason	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Io	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Io::context	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Io::source	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::NotFound	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::alias	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::target	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetExists	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetExists::new	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::new	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::target	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::new	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::reason	field	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::is_conflict	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::registry::RenameOptions	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOptions::busy_wait	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOptions::default	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOptions::legacy_probe	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOptions::replace_empty	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::alias_changes	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::name_rewritten	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::new	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::old	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::resumed	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOutcome::trashed_target	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::max_open_palaces_from_env	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval	mod	KEEP	path of every kept retrieval item (trusty-mpm, trusty-crate-contracts, tests/)	A4
+trusty_memory::engine::retrieval::AliasAudit	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Measured	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Measured::aliased_drawer_ids	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Measured::distinct_vector_ids	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Measured::key_rows	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Measured::unnameable_keys	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Unavailable	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::Unavailable::reason	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::aliased_drawer_ids	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::counts	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::from_scan	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::is_clean	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::unavailable_reason	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasAudit::unnameable_keys	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOptions	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOptions::default	trait_method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOptions::dry_run	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Clean	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Partial	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Partial::not_freed	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Partial::still_aliased	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Partial::unparsed_keys	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Planned	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Repaired	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Unavailable	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::Unavailable::reason	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::as_str	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairOutcome::is_success	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::after	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::before	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::dry_run	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::freed_ids	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::outcome	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::palace_id	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::reembed_required	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::AliasRepairReport::unnameable_keys	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CHUNK_MARKER_FILE	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkCheck	enum	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::ChunkCheck::Ran	variant	KEEP	member of ChunkCheck	A4
+trusty_memory::engine::retrieval::ChunkCheck::Unavailable	variant	KEEP	member of ChunkCheck	A4
+trusty_memory::engine::retrieval::ChunkCheck::unavailable_reason	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::LockWait	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::LockWait::palace	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::LockWait::waited	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::Upsert	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::Upsert::palace	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkCommitError::Upsert::reason	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ChunkMarker	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::from_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::last_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::needs_scan	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::read	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::updated_at	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::version	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::window	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::write	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::done	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Backfilling	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Complete	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::CompleteWithFailures	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Unknown	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::CrossPalaceRecall	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CrossPalaceRecall::failed	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CrossPalaceRecall::results	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CrossPalaceResult	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CrossPalaceResult::palace_id	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::CrossPalaceResult::result	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::DEFAULT_RELEVANCE_FLOOR	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth	struct	KEEP	PalaceHandle::embed_health return type; tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::EmbedHealth::alias_audit	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth::chunk_check	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::EmbedHealth::chunk_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::EmbedHealth::drawer_count	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth::embedder_ready	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth::is_healthy	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::EmbedHealth::missing_vector_ids	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::EmbedHealth::palace_id	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth::recorded_failures	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::EmbedHealth::short_chunk_ids	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::EmbedHealth::vector_count	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FACT_KEY_MAX_LEN	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FloorOutcome	struct	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FloorOutcome::kept	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FloorOutcome::silenced	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FloorOutcome::withheld	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ForgetOutcome	enum	KEEP	PalaceHandle::forget return type	A4
+trusty_memory::engine::retrieval::ForgetOutcome::Deleted	variant	KEEP	member of ForgetOutcome	A4
+trusty_memory::engine::retrieval::ForgetOutcome::NotFound	variant	KEEP	member of ForgetOutcome	A4
+trusty_memory::engine::retrieval::ForgetOutcome::as_str	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::ForgetOutcome::is_deleted	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::L0Identity	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::L0Identity::content	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::L1Essential	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::L1Essential::drawers	field	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::PalaceHandle	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::closets	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::commit_mutex	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::compact_vector_orphans	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::data_dir	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::decay_config	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::drawer_load_degraded	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::drawers	field	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::embed_health	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget_for_maintenance	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::id	field	KEEP	tests/alias_lane/mod.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::identity	field	KEEP	tests/bm25_alias_recall.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::idle_secs	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::is_compacting	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::is_compacting	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::is_read_only	method	KEEP	trusty-mpm src/daemon/manager/memory_tests.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::kg	field	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::l1_drawers	field	KEEP	tests/bm25_alias_recall.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::last_accessed	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::list_drawers	method	KEEP	trusty-mpm src/core/sm/memory.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::new	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	tests/kg_triple_key_migration_tests.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent_purging	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::recall_log	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options_within	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::repair_aliases	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::snapshot	method	KEEP	tests/palace_backup_9282.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::touch	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::vector_store	field	KEEP	tests/chunked_embed_9275.rs, tests/hnsw_abandoned_health_9487.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::with_decay_config	method	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::PalaceHandle::with_recall_log	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::PalaceHandle::without_idle_touch	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::write_mutex	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallResult	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::retrieval::RecallResult::drawer	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/core/sm/agent/mod.rs	A4
+trusty_memory::engine::retrieval::RecallResult::layer	field	KEEP	tests/recall_short_id_tokens.rs	A4
+trusty_memory::engine::retrieval::RecallResult::score	field	KEEP	tests/http_recall_bm25_fusion.rs	A4
+trusty_memory::engine::retrieval::RecallScope	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallScope::All	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallScope::Room	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallScope::Wing	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallScope::allowed_room_ids	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RecallScope::from_room_filter	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RememberOptions	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::RememberOptions::allow_secret_like	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::classify_as	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::default	trait_method	KEEP	member of RememberOptions (Default impl)	A4
+trusty_memory::engine::retrieval::RememberOptions::defer_embedding	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::enforce_min_tokens	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::expires_at	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::fact_key	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::filter	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::force	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::forced	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RememberOptions::note	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::retrieval::RememberOptions::verify_with	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RememberOptions::wing_id	field	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::RetrievalLayers	struct	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::RetrievalLayers::load_l0	method	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::RetrievalLayers::load_l1	method	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::RetryPolicy	struct	KEEP	VectorBackfillOptions::retry field type	A4
+trusty_memory::engine::retrieval::RetryPolicy::attempts	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RetryPolicy::base_delay	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::RetryPolicy::default	trait_method	KEEP	member of RetryPolicy (Default impl)	A4
+trusty_memory::engine::retrieval::SliceBounds	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::budget	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::default	trait_method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::embed_timeout	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::from_env	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::host_failures	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::ledger_backoff	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::lock_wait	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::max_chunks	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::max_drawers	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::min_age	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::attempted	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::chunks_embedded	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::host_failure	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::ledger_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::repaired	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::stale	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::stop	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::Budget	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCheckUnavailable	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::DrawerCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::EmbedTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::HostFailure	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::LockTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::QueueEmpty	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ReadOnly	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::StoreError	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::TIER_C_DEFAULT_TTL_HOURS	const	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::Admitted	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::Admitted::expires_at	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::Admitted::fact_key	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::NotRequested	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::Refused	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCAdmission::tier_label	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::TierCRefusal	enum	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::MalformedKey	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::MalformedKey::detail	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::MalformedKey::key	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::RetirementAlreadyElapsed	variant	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::RetirementAlreadyElapsed::expires_at	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::RetirementAlreadyElapsed::key	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::TierCRefusal::fmt	trait_method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillOptions	struct	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillOptions::default	trait_method	KEEP	member of VectorBackfillOptions (Default impl)	A4
+trusty_memory::engine::retrieval::VectorBackfillOptions::dry_run	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillOptions::limit	field	KEEP	tests/chunked_embed_9275.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::VectorBackfillOptions::retry	field	KEEP	tests/chunked_embed_9275.rs (struct update syntax needs every field)	A4
+trusty_memory::engine::retrieval::VectorBackfillReport	struct	KEEP	PalaceHandle::backfill_missing_vectors return type; tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::alias_audit	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::attempted	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::chunk_check	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::drawer_count	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::dry_run	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::missing	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::palace_id	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::repaired	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::short	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::still_failing	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::still_missing_ids	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::still_short_ids	field	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::VectorBackfillReport::vector_count	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::VerifyNotStored	struct	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs (builds the literal)	A4
+trusty_memory::engine::retrieval::VerifyNotStored::drawer	field	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs	A4
+trusty_memory::engine::retrieval::VerifyNotStored::reason	field	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs	A4
+trusty_memory::engine::retrieval::admit_tier_c	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::apply_relevance_floor	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::dedup_extend	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::embed_chunks	fn	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::expand_query	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::list_drawers_in_wing	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::next_refill_window	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_across_palaces	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::recall_across_palaces_reporting	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_across_palaces_with_default_embedder	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::recall_deep	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_deep_in_room	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_deep_scoped	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_deep_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs	A4
+trusty_memory::engine::retrieval::recall_in_room	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::recall_scoped	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::recall_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::rescore_l1_by_similarity	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::retrieve_l0_l1	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::retrieve_l0_l1_scoped	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::retrieve_l2	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::retrieve_l2_scoped	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::retrieve_l3	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::retrieve_l3_scoped	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::scope_admits	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
+trusty_memory::engine::retrieval::shared_embedder_initialized	fn	KEEP	tests/verify_embedded_warmup_9275.rs, tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::retrieval::validate_fact_key	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::store	mod	KEEP	path of every kept store item (trusty-agents, tests/)	A3b
 trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b

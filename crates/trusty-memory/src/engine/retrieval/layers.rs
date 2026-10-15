@@ -202,7 +202,8 @@ pub(super) fn uuid_prefix_eq(a: Uuid, b: Uuid) -> bool {
 /// `expired_l1_drawer_is_excluded_without_reopen` covers the filter;
 /// `forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle` covers forget;
 /// `l1_serves_the_live_row_not_its_cached_copy` covers the live-row join.
-pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
+#[cfg(test)]
+pub(crate) fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
     l0_l1_admitted(handle, &None)
 }
 
@@ -294,7 +295,7 @@ pub(super) fn l0_l1_admitted(
 /// Test: `recall_ranks_by_similarity_over_importance` inserts one
 /// high-importance-but-irrelevant drawer and one low-importance-but-on-topic
 /// drawer, then asserts the on-topic drawer ranks first after a query.
-pub fn rescore_l1_by_similarity(
+pub(crate) fn rescore_l1_by_similarity(
     results: &mut [RecallResult],
     similarity_scores: &HashMap<Uuid, f32>,
 ) {
@@ -332,7 +333,8 @@ pub fn rescore_l1_by_similarity(
 /// asserts a Rust-themed query retrieves it at rank 0.
 /// `l2_room_filter_excludes_other_rooms` (issue #3274) asserts a drawer from
 /// a non-matching room is dropped rather than silently included.
-pub async fn retrieve_l2(
+#[cfg(test)]
+pub(crate) async fn retrieve_l2(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -364,7 +366,7 @@ pub async fn retrieve_l2(
 /// all, which is distinct from a scope that resolves to an empty set.
 /// Test: `wing_scope_returns_only_that_wings_drawers`,
 /// `l2_room_filter_excludes_other_rooms` (unchanged, via the wrapper).
-pub async fn retrieve_l2_scoped(
+pub(crate) async fn retrieve_l2_scoped(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -433,7 +435,8 @@ pub async fn retrieve_l2_scoped(
 /// `RecallResult`s.
 /// Test: Symmetric with `l2_returns_relevant_drawer`; same join logic.
 /// `l3_room_filter_excludes_other_rooms` covers the filter.
-pub async fn retrieve_l3(
+#[cfg(test)]
+pub(crate) async fn retrieve_l3(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -460,7 +463,7 @@ pub async fn retrieve_l3(
 /// scope's resolved room-id set.
 /// Test: `l3_room_filter_excludes_other_rooms`,
 /// `wing_scoped_deep_recall_returns_only_that_wing`.
-pub async fn retrieve_l3_scoped(
+pub(crate) async fn retrieve_l3_scoped(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -510,7 +513,7 @@ pub async fn retrieve_l3_scoped(
 /// What: Lowercase-scans the query for trigger phrases and appends a list of
 /// related domain terms. No-op when no triggers match.
 /// Test: `expand_query_adds_synonyms`, `expand_query_noop_for_unmatched`.
-pub fn expand_query(query: &str) -> String {
+pub(crate) fn expand_query(query: &str) -> String {
     let q = query.to_lowercase();
     let mut extra: Vec<&str> = Vec::new();
 
@@ -557,7 +560,7 @@ pub fn expand_query(query: &str) -> String {
 /// low-importance but on-topic drawer outranks a high-importance but
 /// off-topic drawer after this function returns.
 /// `recall_top_k_caps_result_count` (issue #877) verifies the length cap.
-pub async fn recall(
+pub(crate) async fn recall(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -577,7 +580,8 @@ pub async fn recall(
 /// Kept as its own entry point because a room is the axis most callers want and
 /// `Option<RoomType>` is the shape they already hold.
 /// Test: `recall_in_room_scopes_l2_hits`.
-pub async fn recall_in_room(
+#[cfg(test)]
+pub(crate) async fn recall_in_room(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -610,7 +614,7 @@ pub async fn recall_in_room(
 /// Test: `wing_scoped_recall_returns_only_that_wing`,
 /// `recall_in_room_scopes_l2_hits`,
 /// `a_wing_scoped_recall_drops_another_wings_l1_drawer`.
-pub async fn recall_scoped(
+pub(crate) async fn recall_scoped(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -668,7 +672,7 @@ pub async fn recall_scoped(
 /// **truncated to `top_k`** (issue #877) before returning so the caller
 /// always receives at most `top_k` results.
 /// Test: Symmetric with `recall`; covered indirectly.
-pub async fn recall_deep(
+pub(crate) async fn recall_deep(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -683,7 +687,7 @@ pub async fn recall_deep(
 /// motivation and same L0/L1 policy as [`recall_in_room`].
 /// What: identical to [`recall_deep`] except the room filter reaches L3.
 /// Test: `recall_deep_in_room_scopes_l3_hits`.
-pub async fn recall_deep_in_room(
+pub(crate) async fn recall_deep_in_room(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -705,7 +709,7 @@ pub async fn recall_deep_in_room(
 /// Why/What: the L3 counterpart of [`recall_scoped`], so `memory_recall_deep`
 /// honours a wing exactly as `memory_recall` does, L1 included (#9719).
 /// Test: `wing_scoped_deep_recall_returns_only_that_wing`.
-pub async fn recall_deep_scoped(
+pub(crate) async fn recall_deep_scoped(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
     query: &str,
@@ -784,7 +788,8 @@ pub async fn recall_deep_with_default_embedder(
 /// `result.score` descending, then truncated to `top_k`.
 /// Test: `recall_across_palaces_merges_results` verifies results from two
 /// palaces appear in the combined output.
-pub async fn recall_across_palaces(
+#[cfg(test)]
+pub(crate) async fn recall_across_palaces(
     handles: &[Arc<PalaceHandle>],
     embedder: &Arc<dyn Embedder + Send + Sync>,
     query: &str,
@@ -807,7 +812,8 @@ pub async fn recall_across_palaces(
 /// and skipped, and its id is pushed to [`CrossPalaceRecall::failed`] in
 /// handle order. An empty `handles` or `top_k == 0` returns an empty value.
 /// Test: `recall_across_palaces_reporting_names_a_failed_palace`.
-pub async fn recall_across_palaces_reporting(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) async fn recall_across_palaces_reporting(
     handles: &[Arc<PalaceHandle>],
     embedder: &Arc<dyn Embedder + Send + Sync>,
     query: &str,
@@ -900,7 +906,8 @@ pub async fn recall_across_palaces_reporting(
 /// Sync>`, and delegates to `recall_across_palaces`.
 /// Test: Indirectly exercised via the MCP / HTTP / CLI integration paths;
 /// `recall_across_palaces_merges_results` covers the core merge logic.
-pub async fn recall_across_palaces_with_default_embedder(
+#[cfg(test)]
+pub(crate) async fn recall_across_palaces_with_default_embedder(
     handles: &[Arc<PalaceHandle>],
     query: &str,
     top_k: usize,
@@ -923,7 +930,7 @@ pub async fn recall_across_palaces_with_default_embedder(
 /// trusty-memory's warming path merges its BM25 lane through this too.
 /// Test: `a_lane_hit_replaces_its_l1_copy`; trusty-memory's
 /// `a_warming_lane_hit_replaces_its_l1_copy`.
-pub fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
+pub(crate) fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
     for r in extra {
         match base.iter().position(|b| b.drawer.id == r.drawer.id) {
             // #9719: the lane's query-scored row wins over the L1 copy.

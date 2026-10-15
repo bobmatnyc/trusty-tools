@@ -873,8 +873,8 @@ mod tests {
         // The alias is `personal`, the one name the project-slug gate always
         // admits, so the create reaches the registry without an env write.
         let state = test_state();
-        let target = crate::engine::Palace {
-            id: crate::engine::PalaceId::new("rpc-target"),
+        let target = crate::engine::palace::Palace {
+            id: crate::engine::palace::PalaceId::new("rpc-target"),
             name: "rpc-target".to_string(),
             description: None,
             created_at: chrono::Utc::now(),

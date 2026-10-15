@@ -43,7 +43,9 @@ pub use types::{
 mod tests {
     use super::*;
     use crate::attribution::{CreatorInfo, CreatorSource};
-    use crate::engine::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::retrieval::PalaceHandle;
     use chrono::Utc;
     use std::path::Path;
     use std::path::PathBuf;
