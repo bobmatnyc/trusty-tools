@@ -38,6 +38,7 @@ pub(crate) mod tests;
 mod supersession_tests;
 
 // See #9278: only the items with a consumer outside the library stay public.
+pub(crate) use error::Internal;
 pub use error::KgError;
 #[cfg(feature = "server")]
 pub(crate) use explore::{ExpandDirection, SeedNode};

@@ -32,7 +32,8 @@ mod types;
 
 pub use store::ChatSessionStore;
 // #9278: only ChatMessage has a caller outside the library (trusty-agents).
-pub use types::ChatMessage;
+// T2: ChatSessionStoreError is the error of the public open/create_session.
+pub use types::{ChatMessage, ChatSessionStoreError};
 
 #[cfg(test)]
 mod tests {

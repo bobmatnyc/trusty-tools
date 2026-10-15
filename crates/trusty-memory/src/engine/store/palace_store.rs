@@ -33,16 +33,19 @@ const IDENTITY_TXT: &str = "identity.txt";
 /// covered in palace_format_tests.rs and format_backup_tests.rs; the #9918
 /// behind-format messages in `behind_format_refusals_tell_the_operator_what_to_do`.
 // #9274: `non_exhaustive` so later format arms are not a semver break.
+// #9278 T2: every struct variant is `non_exhaustive` too.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PalaceStoreError {
     #[error("io error at {path}: {source}")]
+    #[non_exhaustive]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("json error at {path}: {source}")]
+    #[non_exhaustive]
     Json {
         path: PathBuf,
         #[source]
@@ -55,6 +58,7 @@ pub enum PalaceStoreError {
         "FormatTooNew: palace {palace} is at format {found}, newer than the format {supported} \
          this binary reads; upgrade trusty-memory to a release that reads format {found}"
     )]
+    #[non_exhaustive]
     FormatTooNew {
         palace: String,
         found: u32,
@@ -69,6 +73,7 @@ pub enum PalaceStoreError {
          palaces), which migrates it to format {supported} behind a verified backup, then \
          retry; `trusty-memory doctor` lists palaces still awaiting migration"
     )]
+    #[non_exhaustive]
     FormatNeedsMigration {
         palace: String,
         found: u32,
@@ -81,6 +86,7 @@ pub enum PalaceStoreError {
          to format {supported}; install a trusty-memory release that migrates format {found}, \
          start its daemon once so it migrates the palace, then retry with this release"
     )]
+    #[non_exhaustive]
     FormatTooOld {
         palace: String,
         found: u32,
@@ -91,6 +97,7 @@ pub enum PalaceStoreError {
         "FormatMarkerMismatch: palace {palace} has kg.redb format {marker} but palace.json \
          format {mirror}; refusing to open it"
     )]
+    #[non_exhaustive]
     FormatMarkerMismatch {
         palace: String,
         marker: u32,
@@ -98,6 +105,7 @@ pub enum PalaceStoreError {
     },
     /// #9274: a format marker exists but could not be read; fail closed.
     #[error("FormatMarkerUnreadable: palace {palace} format marker at {path}: {reason}")]
+    #[non_exhaustive]
     FormatMarkerUnreadable {
         palace: String,
         path: PathBuf,
@@ -105,6 +113,7 @@ pub enum PalaceStoreError {
     },
     /// #9274 (ADR-0067 D3 rule 3): a format-migration backup step failed.
     #[error("BackupFailed: format-migration backup at {path}: {source}")]
+    #[non_exhaustive]
     BackupFailed {
         path: PathBuf,
         #[source]
@@ -112,6 +121,7 @@ pub enum PalaceStoreError {
     },
     /// #9274: a backup copy, or its source, did not hash to the expected value.
     #[error("BackupVerifyMismatch: {file}: expected sha256 {expected}, got {actual}")]
+    #[non_exhaustive]
     BackupVerifyMismatch {
         file: PathBuf,
         expected: String,
@@ -123,6 +133,7 @@ pub enum PalaceStoreError {
         "FormatMigrationFailed: palace {palace} migration from format {from} to {to} failed: \
          {reason}; the palace is refused until a writer open completes it"
     )]
+    #[non_exhaustive]
     FormatMigrationFailed {
         palace: String,
         from: u32,
@@ -134,6 +145,7 @@ pub enum PalaceStoreError {
         "InsufficientSpace: format-migration backup at {path} needs {needed} bytes, \
          {available} available"
     )]
+    #[non_exhaustive]
     InsufficientSpace {
         path: PathBuf,
         needed: u64,

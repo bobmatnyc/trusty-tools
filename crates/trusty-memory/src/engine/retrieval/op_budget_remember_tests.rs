@@ -99,7 +99,7 @@ mod tests {
         let err = outcome.expect_err("a remember whose vector step failed must not succeed");
         assert!(
             matches!(
-                op_budget_error(&err),
+                op_budget_error(&*err),
                 Some(OpBudgetError::BudgetExceeded { op: "upsert", .. })
             ),
             "expected the op budget error, got {err:#}"

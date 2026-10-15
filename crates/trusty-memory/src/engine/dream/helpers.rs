@@ -301,7 +301,8 @@ async fn replace_group(
     embed_timeout: Duration,
 ) -> Result<()> {
     let vecs = embed_chunks_within(embedder, text, embed_timeout).await?;
-    handle.vector_store.upsert_chunks(id, vecs).await
+    // #9278 T2: `upsert_chunks` returns `HnswStoreError`.
+    Ok(handle.vector_store.upsert_chunks(id, vecs).await?)
 }
 
 /// Put `survivor`'s own group back after a failed merge commit (#9275).
@@ -459,7 +460,7 @@ async fn rebuild_one(
     .map(str::to_string)
     .collect();
     let vecs = embed_planned_within(embedder, &chunks, per_chunk).await?;
-    handle.vector_store.upsert_chunks(drawer.id, vecs).await
+    Ok(handle.vector_store.upsert_chunks(drawer.id, vecs).await?)
 }
 
 /// Rebuild closets: simple whitespace tokenization, stop-word filter,

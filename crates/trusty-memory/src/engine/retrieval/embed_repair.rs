@@ -485,7 +485,11 @@ impl PalaceHandle {
             .copied()
             .filter(|id| vector_ids.contains(id))
             .collect();
-        let shapes = self.vector_store.chunk_shapes();
+        // #9278 T2: `chunk_shapes` returns `HnswStoreError`.
+        let shapes = self
+            .vector_store
+            .chunk_shapes()
+            .map_err(anyhow::Error::from);
         let (short_chunk_ids, chunk_check) =
             short_chunk_ids(embedder, &self.drawers, &with_vector, shapes);
         if let Some(reason) = chunk_check.unavailable_reason() {

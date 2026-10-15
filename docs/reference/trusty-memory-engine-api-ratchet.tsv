@@ -3,10 +3,10 @@ marker	slice	initial	ceiling
 # `initial` is the T0 count and never changes. `ceiling` may only fall: each slice PR
 # lowers its own ceilings to the markers left in the audit table (0 when the slice is done).
 anyhow	T1	25	0
-anyhow	T2	7	7
+anyhow	T2	7	0
 anyhow	T3	41	41
 anyhow	T4	12	12
 variant	T1	3	0
-variant	T2	16	16
+variant	T2	16	0
 variant	T3	28	28
 variant	T4	0	0

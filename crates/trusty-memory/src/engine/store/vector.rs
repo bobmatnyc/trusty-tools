@@ -34,8 +34,8 @@ use crate::engine::store::concurrent_open::{
     OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, is_incompatible_format_refusal,
     try_open_or_snapshot,
 };
-use crate::engine::store::hnsw_store::HnswStore;
 use crate::engine::store::hnsw_store::op_budget::OpBreaker;
+use crate::engine::store::hnsw_store::{HnswStore, HnswStoreError};
 use crate::engine::store::kg_redb::READ_ONLY_ERROR_MSG;
 use crate::engine::store::vector_key;
 use crate::engine::store::write_deadline::palace_label;
@@ -336,8 +336,10 @@ impl UsearchStore {
     /// feature is compiled in.
     /// Test: `persist_and_reload` exercises the open path twice on the
     /// same logical path.
-    pub fn new(path: PathBuf, dim: usize) -> Result<Self> {
+    pub fn new(path: PathBuf, dim: usize) -> std::result::Result<Self, HnswStoreError> {
+        // #9278 T2: typed at the public edge; `new_with_intent` stays anyhow.
         Self::new_with_intent(path, dim, OpenIntent::ReadOnlyClient)
+            .map_err(HnswStoreError::from_internal)
     }
 
     /// Open or create an HNSW index with the caller's open intent.
@@ -508,7 +510,8 @@ impl UsearchStore {
     /// Test: `health_flags_a_gapped_group`,
     /// `chunk_shapes_counts_rows_and_the_highest_index`,
     /// `a_stalled_group_trips_for_good_and_is_never_counted_complete`.
-    pub fn chunk_shapes(&self) -> Result<HashMap<Uuid, ChunkShape>> {
+    // #9278 T2: both calls already return `HnswStoreError`.
+    pub fn chunk_shapes(&self) -> std::result::Result<HashMap<Uuid, ChunkShape>, HnswStoreError> {
         // #9728: a tripped store may hold a committed group whose tail never
         // reached the graph; its rows must not read as a complete group.
         self.inner.refuse_if_tripped()?;
@@ -555,9 +558,14 @@ impl UsearchStore {
     /// `upsert_chunks_with_one_bad_dimension_changes_nothing`,
     /// `upsert_chunks_rejects_empty_and_over_cap`,
     /// `a_legal_group_slower_than_the_budget_completes_without_tripping`.
-    pub async fn upsert_chunks(&self, id: Uuid, chunks: Vec<Vec<f32>>) -> Result<()> {
+    pub async fn upsert_chunks(
+        &self,
+        id: Uuid,
+        chunks: Vec<Vec<f32>>,
+    ) -> std::result::Result<(), HnswStoreError> {
+        // #9278 T2: typed; the read-only text is `READ_ONLY_ERROR_MSG`.
         if self.is_read_only() {
-            anyhow::bail!(READ_ONLY_ERROR_MSG);
+            return Err(HnswStoreError::ReadOnly);
         }
         let inner = self.inner.clone();
         let key = id.to_string();
@@ -576,6 +584,7 @@ impl UsearchStore {
                 Ok(())
             })
             .await
+            .map_err(HnswStoreError::from_internal)
     }
 
     /// Drawer ids whose vector has been overwritten by another drawer's.
@@ -774,8 +783,9 @@ impl VectorStore for UsearchStore {
         let inner = self.inner.clone();
         let key = id.to_string();
         // #9487: joined within the op budget; a tripped store spawns nothing.
+        // #9278 T2: the anyhow runner, until T4 types the `VectorStore` trait.
         self.inner
-            .run_bounded("upsert", move || -> Result<()> {
+            .run_bounded_progress("upsert", move |_| -> Result<()> {
                 // #9275: one vector is a one-chunk drawer; stale `#n` rows go.
                 inner
                     .replace_group(&key, &[embedding])
@@ -790,7 +800,7 @@ impl VectorStore for UsearchStore {
         let query = query.to_vec();
         // #9487: joined within the op budget; a tripped store spawns nothing.
         self.inner
-            .run_bounded("search", move || -> Result<Vec<VectorHit>> {
+            .run_bounded_progress("search", move |_| -> Result<Vec<VectorHit>> {
                 let raw = inner.search(&query, top_k).context("hnsw search")?;
                 let mut hits = Vec::with_capacity(raw.len());
                 for (uuid_str, distance) in raw {
@@ -829,7 +839,7 @@ impl VectorStore for UsearchStore {
         let key = id.to_string();
         // #9487: joined within the op budget; a tripped store spawns nothing.
         self.inner
-            .run_bounded("remove", move || -> Result<()> {
+            .run_bounded_progress("remove", move |_| -> Result<()> {
                 // #9275: every row of the drawer, bare and `#n`, in one txn.
                 let _ = inner
                     .delete_group(&key)
