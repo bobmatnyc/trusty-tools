@@ -33,7 +33,7 @@ pub enum ChunkCheck {
 
 impl ChunkCheck {
     /// The reason the check could not run, or `None` when it ran.
-    pub fn unavailable_reason(&self) -> Option<&str> {
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
         match self {
             ChunkCheck::Ran => None,
             ChunkCheck::Unavailable(reason) => Some(reason),

@@ -11,7 +11,7 @@
 //! Test: `crates/trusty-memory/tests/wing_mcp.rs`.
 
 use crate::AppState;
-use crate::engine::PalaceHandle;
+use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::wings::{
     WingSummary, list_wings, rename_wing, resolve_or_create_wing, resolve_wing_selector,
 };

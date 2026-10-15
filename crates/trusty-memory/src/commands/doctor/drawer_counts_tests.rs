@@ -4,8 +4,9 @@
 use super::*;
 use crate::commands::doctor::CheckStatus;
 use crate::drawer_counts::{CountLine, CountSource, take_snapshot};
+use crate::engine::PalaceRegistry;
 use crate::engine::maintenance_log::{DeletionReason, MaintenanceDeletion, record};
-use crate::engine::{Palace, PalaceId, PalaceRegistry};
+use crate::engine::palace::{Palace, PalaceId};
 use chrono::Duration;
 use uuid::Uuid;
 
@@ -60,7 +61,7 @@ fn seed(root: &Path, name: &str, drawers: usize) {
     };
     let handle = registry.create_palace(root, palace).expect("create_palace");
     for i in 0..drawers {
-        let d = crate::engine::Drawer::new(Uuid::new_v4(), format!("drawer {i}"));
+        let d = crate::engine::palace::Drawer::new(Uuid::new_v4(), format!("drawer {i}"));
         handle.kg.store().upsert_drawer(&d).expect("upsert");
     }
     drop(handle);
@@ -149,7 +150,12 @@ async fn drawer_counts_doctor_green_for_user_forget() {
     let mut ids = Vec::new();
     for text in ["first fact to keep around", "second fact the user forgets"] {
         let id = handle
-            .remember(text.into(), crate::engine::RoomType::General, vec![], 0.5)
+            .remember(
+                text.into(),
+                crate::engine::palace::RoomType::General,
+                vec![],
+                0.5,
+            )
             .await
             .expect("remember");
         ids.push(id);

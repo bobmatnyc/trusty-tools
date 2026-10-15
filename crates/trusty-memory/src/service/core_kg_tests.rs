@@ -59,7 +59,7 @@ fn palace_body(name: &str) -> CreatePalaceBody {
 /// Create a palace on disk without going through the service, for a fixture
 /// that only needs the directory and a handle.
 fn seed_palace(state: &AppState, name: &str) {
-    let palace = crate::engine::Palace {
+    let palace = crate::engine::palace::Palace {
         id: PalaceId::new(name),
         name: name.to_string(),
         description: None,

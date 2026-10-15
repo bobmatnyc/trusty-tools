@@ -2,7 +2,7 @@
 //! per-palace search state, and the fold that merges the leg into a recall.
 
 use super::*;
-use crate::engine::Drawer;
+use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 fn hit(content: &str, tags: &[&str], score: f32, layer: u8) -> RecallResult {

@@ -54,7 +54,7 @@ fn drawer_preview_collapses_whitespace_and_truncates() {
 /// Test: itself.
 #[test]
 fn recall_entry_json_hoists_drawer_fields() {
-    use crate::engine::Drawer;
+    use crate::engine::palace::Drawer;
 
     let room = Uuid::new_v4();
     let mut drawer = Drawer::new(room, "the answer is 42");

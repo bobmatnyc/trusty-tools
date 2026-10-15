@@ -3,7 +3,8 @@
 //! Why: A 4-level spatial hierarchy is the load-bearing concept for trusty-memory's
 //! progressive retrieval; modeling it as Rust types keeps the rest of the system
 //! compiler-checked.
-//! What: Defines `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, and `Drawer`.
+//! What: Defines `PalaceId`, `Palace`, `RoomType`, and `Drawer`. Wings and
+//! rooms are rows in the palace store (`store::wings`, `store::rooms`).
 //! A *closet* is NOT a hierarchy level: it is the cross-cutting keyword ->
 //! drawer-ids inverted index held on `PalaceHandle::closets`
 //! (`retrieval/handle.rs`), rebuilt on write and worth a small topical boost
@@ -47,6 +48,7 @@ impl PalaceId {
 /// Test: covered indirectly by `health_probe_palace_is_invisible` in
 /// `web::tests` (drives a full `/health` round-trip and asserts the probe
 /// palace does not appear in `MemoryService::list_palaces`).
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
     id.as_str().starts_with("__")
 }
@@ -65,14 +67,6 @@ pub struct Palace {
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub data_dir: PathBuf,
-}
-
-/// A wing groups rooms by domain area or agent persona.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Wing {
-    pub id: Uuid,
-    pub palace_id: PalaceId,
-    pub name: String,
 }
 
 /// Topical category for a Room. Custom variants allow project-specific topics.
@@ -100,7 +94,7 @@ impl RoomType {
     /// any unrecognized value is wrapped in `Custom`.
     /// Test: `room_type_parse` asserts case-insensitive matches and Custom
     /// fallback.
-    pub fn parse(name: &str) -> Self {
+    pub(crate) fn parse(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "frontend" => RoomType::Frontend,
             "backend" => RoomType::Backend,
@@ -114,14 +108,6 @@ impl RoomType {
             other => RoomType::Custom(other.to_string()),
         }
     }
-}
-
-/// A room is a topic-bound container of drawers within a wing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Room {
-    pub id: Uuid,
-    pub wing_id: Uuid,
-    pub room_type: RoomType,
 }
 
 /// Signal-vs-noise classification for a drawer.
@@ -189,7 +175,7 @@ impl DrawerType {
     /// to serde's enum encoding.
     /// What: Returns the variant name (`"UserFact"`, `"SessionEvent"`, etc.).
     /// Test: `drawer_type_as_str_matches_variant`.
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             DrawerType::UserFact => "UserFact",
             DrawerType::SessionEvent => "SessionEvent",
@@ -221,7 +207,7 @@ impl DrawerType {
     /// `drawer_type_from_unknown_tag_is_unknown`,
     /// `lenient_decode_keeps_unknown_where_the_strict_parser_errors`,
     /// `new_drawer_types_survive_a_palace_reopen`.
-    pub fn from_tag(tag: Option<&str>) -> Self {
+    pub(crate) fn from_tag(tag: Option<&str>) -> Self {
         match tag {
             Some("UserFact") => DrawerType::UserFact,
             Some("SessionEvent") => DrawerType::SessionEvent,
@@ -240,6 +226,7 @@ impl DrawerType {
 
     /// The five variants a caller may name at write time (#9144 ruling Q9).
     /// The older variants and `Unknown` stay readable but are not writable.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     const WRITABLE: [DrawerType; 5] = [
         DrawerType::Ruling,
         DrawerType::Decision,
@@ -261,7 +248,8 @@ impl DrawerType {
     /// Test: `write_type_accepts_every_name_case_insensitively`,
     /// `write_type_error_arm_rejects_unknown_blank_and_garbage`,
     /// `lenient_decode_keeps_unknown_where_the_strict_parser_errors`.
-    pub fn parse_write_type(name: &str) -> Result<Self, ParseDrawerTypeError> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn parse_write_type(name: &str) -> Result<Self, ParseDrawerTypeError> {
         Self::WRITABLE
             .into_iter()
             .find(|t| t.as_str().eq_ignore_ascii_case(name))
@@ -279,7 +267,7 @@ impl DrawerType {
     /// What: returns `true` only for `DrawerType::Task`.
     /// Test: `task_drawer_is_protected` in this module; behavioural coverage in
     /// `tests/memory_palace.rs` and the dream cycle tests.
-    pub fn is_protected(&self) -> bool {
+    pub(crate) fn is_protected(&self) -> bool {
         matches!(self, DrawerType::Task)
     }
 }
@@ -296,13 +284,15 @@ impl DrawerType {
     "unknown drawer type {name:?}; expected one of: ruling, decision, status, turn, \
      reference (any case)"
 )]
-pub struct ParseDrawerTypeError {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct ParseDrawerTypeError {
     name: String,
 }
 
 impl ParseDrawerTypeError {
     /// The rejected input, exactly as the caller passed it.
-    pub fn name(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 }
@@ -321,7 +311,7 @@ impl ParseDrawerTypeError {
 #[non_exhaustive]
 pub struct Drawer {
     pub id: Uuid,
-    pub room_id: Uuid,
+    pub(crate) room_id: Uuid,
     /// The memory body, verbatim as written. PRIVATE by design (#5902) — read it
     /// with [`Drawer::content`], change it with [`Drawer::set_content`]. A public
     /// field would let an assignment leave [`Self::content_hash`] describing a
@@ -329,15 +319,15 @@ pub struct Drawer {
     content: String,
     /// Importance in [0.0, 1.0]. Used to rank L1 essential drawers.
     pub importance: f32,
-    pub source_file: Option<PathBuf>,
+    pub(crate) source_file: Option<PathBuf>,
     pub created_at: DateTime<Utc>,
     pub tags: Vec<String>,
     /// Timestamp of the most recent recall hit, if any.
     #[serde(default)]
-    pub last_accessed_at: Option<DateTime<Utc>>,
+    pub(crate) last_accessed_at: Option<DateTime<Utc>>,
     /// Number of times this drawer has been returned in a recall result.
     #[serde(default)]
-    pub access_count: u32,
+    pub(crate) access_count: u32,
     /// Signal-vs-noise classification (issue #61). Legacy rows decode to
     /// `DrawerType::Unknown` via `#[serde(default)]`.
     #[serde(default)]
@@ -448,7 +438,7 @@ impl Drawer {
     /// What: the digest of the current body, as maintained by [`Self::new`],
     /// [`Self::set_content`], and [`Self::refresh_content_hash`].
     /// Test: `drawer_new_hashes_its_content`, `set_content_recomputes_the_hash`.
-    pub fn content_hash(&self) -> ContentHash {
+    pub(crate) fn content_hash(&self) -> ContentHash {
         self.content_hash
     }
 
@@ -482,7 +472,7 @@ impl Drawer {
     /// Cheap enough to call per row on a cold open — a SHA-256 over a few
     /// hundred bytes, against the redb decode and NFC pass already happening.
     /// Test: `refresh_content_hash_heals_an_unset_or_stale_digest`.
-    pub fn refresh_content_hash(&mut self) {
+    pub(crate) fn refresh_content_hash(&mut self) {
         self.content_hash = memory_content_hash(&self.content);
     }
 
@@ -497,7 +487,7 @@ impl Drawer {
     /// `expires_at = Some(created_at + 7 days)`. Other types leave
     /// `expires_at` untouched.
     /// Test: `drawer_with_type_sets_session_ttl`.
-    pub fn with_type(mut self, drawer_type: DrawerType) -> Self {
+    pub(crate) fn with_type(mut self, drawer_type: DrawerType) -> Self {
         self.drawer_type = drawer_type;
         if drawer_type == DrawerType::SessionEvent && self.expires_at.is_none() {
             self.expires_at = Some(self.created_at + chrono::Duration::days(7));
@@ -526,7 +516,7 @@ impl Drawer {
     /// `expired_l1_drawer_is_excluded_without_reopen` and
     /// `expired_drawer_is_excluded_from_l2` cover the read path,
     /// `purge_expired_drops_only_past_ttl` the sweep.
-    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+    pub(crate) fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|t| t < now)
     }
 
@@ -551,7 +541,7 @@ impl Drawer {
     /// and the sweeps treat it exactly as they treat any other drawer.
     /// Test: `expired_tier_c_drawer_survives_the_open_time_sweep`,
     /// `purge_expired_leaves_tier_c_drawers_alone`.
-    pub fn is_tier_c(&self) -> bool {
+    pub(crate) fn is_tier_c(&self) -> bool {
         self.fact_key.is_some()
     }
 
@@ -561,7 +551,7 @@ impl Drawer {
     /// computed boost so `DecayConfig::effective_importance` stays pure.
     /// What: `(access_count * config.access_boost).min(config.access_boost_cap)`
     /// Test: See `decay::tests::drawer_accumulated_boost`.
-    pub fn accumulated_boost(&self, config: &crate::engine::decay::DecayConfig) -> f32 {
+    pub(crate) fn accumulated_boost(&self, config: &crate::engine::decay::DecayConfig) -> f32 {
         (self.access_count as f32 * config.access_boost).min(config.access_boost_cap)
     }
 
@@ -571,7 +561,8 @@ impl Drawer {
     /// access boost reflects real usage.
     /// What: Sets `last_accessed_at = now()` and saturates `access_count`.
     /// Test: After two `record_access()` calls, `access_count == 2`.
-    pub fn record_access(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn record_access(&mut self) {
         self.last_accessed_at = Some(Utc::now());
         self.access_count = self.access_count.saturating_add(1);
     }

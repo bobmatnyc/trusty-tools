@@ -1,28 +1,14 @@
-//! Core retrieval types: layer result structs, RememberOptions, stubs.
+//! Core retrieval types: the recall result, RememberOptions, forget outcome.
 //!
 //! Why: Extracted from retrieval/mod.rs to keep each file under the 500-SLOC
 //! cap (#607). Pure data types with no heavy logic.
-//! What: `L0Identity`, `L1Essential`, `RecallResult`, `L1_CAP`,
-//! `RememberOptions`, `CrossPalaceResult`, `RetrievalLayers`.
+//! What: `RecallResult`, `ForgetOutcome`, `RememberOptions`,
+//! `CrossPalaceResult`, `CrossPalaceRecall`.
 //! Test: Types are exercised by retrieval::tests and callers throughout the
 //! workspace.
 
 use crate::engine::filter::FilterConfig;
-use crate::engine::palace::{Drawer, DrawerType, PalaceId};
-use anyhow::Result;
-use std::path::Path;
-
-/// L0 — palace identity. Tiny (~100 tokens), always loaded, read from
-/// `<data_dir>/identity.txt` on palace open.
-pub struct L0Identity {
-    pub content: String,
-}
-
-/// L1 — essential drawers (top-15 by importance, ~800 tokens), pre-computed
-/// at write time and cached on the `PalaceHandle`.
-pub struct L1Essential {
-    pub drawers: Vec<Drawer>,
-}
+use crate::engine::palace::{Drawer, DrawerType};
 
 /// A single ranked memory result produced by any retrieval layer.
 ///
@@ -61,12 +47,13 @@ pub enum ForgetOutcome {
 
 impl ForgetOutcome {
     /// True only when a drawer was actually removed.
-    pub fn is_deleted(self) -> bool {
+    pub(crate) fn is_deleted(self) -> bool {
         matches!(self, Self::Deleted)
     }
 
     /// Wire/CLI spelling: `"deleted"` or `"not_found"`.
-    pub fn as_str(self) -> &'static str {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Deleted => "deleted",
             Self::NotFound => "not_found",
@@ -241,7 +228,7 @@ impl RememberOptions {
     }
 
     /// Preset that bypasses every filter (the `force = true` MCP arg).
-    pub fn forced() -> Self {
+    pub(crate) fn forced() -> Self {
         Self {
             force: true,
             ..Self::default()
@@ -261,9 +248,10 @@ impl RememberOptions {
 /// Test: `recall_across_palaces_merges_results` asserts both palace ids appear
 /// in the merged output.
 #[derive(Debug, Clone)]
-pub struct CrossPalaceResult {
-    pub palace_id: String,
-    pub result: RecallResult,
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct CrossPalaceResult {
+    pub(crate) palace_id: String,
+    pub(crate) result: RecallResult,
 }
 
 /// A cross-palace recall's merged hits plus the palaces whose recall failed.
@@ -274,40 +262,10 @@ pub struct CrossPalaceResult {
 /// the ids of the palaces whose recall returned an error, in handle order.
 /// Test: `recall_across_palaces_reporting_names_a_failed_palace`.
 #[derive(Debug, Clone, Default)]
-pub struct CrossPalaceRecall {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct CrossPalaceRecall {
     /// Merged, deduplicated, sorted, truncated hits.
-    pub results: Vec<CrossPalaceResult>,
+    pub(crate) results: Vec<CrossPalaceResult>,
     /// Ids of palaces whose recall errored; their hits are absent.
-    pub failed: Vec<String>,
-}
-
-// -- Legacy stubs (kept for backwards compatibility with existing callers) --
-
-pub struct RetrievalLayers;
-
-impl RetrievalLayers {
-    /// Load L0 identity for a palace.
-    ///
-    /// Why: Provides a stable persona / project description that grounds every
-    /// reply, without taking up real context budget.
-    /// What: Reads `identity.txt` from the palace data dir; returns empty
-    /// content if the file does not yet exist.
-    /// Test: For a freshly created palace dir, returns `L0Identity { content: "" }`.
-    pub async fn load_l0(_palace_data_dir: &Path) -> Result<L0Identity> {
-        Ok(L0Identity {
-            content: String::new(),
-        })
-    }
-
-    /// Load L1 essential drawers.
-    ///
-    /// Why: Top-importance drawers are queried on virtually every request, so
-    /// we want them already in memory and pre-ranked.
-    /// What: Returns the top-15 drawers across the palace, sorted by importance.
-    /// Test: For an empty palace, returns `L1Essential { drawers: [] }`.
-    pub async fn load_l1(_palace_id: &PalaceId) -> Result<L1Essential> {
-        Ok(L1Essential {
-            drawers: Vec::new(),
-        })
-    }
+    pub(crate) failed: Vec<String>,
 }

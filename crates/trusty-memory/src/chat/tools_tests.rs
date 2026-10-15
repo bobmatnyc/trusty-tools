@@ -110,7 +110,7 @@ async fn execute_tool_dispatches_known_tools() {
 
 /// Create a palace on `state` and return its name, for the chat KG tests.
 fn seed_palace(state: &crate::AppState, name: &str) {
-    let palace = crate::engine::Palace {
+    let palace = crate::engine::palace::Palace {
         id: PalaceId::new(name),
         name: name.to_string(),
         description: None,

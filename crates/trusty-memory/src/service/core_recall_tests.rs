@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::{Drawer, PalaceRegistry};
+use crate::engine::PalaceRegistry;
+use crate::engine::palace::{Drawer, Palace, PalaceId};
 use chrono::Utc;
 use uuid::Uuid;
 

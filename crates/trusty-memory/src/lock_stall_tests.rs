@@ -29,7 +29,7 @@ fn registry_with(
     id: &str,
 ) -> (
     Arc<PalaceRegistry>,
-    Arc<crate::engine::PalaceHandle>,
+    Arc<crate::engine::retrieval::PalaceHandle>,
     tempfile::TempDir,
 ) {
     let tmp = tempfile::tempdir().expect("tempdir");

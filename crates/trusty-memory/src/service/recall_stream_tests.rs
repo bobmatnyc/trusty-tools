@@ -165,7 +165,7 @@ async fn recall_all_skips_empty_palaces_without_opening_them() {
             .create_palace(tmp.path(), palace.clone())
             .expect("create_palace");
         if i < 2 {
-            let drawer = crate::engine::Drawer::new(uuid::Uuid::new_v4(), "a stored fact");
+            let drawer = crate::engine::palace::Drawer::new(uuid::Uuid::new_v4(), "a stored fact");
             handle.kg.store().upsert_drawer(&drawer).expect("upsert");
         }
         drop(handle);

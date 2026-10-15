@@ -484,7 +484,7 @@ pub struct TierSAdmission<'a>(#[allow(dead_code)] tokio::sync::MutexGuard<'a, ()
 /// `tier_s_cap_holds_under_concurrent_writes`.
 pub async fn check_tier_s_admission<'a>(
     state: &'a AppState,
-    handle: &std::sync::Arc<crate::engine::PalaceHandle>,
+    handle: &std::sync::Arc<crate::engine::retrieval::PalaceHandle>,
     subject: &str,
     predicate: &str,
     object: &str,

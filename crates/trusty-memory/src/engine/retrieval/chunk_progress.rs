@@ -19,18 +19,18 @@ use trusty_common::json_rmw;
 use uuid::Uuid;
 
 /// File name of the advisory marker inside a palace's data directory.
-pub const CHUNK_MARKER_FILE: &str = "chunk_backfill.json";
+pub(crate) const CHUNK_MARKER_FILE: &str = "chunk_backfill.json";
 
 /// Marker schema version this build writes and trusts.
 const MARKER_VERSION: u32 = 1;
 
 /// A `complete` marker older than this is rescanned.
-pub const MARKER_RESCAN_AFTER: Duration = Duration::from_secs(24 * 3600);
+pub(crate) const MARKER_RESCAN_AFTER: Duration = Duration::from_secs(24 * 3600);
 
 /// Where a palace stands on the chunk backfill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChunkState {
+pub(crate) enum ChunkState {
     /// Drawers without a failure row still need a vector or chunk rows.
     Backfilling,
     /// Every live drawer has its full chunk group.
@@ -51,18 +51,19 @@ pub enum ChunkState {
 /// Test: `progress_counts_done_over_total_for_a_half_backfilled_palace`,
 /// `progress_is_unknown_not_complete_when_the_chunk_check_is_unavailable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChunkProgress {
-    pub total: usize,
-    pub done: usize,
-    pub pending: usize,
-    pub failed: usize,
-    pub state: ChunkState,
+pub(crate) struct ChunkProgress {
+    pub(crate) total: usize,
+    pub(crate) done: usize,
+    pub(crate) pending: usize,
+    pub(crate) failed: usize,
+    pub(crate) state: ChunkState,
 }
 
 impl EmbedHealth {
     /// Chunk backfill progress derived from this health snapshot.
     /// Test: `progress_counts_done_over_total_for_a_half_backfilled_palace`.
-    pub fn chunk_progress(&self) -> ChunkProgress {
+    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    pub(crate) fn chunk_progress(&self) -> ChunkProgress {
         let needing: HashSet<Uuid> = self
             .missing_vector_ids
             .iter()
@@ -101,21 +102,22 @@ impl EmbedHealth {
 /// Test: `unparsable_marker_is_missing_not_complete`,
 /// `window_change_forces_a_rescan`, `two_writers_do_not_corrupt_the_marker`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChunkMarker {
-    pub version: u32,
+pub(crate) struct ChunkMarker {
+    pub(crate) version: u32,
     /// The embed window the counts were taken at; `None` means no chunking.
-    pub window: Option<usize>,
-    pub total: usize,
-    pub pending: usize,
-    pub failed: usize,
-    pub state: Option<ChunkState>,
-    pub updated_at: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
+    pub(crate) window: Option<usize>,
+    pub(crate) total: usize,
+    pub(crate) pending: usize,
+    pub(crate) failed: usize,
+    pub(crate) state: Option<ChunkState>,
+    pub(crate) updated_at: Option<DateTime<Utc>>,
+    pub(crate) last_error: Option<String>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
 impl ChunkMarker {
     /// A marker for `progress` taken at `window`.
-    pub fn from_progress(
+    pub(crate) fn from_progress(
         progress: &ChunkProgress,
         window: Option<usize>,
         last_error: Option<String>,
@@ -135,7 +137,7 @@ impl ChunkMarker {
 
     /// The marker in `dir`, or `None` when absent or unparsable.
     /// Test: `unparsable_marker_is_missing_not_complete`.
-    pub fn read(dir: &Path) -> Option<Self> {
+    pub(crate) fn read(dir: &Path) -> Option<Self> {
         let bytes = std::fs::read(marker_path(dir)).ok()?;
         match serde_json::from_slice::<Self>(&bytes) {
             Ok(marker) if marker.version == MARKER_VERSION => Some(marker),
@@ -151,7 +153,7 @@ impl ChunkMarker {
     /// on `spawn_blocking`. An unparsable marker is removed and rewritten.
     /// Test: `two_writers_do_not_corrupt_the_marker`,
     /// `unparsable_marker_is_missing_not_complete`.
-    pub fn write(&self, dir: &Path) -> anyhow::Result<()> {
+    pub(crate) fn write(&self, dir: &Path) -> anyhow::Result<()> {
         let path = marker_path(dir);
         let replace = |path: &Path| {
             json_rmw::update(path, |m: &mut ChunkMarker| {
@@ -175,7 +177,11 @@ impl ChunkMarker {
     /// What: true when the marker is absent, written at another `window`,
     /// not complete, or complete but older than [`MARKER_RESCAN_AFTER`].
     /// Test: `window_change_forces_a_rescan`.
-    pub fn needs_scan(marker: Option<&Self>, window: Option<usize>, now: DateTime<Utc>) -> bool {
+    pub(crate) fn needs_scan(
+        marker: Option<&Self>,
+        window: Option<usize>,
+        now: DateTime<Utc>,
+    ) -> bool {
         let Some(m) = marker else {
             return true;
         };

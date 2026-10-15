@@ -30,7 +30,8 @@ use trusty_common::redb_open::INCOMPATIBLE_SUFFIX;
 /// Reports legacy data the live store has not absorbed, given the palace
 /// directory and the drawer ids the live store holds. `Some(reason)` makes the
 /// palace non-empty.
-pub type LegacyProbe = dyn Fn(&Path, &HashSet<Uuid>) -> Option<String> + Send + Sync;
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) type LegacyProbe = dyn Fn(&Path, &HashSet<Uuid>) -> Option<String> + Send + Sync;
 
 /// Why a palace is not empty.
 ///
@@ -68,7 +69,8 @@ pub enum PalaceNotEmpty {
 /// Test: `rename_palace_refuses_a_nonempty_target`,
 /// `chat_sessions_make_a_palace_non_empty`,
 /// `rename_palace_replace_empty_trashes_the_target`.
-pub fn check_palace_empty(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn check_palace_empty(
     handle: &PalaceHandle,
     data_dir: &Path,
     legacy: &LegacyProbe,
@@ -104,7 +106,8 @@ pub fn check_palace_empty(
 /// when any `.v2-incompatible` file sits directly in `data_dir` or the
 /// directory cannot be listed; `None` otherwise.
 /// Test: `conservative_probe_flags_kg_db_and_quarantined_stores`.
-pub fn conservative_legacy_probe(data_dir: &Path, _live: &HashSet<Uuid>) -> Option<String> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn conservative_legacy_probe(data_dir: &Path, _live: &HashSet<Uuid>) -> Option<String> {
     let mut reasons = Vec::new();
     match data_dir.join("kg.db").try_exists() {
         Ok(false) => {}
@@ -140,7 +143,8 @@ pub fn conservative_legacy_probe(data_dir: &Path, _live: &HashSet<Uuid>) -> Opti
 /// failure — including a store another process holds open — is `Err` with a
 /// reason, so the caller fails closed.
 /// Test: `chat_sessions_make_a_palace_non_empty`.
-pub fn count_chat_sessions(data_dir: &Path) -> Result<u64, String> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn count_chat_sessions(data_dir: &Path) -> Result<u64, String> {
     let path = data_dir.join("chat_sessions.redb");
     match path.try_exists() {
         Ok(false) => return Ok(0),

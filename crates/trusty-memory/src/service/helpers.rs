@@ -12,9 +12,8 @@
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
 use crate::AppState;
-use crate::engine::PalaceHandle;
 use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::retrieval::RecallResult;
+use crate::engine::retrieval::{PalaceHandle, RecallResult};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use std::collections::HashSet;

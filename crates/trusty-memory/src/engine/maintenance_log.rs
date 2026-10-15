@@ -392,7 +392,7 @@ impl PalaceHandle {
     /// Test: `maintenance_log_tests::dream_dedup_records_the_removed_and_surviving_drawer`,
     /// `maintenance_log_tests::a_user_forget_writes_a_user_forget_journal_record`,
     /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
-    pub async fn forget_for_maintenance(
+    pub(crate) async fn forget_for_maintenance(
         &self,
         id: Uuid,
         reason: DeletionReason,

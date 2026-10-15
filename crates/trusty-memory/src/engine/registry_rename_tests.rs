@@ -22,7 +22,11 @@ fn opts() -> RenameOptions<'static> {
 }
 
 /// Create palace `id` under `root` (its handle is dropped, so it is idle).
-fn create(reg: &PalaceRegistry, root: &Path, id: &str) -> Arc<crate::engine::PalaceHandle> {
+fn create(
+    reg: &PalaceRegistry,
+    root: &Path,
+    id: &str,
+) -> Arc<crate::engine::retrieval::PalaceHandle> {
     let palace = Palace {
         id: PalaceId::new(id),
         name: id.to_string(),

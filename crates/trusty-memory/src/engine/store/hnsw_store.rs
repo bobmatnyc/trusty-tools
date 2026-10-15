@@ -775,6 +775,7 @@ impl HnswStore {
     /// under the write-transaction deadline, like `compact_orphans`.
     /// Test: `unalias_frees_every_uuid_in_a_collision_group`,
     /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn unalias(&self) -> Result<Vec<String>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);

@@ -260,8 +260,8 @@ async fn default_palace_used_when_arg_omitted() {
 
     // Pre-create the default palace so remember has somewhere to land.
     let registry = crate::engine::PalaceRegistry::new();
-    let palace = crate::engine::Palace {
-        id: crate::engine::PalaceId::new("default-pal"),
+    let palace = crate::engine::palace::Palace {
+        id: crate::engine::palace::PalaceId::new("default-pal"),
         name: "default-pal".to_string(),
         description: None,
         created_at: chrono::Utc::now(),
@@ -409,7 +409,8 @@ async fn missing_palace_without_default_errors_for_a_write() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_rehydrates_registry() {
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -472,7 +473,8 @@ async fn load_palaces_from_disk_rehydrates_registry() {
 /// Test: this test itself.
 #[tokio::test]
 async fn restart_burst_hydration_is_immediately_idle_evictable() {
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -565,7 +567,8 @@ async fn with_writer_intent_marks_registry_writer() {
 #[tokio::test]
 #[should_panic(expected = "is_empty()")]
 async fn with_writer_intent_panics_on_hydrated_registry() {
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -619,11 +622,11 @@ async fn with_writer_intent_panics_on_hydrated_registry() {
 fn incompatible_palace_fixture() -> (
     tempfile::TempDir,
     std::path::PathBuf,
-    crate::engine::PalaceId,
+    crate::engine::palace::PalaceId,
     std::path::PathBuf,
 ) {
+    use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::store::PalaceStore;
-    use crate::engine::{Palace, PalaceId};
 
     const GARBAGE: [u8; 4096] = [0xABu8; 4096];
 
@@ -748,8 +751,8 @@ async fn load_palaces_from_disk_honours_registry_open_intent() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_records_an_unopenable_palace() {
+    use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::store::PalaceStore;
-    use crate::engine::{Palace, PalaceId};
 
     let (_tmp, root, pid, _store) = incompatible_palace_fixture();
 
@@ -875,7 +878,8 @@ fn resolve_palace_registry_dir_root_input_stays_root() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_handles_palaces_subdir() {
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -939,7 +943,8 @@ async fn load_palaces_from_disk_empty_root_returns_zero() {
 /// Test: this test itself.
 #[tokio::test]
 async fn palace_name_cache_populated_after_hydration() {
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1453,7 +1458,7 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
     let (state, _tmp) = test_state();
     // Create a palace on disk.
     let pid = crate::engine::palace::PalaceId::new("hydration-skip");
-    let palace = crate::engine::Palace {
+    let palace = crate::engine::palace::Palace {
         id: pid.clone(),
         name: "hydration-skip".to_string(),
         description: None,
@@ -1500,7 +1505,7 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
 /// `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir` and
 /// `session_store_fails_open_when_the_alias_dir_store_cannot_be_read`.
 fn live_alias(state: &AppState, canonical: &str, alias: &str) {
-    let palace = crate::engine::Palace {
+    let palace = crate::engine::palace::Palace {
         id: crate::engine::palace::PalaceId::new(canonical),
         name: canonical.to_string(),
         description: None,

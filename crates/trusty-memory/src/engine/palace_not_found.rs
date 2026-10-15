@@ -124,12 +124,9 @@ impl PalaceNotFound {
             .map(|absent| Self::listing(absent.palace.clone(), data_root))
     }
 
-    /// The palace id that was not found.
-    pub fn palace(&self) -> &str {
-        &self.palace
-    }
-
     /// The existing palaces this error names.
+    // #9278: crate-only now, and only the unit tests read it.
+    #[cfg(test)]
     pub fn existing(&self) -> &ExistingPalaces {
         &self.existing
     }

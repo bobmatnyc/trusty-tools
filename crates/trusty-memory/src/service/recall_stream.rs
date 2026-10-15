@@ -31,9 +31,8 @@
 //! `recall_stream_tests`; the ADR-0071 criteria in `recall_scope_tests`.
 
 use crate::AppState;
-use crate::engine::PalaceHandle;
 use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult};
+use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult, PalaceHandle};
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};

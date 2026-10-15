@@ -365,7 +365,7 @@ async fn health_endpoint_round_trip_on_fresh_install_is_ok() {
 #[ignore = "loads the default ONNX embedder; run with --include-ignored"]
 async fn health_endpoint_round_trip_with_palace_is_ok() {
     let state = test_state();
-    let palace = crate::engine::Palace {
+    let palace = crate::engine::palace::Palace {
         id: PalaceId::new("health-probe-palace"),
         name: "health-probe-palace".to_string(),
         description: None,
@@ -445,7 +445,7 @@ async fn health_probe_palace_is_invisible() {
 /// Test: this test.
 #[tokio::test]
 async fn health_probe_cleans_up_on_success() {
-    use crate::engine::Drawer;
+    use crate::engine::palace::Drawer;
 
     let state = test_state();
     ensure_health_probe_palace(&state).expect("ensure_health_probe_palace");
@@ -832,7 +832,8 @@ async fn health_drawer_degraded_names_only_the_degraded_palace() {
 /// Test: this test.
 #[tokio::test]
 async fn health_drawer_degraded_check_opens_no_palace() {
-    use crate::engine::{Palace, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::Palace;
 
     let mut state = test_state();
     let registry = PalaceRegistry::with_max_open(2);

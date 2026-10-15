@@ -368,8 +368,8 @@ browser. ✅
 
 | Module | Responsibility |
 |---|---|
-| `mod.rs` | Re-exports the palace hierarchy, registry, retrieval handle, consolidation types. Gated behind the `memory-core` feature. |
-| `palace.rs` | Data model: `PalaceId`, `Palace` → `Wing` → `Room` → `Drawer`. A *closet* is not a level — it is the keyword → drawer-ids inverted index on `PalaceHandle` (ADR-0027 D3). |
+| `mod.rs` | Re-exports the registry and the consolidation types. The palace hierarchy types live at `engine::palace` and the retrieval handle at `engine::retrieval`, one path per type (#9278). Gated behind the `memory-core` feature. |
+| `palace.rs` | Data model: `PalaceId`, `Palace`, `RoomType`, `Drawer` (palace → wing → room → drawer; wings and rooms are palace-store rows). A *closet* is not a level — it is the keyword → drawer-ids inverted index on `PalaceHandle` (ADR-0027 D3). |
 | `registry.rs` | `PalaceRegistry` — concurrent `DashMap<PalaceId, Arc<PalaceHandle>>`. |
 | `retrieval.rs` | 4-layer (L0–L3) progressive retrieval; the canonical `PalaceHandle`. |
 | `dream.rs` | `Dreamer` / `dream_cycle` — idle consolidation (prune/dedup/compact/closet) + optional semantic phase. |

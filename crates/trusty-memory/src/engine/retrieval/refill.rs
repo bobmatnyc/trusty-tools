@@ -29,7 +29,7 @@ pub const EXPIRED_REFILL_FETCH_CAP: usize = 1024;
 /// [`EXPIRED_REFILL_FETCH_CAP`]. Otherwise doubles the window, capped. The
 /// window strictly grows until the cap, so a loop over this ends.
 /// Test: `the_refill_stops_on_every_bound`.
-pub fn next_refill_window(
+pub(crate) fn next_refill_window(
     fetched: usize,
     returned: usize,
     live: usize,

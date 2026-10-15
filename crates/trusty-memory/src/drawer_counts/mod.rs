@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::{Palace, PalaceHandle, PalaceRegistry};
+use crate::engine::PalaceRegistry;
+use crate::engine::palace::Palace;
+use crate::engine::retrieval::PalaceHandle;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
