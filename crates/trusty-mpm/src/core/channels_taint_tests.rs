@@ -519,3 +519,21 @@ fn the_reapply_failures_record_is_not_a_taint_file() {
     assert!(list_taints(&dir).expect("list").is_empty());
     assert_eq!(presence(&dir), Presence::Some);
 }
+
+/// 🔴 #9873 (Q5): the delivery trace outlives the retire of the session it
+/// names (a retire removes `*.json` taints only), and keeps the dir live.
+#[test]
+fn delivery_record_survives_retire_of_the_session() {
+    use crate::core::channels_delivery::{
+        DELIVERY_FILE, DeliveryLine, DeliveryState, read_deliveries, record_delivery,
+    };
+    let (_tmp, dir) = dir();
+    taint_managed_session(&dir, "m-1", "claude-1", &mark()).expect("taint");
+    let failed = DeliveryLine::new(DeliveryState::Failed, "7", "m-1", Some("send_failed"));
+    record_delivery(&dir, &failed).expect("trace");
+    assert_eq!(retire(&dir, "m-1").expect("retire"), 1);
+    assert_eq!(read_state(&dir, "claude-1"), TaintState::Untainted);
+    assert!(dir.join(DELIVERY_FILE).exists(), "the trace survives");
+    assert_eq!(read_deliveries(&dir).expect("read").lines, [failed]);
+    assert_eq!(presence(&dir), Presence::Some);
+}

@@ -42,6 +42,12 @@ pub mod files;
 pub mod fleet;
 mod foreign_harness;
 pub mod front_gate;
+// #9873: the daemon body of an inbound channel answer (P5).
+#[cfg(feature = "channels")]
+pub mod inbound;
+// #9873 Q1: the sandbox-only inbound source; see `channels_router`.
+#[cfg(feature = "channels")]
+pub mod inbound_fake;
 // #9843: the FRONT gate's answer — launch or deny the withheld runtime.
 mod front_gate_answer;
 pub mod inproject;
@@ -140,13 +146,18 @@ pub fn egress_verdict_router() -> axum::Router<Arc<DaemonState>> {
     }
 }
 
-/// The daemon's channel sub-routers: the egress verdict (#8454 VC) and
-/// `ask_owner` (#9856). `api.rs` merges this one router, so a new channel
-/// route never grows that file past its frozen SLOC budget.
+/// The daemon's channel sub-routers: the egress verdict (#8454 VC),
+/// `ask_owner` (#9856) and, in a sandbox daemon only, the fake inbound
+/// source (#9873). `api.rs` merges this one router, so a new channel route
+/// never grows that file past its frozen SLOC budget.
+/// Test: `inbound_fake_route_is_absent_outside_the_sandbox`.
 pub fn channels_router() -> axum::Router<Arc<DaemonState>> {
     let router = egress_verdict_router();
     #[cfg(feature = "channels")]
     let router = router.merge(ask_owner::router());
+    // #9873 Q1: mounted only in a daemon whose one-way sandbox latch is set.
+    #[cfg(feature = "channels")]
+    let router = router.merge(inbound_fake::router(crate::secret_source::sandboxed()));
     router
 }
 

@@ -453,6 +453,33 @@ impl QuestionTable {
         state.book.questions.get(&id).map(|e| e.question.clone())
     }
 
+    /// The question posted in `conversation`, open or answered.
+    ///
+    /// Why: #9873 Q2: an owner's thread reply carries no `[Q-n]` token, so
+    /// the conversation is the binding; text is never trusted to bind.
+    /// What: the one opened question whose conversation equals it. `None`
+    /// for no match, for two (fail closed), and on a poisoned table. A
+    /// reserved-only id has no conversation, so it is never found.
+    /// Test: `conversation_lookup_finds_the_question_posted_there`,
+    /// `conversation_lookup_on_a_poisoned_table_is_none`.
+    pub fn find_by_conversation(&self, conversation: &Conversation) -> Option<QuestionId> {
+        let state = self.lock().ok()?;
+        let mut found = state
+            .book
+            .questions
+            .values()
+            .filter(|e| e.question.ask.conversation == *conversation);
+        let id = found.next()?.question.id;
+        found.next().is_none().then_some(id)
+    }
+
+    /// The first answer to question `id`; `None` when unanswered, unknown or
+    /// poisoned. #9873: a second answer reports who won, and when.
+    pub fn answer(&self, id: QuestionId) -> Option<Answer> {
+        let state = self.lock().ok()?;
+        state.book.questions.get(&id)?.answer.clone()
+    }
+
     /// True once an append failed or the lock was poisoned.
     pub fn is_poisoned(&self) -> bool {
         // #8433: a poisoned mutex refuses for good, so its flock can go.
@@ -581,6 +608,36 @@ impl Drop for Flock {
         // forked child holds a copy; the unlock covers that copy.
         self.release("dropped");
     }
+}
+
+/// The answered questions in the log at `path`, with their askers, read
+/// without the table's lock.
+///
+/// Why: #9873 Q4a: `tm doctor` lists a question resolved with no delivery
+/// record while the daemon holds the lock, so it cannot open the table.
+/// What: replays every newline-terminated line under the live rules; an
+/// unterminated final line (an append in flight, or a torn one the next
+/// open judges) is skipped. An absent log has none; a read or replay
+/// error is an `Err`.
+/// Test: `resolved_question_without_a_delivery_line_is_a_doctor_fail`.
+pub fn answered_in_log(path: &Path) -> Result<Vec<(QuestionId, String)>, QuestionTableError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(path)(e)),
+    };
+    let mut book = Book::new();
+    for (n, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if line.ends_with(b"\n") && !line.trim_ascii().is_empty() {
+            replay_line(&mut book, decode(line), path, n + 1)?;
+        }
+    }
+    Ok(book
+        .questions
+        .values()
+        .filter(|e| e.answer.is_some())
+        .map(|e| (e.question.id, e.question.ask.asker_managed_session.clone()))
+        .collect())
 }
 
 /// Write one record line to the table's log and sync it.

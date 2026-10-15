@@ -6,17 +6,23 @@
 //! them; it never deletes anything, because deleting a taint is an untaint.
 //! What: [`check_channel_taint`] reads the taint directory under the home and
 //! the manager's records, and [`channel_taint_row`] grades them: `Unknown`
-//! when the directory cannot be listed; `Fail` when the hook recorded a double
-//! failure; `Warn` naming each orphaned file or marker (its managed session is
+//! when the directory cannot be listed; `Fail` when the hook recorded a
+//! double failure, or (#9873) an inbound answer was resolved but its delivery
+//! failed, never settled, or left no line, or a trace line is malformed;
+//! `Unknown` when the delivery trace or the question log cannot be read and
+//! nothing grades `Fail` (the unreadable part is named either way, #9873 fix
+//! round); `Warn` naming each orphaned file or marker (its managed session is
 //! missing, terminal or deliberately stopped, so its retire did not complete),
 //! each failed re-apply and each unreadable file; `Ok` otherwise.
 //! Test: `doctor_lists_orphan_taint_files_and_deletes_none`,
 //! `doctor_row_is_unknown_when_taint_cannot_be_listed`,
-//! `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`.
+//! `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`,
+//! `delivery_failed_line_is_a_doctor_fail_naming_question_and_asker`.
 
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::core::channels_delivery;
 use crate::core::channels_taint;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::session_manager::{ManagedSessionState, SessionManager, StopCause};
@@ -109,19 +115,42 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
         .map_or(0, |text| {
             text.lines().filter(|l| !l.trim().is_empty()).count()
         });
+    // #9873 (Q5, F18): an unreadable delivery trace or log is never `Ok`;
+    // #9873 fix round: it adds a part and never lowers a `Fail`.
+    let (undelivered, unreadable) = delivery_problems_in(dir);
     let held = files.len();
     let tail = format!("Nothing was deleted; see {}.", dir.display());
-    if failures > 0 {
-        return DoctorCheck::new(
-            NAME,
-            CheckStatus::Fail,
-            format!(
+    if failures > 0 || !undelivered.is_empty() {
+        let mut parts = Vec::new();
+        if !undelivered.is_empty() {
+            // #9873 (AC2, Q4): a resolved answer is final; name each loss.
+            parts.push(format!(
+                "{} channel answer(s) resolved but not confirmed delivered (final, #8433 Q4; see \
+                 {}): {}.",
+                undelivered.len(),
+                channels_delivery::DELIVERY_FILE,
+                undelivered.join("; ")
+            ));
+        }
+        if failures > 0 {
+            parts.push(format!(
                 "{failures} SessionStart(s) could not re-apply a channel taint at all (D09 double \
-                 failure; those sessions may read untainted): see {}. {}",
-                channels_taint::REAPPLY_FAILURES_FILE,
-                lines.join("; ")
-            ),
-        );
+                 failure; those sessions may read untainted): see {}.",
+                channels_taint::REAPPLY_FAILURES_FILE
+            ));
+        }
+        parts.extend(unreadable);
+        if !lines.is_empty() {
+            parts.push(lines.join("; "));
+        }
+        return DoctorCheck::new(NAME, CheckStatus::Fail, parts.join(" "));
+    }
+    if !unreadable.is_empty() {
+        let mut parts = unreadable;
+        if !lines.is_empty() {
+            parts.push(lines.join("; "));
+        }
+        return DoctorCheck::new(NAME, CheckStatus::Unknown, parts.join(" "));
     }
     if lines.is_empty() {
         let msg = format!("{held} taint file(s), each owned by a live managed session");
@@ -132,6 +161,61 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
         CheckStatus::Warn,
         format!("{} {tail}", lines.join("; ")),
     )
+}
+
+/// The delivery problems in taint directory `dir` (#9873 Q5, Q4a).
+///
+/// What: the trace's lines against the answered questions of the question
+/// log beside `dir` (`channels/questions.jsonl`; [`channels_taint::taint_dir`]
+/// is `channels/taint`), plus each malformed trace line; then one sentence
+/// per read that failed (#9873 fix round). An unreadable trace yields no
+/// problems, since every resolved question would read unrecorded; an
+/// unreadable log still yields the trace's own problems.
+/// Test: `delivery_pending_without_settle_is_a_doctor_fail`,
+/// `resolved_question_without_a_delivery_line_is_a_doctor_fail`,
+/// `doctor_row_is_unknown_when_delivery_log_unreadable`,
+/// `unreadable_trace_never_hides_a_doctor_fail`.
+fn delivery_problems_in(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let trace = match channels_delivery::read_deliveries(dir) {
+        Ok(trace) => trace,
+        Err(e) => {
+            let why = format!(
+                "The channel answer delivery trace is unreadable ({e}); delivery state is unknown."
+            );
+            return (Vec::new(), vec![why]);
+        }
+    };
+    let mut unreadable = Vec::new();
+    let resolved = answered_beside(dir).unwrap_or_else(|e| {
+        unreadable.push(format!(
+            "The question log is unreadable ({e}); a resolved answer with no delivery record \
+             cannot be listed."
+        ));
+        Vec::new()
+    });
+    let mut problems = channels_delivery::delivery_problems(&trace.lines, &resolved);
+    problems.extend(trace.malformed);
+    (problems, unreadable)
+}
+
+/// The answered questions (id, asker) in the question log beside `dir`.
+#[cfg(feature = "channels")]
+fn answered_beside(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let log = dir.with_file_name("questions.jsonl");
+    crate::channels::question_table::answered_in_log(&log)
+        .map(|found| {
+            found
+                .into_iter()
+                .map(|(id, asker)| (id.to_string(), asker))
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// A build without the `channels` feature holds no question table.
+#[cfg(not(feature = "channels"))]
+fn answered_beside(_dir: &Path) -> Result<Vec<(String, String)>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
