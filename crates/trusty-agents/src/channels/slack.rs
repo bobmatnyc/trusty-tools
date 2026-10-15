@@ -214,14 +214,19 @@ mod tests {
             )
             // #8037: the history read moved out of `agent_channels::messages`
             // into `conversation_history`, so the mock has to serve it too.
+            // #9919: Slack ignores POST JSON args on reads; serve GET + query only.
             .route(
                 "/conversations.history",
-                axum::routing::post(
-                    move |headers: axum::http::HeaderMap, _body: String| async move {
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
                         *history_seen.lock().unwrap() = headers
                             .get(axum::http::header::AUTHORIZATION)
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_string);
+                        if query.as_deref() != Some("channel=C123456&limit=30") {
+                            return axum::Json(json!({"ok":false,"error":"invalid_arguments"}));
+                        }
                         axum::Json(json!({"ok":true,"messages":[
                             {"ts":"1700000000.000100","text":"hello there","user":"U1"}
                         ]}))
