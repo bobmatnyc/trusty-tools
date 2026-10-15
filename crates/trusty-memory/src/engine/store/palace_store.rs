@@ -67,8 +67,7 @@ pub enum PalaceStoreError {
          {supported} this binary reads; restart the daemon that owns the palace (the \
          trusty-memory daemon, or `tm daemon run` for the Session Manager and portfolio \
          palaces), which migrates it to format {supported} behind a verified backup, then \
-         retry; if that daemon is already running, the migration failed: run `trusty-memory \
-         doctor` for the reason"
+         retry; `trusty-memory doctor` lists palaces still awaiting migration"
     )]
     FormatNeedsMigration {
         palace: String,

@@ -435,8 +435,8 @@ fn behind_format_refusals_tell_the_operator_what_to_do() {
         "FormatNeedsMigration: palace p is at format 0, older than the format 2 this binary \
          reads; restart the daemon that owns the palace (the trusty-memory daemon, or `tm daemon \
          run` for the Session Manager and portfolio palaces), which migrates it to format 2 \
-         behind a verified backup, then retry; if that daemon is already running, the migration \
-         failed: run `trusty-memory doctor` for the reason"
+         behind a verified backup, then retry; `trusty-memory doctor` lists palaces still \
+         awaiting migration"
     );
     let old = check_format_with("p", 0, 2, 1).expect_err("below the oldest");
     assert_eq!(
