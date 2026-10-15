@@ -564,6 +564,11 @@ impl OrchestratorBackend for StateBackend {
         Err("secrets_get_ref: the secrets socket needs a Unix platform".to_owned())
     }
 
+    /// Back `ask_owner` (#9856) — see `super::mcp_ask_owner`.
+    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String> {
+        super::mcp_ask_owner::ask_owner(&self.state, recipient, question).await
+    }
+
     async fn config_read(&self) -> Result<Value, String> {
         super::mcp_console::config_read()
     }

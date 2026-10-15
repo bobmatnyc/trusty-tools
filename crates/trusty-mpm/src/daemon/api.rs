@@ -283,8 +283,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // #6892: the machine-wide builder-slot claim, a sibling sub-router for
         // the same line-cap reason.
         .merge(super::builder_slot_routes::router())
-        // #8454 VC: the egress hook's policy verdict.
-        .merge(super::managed_routes::egress_verdict_router())
+        // #8454 VC egress verdict; #9856 ask_owner.
+        .merge(super::managed_routes::channels_router())
         .route("/api/v1/doctor", get(doctor))
         .route("/api/v1/errors", get(list_errors))
         .route("/api/v1/report-bug", post(report_bug_http))
