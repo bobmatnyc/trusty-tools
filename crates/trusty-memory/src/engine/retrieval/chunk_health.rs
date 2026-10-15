@@ -24,6 +24,7 @@ use uuid::Uuid;
 /// this process, its tokenizer would not load, or the index scan failed.
 /// Test: `health_reports_chunk_check_unavailable_when_no_embedder_is_ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum ChunkCheck {
     /// The comparison ran over every live drawer with a vector.
     Ran,
