@@ -260,10 +260,17 @@ async fn files_info_error_names_the_method() {
     }
 }
 
+/// One read-method case: Slack method, request params, and the decoded query
+/// pairs expected on the wire, in order.
+type ReadCase = (
+    &'static str,
+    serde_json::Value,
+    &'static [(&'static str, &'static str)],
+);
+
 #[tokio::test]
 async fn read_methods_send_params_as_get_query() {
-    // (method, request params, expected decoded query pairs in order)
-    let cases: [(&str, serde_json::Value, &[(&str, &str)]); 8] = [
+    let cases: [ReadCase; 8] = [
         ("files.info", json!({"file": "F1"}), &[("file", "F1")]),
         (
             "conversations.info",
