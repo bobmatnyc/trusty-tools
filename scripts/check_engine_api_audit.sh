@@ -1,31 +1,43 @@
 #!/usr/bin/env bash
 #
-# check_engine_api_audit.sh — the audited part of the trusty-memory engine
+# check_engine_api_audit.sh — the whole trusty-memory `--no-default-features`
 #   public API equals the audit table's public rows (issue #9278, E10).
 #
-# Why: E10 narrows `trusty_memory::engine::*` (the ADR-0066 frozen surface)
-#   one batch at a time, and records every item's disposition in
+# Why: E10 narrows the trusty-memory library surface (the ADR-0066 frozen
+#   `engine` plus the crate root and `transport`) one batch at a time, and
+#   records every item's disposition in
 #   docs/reference/trusty-memory-engine-api-audit.tsv. Without a check the
 #   table and the code drift apart: an item marked NARROW stays public, or a
-#   new public item lands in an audited module with no row.
+#   new public item lands anywhere in the crate with no row. D1 defines done
+#   as every path of the no-default-features listing triaged, so the check
+#   covers the whole listing, not a list of audited modules (A6 Q3).
 #
 # What: reads a `cargo public-api` listing of trusty-memory built with
-#   `--no-default-features`, takes the item path of every line (impl headers
-#   are skipped), and keeps the paths under an audited scope prefix
-#   (SCOPE_PREFIXES below; each batch adds its prefixes). It compares them with
-#   the table rows under the same prefixes:
+#   `--no-default-features`, takes the item path of every `pub` line (impl
+#   headers are skipped), and compares the set of `trusty_memory` paths with
+#   the table:
 #     - EXTRA      a listed path whose row is NARROW or HIDE (`cargo
 #                  public-api` omits `#[doc(hidden)]` items, so a HIDE item
 #                  that is listed lost its attribute);
 #     - UNAUDITED  a listed path with no row at all;
 #     - MISSING    a KEEP or DEPRECATE row whose path is not listed.
-#   Each failure prints one line naming the path. A path matches a prefix
-#   when it equals it or continues with `::`.
+#   Each failure prints one line naming the path.
 #
-#   Fails CLOSED: an empty listing, a listing with no path under any scope
-#   prefix, or a table row that does not have exactly 5 tab-separated fields
-#   and a disposition in {KEEP, NARROW, HIDE, DEPRECATE} (the message names the
-#   line) is exit 2, never a pass over nothing.
+#   One path may carry two rows only when they differ in `kind` and agree on
+#   public versus absent (a field and a method sharing a name print the same
+#   path; the listing cannot tell them apart).
+#
+#   Fails CLOSED with exit 2, never a pass over nothing:
+#     - the table is missing or has no data row;
+#     - a row lacks exactly 5 non-empty tab-separated fields, names a path
+#       that is not a plain `trusty_memory[::segment]*` path, has a `kind`
+#       outside the known set or a disposition outside
+#       {KEEP, NARROW, HIDE, DEPRECATE} (the message names the line);
+#     - two rows share a path and kind, or one path has a public row and an
+#       absent row (the message names the path);
+#     - the listing is missing or empty, has no `trusty_memory` path, or has a
+#       `pub` line the parser cannot cut to a `trusty_memory` path (the
+#       message names the line).
 #
 # Usage:
 #   bash scripts/check_engine_api_audit.sh --api-file <listing>
@@ -39,98 +51,21 @@
 #   ENGINE_API_AUDIT_TSV  the audit table (default docs/reference/...tsv)
 #
 # Exit: 0 when the listing matches the table; 1 on any EXTRA, UNAUDITED or
-#   MISSING path; 2 on a usage or tool error.
+#   MISSING path; 2 on a usage, tool, table or listing error.
 #
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
-#   NARROW or HIDE row still listed, an unaudited path, a missing KEEP row, an
-#   out-of-scope path, a prefix that only shares a stem, an engine-root
-#   re-export stem, the A5 generic shapes (a lifetime-and-type generic fn, a
-#   nested trait bound, an async_trait method, a type alias), a DEPRECATE row
-#   not listed, malformed table rows, and the empty-listing and bad-argument
-#   errors.
+#   NARROW or HIDE row still listed, an unaudited path (in an engine module,
+#   at the crate root, under `transport`, sharing a row's stem, on a generic
+#   type, and each generic shape), a missing KEEP or DEPRECATE row, a field
+#   and method sharing a path, the malformed-row, duplicate-row and
+#   conflicting-row errors, and the missing, empty, crate-less and unparsable
+#   listing errors.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); awk, sort, comm.
 
 # #7812: re-exec under bash when started from zsh (the harness shell).
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
-
-# See #9278: one prefix per audited module stem, so a new submodule or
-# re-export is in scope the moment it appears and fails UNAUDITED until it has
-# a row. `engine::storex` is not under `engine::store` (the match needs `::`
-# after the prefix). A4 adds `retrieval`, `registry`, `palace` and
-# `palace_emptiness`, plus the engine-root names `engine/mod.rs` re-exports
-# from them (`engine::PalaceHandle` is where the listing names the
-# PalaceHandle methods); `engine::Room` and `engine::Wing` stay listed so a
-# re-added root re-export of either is audited. A5 adds the remaining fifteen
-# engine modules and the 34 engine-root names `engine/mod.rs` re-exports from
-# them; a root name stays listed after its re-export goes, so a re-added one
-# is audited.
-SCOPE_PREFIXES='
-trusty_memory::engine::store
-trusty_memory::engine::retrieval
-trusty_memory::engine::registry
-trusty_memory::engine::palace
-trusty_memory::engine::palace_emptiness
-trusty_memory::engine::PalaceHandle
-trusty_memory::engine::PalaceRegistry
-trusty_memory::engine::Palace
-trusty_memory::engine::PalaceId
-trusty_memory::engine::Drawer
-trusty_memory::engine::DrawerType
-trusty_memory::engine::RoomType
-trusty_memory::engine::Room
-trusty_memory::engine::Wing
-trusty_memory::engine::analytics
-trusty_memory::engine::community
-trusty_memory::engine::content_hash
-trusty_memory::engine::decay
-trusty_memory::engine::dream
-trusty_memory::engine::embed
-trusty_memory::engine::filter
-trusty_memory::engine::git
-trusty_memory::engine::maintenance_lease
-trusty_memory::engine::maintenance_log
-trusty_memory::engine::room_identity
-trusty_memory::engine::semantic_consolidation
-trusty_memory::engine::share
-trusty_memory::engine::timeouts
-trusty_memory::engine::wing_identity
-trusty_memory::engine::KnowledgeGap
-trusty_memory::engine::find_communities
-trusty_memory::engine::CONTENT_HASH_VERSION
-trusty_memory::engine::ContentHash
-trusty_memory::engine::memory_content_hash
-trusty_memory::engine::normalize_for_hash
-trusty_memory::engine::LeaseStatus
-trusty_memory::engine::MaintenanceLease
-trusty_memory::engine::DEFAULT_WING_ID
-trusty_memory::engine::canonical_room_key
-trusty_memory::engine::mint_room_id
-trusty_memory::engine::room_to_uuid
-trusty_memory::engine::ConsolidationAction
-trusty_memory::engine::ConsolidationProvider
-trusty_memory::engine::ConsolidationResult
-trusty_memory::engine::MockInference
-trusty_memory::engine::OllamaInference
-trusty_memory::engine::OpenRouterInference
-trusty_memory::engine::SemanticConsolidationConfig
-trusty_memory::engine::SemanticConsolidator
-trusty_memory::engine::inference_available
-trusty_memory::engine::resolve_consolidation_provider
-trusty_memory::engine::ImportOutcome
-trusty_memory::engine::ImportSummary
-trusty_memory::engine::SHARE_FORMAT_VERSION
-trusty_memory::engine::SharedMemoryRecord
-trusty_memory::engine::export_palace_jsonl
-trusty_memory::engine::export_palace_records
-trusty_memory::engine::import_palace_jsonl
-trusty_memory::engine::import_palace_records
-trusty_memory::engine::supersede_drawer
-trusty_memory::engine::DEFAULT_WING_LABEL
-trusty_memory::engine::canonical_wing_key
-trusty_memory::engine::mint_wing_id
-'
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIT="${ENGINE_API_AUDIT_TSV:-$REPO_ROOT/docs/reference/trusty-memory-engine-api-audit.tsv}"
@@ -156,17 +91,35 @@ done
 
 [ -f "$AUDIT" ] || { echo "check_engine_api_audit: no audit table at $AUDIT" >&2; exit 2; }
 
-# Fail closed on a malformed table: every row past the header, comments and
-# blank lines aside, has exactly 5 tab-separated fields and a disposition in
-# {KEEP, NARROW, HIDE, DEPRECATE}. Checked before any comparison, so a typo
-# (`narrow`, `Keep`) or a space-separated row is never read as "audited".
+# Fail closed on a malformed table, before any comparison, so a typo
+# (`narrow`, `Keep`, `fucntion`), a space-separated row or a row naming
+# something outside the crate is never read as "audited". #9278 A6: the path
+# must be plain segments, since every listed path is compared with every row.
 if ! awk -F '\t' '
   NR == 1 || $0 == "" || $0 ~ /^#/ { next }
-  NF != 5 || $3 !~ /^(KEEP|NARROW|HIDE|DEPRECATE)$/ {
+  { rows++ }
+  NF != 5 || $1 !~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*$/ \
+    || $2 !~ /^(mod|struct|enum|union|variant|field|fn|method|trait|trait_method|const|static|type|reexport|macro)$/ \
+    || $3 !~ /^(KEEP|NARROW|HIDE|DEPRECATE)$/ || $4 == "" || $5 == "" {
     printf "check_engine_api_audit: malformed row at line %d in %s: %s\n", NR, FILENAME, $0 > "/dev/stderr"
     bad = 1
+    next
   }
-  END { exit bad }' "$AUDIT"; then
+  (($1, $2) in seen) {
+    printf "check_engine_api_audit: duplicate row for %s (%s) at lines %d and %d\n", $1, $2, seen[$1, $2], NR > "/dev/stderr"
+    bad = 1
+  }
+  { seen[$1, $2] = NR
+    side = ($3 == "KEEP" || $3 == "DEPRECATE") ? "public" : "absent"
+    if (($1 in sides) && sides[$1] != side) {
+      printf "check_engine_api_audit: conflicting rows for %s: one public, one NARROW or HIDE (line %d)\n", $1, NR > "/dev/stderr"
+      bad = 1
+    }
+    sides[$1] = side }
+  END {
+    if (rows == 0) { printf "check_engine_api_audit: no data row in %s\n", FILENAME > "/dev/stderr"; bad = 1 }
+    exit bad
+  }' "$AUDIT"; then
   exit 2
 fi
 
@@ -181,23 +134,19 @@ if [ -z "$API_FILE" ]; then
     exit 2
   fi
 fi
+[ -f "$API_FILE" ] || { echo "check_engine_api_audit: no listing at $API_FILE" >&2; exit 2; }
 [ -s "$API_FILE" ] || { echo "check_engine_api_audit: empty listing $API_FILE" >&2; exit 2; }
 
-printf '%s\n' "$SCOPE_PREFIXES" | awk 'NF' > "$WORK/scopes"
-
-# in_scope: keep the input lines whose first field is under a scope prefix.
-in_scope() {
-  awk -F '\t' 'NR == FNR { p[$1] = 1; next }
-    { for (s in p) if ($1 == s || index($1, s "::") == 1) { print; next } }' "$WORK/scopes" -
-}
-
 # Item path of each listing line: drop leading attributes, skip impl headers,
-# strip the keyword, then drop generic groups (`<...>`, nested and lifetimes), then cut at the
-# first `(`, `{`, `: ` or ` `.
-awk '{
+# strip the keyword, then drop generic groups (`<...>`, nested and lifetimes),
+# then cut at the first `(`, `{`, `: ` or ` `. #9278 A6: a `pub` line that does
+# not cut to a `trusty_memory` path, or a line that is neither `pub` nor an
+# impl header, is a parser gap: it fails closed rather than drop a path.
+if ! awk '{
   s = $0
   while (s ~ /^#\[[^]]*\] /) sub(/^#\[[^]]*\] /, "", s)
-  if (s ~ /^impl/ || s !~ /^pub /) next
+  if (s == "" || s ~ /^(unsafe )?impl/) next
+  if (s !~ /^pub /) { bad_line(); next }
   sub(/^pub /, "", s)
   sub(/^((unsafe|async|const|extern "[^"]*") )*fn /, "", s)
   sub(/^(struct|enum|union|trait|unsafe trait|type|mod|const|static|use|macro) /, "", s)
@@ -205,16 +154,24 @@ awk '{
   # `X::m`, not a collapse into the row of the type itself.
   while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
   sub(/[({].*/, "", s); sub(/: .*/, "", s); sub(/ .*/, "", s); sub(/:$/, "", s)
-  if (s ~ /^trusty_memory(::|$)/) print s
-}' "$API_FILE" | in_scope | LC_ALL=C sort -u > "$WORK/listed"
+  if (s ~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*$/) print s
+  else bad_line()
+}
+function bad_line() {
+  printf "check_engine_api_audit: unparsable listing line %d in %s: %s\n", NR, FILENAME, $0 > "/dev/stderr"
+  bad = 1
+}
+END { exit bad }' "$API_FILE" > "$WORK/paths"; then
+  exit 2
+fi
+LC_ALL=C sort -u "$WORK/paths" > "$WORK/listed"
 
 if [ ! -s "$WORK/listed" ]; then
-  echo "check_engine_api_audit: no listed path under any scope prefix in $API_FILE" >&2
+  echo "check_engine_api_audit: no trusty_memory path in $API_FILE" >&2
   exit 2
 fi
 
-awk -F '\t' 'NR > 1 && $1 !~ /^#/ && NF == 5 { print $1 "\t" $3 }' "$AUDIT" \
-  | in_scope > "$WORK/rows"
+awk -F '\t' 'NR > 1 && $0 != "" && $1 !~ /^#/ { print $1 "\t" $3 }' "$AUDIT" > "$WORK/rows"
 cut -f1 "$WORK/rows" | LC_ALL=C sort -u > "$WORK/audited"
 awk -F '\t' '$2 == "NARROW" || $2 == "HIDE" { print $1 }' "$WORK/rows" \
   | LC_ALL=C sort -u > "$WORK/absent"
