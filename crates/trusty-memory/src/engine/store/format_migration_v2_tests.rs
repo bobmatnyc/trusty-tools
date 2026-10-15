@@ -20,13 +20,14 @@ use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::format_backup::ensure_format_backup;
 use crate::engine::store::format_v0_fixture::FORMAT_0_TRIPLES;
-use crate::engine::store::kg_redb::migrate::migrate_kg_to_format;
+use crate::engine::store::kg_redb::migrate::{STEPS, migrate_kg_to_format};
 use crate::engine::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, TripleValue, encode_triple_key,
     encode_value,
 };
 use crate::engine::store::palace_format::{
-    FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, classify_with, is_format_refusal,
+    FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED, classify_with,
+    is_format_refusal,
 };
 use crate::engine::store::palace_store::PalaceStoreError;
 use redb::{ReadableDatabase, ReadableTable};
@@ -327,6 +328,13 @@ fn the_0_to_1_step_commits_nothing_unless_the_kg_is_an_intact_format_0() {
     }
 }
 
+/// #9918: one `kg.redb` step per format below the supported one, so a format
+/// bump that forgets its step fails here.
+#[test]
+fn the_step_table_has_one_step_per_older_format() {
+    assert_eq!(STEPS.len(), PALACE_FORMAT_SUPPORTED as usize);
+}
+
 /// Overwrite the `palace_format` row with 0 — a KG that changed under the
 /// gate.
 fn marker_zero(wtx: &redb::WriteTransaction) {
@@ -345,7 +353,7 @@ fn a_failed_step_does_not_advance_the_stored_format_or_remove_the_record() {
     let v1 = build_v1_with("v1-step-fails", marker_zero);
     let (dir, id) = (v1.dir(), v1.palace.id.as_str());
     for attempt in 0..2 {
-        let err = migrate(dir, id, 2, Seams::default())
+        let err = migrate(dir, id, 1, 2, Seams::default())
             .expect_err("the step refuses a KG that is not at format 1");
         assert!(
             matches!(err, PalaceStoreError::FormatMigrationFailed { .. }),
