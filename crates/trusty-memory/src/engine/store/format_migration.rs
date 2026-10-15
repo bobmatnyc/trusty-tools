@@ -487,3 +487,7 @@ mod lock_tests;
 #[cfg(test)]
 #[path = "format_migration_v2_tests.rs"]
 mod v2_tests;
+
+#[cfg(test)]
+#[path = "format_migration_chain_tests.rs"]
+mod chain_tests;
