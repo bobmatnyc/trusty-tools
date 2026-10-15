@@ -16,6 +16,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cycle_support::{Env, QuietHost, TestResult, config_at, fleet, screen};
+use trusty_architect::poller::steps::notify_macos::RecordingNotifier;
+use trusty_architect::poller::steps::usage::RecordingProbe;
 use trusty_architect::poller::{Phase, PollSession, Runner, WakeAll, load_state};
 use trusty_architect::{Clock, FakeClock};
 
@@ -32,6 +34,8 @@ fn child(root: &Path) -> TestResult {
         probe: &QuietHost,
         triage: &WakeAll,
         config: &config,
+        usage_probe: &RecordingProbe::default(),
+        notifier: &RecordingNotifier::default(),
         dry_run: false,
     };
     let (mut session, _) = PollSession::load(&config, false, clock.now_unix());

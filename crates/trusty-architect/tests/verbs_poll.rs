@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use cycle_support::{Env, QuietHost, TestResult, fleet, screen};
+use trusty_architect::poller::steps::usage::RecordingProbe;
 use trusty_architect::poller::{PollState, RunError, Sensors, TranscriptCtx, Waker, collect};
 use trusty_architect::verbs::{self, PollArgs, VerbError};
 use trusty_architect::{FakeClock, ScriptedTmux};
@@ -57,6 +58,7 @@ fn dry_run_pane_lines_match_python() -> TestResult {
         tmux: &tmux,
         probe: &QuietHost,
         config: &env.config,
+        usage_probe: &RecordingProbe::default(),
         dry_run: true,
     };
     let found = collect(
@@ -259,6 +261,7 @@ fn a_configured_supervisor_is_skipped_and_the_only_pane_woken() -> TestResult {
         tmux: &tmux,
         probe: &QuietHost,
         config: &config,
+        usage_probe: &RecordingProbe::default(),
         dry_run: true,
     };
     let mut state = PollState {

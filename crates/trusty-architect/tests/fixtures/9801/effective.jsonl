@@ -1,0 +1,6 @@
+["reset_passed_5h", {"pct5h": 0, "pctwk": 25, "reset5h": null, "resetwk": "2026-10-12T11:00:00Z", "inferred5h": true, "inferredwk": false, "stale": false, "age": 75720.0}]
+["reset_passed_week", {"pct5h": 0, "pctwk": 0, "reset5h": null, "resetwk": null, "inferred5h": true, "inferredwk": true, "stale": false, "age": 493320.0}]
+["window_not_started", {"pct5h": 0, "pctwk": 89, "reset5h": null, "resetwk": "2026-10-12T15:00:00Z", "inferred5h": false, "inferredwk": false, "stale": false, "age": 780.0}]
+["no_reset_over_5h", {"pct5h": 0, "pctwk": 89, "reset5h": null, "resetwk": null, "inferred5h": true, "inferredwk": false, "stale": false, "age": 23400.0}]
+["null_pct_over_5h", {"pct5h": 0, "pctwk": null, "reset5h": null, "resetwk": null, "inferred5h": true, "inferredwk": false, "stale": false, "age": 23400.0}]
+["stale_day_old", {"pct5h": 12.5, "pctwk": 30.0, "reset5h": "2026-10-10T00:00:00Z", "resetwk": "2026-10-12T00:00:00Z", "inferred5h": false, "inferredwk": false, "stale": true, "age": 196200.0}]

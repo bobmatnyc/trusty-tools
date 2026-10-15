@@ -1,0 +1,4 @@
+["Architect watchdog", "[tm-architect]: architect_dead: no pane for tm-architect", ["osascript", "-e", "display notification \"[tm-architect]: architect_dead: no pane for tm-architect\" with title \"Architect watchdog\""], [["capture_output", true], ["timeout", 10]]]
+["Architect watchdog", "say \"hi\" then C:\\temp\\x and \\\"both\\\"", ["osascript", "-e", "display notification \"say \\\"hi\\\" then C:\\\\temp\\\\x and \\\\\\\"both\\\\\\\"\" with title \"Architect watchdog\""], [["capture_output", true], ["timeout", 10]]]
+["T\"i\\tle", "café ❯ 📅 done", ["osascript", "-e", "display notification \"café ❯ 📅 done\" with title \"T\\\"i\\\\tle\""], [["capture_output", true], ["timeout", 10]]]
+["", "", ["osascript", "-e", "display notification \"\" with title \"\""], [["capture_output", true], ["timeout", 10]]]

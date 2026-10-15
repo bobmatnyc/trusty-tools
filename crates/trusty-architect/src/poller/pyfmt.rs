@@ -33,6 +33,38 @@ pub(crate) fn py_float_repr(x: f64) -> String {
     if s.contains('.') { s } else { format!("{s}.0") }
 }
 
+/// Python's `format(x, "g")`: six significant digits, trailing zeros and a
+/// bare point dropped, the exponent form (`e+08`, `e-05`) outside
+/// `1e-4 <= |x| < 1e6` after rounding (#9801, the usage alert text).
+pub(crate) fn py_g(x: f64) -> String {
+    const P: i32 = 6;
+    if x.is_nan() {
+        return "nan".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf" } else { "-inf" }.to_owned();
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0" } else { "0" }.to_owned();
+    }
+    let sci = format!("{x:.*e}", (P - 1) as usize);
+    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let trim = |s: &str| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    if (-4..P).contains(&exp) {
+        trim(&format!("{x:.*}", (P - 1 - exp) as usize))
+    } else {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", trim(mant), exp.abs())
+    }
+}
+
 /// Removes `_` between two digits, as Python's number parsers allow; any
 /// other `_` is kept so the parse fails.
 fn drop_digit_underscores(s: &str) -> String {
@@ -83,6 +115,26 @@ mod tests {
         ];
         for (x, want) in cases {
             assert_eq!(py_float_repr(x), want, "{x}");
+        }
+    }
+
+    /// Expected values printed by Python 3.14 `format(x, "g")`.
+    #[test]
+    fn py_g_matches_python() {
+        let cases = [
+            (84.0, "84"),
+            (12.5, "12.5"),
+            (91.75, "91.75"),
+            (1e-5, "1e-05"),
+            (123_456_789.0, "1.23457e+08"),
+            (999_999.5, "1e+06"),
+            (0.0001, "0.0001"),
+            (100.000_000_000_01, "100"),
+            (-0.0, "-0"),
+            (27.0, "27"),
+        ];
+        for (x, want) in cases {
+            assert_eq!(py_g(x), want, "{x}");
         }
     }
 

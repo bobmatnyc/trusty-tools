@@ -229,3 +229,65 @@ pub enum RunError {
     #[error("poller configuration has problems: {0}")]
     BadConfig(String),
 }
+
+/// Why the usage step produced no reading or no alerts (#9801). Each message
+/// starts with the Python exception the prototype raises in the same case.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum UsageError {
+    /// A time that `datetime.fromisoformat` would reject, or one without a
+    /// UTC offset (the prototype reads that as host-local time; the port
+    /// refuses it).
+    #[error("ValueError: not an ISO time with a UTC offset: {0:?}")]
+    BadTime(String),
+    /// A time outside `datetime`'s years 1-9999, or an infinite span.
+    #[error("OverflowError: date value out of range")]
+    OutOfRange,
+    /// A ledger or state value of the wrong JSON type.
+    #[error("TypeError: {key} is {value}, not {want}")]
+    WrongType {
+        /// The key read.
+        key: String,
+        /// The JSON found.
+        value: String,
+        /// What was wanted (`a number`, `a string`, `an object`).
+        want: &'static str,
+    },
+    /// The ledger is not UTF-8.
+    #[error("UnicodeDecodeError: {0} is not UTF-8")]
+    NotUtf8(std::path::PathBuf),
+    /// A ledger append failed.
+    #[error("OSError: {what} {path}: {source}")]
+    Io {
+        /// What was being done.
+        what: &'static str,
+        /// The file.
+        path: std::path::PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Why a macOS notification was not shown (#9801).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum NotifyError {
+    /// `osascript` could not be started.
+    #[error("osascript could not start: {0}")]
+    Spawn(#[source] std::io::Error),
+    /// `osascript` did not finish in time; it was killed and reaped.
+    #[error("osascript timed out after {0:?}")]
+    Timeout(std::time::Duration),
+    /// Waiting on `osascript` failed; it was killed and reaped.
+    #[error("osascript wait failed: {0}")]
+    Wait(#[source] std::io::Error),
+    /// `osascript` ran and exited non-zero.
+    #[error("osascript exit {code:?}: {stderr}")]
+    Failed {
+        /// The exit code, or `None` when a signal ended it.
+        code: Option<i32>,
+        /// Its stderr, trimmed.
+        stderr: String,
+    },
+}
