@@ -1,15 +1,15 @@
-//! The palace format N-1 → N migration, run lazily at a writer-intent open
-//! (#9274; the 1 → 2 step since #9275).
+//! The palace format migration, run lazily at a writer-intent open (#9274;
+//! the 1 → 2 step since #9275, chained from any older format since #9918).
 //!
-//! Why: ADR-0067 D3 rules 2–4. A palace one format behind is migrated by its
+//! Why: ADR-0067 D3 rules 2–4. A palace behind this format is migrated by its
 //! first writer-intent open — the daemon's startup hydration opens every palace
 //! that way (ADR-0067 Consequences). The migration may not write
 //! until a verified backup exists, and a crash or error at any step must leave
-//! the palace either at N-1 or at N — never opened half-done. N-1 only: a
-//! palace two or more behind is refused `FormatTooOld` (D3 rule 2, D7).
+//! the palace at the format of its last committed step — never opened
+//! half-done. #9918: a palace several formats behind runs every step in order.
 //! What: [`open_gate`] classifies the palace (`palace_format::classify_with`).
 //! A current palace opens; a writer also rewrites a missing or lower mirror.
-//! A palace one behind is refused under read-only intent and migrated under
+//! A palace behind is refused under read-only intent and migrated under
 //! writer intent, in idempotent steps, one migration of a palace at a time
 //! (`format_migration_lock`):
 //! 1. backup — free-space check, copy, verify, manifest written last
@@ -19,13 +19,15 @@
 //!    migration record, naming that backup, fsynced and renamed into place;
 //! 3. the `palace.json` mirror, written before the marker so an older binary
 //!    refuses the palace from the moment the first palace byte changes;
-//! 4. the `kg.redb` step — for 1 → 2 a guarded stamp of both markers in one
-//!    redb transaction, the commit point (`kg_redb::migrate`); the vector
-//!    index is not touched and nothing is re-embedded;
+//! 4. the `kg.redb` step — guarded, its table work and both markers in one
+//!    redb transaction, that step's commit point (`kg_redb::migrate`); the
+//!    vector index is not touched and nothing is re-embedded; #9918: steps 3–4
+//!    repeat for each format from the one `kg.redb` holds up to this one;
 //! 5. the record is removed, then `kg.redb` is released.
 //!
 //! A record on disk means "resume": the next writer open re-runs steps 3–5 on
-//! the files as they are, behind the backup the record names, after checking
+//! the files as they are, from the format `kg.redb` holds, behind the backup
+//! the record names, after checking
 //! that backup still verifies. Any failure leaves the palace refused, never
 //! opened un-migrated.
 //! Test: format_migration_tests.rs, starting with
@@ -205,7 +207,9 @@ fn verify_kg_for_writer(kg_path: &Path, palace: &str, to: u32) -> anyhow::Result
 /// so a newer, unreadable or held KG fails the migration with no record left.
 /// #9918: one backup and one record cover the chain; a failed step is
 /// `FormatMigrationFailed` for that step and stops it.
-/// Test: `a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes`,
+/// Test: `a_format_0_palace_migrates_to_2_at_first_writer_open`,
+/// `a_fault_between_chain_steps_leaves_a_resumable_palace`,
+/// `a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes`,
 /// `a_blocked_backup_aborts_before_any_palace_byte_changes`,
 /// `two_writer_opens_in_one_process_migrate_a_palace_once`,
 /// `a_failed_step_does_not_advance_the_stored_format_or_remove_the_record`.
@@ -331,15 +335,17 @@ fn open_kg(
 
 /// A resumed migration must name this palace, this move, and a backup that
 /// still verifies against its own manifest (PR2 critic MEDIUM, #9274).
-///
-/// Test: `a_resume_refuses_a_record_whose_backup_no_longer_verifies`.
+/// #9918: a record may end below `to` (0.33.x's 0 → 1); its backup predates
+/// every step, so the chain resumes behind it.
+/// Test: `a_resume_refuses_a_record_whose_backup_no_longer_verifies`,
+/// `a_stale_0_to_1_record_is_resumed_by_the_chain`.
 fn check_resume(
     record: &MigrationRecord,
     palace: &str,
     from: u32,
     to: u32,
 ) -> std::result::Result<(), String> {
-    if record.palace != palace || record.from != from || record.to != to {
+    if record.palace != palace || record.from != from || !(from..=to).contains(&record.to) {
         return Err(format!(
             "the migration record names palace {} format {} -> {}",
             record.palace, record.from, record.to
@@ -347,7 +353,7 @@ fn check_resume(
     }
     let manifest = verify_backup(&record.backup)
         .map_err(|e| format!("the backup the migration record names does not verify: {e}"))?;
-    if manifest.palace != palace || manifest.from != from || manifest.to != to {
+    if manifest.palace != palace || manifest.from != from || manifest.to != record.to {
         return Err(format!(
             "backup {} belongs to palace {} format {} -> {}",
             record.backup.display(),
@@ -487,3 +493,7 @@ mod lock_tests;
 #[cfg(test)]
 #[path = "format_migration_v2_tests.rs"]
 mod v2_tests;
+
+#[cfg(test)]
+#[path = "format_migration_chain_tests.rs"]
+mod chain_tests;
