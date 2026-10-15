@@ -44,6 +44,41 @@ granted value. The
 [crate README](../../crates/trusty-secrets/README.md) lists what each adds and
 has a library example.
 
+## Sync targets
+
+A sync target is a remote place that receives secret values and never gives
+them back. The local store stays the source. A sync target is write-only,
+never read back, never a configured backend, and never swept by `delete`.
+Design: [DOC-74](../specs/DOC-74-secrets-integration.md) section 15.4.
+
+Today there is one: `github-actions`. It is provisional. No test has run
+against a real repository, so the `gh` messages are not yet confirmed
+([#9069](https://github.com/bobmatnyc/trusty-tools/issues/9069)). A Vercel
+target is in progress and is not described here.
+
+Push named keys into the Actions secrets of a repository:
+
+```bash
+tm secrets copy --from <local> --to github-actions KEY_ONE KEY_TWO
+```
+
+| Rule | Behaviour |
+|---|---|
+| Keys | A key list is required. An empty list fails with `invalid_params`. |
+| Repository | The `github.com/<owner>/<repo>` of the checkout's `origin` remote. A vault override changes where keys are read from, never the repository. |
+| Enabling | Only the account's own machine config section `secrets.github_actions` enables the target. A tracked project file with a `github_actions:` section is refused. A sandboxed server opens no sync target. |
+| Login | `gh` uses its own stored login. Inherited `GH_*`, `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` variables are removed. A signed-out `gh` fails with `backend_locked` and nothing is pushed. |
+| Value | The value reaches `gh secret set` on stdin only. It is never an argument. |
+| Agents | A caller with a Claude Code ancestor is refused with `agent_use_refused`, whatever the key's "agents may use" flag says. |
+| Key names | `[A-Za-z0-9_]`, not starting with a digit or `GITHUB_`. GitHub stores them uppercased. |
+
+The reply lists `copied` and `failed` keys. A key is `copied` only when the
+secret's `updated_at` advanced after the push; exit status 0 alone does not
+count. A failed key is listed in `failed` and the next key still runs.
+
+The server writes one audit record per key, and one denial for a refusal
+before any key moves. If the audit log cannot be opened, nothing is pushed.
+
 ## Safety rules
 
 - No part of the crate prints or logs a secret value.
