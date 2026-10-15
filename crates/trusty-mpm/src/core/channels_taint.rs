@@ -17,8 +17,9 @@
 //! `managed/<managed_id>.seen` lists every Claude id a SessionStart reported
 //! for the session: [`reapply`] appends before it reads the mark, and
 //! [`taint_managed_session`] reads it after it writes the mark, so one of the
-//! two always taints a new id (#9877). Each taint record carries its
-//! own workspace scope, which a retire's hand-off keeps (C1). Only [`retire`]
+//! two always taints a new id (#9877); an id no SessionStart reported is
+//! tainted by the egress guard through [`taint_covered`] (#9923). Each taint
+//! record carries its own workspace scope, which a retire's hand-off keeps (C1). Only [`retire`]
 //! removes either, when the managed session ends; no timer exists. The
 //! verdict reads presence only: absent is untainted, and every other outcome,
 //! including an unreadable or malformed file and a bad id, is tainted.
@@ -547,34 +548,10 @@ pub fn presence(dir: &Path) -> Presence {
     seen
 }
 
-/// The managed session whose mark covers a `SessionStart` at `cwd` (D09).
-///
-/// Why (critic HIGH 2): the hook settles an unconfirmed `SessionStart` from
-/// the user tier, so a taint must reach only the sessions of its own
-/// workspace, and the record it writes must name a managed session whose
-/// retire removes it.
-/// What: reads each `managed/<id>.json` in id order; the first mark that
-/// [`TaintMark::covers`] the canonical `cwd` names its id. A mark that cannot
-/// be read covers every cwd. A listing error is [`Cover::Unknown`].
-/// Test: `covering_mark_follows_the_workspace_and_fails_closed`.
-pub fn covering_mark(dir: &Path, cwd: Option<&Path>) -> Cover {
-    let Ok(names) = entry_names(&dir.join(MANAGED_DIR)) else {
-        return Cover::Unknown;
-    };
-    let cwd = cwd.map(|cwd| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
-    for managed in names.iter().filter_map(|name| json_stem(name)) {
-        let covers = match managed_mark(dir, managed) {
-            Ok(Some(mark)) => mark.covers(cwd.as_deref()),
-            // Retired between the listing and the read.
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        if covers {
-            return Cover::Managed(managed.to_owned());
-        }
-    }
-    Cover::None
-}
+// #9923: split out to keep this file under the SLOC cap.
+#[path = "channels_taint_cover.rs"]
+mod cover;
+pub use cover::{covering_mark, taint_covered};
 
 /// One listed taint file: its path, and its record or why it is unreadable.
 pub type ListedTaint = (PathBuf, Result<TaintRecord, String>);

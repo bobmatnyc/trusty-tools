@@ -44,6 +44,7 @@ use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_trust_anchor::{HookEnv, TRUST_ANCHOR_RULE, evaluate};
 use trusty_mpm::core::channels_readiness::{NotReady, policy_ready};
 use trusty_mpm::core::config::MpmConfig;
+use trusty_mpm::core::session_profile;
 
 /// The deny reason printed when the guard panics.
 const PANIC_REASON: &str = "tm hook --egress-guard failed while deciding this tool call, so \
@@ -246,13 +247,15 @@ enum TaintStep<'a> {
 
 /// The taint arm up to the readiness gate: a deny stands, an allow of a
 /// readable payload that [`taint_verdict`] refuses needs the policy.
+/// #9923: `launch` is the session's launch directory, `None` when unknown.
 fn taint_step<'a>(
     first: Verdict,
     read: &'a Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
+    launch: Option<&std::path::Path>,
 ) -> TaintStep<'a> {
     match (first, read) {
-        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home) {
+        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home, launch) {
             None => TaintStep::Done(Verdict::Allow),
             Some(taint) => TaintStep::Policy { payload, taint },
         },
@@ -290,9 +293,10 @@ pub(crate) fn with_taint(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
+    launch: Option<&std::path::Path>,
     ready: impl FnOnce() -> Result<(), NotReady>,
 ) -> Verdict {
-    match taint_step(first, read, home) {
+    match taint_step(first, read, home, launch) {
         TaintStep::Done(verdict) => verdict,
         TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready()),
     }
@@ -310,12 +314,13 @@ pub(crate) async fn with_taint_async<F>(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
+    launch: Option<&std::path::Path>,
     ready: impl FnOnce() -> F,
 ) -> Verdict
 where
     F: std::future::Future<Output = Result<(), NotReady>>,
 {
-    match taint_step(first, read, home) {
+    match taint_step(first, read, home, launch) {
         TaintStep::Done(verdict) => verdict,
         TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready().await),
     }
@@ -353,10 +358,13 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let anchor = |payload: &serde_json::Value| evaluate(payload, &env, MpmConfig::load_default);
     let first = verdict(&read, &FamilyTable::builtin(), anchor);
     let home = env.home.as_deref();
+    // #9923 (Architect Q10): the launch directory, which a `cd` does not move.
+    let launch = session_profile::hook_project_dir(env.project_dir.clone());
     // #9741: the policy loads under the same home the taint is read from.
     // #8454 VC: the daemon's verdict first; the inline load where none is served.
     let ready = || cached_policy_ready(url, home, || policy_ready(home));
-    let Verdict::Deny { check, reason } = with_taint_async(first, &read, home, ready).await else {
+    let verdict = with_taint_async(first, &read, home, launch.as_deref(), ready).await;
+    let Verdict::Deny { check, reason } = verdict else {
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.
