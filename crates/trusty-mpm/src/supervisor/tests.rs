@@ -224,6 +224,7 @@ async fn seed_sessions(
         let id = ManagedSessionId::new();
         let tmux_name = format!("tmpm-fleet-{i}");
         let rec = SessionRecord {
+            context_usage: None,
             id,
             // #9101: bound to the fake's pane for this name, on its server.
             pane_id: Some(fake_pane(&tmux_name)),
@@ -456,6 +457,7 @@ fn env_bool_recognizes_truthy_and_falsy() {
 
 fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-x".into(),
         cwd: PathBuf::from("/tmp"),

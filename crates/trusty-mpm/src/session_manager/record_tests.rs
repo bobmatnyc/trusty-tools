@@ -33,6 +33,7 @@ fn state_display() {
 #[test]
 fn record_serde_round_trip() {
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-quiet-falcon".into(),
         cwd: PathBuf::from("/tmp/project"),
@@ -77,6 +78,7 @@ fn stopped_state_survives_serde() {
     // Why: reconciliation persists Stopped state; this guards the serde
     // round-trip for the new variant.
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -119,6 +121,7 @@ fn stopped_state_survives_serde() {
 fn decommissioned_state_survives_serde() {
     // Why: tombstone records for decommissioned sessions must survive restarts.
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-gone".into(),
         cwd: PathBuf::from("/tmp"),
@@ -186,6 +189,7 @@ fn record_round_trips_tcode_runtime() {
     // Why: a tcode-backed session must persist its runtime so `resume`
     // re-spawns on tcode, not claude-code.
     let mut record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-tcode".into(),
         cwd: PathBuf::from("/tmp"),
@@ -257,6 +261,7 @@ fn record_round_trips_ephemeral_true() {
     // Why (#1508): a session tagged ephemeral at creation must persist the flag
     // so the bulk-teardown + age-based reap paths can later target it.
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-ephemeral".into(),
         cwd: PathBuf::from("/tmp"),
@@ -358,6 +363,7 @@ fn record_round_trips_scrollback_fields() {
     // Why (#1816): records written after idle auto-stop must persist both
     // scrollback_path and last_cwd so resume can restore context.
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-snap".into(),
         cwd: PathBuf::from("/home/user/project"),
@@ -404,6 +410,7 @@ fn record_round_trips_workspace_owned_true() {
     // Why (#1511): a clone-provisioned session must persist workspace_owned=true
     // so decommission knows it is safe to remove the workspace.
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-clone".into(),
         cwd: PathBuf::from("/managed/root/owner/repo/abc"),
@@ -478,6 +485,7 @@ fn record_round_trips_deliverable_id() {
     // must persist the link so `resume`/`ls`/`status` all see it.
     let did = crate::deliverable::DeliverableId::new();
     let record = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-bound".into(),
         cwd: PathBuf::from("/tmp"),
@@ -549,6 +557,7 @@ fn record_round_trips_worktree_owner() {
     // can resolve ownership from the registry without a disk read.
     let owner = ManagedSessionId::new();
     let record = SessionRecord {
+        context_usage: None,
         id: owner,
         tmux_name: "tmpm-owned".into(),
         cwd: PathBuf::from("/tmp"),
@@ -694,6 +703,7 @@ fn a_stopped_leaked_test_adoption_is_never_auto_resumable() {
 /// Build a minimal Active record for the `set_lifecycle_state` cases.
 fn terminal_fixture() -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-terminal-fixture".into(),
         cwd: PathBuf::from("/tmp"),

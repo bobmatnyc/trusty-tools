@@ -560,6 +560,7 @@ mod tests {
 
     fn make_record(id: ManagedSessionId) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id,
             tmux_name: format!("tmpm-test-{id}"),
             cwd: PathBuf::from("/tmp"),
@@ -645,6 +646,7 @@ mod tests {
     /// transition straight to disk (simulating an out-of-process write).
     fn make_record_with_state(id: ManagedSessionId, state: ManagedSessionState) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             state,
             ..make_record(id)
         }

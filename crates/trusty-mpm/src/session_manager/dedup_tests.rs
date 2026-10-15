@@ -51,6 +51,7 @@ fn rec(
 ) -> SessionRecord {
     let created = Utc::now();
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: ws_path

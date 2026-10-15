@@ -9,13 +9,55 @@
 //! `pending_decisions`, last-activity timestamp, and cumulative supervisor run
 //! stats) and [`PendingDecision`]; [`FleetMetrics::from_records`] derives the
 //! per-state snapshot from a slice of [`SessionRecord`]s.
+//! #8394 adds each live session's latest context figures and one account-wide
+//! plan value, read from the statusline's per-session store by
+//! [`attach_context_usage`].
 //! Test: `metrics_counts_by_state`, `metrics_surfaces_pending_decisions`,
-//! `metrics_last_activity_is_max` in `super::tests`.
+//! `metrics_last_activity_is_max` in `super::tests`; the #8394 fields in
+//! `metrics_context_tests.rs`.
+
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::core::context_usage::{ContextUsage, PlanUsage, read_context_usage};
 use crate::session_manager::{ManagedSessionState, SessionRecord};
+
+/// One live session's latest context figures, as [`FleetMetrics`] reports them
+/// (#8394).
+///
+/// Why: the poller keys its view by the tmux name it already shows.
+/// What: the managed id, the tmux name, and the attached [`ContextUsage`].
+/// Test: `fleet_metrics_report_each_live_sessions_context`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionContextUsage {
+    /// Stringified managed session id.
+    pub session_id: String,
+    /// Friendly tmux name for the session.
+    pub tmux_name: String,
+    /// The session's latest reading.
+    pub context: ContextUsage,
+}
+
+/// Attach each record's latest context reading from `root`'s usage store
+/// (#8394).
+///
+/// Why: the figures live in the statusline's per-session file, keyed by the
+/// Claude session id, not in the session store; a reader that wants them on
+/// [`SessionRecord::context_usage`] calls this on its own copy of the records.
+/// What: sets `context_usage` to [`read_context_usage`] for the record's
+/// `claude_session_id` (stale mark computed at `now`), or `None` when the
+/// record has no Claude session id or no reading exists. Never writes.
+/// Test: `attach_reads_the_reading_keyed_by_claude_session_id`.
+pub fn attach_context_usage(records: &mut [SessionRecord], root: &Path, now: DateTime<Utc>) {
+    for r in records {
+        r.context_usage = r
+            .claude_session_id
+            .as_deref()
+            .and_then(|id| read_context_usage(root, id, now));
+    }
+}
 
 /// A pending decision surfaced (not answered) by the supervisor.
 ///
@@ -77,9 +119,11 @@ pub struct SupervisorRunStats {
 /// What: per-[`ManagedSessionState`] counts, the total, the surfaced
 /// `pending_decisions`, the maximum `last_activity_at` across the fleet, and the
 /// supervisor's [`SupervisorRunStats`].
+/// #8394: plus each live session's latest context figures and the newest
+/// account-wide plan figures. Not `Eq`, since those figures are `f64`.
 /// Test: `metrics_counts_by_state`, `metrics_surfaces_pending_decisions`,
-/// `metrics_last_activity_is_max`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `metrics_last_activity_is_max`, `fleet_metrics_report_each_live_sessions_context`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FleetMetrics {
     /// Sessions in `provisioning`.
     pub provisioning: u64,
@@ -99,6 +143,14 @@ pub struct FleetMetrics {
     pub last_activity_at: Option<DateTime<Utc>>,
     /// The supervisor's own cumulative run statistics.
     pub run_stats: SupervisorRunStats,
+    /// #8394: every non-terminal session with an attached context reading.
+    /// `#[serde(default)]` loads an older snapshot as empty.
+    #[serde(default)]
+    pub context_usage: Vec<SessionContextUsage>,
+    /// #8394: the plan figures from the newest reading that carried any. Plan
+    /// limits are account-wide, so one value stands for the fleet.
+    #[serde(default)]
+    pub plan_usage: Option<PlanUsage>,
 }
 
 impl FleetMetrics {
@@ -111,9 +163,11 @@ impl FleetMetrics {
     /// carrying a `pending_decision` into a [`PendingDecision`] (else an `Active`
     /// record's classifier `blocked_prompt`, #8393), and tracks the
     /// maximum `last_activity_at`. Leaves `run_stats` at its default — the caller
-    /// overlays the supervisor's live counters.
+    /// overlays the supervisor's live counters. #8394: copies each non-terminal
+    /// record's attached `context_usage` (see [`attach_context_usage`]) and keeps
+    /// the plan figures with the newest `updated_at` as `plan_usage`.
     /// Test: `metrics_counts_by_state`, `metrics_surfaces_pending_decisions`,
-    /// `metrics_last_activity_is_max`.
+    /// `metrics_last_activity_is_max`, `fleet_metrics_report_each_live_sessions_context`.
     pub fn from_records(records: &[SessionRecord]) -> Self {
         let mut m = FleetMetrics {
             total: records.len() as u64,
@@ -161,7 +215,26 @@ impl FleetMetrics {
                     _ => ts,
                 });
             }
+            // #8394: a tombstone's figures are not fleet state.
+            if let Some(ctx) = r.context_usage.as_ref().filter(|_| !r.state.is_terminal()) {
+                if let Some(plan) = ctx.plan.as_ref()
+                    && m.plan_usage
+                        .as_ref()
+                        .is_none_or(|cur| plan.updated_at > cur.updated_at)
+                {
+                    m.plan_usage = Some(plan.clone());
+                }
+                m.context_usage.push(SessionContextUsage {
+                    session_id: r.id.to_string(),
+                    tmux_name: r.tmux_name.clone(),
+                    context: ctx.clone(),
+                });
+            }
         }
         m
     }
 }
+
+#[cfg(test)]
+#[path = "metrics_context_tests.rs"]
+mod context_tests;

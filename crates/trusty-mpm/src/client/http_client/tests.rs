@@ -207,6 +207,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
     let target = ManagedSessionId::new();
     for id in [sibling, target] {
         let record = SessionRecord {
+            context_usage: None,
             id,
             tmux_name: format!("tm-7877-client-{id}"),
             cwd: shared.clone(),

@@ -686,6 +686,7 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
 
     let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
     let existing = super::record::SessionRecord {
+        context_usage: None,
         id: super::record::ManagedSessionId::new(),
         tmux_name: "tm-known-01".into(),
         cwd: workspace.path().to_path_buf(),

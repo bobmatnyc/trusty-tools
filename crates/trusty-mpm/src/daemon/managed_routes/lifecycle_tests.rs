@@ -121,6 +121,7 @@ fn stub_record(
     tmux_name: &str,
 ) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.to_owned(),
         cwd: std::path::PathBuf::from("/tmp/project"),

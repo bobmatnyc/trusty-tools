@@ -141,6 +141,8 @@ pub mod config_keys;
 pub mod connect;
 // #9011: the agent roster and harness docs resolve from content here.
 pub mod content_source;
+// #8394: a session's latest context-window and plan figures, from the statusline.
+pub mod context_usage;
 // #9012: skills, instructions, output styles and SM instructions from content.
 pub mod daemon_identity;
 pub mod delegation_authority;
