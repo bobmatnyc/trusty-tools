@@ -138,8 +138,9 @@ fn slug_with_endpoint(method: &str, slug: &str) -> String {
 /// [`slug_with_endpoint`], leaving the slug itself as the leading token and
 /// every other variant untouched.
 /// Test: `tests/tools_http.rs::canvas_create_surfaces_slack_api_error`,
-/// `::canvas_create_channel_endpoint_error_names_the_endpoint`.
-fn with_endpoint(method: &str, err: SlackError) -> ToolCallError {
+/// `::canvas_create_channel_endpoint_error_names_the_endpoint`,
+/// `tests/slack_list_http.rs::files_info_error_names_the_method`.
+pub(super) fn with_endpoint(method: &str, err: SlackError) -> ToolCallError {
     match err {
         SlackError::Api(slug) => {
             ToolCallError::from(SlackError::Api(slug_with_endpoint(method, &slug)))
@@ -368,7 +369,11 @@ pub(super) async fn update_canvas(
 pub(super) async fn read_canvas(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let canvas_id = require_str(&args, "canvas_id")?;
     let body = json!({ "file": canvas_id.as_str() });
-    let resp = client.call_method(FILES_INFO, &body).await?;
+    // #9919: name the method so a bare `invalid_arguments` is diagnosable.
+    let resp = client
+        .call_method(FILES_INFO, &body)
+        .await
+        .map_err(|e| with_endpoint(FILES_INFO, e))?;
     let file = resp.get("file").cloned().unwrap_or(Value::Null);
     let title = field_str(&file, "title");
     let download_url = file
