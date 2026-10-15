@@ -1,0 +1,2 @@
+Changed
+- The palace format migration runs one `kg.redb` step per format, from the format `kg.redb` holds up to the supported one, and the 0 -> 1 triple-key rewrite that 0.35.0 removed is restored as the first step. Each step refuses a KG whose markers do not name the format it moves from, or that holds an undecodable legacy row, and commits nothing when it refuses ([#9918](https://github.com/bobmatnyc/trusty-tools/issues/9918))

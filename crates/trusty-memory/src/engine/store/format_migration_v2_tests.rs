@@ -12,18 +12,22 @@
 
 use super::tests::{
     Fixture, build_v0, build_v1, build_v1_with, hash_tree, interrupt_after, marker, mirror, open,
+    write_format_0_palace_with,
 };
 use super::{Seams, migrate};
 use crate::engine::palace::{Drawer, Palace, PalaceId};
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::format_backup::ensure_format_backup;
-use crate::engine::store::kg_redb::migrate::migrate_kg_to_format;
+use crate::engine::store::format_v0_fixture::FORMAT_0_TRIPLES;
+use crate::engine::store::kg_redb::migrate::{STEPS, migrate_kg_to_format};
 use crate::engine::store::kg_store::{
-    KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, encode_value,
+    KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, TripleValue, encode_triple_key,
+    encode_value,
 };
 use crate::engine::store::palace_format::{
-    FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, classify_with, is_format_refusal,
+    FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED, classify_with,
+    is_format_refusal,
 };
 use crate::engine::store::palace_store::PalaceStoreError;
 use redb::{ReadableDatabase, ReadableTable};
@@ -125,10 +129,14 @@ fn a_stale_0_to_1_record_is_refused_as_too_old() {
     }
 }
 
-/// Every `kg_schema` row, raw.
+/// Every `kg_schema` row, raw; none when the table does not exist.
 fn schema_rows(db: &redb::Database) -> BTreeMap<String, Vec<u8>> {
     let rtx = db.begin_read().expect("read txn");
-    let t = rtx.open_table(KG_SCHEMA).expect("kg_schema");
+    let t = match rtx.open_table(KG_SCHEMA) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return BTreeMap::new(),
+        Err(e) => panic!("kg_schema: {e}"),
+    };
     t.iter()
         .expect("iter")
         .map(|r| {
@@ -211,6 +219,122 @@ fn the_1_to_2_step_commits_nothing_when_the_stored_format_is_not_1() {
     );
 }
 
+/// Every TRIPLES row of a KG, raw.
+fn triple_rows(db: &redb::Database) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let rtx = db.begin_read().expect("read txn");
+    let t = rtx.open_table(TRIPLES).expect("triples");
+    let rows = t.iter().expect("iter").map(|r| r.expect("row"));
+    rows.map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
+        .collect()
+}
+
+/// Extra writes a fixture runs inside its KG write transaction.
+type KgExtra = fn(&redb::WriteTransaction);
+
+/// A v0-fixture KG in `dir`, with `extra` run in its write transaction.
+fn v0_kg(dir: &Path, extra: KgExtra) -> redb::Database {
+    write_format_0_palace_with(dir, "v0-step", extra).expect("v0 palace");
+    trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg")
+}
+
+/// Write `kg_schema[key] = v`.
+fn put_schema(wtx: &redb::WriteTransaction, key: &str, v: u32) {
+    let mut t = wtx.open_table(KG_SCHEMA).expect("kg_schema");
+    t.insert(key, version(v).as_slice()).expect("row");
+}
+
+/// A legacy TRIPLES row whose key does not decode: subject length 9, 5 bytes.
+fn bad_legacy_row(wtx: &redb::WriteTransaction) {
+    let mut t = wtx.open_table(TRIPLES).expect("triples");
+    let value = TripleValue {
+        object: "x".into(),
+        valid_from_ms: 1_700_000_000_000,
+        valid_to_ms: None,
+        confidence: 1.0,
+        provenance: None,
+    };
+    let bytes = encode_value(&value).expect("encode");
+    t.insert(&b"\x00\x09short"[..], bytes.as_slice())
+        .expect("row");
+}
+
+/// #9918: the 0 → 1 step rewrites every legacy triple key, active and
+/// `hist:`, to the #4810 key and stamps both markers at 1 in one commit; the
+/// 1 → 2 step then runs on its result.
+#[test]
+fn the_0_to_1_step_rewrites_legacy_keys_and_stamps_format_1() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = v0_kg(dir.path(), |_| {});
+    migrate_kg_to_format(&db, 1).expect("the 0 -> 1 step");
+    assert_eq!(
+        schema_rows(&db).get(KG_SCHEMA_PALACE_FORMAT),
+        Some(&version(1))
+    );
+    assert_eq!(
+        schema_rows(&db).get(KG_SCHEMA_TRIPLE_KEY),
+        Some(&version(1))
+    );
+    let want: Vec<Vec<u8>> = FORMAT_0_TRIPLES
+        .iter()
+        .map(|(s, p, o, valid_to)| {
+            let key = encode_triple_key(s, p, o);
+            match valid_to {
+                None => key,
+                Some(_) => [
+                    b"hist:".as_slice(),
+                    &key,
+                    &1_700_000_000_000i64.to_be_bytes(),
+                ]
+                .concat(),
+            }
+        })
+        .collect();
+    let got: Vec<Vec<u8>> = triple_rows(&db).into_keys().collect();
+    assert_eq!(got.len(), want.len(), "one row in, one row out");
+    assert!(want.iter().all(|k| got.contains(k)), "{got:?}");
+    migrate_kg_to_format(&db, 2).expect("the 1 -> 2 step follows");
+}
+
+/// #9918 (Fail-Open Check): the 0 → 1 step fails, and commits nothing, on a
+/// KG that is not an intact format 0: a `palace_format` row of any value, an
+/// unknown triple-key marker, or a legacy row that does not decode.
+#[test]
+fn the_0_to_1_step_commits_nothing_unless_the_kg_is_an_intact_format_0() {
+    let cases: [(&str, KgExtra, &str); 4] = [
+        (
+            "format 0",
+            |w| put_schema(w, KG_SCHEMA_PALACE_FORMAT, 0),
+            "palace_format marker is 0",
+        ),
+        (
+            "format 1",
+            |w| put_schema(w, KG_SCHEMA_PALACE_FORMAT, 1),
+            "palace_format marker is 1",
+        ),
+        (
+            "triple key 2",
+            |w| put_schema(w, KG_SCHEMA_TRIPLE_KEY, 2),
+            "triple-key marker is 2",
+        ),
+        ("bad row", bad_legacy_row, "legacy key does not decode"),
+    ];
+    for (name, extra, reason) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = v0_kg(dir.path(), extra);
+        let before = (schema_rows(&db), triple_rows(&db));
+        let err = migrate_kg_to_format(&db, 1).expect_err(name);
+        assert!(format!("{err:#}").contains(reason), "{name}: {err:#}");
+        assert_eq!(before, (schema_rows(&db), triple_rows(&db)), "{name}");
+    }
+}
+
+/// #9918: one `kg.redb` step per format below the supported one, so a format
+/// bump that forgets its step fails here.
+#[test]
+fn the_step_table_has_one_step_per_older_format() {
+    assert_eq!(STEPS.len(), PALACE_FORMAT_SUPPORTED as usize);
+}
+
 /// Overwrite the `palace_format` row with 0 — a KG that changed under the
 /// gate.
 fn marker_zero(wtx: &redb::WriteTransaction) {
@@ -219,16 +343,17 @@ fn marker_zero(wtx: &redb::WriteTransaction) {
         .expect("marker");
 }
 
-/// T7 (Fail-Open Check, error arm): a migration whose KG step fails leaves
-/// the stored format where it was and the record on disk. The mirror already
-/// says 2, so a format-1 binary refuses the palace, and this binary sees a
-/// migration to resume. A retry fails the same way and advances nothing.
+/// T7 (Fail-Open Check, error arm): a migration whose KG fails its check
+/// leaves the stored format where it was and the record on disk. #9918: a KG
+/// below the format the migration started at fails before the mirror moves.
+/// The record names a move to 2, so a format-1 binary refuses the palace, and
+/// this binary sees a migration to resume. A retry fails the same way.
 #[test]
 fn a_failed_step_does_not_advance_the_stored_format_or_remove_the_record() {
     let v1 = build_v1_with("v1-step-fails", marker_zero);
     let (dir, id) = (v1.dir(), v1.palace.id.as_str());
     for attempt in 0..2 {
-        let err = migrate(dir, id, 2, Seams::default())
+        let err = migrate(dir, id, 1, 2, Seams::default())
             .expect_err("the step refuses a KG that is not at format 1");
         assert!(
             matches!(err, PalaceStoreError::FormatMigrationFailed { .. }),
@@ -239,7 +364,7 @@ fn a_failed_step_does_not_advance_the_stored_format_or_remove_the_record() {
             dir.join(MIGRATION_RECORD).exists(),
             "attempt {attempt}: record"
         );
-        assert_eq!(mirror(dir), Some(2), "attempt {attempt}: mirror");
+        assert_eq!(mirror(dir), Some(1), "attempt {attempt}: mirror");
         assert!(refused_too_new_by_format_1(classify_with(dir, id, 1)));
         assert!(matches!(
             classify_with(dir, id, 2),
