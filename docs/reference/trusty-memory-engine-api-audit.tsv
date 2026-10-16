@@ -58,6 +58,7 @@ trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per typ
 trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::EngineError	enum	KEEP	error of PalaceHandle::open and open_with_intent (#9278 T3b-1)	T3b
+trusty_memory::engine::EngineError::Embed	variant	KEEP	member of EngineError (error of the embedder and read paths (#9278 T3c-2))	T3c
 trusty_memory::engine::EngineError::Hnsw	variant	KEEP	member of EngineError (error of the PalaceHandle write paths (#9278 T3c-1))	T3c
 trusty_memory::engine::EngineError::Kg	variant	KEEP	member of EngineError (error of the PalaceHandle write paths (#9278 T3c-1))	T3c
 trusty_memory::engine::EngineError::Other	variant	KEEP	member of EngineError (error of PalaceHandle::open and open_with_intent (#9278 T3b-1))	T3b
@@ -281,7 +282,7 @@ trusty_memory::engine::dream::DreamStats::semantically_consolidated	field	NARROW
 trusty_memory::engine::dream::DreamStats::update_compression_ratio	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::Dreamer	struct	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
 trusty_memory::engine::dream::Dreamer::config	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::dream::Dreamer::dream_cycle	method	KEEP	anyhow-pending T3: tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::dream_cycle	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
 trusty_memory::engine::dream::Dreamer::is_idle	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::Dreamer::is_semantic_consolidation_disabled	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
 trusty_memory::engine::dream::Dreamer::new	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
@@ -809,7 +810,7 @@ trusty_memory::engine::retrieval::L1Essential::drawers	field	NARROW	removed: no 
 trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::PalaceHandle	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::retrieval::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::closets	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::commit_mutex	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::compact_vector_orphans	method	NARROW	no consumer outside the library	A4
@@ -955,7 +956,7 @@ trusty_memory::engine::retrieval::VerifyNotStored::reason	field	KEEP	trusty-mpm 
 trusty_memory::engine::retrieval::admit_tier_c	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::apply_relevance_floor	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::dedup_extend	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::embed_chunks	fn	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::embed_chunks	fn	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::expand_query	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::list_drawers_in_wing	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::next_refill_window	fn	NARROW	no consumer outside the library	A4
@@ -966,10 +967,10 @@ trusty_memory::engine::retrieval::recall_across_palaces_with_default_embedder	fn
 trusty_memory::engine::retrieval::recall_deep	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::recall_deep_in_room	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::recall_deep_scoped	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::recall_deep_with_default_embedder	fn	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs	A4
+trusty_memory::engine::retrieval::recall_deep_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs	A4
 trusty_memory::engine::retrieval::recall_in_room	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::recall_scoped	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::recall_with_default_embedder	fn	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::recall_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::retrieval::rescore_l1_by_similarity	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::retrieve_l0_l1	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::retrieve_l0_l1_scoped	fn	NARROW	no consumer outside the library	A4
@@ -978,7 +979,7 @@ trusty_memory::engine::retrieval::retrieve_l2_scoped	fn	NARROW	no consumer outsi
 trusty_memory::engine::retrieval::retrieve_l3	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::retrieve_l3_scoped	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::scope_admits	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
+trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
 trusty_memory::engine::retrieval::shared_embedder_initialized	fn	KEEP	tests/verify_embedded_warmup_9275.rs, tests/recall_degraded_lane.rs	A4
 trusty_memory::engine::retrieval::validate_fact_key	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::room_identity	mod	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5

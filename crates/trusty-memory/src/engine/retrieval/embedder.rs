@@ -7,9 +7,10 @@
 //! `seed_shared_embedder_with_mock()` test helper.
 //! Test: `shared_embedder_is_singleton` in retrieval::tests.
 
+use crate::engine::EngineError;
 use crate::engine::embed::{Embedder, FastEmbedder};
 use crate::engine::timeouts;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -59,12 +60,12 @@ pub(super) static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> =
 /// bounded by `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s). In test
 /// builds, callers should first call `seed_shared_embedder_with_mock()` so
 /// the cell is pre-populated with `MockEmbedder` and no model download is
-/// attempted.
+/// attempted. A failed or timed-out init is `EngineError::Embed` (#9278).
 /// Test: `shared_embedder_is_singleton`; timeout path covered by
 ///       `timeout_wrapper_fires_on_embedder_init` in retrieval::tests; the
 ///       CoreML hang auto-recovery decision logic is covered by the
 ///       `decide_fallback` unit tests in `embedder::fast_embedder`.
-pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
+pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>, EngineError> {
     let timeout = timeouts::embedder_init_timeout();
     SHARED_EMBEDDER
         .get_or_try_init(|| async {
@@ -83,6 +84,8 @@ pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
         })
         .await
         .cloned()
+        // #9278 T3c-2: typed for callers outside the crate.
+        .map_err(EngineError::embed)
 }
 
 /// Whether the process-wide shared embedder has been initialised.

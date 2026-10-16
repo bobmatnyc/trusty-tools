@@ -255,7 +255,7 @@ pub(super) async fn dedup_pass(
         Some(embedder) => embedder,
         None => shared_embedder()
             .await
-            .map_err(|e| e.context("acquire shared embedder for dream dedup"))?,
+            .context("acquire shared embedder for dream dedup")?,
     };
     dedup_pass_with_embedder(
         handle,
