@@ -701,3 +701,36 @@ fn ensure_venv_does_not_rebuild_on_an_indeterminate_recheck() {
         );
     });
 }
+
+/// Plant a cached uv (0755) under the data-dir override `data` whose
+/// `uv.sha256` records the digest of other bytes. Literal paths on purpose:
+/// this helper compiles on the pre-#9468 base for the red proof.
+fn plant_tampered_cached_uv(data: &Path) -> PathBuf {
+    let uv = data.join("trusty-search/py-embedder/uv/0.12.23/uv");
+    write_fake_venv_python(&uv, "#!/bin/sh\n");
+    let digest = hex::encode(Sha256::digest(b"bytes an install never wrote"));
+    fs::write(uv.with_file_name("uv.sha256"), format!("{digest}  uv\n")).unwrap();
+    uv
+}
+
+#[test]
+fn locate_uv_refuses_a_tampered_cached_uv() {
+    // #9468: mutates PATH, HOME, TRUSTY_DATA_DIR_OVERRIDE — run alone.
+    if !isolate_in_child_process("bootstrap::tests::locate_uv_refuses_a_tampered_cached_uv") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let cached = plant_tampered_cached_uv(tmp.path());
+    // Empty PATH and HOME: only a system-dir uv can still be found, and it wins.
+    unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
+    unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    let host = trusty_common::bin_resolve::resolve_binary("uv");
+    match (with_data_override(tmp.path(), locate_uv), host) {
+        (found, Some(host)) => assert_eq!(found.unwrap(), host, "installed uv wins"),
+        (Ok(found), None) => panic!("a tampered cached uv was returned: {}", found.display()),
+        (Err(e), None) => assert!(
+            format!("{e:#}").contains(&format!("cached uv {} is not usable", cached.display())),
+            "the error must name the refused cached uv, got: {e:#}"
+        ),
+    }
+}
