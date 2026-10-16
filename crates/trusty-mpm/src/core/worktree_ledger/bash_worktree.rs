@@ -116,6 +116,9 @@ struct Dirs {
     alt: Option<PathBuf>,
 }
 
+/// Builds the op for a verb that takes a path.
+type MakeOp = fn(Vec<PathBuf>) -> WorktreeOp;
+
 /// Read one `git …` call (the words after `git`).
 fn git_call(parsed: &mut ParsedCommand, args: &[String], shell: &Dirs) {
     let mut dir = shell.dir.clone();
@@ -140,7 +143,7 @@ fn git_call(parsed: &mut ParsedCommand, args: &[String], shell: &Dirs) {
     }
     let verb = args.get(i + 1).map(String::as_str);
     let rest = args.get(i + 2..).unwrap_or_default();
-    let (make, value_opts): (fn(Vec<PathBuf>) -> WorktreeOp, &[&str]) = match verb {
+    let (make, value_opts): (MakeOp, &[&str]) = match verb {
         Some("add") => (WorktreeOp::Add, ADD_VALUE_OPTS),
         Some("remove") => (WorktreeOp::Remove, &[]),
         Some("prune") => {
