@@ -39,6 +39,61 @@ pub(crate) fn takes(command: &Option<Command>) -> bool {
     }
 }
 
+/// True when `command`'s `main` arm never reads the daemon URL.
+///
+/// Why (#6288): a remote `--url` is refused before dispatch, but a command that
+/// ignores the URL (`tm daemon`, `tm supervisor`, `tm statusline`) was never
+/// asking for that host and must not be blocked by it.
+/// What: an allowlist of the arms in `main` that take neither `client` nor
+/// `url`. A command not listed keeps the refusal (fails closed).
+/// Test: `tests/tm_client_socket_cutover_6288.rs`
+/// (`a_remote_url_does_not_block_a_command_that_ignores_it`).
+pub(crate) fn ignores_url(command: &Option<Command>) -> bool {
+    matches!(
+        command,
+        Some(
+            Command::Stop
+                | Command::Validate { .. }
+                | Command::Hooks { .. }
+                | Command::Agent { .. }
+                | Command::Generate { .. }
+                | Command::Tui { .. }
+                | Command::Slack { .. }
+                | Command::Install { .. }
+                | Command::Reinstall(_)
+                | Command::PromptFeedback(_)
+                | Command::Divert { .. }
+                | Command::Memory { .. }
+                | Command::Compress { .. }
+                | Command::Wait(_)
+                | Command::BuildLease(_)
+                | Command::Daemon { .. }
+                | Command::Supervisor { .. }
+                | Command::Fleet { .. }
+                | Command::Architect { .. }
+                | Command::Env { .. }
+                | Command::Secrets { .. }
+                | Command::Content { .. }
+                | Command::Worktrees(_)
+                | Command::Services { .. }
+                | Command::Auth { .. }
+                | Command::Catalog { .. }
+                | Command::Issue { .. }
+                | Command::Meta { .. }
+                | Command::Load { .. }
+                | Command::Path { .. }
+                | Command::ShellInit { .. }
+                | Command::Login { .. }
+                | Command::Rm { .. }
+                | Command::Update { .. }
+                | Command::Statusline
+                | Command::CommitTrailers(_)
+                | Command::Banner { .. }
+                | Command::Mcp { .. }
+        )
+    )
+}
+
 /// Run one socket command to completion.
 ///
 /// # Errors

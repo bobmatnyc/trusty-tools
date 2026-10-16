@@ -469,11 +469,11 @@ fn recorded_console_addr(recorded: Option<String>) -> Option<String> {
 
 /// Resolve the `host:port` the trusty-console is selected to serve on.
 ///
-/// Why: two callers need the console's selected port — the gateway resolver
-/// above, and the `tm statusline` version segment, which links to the
-/// dashboard. This repo's common-entry-point rule makes a second copy of the
-/// discovery-file read a defect, so the read lives here once and both callers
-/// route through it.
+/// Why: the `tm statusline` version segment links to the dashboard, and the
+/// banner probes the console (#9556). This repo's common-entry-point rule makes
+/// a second copy of the discovery-file read a defect, so the read lives here
+/// once and every caller routes through it (#6288: the daemon-URL gateway
+/// resolver that was the other caller is gone).
 /// What: reads the `trusty-console` discovery file via
 /// [`trusty_common::read_daemon_addr`]; an absent, unreadable, or blank file
 /// falls back to [`DEFAULT_CONSOLE_ADDR`]. Never errors, never probes the
@@ -491,8 +491,8 @@ pub fn console_addr() -> String {
 
 /// Pure core of [`console_addr`] with the discovery-file read injected.
 ///
-/// Why: mirrors [`resolve_daemon_url_via_gateway_inner`] — the fallback rule is
-/// the part worth testing, and testing it should not require stubbing `$HOME`.
+/// Why: the fallback rule is the part worth testing, and testing it should not
+/// require stubbing `$HOME`.
 /// What: returns `recorded` trimmed when it is present and non-blank, else
 /// [`DEFAULT_CONSOLE_ADDR`].
 /// Test: `console_addr_from_prefers_the_recorded_addr`,

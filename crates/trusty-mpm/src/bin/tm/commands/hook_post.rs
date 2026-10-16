@@ -57,16 +57,15 @@ pub(crate) const HOOK_POST_BACKOFF: Duration = Duration::from_millis(150);
 /// Why: the sum of the per-attempt bounds is not itself a guarantee — a
 /// `reqwest` client under a stalled DNS resolver can overrun one. This wraps the
 /// loop in `tokio::time::timeout` so the hook's worst case is a number, not an
-/// estimate. Chosen against the four bounds a `SubagentStop` invocation pays in
-/// series: the daemon-URL probe
-/// ([`trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT`], 500 ms), the stdin
+/// estimate. Chosen against the three bounds a `SubagentStop` invocation pays in
+/// series (#6288: `main` no longer probes the console gateway first): the stdin
 /// read ([`crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT`], 500 ms), the
 /// idle-parking detection
-/// ([`crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT`], 300 ms) and this — 3.8 s
-/// of the 5 s Claude Code is told to allow, leaving 1.2 s for exec, the spool
+/// ([`crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT`], 300 ms) and this — 3.3 s
+/// of the 5 s Claude Code is told to allow, leaving 1.7 s for exec, the spool
 /// write and process teardown.
 /// Test: `the_stop_post_budget_stays_inside_the_registered_hook_timeout`, which
-/// sums all four so lowering any one of them trips the gate.
+/// sums all three so lowering any one of them trips the gate.
 pub(crate) const HOOK_POST_BUDGET: Duration = Duration::from_millis(2500);
 
 /// The `timeout` Claude Code is told to allow the `SubagentStop` hook, in

@@ -914,12 +914,15 @@ where
 /// registered through this daemon at all, and the guard is structurally off.
 /// A timeout does not: the daemon accepted the connection, so a writer may
 /// already be recorded and the answer simply did not arrive in time.
-/// What (#6288, over the daemon socket): `Unavailable` when no connection was
-/// made — the socket is absent, refuses the dial, or fails the hardened
-/// ownership check — and when the daemon predates the method (version skew,
-/// the socket form of the HTTP 404 below). Everything else — a timeout, a cut
-/// or unreadable frame — leaves the question open.
+/// What (#6288, over the daemon socket): `Unavailable` only when the dial found
+/// nothing listening — the socket is absent or stale (`nothing_listening`) —
+/// and when the daemon predates the method (version skew, the socket form of
+/// the HTTP 404 below). Everything else leaves the question open: a timeout, a
+/// cut or unreadable frame, and any other unreachable socket (refused by the
+/// owner/mode check, `EACCES`, retries exhausted on a saturated listener) —
+/// something may be serving it, so the claim is unanswered and denies.
 /// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` (absent),
+/// `claim_is_unknown_when_the_socket_is_refused_by_the_ownership_check`,
 /// `claim_is_unknown_when_the_daemon_times_out` (accepted then silent),
 /// `claim_is_empty_when_the_daemon_has_no_such_route` (method missing).
 fn classify_transport_failure(
@@ -927,7 +930,9 @@ fn classify_transport_failure(
     endpoint: &str,
     error: &trusty_mpm::client::DaemonCallError,
 ) -> SharedTreeReply {
-    if error.is_connect() {
+    // #6288: only positive evidence that nothing listens opens the guard; any
+    // other unreachable socket falls through to Unanswered (deny).
+    if error.nothing_listening() {
         return SharedTreeReply::Unavailable(format!("nothing is listening at {url}"));
     }
     if error.is_method_missing() {
@@ -1397,6 +1402,26 @@ mod tests {
         // #6288: an absent daemon socket.
         let url = socket_mock::absent();
         assert!(writers_of(claim_against(&url).await).is_empty());
+    }
+
+    /// #6288: a present socket the hardened dial refuses (mode `0666`) is not
+    /// "nothing listening" — a daemon may be serving it, so the claim must not
+    /// read as an empty tree (fail closed), unlike the absent socket above.
+    #[tokio::test]
+    async fn claim_is_unknown_when_the_socket_is_refused_by_the_ownership_check() {
+        let (listener, mock) = unaccepted_listener();
+        let path = listener
+            .local_addr()
+            .expect("addr")
+            .as_pathname()
+            .expect("path")
+            .to_path_buf();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .expect("widen");
+        assert!(
+            matches!(claim_against(&mock).await, SharedTreeClaim::Unknown(_)),
+            "a socket refused for its mode must not read as an absent daemon"
+        );
     }
 
     /// A bound socket that never accepts, and its locator (#8492, #6288).

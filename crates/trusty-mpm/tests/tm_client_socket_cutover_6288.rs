@@ -263,6 +263,21 @@ async fn a_remote_url_is_refused() {
     );
 }
 
+/// #6288: a command that never reads the daemon URL is not refused over a
+/// remote `TRUSTY_MPM_URL` (the refusal belongs to commands that dial).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_url_does_not_block_a_command_that_ignores_it() {
+    let scratch = Scratch::new();
+    for args in [&["statusline"][..], &["shell-init", "bash"][..]] {
+        let run = scratch.tm_with_url(args, "http://100.64.0.1:7880").await;
+        let err = text(&run.stderr);
+        assert!(
+            !err.contains("another host"),
+            "`tm {args:?}` was refused over a URL it never uses: {err}"
+        );
+    }
+}
+
 /// A hook's daemon post travels over the socket: the daemon ingests it, and
 /// the canary named by the hook's `TRUSTY_MPM_URL` sees nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

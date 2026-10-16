@@ -428,8 +428,15 @@ async fn main() -> anyhow::Result<()> {
     // sandbox with no socket of its own gets the #9556 sentinel, as before.
     // `client` stays only for the HTTP-shaped signatures; it is never sent to.
     let client = trusty_mpm::client::http_client::default_client();
-    let fail_open = matches!(cli.command, Some(Command::Hook { .. }));
-    let url = trusty_mpm::core::resolve_daemon_url_for_dispatch(cli.url.as_deref(), fail_open)?;
+    // #6288: a command that never reads `url` is not resolved or refused over
+    // it (`tm daemon`, `tm supervisor`, `tm statusline`, ...): it gets the
+    // refused-address sentinel, which no transport sends to, and no notice.
+    let url = if commands::socket_dispatch::ignores_url(&cli.command) {
+        trusty_mpm::core::REFUSED_DAEMON_URL.to_string()
+    } else {
+        let fail_open = matches!(cli.command, Some(Command::Hook { .. }));
+        trusty_mpm::core::resolve_daemon_url_for_dispatch(cli.url.as_deref(), fail_open)?
+    };
     // #7166: captured before `cli.command` is moved into the match below —
     // `--account` is a `global = true` flag (see `cli::Cli::account`'s doc),
     // so it binds regardless of where in the invocation it appeared.
