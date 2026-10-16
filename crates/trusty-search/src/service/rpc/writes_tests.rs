@@ -1192,6 +1192,10 @@ async fn graph_ingest_over_the_socket_matches_the_http_body() {
         serde_json::json!(3),
         "the contribution must be queryable, or this proves nothing: {over_socket}"
     );
+    assert!(
+        over_socket.get("derived_graph_persist_degraded").is_none(),
+        "a healthy ingest carries no degraded key: {over_socket}"
+    );
     assert_eq!(over_socket, over_http);
 }
 
