@@ -135,13 +135,15 @@ pub(crate) struct RulingsHits {
     pub hits: Vec<RecallResult>,
     /// `superseded -> replacement` among `hits`, from this palace's KG.
     pub superseded: Supersessions,
+    /// #9881 (Q3): the palace that owns `hits`; empty in fixtures.
+    pub palace: String,
 }
 
 impl From<Vec<RecallResult>> for RulingsHits {
     fn from(hits: Vec<RecallResult>) -> Self {
         Self {
             hits,
-            superseded: Supersessions::new(),
+            ..Self::default()
         }
     }
 }
@@ -546,7 +548,11 @@ fn search_palace(
         // #9421: read while the handle is open; never past the leg's bound.
         let budget = edge_read_budget(deadline, Instant::now());
         let superseded = supersessions_for_within(&handle, &hits, budget).await;
-        Ok(RulingsHits { hits, superseded })
+        Ok(RulingsHits {
+            hits,
+            superseded,
+            palace: handle.id.as_str().to_string(),
+        })
     })
 }
 
@@ -560,6 +566,8 @@ pub(crate) struct RulingsFold {
     pub floored: Vec<Uuid>,
     /// `superseded -> replacement` edges the rulings palaces reported (#9421).
     pub superseded: Supersessions,
+    /// #9881 (Q3): each folded ruling's owning palace, keyed by drawer id.
+    pub owners: HashMap<Uuid, String>,
 }
 
 /// Merge the rulings leg's outcomes into `results` and report the failures.
@@ -599,6 +607,7 @@ pub(crate) fn fold_rulings(
             Ok(RulingsHits {
                 hits,
                 superseded: edges,
+                palace,
             }) => {
                 // #9421: drawer ids are UUIDs, so palaces' maps never collide.
                 superseded.extend(edges);
@@ -609,17 +618,19 @@ pub(crate) fn fold_rulings(
                         && ids.insert(hit.drawer.id)
                         && hashes.insert(hit.drawer.content_hash());
                     if admitted {
-                        rulings.push(hit);
+                        rulings.push((hit, palace.clone()));
                     }
                 }
             }
         }
     }
-    rulings.sort_by(|a, b| b.score.total_cmp(&a.score));
+    rulings.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
     // #9143: the leg contributes at most ceil(top_k / 3) hits.
     rulings.truncate(top_k.div_ceil(3));
     let mut floored = Vec::new();
-    for mut hit in rulings {
+    let mut owners = HashMap::new();
+    for (mut hit, palace) in rulings {
+        owners.insert(hit.drawer.id, palace);
         // #9143 AC2: only a capped ruling that answers the query is floored.
         if ruling_answers_query(query, hit.drawer.content()) {
             floored.push(hit.drawer.id);
@@ -631,6 +642,7 @@ pub(crate) fn fold_rulings(
         degraded,
         floored,
         superseded,
+        owners,
     }
 }
 

@@ -36,6 +36,8 @@ use super::helpers::open_palace_handle;
 use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
 use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
+// #9881: the served hits record an access in their owning palace.
+use super::recall_access::{ServedHits, record_served_across};
 use super::recall_rulings::{RulingsFold, fetch_user_rulings, fold_rulings};
 use super::recall_rulings_floor::apply_rulings_floor;
 // #9421: drawers superseded through a `superseded_by` edge rank below their
@@ -216,7 +218,10 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup));
+        let (out, served) =
+            cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
+        served.record(state, &handle); // #9881
+        return Ok(out);
     }
 
     let embedder = state.embedder().await?;
@@ -253,7 +258,9 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold, sup))
+    let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
+    served.record(state, &handle); // #9881
+    Ok(out)
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
@@ -289,7 +296,10 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup));
+        let (out, served) =
+            cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
+        served.record(state, &handle); // #9881
+        return Ok(out);
     }
 
     let embedder = state.embedder().await?;
@@ -313,7 +323,9 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let sup = supersessions_for(&handle, &results).await;
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold, sup))
+    let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
+    served.record(state, &handle); // #9881
+    Ok(out)
 }
 
 /// The caller's cut for a single-palace recall: count, floor and tag view.
@@ -343,6 +355,8 @@ impl RecallCut {
     /// `sup` holds the project palace's edges; the rulings palaces' own edges
     /// arrive in `rulings.superseded` and join it here (#9421). A superseded
     /// ruling keeps its demoted score rank but loses its reserved slot.
+    /// #9881: also returns the [`ServedHits`] the response carries, for the
+    /// caller to record as accesses.
     /// Test: `the_rulings_floor_never_lifts_a_superseded_ruling_above_its_replacement`,
     /// `a_superseded_ruling_from_a_rulings_palace_ranks_below_its_replacement`.
     fn rank_and_serialize(
@@ -352,7 +366,7 @@ impl RecallCut {
         mut results: Vec<RecallResult>,
         mut rulings: RulingsFold,
         mut sup: Supersessions,
-    ) -> Value {
+    ) -> (Value, ServedHits) {
         // #9421: a ruling superseded inside its rulings palace demotes too.
         sup.extend(std::mem::take(&mut rulings.superseded));
         // #9421: a superseded ruling is no longer the standing rule, so the
@@ -363,7 +377,9 @@ impl RecallCut {
         // the reserved slots sit inside `top_k`.
         apply_rulings_floor(&mut results, &rulings.floored, self.top_k);
         let dropped_below_floor = apply_score_floor(&mut results, self.min_score, self.top_k);
-        serialize_recall(
+        // #9881: classified after the cut, so only what the caller sees counts.
+        let served = ServedHits::from_cut(&results, &rulings.owners);
+        let out = serialize_recall(
             palace,
             query,
             results,
@@ -372,7 +388,8 @@ impl RecallCut {
                 dropped_below_floor,
                 rulings_degraded: rulings.degraded,
             },
-        )
+        );
+        (out, served)
     }
 }
 
@@ -499,6 +516,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     let sup = std::mem::take(&mut *sup.lock());
     demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
     results.truncate(top_k);
+    record_served_across(state, &results); // #9881 (Q4): per owning palace.
 
     let payload: Vec<Value> = results
         .iter()

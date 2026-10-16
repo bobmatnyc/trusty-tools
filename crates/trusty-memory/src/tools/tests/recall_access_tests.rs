@@ -124,3 +124,42 @@ async fn recall_all_records_each_hit_in_its_own_palace() {
         assert_eq!((count, stamped), (1, true), "{palace}/{drawer}");
     }
 }
+
+/// Why: the access write is advisory; a failed one must never fail a recall.
+/// What: the palace's next access write fails. Two recalls still succeed; the
+/// failed flush keeps the accesses pending, and the next flush writes both.
+/// Test: this function.
+#[tokio::test]
+async fn a_failed_access_write_never_fails_the_recall() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "acc-fail"}))
+        .await
+        .expect("palace_create");
+    let text = "A failed access write leaves the recall answer untouched";
+    let id = remember(&state, "acc-fail", text).await;
+    let handle = state
+        .registry
+        .peek(&PalaceId::new("acc-fail"))
+        .expect("resident handle");
+    // No background flush may race the explicit ones below.
+    handle
+        .accesses
+        .set_debounce(std::time::Duration::from_secs(600));
+    handle.accesses.fail_next_write();
+    let args = json!({"palace": "acc-fail", "query": text, "top_k": 3});
+    let first = dispatch_tool(&state, "memory_recall", args.clone())
+        .await
+        .expect("recall survives a pending failure");
+    assert!(lane_hits(&first).iter().any(|(_, d)| *d == id), "{first:#}");
+    assert!(handle.flush_pending_accesses().await.is_err(), "seam fails");
+    dispatch_tool(&state, "memory_recall", args)
+        .await
+        .expect("recall after a failed write");
+    assert_eq!(handle.flush_pending_accesses().await.expect("retry"), 1);
+    let on_disk = handle.kg.load_drawers().expect("load");
+    let row = on_disk
+        .iter()
+        .find(|d| d.id.to_string() == id)
+        .expect("row");
+    assert_eq!(row.access_count, 2);
+}

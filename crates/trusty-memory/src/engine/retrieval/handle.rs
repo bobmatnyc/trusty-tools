@@ -9,6 +9,8 @@
 //! Test: `registry_create_and_open`, `cli_remember_and_recall`, and
 //! the full retrieval test suite in retrieval::tests.
 
+// #9881: the buffered recall-access writes this handle owns.
+use super::access::AccessLog;
 // #4906: the deferred-embed lane — retry, then durably record what was lost.
 use super::deferred_embed;
 use super::types::{ForgetOutcome, RememberOptions};
@@ -229,6 +231,8 @@ pub struct PalaceHandle {
     /// `registry_tests::open_does_not_reset_idle_clock`,
     /// `registry_tests::touch_after_open_makes_handle_recent`.
     pub(crate) last_accessed: Arc<AtomicU64>,
+    /// #9881: recall accesses not yet written; see `access.rs`.
+    pub(crate) accesses: Arc<AccessLog>,
     /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub(crate) fail_next_verify_record: Arc<AtomicBool>,
@@ -321,13 +325,16 @@ impl PalaceHandle {
         vector_store: UsearchStore,
         kg: KnowledgeGraph,
     ) -> Self {
+        let (kg, drawers) = (Arc::new(kg), Arc::new(RwLock::new(Vec::new())));
+        let (write_mutex, commit_mutex) = (Arc::default(), Arc::default());
         Self {
+            accesses: AccessLog::shared(&id, &kg, &drawers, &write_mutex, &commit_mutex),
             id,
             identity,
             l1_drawers: Arc::default(),
             vector_store: Arc::new(vector_store),
-            kg: Arc::new(kg),
-            drawers: Arc::new(RwLock::new(Vec::new())),
+            kg,
+            drawers,
             // #6201: an in-memory handle never loaded a persisted table, so it
             // is empty-by-construction, not degraded.
             drawer_load_degraded: false,
@@ -336,8 +343,8 @@ impl PalaceHandle {
             recall_log: None,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
-            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            write_mutex,
+            commit_mutex,
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
             #[cfg(any(test, feature = "embedder-test-support"))]
             fail_next_verify_record: Arc::default(),
@@ -621,12 +628,15 @@ impl PalaceHandle {
             }
         };
 
+        let kg = Arc::new(kg);
+        let (write_mutex, commit_mutex) = (Arc::default(), Arc::default());
         let handle = PalaceHandle {
+            accesses: AccessLog::shared(&palace.id, &kg, &drawers, &write_mutex, &commit_mutex),
             id: palace.id.clone(),
             identity,
             l1_drawers,
             vector_store: Arc::new(vector_store),
-            kg: Arc::new(kg),
+            kg,
             drawers,
             drawer_load_degraded,
             data_dir: Some(data_dir.clone()),
@@ -634,8 +644,8 @@ impl PalaceHandle {
             recall_log,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
-            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            write_mutex,
+            commit_mutex,
             // #7087: an on-disk open is not an access — see the field doc.
             last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
             #[cfg(any(test, feature = "embedder-test-support"))]
