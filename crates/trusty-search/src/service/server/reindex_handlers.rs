@@ -608,9 +608,8 @@ const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 /// in `Body::from_stream` and returned as `text/event-stream`.
 ///
 /// Test: `reindex_stream_handler` is exercised by the full-reindex integration
-/// path and by `reindex_progress_events_match_the_sse_body_frame_for_frame` in
-/// `service::rpc::streams_tests`, which compares it frame for frame against the
-/// socket stream that opens the same way. The heartbeat interval fires
+/// path; #9535 removed its frame-for-frame comparison with the socket stream,
+/// which `service::rpc::streams_tests` now covers alone. The heartbeat interval fires
 /// independently of real events so it cannot be blocked by a stalled sidecar.
 /// `service::reindex::progress_race_tests` covers the #6386 exactly-once open
 /// both surfaces now share.

@@ -211,7 +211,7 @@ impl ReindexProgress {
     /// and `an_event_pushed_either_side_of_an_open_arrives_on_exactly_one_path` in
     /// `progress_race_tests.rs`;
     /// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once` in
-    /// `service::rpc::streams_tests` drives it end to end over both transports.
+    /// `service::rpc::streams_tests` drives it end to end over the socket.
     pub async fn subscribe_with_replay(
         &self,
     ) -> (Vec<String>, ReindexStatus, broadcast::Receiver<String>) {

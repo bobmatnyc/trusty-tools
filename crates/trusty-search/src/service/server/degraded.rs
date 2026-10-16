@@ -503,7 +503,7 @@ pub(super) fn embedder_unavailable_from(
 /// replaces outright. Otherwise `false`, with `blocking_producer` naming the
 /// row an operator must re-send or delete.
 /// Test: `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`
-/// and `ingest_route_answers_503_over_http_when_the_merge_fails` — the
+/// and `an_unmerged_contribution_is_refused_identically_and_stays_unqueryable` — the
 /// not-retryable-when-the-blocker-is-another-producer's-row verdict is
 /// asserted inside the first of these two.
 pub(super) fn contrib_not_merged_response(

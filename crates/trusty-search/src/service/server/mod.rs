@@ -104,8 +104,6 @@ mod tests_2336;
 #[cfg(test)]
 mod tests_2984;
 #[cfg(test)]
-mod tests_3304;
-#[cfg(test)]
 mod tests_allowlist_gate_767;
 #[cfg(test)]
 // #6822: the quantize route + the live-precision status field.
@@ -439,8 +437,10 @@ pub fn build_router(state: SearchAppState) -> Router {
 /// What: identical router to `build_router`, except the final middleware is
 /// `with_guarded_middleware` (guard + standard stack) instead of
 /// `with_standard_middleware`.
-/// Test: `admin_stop_rejects_cross_origin_write` / `_allows_loopback_write` /
-/// `_allows_missing_origin` / `read_route_allows_cross_origin` in `tests_2984`.
+/// Test: no test in this crate since #9535 removed the HTTP-only guard suite;
+/// the daemon serves only the socket, guarded by the peer-uid check
+/// (trusty-common `src/uds/tests.rs`). The shared guard's 403 contract is
+/// pinned in trusty-agents `src/api/server/tests/guard.rs`.
 #[cfg(test)]
 pub fn build_router_with_self_origins(
     state: SearchAppState,

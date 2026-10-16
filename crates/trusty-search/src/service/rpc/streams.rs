@@ -155,7 +155,7 @@ const STREAM_BUFFER: usize = 64;
 /// dropped or turned into a terminal error. That is a producer bug, and the
 /// stream HTTP would have delivered must not die of it — the bytes stay
 /// recoverable by the consumer.
-/// Test: `reindex_progress_events_match_the_sse_body_frame_for_frame`.
+/// Test: `reindex_progress_events_replay_the_planted_sequence_frame_for_frame`.
 fn item(line: String) -> serde_json::Value {
     serde_json::from_str(&line).unwrap_or(serde_json::Value::String(line))
 }
@@ -174,8 +174,8 @@ fn lag(skipped: u64) -> serde_json::Value {
 /// a lag frame when the subscriber falls behind. The stream ends only when the
 /// daemon's sender is dropped, which is process shutdown, or when the client
 /// disconnects.
-/// Test: `the_status_stream_opens_with_the_same_connected_frame_sse_writes`,
-/// `a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream`.
+/// Test: `the_status_stream_opens_with_the_connected_frame`,
+/// `a_daemon_event_reaches_the_socket_stream`.
 fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
     let mut events = state.events.subscribe();
     let (tx, items) = mpsc::channel(STREAM_BUFFER);
@@ -238,7 +238,7 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 ///
 /// [`CODE_NOT_FOUND`]: super::error::CODE_NOT_FOUND
 ///
-/// Test: `reindex_progress_events_match_the_sse_body_frame_for_frame`,
+/// Test: `reindex_progress_events_replay_the_planted_sequence_frame_for_frame`,
 /// `a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted`,
 /// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once`,
 /// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing`,
