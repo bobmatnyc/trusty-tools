@@ -366,6 +366,8 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
     // #7965: one subprocess storm at a time. This pass and the in-project hygiene
     // sweep both spend minutes in `git`/`gh`, and running them together is what
     // pushed `GET /health` past the client's 500 ms probe.
+    // #8994: the manual `--merged-prs` route takes this same lane through
+    // `try_manual_permit`, so the two reclaim paths never overlap.
     let Ok(_permit) = super::sweep_status::lane().acquire().await else {
         warn!("worktree-reclaim sweep: maintenance lane closed; pass not run");
         return;
@@ -415,6 +417,37 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         }
         Err(e) => warn!("worktree-reclaim sweep: the pass did not complete: {e}"),
     }
+}
+
+/// Why a manual reclaim pass did not get the maintenance permit (#8994).
+///
+/// Test: `manual_permit_refuses_while_the_timer_holds_the_lane`,
+/// `manual_permit_fails_closed_on_a_closed_lane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualPermitRefusal {
+    /// Another holder — the timer sweep or another maintenance pass — has it.
+    Busy,
+    /// The lane is closed. Not "held by the other", so the pass fails closed.
+    Closed,
+}
+
+/// Take the maintenance permit for an operator-typed reclaim pass, or refuse.
+///
+/// Why: the timer sweep in [`run_one_tick`] takes `lane` for a whole pass; a
+/// manual `tm session prune-worktrees --merged-prs` that skipped it could remove
+/// worktrees in the same project while the timer sweep was mid-pass (#8994).
+/// What: a non-blocking `try_acquire` on the SAME lane the timer waits on. It
+/// never waits — the route holds an HTTP request open, so it reports busy instead
+/// of hanging. Every error is a refusal; no arm proceeds without a permit.
+/// Test: `manual_permit_refuses_while_the_timer_holds_the_lane`,
+/// `manual_permit_fails_closed_on_a_closed_lane`.
+pub(crate) fn try_manual_permit(
+    lane: &tokio::sync::Semaphore,
+) -> Result<tokio::sync::SemaphorePermit<'_>, ManualPermitRefusal> {
+    lane.try_acquire().map_err(|e| match e {
+        tokio::sync::TryAcquireError::NoPermits => ManualPermitRefusal::Busy,
+        tokio::sync::TryAcquireError::Closed => ManualPermitRefusal::Closed,
+    })
 }
 
 #[cfg(test)]

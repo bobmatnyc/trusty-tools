@@ -235,6 +235,26 @@ pub(crate) async fn prune_worktrees_core(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
 ) -> RouteOutcome {
+    // #8994: the daemon's one maintenance lane, which the timer sweep also takes.
+    prune_worktrees_core_in(state, req, crate::daemon::services::sweep_status::lane()).await
+}
+
+/// [`prune_worktrees_core`] with the maintenance lane as a parameter (#8994).
+///
+/// Why: a `--merged-prs` pass and the timer reclaim sweep must never run at
+/// once. The lane is a parameter so a test can hold or close its own lane
+/// instead of the process-global one other tests share.
+/// What: when `merged_prs` is set, takes the permit with
+/// [`try_manual_permit`](crate::daemon::services::merged_pr_reclaim::try_manual_permit)
+/// before any work and holds it for the whole request. Busy is a 409 and a
+/// closed lane a 500; neither runs a pass.
+/// Test: `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`,
+/// `a_merged_prs_prune_fails_closed_on_a_closed_lane`.
+pub(crate) async fn prune_worktrees_core_in(
+    state: &Arc<DaemonState>,
+    req: PruneWorktreesRequest,
+    lane: &tokio::sync::Semaphore,
+) -> RouteOutcome {
     // #6806: reject a present-but-unparseable caller id before any work, for
     // the reason #6118 gives — dropping it would run the sweep with the
     // self-attribution the caller asked for silently switched off, and report
@@ -261,6 +281,16 @@ pub(crate) async fn prune_worktrees_core(
             warn!("prune-worktrees route: {msg}");
             return RouteOutcome::text(400, msg);
         }
+    };
+    // #8994: one maintenance permit for manual and timer reclaim, taken before
+    // any work and held until the reply. Every refusal returns here.
+    let _permit = if req.merged_prs {
+        match crate::daemon::services::merged_pr_reclaim::try_manual_permit(lane) {
+            Ok(permit) => Some(permit),
+            Err(refusal) => return merged_prs_refusal(refusal),
+        }
+    } else {
+        None
     };
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
@@ -443,6 +473,30 @@ pub(crate) async fn prune_worktrees_core(
             RouteOutcome::text(500, format!("orphan worktree scan failed: {e}"))
         }
     }
+}
+
+/// The reply for a `--merged-prs` prune that did not get the permit (#8994).
+///
+/// Test: `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`,
+/// `a_merged_prs_prune_fails_closed_on_a_closed_lane`.
+fn merged_prs_refusal(
+    refusal: crate::daemon::services::merged_pr_reclaim::ManualPermitRefusal,
+) -> RouteOutcome {
+    use crate::daemon::services::merged_pr_reclaim::ManualPermitRefusal;
+    let (status, msg) = match refusal {
+        ManualPermitRefusal::Busy => (
+            409,
+            "a worktree reclaim or other maintenance sweep is in progress in the daemon; \
+             nothing was pruned — retry when it finishes (#8994)",
+        ),
+        ManualPermitRefusal::Closed => (
+            500,
+            "the daemon's maintenance lane is closed, so the reclaim cannot be serialised \
+             against the timer sweep; nothing was pruned (#8994)",
+        ),
+    };
+    warn!("prune-worktrees route: {msg}");
+    RouteOutcome::text(status, msg.to_string())
 }
 
 /// The orphan pass's paths as preview rows: path, owning checkout, reason (#8782).
@@ -684,6 +738,78 @@ mod tests {
         .await
         .into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A `--merged-prs` preview request, the shape the CLI's first POST sends.
+    fn merged_prs_preview() -> PruneWorktreesRequest {
+        PruneWorktreesRequest {
+            dry_run: true,
+            discard_dirty: false,
+            merged_prs: true,
+            invoking_session: None,
+            project_root: None,
+            only_orphan_paths: None,
+            only_merged_paths: None,
+            only_discard_paths: None,
+        }
+    }
+
+    /// The status and text body of a route outcome.
+    async fn status_and_text(outcome: RouteOutcome) -> (StatusCode, String) {
+        let resp = outcome.into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("route body must be readable");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// 🔴 #8994: while the timer sweep holds the maintenance lane, a
+    /// `--merged-prs` prune does not start a pass; it answers 409 naming why.
+    ///
+    /// Fails when the route skips the permit: it then runs both passes and
+    /// answers 200. A dry run on a local lane, so even that arm deletes nothing
+    /// and no other test's use of the global lane can interfere.
+    #[tokio::test]
+    async fn a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let lane = tokio::sync::Semaphore::new(1);
+        // The timer sweep's own acquisition (`run_one_tick`).
+        let _timer = lane.acquire().await.expect("a fresh lane is open");
+
+        let (status, text) =
+            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), &lane).await)
+                .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {text}");
+        assert!(
+            text.contains("in progress") && text.contains("nothing was pruned"),
+            "the refusal must say why and that nothing ran: {text}"
+        );
+    }
+
+    /// 🔴 #8994 FAIL-CLOSED: a lane that is closed — not held by another
+    /// pass — stops the `--merged-prs` prune with a 500 before any work.
+    ///
+    /// Fails when the route proceeds without a permit on any refusal other
+    /// than busy: it then answers 200 having run both passes.
+    #[tokio::test]
+    async fn a_merged_prs_prune_fails_closed_on_a_closed_lane() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let lane = tokio::sync::Semaphore::new(1);
+        lane.close();
+
+        let (status, text) =
+            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), &lane).await)
+                .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {text}");
+        assert!(
+            text.contains("lane is closed") && text.contains("nothing was pruned"),
+            "the refusal must say the lane is closed and that nothing ran: {text}"
+        );
     }
 
     /// Test: this function IS the test.
