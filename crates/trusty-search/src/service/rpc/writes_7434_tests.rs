@@ -4,11 +4,29 @@
 //! body, refused the same way, and an absolute `remove-file` path under an
 //! additional root must remove that root's `@root<n>/…` key and forget the
 //! same key's hash (#9236).
-//! What: drives the real axum router and the real RPC router from the
-//! parent's harness.
+//! What: drives the real RPC router and, for the HTTP side, the `*_report`
+//! core each route wraps (#9535: the router is going).
 //! Test: this file.
 
 use super::*;
+use crate::service::server::{
+    add_index_roots_report, create_index_report, grep_report, index_status_report,
+    remove_file_report, search_report,
+};
+
+/// `POST /indexes`'s 200 body, from its core.
+async fn create(state: &Arc<SearchAppState>, body: serde_json::Value) -> serde_json::Value {
+    http_body(create_index_report(state, params(body)).await)
+}
+
+/// `POST /indexes/{id}/roots`'s answer, from its core.
+async fn add_roots(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    add_index_roots_report(state, id, params(body)).await
+}
 
 /// A planted index over `primary` that also covers `extra`.
 fn planted_multi_root(id: &str, primary: &Path, extra: &Path) -> IndexRegistry {
@@ -51,29 +69,12 @@ async fn add_root_over_http_and_socket_returns_the_full_table() {
     let (http_root, http_extra) = (safe_root("roots-http-a"), safe_root("roots-http-b"));
     let (sock_root, sock_extra) = (safe_root("roots-sock-a"), safe_root("roots-sock-b"));
     let approved = [&*http_root, &*http_extra, &*sock_root, &*sock_extra];
-    let (state, http, rpc) = empty_state(isolated.path(), &approved).await;
-    http_ok(
-        &http,
-        "POST",
-        "/indexes",
-        create_body("roots-http", &http_root),
-    )
-    .await;
-    http_ok(
-        &http,
-        "POST",
-        "/indexes",
-        create_body("roots-sock", &sock_root),
-    )
-    .await;
+    let (state, rpc) = empty_served(isolated.path(), &approved).await;
+    create(&state, create_body("roots-http", &http_root)).await;
+    create(&state, create_body("roots-sock", &sock_root)).await;
 
-    let over_http = http_ok(
-        &http,
-        "POST",
-        "/indexes/roots-http/roots",
-        serde_json::json!({ "roots": [http_extra] }),
-    )
-    .await;
+    let roots = serde_json::json!({ "roots": [http_extra] });
+    let over_http = http_body(add_roots(&state, "roots-http", roots).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_ROOTS_ADD,
@@ -118,19 +119,14 @@ async fn add_root_refuses_another_indexes_additional_root() {
         safe_root("own-shared"),
         safe_root("own-b"),
     );
-    let (state, http, rpc) = empty_state(isolated.path(), &[&a, &shared, &b]).await;
-    http_ok(&http, "POST", "/indexes", create_body("own-a", &a)).await;
-    http_ok(&http, "POST", "/indexes", create_body("own-b", &b)).await;
-    http_ok(
-        &http,
-        "POST",
-        "/indexes/own-a/roots",
-        serde_json::json!({ "roots": [shared] }),
-    )
-    .await;
+    let (state, rpc) = empty_served(isolated.path(), &[&a, &shared, &b]).await;
+    create(&state, create_body("own-a", &a)).await;
+    create(&state, create_body("own-b", &b)).await;
+    let roots = serde_json::json!({ "roots": [shared] });
+    http_body(add_roots(&state, "own-a", roots).await);
 
     let body = serde_json::json!({ "roots": [shared] });
-    let over_http = http_err(&http, "POST", "/indexes/own-b/roots", body.clone()).await;
+    let over_http = http_refusal(add_roots(&state, "own-b", body.clone()).await);
     assert_eq!(over_http.0, StatusCode::CONFLICT, "{}", over_http.1);
     let over_socket = rpc_err(
         &rpc,
@@ -159,16 +155,11 @@ async fn add_root_refuses_a_root_nested_in_its_own_primary() {
     let primary = safe_root("nest-primary");
     let nested = primary.join("vendor");
     std::fs::create_dir_all(&nested).expect("mkdir");
-    let (state, http, _rpc) = empty_state(isolated.path(), &[&primary, &nested]).await;
-    http_ok(&http, "POST", "/indexes", create_body("nest", &primary)).await;
+    let (state, _rpc) = empty_served(isolated.path(), &[&primary, &nested]).await;
+    create(&state, create_body("nest", &primary)).await;
 
-    let (status, body) = http_err(
-        &http,
-        "POST",
-        "/indexes/nest/roots",
-        serde_json::json!({ "roots": [nested] }),
-    )
-    .await;
+    let roots = serde_json::json!({ "roots": [nested] });
+    let (status, body) = http_refusal(add_roots(&state, "nest", roots).await);
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "index_root_overlap", "{body}");
     let handle = state.registry.get(&IndexId::new("nest")).expect("nest");
@@ -185,8 +176,8 @@ async fn add_root_refuses_a_root_nested_in_its_own_primary() {
 async fn add_root_is_refused_while_a_reindex_runs() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let (primary, extra) = (safe_root("busy-a"), safe_root("busy-b"));
-    let (state, http, _rpc) = empty_state(isolated.path(), &[&primary, &extra]).await;
-    http_ok(&http, "POST", "/indexes", create_body("busy", &primary)).await;
+    let (state, _rpc) = empty_served(isolated.path(), &[&primary, &extra]).await;
+    create(&state, create_body("busy", &primary)).await;
     let claim = loop {
         // The create's own catch-up reindex may still hold the claim.
         match crate::service::reindex::try_claim_reindex(&IndexId::new("busy"), "test", false) {
@@ -195,13 +186,8 @@ async fn add_root_is_refused_while_a_reindex_runs() {
         }
     };
 
-    let (status, body) = http_err(
-        &http,
-        "POST",
-        "/indexes/busy/roots",
-        serde_json::json!({ "roots": [extra] }),
-    )
-    .await;
+    let roots = serde_json::json!({ "roots": [extra] });
+    let (status, body) = http_refusal(add_roots(&state, "busy", roots).await);
     drop(claim);
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "reindex_already_running", "{body}");
@@ -217,16 +203,11 @@ async fn add_root_is_refused_while_a_reindex_runs() {
 async fn add_root_of_own_root_is_a_no_op() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let primary = safe_root("noop-a");
-    let (state, http, _rpc) = empty_state(isolated.path(), &[&primary]).await;
-    http_ok(&http, "POST", "/indexes", create_body("noop", &primary)).await;
+    let (state, _rpc) = empty_served(isolated.path(), &[&primary]).await;
+    create(&state, create_body("noop", &primary)).await;
 
-    let body = http_ok(
-        &http,
-        "POST",
-        "/indexes/noop/roots",
-        serde_json::json!({ "roots": [primary] }),
-    )
-    .await;
+    let roots = serde_json::json!({ "roots": [primary] });
+    let body = http_body(add_roots(&state, "noop", roots).await);
     assert_eq!(body["added"], serde_json::json!([]), "{body}");
     assert_eq!(body["reindex_queued"], serde_json::json!(false), "{body}");
     let handle = state.registry.get(&IndexId::new("noop")).expect("noop");
@@ -243,17 +224,12 @@ async fn add_root_of_own_root_is_a_no_op() {
 async fn status_lists_every_root_and_its_watch() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let (primary, extra) = (safe_root("status-a"), safe_root("status-b"));
-    let (state, http, _rpc) = empty_state(isolated.path(), &[&primary, &extra]).await;
-    let mut create = create_body("status", &primary);
-    create["roots"] = serde_json::json!([extra]);
-    http_ok(&http, "POST", "/indexes", create).await;
+    let (state, _rpc) = empty_served(isolated.path(), &[&primary, &extra]).await;
+    let mut request = create_body("status", &primary);
+    request["roots"] = serde_json::json!([extra]);
+    create(&state, request).await;
 
-    let request = Request::builder()
-        .uri("/indexes/status/status")
-        .body(Body::empty())
-        .expect("request");
-    let (status, body) = http_raw(&http, request).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    let body = http_body(index_status_report(&state, "status").await);
     assert_eq!(
         roots_of(&body),
         vec![primary.display().to_string(), extra.display().to_string()],
@@ -281,7 +257,7 @@ async fn remove_file_maps_an_additional_root_path_to_its_stored_key() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
     let registry = planted_multi_root("mr", primary.path(), extra.path());
-    let (state, http, rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, rpc) = served(SearchAppState::new(registry)).await;
     let key = format!("@root1/{FILE}");
     let id = IndexId::new("mr");
     let seed = || async {
@@ -293,13 +269,8 @@ async fn remove_file_maps_an_additional_root_path_to_its_stored_key() {
 
     seed().await;
     let absolute = extra.path().join(FILE);
-    let reply = http_ok(
-        &http,
-        "POST",
-        "/indexes/mr/remove-file",
-        serde_json::json!({ "path": absolute }),
-    )
-    .await;
+    let path = params(serde_json::json!({ "path": absolute }));
+    let reply = http_body(remove_file_report(&state, "mr", path).await);
     assert!(reply["removed_chunks"].as_u64().unwrap_or(0) > 0, "{reply}");
     assert!(chunks_for(&state, "mr", &key).await.is_empty());
     assert!(
@@ -319,7 +290,7 @@ async fn remove_file_maps_an_additional_root_path_to_its_stored_key() {
     // Error arm: a path under neither root is still refused, and keeps chunks.
     seed().await;
     let outside = serde_json::json!({ "path": "/definitely/elsewhere/src/auth.rs" });
-    let (status, body) = http_err(&http, "POST", "/indexes/mr/remove-file", outside).await;
+    let (status, body) = http_refusal(remove_file_report(&state, "mr", params(outside)).await);
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"], "remove_file_path_outside_root");
     assert!(!chunks_for(&state, "mr", &key).await.is_empty());
@@ -327,15 +298,12 @@ async fn remove_file_maps_an_additional_root_path_to_its_stored_key() {
 
 /// Plant a multi-root index whose additional root holds `src/extra.rs`, both
 /// on disk and as `@root1/src/extra.rs` chunks.
-async fn planted_with_extra_file(
-    primary: &Path,
-    extra: &Path,
-) -> (Arc<SearchAppState>, Router, PathBuf) {
+async fn planted_with_extra_file(primary: &Path, extra: &Path) -> (Arc<SearchAppState>, PathBuf) {
     let on_disk = extra.join("src/extra.rs");
     std::fs::create_dir_all(on_disk.parent().expect("parent")).expect("mkdir");
     std::fs::write(&on_disk, "fn zebra_unicorn_marker() {}\n").expect("write");
     let registry = planted_multi_root("mrs", primary, extra);
-    let (state, http, _rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, _rpc) = served(SearchAppState::new(registry)).await;
     {
         let handle = state.registry.get(&IndexId::new("mrs")).expect("mrs");
         let indexer = handle.indexer.read().await;
@@ -344,7 +312,7 @@ async fn planted_with_extra_file(
             .await
             .expect("seed");
     }
-    (state, http, on_disk)
+    (state, on_disk)
 }
 
 /// Why (#64 × #7434): the search post-filter and the result's `file` must
@@ -356,15 +324,10 @@ async fn planted_with_extra_file(
 async fn search_keeps_a_hit_under_an_additional_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
-    let (_state, http, on_disk) = planted_with_extra_file(primary.path(), extra.path()).await;
+    let (state, on_disk) = planted_with_extra_file(primary.path(), extra.path()).await;
 
-    let body = http_ok(
-        &http,
-        "POST",
-        "/indexes/mrs/search",
-        serde_json::json!({ "text": "zebra_unicorn_marker", "top_k": 5 }),
-    )
-    .await;
+    let query = params(serde_json::json!({ "text": "zebra_unicorn_marker", "top_k": 5 }));
+    let body = http_body(search_report(&state, "mrs", query).await);
     let files: Vec<String> = body["results"]
         .as_array()
         .unwrap_or_else(|| panic!("no results array: {body}"))
@@ -386,15 +349,10 @@ async fn search_keeps_a_hit_under_an_additional_root() {
 async fn grep_finds_a_match_under_an_additional_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
-    let (_state, http, _on_disk) = planted_with_extra_file(primary.path(), extra.path()).await;
+    let (state, _on_disk) = planted_with_extra_file(primary.path(), extra.path()).await;
 
-    let body = http_ok(
-        &http,
-        "POST",
-        "/indexes/mrs/grep",
-        serde_json::json!({ "pattern": "zebra_unicorn_marker" }),
-    )
-    .await;
+    let req = params(serde_json::json!({ "pattern": "zebra_unicorn_marker" }));
+    let body = http_body(grep_report(&state, "mrs", req).await);
     let files: Vec<&str> = body["matches"]
         .as_array()
         .unwrap_or_else(|| panic!("no matches array: {body}"))
@@ -415,13 +373,13 @@ async fn grep_finds_a_match_under_an_additional_root() {
 async fn add_root_with_an_unreadable_registry_adds_nothing() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let (primary, extra) = (safe_root("unread-a"), safe_root("unread-b"));
-    let (state, http, rpc) = empty_state(isolated.path(), &[&primary, &extra]).await;
-    http_ok(&http, "POST", "/indexes", create_body("unread", &primary)).await;
+    let (state, rpc) = empty_served(isolated.path(), &[&primary, &extra]).await;
+    create(&state, create_body("unread", &primary)).await;
     let toml = persistence::indexes_toml_path().expect("registry path");
     std::fs::write(&toml, "this is [[ not toml").expect("corrupt the registry");
 
     let body = serde_json::json!({ "roots": [extra] });
-    let over_http = http_err(&http, "POST", "/indexes/unread/roots", body.clone()).await;
+    let over_http = http_refusal(add_roots(&state, "unread", body.clone()).await);
     assert_eq!(
         over_http.0,
         StatusCode::INTERNAL_SERVER_ERROR,
