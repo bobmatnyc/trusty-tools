@@ -29,6 +29,7 @@ use super::chunk_health::{ChunkCheck, short_chunk_ids};
 use super::deferred_embed::RetryPolicy;
 use super::embedder::{SHARED_EMBEDDER, shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
+use crate::engine::EngineError;
 use crate::engine::embed::Embedder;
 use crate::engine::store::embed_ledger::{self, EmbedFailure};
 use crate::engine::store::vector::AliasScan;
@@ -533,13 +534,16 @@ impl PalaceHandle {
     /// there is known work to do and no embedder can be initialised. A dry run
     /// has neither constraint, so it still reports on a host with no model; so
     /// does a palace whose only gap is a chunk check that could not run.
+    /// #9278: the embedder failure is `EngineError::Embed`; the rest maps
+    /// through `EngineError::from_internal`.
     /// Test: `backfill_reembeds_a_marked_drawer`,
     /// `backfill_is_a_noop_on_a_healthy_palace`, `backfill_dry_run_repairs_nothing`,
-    /// `legacy_palace_recalls_unchanged_then_reembed_adds_the_tail`.
+    /// `legacy_palace_recalls_unchanged_then_reembed_adds_the_tail`,
+    /// `the_embedder_and_read_paths_return_engine_error`.
     pub async fn backfill_missing_vectors(
         &self,
         opts: VectorBackfillOptions,
-    ) -> Result<VectorBackfillReport> {
+    ) -> std::result::Result<VectorBackfillReport, EngineError> {
         let health = self.embed_health();
         // A healthy palace short-circuits BEFORE touching the embedder, so the
         // no-op case costs nothing and works on a host with no model at all.
@@ -553,16 +557,21 @@ impl PalaceHandle {
         if unknown_only && self.is_read_only() {
             return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
         }
-        self.refuse_read_only_backfill()?;
+        // #9278 T3c-2: typed for callers outside the crate.
+        self.refuse_read_only_backfill()
+            .map_err(EngineError::from_internal)?;
         let embedder = match shared_embedder().await {
             Ok(embedder) => embedder,
             Err(e) if unknown_only => {
                 tracing::warn!(palace = %self.id, "#9275: no embedder for the chunk check: {e:#}");
                 return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
             }
-            Err(e) => return Err(e.context("acquire shared embedder for vector backfill")),
+            // `Embed` as-is; Q7 would drop a context prefix on it.
+            Err(e) => return Err(e),
         };
-        self.backfill_with(opts, &embedder).await
+        self.backfill_with(opts, &embedder)
+            .await
+            .map_err(EngineError::from_internal)
     }
 
     /// [`Self::backfill_missing_vectors`] against an explicit embedder.

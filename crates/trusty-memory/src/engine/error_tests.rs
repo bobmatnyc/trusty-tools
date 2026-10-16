@@ -125,3 +125,25 @@ fn classifiers_see_a_refusal_through_kg_and_hnsw_variants() {
     )));
     assert!(!is_format_refusal(&e) && !is_incompatible_format_refusal(&e));
 }
+
+/// #9278 T3c-2: an embedder failure is `Embed`, keeps its whole text, stays
+/// `Embed` under a `.context()` (Q7), and both classifiers still find a
+/// refusal inside it (#9918).
+#[test]
+fn an_embed_error_keeps_its_variant_its_text_and_a_refusal_inside_it() {
+    let e = EngineError::embed(anyhow::anyhow!("no model").context("init embedder"));
+    assert!(matches!(e, EngineError::Embed(_)), "{e:?}");
+    assert_eq!(format!("{e:#}"), "init embedder: no model");
+    let e = EngineError::from_internal(anyhow::Error::from(e).context("acquire for recall"));
+    assert!(matches!(e, EngineError::Embed(_)), "{e:?}");
+    let e = anyhow::Error::from(e);
+    assert!(!is_format_refusal(&e) && !is_incompatible_format_refusal(&e));
+
+    let wrap = |e: EngineError| anyhow::Error::from(e).context("recall");
+    let e = wrap(EngineError::embed(
+        anyhow::Error::from(too_new()).context("x"),
+    ));
+    assert!(is_format_refusal(&e), "Embed internal: {e:#}");
+    let e = wrap(EngineError::embed(incompatible().into()));
+    assert!(is_incompatible_format_refusal(&e), "Embed internal: {e:#}");
+}

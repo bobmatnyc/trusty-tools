@@ -64,7 +64,7 @@ pub async fn screen_for_import(
 ) -> Result<Vec<Drawer>> {
     let embedder = shared_embedder()
         .await
-        .map_err(|e| e.context("acquire the embedder for the near-duplicate screen"))?;
+        .context("acquire the embedder for the near-duplicate screen")?;
     let backfill = handle
         .backfill_missing_vectors(VectorBackfillOptions {
             dry_run: false,

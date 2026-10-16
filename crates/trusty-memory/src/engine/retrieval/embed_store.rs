@@ -9,6 +9,7 @@
 //! drawer has.
 //! Test: `embed_store_tests.rs`.
 
+use crate::engine::EngineError;
 use crate::engine::embed::Embedder;
 use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
 use crate::engine::timeouts;
@@ -133,14 +134,23 @@ pub(crate) fn expected_chunk_count(embedder: &dyn Embedder, text: &str) -> Resul
 /// drawer's whole group.
 /// What: [`plan_chunks`], then one `embed_batch` over all chunks (the
 /// embedder bounds its own inference batches). Callers keep their own timeout.
+/// Any failure, a split or an inference one, is `EngineError::Embed` (#9278).
 /// Test: `long_text_embeds_every_chunk_in_one_batch`,
-/// `needle_in_the_last_chunk_is_recalled_at_rank_1`.
-pub async fn embed_chunks(embedder: &dyn Embedder, text: &str) -> Result<Vec<Vec<f32>>> {
-    let chunks: Vec<String> = plan_chunks(embedder, text)?
+/// `needle_in_the_last_chunk_is_recalled_at_rank_1`,
+/// `an_inference_failure_is_engine_error_embed_with_its_text`.
+pub async fn embed_chunks(
+    embedder: &dyn Embedder,
+    text: &str,
+) -> std::result::Result<Vec<Vec<f32>>, EngineError> {
+    // #9278 T3c-2: typed for callers outside the crate.
+    let chunks: Vec<String> = plan_chunks(embedder, text)
+        .map_err(EngineError::embed)?
         .into_iter()
         .map(str::to_string)
         .collect();
-    embed_planned(embedder, &chunks).await
+    embed_planned(embedder, &chunks)
+        .await
+        .map_err(EngineError::embed)
 }
 
 /// The embed ceiling for `chunks` inputs: `per_chunk` once per chunk.
