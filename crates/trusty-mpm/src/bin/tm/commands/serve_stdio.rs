@@ -595,11 +595,7 @@ mod tests {
     /// that reads one request frame, then answers once the returned sender
     /// fires. It arms no timer of its own, so the paused clock only ever
     /// advances to the client's bound or to the test's own sleep.
-    fn slow_socket() -> (
-        String,
-        tempfile::TempDir,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
+    fn slow_socket() -> (String, tempfile::TempDir, tokio::sync::oneshot::Sender<()>) {
         use std::os::unix::fs::PermissionsExt as _;
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
         let dir = tempfile::tempdir().expect("tempdir");
@@ -644,7 +640,7 @@ mod tests {
             .await
             .expect("join")
             .expect("a chat turn outlasts 60 s inside the chat bound");
-        assert_eq!(reply["result"]["ok"], true);
+        assert_eq!(reply["ok"], true);
 
         let (url, _dir, _release) = slow_socket();
         let err = forward_over_socket(&url, call("session_list", json!({})))
