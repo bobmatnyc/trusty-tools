@@ -20,7 +20,7 @@
 #   features  optional: `--features` the target's build needs (empty default set).
 # A module row covers every test in it, including ones added later; a test
 # row covers only that test. Prefer a test row in a large, slow module.
-trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal '../trusty-mpm/src/assets/architect/skills' (#8436)
+trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal 'content/instructions/architect/skills' (#8436, #9132)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
@@ -37,7 +37,7 @@ trusty-code	lib	run_task::tests::engineer_registry_reads_embedded_agent_skill_po
 trusty-code	lib	task::executor::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
 trusty-code	test:integration	paths_import_mpm_catalog_e2e	reads checkout_content, AgentRoster::load (a module of the integration target since #9302)
 trusty-common	lib	content::tests	14 reads: find_dev_checkout, DEV_CLASS_SOURCES, literal 'content/skills' (#8378)	content-resolver
-trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template through commands::fleet::seed::FILES (#8436)
+trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template from content through ArchitectSeed::resolve_in (#8436, #9132)
 trusty-mpm	bin:tm	commands::install::tests::install_without_the_bundled_docs_fails_naming_the_doc	reads install::test_content_ref into a docs-less checkout (#9012)
 trusty-mpm	bin:tm	commands::install::tests::install_with_a_failed_first_use_fetch_fails_closed	reads AgentRoster::load after a failed first-use fetch (#9396)
 trusty-mpm	bin:tm	commands::pm_guard_kuzu_store::tests	names content/skills/tm-memory-import.md as a Read-denied path literal (#8625) and include_str!s it to check its PM commands (#9794)
@@ -83,7 +83,7 @@ trusty-mpm	lib	core::instruction_overrides::tests	reads test_support::rc — com
 trusty-mpm	lib	core::instruction_package::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::instruction_pipeline::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::instruction_safety_core::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
-trusty-mpm	lib	core::launch_policy::floor::tests	reads literal '../../content/{agents,instructions,skills}' and 'src/assets/architect/skills' — the MCP, tool and skill floors must cover every grant and load (#8988, #8992)
+trusty-mpm	lib	core::launch_policy::floor::tests	reads literal '../../content/{agents,instructions,skills}' and 'instructions/architect/skills' (#9132) — the MCP, tool and skill floors must cover every grant and load (#8988, #8992)
 trusty-mpm	lib	core::managed_config::tests	reads test_support::rc — the skill source stamp (#9012)
 trusty-mpm	lib	core::managed_config::tests::ensure_managed_config_dir_refreshes_stale_bundled_agents	reads test_support::repo_roster; runtime: autodeploy resolves content from the cwd
 trusty-mpm	lib	core::managed_config::tests::manual_static_verify_full_roster	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
@@ -98,13 +98,14 @@ trusty-mpm	lib	core::output_style_deployer::tests	reads the checkout's content: 
 trusty-mpm	lib	core::pm_prompt_golden_tests	reads test_support::rc — the committed PM prompt goldens (#9012)
 trusty-mpm	lib	core::pm_prompt_golden_tests::golden_bundled_fallback_prompt	reads compose_bundled_fallback_with_overrides
 trusty-mpm	lib	core::pm_prompt_golden_tests::the_memory_section_claims_no_per_prompt_context_hook	reads compose_bundled_fallback_with_overrides
-trusty-mpm	lib	core::project_skill_tier::architect_skills::tests	reads the embedded Architect skills (#9540)
+trusty-mpm	lib	core::project_skill_tier::architect_seed::tests	reads FrameworkContent::load and test_support::rc for the Architect seed files (#9132)
+trusty-mpm	lib	core::project_skill_tier::architect_skills::tests	reads the Architect skills from content through architect_seed::test_support (#9540, #9132)
 trusty-mpm	lib	core::prompt_self_improvement::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::reinstall::tests	reads seeded (test_support::repo_roster) (#9011)
 trusty-mpm	lib	core::savings_instructions::tests	reads test_support::rc — section byte figures (#9012)
 trusty-mpm	lib	core::savings_sidecar::sweep_tests	reads test_support::rc — the compiled-prompt floor (#9012)
 trusty-mpm	lib	core::scaffold_gitignore::tests::a_project_style_stays_trackable_and_generated_styles_are_ignored	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
-trusty-mpm	lib	core::session_launch::skills::architect_9540_tests	reads the embedded Architect skills (#9540)
+trusty-mpm	lib	core::session_launch::skills::architect_9540_tests	reads the Architect skills from content through architect_seed::test_support (#9540, #9132)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_for_applies_project_override	reads test_support::rc (#9012)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_for_no_override_matches_bundled_sections	reads test_support::rc (#9012)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_includes_trusty_block	reads test_support::rc (#9012)

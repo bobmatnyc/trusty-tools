@@ -6,13 +6,15 @@
 //! must reach the Architect only (rulings df-D21, df-D22): the managed skill
 //! tier is shared by every PM and outranks the project tier, so the one valid
 //! destination is the Architect's own `<project>/.claude/skills`.
-//! What: [`SKILLS`] is the one table of shipped bytes (`tm fleet init` reads
-//! it too). [`deploy_for_launch`] runs at every launch, resume and relaunch;
-//! for a positive Architect profile it calls [`deploy_architect_skills`], and
-//! for anything else it writes nothing. A copy that differs from the last
-//! deployed copy is project-custom and is never overwritten. [`health`] is
-//! the read-only verdict `tm fleet status` reports.
-//! Test: `architect_skills_tests.rs`,
+//! What: [`SHIPPED`] names each skill and its content file; #9132 reads the
+//! bytes from content at runtime ([`super::architect_seed`]), and `tm fleet
+//! init` seeds the same bytes. [`deploy_for_launch`] runs at every launch,
+//! resume and relaunch; for a positive Architect profile it calls
+//! [`deploy_architect_skills`], and for anything else it writes nothing. A
+//! copy that differs from the last deployed copy is project-custom and is
+//! never overwritten. [`health`] is the read-only verdict `tm fleet status`
+//! reports.
+//! Test: `architect_skills_tests.rs`, `architect_seed_tests.rs`,
 //! `session_launch::skills::architect_9540_tests`.
 
 use std::collections::BTreeMap;
@@ -21,22 +23,35 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::architect_seed::{ArchitectSeedError, local_skills};
+
 /// One skill shipped to the Architect: its stem and its `SKILL.md` bytes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ArchitectSkill {
     /// Directory name under `.claude/skills/`.
     pub stem: &'static str,
-    /// The shipped `SKILL.md` text.
-    pub contents: &'static str,
+    /// The shipped `SKILL.md` text, read from content (#9132).
+    pub contents: String,
     /// sha256 hex of every earlier shipped `SKILL.md`: a live copy equal to one
     /// of these, with no deploy record, is an untouched tm deploy.
     pub previous: &'static [&'static str],
 }
 
+/// Where one shipped skill's text lives in content, and its shipped history.
+#[derive(Debug, Clone, Copy)]
+pub struct ShippedSkill {
+    /// Directory name under `.claude/skills/`.
+    pub stem: &'static str,
+    /// The `SKILL.md` source, relative to `instructions/` (#9132).
+    pub source: &'static str,
+    /// See [`ArchitectSkill::previous`].
+    pub previous: &'static [&'static str],
+}
+
 /// `tm-fleet-check`, the Architect's per-pass fleet check.
-pub const FLEET_CHECK: ArchitectSkill = ArchitectSkill {
+pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
     stem: "tm-fleet-check",
-    contents: include_str!("../../assets/architect/skills/tm-fleet-check.md"),
+    source: "architect/skills/tm-fleet-check.md",
     // Every earlier shipped text (git history of the asset). Edit the asset
     // and the old hash joins this list, or a `tm fleet init` seed of the old
     // text reads as project-custom; `the_shipped_history_is_pinned_*` trips.
@@ -44,21 +59,25 @@ pub const FLEET_CHECK: ArchitectSkill = ArchitectSkill {
         "3de7f63492d03ef3d7b0ca613c04ef977b82f4349e9e3d379240c323f6b91db6",
         "dc87f24d8905d63671ecb1deed6a832dcbbde8469161b6873b7d982d7352cdae",
         "a485db4f6b3fc33fba3a880a0f56b903da5433ae78474c341b96e8002f0c8726",
+        // #9132: the compiled-in text, before `version:` became `metadata:`.
+        "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
     ],
 };
 
 /// `tm-context-refresh`, the Architect's context refresh.
-pub const CONTEXT_REFRESH: ArchitectSkill = ArchitectSkill {
+pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
     stem: "tm-context-refresh",
-    contents: include_str!("../../assets/architect/skills/tm-context-refresh.md"),
+    source: "architect/skills/tm-context-refresh.md",
     previous: &[
         "e44d87a0715798a89ee20ab450ac4ff2b320d274c3ba3569c6894ec0277d883c",
         "922ed43c92abc1288a1053b1180e9cc6e0b1a1b259b5d51a163d6a94b7663e8f",
+        // #9132: the compiled-in text, before `version:` became `metadata:`.
+        "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
     ],
 };
 
-/// Every skill the Architect receives. #9132 moves the bytes to `content/`.
-pub const SKILLS: &[ArchitectSkill] = &[FLEET_CHECK, CONTEXT_REFRESH];
+/// Every skill the Architect receives, in deploy order.
+pub const SHIPPED: &[ShippedSkill] = &[FLEET_CHECK, CONTEXT_REFRESH];
 
 /// The deploy record, beside the skills in the project tier.
 ///
@@ -217,14 +236,18 @@ fn reserved_tiers_of(fw: &crate::core::paths::FrameworkPaths) -> Vec<PathBuf> {
     vec![fw.skill_deploy_dir(), fw.claude_skills_dir()]
 }
 
-/// Deploy [`SKILLS`] into `project_dir`'s project tier, unless that tier
+/// Deploy `skills` into `project_dir`'s project tier, unless that tier
 /// resolves onto one of `reserved`.
 ///
-/// Why/What: see [`deploy_skills_into`]; this is it with the shipped table and
-/// the reserved-tier refusal, which becomes the report's one error line.
+/// Why/What: see [`deploy_skills_into`]; this is it with the reserved-tier
+/// refusal, which becomes the report's one error line.
 /// Test: `an_absent_skill_is_written_byte_equal`,
 /// `a_tier_resolving_onto_a_reserved_dir_is_refused`.
-pub fn deploy_architect_skills(project_dir: &Path, reserved: &[PathBuf]) -> DeployReport {
+pub fn deploy_architect_skills(
+    project_dir: &Path,
+    reserved: &[PathBuf],
+    skills: &[ArchitectSkill],
+) -> DeployReport {
     let tier = project_tier(project_dir);
     if let Some(why) = reserved_conflict(&tier, reserved) {
         return DeployReport {
@@ -232,7 +255,25 @@ pub fn deploy_architect_skills(project_dir: &Path, reserved: &[PathBuf]) -> Depl
             ..DeployReport::default()
         };
     }
-    deploy_skills_into(&tier, SKILLS)
+    deploy_skills_into(&tier, skills)
+}
+
+/// [`deploy_architect_skills`] with the shipped skills as resolved, or one
+/// error line and no write when they did not resolve (#9132: fail closed).
+///
+/// Test: `an_unreadable_seed_writes_no_skill_and_names_the_file`.
+pub fn deploy_resolved(
+    project_dir: &Path,
+    reserved: &[PathBuf],
+    skills: Result<Vec<ArchitectSkill>, ArchitectSeedError>,
+) -> DeployReport {
+    match skills {
+        Ok(skills) => deploy_architect_skills(project_dir, reserved, &skills),
+        Err(err) => DeployReport {
+            errors: vec![err.to_string()],
+            ..DeployReport::default()
+        },
+    }
 }
 
 /// Write each of `skills` into `skills_dir` where it is absent or unchanged
@@ -340,9 +381,10 @@ pub fn inspect(
 ///
 /// Why: a deploy runs fail-open, so its failure must show somewhere a person
 /// reads; df-D22 also asks that a kept custom copy be named.
-/// What: `ok` only when every [`SKILLS`] entry is [`SkillState::Current`], the
+/// What: `ok` only when every shipped skill is [`SkillState::Current`], the
 /// record loads, and the tier is not a reserved one; otherwise the detail
-/// names each problem. Writes nothing.
+/// names each problem. #9132: shipped skills that do not resolve from content
+/// are not ok, and the detail names why. Writes nothing.
 /// Test: `health_names_each_skill_that_is_not_current`,
 /// `a_blocked_skill_dir_is_an_error_line`,
 /// `the_skills_row_names_a_malformed_record`,
@@ -350,16 +392,23 @@ pub fn inspect(
 /// `the_skills_row_names_a_missing_or_custom_skill`.
 pub fn health(project_dir: &Path) -> (bool, String) {
     let fw = crate::core::paths::FrameworkPaths::default();
-    health_with(project_dir, &reserved_tiers_of(&fw))
+    match local_skills(project_dir) {
+        Ok(skills) => health_with(project_dir, &reserved_tiers_of(&fw), &skills),
+        Err(err) => (false, format!("shipped copies unavailable: {err}")),
+    }
 }
 
-/// [`health`] against an explicit `reserved` list.
-pub fn health_with(project_dir: &Path, reserved: &[PathBuf]) -> (bool, String) {
+/// [`health`] against an explicit `reserved` list and shipped `skills`.
+pub fn health_with(
+    project_dir: &Path,
+    reserved: &[PathBuf],
+    skills: &[ArchitectSkill],
+) -> (bool, String) {
     let tier = project_tier(project_dir);
     if let Some(why) = reserved_conflict(&tier, reserved) {
         return (false, format!("deploy refused: {why}"));
     }
-    let (states, record_error) = inspect(&tier, SKILLS);
+    let (states, record_error) = inspect(&tier, skills);
     let mut problems: Vec<String> = states
         .iter()
         .filter_map(|(stem, state)| {
@@ -390,8 +439,10 @@ pub fn health_with(project_dir: &Path, reserved: &[PathBuf]) -> (bool, String) {
 /// What: returns `None` and writes nothing unless
 /// [`crate::core::session_profile::resolve`] says Architect (fail closed: a
 /// PM, a refused request and an unreadable config all deploy nothing).
-/// Otherwise runs [`deploy_architect_skills`], logs what it wrote and each
-/// error, and returns the report. It never fails the caller.
+/// Otherwise reads the shipped skills from the local content and runs
+/// [`deploy_resolved`], logs what it wrote and each error, and returns the
+/// report. #9132: content without the skills is an error line, never a
+/// write. It never fails the caller.
 /// Test: `an_architect_launch_writes_both_skills_byte_equal`,
 /// `a_pm_launch_writes_no_architect_skill_anywhere`,
 /// `a_deleted_copy_returns_on_the_next_launch_and_on_sync_assets`,
@@ -408,7 +459,12 @@ pub fn deploy_for_launch(fw_root: &Path, project_dir: &Path) -> Option<DeployRep
         return None;
     }
     let fw = crate::core::paths::FrameworkPaths::from_root(fw_root);
-    let report = deploy_architect_skills(project_dir, &reserved_tiers_of(&fw));
+    // #9132: the launch resolved this content already, so it is never fetched.
+    let report = deploy_resolved(
+        project_dir,
+        &reserved_tiers_of(&fw),
+        local_skills(project_dir),
+    );
     if !report.written.is_empty() {
         tracing::info!(
             project_dir = %project_dir.display(),

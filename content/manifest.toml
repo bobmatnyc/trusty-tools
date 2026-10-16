@@ -187,6 +187,14 @@ path = "agents/web-ui-engineer.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/architect/skills/tm-context-refresh.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/tm-fleet-check.md"
+version = "0.1.0"
+
+[[member]]
 path = "skills/api-design-patterns.md"
 version = "1.0.0"
 

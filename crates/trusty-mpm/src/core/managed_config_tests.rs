@@ -956,10 +956,12 @@ fn ensure_managed_config_dir_restores_a_deleted_architect_skill() {
 
     assert_eq!(
         std::fs::read_to_string(&copy).unwrap_or_default(),
-        architect_skills::FLEET_CHECK.contents,
+        crate::core::project_skill_tier::architect_seed::test_support::shipped_text(
+            architect_skills::FLEET_CHECK.stem
+        ),
         "a resume must restore the Architect's deleted skill"
     );
-    for skill in architect_skills::SKILLS {
+    for skill in architect_skills::SHIPPED {
         let managed = architect_skills::skill_path(&config_dir.join("skills"), skill.stem);
         assert!(
             !managed.exists(),
@@ -1006,7 +1008,9 @@ fn an_earlier_phase_failure_still_restores_a_deleted_architect_skill() {
     assert!(result.is_err(), "the earlier-phase failure was swallowed");
     assert_eq!(
         std::fs::read_to_string(&copy).unwrap_or_default(),
-        architect_skills::FLEET_CHECK.contents,
+        crate::core::project_skill_tier::architect_seed::test_support::shipped_text(
+            architect_skills::FLEET_CHECK.stem
+        ),
         "an earlier-phase failure skipped the Architect deploy"
     );
 }
