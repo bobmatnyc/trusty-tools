@@ -66,6 +66,7 @@ async fn make_state_with_index(
 /// `mode` is `"lexical"`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_empty_query_returns_empty_list() {
     let (state, _idx, _tmp) = make_state_with_index("empty-q-idx").await;
 
@@ -87,6 +88,7 @@ async fn typeahead_empty_query_returns_empty_list() {
 /// What: calls the core with `q = "   "` and asserts empty result.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_whitespace_query_returns_empty_list() {
     let (state, _idx, _tmp) = make_state_with_index("ws-q-idx").await;
 
@@ -107,6 +109,7 @@ async fn typeahead_whitespace_query_returns_empty_list() {
 /// `limit = 999` — the response must have at most 25 hits.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_limit_clamped_to_max() {
     let (state, idx_arc, _tmp) = make_state_with_index("clamp-idx").await;
 
@@ -142,6 +145,7 @@ async fn typeahead_limit_clamped_to_max() {
 /// response must have at most 2 hits.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_respects_smaller_limit() {
     let (state, idx_arc, _tmp) = make_state_with_index("small-limit-idx").await;
 
@@ -180,6 +184,7 @@ async fn typeahead_respects_smaller_limit() {
 /// `source` is one of the three valid tags.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_lexical_returns_hits_with_required_fields() {
     let (state, idx_arc, _tmp) = make_state_with_index("fields-idx").await;
 
@@ -227,6 +232,7 @@ async fn typeahead_lexical_returns_hits_with_required_fields() {
 /// What: calls typeahead with a non-existent index id and asserts 404.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_unknown_index_returns_404() {
     let (state, _idx, _tmp) = make_state_with_index("real-idx").await;
 
@@ -247,6 +253,7 @@ async fn typeahead_unknown_index_returns_404() {
 /// What: exercises every documented `match_reason` value.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn classify_source_covers_all_known_match_reasons() {
     assert_eq!(TypeaheadHit::classify_source("hybrid+kg"), "kg");
     assert_eq!(TypeaheadHit::classify_source("kg"), "kg");
@@ -267,6 +274,7 @@ fn classify_source_covers_all_known_match_reasons() {
 /// valid tags.
 /// Test: `cargo test -p trusty-search --lib typeahead_tests:: -- --include-ignored`.
 #[tokio::test]
+#[serial_test::parallel]
 #[ignore = "loads the ONNX embedder; run by the pre-publish ignored-tests gate"]
 async fn typeahead_blended_mode_returns_results_tagged_by_source() {
     use crate::core::indexer::typeahead::TypeaheadMode;
