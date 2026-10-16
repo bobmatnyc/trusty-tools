@@ -369,9 +369,10 @@ async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
 }
 
 /// A relauncher that succeeds and counts, standing in for the daemon's.
+/// #9017: shared with `architect_tests.rs`'s restart tests.
 #[derive(Default)]
-struct CountingRelauncher {
-    calls: std::sync::atomic::AtomicUsize,
+pub(super) struct CountingRelauncher {
+    pub(super) calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -384,7 +385,7 @@ impl crate::session_manager::relaunch::RuntimeRelauncher for CountingRelauncher 
 
 /// `run_tick` is generic over a classifier even when handed `None`; this names
 /// the type without ever being called (`classify_idle` is false here).
-struct NeverClassifies;
+pub(super) struct NeverClassifies;
 
 impl crate::activity::monitor::LlmClassifier for NeverClassifies {
     async fn classify(
