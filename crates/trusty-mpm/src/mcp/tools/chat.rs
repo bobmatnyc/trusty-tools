@@ -3,7 +3,7 @@
 //! Why: the console's mpm chat page reaches the daemon only through this MCP
 //! surface once the daemon's TCP bind retires (D96). `mpm.sessions.chat`
 //! already serves the chat turn on the socket; this tool exposes the same turn.
-//! What: [`chat_tools`] returns the one `sessions_chat` descriptor. Its
+//! What: `chat_tools` returns the one `sessions_chat` descriptor. Its
 //! arguments are the `mpm.sessions.chat` request fields, and its result is
 //! that method's response unchanged.
 //! Test: `super::tests::sessions_chat_tool_mirrors_the_chat_request`,
