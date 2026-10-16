@@ -290,7 +290,7 @@ impl KgStoreRedb {
         let rtx = self.db().begin_read().context("begin load_drawers txn")?;
         let drawers = rtx.open_table(DRAWERS).context("open drawers table")?;
         // #9881: recall access counts live beside the rows; same snapshot.
-        let mut accesses = read_access_map(&rtx)?;
+        let mut accesses = read_access_map(&rtx);
         let mut out = Vec::new();
         let mut skipped = 0usize;
         for entry in drawers.iter().context("iter drawers")? {
@@ -358,7 +358,7 @@ impl KgStoreRedb {
         let mut drawer = drawer_from_row(id, guard.value())
             .with_context(|| format!("hydrate drawer row {id}"))?;
         // #9881: the access fields, so a write-back of this row keeps them.
-        if let Some(rec) = read_access(&rtx, id)? {
+        if let Some(rec) = read_access(&rtx, id) {
             merge_access(&mut drawer, rec);
         }
         Ok(Some(drawer))

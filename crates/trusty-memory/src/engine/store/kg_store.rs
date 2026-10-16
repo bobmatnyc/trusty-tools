@@ -402,6 +402,19 @@ pub(crate) struct AccessRecord {
     pub last_ms: Option<i64>,
 }
 
+impl AccessRecord {
+    /// The larger count and the later access time of `self` and `other` (#9881).
+    ///
+    /// Why: a stored access value never goes backwards, whatever order writers land in.
+    /// Test: `a_lower_access_write_never_lowers_the_stored_value`.
+    pub(crate) fn max_with(self, other: Self) -> Self {
+        Self {
+            count: self.count.max(other.count),
+            last_ms: self.last_ms.max(other.last_ms),
+        }
+    }
+}
+
 // ── Key encoding helpers ─────────────────────────────────────────────────
 
 /// Why: redb requires Ord-preserving byte keys for range scans. Composite
