@@ -90,6 +90,8 @@ struct ContendedBootstrap {
     teardowns: Arc<AtomicUsize>,
     budgets: Mutex<Vec<Duration>>,
     venv_checks: Mutex<Vec<VenvCheck>>,
+    /// `ensure_venv` fails (a decided error) from this 0-based call on.
+    venv_fails_from: AtomicUsize,
 }
 
 impl ContendedBootstrap {
@@ -103,6 +105,7 @@ impl ContendedBootstrap {
             teardowns: Arc::new(AtomicUsize::new(0)),
             budgets: Mutex::new(Vec::new()),
             venv_checks: Mutex::new(Vec::new()),
+            venv_fails_from: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -121,10 +124,12 @@ impl ContendedBootstrap {
 
 impl PythonBootstrap for ContendedBootstrap {
     fn ensure_venv(&self, check: VenvCheck) -> anyhow::Result<()> {
-        self.venv_checks
-            .lock()
-            .expect("venv_checks lock")
-            .push(check);
+        let mut checks = self.venv_checks.lock().expect("venv_checks lock");
+        let call = checks.len();
+        checks.push(check);
+        if call >= self.venv_fails_from.load(Ordering::SeqCst) {
+            anyhow::bail!("fake venv rebuild failure");
+        }
         Ok(())
     }
 
@@ -318,6 +323,41 @@ async fn graceful_bootstrap_missing_launcher_is_terminal_with_no_retry() {
     );
     assert_eq!(fake.launcher_lookups.load(Ordering::SeqCst), 2);
     assert_eq!(fake.built(), 0, "no adapter, so no sidecar, was ever built");
+}
+
+/// #9949: a decided error in a background round (the probe failed at startup,
+/// then the venv check fails) is terminal: `Failed`, no retry scheduled, and
+/// no further attempt ever runs.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_background_decided_failure_is_terminal() {
+    let switchable = ort_switchable();
+    let fake = ContendedBootstrap::failing_probes(usize::MAX);
+    // Call 0 is the startup attempt (probe fails); call 1 is the first
+    // background round, where the venv check decides.
+    fake.venv_fails_from.store(1, Ordering::SeqCst);
+
+    let promoted = drive(&switchable, &fake, 1).await;
+
+    assert!(promoted.is_none());
+    assert_eq!(switchable.active().kind, BackendKind::Ort);
+    assert_eq!(switchable.active().bootstrap, BootstrapState::Failed);
+    let report = switchable.bootstrap_control().report();
+    assert_eq!(report.next_retry_at, None, "a terminal failure clears it");
+    assert_eq!(report.attempts, 2);
+    assert!(
+        report
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("fake venv rebuild failure")),
+        "the report must say why: {report:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(3 * 3600)).await;
+    assert_eq!(fake.venv_checks.lock().expect("venv_checks lock").len(), 2);
+    assert_eq!(
+        fake.built(),
+        1,
+        "no attempt may run after the decided failure"
+    );
 }
 
 /// Shutdown during the background wait stops the loop: the task finishes

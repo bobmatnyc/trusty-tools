@@ -396,7 +396,8 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// `graceful_bootstrap_gives_up_after_exhausting_retries` in `start/tests.rs`;
 /// `graceful_bootstrap_promotes_to_python_after_contention_window`,
 /// `graceful_bootstrap_missing_launcher_is_terminal_with_no_retry`,
-/// `graceful_bootstrap_shutdown_cancels_a_pending_retry` in `start/tests_9949.rs`.
+/// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
+/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`.
 pub(super) async fn drive_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,

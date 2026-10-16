@@ -128,8 +128,9 @@ impl BootstrapControl {
     /// lets the loop tear that child down cooperatively before the daemon
     /// exits through `process::exit`, which runs no `Drop`.
     /// What: cancels the token, then awaits the attached task for at most
-    /// `bound`. A task still running at the bound is aborted; aborting drops
-    /// the in-flight spawn, whose child is `kill_on_drop`. Returns `true` when
+    /// `bound`. A task still running at the bound is aborted and then awaited
+    /// until the abort completes, so the in-flight spawn (whose child is
+    /// `kill_on_drop`) has been dropped when this returns. Returns `true` when
     /// the task finished inside the bound or none was attached.
     /// Test: `shutdown_waits_for_the_attached_task`,
     /// `shutdown_aborts_a_task_that_outlives_the_bound`.
@@ -151,6 +152,10 @@ impl BootstrapControl {
             bound.as_secs()
         );
         task.abort();
+        // #9949: an abort only schedules the drop; wait for it so the child is
+        // killed before the caller reaches `process::exit`. The cancelled
+        // `JoinError` is the expected outcome.
+        let _ = task.await;
         false
     }
 }
