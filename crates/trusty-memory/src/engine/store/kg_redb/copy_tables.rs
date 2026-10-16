@@ -8,7 +8,7 @@
 //! would be silently dropped by the rewrite. It is therefore also the
 //! unknown-table guard, and it FAILS CLOSED — an unrecognised table aborts the
 //! compaction with the live file untouched rather than rewriting without it.
-//! What: [`BYTE_TABLES`] and [`STR_TABLES`] name the eleven tables `kg.redb`
+//! What: [`BYTE_TABLES`] and [`STR_TABLES`] name the twelve tables `kg.redb`
 //! carries, [`DROPPED_TABLES`] names the one #6652 deliberately does not copy,
 //! and [`copy_all`] streams rows from a read transaction on the source into
 //! write transactions on the destination, applying the history prune as a skip.
@@ -16,8 +16,8 @@
 //! `compaction_preserves_every_live_row`.
 
 use crate::engine::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
-    TRIPLES_BY_OBJECT, TripleValue, WING_KEYS, WINGS, decode_value,
+    ACTIVE_SUBJECT_COUNTS, DRAWER_ACCESS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS,
+    ROOMS, TRIPLES, TRIPLES_BY_OBJECT, TripleValue, WING_KEYS, WINGS, decode_value,
 };
 use anyhow::{Context, Result};
 use redb::{Database, ReadTransaction, ReadableTable, TableDefinition, TableHandle};
@@ -39,6 +39,8 @@ pub(super) const BYTE_TABLES: &[TableDefinition<'static, &'static [u8], &'static
     ACTIVE_SUBJECT_COUNTS,
     DRAWERS,
     DRAWERS_BY_FACT_KEY,
+    // #9881: recall access counts; a compaction must carry them.
+    DRAWER_ACCESS,
     ROOMS,
     WINGS,
 ];
@@ -88,7 +90,7 @@ pub(super) struct CopyCounts {
 /// delete of a million history rows would grow `kg.redb` before the rewrite
 /// shrank it.
 /// What: reads through ONE caller-supplied read transaction, so the copy is a
-/// single consistent snapshot rather than eleven independently-timed ones.
+/// single consistent snapshot rather than twelve independently-timed ones.
 /// Writes in [`COPY_BATCH_ROWS`]-sized transactions. A `TRIPLES` row is skipped
 /// when [`history_close_ms`] says it is a closed history row older than
 /// `history_cutoff_ms`; every other row, including any row whose value will not

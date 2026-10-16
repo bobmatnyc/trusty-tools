@@ -326,9 +326,8 @@ impl PalaceHandle {
         kg: KnowledgeGraph,
     ) -> Self {
         let (kg, drawers) = (Arc::new(kg), Arc::new(RwLock::new(Vec::new())));
-        let (write_mutex, commit_mutex) = (Arc::default(), Arc::default());
         Self {
-            accesses: AccessLog::shared(&id, &kg, &drawers, &write_mutex, &commit_mutex),
+            accesses: AccessLog::shared(&id, &kg, &drawers),
             id,
             identity,
             l1_drawers: Arc::default(),
@@ -343,8 +342,8 @@ impl PalaceHandle {
             recall_log: None,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
-            write_mutex,
-            commit_mutex,
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
             #[cfg(any(test, feature = "embedder-test-support"))]
             fail_next_verify_record: Arc::default(),
@@ -629,9 +628,8 @@ impl PalaceHandle {
         };
 
         let kg = Arc::new(kg);
-        let (write_mutex, commit_mutex) = (Arc::default(), Arc::default());
         let handle = PalaceHandle {
-            accesses: AccessLog::shared(&palace.id, &kg, &drawers, &write_mutex, &commit_mutex),
+            accesses: AccessLog::shared(&palace.id, &kg, &drawers),
             id: palace.id.clone(),
             identity,
             l1_drawers,
@@ -644,8 +642,8 @@ impl PalaceHandle {
             recall_log,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
-            write_mutex,
-            commit_mutex,
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             // #7087: an on-disk open is not an access — see the field doc.
             last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
             #[cfg(any(test, feature = "embedder-test-support"))]

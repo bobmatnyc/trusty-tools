@@ -7,7 +7,8 @@
 //! writer, so the bump is buffered.
 //! What: [`PalaceHandle::record_accesses`] bumps the in-memory drawers at once
 //! and marks them dirty in the handle's [`AccessLog`]. The log persists the
-//! dirty drawers in one redb transaction after [`ACCESS_FLUSH_DEBOUNCE`], when
+//! dirty drawers' access fields to the `drawer_access` side table, in one redb
+//! transaction, after [`ACCESS_FLUSH_DEBOUNCE`], when
 //! [`PalaceHandle::flush_pending_accesses`] runs (a dream cycle calls it
 //! before prune), and when the handle drops. A crash before a flush loses at
 //! most that window of increments (ruling Q5). Every failure is logged and
@@ -18,9 +19,7 @@
 use super::handle::PalaceHandle;
 use crate::engine::palace::{Drawer, PalaceId};
 use crate::engine::store::kg::KnowledgeGraph;
-use crate::engine::store::kg_redb::BatchWriteOp;
-use crate::engine::timeouts;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -37,17 +36,15 @@ pub(crate) const ACCESS_FLUSH_DEBOUNCE: Duration = Duration::from_secs(5);
 /// can borrow the handle; the log carries clones of the handle's `Arc`s.
 /// What: the dirty drawer ids, a "flush task scheduled" flag, and the debounce.
 /// The background task holds only a `Weak`, so it never keeps a dropped
-/// palace's redb files open. Writes take the handle's `write_mutex` and then
-/// its `commit_mutex` (the order `remember` takes them), so a flush writes the
-/// CURRENT in-memory drawer and cannot interleave with another drawer write.
+/// palace's redb files open. A write reads the CURRENT in-memory counts and
+/// touches only `drawer_access`, so it needs no palace lock and can never
+/// overwrite a drawer row another writer just committed.
 /// Test: `a_flush_failure_requeues_and_never_fails_the_caller`,
 /// `dropping_the_handle_persists_pending_accesses`.
 pub(crate) struct AccessLog {
     palace: PalaceId,
     kg: Arc<KnowledgeGraph>,
     drawers: Arc<RwLock<Vec<Drawer>>>,
-    write_mutex: Arc<tokio::sync::Mutex<()>>,
-    commit_mutex: Arc<tokio::sync::Mutex<()>>,
     pending: Mutex<HashSet<Uuid>>,
     scheduled: AtomicBool,
     debounce_ms: AtomicU64,
@@ -57,43 +54,22 @@ pub(crate) struct AccessLog {
 }
 
 impl AccessLog {
-    /// Build the log over the handle's shared drawer table, KG and locks.
-    fn new(
-        palace: PalaceId,
-        kg: Arc<KnowledgeGraph>,
-        drawers: Arc<RwLock<Vec<Drawer>>>,
-        write_mutex: Arc<tokio::sync::Mutex<()>>,
-        commit_mutex: Arc<tokio::sync::Mutex<()>>,
-    ) -> Self {
-        Self {
-            palace,
-            kg,
-            drawers,
-            write_mutex,
-            commit_mutex,
+    /// Build the log over clones of the handle's drawer table and KG.
+    pub(crate) fn shared(
+        palace: &PalaceId,
+        kg: &Arc<KnowledgeGraph>,
+        drawers: &Arc<RwLock<Vec<Drawer>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            palace: palace.clone(),
+            kg: Arc::clone(kg),
+            drawers: Arc::clone(drawers),
             pending: Mutex::default(),
             scheduled: AtomicBool::new(false),
             debounce_ms: AtomicU64::new(ACCESS_FLUSH_DEBOUNCE.as_millis() as u64),
             #[cfg(test)]
             fail_next_write: AtomicBool::new(false),
-        }
-    }
-
-    /// [`Self::new`] over clones of the handle's `Arc`s, shared.
-    pub(crate) fn shared(
-        palace: &PalaceId,
-        kg: &Arc<KnowledgeGraph>,
-        drawers: &Arc<RwLock<Vec<Drawer>>>,
-        write_mutex: &Arc<tokio::sync::Mutex<()>>,
-        commit_mutex: &Arc<tokio::sync::Mutex<()>>,
-    ) -> Arc<Self> {
-        Arc::new(Self::new(
-            palace.clone(),
-            Arc::clone(kg),
-            Arc::clone(drawers),
-            Arc::clone(write_mutex),
-            Arc::clone(commit_mutex),
-        ))
+        })
     }
 
     /// Number of drawers with an access not yet written.
@@ -142,11 +118,6 @@ impl AccessLog {
             self.pending.lock().clear();
             return Ok(0);
         }
-        let label = self.palace.as_str();
-        let _write =
-            timeouts::lock_with_timeout(&self.write_mutex, timeouts::write_lock_timeout(), label)
-                .await?;
-        let _commit = self.commit_mutex.lock().await;
         let ids = std::mem::take(&mut *self.pending.lock());
         let rows = self.current_rows(&ids);
         let written = rows.len();
@@ -168,14 +139,23 @@ impl AccessLog {
     }
 
     async fn write(&self, rows: Vec<Drawer>) -> Result<()> {
-        #[cfg(test)]
-        if self.fail_next_write.swap(false, Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("#9881 test seam: access write failed"));
-        }
+        self.check_seam()?;
         if rows.is_empty() {
             return Ok(());
         }
-        self.kg.upsert_drawers_atomic(rows).await
+        let store = self.kg.store();
+        tokio::task::spawn_blocking(move || store.put_accesses(&rows))
+            .await
+            .context("access write join")?
+    }
+
+    /// The test seam's failure, consumed once; always `Ok` outside tests.
+    fn check_seam(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_next_write.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("#9881 test seam: access write failed");
+        }
+        Ok(())
     }
 
     /// Test seam: make the next write fail.
@@ -195,25 +175,17 @@ impl AccessLog {
 impl Drop for AccessLog {
     /// Why (Q5): a handle released by the idle sweep or a recall-all batch
     /// must not lose the accesses its debounce had not written yet.
-    /// What: a synchronous one-transaction write, skipped (with a warning) when
-    /// a writer still holds either palace lock, since its commit may be newer
-    /// than the in-memory row.
+    /// What: a synchronous one-transaction write; a failure is logged.
     fn drop(&mut self) {
         let ids = std::mem::take(self.pending.get_mut());
         if ids.is_empty() || self.kg.is_read_only() {
             return;
         }
-        let (Ok(_write), Ok(_commit)) = (self.write_mutex.try_lock(), self.commit_mutex.try_lock())
-        else {
-            tracing::warn!(palace = %self.palace, n = ids.len(), "#9881: palace busy at drop; accesses not written");
-            return;
-        };
-        let ops: Vec<BatchWriteOp> = self
-            .current_rows(&ids)
-            .into_iter()
-            .map(BatchWriteOp::UpsertDrawer)
-            .collect();
-        if let Err(e) = self.kg.store().apply_batch(&ops) {
+        let rows = self.current_rows(&ids);
+        let written = self
+            .check_seam()
+            .and_then(|()| self.kg.store().put_accesses(&rows));
+        if let Err(e) = written {
             tracing::warn!(palace = %self.palace, "#9881: access write at drop failed: {e:#}");
         }
     }

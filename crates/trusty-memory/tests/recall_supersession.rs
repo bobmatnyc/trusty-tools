@@ -15,7 +15,9 @@
 
 mod recall_support;
 
-use recall_support::{Surface, rank_of, recall, recall_on, remember, state_with, supersede};
+use recall_support::{
+    Surface, rank_of, recall, recall_on, remember, saturate_access_boost, state_with, supersede,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -167,6 +169,8 @@ async fn recall_order_is_unchanged_for_drawers_with_no_edge() {
     )
     .await;
     let new = remember(&state, "project-a", "cert-manager renews certs", &[], None).await;
+    // #9881: recall moves scores through the access boost; cap it first.
+    saturate_access_boost(&state, "project-a", query).await;
 
     let before = ranked(&recall(&state, "project-a", query, 10).await);
     supersede(&state, "project-a", old, new).await;
@@ -211,6 +215,8 @@ async fn a_drawer_superseded_by_a_missing_drawer_keeps_its_score() {
         None,
     )
     .await;
+    // #9881: recall moves scores through the access boost; cap it first.
+    saturate_access_boost(&state, "project-a", query).await;
     let surfaces = [
         Surface::McpRecall,
         Surface::McpRecallDeep,

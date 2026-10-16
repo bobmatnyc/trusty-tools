@@ -95,19 +95,17 @@ async fn dropping_the_handle_persists_pending_accesses() {
     assert_eq!(on_disk(&kg, id), (1, true));
 }
 
-/// Why: a drop while a writer holds the palace must not overwrite that
-/// writer's commit with an older in-memory row.
-/// What: holds `write_mutex` across the drop; nothing is written.
+/// Why: a failed write at drop is logged; a drop must never panic.
+/// What: the seam fails the drop's write; the drop returns and nothing is
+/// stored.
 /// Test: this function.
 #[tokio::test]
-async fn a_drop_while_a_writer_holds_the_palace_writes_nothing() {
+async fn a_failed_write_at_drop_is_logged_not_raised() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (h, id) = handle_with_drawer(dir.path()).await;
     h.record_accesses(&[id]);
-    let lock = h.write_mutex_for_test();
-    let guard = lock.lock().await;
+    h.accesses.fail_next_write();
     drop(h);
-    drop(guard);
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).expect("reopen kg");
     assert_eq!(on_disk(&kg, id), (0, false));
 }
