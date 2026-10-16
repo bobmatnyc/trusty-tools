@@ -48,6 +48,8 @@ struct TestEnv {
     opener: Opener,
     slot: Mutex<Option<Arc<ClaimStore>>>,
     policy_ready: Mutex<Result<(), String>>,
+    /// Whether `ready` opens the store, as the daemon's does.
+    ready_opens_store: Mutex<bool>,
     log: Log,
     /// The effect: the real `decide` over this inbound fake, when set.
     inbound: Option<Arc<Fake>>,
@@ -62,6 +64,7 @@ impl TestEnv {
             opener: Box::new(ClaimStore::open_at),
             slot: Mutex::new(None),
             policy_ready: Mutex::new(Ok(())),
+            ready_opens_store: Mutex::new(true),
             log: Arc::clone(log),
             inbound: None,
             on_act: None,
@@ -88,6 +91,9 @@ impl TestEnv {
 impl SocketEnv for TestEnv {
     async fn ready(&self) -> Result<(), String> {
         self.policy_ready.lock().expect("ready").clone()?;
+        if !*self.ready_opens_store.lock().expect("flag") {
+            return Ok(());
+        }
         self.store().map(drop)
     }
 
@@ -350,17 +356,23 @@ async fn claim_survives_daemon_restart_so_a_retry_after_restart_is_not_redeliver
     );
 }
 
-/// One fail-open arm: the event through `handle_event`; no ack, no effect.
+/// One fail-open arm: the event through `handle_event` twice, once with
+/// the store judged by `ready` (the daemon's shape) and once with `ready`
+/// passing, so the claim step itself must refuse; no ack, no effect.
 async fn assert_no_ack_no_act(env: &TestEnv, log: &Log, what: &str) {
-    let mut conn = FakeConn::new(log, []);
-    handle_event(
-        env,
-        &mut conn,
-        envelope(&event_frame("E1", "Ev1", 0, "yes")),
-    )
-    .await;
-    assert_eq!(conn.acks(), 0, "{what}: acked");
-    assert_eq!(env.acts(), 0, "{what}: acted");
+    for ready_opens_store in [true, false] {
+        *env.ready_opens_store.lock().expect("flag") = ready_opens_store;
+        let mut conn = FakeConn::new(log, []);
+        handle_event(
+            env,
+            &mut conn,
+            envelope(&event_frame("E1", "Ev1", 0, "yes")),
+        )
+        .await;
+        assert_eq!(conn.acks(), 0, "{what} ({ready_opens_store}): acked");
+        assert_eq!(env.acts(), 0, "{what} ({ready_opens_store}): acted");
+    }
+    *env.ready_opens_store.lock().expect("flag") = true;
 }
 
 /// 🔴 #9923 (plan item 6, Fail-Open Check): an append failure acks nothing
