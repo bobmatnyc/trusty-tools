@@ -49,7 +49,8 @@ impl Home {
             route: "owner-dm".into(),
             question_id: "Q-1".into(),
             tainted_at: chrono::Utc::now(),
-            workspace: PathBuf::from("/"),
+            // #9923: scoped, so a session launched outside it stays untainted.
+            workspace: home.join("ws"),
         };
         taint_managed_session(&taint_dir(&home), "m-1", SESSION, &mark).expect("taint");
         Self { _tmp: tmp, home }
@@ -87,6 +88,7 @@ fn gated(home: &Home, ready: impl FnOnce() -> Result<(), NotReady>) -> Verdict {
         Verdict::Allow,
         &read_payload(Some(SESSION)),
         Some(&home.home),
+        None,
         ready,
     )
 }
@@ -181,9 +183,13 @@ fn bob_report(home: &Home) -> LoadReport {
 /// 🔴 #9741 B1: no home means no `config.yaml` can be read.
 #[test]
 fn home_unknown_denies_a_gated_call() {
-    let verdict = with_taint(Verdict::Allow, &read_payload(Some(SESSION)), None, || {
-        check(None, LIMIT)
-    });
+    let verdict = with_taint(
+        Verdict::Allow,
+        &read_payload(Some(SESSION)),
+        None,
+        None,
+        || check(None, LIMIT),
+    );
     assert_not_ready(&verdict, "no home directory is known", "home unknown");
 }
 
@@ -421,6 +427,8 @@ fn untainted_session_never_reads_the_policy() {
         Verdict::Allow,
         &read_payload(Some("s-clean")),
         Some(&home.home),
+        // #9923: launched outside the mark's workspace, so no mark covers it.
+        Some(&home.home),
         never,
     );
     assert_eq!(clean, Verdict::Allow);
@@ -430,7 +438,7 @@ fn untainted_session_never_reads_the_policy() {
         "tool_input": {},
     }));
     assert_eq!(
-        with_taint(Verdict::Allow, &todo, Some(&home.home), never),
+        with_taint(Verdict::Allow, &todo, Some(&home.home), None, never),
         Verdict::Allow
     );
     let first = Verdict::Deny {
@@ -439,7 +447,7 @@ fn untainted_session_never_reads_the_policy() {
     };
     let read = read_payload(Some(SESSION));
     assert_eq!(
-        with_taint(first.clone(), &read, Some(&home.home), never),
+        with_taint(first.clone(), &read, Some(&home.home), None, never),
         first
     );
 }

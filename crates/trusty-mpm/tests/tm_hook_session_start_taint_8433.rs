@@ -141,7 +141,7 @@ fn egress_read(home: &Path, socket: &Path, ws: &Path, id: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Assert `stdout` is a channel-taint deny.
+/// Assert `stdout` is a deny from a taint file that existed BEFORE the guard ran.
 fn assert_taint_deny(stdout: &str, case: &str) {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("{case}: no deny JSON ({e}): {stdout:?}"));
@@ -152,7 +152,12 @@ fn assert_taint_deny(stdout: &str, case: &str) {
     let reason = value["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .unwrap_or_default();
-    assert!(reason.contains("channel-tainted"), "{case}: {reason}");
+    // #9923: the lazy path says "now channel-tainted" and never prints the
+    // state, so only a taint file that existed before the guard ran matches.
+    assert!(
+        reason.contains("channel-tainted (Tainted(Present))"),
+        "{case}: the taint file must pre-exist, not be written lazily: {reason}"
+    );
 }
 
 /// Run one blocking `tm` step off the runtime.

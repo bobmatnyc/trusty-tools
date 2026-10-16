@@ -69,6 +69,8 @@ mod tm_hook_delegation_payload;
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 mod tm_hook_egress_guard_8454;
+// #9923: the egress guard taints a hook-less id under a live mark.
+mod tm_hook_egress_lazy_taint_9923;
 mod tm_hook_idle_parking;
 mod tm_hook_notification_8392;
 // #8531: `tm hook` SessionStart over the socket, HTTP only on Unreachable.

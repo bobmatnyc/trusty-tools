@@ -5,7 +5,8 @@
 //! id that was never tainted when a `SessionEnd` was lost or raced. Each test
 //! goes red against a reapply that does not record the id before it reads the
 //! marker, a deliverer that does not taint the recorded ids after it writes
-//! the marker, or a failure on either side that is not an `Err`.
+//! the marker, or a failure on either side that is not an `Err`. #9923: the
+//! residual, an id no SessionStart reported, is closed by [`taint_covered`].
 //! What: a temp taint directory; [`at_handshake_gap`] forces the interleaving.
 //! Test: this is the test module.
 
@@ -185,4 +186,84 @@ fn a_seen_list_a_retire_cannot_remove_keeps_the_mark() {
         managed_mark(&dir, ASKER).expect("read").is_some(),
         "the mark is kept"
     );
+}
+
+/// A canonical root holding `ws`, `ws/sub` and `out`, with [`ASKER`] marked
+/// for `ws` and [`X`] tainted (#9923); the root, the taint dir and `ws`.
+fn scoped() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+    for sub in ["ws/sub", "out"] {
+        std::fs::create_dir_all(root.join(sub)).expect("mkdir");
+    }
+    let dir = taint_dir(&root.join("home"));
+    let ws_mark = TaintMark {
+        workspace: root.join("ws"),
+        ..mark()
+    };
+    taint_managed_session(&dir, ASKER, X, &ws_mark).expect("taint");
+    (tmp, dir, root)
+}
+
+/// 🔴 #9923: an id no SessionStart reported is tainted for the mark covering
+/// its launch directory (or, second, its live cwd), and that mark's retire
+/// removes it; an id no mark covers is left alone.
+#[test]
+fn a_hook_less_id_is_tainted_for_the_mark_covering_its_launch_dir() {
+    let (_tmp, dir, root) = scoped();
+    let (ws, out) = (root.join("ws"), root.join("out"));
+    let covered = |id, launch: Option<&Path>, cwd: Option<&Path>| {
+        taint_covered(&dir, id, launch, cwd).expect("taint_covered")
+    };
+    assert_eq!(covered(Y, Some(&out), Some(&out)), None, "outside");
+    assert_eq!(covered(Y, Some(&out), None), None, "outside, no cwd");
+    assert_eq!(read_state(&dir, Y), TaintState::Untainted);
+    let asker = Some(ASKER.to_owned());
+    assert_eq!(covered(Y, Some(&ws), Some(&out)), asker, "launched in ws");
+    assert_eq!(
+        covered("y-sub", Some(&ws.join("sub")), None),
+        asker,
+        "under"
+    );
+    assert_eq!(covered("y-cwd", Some(&out), Some(&ws)), asker, "cwd in ws");
+    assert_eq!(covered("y-none", None, Some(&out)), asker, "no launch dir");
+    let record: TaintRecord =
+        serde_json::from_slice(&std::fs::read(taint_path(&dir, Y).expect("path")).expect("read"))
+            .expect("record");
+    assert_eq!(record.managed_session, ASKER);
+    retire(&dir, ASKER).expect("retire");
+    for id in [Y, "y-sub", "y-cwd", "y-none"] {
+        assert_eq!(read_state(&dir, id), TaintState::Untainted, "{id}");
+    }
+    let bare = taint_dir(&root.join("no-marks"));
+    assert_eq!(taint_covered(&bare, Y, None, None).expect("no marks"), None);
+}
+
+/// 🔴 #9923 (Fail-Open Check): a bad id, marks that cannot be listed, a mark
+/// that cannot be read and a failed taint write are each an `Err`.
+#[test]
+fn lazy_taint_fails_closed_on_every_error() {
+    let (_tmp, dir, root) = scoped();
+    let ws = root.join("ws");
+    assert!(
+        taint_covered(&dir, "../y", Some(&ws), None).is_err(),
+        "bad id"
+    );
+
+    let managed = dir.join("managed");
+    chmod(&managed, 0o000);
+    let unlisted = taint_covered(&dir, Y, Some(&ws), None);
+    chmod(&managed, 0o700);
+    assert!(unlisted.is_err(), "unlistable marks: {unlisted:?}");
+
+    chmod(&dir, 0o500);
+    let unwritten = taint_covered(&dir, Y, Some(&ws), None);
+    chmod(&dir, 0o700);
+    assert!(unwritten.is_err(), "failed write: {unwritten:?}");
+    assert_eq!(read_state(&dir, Y), TaintState::Untainted);
+
+    std::fs::write(managed.join("m-bad.json"), b"not json").expect("write");
+    let out = root.join("out");
+    let unread = taint_covered(&dir, Y, Some(&out), None);
+    assert!(unread.is_err(), "unreadable mark: {unread:?}");
 }
