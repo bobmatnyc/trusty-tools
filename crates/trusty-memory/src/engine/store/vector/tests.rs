@@ -454,6 +454,73 @@ async fn a_reopen_behind_a_stuck_vector_write_still_reads() {
     );
 }
 
+/// #9278 T3b-1 (M1): a vector open of an incompatible redb file returns
+/// `HnswStoreError::Other`, and the retry classifier still sees the refusal.
+/// Test: itself.
+#[test]
+fn hnsw_other_boxing_an_incompatible_format_file_is_seen_by_is_incompatible_format_refusal() {
+    use crate::engine::store::concurrent_open::is_incompatible_format_refusal;
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("x.usearch.redb"), [0xABu8; 4096]).unwrap();
+    let err = UsearchStore::new(dir.path().join("x.usearch"), 384)
+        .err()
+        .expect("an incompatible vector file is refused");
+    assert!(matches!(err, HnswStoreError::Other(_)), "{err:?}");
+    let err = anyhow::Error::from(err).context("open vector store");
+    assert!(is_incompatible_format_refusal(&err), "{err:#}");
+}
+
+/// #9278 T3b-1 (M1, #9914 MEDIUM): both classifiers find a refusal boxed in
+/// any wrapper's `Other`, a root `KgError::Palace` with no context included,
+/// and one wrapper inside another; a plain error is neither.
+/// Test: itself.
+#[test]
+fn a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers() {
+    use crate::engine::share::ShareError;
+    use crate::engine::store::concurrent_open::is_incompatible_format_refusal;
+    use crate::engine::store::kg::{KgError, KnowledgeGraph};
+    use crate::engine::store::palace_format::is_format_refusal;
+    use crate::engine::store::palace_store::PalaceStoreError;
+    let too_new = || PalaceStoreError::FormatTooNew {
+        palace: "p".into(),
+        found: 3,
+        supported: 2,
+    };
+    let kg_palace = || anyhow::Error::from(KgError::Palace(too_new()));
+    let dir = tempdir().unwrap();
+    let bad = dir.path().join("bad.redb");
+    std::fs::write(&bad, [0xABu8; 4096]).unwrap();
+    let refused = || anyhow::Error::from(KnowledgeGraph::open(&bad).err().expect("refused"));
+
+    let hnsw = HnswStoreError::from_internal(kg_palace());
+    assert!(matches!(hnsw, HnswStoreError::Other(_)), "{hnsw:?}");
+    assert!(is_format_refusal(&anyhow::Error::from(hnsw)));
+    // The #9914 MEDIUM: a root, context-free `KgError::Palace` in `ShareError::Other`.
+    let share = ShareError::from_internal(kg_palace());
+    assert!(matches!(share, ShareError::Other(_)), "{share:?}");
+    assert!(is_format_refusal(&anyhow::Error::from(share)));
+    let kg = KgError::from_internal(anyhow::Error::from(HnswStoreError::Palace(too_new())));
+    assert!(matches!(kg, KgError::Other(_)), "{kg:?}");
+    assert!(is_format_refusal(&anyhow::Error::from(kg)));
+    let nested = anyhow::Error::from(HnswStoreError::from_internal(kg_palace())).context("write");
+    let share = ShareError::from_internal(nested);
+    assert!(
+        matches!(share, ShareError::Hnsw(HnswStoreError::Other(_))),
+        "{share:?}"
+    );
+    assert!(is_format_refusal(&anyhow::Error::from(share)));
+
+    let hnsw = HnswStoreError::from_internal(refused());
+    assert!(is_incompatible_format_refusal(&anyhow::Error::from(hnsw)));
+    let share = ShareError::from_internal(anyhow::Error::from(HnswStoreError::from_internal(
+        refused(),
+    )));
+    assert!(is_incompatible_format_refusal(&anyhow::Error::from(share)));
+
+    let plain = anyhow::Error::from(HnswStoreError::from_internal(anyhow::anyhow!("boom")));
+    assert!(!is_format_refusal(&plain) && !is_incompatible_format_refusal(&plain));
+}
+
 use crate::engine::store::kg_store::VECTOR_KEYS as VECTOR_KEYS_FOR_TEST;
 
 // #9275: `{uuid}#n` chunk rows read as one drawer.

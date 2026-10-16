@@ -149,6 +149,33 @@ impl std::error::Error for Internal {
     }
 }
 
+/// The internal error a typed wrapper boxes, for the open classifiers.
+///
+/// Why (#9278 M1, #9914 MEDIUM): a wrapper's boxed variant is transparent, so
+/// `chain()` steps past the error it boxes; a refusal inside is found only by
+/// recursing into it. One helper keeps both classifiers on the same wrappers.
+/// What: `KgError`, `HnswStoreError`, `ShareError` (also through its `Hnsw`
+/// variant) and `EngineError`; `None` for any other error.
+/// Test: `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`,
+/// `engine_error_from_internal_maps_each_variant_and_keeps_text`.
+pub(crate) fn internal_of<'a>(
+    e: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a anyhow::Error> {
+    use crate::engine::{EngineError, share::ShareError, store::hnsw_store::HnswStoreError};
+    if let Some(k) = e.downcast_ref::<KgError>() {
+        return k.internal();
+    }
+    if let Some(h) = e.downcast_ref::<HnswStoreError>() {
+        return h.internal();
+    }
+    match e.downcast_ref::<ShareError>() {
+        Some(ShareError::Hnsw(h)) => return h.internal(),
+        Some(s) => return s.internal(),
+        None => {}
+    }
+    e.downcast_ref::<EngineError>()?.internal()
+}
+
 /// `T` at the root, under a `.context()`, or anywhere in the source chain.
 fn find<T: std::error::Error + Send + Sync + 'static>(e: &anyhow::Error) -> Option<&T> {
     e.downcast_ref::<T>()

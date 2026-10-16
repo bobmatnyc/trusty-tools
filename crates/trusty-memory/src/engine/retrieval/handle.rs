@@ -14,6 +14,7 @@ use super::deferred_embed;
 use super::types::{ForgetOutcome, RememberOptions};
 // #6366: the bounded write critical section this handle's `remember` runs in.
 use super::write_pipeline;
+use crate::engine::EngineError;
 use crate::engine::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::engine::decay::DecayConfig;
 use crate::engine::dream::extract_keywords;
@@ -411,9 +412,10 @@ impl PalaceHandle {
     /// the L1 snapshot fills drawers missing from it (the #32 migration), and
     /// the maintainer's open persists them and stamps the marker (#9722). L1
     /// is selected from the merged table.
+    /// Errors: [`EngineError`] (#9278 T3b-1), as [`Self::open_with_intent`].
     /// Test: `registry_create_and_open` creates a palace, drops the registry,
     /// and re-opens it.
-    pub fn open(palace: &Palace) -> Result<Arc<PalaceHandle>> {
+    pub fn open(palace: &Palace) -> std::result::Result<Arc<PalaceHandle>, EngineError> {
         Self::open_with_intent(palace, OpenIntent::ReadOnlyClient)
     }
 
@@ -433,11 +435,17 @@ impl PalaceHandle {
     /// The returned handle's `last_accessed` starts at `NEVER_ACCESSED`, not
     /// "now" (#7087) — see the field doc — so a restart's hydration burst
     /// doesn't read as a burst of fresh use to `evict_idle`.
+    /// Errors (#9278 T3b-1): a format refusal or another palace-store fault is
+    /// [`EngineError::Palace`]; every other failure is [`EngineError::Other`].
     /// Test: `registry_create_and_open` (default read-only path),
-    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests, and
-    /// `registry_tests::open_does_not_reset_idle_clock`.
-    pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
-        Self::open_with_intent_purging(palace, intent, true)
+    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests,
+    /// `registry_tests::open_does_not_reset_idle_clock`, and
+    /// `a_read_only_open_of_a_format_1_palace_is_refused_and_writes_nothing`.
+    pub fn open_with_intent(
+        palace: &Palace,
+        intent: OpenIntent,
+    ) -> std::result::Result<Arc<PalaceHandle>, EngineError> {
+        Self::open_with_intent_purging(palace, intent, true).map_err(EngineError::from_internal)
     }
 
     /// [`Self::open_with_intent`], choosing whether the open-time TTL purge

@@ -57,6 +57,9 @@ trusty_memory::engine::DrawerType::Task	variant	NARROW	removed: one path per typ
 trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::EngineError	enum	KEEP	error of PalaceHandle::open and open_with_intent (#9278 T3b-1)	T3b
+trusty_memory::engine::EngineError::Other	variant	KEEP	member of EngineError (error of PalaceHandle::open and open_with_intent (#9278 T3b-1))	T3b
+trusty_memory::engine::EngineError::Palace	variant	KEEP	member of EngineError (error of PalaceHandle::open and open_with_intent (#9278 T3b-1))	T3b
 trusty_memory::engine::ExistingPalaces	enum	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::Listed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::Listed::shown	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
@@ -826,8 +829,8 @@ trusty_memory::engine::retrieval::PalaceHandle::l1_drawers	field	KEEP	tests/bm25
 trusty_memory::engine::retrieval::PalaceHandle::last_accessed	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::list_drawers	method	KEEP	trusty-mpm src/core/sm/memory.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::new	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	anyhow-pending T3: tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	anyhow-pending T3: tests/kg_triple_key_migration_tests.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	tests/kg_triple_key_migration_tests.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::open_with_intent_purging	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4

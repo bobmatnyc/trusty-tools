@@ -27,17 +27,17 @@ use crate::engine::store::kg_store::{
 };
 use crate::engine::store::palace_format::{
     FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED, classify_with,
-    is_format_refusal,
+    is_format_refusal, palace_store_errors,
 };
 use crate::engine::store::palace_store::PalaceStoreError;
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The [`PalaceStoreError`] anywhere in `err`'s chain.
+/// The [`PalaceStoreError`] anywhere in `err`'s chain, wrappers included
+/// (#9278 T3b-1: the open helper's error is an `EngineError`).
 pub(super) fn store_error(err: &anyhow::Error) -> Option<&PalaceStoreError> {
-    err.chain()
-        .find_map(|e| e.downcast_ref::<PalaceStoreError>())
+    palace_store_errors(err).next()
 }
 
 /// Whether `r` is the format-1 gate's refusal of a format-2 palace.

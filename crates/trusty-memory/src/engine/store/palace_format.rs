@@ -16,13 +16,14 @@
 
 use super::chat_sessions::ChatSessionStoreError;
 use super::hnsw_store::HnswStoreError;
-use super::kg::KgError;
+use super::kg::{KgError, internal_of};
 use super::kg_store::{
     DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker,
     TRIPLES, decode_value, encode_value,
 };
 use super::palace_store::PalaceStoreError;
 use super::write_deadline::palace_label;
+use crate::engine::EngineError;
 use crate::engine::share::ShareError;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::Deserialize;
@@ -473,22 +474,28 @@ pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
 }
 
 /// Every `PalaceStoreError` in an error's chain, bare or inside a `KgError`,
-/// a `ChatSessionStoreError`, a `HnswStoreError` or a `ShareError`.
+/// a `ChatSessionStoreError`, a `HnswStoreError`, a `ShareError` or an
+/// `EngineError`, and in the internal error any of them boxes.
 ///
 /// Why (#9278 Q4, T2): each `Palace` variant is transparent, so `chain()`
-/// steps past its payload; only a match on the wrapper reaches it.
+/// steps past its payload; only a match on the wrapper reaches it. A boxed
+/// variant hides its whole internal error the same way (M1, #9914 MEDIUM).
 /// Test: `format_refusal_is_seen_through_kg_error`,
 /// `count_refusal_sees_a_kg_error_palace`,
 /// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`,
-/// `share_error_keeps_typed_sources_visible_to_the_classifiers`.
-pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &PalaceStoreError> {
+/// `share_error_keeps_typed_sources_visible_to_the_classifiers`,
+/// `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`.
+pub(crate) fn palace_store_errors(
+    err: &anyhow::Error,
+) -> Box<dyn Iterator<Item = &PalaceStoreError> + '_> {
     fn hnsw(h: &HnswStoreError) -> Option<&PalaceStoreError> {
         match h {
             HnswStoreError::Palace(p) => Some(p),
             _ => None,
         }
     }
-    err.chain().filter_map(|e| {
+    Box::new(err.chain().flat_map(|e| {
+        let nested = internal_of(e).into_iter().flat_map(palace_store_errors);
         e.downcast_ref::<PalaceStoreError>()
             .or_else(|| e.downcast_ref::<KgError>()?.as_palace_store())
             .or_else(|| match e.downcast_ref::<ChatSessionStoreError>()? {
@@ -502,7 +509,13 @@ pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &
                 ShareError::Hnsw(h) => hnsw(h),
                 _ => None,
             })
-    })
+            .or_else(|| match e.downcast_ref::<EngineError>()? {
+                EngineError::Palace(p) => Some(p),
+                _ => None,
+            })
+            .into_iter()
+            .chain(nested)
+    }))
 }
 
 #[cfg(test)]
