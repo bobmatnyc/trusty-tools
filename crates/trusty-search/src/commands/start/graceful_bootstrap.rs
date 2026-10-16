@@ -32,7 +32,9 @@
 //! #9949: a probe that fails every startup attempt no longer pins the daemon
 //! to ort. [`drive_bootstrap`] keeps retrying in the background with capped
 //! backoff ([`background_retry_delay`]) until one attempt succeeds; only a
-//! decided failure (missing launcher, venv build error) is terminal.
+//! permanent failure (missing launcher, venv build error) is terminal.
+//! #9468: each attempt locates the launcher before any venv work, and a
+//! permanent failure ends the bootstrap on its first occurrence.
 //!
 //! Test: `graceful_bootstrap_swaps_to_python_on_success`,
 //! `graceful_bootstrap_stays_ort_and_retrying_after_probe_failure`,
@@ -115,16 +117,45 @@ pub(crate) enum VenvCheck {
     Liveness,
 }
 
-/// Why an attempt did not swap to python (#9949).
+/// Why an attempt did not swap to python (#9949). Build it with
+/// [`AttemptError::at`], which decides permanent vs transient.
 #[derive(Debug)]
 enum AttemptError {
-    /// Retrying cannot help: the launcher is missing, or the venv build or
-    /// rebuild returned an error.
-    Decided(anyhow::Error),
-    /// The readiness probe failed or timed out; a slow host may pass later.
+    /// Retrying cannot help, so the bootstrap ends on the first one.
+    Permanent(anyhow::Error),
+    /// A later attempt may pass; the #9949 retry loop keeps going.
     Transient(anyhow::Error),
     /// Daemon shutdown cancelled the attempt.
     Cancelled,
+}
+
+/// The step an attempt failed at (#9468).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedStep {
+    /// `locate_launcher`: no `trusty-embedderd-py` binary.
+    Launcher,
+    /// `ensure_venv` returned an error, or its blocking task panicked.
+    Venv,
+    /// The readiness probe failed or timed out.
+    Probe,
+}
+
+impl AttemptError {
+    /// The one place that decides whether a failed step is retried (#9468).
+    ///
+    /// Why: a missing launcher was retried, and each retry rebuilt the venv
+    /// (a ~3 GB torch download) before failing the same lookup again.
+    /// What: `Launcher` and `Venv` are permanent: another attempt repeats the
+    /// same missing binary or the same failed build. `Probe` is transient: a
+    /// contended host can answer minutes later (#9949).
+    /// Test: `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
+    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`.
+    fn at(step: FailedStep, e: anyhow::Error) -> Self {
+        match step {
+            FailedStep::Launcher | FailedStep::Venv => Self::Permanent(e),
+            FailedStep::Probe => Self::Transient(e),
+        }
+    }
 }
 
 /// Abstracts "the thing that must be torn down if the readiness probe fails
@@ -363,8 +394,8 @@ pub(super) async fn run_graceful_python_bootstrap(
     }
 }
 
-/// Drive the ort→python hot-swap state machine: bootstrap the venv, locate
-/// the launcher, build the adapter, probe it once, and hot-swap on success.
+/// Drive the ort→python hot-swap state machine: locate the launcher,
+/// bootstrap the venv, build the adapter, probe it once, and hot-swap on success.
 ///
 /// Why: isolated from [`run_graceful_python_bootstrap`] so tests can inject
 /// a fake [`PythonBootstrap`] and a hand-built `SwitchableEmbedder` /
@@ -373,19 +404,19 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// would answer minutes later; giving up then pinned the daemon to ort for
 /// its whole uptime.
 /// What: makes up to `retries` startup attempts (linear backoff, `2 *
-/// attempt` seconds). If the last one failed on a decided error (missing
-/// launcher, venv build error), marks the bootstrap `Failed` and returns. If
-/// it failed on the probe, marks it `Retrying` and keeps attempting in the
-/// background, waiting [`background_retry_delay`] between rounds, until an
-/// attempt succeeds, a decided error ends it, or the switchable's
-/// `BootstrapControl` is shut down. Every failed attempt records its error in
+/// attempt` seconds). The first permanent error ([`AttemptError::at`]) marks
+/// the bootstrap `Failed` and returns, in a startup or a background attempt
+/// (#9468). If every startup attempt failed on the probe, marks it `Retrying`
+/// and keeps attempting in the background, waiting [`background_retry_delay`]
+/// between rounds, until an attempt succeeds, a permanent error ends it, or
+/// the switchable's `BootstrapControl` is shut down. Every failed attempt records its error in
 /// that control's report before logging it. On success hot-swaps `switchable`
 /// to the python adapter (`ActiveBackend::bootstrap = Ready`) and installs the
 /// pid slot on `state`. The live ort backend (`inner`) is never touched
 /// otherwise, so search keeps serving on ort throughout.
 ///
 /// Returns the python adapter's [`PythonAdapterTeardown`] handle on a
-/// successful hot-swap (epic #3524 slice 6, PR 4/5); `None` on a decided
+/// successful hot-swap (epic #3524 slice 6, PR 4/5); `None` on a permanent
 /// failure or a shutdown. [`run_graceful_python_bootstrap`] uses the `Some`
 /// case to hand the live python handle's teardown to the swap-back watchdog.
 ///
@@ -395,7 +426,9 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// `graceful_bootstrap_retries_before_giving_up`,
 /// `graceful_bootstrap_gives_up_after_exhausting_retries` in `start/tests.rs`;
 /// `graceful_bootstrap_promotes_to_python_after_contention_window`,
-/// `graceful_bootstrap_missing_launcher_is_terminal_with_no_retry`,
+/// `graceful_bootstrap_missing_launcher_builds_no_venv`,
+/// `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
+/// `graceful_bootstrap_transient_failure_keeps_retrying`,
 /// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
 /// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`.
 pub(super) async fn drive_bootstrap(
@@ -408,19 +441,24 @@ pub(super) async fn drive_bootstrap(
     let cancel = switchable.bootstrap_control().cancel_token();
     let mut attempt = 0u32;
 
-    let last_err = loop {
+    loop {
         attempt += 1;
         match run_attempt(&switchable, &state, &ops, attempt, &cancel).await {
             Ok(python_teardown) => return Some(python_teardown),
             Err(AttemptError::Cancelled) => return None,
-            Err(e) => {
+            // #9468: a permanent failure ends the bootstrap at once; another
+            // startup attempt would repeat it, venv build included.
+            Err(AttemptError::Permanent(e)) => {
+                give_up(&switchable, attempt, &e);
+                return None;
+            }
+            Err(AttemptError::Transient(e)) => {
                 tracing::warn!(
                     "graceful python bootstrap attempt {attempt}/{retries} failed \
-                     ({}) — staying on the ort sidecar",
-                    attempt_error_text(&e)
+                     ({e:#}) — staying on the ort sidecar"
                 );
                 if attempt >= retries {
-                    break e;
+                    break;
                 }
                 let backoff = Duration::from_secs(2 * u64::from(attempt));
                 if !sleep_unless_cancelled(backoff, &cancel).await {
@@ -428,10 +466,6 @@ pub(super) async fn drive_bootstrap(
                 }
             }
         }
-    };
-    if let AttemptError::Decided(e) = last_err {
-        give_up(&switchable, attempt, &e);
-        return None;
     }
 
     // #9949: the probe failed, not the setup — keep retrying while ort serves.
@@ -459,7 +493,7 @@ pub(super) async fn drive_bootstrap(
         match run_attempt(&switchable, &state, &ops, attempt, &cancel).await {
             Ok(python_teardown) => return Some(python_teardown),
             Err(AttemptError::Cancelled) => return None,
-            Err(AttemptError::Decided(e)) => {
+            Err(AttemptError::Permanent(e)) => {
                 give_up(&switchable, attempt, &e);
                 return None;
             }
@@ -474,7 +508,7 @@ pub(super) async fn drive_bootstrap(
 /// The log/report text for a failed attempt.
 fn attempt_error_text(e: &AttemptError) -> String {
     match e {
-        AttemptError::Decided(e) | AttemptError::Transient(e) => format!("{e:#}"),
+        AttemptError::Permanent(e) | AttemptError::Transient(e) => format!("{e:#}"),
         AttemptError::Cancelled => "cancelled by daemon shutdown".to_string(),
     }
 }
@@ -488,7 +522,7 @@ async fn sleep_unless_cancelled(delay: Duration, cancel: &CancellationToken) -> 
     }
 }
 
-/// Mark the bootstrap terminally `Failed` on a decided error (#9949).
+/// Mark the bootstrap terminally `Failed` on a permanent error (#9949).
 fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
     switchable
         .bootstrap_control()
@@ -562,11 +596,10 @@ async fn run_attempt(
 /// budget now reaches the supervisor through `build_adapter`, so the spawn is
 /// not cut off at the flat base first.
 ///
-/// Errors are classified for the retry loop: a venv or launcher error is
-/// [`AttemptError::Decided`], a probe error or timeout is
-/// [`AttemptError::Transient`], and `cancel` firing is
-/// [`AttemptError::Cancelled`]. A cancel during the probe tears the
-/// just-spawned handle down before returning, like a failed probe does.
+/// Errors are classified for the retry loop by [`AttemptError::at`], and
+/// `cancel` firing is [`AttemptError::Cancelled`]. A cancel during the probe
+/// tears the just-spawned handle down before returning, like a failed probe
+/// does.
 async fn try_bootstrap_once(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
@@ -575,7 +608,17 @@ async fn try_bootstrap_once(
     check: VenvCheck,
     cancel: &CancellationToken,
 ) -> std::result::Result<Arc<dyn PythonAdapterTeardown>, AttemptError> {
-    // Step a: blocking venv bootstrap off the async runtime. A shutdown does
+    // Step a: locate the launcher binary.
+    // #9468: before any venv work, so a missing launcher creates no venv
+    // directory, calls no uv and downloads no torch.
+    let launcher = ops.locate_launcher().map_err(|e| {
+        AttemptError::at(
+            FailedStep::Launcher,
+            e.context("python sidecar launcher not found"),
+        )
+    })?;
+
+    // Step b: blocking venv bootstrap off the async runtime. A shutdown does
     // not wait for it: the blocking thread finishes on its own and spawns no
     // sidecar.
     let venv_ops = Arc::clone(ops);
@@ -587,18 +630,14 @@ async fn try_bootstrap_once(
     };
     match venv {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(AttemptError::Decided(e)),
+        Ok(Err(e)) => return Err(AttemptError::at(FailedStep::Venv, e)),
         Err(e) => {
-            return Err(AttemptError::Decided(anyhow::anyhow!(
-                "py-embedder bootstrap task panicked: {e}"
-            )))
+            return Err(AttemptError::at(
+                FailedStep::Venv,
+                anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"),
+            ))
         }
     }
-
-    // Step b: locate the launcher binary.
-    let launcher = ops
-        .locate_launcher()
-        .map_err(|e| AttemptError::Decided(e.context("python sidecar launcher not found")))?;
 
     // Step c: build the python `LazyEmbedderHandle` + adapter. `teardown` is
     // the SAME underlying handle as `adapter` (viewed through
@@ -626,22 +665,26 @@ async fn try_bootstrap_once(
         // #9949: shutdown landed mid-probe; the dropped spawn future already
         // killed a half-started child, and teardown stops a started one.
         None => Some(AttemptError::Cancelled),
-        Some(Ok(Err(e))) => Some(AttemptError::Transient(
+        Some(Ok(Err(e))) => Some(AttemptError::at(
+            FailedStep::Probe,
             e.context("python readiness probe failed"),
         )),
         // #4125: name the multiplier AND whether the ceiling decided it.
-        Some(Err(_elapsed)) => Some(AttemptError::Transient(anyhow::anyhow!(
-            "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
+        Some(Err(_elapsed)) => Some(AttemptError::at(
+            FailedStep::Probe,
+            anyhow::anyhow!(
+                "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
              base budget{})",
-            budget.timeout.as_secs(),
-            budget.multiplier,
-            base.as_secs(),
-            if budget.capped {
-                format!(", capped at the {MAX_PROBE_TIMEOUT_MULTIPLIER}x ceiling")
-            } else {
-                String::new()
-            }
-        ))),
+                budget.timeout.as_secs(),
+                budget.multiplier,
+                base.as_secs(),
+                if budget.capped {
+                    format!(", capped at the {MAX_PROBE_TIMEOUT_MULTIPLIER}x ceiling")
+                } else {
+                    String::new()
+                }
+            ),
+        )),
     };
     if let Some(failure) = failure {
         // code-critic HIGH fix (epic #3524 slice 6 PR-3): the probe may have
