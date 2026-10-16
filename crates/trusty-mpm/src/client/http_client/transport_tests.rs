@@ -236,6 +236,7 @@ async fn nothing_listening_is_only_an_absent_or_stale_socket() {
         absent.is_connect() && absent.nothing_listening(),
         "{absent}"
     );
+    assert!(absent.socket_absent() && !absent.dial_refused(), "{absent}");
 
     drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
     let stale = DaemonClient::over_socket(&socket)
@@ -244,6 +245,9 @@ async fn nothing_listening_is_only_an_absent_or_stale_socket() {
         .await
         .expect_err("stale");
     assert!(stale.is_connect() && stale.nothing_listening(), "{stale}");
+    // #6288: a stale file is a REFUSAL, the same errno a saturated live
+    // listener gives; the error alone cannot tell them apart.
+    assert!(stale.dial_refused() && !stale.socket_absent(), "{stale}");
 
     // A socket with the wrong mode is refused before the dial: unreachable,
     // and not evidence that nothing listens.

@@ -4,3 +4,4 @@ Changed
 - `tm sessctl connect` reads the session's events from the daemon's `mpm.control.connect` frame stream. The socket form observes only and takes no write-lock (#6288).
 - The daemon serves the egress guard's verdict (`mpm.channels.egress_verdict`) and a managed session's file changes (`mpm.managed.files`) on its socket, with the same answers as their HTTP routes (#6288).
 - `tm hook` no longer retries a `SessionStart` over HTTP when the socket is unreachable; the delivery counts as unconfirmed (#6288).
+- `tm hook --pm-guard` tells a stale socket from a saturated live daemon. A refused dial (`ECONNREFUSED`, which a stale socket file and a full accept backlog both give) opens the shared-tree guard only when `daemon.lock` names no live daemon; a live `tm daemon` pid, or a live pid whose command line cannot be read, denies. A pid reused by an unrelated program counts as no daemon. An absent socket file still allows with a warning (#6288).

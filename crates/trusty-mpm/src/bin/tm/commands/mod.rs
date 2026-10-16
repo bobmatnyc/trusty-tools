@@ -177,6 +177,7 @@ pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_content;
 pub(crate) mod pm_guard_deny_by_default;
 // #8722: the denial record and audit POST every pm-guard deny makes.
+pub(crate) mod pm_guard_daemon_live;
 pub(crate) mod pm_guard_deny_log;
 pub(crate) mod pm_guard_dispatch;
 pub(crate) mod pm_guard_dispatch_deny;

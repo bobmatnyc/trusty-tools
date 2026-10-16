@@ -130,6 +130,7 @@ use trusty_mpm::core::dispatch_isolation::{
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
 use crate::commands::hook_payload::build_hook_payload;
+use crate::commands::pm_guard_daemon_live::daemon_live_for;
 // #8257: the writer-deny text lives beside this module, which is over cap.
 use crate::commands::pm_guard_dispatch_deny::{
     blocking_records, deny_reason, granted_deny_reason, records_in,
@@ -914,25 +915,46 @@ where
 /// registered through this daemon at all, and the guard is structurally off.
 /// A timeout does not: the daemon accepted the connection, so a writer may
 /// already be recorded and the answer simply did not arrive in time.
-/// What (#6288, over the daemon socket): `Unavailable` only when the dial found
-/// nothing listening — the socket is absent or stale (`nothing_listening`) —
-/// and when the daemon predates the method (version skew, the socket form of
-/// the HTTP 404 below). Everything else leaves the question open: a timeout, a
-/// cut or unreadable frame, and any other unreachable socket (refused by the
-/// owner/mode check, `EACCES`, retries exhausted on a saturated listener) —
-/// something may be serving it, so the claim is unanswered and denies.
+/// What (#6288, over the daemon socket): `Unavailable` only for positive
+/// evidence of no live daemon — an absent socket file, a refusal (`ECONNREFUSED`)
+/// while the daemon's lock names no live daemon (a stale socket file; owner
+/// ruling #8004: allow with a warning), and a daemon that predates the method
+/// (the socket form of the HTTP 404 below). A refusal is AMBIGUOUS: a saturated
+/// live listener refuses with the same errno after the retries, so a refusal
+/// opens the guard only when [`daemon_live_for`] finds no live daemon behind it
+/// (a pid reused by an unrelated program is not one). Everything else leaves
+/// the question open and denies: a timeout, a cut or unreadable frame, a socket
+/// refused by the owner/mode check or `EACCES`, and a refusal with a live
+/// daemon behind it.
 /// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` (absent),
 /// `claim_is_unknown_when_the_socket_is_refused_by_the_ownership_check`,
 /// `claim_is_unknown_when_the_daemon_times_out` (accepted then silent),
-/// `claim_is_empty_when_the_daemon_has_no_such_route` (method missing).
+/// `claim_is_empty_when_the_daemon_has_no_such_route` (method missing),
+/// and in `pm_guard_daemon_live_tests.rs`:
+/// `a_stale_socket_with_no_live_daemon_allows`,
+/// `a_refused_dial_with_a_live_daemon_denies`,
+/// `a_refused_dial_over_a_reused_pid_allows`.
 fn classify_transport_failure(
     url: &str,
     endpoint: &str,
     error: &trusty_mpm::client::DaemonCallError,
 ) -> SharedTreeReply {
-    // #6288: only positive evidence that nothing listens opens the guard; any
-    // other unreachable socket falls through to Unanswered (deny).
-    if error.nothing_listening() {
+    classify_transport_failure_with(url, endpoint, error, &|| daemon_live_for(url))
+}
+
+/// [`classify_transport_failure`] with the "is a daemon alive?" probe injected.
+///
+/// Test: `pm_guard_daemon_live_tests.rs`.
+pub(super) fn classify_transport_failure_with(
+    url: &str,
+    endpoint: &str,
+    error: &trusty_mpm::client::DaemonCallError,
+    daemon_live: &dyn Fn() -> bool,
+) -> SharedTreeReply {
+    // #6288: positive evidence of no daemon opens the guard. A refusal counts
+    // only when no live daemon could be the one refusing; any other
+    // unreachable socket falls through to Unanswered (deny).
+    if error.socket_absent() || (error.dial_refused() && !daemon_live()) {
         return SharedTreeReply::Unavailable(format!("nothing is listening at {url}"));
     }
     if error.is_method_missing() {

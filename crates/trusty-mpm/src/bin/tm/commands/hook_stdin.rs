@@ -56,7 +56,7 @@ pub(crate) const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// 10 s `REGISTERED_HOOK_TIMEOUT` Claude Code is told to allow, leaving 3 s for
 /// exec and classification.
 /// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`,
-/// which sums all three so lowering any one of them trips the gate;
+/// which sums both so lowering either trips the gate;
 /// `read_hook_stdin_reads_a_slow_megabyte_inside_the_guard_budget`.
 pub(crate) const PM_GUARD_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 

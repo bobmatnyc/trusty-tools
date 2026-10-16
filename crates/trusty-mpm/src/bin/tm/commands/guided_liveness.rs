@@ -176,17 +176,31 @@ pub(crate) fn lock_evidence_for(
     use super::guided_autostart_plan::{lock_evidence, lock_verdict};
     let text = std::fs::read_to_string(lock_path).ok()?;
     let lock = trusty_mpm::core::daemon_identity::parse_lock(&text)?;
-    let ours = match trusty_mpm::core::socket_from_locator(url) {
+    if !lock_names_target(url, &lock) {
+        return None;
+    }
+    lock_evidence(lock_verdict(lock_path, identify))
+}
+
+/// Does `lock` describe the daemon `url` points at?
+///
+/// Why: a live pid is evidence about the daemon at the lock's own socket or
+/// address only (#9034, #6288). Shared by [`lock_evidence_for`] and the
+/// pm-guard's saturated-versus-stale rule.
+/// What: a socket locator matches the lock's non-empty `socket_path`; any other
+/// URL matches by the lock's `addr` prefix.
+/// Test: `live_pid_requires_matching_addr`, `live_pid_matches_the_socket_locator`.
+pub(crate) fn lock_names_target(
+    url: &str,
+    lock: &trusty_mpm::core::daemon_identity::DaemonLock,
+) -> bool {
+    match trusty_mpm::core::socket_from_locator(url) {
         Some(socket) => !lock.socket_path.is_empty() && Path::new(&lock.socket_path) == socket,
         None => {
             let addr = lock.addr.trim_end_matches('/');
             !addr.is_empty() && url.trim_end_matches('/').starts_with(addr)
         }
-    };
-    if !ours {
-        return None;
     }
-    lock_evidence(lock_verdict(lock_path, identify))
 }
 
 /// The error bare `tm` stops with when the daemon may be running.
