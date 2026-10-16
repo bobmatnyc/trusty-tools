@@ -27,6 +27,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
 use crate::engine::store::kg::Internal;
+use crate::engine::store::kg_redb::READ_ONLY_ERROR_MSG;
 use crate::engine::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
 use crate::engine::store::palace_store::PalaceStoreError;
 use crate::engine::store::write_deadline::{DeadlinedWrite, WriteTxnError};
@@ -151,11 +152,8 @@ pub enum HnswStoreError {
     /// Returned by every write method when the store is in snapshot
     /// (read-only) mode. Callers should surface this verbatim — the
     /// message is the canonical guidance for issue #59.
-    #[error(
-        "palace is read-only: HTTP daemon holds the write lock — \
-         route writes through the daemon's HTTP API or stop the daemon \
-         before retrying via stdio"
-    )]
+    // #9278 M2 (#9910): the text is the constant, not a copy of it.
+    #[error("{}", READ_ONLY_ERROR_MSG)]
     ReadOnly,
     /// #9487: an operation exceeded its budget, or the store is wedged.
     #[error(transparent)]

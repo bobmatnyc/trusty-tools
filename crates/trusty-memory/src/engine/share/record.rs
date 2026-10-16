@@ -91,6 +91,7 @@ pub struct SharedMemoryRecord {
 /// and permanently. Refusing the line is recoverable; accepting it is not.
 /// Test: `verify_rejects_a_forged_digest`, `verify_rejects_an_unknown_format_version`,
 /// `import_skips_a_bad_line_and_keeps_the_rest`.
+// #9278 T3a: every struct variant is `non_exhaustive` too.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecordError {
@@ -98,16 +99,19 @@ pub enum RecordError {
         "record declares share format version {found}, but this build understands \
          up to {SHARE_FORMAT_VERSION}; upgrade before importing"
     )]
+    #[non_exhaustive]
     UnknownFormatVersion { found: u32 },
     #[error(
         "record declares content-hash version {found}, but this build computes \
          version {CONTENT_HASH_VERSION}; its digests are not comparable with local ones"
     )]
+    #[non_exhaustive]
     UnknownHashVersion { found: u32 },
     #[error(
         "record's declared content_hash {declared} does not match the digest of \
          its own body ({computed})"
     )]
+    #[non_exhaustive]
     DigestMismatch {
         declared: ContentHash,
         computed: ContentHash,

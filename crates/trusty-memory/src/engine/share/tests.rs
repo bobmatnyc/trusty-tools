@@ -1014,3 +1014,86 @@ async fn import_writes_chunk_rows_for_a_long_shared_record() {
     let shape = dst.vector_store.chunk_shapes().unwrap()[&id];
     assert_eq!((shape.rows, shape.max_index), (k, (k - 1) as u32));
 }
+
+// ── #9278 T3a: ShareError ───────────────────────────────────────────────────
+
+/// #9278 T3a: both share write paths refuse a read-only palace with the typed
+/// `ShareError::ReadOnly`, whose text is `READ_ONLY_ERROR_MSG`, and write nothing.
+/// Test: itself.
+#[tokio::test]
+async fn share_writes_refuse_a_read_only_palace_with_share_error() {
+    use crate::engine::palace::Drawer;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::kg_redb::READ_ONLY_ERROR_MSG;
+    use crate::engine::store::vector::UsearchStore;
+
+    seed_shared_embedder_with_mock();
+    let tmp = tempdir().unwrap();
+    let logical = tmp.path().join("idx.usearch");
+    drop(UsearchStore::new(logical.clone(), 384).unwrap());
+    // Hold the vector redb's lock so the open falls back to a snapshot.
+    let _live = redb::Database::create(tmp.path().join("idx.usearch.redb")).unwrap();
+    let vs = UsearchStore::new(logical, 384).unwrap();
+    let kg = KnowledgeGraph::open(&tmp.path().join("kg.redb")).unwrap();
+    let h = PalaceHandle::new(PalaceId::new("share-ro"), String::new(), vs, kg);
+    assert!(h.is_read_only(), "precondition: a snapshot handle");
+
+    let rec = SharedMemoryRecord::from_drawer(&Drawer::new(Uuid::new_v4(), "a fact"), "general");
+    let err = import_palace_records(&h, &[rec]).await.expect_err("import");
+    assert!(matches!(err, ShareError::ReadOnly), "{err:?}");
+    assert_eq!(err.to_string(), READ_ONLY_ERROR_MSG);
+    let err = supersede_drawer(&h, Uuid::new_v4(), "a fix", RoomType::General, vec![], 0.5)
+        .await
+        .expect_err("supersede");
+    assert!(matches!(err, ShareError::ReadOnly), "{err:?}");
+    assert!(h.drawers.read().is_empty(), "nothing was written");
+    assert!(
+        h.kg.load_drawers().unwrap().is_empty(),
+        "nothing was written"
+    );
+}
+
+/// #9278 T3a (the #9910 M1 lesson): `ShareError::from_internal` leaves a typed
+/// source where the open classifiers still find it — a palace refusal in
+/// `Palace` or inside `Hnsw`, and an incompatible-format refusal boxed in
+/// `Other` — and `Other` keeps the whole chain's text.
+/// Test: itself.
+#[test]
+fn share_error_keeps_typed_sources_visible_to_the_classifiers() {
+    use crate::engine::store::concurrent_open::is_incompatible_format_refusal;
+    use crate::engine::store::hnsw_store::HnswStoreError;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::palace_format::is_format_refusal;
+    use crate::engine::store::palace_store::PalaceStoreError;
+
+    let too_new = || PalaceStoreError::FormatTooNew {
+        palace: "p".into(),
+        found: 2,
+        supported: 1,
+    };
+    let share = ShareError::from_internal(anyhow::Error::from(too_new()).context("share"));
+    assert!(matches!(share, ShareError::Palace(_)), "{share:?}");
+    assert!(is_format_refusal(
+        &anyhow::Error::from(share).context("import")
+    ));
+
+    let hnsw = HnswStoreError::from_internal(anyhow::Error::from(too_new()));
+    let share = ShareError::from_internal(anyhow::Error::from(hnsw).context("write"));
+    assert!(
+        matches!(share, ShareError::Hnsw(HnswStoreError::Palace(_))),
+        "{share:?}"
+    );
+    assert!(is_format_refusal(&anyhow::Error::from(share)));
+
+    let dir = tempdir().unwrap();
+    let bad = dir.path().join("bad.redb");
+    std::fs::write(&bad, [0xABu8; 4096]).unwrap();
+    let refused = anyhow::Error::from(KnowledgeGraph::open(&bad).err().expect("refused"));
+    let share = ShareError::from_internal(refused);
+    assert!(matches!(share, ShareError::Other(_)), "{share:?}");
+    assert!(is_incompatible_format_refusal(&anyhow::Error::from(share)));
+
+    let other = ShareError::from_internal(anyhow::anyhow!("boom").context("export"));
+    assert_eq!(format!("{other:#}"), "export: boom");
+    assert!(!is_format_refusal(&anyhow::Error::from(other)));
+}

@@ -24,6 +24,7 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
+use crate::engine::share::ShareError;
 use crate::engine::store::kg::KgError;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
@@ -487,12 +488,18 @@ pub(crate) struct IncompatibleFormatRefused {
 /// What: downcasts through any `.context()` layers the caller added, and into
 /// the internal error of a root `KgError`.
 /// Test: `refusal_is_recognised_through_a_context_layer`,
-/// `knowledge_graph_open_refusals_stay_classified`.
+/// `knowledge_graph_open_refusals_stay_classified`,
+/// `share_error_keeps_typed_sources_visible_to_the_classifiers`.
 pub(crate) fn is_incompatible_format_refusal(err: &anyhow::Error) -> bool {
     // #9278: a typed `KnowledgeGraph::open` boxes the refusal in `KgError::Other`.
     let boxed = err.downcast_ref::<KgError>().and_then(KgError::internal);
+    // #9278 T3a: `ShareError::Other` boxes any internal error, a `KgError` too.
+    let share = err
+        .downcast_ref::<ShareError>()
+        .and_then(ShareError::internal);
     err.downcast_ref::<IncompatibleFormatRefused>().is_some()
         || boxed.is_some_and(|e| e.downcast_ref::<IncompatibleFormatRefused>().is_some())
+        || share.is_some_and(is_incompatible_format_refusal)
 }
 
 /// Open `path` exclusively for a writer, retrying through a brief

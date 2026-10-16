@@ -17,6 +17,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
+use super::error::ShareError;
 use super::record::SharedMemoryRecord;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::rooms::list_room_summaries;
@@ -51,8 +52,11 @@ use crate::engine::store::rooms::list_room_summaries;
 /// `"general"`, matching how recall treats an unregistered room.
 /// Test: `export_writes_one_line_per_drawer`, `export_skips_expired_and_tier_c`,
 /// `export_is_ordered_by_hash`.
-pub fn export_palace_records(handle: &PalaceHandle) -> Result<Vec<SharedMemoryRecord>> {
-    let labels = room_labels(handle)?;
+pub fn export_palace_records(
+    handle: &PalaceHandle,
+) -> std::result::Result<Vec<SharedMemoryRecord>, ShareError> {
+    // #9278 T3a: typed at the public edge.
+    let labels = room_labels(handle).map_err(ShareError::from_internal)?;
     let now = chrono::Utc::now();
     let drawers = handle.drawers.read().clone();
 
@@ -89,7 +93,10 @@ pub fn export_palace_records(handle: &PalaceHandle) -> Result<Vec<SharedMemoryRe
 /// What: creates `path`'s parent, serializes one record per line to
 /// `<path>.tmp`, then renames over `path`.
 /// Test: `export_writes_one_line_per_drawer`, `export_then_import_preserves_metadata`.
-pub fn export_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<usize> {
+pub fn export_palace_jsonl(
+    handle: &PalaceHandle,
+    path: &Path,
+) -> std::result::Result<usize, ShareError> {
     let records = export_palace_records(handle)?;
     write_jsonl(&records, path)?;
     Ok(records.len())
@@ -102,7 +109,16 @@ pub fn export_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<usize> 
 /// hand-built file without standing up a palace.
 /// What: as described on [`export_palace_jsonl`].
 /// Test: `export_then_import_preserves_metadata`, `two_machines_converge_on_one_memory`.
-pub fn write_jsonl(records: &[SharedMemoryRecord], path: &Path) -> Result<()> {
+pub fn write_jsonl(
+    records: &[SharedMemoryRecord],
+    path: &Path,
+) -> std::result::Result<(), ShareError> {
+    // #9278 T3a: io and serde failures are `Other`, with their context.
+    write_jsonl_inner(records, path).map_err(ShareError::from_internal)
+}
+
+/// [`write_jsonl`]'s body, on `anyhow` for its context layers.
+fn write_jsonl_inner(records: &[SharedMemoryRecord], path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create {} for the export", parent.display()))?;

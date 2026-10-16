@@ -347,8 +347,8 @@ trusty_memory::engine::embed::EMBED_DIM	reexport	NARROW	re-export of trusty_comm
 trusty_memory::engine::embed::Embedder	reexport	NARROW	re-export of trusty_common::embedder::Embedder; module pub(crate) (Q3)	A5
 trusty_memory::engine::embed::FastEmbedder	reexport	NARROW	re-export of trusty_common::embedder::FastEmbedder; module pub(crate) (Q3)	A5
 trusty_memory::engine::embed::embed_one	reexport	NARROW	re-export of trusty_common::embedder::embed_one removed: no caller; the item stays in trusty-common (Q3)	A5
-trusty_memory::engine::export_palace_jsonl	fn	KEEP	anyhow-pending T3: re-export of share::export_palace_jsonl (KEEP)	A5
-trusty_memory::engine::export_palace_records	fn	KEEP	anyhow-pending T3: re-export of share::export_palace_records (KEEP)	A5
+trusty_memory::engine::export_palace_jsonl	fn	KEEP	re-export of share::export_palace_jsonl (KEEP)	A5
+trusty_memory::engine::export_palace_records	fn	KEEP	re-export of share::export_palace_records (KEEP)	A5
 trusty_memory::engine::filter	mod	KEEP	path of FilterConfig	A5
 trusty_memory::engine::filter::BLOCKLIST_PATTERNS	const	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::DEFAULT_MIN_TOKENS	const	NARROW	no consumer outside the library (Q6)	A5
@@ -444,8 +444,8 @@ trusty_memory::engine::git::classify_file_path	fn	NARROW	unit tests only, #[cfg(
 trusty_memory::engine::git::extract_entities	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::git::parse_conventional_commit	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::git::score_importance	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
-trusty_memory::engine::import_palace_jsonl	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_jsonl (KEEP)	A5
-trusty_memory::engine::import_palace_records	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_records (KEEP)	A5
+trusty_memory::engine::import_palace_jsonl	fn	KEEP	re-export of share::import_palace_jsonl (KEEP)	A5
+trusty_memory::engine::import_palace_records	fn	KEEP	re-export of share::import_palace_records (KEEP)	A5
 trusty_memory::engine::inference_available	fn	KEEP	re-export of semantic_consolidation::inference_available (KEEP)	A5
 trusty_memory::engine::maintenance_lease	mod	NARROW	no consumer outside the library; module pub(crate)	A5
 trusty_memory::engine::maintenance_lease::LeaseStatus	enum	NARROW	no consumer outside the library; module pub(crate)	A5
@@ -656,25 +656,25 @@ trusty_memory::engine::registry::PalaceRegistry::with_max_open	method	NARROW	no 
 trusty_memory::engine::registry::PalaceRegistry::with_open_queue_timeout	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::registry::PalaceRegistry::with_writer_intent	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A4
 trusty_memory::engine::registry::PalaceRenameError	enum	KEEP	service::rename::RenameError::Palace field type (server)	A4
-trusty_memory::engine::registry::PalaceRenameError::Busy	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Busy	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Busy::detail	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Busy::palace	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::InvalidTarget	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::InvalidTarget	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::reason	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::Io	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Io	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Io::context	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Io::source	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::NotFound	variant	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::alias	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::target	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetExists	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetExists	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetExists::new	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::target	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty	variant	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::reason	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::is_conflict	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
@@ -1057,15 +1057,20 @@ trusty_memory::engine::share::ImportSummary::merged	field	KEEP	ADR-0067 intercha
 trusty_memory::engine::share::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::DigestMismatch	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::UnknownFormatVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::UnknownHashVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::SUPERSEDED_BY	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::engine::share::ShareError	enum	KEEP	error of every public share export, import and supersede fn (#9278 T3a)	T3a
+trusty_memory::engine::share::ShareError::Hnsw	variant	KEEP	member of ShareError (error of every public share export, import and supersede fn (#9278 T3a))	T3a
+trusty_memory::engine::share::ShareError::Other	variant	KEEP	member of ShareError (error of every public share export, import and supersede fn (#9278 T3a))	T3a
+trusty_memory::engine::share::ShareError::Palace	variant	KEEP	member of ShareError (error of every public share export, import and supersede fn (#9278 T3a))	T3a
+trusty_memory::engine::share::ShareError::ReadOnly	variant	KEEP	member of ShareError (error of every public share export, import and supersede fn (#9278 T3a))	T3a
 trusty_memory::engine::share::SharedMemoryRecord	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::SharedMemoryRecord::content	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::SharedMemoryRecord::content_hash	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
@@ -1081,11 +1086,11 @@ trusty_memory::engine::share::Supersession::linked	field	KEEP	ADR-0067 interchan
 trusty_memory::engine::share::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
 trusty_memory::engine::share::export	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
-trusty_memory::engine::share::export::export_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export::export_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export::write_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::import::ImportOutcome	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportOutcome::Inserted	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
@@ -1098,20 +1103,20 @@ trusty_memory::engine::share::import::ImportSummary::inserted	field	KEEP	ADR-006
 trusty_memory::engine::share::import::ImportSummary::merged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import::import_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import::import_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::import::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::import::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::record::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::DigestMismatch	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::UnknownFormatVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::UnknownHashVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::SharedMemoryRecord	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
@@ -1133,9 +1138,9 @@ trusty_memory::engine::share::supersede::Supersession	struct	KEEP	ADR-0067 inter
 trusty_memory::engine::share::supersede::Supersession::linked	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::supersede::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::supersede::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
-trusty_memory::engine::share::supersede::supersede_drawer	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::supersede_drawer	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::write_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::store	mod	KEEP	path of every kept store item (trusty-agents, tests/)	A3b
 trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b
@@ -1804,50 +1809,50 @@ trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_FORMAT_VERSION	const	N
 trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_KIND	const	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST	const	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError	enum	KEEP	engine::PalaceHandle::snapshot error type (A4)	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::table	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::name	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::found	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::supported	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::tables	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile	struct	NARROW	no consumer outside the library	A3a
@@ -2212,7 +2217,7 @@ trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::p
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::stage	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::store	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::palace_label	fn	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::supersede_drawer	fn	KEEP	anyhow-pending T3: re-export of share::supersede_drawer (KEEP)	A5
+trusty_memory::engine::supersede_drawer	fn	KEEP	re-export of share::supersede_drawer (KEEP)	A5
 trusty_memory::engine::timeouts	mod	KEEP	path of OpBudget	A5
 trusty_memory::engine::timeouts::OpBudget	struct	KEEP	owner of OpBudget::start_default, a deletion candidate	A5
 trusty_memory::engine::timeouts::OpBudget::leg	method	NARROW	no consumer outside the library	A5

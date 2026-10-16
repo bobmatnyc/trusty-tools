@@ -23,6 +23,7 @@ use super::kg_store::{
 };
 use super::palace_store::PalaceStoreError;
 use super::write_deadline::palace_label;
+use crate::engine::share::ShareError;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::Deserialize;
 use std::path::Path;
@@ -472,14 +473,21 @@ pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
 }
 
 /// Every `PalaceStoreError` in an error's chain, bare or inside a `KgError`,
-/// a `ChatSessionStoreError` or a `HnswStoreError`.
+/// a `ChatSessionStoreError`, a `HnswStoreError` or a `ShareError`.
 ///
 /// Why (#9278 Q4, T2): each `Palace` variant is transparent, so `chain()`
 /// steps past its payload; only a match on the wrapper reaches it.
 /// Test: `format_refusal_is_seen_through_kg_error`,
 /// `count_refusal_sees_a_kg_error_palace`,
-/// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`.
+/// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`,
+/// `share_error_keeps_typed_sources_visible_to_the_classifiers`.
 pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &PalaceStoreError> {
+    fn hnsw(h: &HnswStoreError) -> Option<&PalaceStoreError> {
+        match h {
+            HnswStoreError::Palace(p) => Some(p),
+            _ => None,
+        }
+    }
     err.chain().filter_map(|e| {
         e.downcast_ref::<PalaceStoreError>()
             .or_else(|| e.downcast_ref::<KgError>()?.as_palace_store())
@@ -487,8 +495,11 @@ pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &
                 ChatSessionStoreError::Palace(p) => Some(p),
                 _ => None,
             })
-            .or_else(|| match e.downcast_ref::<HnswStoreError>()? {
-                HnswStoreError::Palace(p) => Some(p),
+            .or_else(|| hnsw(e.downcast_ref::<HnswStoreError>()?))
+            // #9278 T3a: a share path carries both wrappers.
+            .or_else(|| match e.downcast_ref::<ShareError>()? {
+                ShareError::Palace(p) => Some(p),
+                ShareError::Hnsw(h) => hnsw(h),
                 _ => None,
             })
     })

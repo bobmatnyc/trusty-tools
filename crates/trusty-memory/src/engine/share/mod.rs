@@ -33,6 +33,7 @@
 //! Test: `share::tests` covers the four properties above end to end against a real
 //! redb-backed palace; `content_hash`'s own tests pin normalization.
 
+mod error;
 pub mod export;
 pub mod import;
 pub mod record;
@@ -41,6 +42,8 @@ pub mod supersede;
 #[cfg(test)]
 mod tests;
 
+// #9278 T3a: the error of every public share function.
+pub use error::ShareError;
 pub use export::{export_palace_jsonl, export_palace_records, write_jsonl};
 pub use import::{
     ImportOutcome, ImportSummary, import_palace_jsonl, import_palace_records, merge_records,

@@ -60,19 +60,24 @@ fn direct_dependencies_without_default_features() -> Vec<String> {
 
 /// Why (#9271): the engine's crates moving with it is what makes the engine
 /// trusty-memory's; a re-export would leave them under trusty-common.
-/// What: `hnsw_rs`, `git2` and `postcard` are direct dependencies of
-/// trusty-memory in the `--no-default-features` graph.
+/// What: `hnsw_rs` and `postcard` are direct dependencies of
+/// trusty-memory in the `--no-default-features` graph; `git2` is not (#9278
+/// T3d: it is a dev-dependency).
 /// Test: itself.
 #[test]
 fn engine_crates_are_trusty_memory_dependencies_without_default_features() {
     let names = direct_dependencies_without_default_features();
-    for krate in ["hnsw_rs", "git2", "postcard"] {
+    for krate in ["hnsw_rs", "postcard"] {
         assert!(
             names.iter().any(|n| n == krate),
             "`{krate}` is not a direct dependency of trusty-memory under \
              --no-default-features: {names:?}"
         );
     }
+    assert!(
+        !names.iter().any(|n| n == "git2"),
+        "`git2` must stay a dev-dependency: {names:?}"
+    );
 }
 
 /// Why (ADR-0066 D1.4): the frozen engine surface has to work, not only
