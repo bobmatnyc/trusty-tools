@@ -29,7 +29,9 @@
 //! which only the socket carries — since #6288 every call travels that way.
 //!
 //! #9979: a `sessions_chat` call is forwarded under a longer bound than every
-//! other request — see [`forwarding_timeout`].
+//! other request — see [`forwarding_timeout`]. The tool is served only by a
+//! bridge started with `--allow-chat`; every other bridge hides it and refuses
+//! the call locally — see [`chat_gate_refusal`].
 //!
 //! Test: `is_notification_*`, `value_to_mcp_response_*`,
 //! `forward_errors_on_an_absent_socket_naming_it`, and `stamp_*` unit tests
@@ -62,6 +64,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// cancel the turn on the bridge or the daemon. The S2 chat client therefore
 /// needs a dedicated MCP handle for chat, a caller bound >= this cap, and no
 /// automatic retry (#9979).
+///
+/// #9979: that dedicated handle is the only caller. The tool is served only by
+/// a bridge started with `--allow-chat`, which S2's chat handle passes; the
+/// shared bridges (`.mcp.json`, the console's shared handle) omit the flag and
+/// never expose it.
 /// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
 const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
@@ -297,6 +304,93 @@ fn forward_failure_message(e: &anyhow::Error) -> String {
     }
 }
 
+/// The one tool name the `--allow-chat` gate governs (#9979).
+const CHAT_TOOL: &str = "sessions_chat";
+
+/// The local refusal for a `sessions_chat` call on a bridge without `--allow-chat`.
+///
+/// Why (#9979): a chat turn holds this serial bridge for up to
+/// [`CHAT_REQUEST_TIMEOUT`], and every PM session loads the shared bridge, so
+/// the tool is opt-in per bridge.
+/// What: `Some(MCP tool-error result)` (isError true, naming `--allow-chat`)
+/// when `allow_chat` is false and `req` is a `tools/call` for `sessions_chat`;
+/// `None` otherwise. The caller answers it without a socket call.
+/// Test: `a_chat_call_without_allow_chat_is_refused_locally`,
+/// `a_chat_call_with_allow_chat_reaches_the_daemon`.
+fn chat_gate_refusal(req: &serde_json::Value, allow_chat: bool) -> Option<serde_json::Value> {
+    let method = req.get("method").and_then(serde_json::Value::as_str);
+    let tool = req
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str);
+    if allow_chat || method != Some("tools/call") || tool != Some(CHAT_TOOL) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": "sessions_chat is not enabled on this bridge: chat is served only by a \
+                     `tm serve --stdio --allow-chat` bridge (a dedicated chat handle), not \
+                     the shared one."
+        }],
+        "isError": true,
+    }))
+}
+
+/// Remove `sessions_chat` from a `tools/list` response value when chat is off.
+///
+/// Why (#9979): the daemon catalog keeps the tool; only this bridge hides it.
+/// What: drops the `sessions_chat` entry from `result.tools`; any other
+/// response, and every response with `allow_chat`, is left untouched.
+/// Test: `tools_list_without_allow_chat_omits_sessions_chat`,
+/// `tools_list_with_allow_chat_keeps_sessions_chat`.
+fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_chat: bool) {
+    if allow_chat || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list") {
+        return;
+    }
+    if let Some(tools) = resp
+        .pointer_mut("/result/tools")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        tools.retain(|t| t.get("name").and_then(serde_json::Value::as_str) != Some(CHAT_TOOL));
+    }
+}
+
+/// Answer one non-notification request: gate, stamp, forward, filter.
+///
+/// Why: one function carries the whole per-request path so the `--allow-chat`
+/// gate is testable against a fake socket (#9979).
+/// What: a gated `sessions_chat` call is answered locally with no socket
+/// call; otherwise the request is stamped (#6888), forwarded to `url`, and the
+/// reply has `sessions_chat` hidden from a `tools/list`.
+/// Test: the `tools_list_*` and `a_chat_call_*` tests below.
+async fn handle_request(
+    req: Request,
+    url: &str,
+    managed: Option<&str>,
+    allow_chat: bool,
+) -> Response {
+    let mut req_value = req_to_value(&req);
+    if let Some(result) = chat_gate_refusal(&req_value, allow_chat) {
+        return Response::ok(req.id.clone(), result);
+    }
+    stamp_caller_session_id(&mut req_value, managed);
+    let list_req = req_value.clone();
+    match forward_over_socket(url, req_value).await {
+        Ok(mut resp_value) => {
+            hide_chat_tool(&list_req, &mut resp_value, allow_chat);
+            value_to_mcp_response(resp_value)
+        }
+        Err(e) => {
+            tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
+            Response::err(
+                req.id.clone(),
+                mcp::error_codes::INTERNAL_ERROR,
+                forward_failure_message(&e),
+            )
+        }
+    }
+}
+
 /// Convert the daemon's JSON-RPC response value into an `mcp::Response`.
 ///
 /// Why: `run_stdio_loop` expects `mcp::Response`; the daemon returns a raw value
@@ -389,9 +483,12 @@ async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<()> {
 /// other request as `mpm.mcp.dispatch` over the socket, re-resolved per request.
 /// A transport error returns a JSON-RPC internal error rather than crashing the
 /// loop — the next request reconnects.
+///
+/// #9979: `allow_chat` (`--allow-chat`) is off by default; off, the bridge
+/// hides `sessions_chat` from `tools/list` and refuses the call locally.
 /// Test: the helpers are unit-tested below; the end-to-end forward path is
 /// covered by the daemon's `rpc_*` integration tests.
-pub(crate) async fn run_stdio_bridge() -> Result<()> {
+pub(crate) async fn run_stdio_bridge(allow_chat: bool) -> Result<()> {
     // Step 1: ensure the daemon is reachable (auto-start if needed). Hard error
     // on failure — no silent fallback. All output goes to stderr.
     let config = build_bridge_config();
@@ -411,19 +508,7 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
                 return Response::suppressed();
             }
             let url = trusty_mpm::core::resolve_daemon_url(None);
-            let mut req_value = req_to_value(&req);
-            stamp_caller_session_id(&mut req_value, managed_session_id.as_deref());
-            match forward_over_socket(&url, req_value).await {
-                Ok(resp_value) => value_to_mcp_response(resp_value),
-                Err(e) => {
-                    tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
-                    Response::err(
-                        req.id.clone(),
-                        mcp::error_codes::INTERNAL_ERROR,
-                        forward_failure_message(&e),
-                    )
-                }
-            }
+            handle_request(req, &url, managed_session_id.as_deref(), allow_chat).await
         }
     })
     .await
@@ -668,6 +753,114 @@ mod tests {
             .await
             .expect_err("nothing listens");
         assert!(forward_failure_message(&err).starts_with("trusty-mpm daemon unreachable"));
+    }
+
+    /// A counting fake daemon socket (0600 in a 0700 dir). Every connection is
+    /// one request frame answered with `reply`; the counter is the number of
+    /// socket calls the bridge made.
+    fn counting_socket(
+        reply: serde_json::Value,
+    ) -> (
+        String,
+        tempfile::TempDir,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_dir = dir.path().join("s");
+        std::fs::create_dir(&sock_dir).expect("socket dir");
+        std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let path = sock_dir.join("mpm.sock");
+        let std_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let listener = tokio::net::UnixListener::from_std(std_listener).expect("tokio listener");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line).await;
+                seen.fetch_add(1, Ordering::SeqCst);
+                let frame = format!("{reply}\n");
+                let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+            }
+        });
+        (trusty_mpm::core::socket_locator(&path), dir, calls)
+    }
+
+    fn list_request() -> Request {
+        serde_json::from_value(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}))
+            .expect("request")
+    }
+
+    fn chat_request() -> Request {
+        serde_json::from_value(call("sessions_chat", json!({"message": "hi"}))).expect("request")
+    }
+
+    fn catalog_reply() -> serde_json::Value {
+        json!({"jsonrpc": "2.0", "id": 7, "result": {"tools": [
+            {"name": "session_list"}, {"name": "sessions_chat"}, {"name": "disk_survey"}
+        ]}})
+    }
+
+    fn tool_names(resp: &Response) -> Vec<String> {
+        resp.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    /// #9979: without `--allow-chat`, `tools/list` omits `sessions_chat` and
+    /// keeps the other tools.
+    #[tokio::test]
+    async fn tools_list_without_allow_chat_omits_sessions_chat() {
+        let (url, _dir, _calls) = counting_socket(catalog_reply());
+        let resp = handle_request(list_request(), &url, None, false).await;
+        assert_eq!(tool_names(&resp), ["session_list", "disk_survey"]);
+    }
+
+    /// #9979: with `--allow-chat`, `tools/list` passes through unchanged.
+    #[tokio::test]
+    async fn tools_list_with_allow_chat_keeps_sessions_chat() {
+        let (url, _dir, _calls) = counting_socket(catalog_reply());
+        let resp = handle_request(list_request(), &url, None, true).await;
+        assert_eq!(
+            tool_names(&resp),
+            ["session_list", "sessions_chat", "disk_survey"]
+        );
+    }
+
+    /// #9979: without `--allow-chat`, a `sessions_chat` call is answered
+    /// locally with an MCP tool error naming the flag; the daemon is never dialled.
+    #[tokio::test]
+    async fn a_chat_call_without_allow_chat_is_refused_locally() {
+        let (url, _dir, calls) = counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
+        let resp = handle_request(chat_request(), &url, None, false).await;
+        let result = resp.result.expect("a tool error is a JSON-RPC result");
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("--allow-chat") && text.contains("not enabled"),
+            "{text}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// #9979: with `--allow-chat`, the call reaches the daemon and its reply
+    /// comes back verbatim.
+    #[tokio::test]
+    async fn a_chat_call_with_allow_chat_reaches_the_daemon() {
+        let (url, _dir, calls) =
+            counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {"reply": "hello"}}));
+        let resp = handle_request(chat_request(), &url, None, true).await;
+        assert_eq!(resp.result.expect("result")["reply"], "hello");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// #6288: with no daemon socket the forward fails naming the socket, and
