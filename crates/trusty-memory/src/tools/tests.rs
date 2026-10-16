@@ -578,6 +578,8 @@ mod lease_refusal_tests;
 mod palace_index_tests;
 // #9751: a write to a missing palace names it and the existing ones, no path.
 mod palace_missing_tests;
+// #9881: a served recall hit records an access, persisted per owning palace.
+mod recall_access_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.
