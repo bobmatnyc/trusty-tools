@@ -3,25 +3,41 @@
 //! Why: `index-file` stored a pushed absolute path verbatim as the chunk key,
 //! so the file's root-relative chunks were never replaced, `path_prefix`
 //! searches could not find the new ones, and a reindex did not heal it.
-//! What: drives the real axum router and the real RPC router from the
-//! parent's harness.
+//! What: drives the real RPC router and, for the HTTP side, the `*_report`
+//! core each route wraps (#9535: the router is going).
 //! Test: this file.
 
+use super::roots_7434::{http_body, http_refusal, params, served};
 use super::*;
+use crate::service::server::{index_chunks_report, index_file_report, search_report};
 
 /// The `total` the chunk enumeration reports for index `id`.
-async fn total_chunks(http: &Router, id: &str) -> u64 {
-    let (status, body) = http_bodyless(http, "GET", &format!("/indexes/{id}/chunks")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+async fn total_chunks(state: &Arc<SearchAppState>, id: &str) -> u64 {
+    // An empty `?` query: every `ChunksParams` field takes its serde default.
+    let body = http_body(index_chunks_report(state, id, &params(serde_json::json!({}))).await);
     body["total"].as_u64().unwrap_or(0)
 }
 
+/// `POST /indexes/{id}/index-file`'s answer, from its core.
+async fn put_file(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    index_file_report(state, id, params(body)).await
+}
+
 /// True when a search for `term` scoped to `prefix` returns a chunk holding it.
-async fn prefix_search_finds(http: &Router, id: &str, term: &str, prefix: &str) -> bool {
+async fn prefix_search_finds(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    term: &str,
+    prefix: &str,
+) -> bool {
     let query = serde_json::json!({
         "text": term, "top_k": 10, "expand_graph": false, "path_prefix": prefix,
     });
-    let body = http_ok(http, "POST", &format!("/indexes/{id}/search"), query).await;
+    let body = http_body(search_report(state, id, params(query)).await);
     body["results"].as_array().is_some_and(|hits| {
         hits.iter()
             .any(|hit| hit["content"].as_str().is_some_and(|c| c.contains(term)))
@@ -53,11 +69,11 @@ fn rooted(tmp: &Path) -> (PathBuf, PathBuf) {
 async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, alias) = rooted(tmp.path());
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("ia", &root))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
-    let reply = http_ok(&http, "POST", "/indexes/ia/index-file", put).await;
+    let reply = http_body(put_file(&state, "ia", put).await);
     assert_eq!(reply["indexed"], true, "{reply}");
-    let expected = total_chunks(&http, "ia").await;
+    let expected = total_chunks(&state, "ia").await;
     assert!(expected > 0, "the relative write must index something");
 
     let canonical = std::fs::canonicalize(&root).expect("canonical root");
@@ -75,11 +91,11 @@ async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
             )
             .await
         } else {
-            http_ok(&http, "POST", "/indexes/ia/index-file", put).await
+            http_body(put_file(&state, "ia", put).await)
         };
         assert_eq!(reply["indexed"], true, "{absolute}: {reply}");
         assert_eq!(
-            total_chunks(&http, "ia").await,
+            total_chunks(&state, "ia").await,
             expected,
             "{absolute} added chunks instead of replacing them"
         );
@@ -92,7 +108,7 @@ async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
         let abs_prefix = canonical.join("src").display().to_string();
         for prefix in ["src", abs_prefix.as_str()] {
             assert!(
-                prefix_search_finds(&http, "ia", &term, prefix).await,
+                prefix_search_finds(&state, "ia", &term, prefix).await,
                 "{absolute}: path_prefix `{prefix}` missed `{term}`"
             );
         }
@@ -114,10 +130,10 @@ async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, alias) = rooted(tmp.path());
     std::fs::write(tmp.path().join("outside.rs"), "fn outside() {}\n").expect("outside");
-    let (_state, http, rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("ia", &root))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/ia/index-file", put).await;
-    let before = total_chunks(&http, "ia").await;
+    http_body(put_file(&state, "ia", put).await);
+    let before = total_chunks(&state, "ia").await;
 
     let root_s = root.display().to_string();
     for outside in [
@@ -128,7 +144,7 @@ async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
         format!("{root_s}/"),
     ] {
         let body = serde_json::json!({ "path": outside, "content": CONTENT });
-        let over_http = http_err(&http, "POST", "/indexes/ia/index-file", body.clone()).await;
+        let over_http = http_refusal(put_file(&state, "ia", body.clone()).await);
         assert_eq!(
             over_http.0,
             StatusCode::BAD_REQUEST,
@@ -152,7 +168,7 @@ async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
             trusty_common::uds::server::CODE_INVALID_PARAMS,
             &outside,
         );
-        assert_eq!(total_chunks(&http, "ia").await, before, "{outside}");
+        assert_eq!(total_chunks(&state, "ia").await, before, "{outside}");
     }
 }
 
@@ -167,14 +183,14 @@ async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
 async fn index_file_keeps_a_relative_path_unchanged_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());
-    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("ia", &root))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
-    let reply = http_ok(&http, "POST", "/indexes/ia/index-file", put).await;
+    let reply = http_body(put_file(&state, "ia", put).await);
     assert_eq!(reply["path"], FILE, "{reply}");
     assert!(!chunks_for(&state, "ia", FILE).await.is_empty());
 
     let climb = serde_json::json!({ "path": "../outside.rs", "content": CONTENT });
-    let (status, body) = http_err(&http, "POST", "/indexes/ia/index-file", climb).await;
+    let (status, body) = http_refusal(put_file(&state, "ia", climb).await);
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "index_file_excluded", "{body}");
 }
@@ -195,7 +211,7 @@ async fn index_file_keeps_a_relative_path_unchanged_9510() {
 async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());
-    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("ia", &root))).await;
     let absolute = root.join(FILE).display().to_string();
     let term = "purge_stale_copy_9510";
     let content = format!("fn {term}(token: &str) -> bool {{ verify(token) }}\n");
@@ -207,15 +223,15 @@ async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
             .await
             .expect("plant the pre-#9510 absolute key");
     }
-    let single = total_chunks(&http, "ia").await;
+    let single = total_chunks(&state, "ia").await;
     assert!(single > 0, "the planted key must index something");
 
     let put = serde_json::json!({ "path": absolute, "content": content });
-    let reply = http_ok(&http, "POST", "/indexes/ia/index-file", put).await;
+    let reply = http_body(put_file(&state, "ia", put).await);
     assert_eq!(reply["indexed"], true, "{reply}");
 
     let query = serde_json::json!({ "text": term, "top_k": 10, "expand_graph": false });
-    let body = http_ok(&http, "POST", "/indexes/ia/search", query).await;
+    let body = http_body(search_report(&state, "ia", params(query)).await);
     let ids: Vec<String> = body["results"]
         .as_array()
         .unwrap_or_else(|| panic!("no results array: {body}"))
@@ -228,7 +244,7 @@ async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
         "a search must answer only the relative-key copy; got {ids:?}"
     );
     assert_eq!(
-        total_chunks(&http, "ia").await,
+        total_chunks(&state, "ia").await,
         single,
         "the verbatim absolute copy survived the re-add"
     );
@@ -252,7 +268,7 @@ async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
 async fn index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());
-    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("ia", &root))).await;
     let absolute = root.join("node_modules/pkg/auth.rs").display().to_string();
     let content = "fn excluded_stale_copy_9510(token: &str) -> bool { verify(token) }\n";
     {
@@ -263,15 +279,15 @@ async fn index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9
             .await
             .expect("plant the pre-#9510 absolute key");
     }
-    assert!(total_chunks(&http, "ia").await > 0, "the plant must index");
+    assert!(total_chunks(&state, "ia").await > 0, "the plant must index");
 
     let put = serde_json::json!({ "path": absolute, "content": content });
-    let (status, body) = http_err(&http, "POST", "/indexes/ia/index-file", put).await;
+    let (status, body) = http_refusal(put_file(&state, "ia", put).await);
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "index_file_excluded", "{body}");
     assert_eq!(body["path"], absolute.as_str(), "{body}");
     assert!(body["removed_chunks"].as_u64().unwrap_or(0) > 0, "{body}");
     let stray = chunks_for(&state, "ia", &absolute).await;
     assert!(stray.is_empty(), "{absolute} kept its own key: {stray:?}");
-    assert_eq!(total_chunks(&http, "ia").await, 0, "a copy survived");
+    assert_eq!(total_chunks(&state, "ia").await, 0, "a copy survived");
 }
