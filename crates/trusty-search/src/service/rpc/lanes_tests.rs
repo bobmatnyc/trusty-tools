@@ -15,8 +15,8 @@
 //!
 //! ## What each lane means, and where it comes from
 //!
-//! `service::server::build_router_on` splits its routes into three groups, and
-//! every socket method mirrors the group its HTTP route is in:
+//! The retired axum router split its routes into three groups, and every
+//! socket method mirrors the group its HTTP route was in:
 //!
 //! | Lane | HTTP group | Admission permit | Query deadline |
 //! |---|---|---|---|
@@ -69,7 +69,7 @@ use crate::service::socket::METHODS;
 /// rather than stopping at a registry lookup.
 const INDEX: &str = "lanes-6285";
 
-/// Which of `build_router_on`'s three route groups a method mirrors.
+/// Which of the retired router's three route groups a method mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lane {
     /// No limiter, no deadline.

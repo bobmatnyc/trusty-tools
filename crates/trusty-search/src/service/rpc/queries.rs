@@ -57,7 +57,7 @@
 //! which end refuses.
 //!
 //! Test: `queries_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
-//! family, driving the real axum router and the real RPC router against one
+//! family, driving the `*_report` core and the real RPC router against one
 //! shared state, over an index holding a real corpus.
 //!
 //! [`register`]: crate::service::rpc::queries::register
@@ -137,8 +137,8 @@ pub struct IndexBody<B> {
 /// search would bypass the admission limit that exists to stop the #2845 storm,
 /// and would hang forever against a stalled embedder where the HTTP route for
 /// the same query answers 408 (#907).
-/// What: the limiter first and the deadline inside it — the same nesting the
-/// axum router builds, so a caller waits for admission and only then starts
+/// What: the limiter first and the deadline inside it — the nesting the
+/// retired axum router built, so a caller waits for admission and only then starts
 /// spending its query budget. Both are read from [`SearchAppState`], which is
 /// the daemon's ONE of each. The permit is held until the body finishes.
 /// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`,
@@ -162,11 +162,10 @@ where
 /// each slice adds one file rather than editing one.
 /// What: one `typed` registration per method, each cloning the `Arc` handle to
 /// the shared [`SearchAppState`] and running its `*_report` core through
-/// [`guarded`]. Every core is the SAME function the axum handler wraps, so a
-/// body cannot be one thing over HTTP and another here.
+/// [`guarded`].
 /// Test: `rpc_router_registers_every_documented_method` in `socket_tests.rs`;
 /// the `*_over_the_socket_matches_the_http_body` cases drive each registration
-/// against its HTTP twin.
+/// against its `*_report` core.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     /// One method whose core already answers a `serde_json::Value`.
     macro_rules! query {

@@ -4,7 +4,7 @@
 //! read-only inspectors that share disk-mtime helpers; grouping them keeps
 //! both the handlers and helpers together.
 //! What: `index_disk_and_mtime`, `first_existing_mtime_rfc3339`,
-//! `index_status_handler`, `graph_handler`, `graph_stats_handler`.
+//! `index_status_handler`, `graph_handler`, and the `*_report` cores.
 //! Test: `index_disk_and_mtime_handles_missing_dir`,
 //! `graph_handler_exports_nodes_and_edges`, etc.
 use axum::http::StatusCode;
@@ -695,32 +695,6 @@ fn unknown_index(index_id: &IndexId) -> (StatusCode, serde_json::Value) {
             "index_id": index_id.0,
         }),
     )
-}
-
-/// `GET /indexes/{id}/graph/stats` — symbol-graph summary statistics
-/// (issue #41 phase 2).
-///
-/// `GET /indexes/{id}/graph/stats` — symbol-graph summary statistics
-/// (issue #41 phase 2).
-///
-/// Why: lets agents and dashboards verify KG health (total nodes/edges plus a
-/// per-`EdgeKind` breakdown) without parsing the much larger `/graph` export
-/// or scraping Prometheus. The Phase B/C edge counts here are the
-/// load-bearing signal that the entity-derived edges are actually wired.
-/// What: snapshots the symbol graph (lock-free after the `Arc` clone) and
-/// returns `{ node_count, edge_count, edge_kinds: { CallsFunction: …, … } }`.
-/// Returns 404 when the index id is unknown.
-/// Test: covered by `graph_stats_handler_returns_breakdown` in this module.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn graph_stats_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // As in `graph_handler`: the HTTP 404 keeps its bare-status shape.
-    graph_stats_report(&state, &id)
-        .await
-        .map(Json)
-        .map_err(|(status, _)| status)
 }
 
 /// The body `GET /indexes/{id}/graph/stats` serves, without the transport

@@ -11781,7 +11781,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",

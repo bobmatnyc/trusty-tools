@@ -43,11 +43,9 @@
 //! calls it and the daemon has never served it — and is a pre-existing bug with
 //! its own ticket, not a gap this surface owes a method for.
 //!
-//! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
-//! the axum router was built on — see
-//! `crate::service::server::build_router_on`. A second `Arc::new` would give
-//! the socket its own registry and its own tickers, and the two transports
-//! would disagree about which indexes exist.
+//! **One state.** The socket serves the `Arc<SearchAppState>` the daemon's
+//! tickers mutate — see `crate::service::server::spawn_daemon_tickers`. A
+//! second `Arc::new` would give the socket its own registry and no tickers.
 //!
 //! **The trust boundary is the socket, not the payload.**
 //! `bind_singleton_hardened` puts a `0600` socket in a `0700` directory, and
@@ -285,9 +283,8 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
 /// The frame budget this listener accepts, in bytes (#6285 slice 5.5).
 ///
 /// Why 64 MiB and not a figure of this surface's own: it is exactly the
-/// `DefaultBodyLimit` `POST /indexes/{id}/graph` carries
-/// (`service::server::build_router_on`), which is what makes the two doors take
-/// the same payload rather than nearly the same one. A contributed graph is the
+/// `DefaultBodyLimit` the retired `POST /indexes/{id}/graph` route carried, so
+/// a producer sized for HTTP still fits. A contributed graph is the
 /// largest thing either transport moves — PR #1129 recorded ~20 MB maxima from
 /// large pilot corpora and sized the HTTP limit at ~3× that — and a slice-3
 /// query response can also pass 8 MiB when a caller asks for full content at a
@@ -328,10 +325,6 @@ pub const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 /// separately rather than their sum, and one progress event or one `DaemonEvent`
 /// is a few hundred bytes — a stream reaches the cap only if a single event
 /// does.
-///
-/// The HTTP half of the pairing is a compile-time link rather than a test:
-/// `build_router_on` names [`MAX_FRAME_BYTES`] in its `DefaultBodyLimit` instead
-/// of restating the literal, so the two doors cannot drift apart.
 ///
 /// Test: `serve_options_carries_the_raised_frame_budget`,
 /// `a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_default`,

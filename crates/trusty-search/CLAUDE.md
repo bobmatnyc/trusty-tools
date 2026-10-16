@@ -1219,7 +1219,7 @@ this table is generated from it, not maintained by hand.
 
 - **Language**: Rust 2021
 - **Async runtime**: tokio (full features)
-- **HTTP**: axum 0.7 + tower-http (CORS, trace, gzip), HTTP/2
+- **HTTP**: axum 0.8 types for the transport-neutral cores (no listener since #9214)
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
 - **Lexical**: BM25 (zero-dep port from `crates/trusty-agents/src/context/bm25.rs`)
@@ -1560,8 +1560,7 @@ The daemon serves every method on its Unix socket and binds no TCP port
 #9536 removed `--port` and `--no-http` from `start`: clap rejects either as
 an unknown argument (exit 2), and `TRUSTY_SEARCH_NO_HTTP` is not read. A unit
 that still passes a flag fails to start; `service install` regenerates it
-without them. The axum router compiles
-only under `cfg(test)` until PR-B deletes it (ruling D1), so `/ui`,
+without them. #9535 deleted the test-only axum router (ruling D1), so `/ui`,
 `/upgrade`, `/metrics` and `/api/chat/providers` are unavailable; the search
 dashboard is served by trusty-console.
 

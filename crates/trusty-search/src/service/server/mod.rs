@@ -1,5 +1,4 @@
-//! The daemon's state, tickers and transport-neutral report cores, plus the
-//! retired axum router.
+//! The daemon's state, tickers and transport-neutral report cores.
 //!
 //! Why: Single shared `SearchAppState` (wrapped in `Arc`) lets every caller
 //! read from the `IndexRegistry` concurrently. `DashMap` shard-locks per index
@@ -8,12 +7,12 @@
 //!
 //! What: This module is a thin facade that declares submodules and re-exports
 //! the public surface. The socket (`service::rpc`) serves the `*_report`
-//! cores. #9214 (ruling D1): the daemon binds no TCP listener, so the axum
-//! router and its handlers compile only under `cfg(test)`, where the HTTP
-//! tests still drive the cores through them; PR-B deletes them.
+//! cores. #9214 (ruling D1): the daemon binds no TCP listener; #9535 deleted
+//! the test-only axum router. The `cfg(test)` handlers that remain are called
+//! directly by tests.
 //!
-//! Test: `cargo test -p trusty-search` boots the router with an in-process
-//! registry and exercises each endpoint.
+//! Test: `cargo test -p trusty-search` drives the report cores and the
+//! remaining handlers against an in-process registry.
 
 mod admin;
 mod components;
@@ -37,7 +36,7 @@ mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
 mod files;
-// #9214 (D1): the `files` HTTP routes, test-only until PR-B deletes them.
+// #9214 (D1): the `files` handlers, test-only; tests call them directly.
 #[cfg(test)]
 mod files_http;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
@@ -74,10 +73,6 @@ mod state_impl;
 mod status;
 mod tickers;
 mod typeahead;
-// #6688: `POST /upgrade`, split out of `health.rs` when it crossed the cap.
-// #9214: HTTP-only, so test-only with the router.
-#[cfg(test)]
-mod upgrade;
 // #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
 mod vector_health;
 // #9027: warm every registered index ahead of an all-index search.
@@ -279,48 +274,29 @@ pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, 
 
 use std::sync::Arc;
 
-// #9214 (ruling D1): the router and its handlers are test-only.
+// #9214 (ruling D1): the handlers are test-only; tests reach them through
+// `super::*`.
 #[cfg(test)]
-use admin::{
-    admin_stop_handler, get_config_handler, logs_tail_handler, patch_config_handler,
-    status_stream_handler,
-};
+use admin::{admin_stop_handler, logs_tail_handler};
 #[cfg(test)]
-use axum::{
-    response::Redirect,
-    routing::{delete, get, post},
-    Router,
-};
-#[cfg(test)]
-use contrib_graph::{graph_neighbors_handler, ingest_graph_handler};
-#[cfg(test)]
-use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
+use files::{get_index_chunks_handler, global_grep_handler, grep_handler};
 #[cfg(test)]
 use health::health_handler;
 #[cfg(test)]
-use index_config::{index_config_handler, patch_index_config_handler};
+use indexes::{create_index_handler, list_indexes_handler};
 #[cfg(test)]
-use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
+use reindex_handlers::reindex_handler;
 #[cfg(test)]
-use quantize_handlers::quantize_handler;
+use search::search_handler;
 #[cfg(test)]
-use reindex_handlers::{reindex_handler, reindex_stream_handler};
+use search_global::global_search_handler;
 #[cfg(test)]
-use routing::search_similar_handler;
-#[cfg(test)]
-use search::{delete_index_handler, global_search_handler, search_handler};
-#[cfg(test)]
-use status::{graph_handler, graph_stats_handler, index_status_handler};
+use status::{graph_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,
     spawn_watcher_idle_suspend_ticker,
 };
-
-#[cfg(test)]
-use files::{call_chain_handler, global_grep_handler, grep_handler};
-#[cfg(test)]
-use typeahead::typeahead_handler;
 
 // Re-export for integration tests in `tests/typeahead.rs`.
 //
@@ -335,18 +311,13 @@ pub use typeahead::{
     typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
 };
 
-#[cfg(test)]
-use self::upgrade::upgrade_handler;
-
 // #6285: the one seam `service::socket` reads the health report through, so the
 // socket and `GET /health` cannot report different things.
 pub(crate) use health::health_report;
 
 // #6285 slice 2: the read surface's transport-neutral bodies and the param
 // types they take. `service::rpc::reads` registers one JSON-RPC method per
-// entry here; the axum handlers above wrap the SAME functions, which is what
-// makes a socket-versus-HTTP parity assertion meaningful rather than a
-// comparison of two independent implementations.
+// entry here.
 pub(crate) use admin::{config_report, ConfigResponse};
 pub(crate) use contrib_graph::{graph_neighbors_report, NeighborsParams};
 pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
@@ -356,7 +327,7 @@ pub(crate) use status::{graph_report, graph_stats_report, index_status_report, G
 
 // #6285 slice 3: the query surface's transport-neutral bodies. Same contract as
 // the slice-2 block above — `service::rpc::queries` registers one JSON-RPC
-// method per entry, and the axum handlers wrap the SAME functions.
+// method per entry.
 pub(crate) use files::{global_grep_report, grep_report};
 pub(crate) use routing::search_similar_report;
 pub(crate) use search::search_report;
@@ -366,14 +337,14 @@ pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
 // #6285 slice 4: the write surface's transport-neutral bodies and the request
 // types they take. Same contract as the two blocks above, and it is what carries
 // the failure arms across: every refusal these cores return is the ONE decision
-// both transports render, so a socket write cannot land where the HTTP route
-// would have refused it — nor report a landing that did not happen.
+// the socket renders, so a socket write cannot report a landing that did not
+// happen.
 pub(crate) use contrib_graph::{ingest_graph_report, IngestGraphRequest};
 pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report};
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
-// #7434: shared by the HTTP route and the `search.index.roots.add` socket method.
+// #7434: the `search.index.roots.add` socket method.
 pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
@@ -392,62 +363,11 @@ pub(crate) use admin::{
 };
 pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest};
 
-// #9027: warm-all, served on both transports.
+// #9027: warm-all, served on the socket.
 pub(crate) use warm_all::{warm_start_report, warm_status_report};
 // #9029: the socket-only file read.
 pub(crate) use file_get::{file_get_report, FileGetParams, FILE_GET_MAX_CONCURRENT};
 pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
-
-/// Build the axum router with the shared state.
-///
-/// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
-/// What: Mounts every route, applies the concurrency limiter to expensive
-/// endpoints, applies a query deadline to interactive routes only (issue #907),
-/// installs the Prometheus metrics route when a recorder is wired, and wraps
-/// the whole router in the standard CORS/tracing/gzip middleware from
-/// `trusty-common`.
-///
-/// Route grouping (issue #907):
-/// - `interactive_limited`: concurrency-limited AND query-timeout-bounded;
-///   contains search/grep/search_similar routes only.
-/// - `bulk_limited`: concurrency-limited only (no per-request deadline);
-///   contains reindex/index-file/remove-file which are legitimately long-running.
-///
-/// Test: each handler test builds the router via this function using `oneshot`.
-// #9214 (ruling D1): no production path builds the router.
-#[cfg(test)]
-pub fn build_router(state: SearchAppState) -> Router {
-    // #3304: loopback-only default. The daemon startup path
-    // (`service::daemon`) calls `build_router_with_self_origins` with the
-    // actually-resolved bind address so a non-loopback (Tailscale) bind still
-    // trusts its own served origin; every existing test keeps this entry point.
-    build_router_with_self_origins(state, trusty_common::server::SelfOrigins::default())
-}
-
-/// Build the router, additionally trusting the given bind-derived, non-loopback
-/// self-origins for the router-wide same-origin write guard (#3304).
-///
-/// Why: the daemon serves destructive write routes (`POST /admin/stop`,
-/// `DELETE /indexes/{id}`, `POST /indexes`, `POST /upgrade`, reindex) behind the
-/// permissive-CORS shared stack; without a same-origin guard any page the
-/// operator visits could drive them cross-origin (CSRF). This is the guarded
-/// entry point; `build_router` delegates here with an empty (loopback-only)
-/// allowlist so existing callers/tests are unchanged. The daemon startup path
-/// passes its resolved bind address so a non-loopback bind trusts itself (#3269).
-/// What: identical router to `build_router`, except the final middleware is
-/// `with_guarded_middleware` (guard + standard stack) instead of
-/// `with_standard_middleware`.
-/// Test: no test in this crate since #9535 removed the HTTP-only guard suite;
-/// the daemon serves only the socket, guarded by the peer-uid check
-/// (trusty-common `src/uds/tests.rs`). The shared guard's 403 contract is
-/// pinned in trusty-agents `src/api/server/tests/guard.rs`.
-#[cfg(test)]
-pub fn build_router_with_self_origins(
-    state: SearchAppState,
-    self_origins: trusty_common::server::SelfOrigins,
-) -> Router {
-    build_router_on(Arc::new(state), self_origins)
-}
 
 /// Spawn every background ticker the daemon runs over `state_arc`.
 ///
@@ -455,7 +375,7 @@ pub fn build_router_with_self_origins(
 /// the HTTP router. The daemon builds no router, so `run_daemon` starts them
 /// here, or it would serve the socket with no residency sweep, no
 /// memory-pressure enforcement and no status events.
-/// What: the nine `spawn_*` calls `build_router_on` made inline. Each holds a
+/// What: the nine `spawn_*` calls the deleted router made inline. Each holds a
 /// `Weak`, so the tickers stop once the last `Arc` drops.
 /// Test: `run_daemon_serves_only_the_socket` waits for a `status_changed`
 /// event from a daemon that built no router.
@@ -473,161 +393,4 @@ pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
     // client that discovers indexes by listing never names them, and boot
     // reconcile walks registered handles only.
     crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(state_arc));
-}
-
-/// [`build_router_with_self_origins`], over a state the caller already shares.
-///
-/// Why (#6285, ADR-0032): the daemon now serves the same registry on two
-/// transports — this router and `service::socket`'s RPC listener. Both have to
-/// read the ONE `SearchAppState` the tickers mutate; a second `Arc::new` would
-/// give the socket its own registry, its own disk-size ticker, and its own
-/// residency sweep, and the two doors would disagree about which indexes exist.
-/// What: the whole former body of [`build_router_with_self_origins`], taking
-/// the `Arc` instead of making it. The by-value entry point above is unchanged
-/// for every existing caller and test. Spawns the daemon's tickers via
-/// [`spawn_daemon_tickers`].
-/// Test: `health_over_the_socket_matches_the_http_body` in
-/// `service::socket::tests`.
-#[cfg(test)]
-pub fn build_router_on(
-    state_arc: Arc<SearchAppState>,
-    self_origins: trusty_common::server::SelfOrigins,
-) -> Router {
-    use crate::service::query_timeout::apply_query_timeout;
-    use crate::service::ui::{
-        chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
-    };
-    spawn_daemon_tickers(&state_arc);
-
-    // #6285 slice 3: both live on the state so the socket gates the same six
-    // query methods on the SAME semaphore and the SAME deadline. Building them
-    // here would give each transport its own.
-    let limiter = Arc::clone(&state_arc.query_limiter);
-    let query_timeout_cfg = Arc::clone(&state_arc.query_timeout);
-
-    // Interactive routes: concurrency-limited AND query-deadline-bounded.
-    // MUST NOT include reindex / index-file — those are legitimately long-running.
-    let interactive_limited = Router::new()
-        .route("/search", post(global_search_handler))
-        .route("/grep", post(global_grep_handler))
-        .route("/indexes/{id}/grep", post(grep_handler))
-        .route("/indexes/{id}/search", post(search_handler))
-        .route("/indexes/{id}/search_similar", post(search_similar_handler))
-        .route("/indexes/{id}/typeahead", get(typeahead_handler))
-        // Concurrency limiter is outermost (evaluated first; bounds the queue
-        // wait). Query timeout is inner (starts after admission; bounds handler
-        // execution). In axum, each successive `.route_layer` call wraps the
-        // previously stacked layers, so the limiter — added last — becomes the
-        // outer layer that a request reaches first.
-        .route_layer(axum::middleware::from_fn(apply_query_timeout))
-        .layer(axum::Extension(Arc::clone(&query_timeout_cfg)))
-        .route_layer(axum::middleware::from_fn(
-            crate::service::concurrency::apply_limiter,
-        ))
-        .layer(axum::Extension(Arc::clone(&limiter)))
-        .with_state(Arc::clone(&state_arc));
-
-    // Bulk / long-running routes: concurrency-limited but NO per-request
-    // query deadline — reindex and index-file can legitimately run for minutes.
-    let bulk_limited = Router::new()
-        .route("/indexes/{id}/index-file", post(index_file_handler))
-        .route("/indexes/{id}/remove-file", post(remove_file_handler))
-        .route("/indexes/{id}/reindex", post(reindex_handler))
-        // #6822: a whole-arena re-encode, so it belongs in the bulk lane with
-        // reindex rather than under the per-request query deadline.
-        .route("/indexes/{id}/quantize", post(quantize_handler))
-        // Contributed-graph ingest (ADR-0009): bulk lane (store + graph
-        // rebuild can run for seconds). Body limit 64 MiB — observed maxima
-        // from large pilot corpora are ~20 MB, so this is ~3x headroom while
-        // bounding the per-request RAM/DoS surface (PR #1129 review,
-        // finding 2); revisit with a streaming ingest path if producers
-        // outgrow it.
-        //
-        // #6285 slice 5.5: the figure is the socket listener's frame budget,
-        // named rather than restated. The two doors must accept the same
-        // payload, and two literals is how they stop doing so.
-        .route(
-            "/indexes/{id}/graph",
-            post(ingest_graph_handler).layer(axum::extract::DefaultBodyLimit::max(
-                crate::service::socket::MAX_FRAME_BYTES as usize,
-            )),
-        )
-        .route_layer(axum::middleware::from_fn(
-            crate::service::concurrency::apply_limiter,
-        ))
-        .layer(axum::Extension(Arc::clone(&limiter)))
-        .with_state(Arc::clone(&state_arc));
-
-    let free = Router::new()
-        .route("/", get(|| async { Redirect::permanent("/ui/") }))
-        .route("/health", get(health_handler))
-        .route("/logs/tail", get(logs_tail_handler))
-        // #6371: a census of `indexes.toml`, not of the live registry — an
-        // allowlist-excluded registration is in neither `state.registry` nor
-        // `GET /indexes`, and is exactly the row this route exists to show.
-        .route(
-            "/registry/orphans",
-            get(crate::service::orphan_report::registry_orphans_handler),
-        )
-        .route("/admin/stop", post(admin_stop_handler))
-        .route("/status/stream", get(status_stream_handler))
-        .route(
-            "/indexes",
-            get(list_indexes_handler).post(create_index_handler),
-        )
-        .route(
-            "/indexes/{id}",
-            delete(delete_index_handler).patch(relocate_index_handler),
-        )
-        // #7434: add a directory tree to an index. Free lane like relocate: it
-        // swaps a handle and QUEUES a walk rather than running one.
-        .route(
-            "/indexes/{id}/roots",
-            post(indexes_roots::add_index_roots_handler),
-        )
-        .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
-        .route("/ui/", get(ui_index_handler))
-        .route("/ui/{*path}", get(ui_asset_handler))
-        .route("/chat", post(chat_handler))
-        .route("/api/chat/providers", get(list_chat_providers))
-        .route("/indexes/{id}/status", get(index_status_handler))
-        .route(
-            "/indexes/{id}/config",
-            get(index_config_handler).patch(patch_index_config_handler),
-        )
-        .route("/indexes/{id}/graph", get(graph_handler))
-        .route("/indexes/{id}/graph/stats", get(graph_stats_handler))
-        .route(
-            "/indexes/{id}/graph/neighbors",
-            get(graph_neighbors_handler),
-        )
-        .route("/indexes/{id}/reindex/stream", get(reindex_stream_handler))
-        .route("/indexes/{id}/chunks", get(get_index_chunks_handler))
-        .route("/indexes/{id}/call_chain", get(call_chain_handler))
-        .route(
-            "/config",
-            get(get_config_handler).patch(patch_config_handler),
-        )
-        .route("/upgrade", post(upgrade_handler))
-        // #9027: start returns at once (the warm runs on its own task), and
-        // status is a snapshot read — both belong in the free lane.
-        .route("/warm", post(warm_all::warm_start_handler))
-        .route("/warm/status", get(warm_all::warm_status_handler))
-        .with_state(Arc::clone(&state_arc));
-
-    let mut router = free.merge(interactive_limited).merge(bulk_limited);
-
-    if let Some(metrics_state) = state_arc.metrics.clone() {
-        router = router
-            .route("/metrics", get(crate::service::metrics::metrics_handler))
-            .layer(axum::Extension(metrics_state));
-    }
-
-    router = router.layer(axum::middleware::from_fn(
-        crate::service::metrics::request_metrics_middleware,
-    ));
-
-    // #3304: router-wide same-origin write guard, applied AFTER all route
-    // registration so every destructive route (incl. any merged in) is covered.
-    trusty_common::server::with_guarded_middleware(router, self_origins)
 }

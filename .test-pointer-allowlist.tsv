@@ -790,13 +790,10 @@ crates/trusty-search/src/service/reindex/quarantine.rs	quarantine_count_reflects
 crates/trusty-search/src/service/reindex/runner.rs	interactive_reindex_not_starved_by_background
 crates/trusty-search/src/service/reindex/semaphore.rs	interactive_reindex_not_starved_by_background
 crates/trusty-search/src/service/reindex/stages.rs	reindex_marks_failed_on_zero_vectors
-crates/trusty-search/src/service/server/admin.rs	get_config_returns_current_values
-crates/trusty-search/src/service/server/admin.rs	patch_config_disables_limit_with_null
 crates/trusty-search/src/service/server/admin.rs	patch_config_partial_update
 crates/trusty-search/src/service/server/files.rs	test_get_index_chunks_paginates
 crates/trusty-search/src/service/server/router.rs	create_index_threads_hygiene_fields
 crates/trusty-search/src/service/server/router.rs	defer_embed_false_forces_synchronous_index
-crates/trusty-search/src/service/server/routing.rs	search_similar_fallback_reembeds_when_cache_misses
 crates/trusty-search/src/service/server/search_global.rs	test_global_search_fans_out_and_merges
 crates/trusty-search/src/service/server/state.rs	emit_propagates_to_subscriber
 crates/trusty-search/src/service/server/state.rs	health_emits_fda_hint_when_loaded_below_prior_count
@@ -965,7 +962,6 @@ crates/trusty-search/src/service/server/state.rs	status_changed
 crates/trusty-search/src/service/server/state_impl.rs	chat_provider_endpoint_returns_payload
 crates/trusty-search/src/service/server/state_impl.rs	health_includes_embedderd_rss_field
 crates/trusty-search/src/service/server/state_impl.rs	start_brings_pool_online
-crates/trusty-search/src/service/server/status.rs	graph_stats_handler_returns_breakdown
 crates/trusty-search/src/service/server/status.rs	test_graph_handler_filters
 crates/trusty-search/src/service/server/tickers.rs	status_changed
 crates/trusty-search/src/service/shutdown_flush.rs	shutdown_flush_skips_external_volume_index

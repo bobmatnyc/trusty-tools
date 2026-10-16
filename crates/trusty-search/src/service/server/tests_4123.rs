@@ -112,7 +112,7 @@ async fn delete_index_without_param_preserves_data() {
 }
 
 /// Issue #4123: the destructive behaviour must remain available and reachable
-/// over HTTP via `?delete_data=true`.
+/// through the delete core with `delete_data: true`.
 ///
 /// Why: making the default safe is only half the fix — callers that genuinely
 /// reclaim disk (the `delete_index` MCP tool, `trusty-search cleanup`,

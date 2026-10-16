@@ -1,12 +1,11 @@
-//! Administrative, config, log-tail, and status-stream handlers.
+//! Administrative, config and log-tail cores.
 //!
-//! Why: Groups operational endpoints (log tailing, live config, graceful stop,
-//! and the SSE dashboard feed) separately from domain search logic.
-//! What: `logs_tail_handler`, `admin_stop_handler`, `get_config_handler`,
-//! `patch_config_handler`, `status_stream_handler`, `collect_status_counts`,
-//! and the transport-free cores three of them delegate to — `logs_tail_report`,
-//! `patch_config_report` and `admin_stop_report`, which `service::rpc::admin`
-//! serves over the socket (#6285 slices 5.5 and 5.6).
+//! Why: Groups operational endpoints (log tailing, live config, graceful stop)
+//! separately from domain search logic.
+//! What: `logs_tail_handler`, `admin_stop_handler` (test-only), and
+//! `collect_status_counts`, and the transport-free cores — `config_report`,
+//! `logs_tail_report`, `patch_config_report` and `admin_stop_report`, which
+//! `service::rpc` serves over the socket (#6285 slices 5.5 and 5.6).
 //! Test: `logs_tail_returns_recent_lines`, `admin_stop_returns_ok`, and
 //! `patch_config_partial_update` in `super::tests`; the socket halves in
 //! `service::rpc::admin`'s `admin_tests.rs`.
@@ -16,15 +15,10 @@ use std::sync::Arc;
 // #9214 (D1): imports only the test-only HTTP handlers use.
 #[cfg(test)]
 use axum::{
-    body::Body,
     extract::{Query, State},
     response::{IntoResponse, Response},
     Json,
 };
-#[cfg(test)]
-use futures::stream::{self, StreamExt};
-#[cfg(test)]
-use tokio_stream::wrappers::BroadcastStream;
 
 use super::state::SearchAppState;
 
@@ -235,21 +229,6 @@ where
     Ok(Some(v))
 }
 
-/// `GET /config` — return the daemon's current memory-limit configuration.
-///
-/// Why: `trusty-search config get` reads this to print the live values, which
-/// may differ from what's in `daemon.env` if the operator has already issued
-/// a `PATCH /config` call. Pure read; no side effects.
-/// What: snapshots `memory_limit_mb()` and `index_memory_limit_mb()` and
-/// returns them as JSON. `null` means "no limit configured".
-/// Test: `tests::get_config_returns_current_values`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn get_config_handler(
-    State(_state): State<Arc<SearchAppState>>,
-) -> Json<ConfigResponse> {
-    Json(config_report())
-}
-
 /// The values `GET /config` reports, without the transport (#6285 slice 2).
 ///
 /// Why: `search.config.get` reads the same two `AtomicU64` cells over the
@@ -262,26 +241,6 @@ pub(crate) fn config_report() -> ConfigResponse {
         memory_limit_mb: memory_limit_mb(),
         index_memory_limit_mb: index_memory_limit_mb(),
     }
-}
-
-/// `PATCH /config` — update the daemon's runtime memory-limit configuration.
-///
-/// Why: lets `trusty-search config set <key> <value>` retune memory limits
-/// without a daemon restart (preserves the 86 MB embedder session and all
-/// loaded indexes). The `AtomicU64` cells in `core::memguard` mean the
-/// background memory poller observes the change on its next tick.
-/// What: applies `memory_limit_mb` and/or `index_memory_limit_mb` from the
-/// request body, logs each change at `INFO`, and returns the resolved
-/// post-update values. Omitted fields are not touched. `null` disables the
-/// corresponding limit. Always returns `200 OK` with a `ConfigResponse`.
-/// Test: `tests::patch_config_partial_update` and
-/// `tests::patch_config_disables_limit_with_null`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn patch_config_handler(
-    State(_state): State<Arc<SearchAppState>>,
-    Json(req): Json<PatchConfigRequest>,
-) -> Json<ConfigResponse> {
-    Json(patch_config_report(req))
 }
 
 /// The update `PATCH /config` applies, without the transport (#6285 slice 5.5).
@@ -360,48 +319,4 @@ pub(super) async fn collect_status_counts(state: &SearchAppState) -> (usize, usi
         }
     }
     (indexes_count, total_chunks)
-}
-
-/// `GET /status/stream` — Server-Sent Events stream of live daemon stats.
-///
-/// Why: The admin dashboard's headline stat cards (Indexes, Documents,
-/// Uptime, Version) should update without a manual refresh. Mirrors the
-/// trusty-memory `/sse` pattern — subscribers receive `DaemonEvent` frames
-/// pushed via the shared `broadcast::Sender` on `SearchAppState`.
-/// What: Subscribes to `state.events`, emits an initial `{"type":"connected"}`
-/// frame, then forwards every `DaemonEvent` as `data: <json>\n\n`. Lagged
-/// subscribers receive a `{"type":"lag","skipped":N}` frame. The 2s status
-/// cadence is supplied by the background ticker spawned in `build_router`.
-/// Test: `curl -N http://127.0.0.1:7878/status/stream` shows a `connected`
-/// frame immediately and a `status_changed` frame every ~2s.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn status_stream_handler(
-    State(state): State<Arc<SearchAppState>>,
-) -> impl IntoResponse {
-    let rx = state.events.subscribe();
-    let initial = stream::once(async {
-        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from(
-            "data: {\"type\":\"connected\"}\n\n",
-        ))
-    });
-    let events = BroadcastStream::new(rx).map(|res| {
-        let frame = match res {
-            Ok(event) => match serde_json::to_string(&event) {
-                Ok(json) => format!("data: {json}\n\n"),
-                Err(e) => format!("data: {{\"type\":\"error\",\"message\":\"{e}\"}}\n\n"),
-            },
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                format!("data: {{\"type\":\"lag\",\"skipped\":{n}}}\n\n")
-            }
-        };
-        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from(frame))
-    });
-    let stream = initial.chain(events);
-
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(stream))
-        .expect("valid SSE response")
 }

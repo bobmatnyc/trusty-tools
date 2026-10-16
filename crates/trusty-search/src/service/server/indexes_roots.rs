@@ -16,12 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path as UrlPath, State},
-    response::{IntoResponse, Json, Response},
-};
 use serde::Deserialize;
 
 use crate::core::index_roots::IndexRoots;
@@ -53,19 +47,6 @@ type Refusal = (StatusCode, serde_json::Value);
 pub struct AddRootsRequest {
     /// Absolute directory paths to add to this index's root table.
     pub roots: Vec<PathBuf>,
-}
-
-/// `POST /indexes/:id/roots` — axum wrapper over [`add_index_roots_report`].
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn add_index_roots_handler(
-    State(state): State<Arc<SearchAppState>>,
-    UrlPath(id): UrlPath<String>,
-    Json(req): Json<AddRootsRequest>,
-) -> Response {
-    match add_index_roots_report(&state, &id, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
 }
 
 /// Add roots to a live index, persist the table, watch them and walk them.

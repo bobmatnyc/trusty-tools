@@ -4,7 +4,7 @@
 //! search lives in `search_global.rs` (extracted to keep both files under the
 //! 500-line cap after issue #993 added cold-store lazy-load logic here).
 //! What: `delete_index_handler`, `search_handler`. Routing helpers
-//! (`RoutingMode`, `compute_context_weights`) and `search_similar_handler`
+//! (`RoutingMode`, `compute_context_weights`) and `search_similar_report`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
 use axum::http::StatusCode;
@@ -24,11 +24,6 @@ use super::helpers::file_is_within_any_root;
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_last_indexed;
 
-// Re-export global fan-out handler so the router in `mod.rs` can reach it
-// through the `search` path without knowing about `search_global`.
-#[cfg(test)]
-pub(super) use super::search_global::global_search_handler;
-
 /// Query parameters for `DELETE /indexes/{id}` (issue #4123).
 ///
 /// Why: before #4123 the handler hardcoded `delete_data=true`, so the HTTP
@@ -42,10 +37,10 @@ pub(super) use super::search_global::global_search_handler;
 /// remove`'s help ("The on-disk redb / HNSW snapshot is preserved") — so
 /// `false` restores the contract the product already advertised.
 /// What: a single optional `delete_data` flag, absent ⇒ `false` (deregister
-/// only). Destroying data is now strictly opt-in via `?delete_data=true`. An
-/// unparseable value (e.g. `?delete_data=maybe`) is rejected by axum's `Query`
-/// extractor with `400` rather than silently defaulting either way — a
-/// destructive toggle must never be guessed at.
+/// only). Destroying data is now strictly opt-in via `delete_data: true`. A
+/// value that is not a bool is refused by the decoder before the delete runs
+/// rather than silently defaulting either way — a destructive toggle must
+/// never be guessed at.
 /// Test: `delete_index_without_param_preserves_data`,
 /// `delete_index_with_delete_data_true_destroys_data`.
 #[derive(Debug, Default, Deserialize)]
@@ -80,11 +75,8 @@ pub(crate) struct DeleteIndexParams {
 /// orphan-reaper already drives with `delete_data=false` — and echoes
 /// `data_deleted` so a caller can confirm which of the two semantics ran
 /// instead of inferring it from the request it sent.
-/// Test: `delete_index_without_param_preserves_data`,
-/// `delete_index_with_delete_data_true_destroys_data`,
-/// `delete_of_an_allowlist_excluded_registration_removes_the_row`,
-/// `delete_of_an_id_in_no_store_and_no_registry_is_404`,
-/// `a_failed_indexes_toml_rewrite_is_reported_not_swallowed`.
+/// Test: `deleted_cold_parked_index_is_404_not_a_permanent_503`; the verdicts
+/// themselves are pinned on [`delete_index_report`].
 #[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
@@ -112,7 +104,11 @@ pub(super) async fn delete_index_handler(
 /// Test: `a_delete_of_an_id_in_no_store_is_not_found_on_either_transport`,
 /// `an_allowlist_excluded_registration_deletes_over_the_socket_too`,
 /// `a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transport`
-/// in `crate::service::rpc::writes`.
+/// in `crate::service::rpc::writes`; `delete_index_without_param_preserves_data`,
+/// `delete_index_with_delete_data_true_destroys_data`,
+/// `delete_of_an_allowlist_excluded_registration_removes_the_row`,
+/// `delete_of_an_id_in_no_store_and_no_registry_is_404`,
+/// `a_failed_indexes_toml_rewrite_is_reported_not_swallowed`.
 pub(crate) async fn delete_index_report(
     state: &Arc<SearchAppState>,
     id: &str,

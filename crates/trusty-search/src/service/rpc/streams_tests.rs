@@ -158,8 +158,8 @@ async fn reindex_progress_events_replay_the_planted_sequence_frame_for_frame() {
 
 /// Why: a finished reindex never sends again, so a producer that subscribed and
 /// then waited would hold the connection open forever after the replay. This
-/// proves the socket ends the stream — the terminal frame arrives, rather than the client timing out and reporting a
-/// truncated stream.
+/// proves the socket ends the stream — the terminal frame arrives, rather than
+/// the client timing out and reporting a truncated stream.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]

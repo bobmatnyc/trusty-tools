@@ -30,9 +30,6 @@ use super::router::{CreateIndexRequest, IndexDetailEntry};
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_disk_and_mtime;
 
-#[cfg(test)]
-pub(super) use super::indexes_relocate::relocate_index_handler;
-
 /// Query parameters accepted by `GET /indexes`.
 ///
 /// Why: the `?format=tree` variant returns hierarchy metadata (parent/child
