@@ -431,6 +431,25 @@ impl HeredocBodies {
         &self.expanding
     }
 
+    /// The end of the shell-source body (see [`Self::shell_body_starting_at`])
+    /// holding byte `idx`, if any (#9146). #9720: binary searches, as there.
+    /// Test: `grouped_steps_emits_operators_and_scopes_a_shell_heredoc_9146`.
+    pub(super) fn shell_body_containing(&self, idx: usize) -> Option<usize> {
+        let at = self.spans.partition_point(|s| {
+            charge(Site::SpanProbe, 1);
+            s.0 <= idx
+        });
+        let span = self.spans.get(at.checked_sub(1)?)?;
+        if idx >= span.1 {
+            return None;
+        }
+        let data = self.data.get(self.data.partition_point(|d| {
+            charge(Site::SpanProbe, 1);
+            d.span.0 < span.0
+        }));
+        data.is_none_or(|d| d.span != *span).then_some(span.1)
+    }
+
     /// Whether byte `idx` is here-document body content.
     ///
     /// Test: `heredoc_bodies_exclude_the_operator_line`,

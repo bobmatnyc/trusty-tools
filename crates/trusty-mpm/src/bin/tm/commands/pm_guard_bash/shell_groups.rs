@@ -17,7 +17,9 @@
 //! command text with its leading `(`, `{`, `}`, `)` and reserved words
 //! ([`KEYWORDS`], shared with the credential rules) peeled off and its trailing
 //! group closers cut, bracketed by [`Step::Enter`] and [`Step::Leave`] wherever
-//! a subshell, a coproc or a child-process wrapper's string begins and ends. A
+//! a subshell, a coproc, a child-process wrapper's string or a here-document
+//! body handed to a shell begins and ends, and each followed by
+//! [`Step::Then`] naming the operator after it (#9146). A
 //! brace group and an `eval` string run in the current shell, so they bracket
 //! nothing. A command whose grouping does not balance comes back flat and
 //! marked unparsed. A balanced command holding a shape the walker cannot place
@@ -53,6 +55,53 @@ pub(super) enum Step {
     Enter,
     /// The child shell [`Step::Enter`] opened ends; its `cd`s end with it.
     Leave,
+    /// The operator after the segment just emitted (#9146): whether a `cd`
+    /// before it ran, and in which shell, depends on it.
+    Then(Sep),
+    /// A `!` was peeled off the next command (#9146): its status is inverted,
+    /// so `! cd <dir> && git …` runs the git verb when the `cd` FAILED.
+    Not,
+    /// A `{ … }` brace group opens. It runs in the current shell, but under a
+    /// preceding `&&`/`||`/`|`/`&` it may not run at all (#9146).
+    OpenGroup,
+    /// The brace group [`Step::OpenGroup`] opened ends.
+    CloseGroup,
+}
+
+/// A composition operator between two segments (#9146).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Sep {
+    /// `&&`: the next command runs only when this one succeeded.
+    And,
+    /// `||`: the next command runs only when this one failed.
+    Or,
+    /// `|`: both sides are pipeline stages, each in its own subshell.
+    Pipe,
+    /// `&`: this command ran in a background subshell.
+    Background,
+    /// `;` or a newline.
+    Seq,
+}
+
+/// The operator that ends `raw`, a slice [`split_shell_segments_raw`] cut
+/// from `command`; `None` for the last segment.
+fn sep_after(command: &str, raw: &str) -> Option<Sep> {
+    // `raw` is a subslice of `command`, so its end is an offset into it.
+    let end = raw.as_ptr() as usize - command.as_ptr() as usize + raw.len();
+    let rest = command.get(end..)?;
+    Some(if rest.starts_with("&&") {
+        Sep::And
+    } else if rest.starts_with("||") {
+        Sep::Or
+    } else if rest.starts_with('|') {
+        Sep::Pipe
+    } else if rest.starts_with('&') {
+        Sep::Background
+    } else if rest.starts_with([';', '\n']) {
+        Sep::Seq
+    } else {
+        return None;
+    })
 }
 
 /// The steps of a command, and whether the walker can place every command.
@@ -85,6 +134,8 @@ struct Peeled {
     command: Option<String>,
     leaves: usize,
     coproc: bool,
+    /// A `!` keyword preceded the command (#9146).
+    negated: bool,
 }
 
 /// Walk `command` into [`Step`]s (#9127).
@@ -106,7 +157,8 @@ struct Peeled {
 /// `grouped_steps_peels_and_scopes_a_coproc`,
 /// `grouped_steps_marks_shapes_it_cannot_place`,
 /// `grouped_steps_reports_an_unbalanced_group`,
-/// `grouped_steps_ignores_quoted_and_heredoc_parens`.
+/// `grouped_steps_ignores_quoted_and_heredoc_parens`,
+/// `grouped_steps_emits_operators_and_scopes_a_shell_heredoc_9146`.
 pub(super) fn grouped_steps(command: &str) -> Groups {
     let mut steps = Vec::new();
     let mut opaque = false;
@@ -133,7 +185,30 @@ fn steps_into(
     opaque: &mut bool,
 ) -> Result<(), Unbalanced> {
     let mut open = Vec::new();
+    // #9146: a body handed to a shell (`bash <<'EOF'`) runs in a child shell,
+    // so its `cd`s end with it.
+    let heredocs = HeredocBodies::scan(command);
+    let mut shell_body_end = None;
     for raw in split_shell_segments_raw(command) {
+        // #9146: a blank or comment-only segment (`false &&⏎cd <wt>` has one
+        // between `&&` and the newline) carries no operator of its own; its
+        // `Then(Seq)` would erase the pending `&&`/`||`/`|`.
+        let text = raw.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        let start =
+            raw.as_ptr() as usize - command.as_ptr() as usize + raw.len() - raw.trim_start().len();
+        if shell_body_end.is_some_and(|end| start >= end) {
+            out.push(Step::Leave);
+            shell_body_end = None;
+        }
+        if shell_body_end.is_none()
+            && let Some(end) = heredocs.shell_body_containing(start)
+        {
+            out.push(Step::Enter);
+            shell_body_end = Some(end);
+        }
         let peeled = peel_segment(raw, &mut open, out, opaque)?;
         if let Some(text) = peeled.command {
             let (wrapped, scope) = shell_lex::wrapped_command_scoped(&text);
@@ -146,6 +221,9 @@ fn steps_into(
             };
             if peeled.coproc {
                 out.push(Step::Enter);
+            }
+            if peeled.negated {
+                out.push(Step::Not);
             }
             out.push(Step::Command(text));
             if let Some(inner) = inner {
@@ -164,6 +242,10 @@ fn steps_into(
             }
         }
         out.extend(std::iter::repeat_with(|| Step::Leave).take(peeled.leaves));
+        out.extend(sep_after(command, raw).map(Step::Then));
+    }
+    if shell_body_end.is_some() {
+        out.push(Step::Leave);
     }
     if open.is_empty() {
         Ok(())
@@ -193,6 +275,7 @@ fn peel_segment(
     let mut rest = raw;
     let mut closed = false;
     let mut coproc = false;
+    let mut negated = false;
     loop {
         let t = rest.trim_start();
         let word = first_word(t);
@@ -211,11 +294,13 @@ fn peel_segment(
             if coproc {
                 out.push(Step::Enter);
             }
+            out.push(Step::OpenGroup);
             coproc = false;
             &t[1..]
         } else if word == "}" {
             match open.pop() {
                 Some(Group::Brace { scoped }) => {
+                    out.push(Step::CloseGroup);
                     if scoped {
                         out.push(Step::Leave);
                     }
@@ -228,6 +313,7 @@ fn peel_segment(
             return Err(Unbalanced);
         } else if KEYWORDS.contains(&word) {
             let after = t[word.len()..].trim_start();
+            negated |= word == "!";
             if word == "coproc" {
                 coproc = true;
                 *opaque = true;
@@ -247,6 +333,7 @@ fn peel_segment(
             command: None,
             leaves: 0,
             coproc: false,
+            negated: false,
         });
     }
     let body = rest.trim();
@@ -257,6 +344,7 @@ fn peel_segment(
         command: (!command.is_empty()).then(|| command.to_string()),
         leaves,
         coproc,
+        negated,
     })
 }
 
@@ -548,8 +636,10 @@ mod tests {
             [
                 Step::Enter,
                 Step::Command("cd x".into()),
+                Step::Then(Sep::And),
                 Step::Command("git commit".into()),
                 Step::Leave,
+                Step::Then(Sep::Seq),
                 Step::Command("git log".into()),
             ]
         );
@@ -568,9 +658,54 @@ mod tests {
                 Step::Command("git commit".into()),
                 Step::Leave,
                 Step::Leave,
+                Step::Then(Sep::And),
                 Step::Command("git log".into()),
             ]
         );
+    }
+
+    /// #9146: each operator follows its segment, and a here-document body
+    /// handed to a shell is a child shell; a data body is not.
+    #[test]
+    fn grouped_steps_emits_operators_and_scopes_a_shell_heredoc_9146() {
+        let ops = grouped_steps("a && b || c | d & e; f\ng");
+        let seps: Vec<Sep> = ops
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Then(sep) => Some(*sep),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            seps,
+            [
+                Sep::And,
+                Sep::Or,
+                Sep::Pipe,
+                Sep::Background,
+                Sep::Seq,
+                Sep::Seq
+            ]
+        );
+        let shell = grouped_steps("bash <<'EOF'\ncd /w\nEOF\ngit commit");
+        assert!(shell.parsed);
+        assert_eq!(
+            shell.steps,
+            [
+                Step::Command("bash <<'EOF'".into()),
+                Step::Then(Sep::Seq),
+                Step::Enter,
+                Step::Command("cd /w".into()),
+                Step::Then(Sep::Seq),
+                Step::Leave,
+                Step::Command("EOF".into()),
+                Step::Then(Sep::Seq),
+                Step::Command("git commit".into()),
+            ]
+        );
+        let data = grouped_steps("cat <<'EOF'\ncd /w\nEOF\ngit commit");
+        assert!(!data.steps.contains(&Step::Enter));
     }
 
     #[test]
@@ -625,6 +760,7 @@ mod tests {
             [
                 Step::Command("eval \"cd /m\"".into()),
                 Step::Command("cd /m".into()),
+                Step::Then(Sep::Seq),
                 Step::Command("git commit".into()),
             ]
         );
