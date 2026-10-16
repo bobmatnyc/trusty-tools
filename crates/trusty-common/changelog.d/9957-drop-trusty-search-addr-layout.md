@@ -1,0 +1,2 @@
+Breaking
+- `daemon_guard::DaemonAddrLayout` is removed, with its only layout `TRUSTY_SEARCH`, that layout's `default_port: 7878`, and the `discovery_file_path`, `port_file_path` and `resolve_base_url` methods. trusty-search binds no TCP port since #9214, and no workspace crate read the layout. A daemon client resolves trusty-search through its Unix socket instead. `daemon_guard::write_addr_file_atomic` stays ([#9957](https://github.com/bobmatnyc/trusty-tools/issues/9957))

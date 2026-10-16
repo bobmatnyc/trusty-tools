@@ -86,10 +86,6 @@ const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
         "provider API keys",
     ),
     // Single-variable writers, one module each.
-    (
-        "src/daemon_guard.rs",
-        "TRUSTY_TEST_ADDR_DIR_EMPTY and a caller-named data-dir variable",
-    ),
     ("src/daemon_token.rs", "TRUSTY_TEST_DAEMON_TOKEN"),
     (
         "src/embedder_client/supervisor_tests.rs",
