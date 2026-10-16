@@ -38,8 +38,12 @@ pub enum EngineError {
     /// The slot drawer committed, but its verify command was not stored.
     #[error(transparent)]
     VerifyNotStored(VerifyNotStored),
-    /// The embedder could not be built or failed to embed (#9278 T3c-2).
-    /// Message-only, like `Other`: the payload is not a stable match target.
+    /// The embedder could not be built or initialised, or the input exceeds
+    /// the chunk limit (`TooManyChunks`, an input-size refusal) (#9278 T3c-2).
+    /// `retrieval::embed_chunks` reports every failure, inference included, as
+    /// `Embed`. An inference or query-embed failure during recall or dream
+    /// dedup is `Other`, not `Embed`. Message-only, like `Other`: the payload is not a
+    /// stable match target.
     #[error(transparent)]
     Embed(Box<dyn std::error::Error + Send + Sync>),
     /// Any other failure.

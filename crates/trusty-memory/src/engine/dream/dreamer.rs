@@ -277,8 +277,10 @@ impl Dreamer {
     /// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`,
     /// `the_embedder_and_read_paths_return_engine_error`.
     ///
-    /// #9278: a failed pass maps through `EngineError::from_internal`, so an
-    /// embedder failure is `EngineError::Embed`.
+    /// #9278: a failed pass maps through `EngineError::from_internal`. Only an
+    /// embedder that could not be built or initialised, or an input over the
+    /// chunk limit, is `EngineError::Embed`; an inference failure or a timed-out
+    /// embed during dedup is `EngineError::Other`.
     pub async fn dream_cycle(
         &self,
         handle: &Arc<PalaceHandle>,
