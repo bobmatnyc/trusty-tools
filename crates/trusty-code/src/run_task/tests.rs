@@ -2480,7 +2480,7 @@ async fn use_skill_absent_from_engineer_when_no_skills() {
 /// they lie outside the project root.
 #[tokio::test]
 async fn engineer_registry_reads_embedded_agent_skill_pointers() {
-    use crate::agents::skill_refs::{REFERENCED_SKILL_FILES, user_skill_refs_dir};
+    use crate::agents::skill_refs::user_skill_refs_dir;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let agent = crate::agents::resolve_agent(project.path(), "rust-engineer")
@@ -2491,14 +2491,14 @@ async fn engineer_registry_reads_embedded_agent_skill_pointers() {
         mcp: tokio::sync::OnceCell::new(),
     };
     let registry = factory.build(&agent, &RunContext::default()).await;
-    for (relative, content) in REFERENCED_SKILL_FILES {
+    for (relative, content) in crate::agents::skill_refs::tests::test_refs().iter() {
         let pointer = user_skill_refs_dir().join(relative).display().to_string();
         assert!(agent.system_prompt.content.contains(&pointer), "{pointer}");
         let out = registry
             .dispatch("read_file", serde_json::json!({ "path": pointer }))
             .await;
         assert!(!out.is_error(), "{pointer}: {}", out.content());
-        assert_eq!(out.content(), *content);
+        assert_eq!(out.content(), content);
     }
 }
 

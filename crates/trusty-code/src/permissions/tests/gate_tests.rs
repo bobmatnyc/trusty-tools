@@ -16,7 +16,6 @@ use serde_json::json;
 
 use crate::agents::config::AgentConfig;
 use crate::agents::md_loader::project_embedded_md;
-use crate::assets::{DEFAULT_AGENTS, EmbeddedAgent};
 use crate::permissions::{
     Decision, DenySource, HARNESS_REGISTERED_TOOLS, Outcome, PermissionBroker, PermissionContext,
     PermissionDecision, PermissionEvents, PermissionGate, PermissionMode, SessionPermissions,
@@ -87,14 +86,14 @@ fn ask_rule_produces_ask() {
 /// The stock `pm` agent, loaded through the real embedded-agent path so the
 /// test sees the shipped `tcode_tools:` line rather than a hand-written copy.
 fn stock_pm_agent() -> AgentConfig {
-    let md = DEFAULT_AGENTS
-        .iter()
-        .find_map(|a| match a {
-            EmbeddedAgent::Direct { name, md } if *name == "pm" => Some(*md),
-            _ => None,
-        })
-        .expect("the embedded roster carries a Direct `pm` agent");
-    project_embedded_md("pm", md).expect("stock pm.md loads")
+    // #9013: the card is content, read from the running checkout.
+    let root = trusty_common::test_harness::test_repo_root().expect("workspace root");
+    let content =
+        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
+    let md = crate::assets::content::direct_agent_from(&content, "pm")
+        .expect("content carries pm.md")
+        .expect("the built-in roster carries a Direct `pm` agent");
+    project_embedded_md("pm", &md).expect("stock pm.md loads")
 }
 
 /// #7948 regression: `delegate_to_agent` is registered on the PM

@@ -167,6 +167,54 @@ path = "agents/ticketing.md"
 version = "0.1.0"
 
 [[member]]
+path = "agents/trusty-code/code-analyzer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/code-critic.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/code-reviewer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/documentation.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/local-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/pm.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/qa-agent.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/qa.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/ticketing.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/version-control.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-code/web-qa.md"
+version = "0.1.0"
+
+[[member]]
 path = "agents/typescript-engineer.md"
 version = "0.1.0"
 
@@ -193,6 +241,118 @@ version = "0.1.0"
 [[member]]
 path = "instructions/architect/skills/tm-fleet-check.md"
 version = "0.1.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/api-design-patterns/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/api-documentation/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/artifacts-builder/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/brainstorming/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/code-production-process/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/code-review-standards/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/condition-based-waiting/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/contract-driven-testing/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/database-migration/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/documentation-style/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/env-manager/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/git-workflow/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/internal-comms/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/json-data-handling/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/model-context-builder/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/requesting-code-review/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/root-cause-tracing/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/security-scanning/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/software-patterns/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/systematic-debugging/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/test-driven-development/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/test-quality-inspector/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/testing-anti-patterns/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/verification-before-completion/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/web-performance-optimization/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/webapp-testing/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/writing-plans/SKILL.md"
+version = "1.0.0"
+
+[[member]]
+path = "instructions/trusty-code/skills/xlsx/SKILL.md"
+version = "1.0.0"
 
 [[member]]
 path = "skills/api-design-patterns.md"

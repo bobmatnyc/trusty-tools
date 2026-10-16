@@ -278,22 +278,22 @@ fi
 if want agent_assets_tool_error; then
   f="$(new_fixture)"
   install_gate "$f" check_agent_assets.sh
-  mkdir -p "$f/crates/trusty-code/src/assets/agents" \
+  mkdir -p "$f/content/agents/trusty-code" \
            "$f/content/agents"
   # The 4 pinned deviations: a shared source, and a trusty-code fork of it that
   # is SUPPOSED to differ.
   for base in code-analyzer code-critic qa web-qa; do
     printf 'shared %s\n' "$base" > "$f/content/agents/$base.md"
-    printf 'deviated %s\n' "$base" > "$f/crates/trusty-code/src/assets/agents/$base.md"
+    printf 'deviated %s\n' "$base" > "$f/content/agents/trusty-code/$base.md"
   done
   # The 4 tcode-only defaults, so the exact-count floor is satisfied and the
   # run reaches the enumeration this case is actually about.
   for base in engineer qa-agent code-reviewer pm; do
-    printf 'tcode-only %s\n' "$base" > "$f/crates/trusty-code/src/assets/agents/$base.md"
+    printf 'tcode-only %s\n' "$base" > "$f/content/agents/trusty-code/$base.md"
   done
   # A RE-COPIED shared asset: the gate must never report OK over it.
   printf 'shared\n' > "$f/content/agents/research.md"
-  printf 'shared\n' > "$f/crates/trusty-code/src/assets/agents/research.md"
+  printf 'shared\n' > "$f/content/agents/trusty-code/research.md"
   # The pins file must pre-exist: --force-add reads it before writing it.
   : > "$f/scripts/agent-asset-pins.tsv"
   ( cd "$f" && bash scripts/check_agent_assets.sh --force-add >/dev/null )
