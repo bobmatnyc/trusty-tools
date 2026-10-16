@@ -1,30 +1,20 @@
-//! Socket-versus-SSE parity for the two streaming surfaces (#6285 slice 5).
+//! Socket streaming surfaces (#6285 slice 5).
 //!
 //! Why: a stream can fail in two ways a one-shot body cannot, and both are
-//! silent. It can deliver a DIFFERENT sequence than the SSE route delivers for
-//! the same operation — a missing replay event, a reordered progress event — and
-//! it can deliver the right sequence while leaking the task and the broadcast
-//! subscription that produced it, once per abandoned dashboard. So every case
-//! here drives the REAL axum router or the REAL RPC router against one shared
-//! state, and the disconnect case drives a REAL Unix socket rather than the
-//! in-process dispatcher, because only a real client can hang up.
-//!
-//! **The comparison excludes SSE's framing and nothing else.** `data: ` and the
-//! blank-line separator come off; the JSON document between them is compared
-//! whole. The heartbeat comment frame has no socket counterpart by design — see
-//! this module's parent header — and no test here produces one, because the
-//! interval is 20 s and every case completes well inside it.
+//! silent. It can deliver the wrong sequence for an operation — a missing
+//! replay event, a reordered progress event — and it can deliver the right
+//! sequence while leaking the task and the broadcast subscription that produced
+//! it, once per abandoned dashboard. So every case here drives the REAL RPC
+//! router against a shared state, and the disconnect case drives a REAL Unix
+//! socket rather than the in-process dispatcher, because only a real client can
+//! hang up. #9535 removed the SSE halves of the former parity cases; the daemon
+//! serves no HTTP, so each case now pins the socket's own expected sequence.
 //!
 //! Test: this file IS the test module for `super`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use futures_util::StreamExt as _;
-use tower::ServiceExt as _;
 use trusty_common::uds::server::{RpcOutcome, RpcRouter, RpcStreamItems};
 
 use crate::core::file_events::FileEventKind;
@@ -35,7 +25,7 @@ use crate::service::query_timeout::QueryTimeoutConfig;
 use crate::service::reindex::{ReindexProgress, ReindexStatus};
 use crate::service::rpc::error::CODE_NOT_FOUND;
 use crate::service::rpc::streams;
-use crate::service::server::{build_router_on, DaemonEvent, SearchAppState};
+use crate::service::server::{DaemonEvent, SearchAppState};
 
 /// How long a real socket dial or a bounded poll is given before the test calls
 /// it stuck. Headroom on a loaded machine, not a latency budget.
@@ -43,13 +33,10 @@ const GENEROUS: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------- fixtures ---
 
-/// One state carrying one registered index, plus both routers built on it.
-///
-/// Why both from the SAME `Arc`: the property under test is that the socket
-/// stream and the SSE route read ONE `reindex_progress` map and ONE event
-/// broadcaster. Two `Arc::new` calls would make every comparison below a
-/// comparison of two independent daemons.
-async fn routers(index_ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter) {
+/// One state carrying the given registered indexes, plus the RPC router built
+/// on it — the planted progress records and emitted events reach the stream
+/// through that one `Arc`.
+async fn routers(index_ids: &[&str]) -> (Arc<SearchAppState>, RpcRouter) {
     let registry = IndexRegistry::new();
     for id in index_ids {
         let root = format!("/nonexistent/streams-{id}");
@@ -60,12 +47,8 @@ async fn routers(index_ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter)
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc = streams::register(RpcRouter::new(), &state);
-    (state, http, rpc)
+    (state, rpc)
 }
 
 /// Plant a reindex-progress record for `id` holding `events`, at `status`.
@@ -102,76 +85,6 @@ fn progress_sequence() -> Vec<serde_json::Value> {
 }
 
 // ------------------------------------------------------------- transports ---
-
-/// Every `data:` payload of an SSE body that ENDS, parsed.
-///
-/// Only usable on a stream that terminates — the completed-reindex replay arm.
-/// A live stream is read incrementally by [`sse_first_payloads`] instead.
-async fn sse_payloads(router: &Router, uri: &str) -> Vec<serde_json::Value> {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(uri)
-                .body(Body::empty())
-                .expect("build the request"),
-        )
-        .await
-        .expect("the router must answer");
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "GET {uri} must be served"
-    );
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the SSE body");
-    parse_payloads(&String::from_utf8_lossy(&bytes))
-}
-
-/// The first `count` `data:` payloads of an SSE body that never ends.
-async fn sse_first_payloads(router: &Router, uri: &str, count: usize) -> Vec<serde_json::Value> {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(uri)
-                .body(Body::empty())
-                .expect("build the request"),
-        )
-        .await
-        .expect("the router must answer");
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "GET {uri} must be served"
-    );
-
-    let mut chunks = response.into_body().into_data_stream();
-    let mut text = String::new();
-    let mut payloads = Vec::new();
-    while payloads.len() < count {
-        let chunk = tokio::time::timeout(GENEROUS, chunks.next())
-            .await
-            .expect("the SSE body must keep flowing rather than hang")
-            .expect("the SSE body must not end before it has written its frames")
-            .expect("read one SSE chunk");
-        text.push_str(&String::from_utf8_lossy(&chunk));
-        payloads = parse_payloads(&text);
-    }
-    payloads.truncate(count);
-    payloads
-}
-
-/// Strip SSE framing, keeping every `data:` document and nothing else.
-fn parse_payloads(text: &str) -> Vec<serde_json::Value> {
-    text.split("\n\n")
-        .filter_map(|frame| frame.trim_start().strip_prefix("data: "))
-        .map(|line| serde_json::from_str(line).expect("every data: line must be one JSON document"))
-        .collect()
-}
 
 /// Open one socket stream through the router's own streaming dispatcher.
 ///
@@ -213,23 +126,20 @@ async fn drain(mut items: RpcStreamItems) -> Vec<serde_json::Value> {
     all
 }
 
-// -------------------------------------------------------- reindex parity ---
+// ------------------------------------------------------- reindex streams ---
 
 /// Why: the replay buffer is the whole reason a late subscriber sees the `start`
-/// event at all, and it is where the two transports could most easily disagree
-/// — the SSE handler reads it under one lock ordering and this module copies
-/// that ordering by hand. This drives both against ONE planted record and
-/// compares the sequences whole, so a dropped, reordered, or re-encoded event
-/// fails here rather than in a dashboard.
+/// event at all. This drains the stream against ONE planted record and compares
+/// the sequence whole, so a dropped, reordered, or re-encoded event fails here
+/// rather than in a dashboard.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
-async fn reindex_progress_events_match_the_sse_body_frame_for_frame() {
-    let (state, http, rpc) = routers(&["rs"]).await;
+async fn reindex_progress_events_replay_the_planted_sequence_frame_for_frame() {
+    let (state, rpc) = routers(&["rs"]).await;
     let expected = progress_sequence();
     plant_progress(&state, "rs", ReindexStatus::Complete, &expected).await;
 
-    let over_sse = sse_payloads(&http, "/indexes/rs/reindex/stream").await;
     let over_socket = drain(
         open_stream(
             &rpc,
@@ -241,25 +151,20 @@ async fn reindex_progress_events_match_the_sse_body_frame_for_frame() {
     .await;
 
     assert_eq!(
-        over_sse, expected,
-        "the SSE route must replay the planted sequence"
-    );
-    assert_eq!(
-        over_socket, over_sse,
-        "the socket stream must deliver the SSE sequence, framing excluded"
+        over_socket, expected,
+        "the socket stream must replay the planted sequence"
     );
 }
 
 /// Why: a finished reindex never sends again, so a producer that subscribed and
-/// then waited would hold the connection open forever after the replay. The SSE
-/// handler ends the body instead, and this proves the socket ends the stream —
-/// the terminal frame arrives, rather than the client timing out and reporting a
+/// then waited would hold the connection open forever after the replay. This
+/// proves the socket ends the stream — the terminal frame arrives, rather than the client timing out and reporting a
 /// truncated stream.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_finished_reindex_stream_ends_after_its_replay() {
-    let (state, _http, rpc) = routers(&["rs"]).await;
+    let (state, rpc) = routers(&["rs"]).await;
     plant_progress(&state, "rs", ReindexStatus::Complete, &progress_sequence()).await;
 
     let items = open_stream(
@@ -283,7 +188,7 @@ async fn a_finished_reindex_stream_ends_after_its_replay() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
-    let (state, _http, rpc) = routers(&["rs"]).await;
+    let (state, rpc) = routers(&["rs"]).await;
     let start = serde_json::json!({ "event": "start", "total_files": 3 });
     let progress = plant_progress(
         &state,
@@ -332,7 +237,7 @@ async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() {
-    let (state, _http, rpc) = routers(&["rs"]).await;
+    let (state, rpc) = routers(&["rs"]).await;
     let before = serde_json::json!({ "event": "start", "total_files": 2 });
     let progress = plant_progress(
         &state,
@@ -387,7 +292,7 @@ async fn a_stream_opening_against_live_pushes_loses_and_repeats_nothing() {
     const EVENTS: usize = 120;
     const WRITERS: usize = 8;
 
-    let (state, _http, rpc) = routers(&["rs"]).await;
+    let (state, rpc) = routers(&["rs"]).await;
     let progress = plant_progress(&state, "rs", ReindexStatus::Running, &[]).await;
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -438,33 +343,15 @@ async fn a_stream_opening_against_live_pushes_loses_and_repeats_nothing() {
     );
 }
 
-/// Why: the SSE route answers `404` for an index with no recorded reindex, and a
-/// stream that opened and then ended empty would read to a consumer as "the
-/// reindex produced nothing" rather than "there is no reindex". This pins the
-/// refusal as a terminal error frame carrying the code the read surface uses for
-/// the same HTTP status.
+/// Why: a stream that opened and then ended empty would read to a consumer as
+/// "the reindex produced nothing" rather than "there is no reindex". This pins
+/// the refusal for an index with no recorded reindex as a terminal error frame
+/// carrying the read surface's not-found code.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_unknown_index_is_refused_before_the_reindex_stream_opens() {
-    let (_state, http, rpc) = routers(&["rs"]).await;
-
-    let response = http
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/indexes/never-reindexed-6285/reindex/stream")
-                .body(Body::empty())
-                .expect("build the request"),
-        )
-        .await
-        .expect("the router must answer");
-    assert_eq!(
-        response.status(),
-        StatusCode::NOT_FOUND,
-        "the SSE route refuses an index with no recorded reindex"
-    );
+    let (_state, rpc) = routers(&["rs"]).await;
 
     let mut items = open_stream(
         &rpc,
@@ -479,11 +366,11 @@ async fn an_unknown_index_is_refused_before_the_reindex_stream_opens() {
         .expect_err("that item must be the refusal, not a progress event");
     assert_eq!(
         refusal.code, CODE_NOT_FOUND,
-        "the socket must report the SSE route's 404 as its own not-found code: {refusal:?}"
+        "the socket must report an index with no recorded reindex as not found: {refusal:?}"
     );
 }
 
-// --------------------------------------------------------- status parity ---
+// -------------------------------------------------------- status streams ---
 
 /// Why: `{"type":"connected"}` is what tells a dashboard its subscription is
 /// live before any event exists. A socket stream that omitted it would leave a
@@ -492,48 +379,34 @@ async fn an_unknown_index_is_refused_before_the_reindex_stream_opens() {
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
-async fn the_status_stream_opens_with_the_same_connected_frame_sse_writes() {
-    let (_state, http, rpc) = routers(&[]).await;
+async fn the_status_stream_opens_with_the_connected_frame() {
+    let (_state, rpc) = routers(&[]).await;
 
-    let over_sse = sse_first_payloads(&http, "/status/stream", 1).await;
     let mut items = open_stream(&rpc, streams::METHOD_STATUS_STREAM, serde_json::Value::Null).await;
     let over_socket = take_items(&mut items, 1).await;
 
     assert_eq!(
-        over_sse,
+        over_socket,
         vec![serde_json::json!({ "type": "connected" })],
-        "the SSE route opens with the connected frame"
-    );
-    assert_eq!(
-        over_socket, over_sse,
-        "the socket stream must open with the same frame"
+        "the socket stream must open with the connected frame"
     );
 }
 
 /// Why: the connected frame is written by the producer itself, so it would match
 /// even if the socket never reached the shared broadcaster. This emits a REAL
-/// `DaemonEvent` and asserts both transports carry the same document for it —
-/// which they can only do by reading one `state.events`.
+/// `DaemonEvent` and asserts the stream carries its document — which it can only
+/// do by reading `state.events`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
-async fn a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream() {
-    let (state, http, rpc) = routers(&[]).await;
+async fn a_daemon_event_reaches_the_socket_stream() {
+    let (state, rpc) = routers(&[]).await;
 
-    // Both subscriptions must exist before the event is emitted: a broadcast
-    // delivers only to receivers that are already attached.
+    // The subscription must exist before the event is emitted: a broadcast
+    // delivers only to receivers already attached, and the producer subscribes
+    // before it writes the connected frame.
     let mut items = open_stream(&rpc, streams::METHOD_STATUS_STREAM, serde_json::Value::Null).await;
     assert_eq!(take_items(&mut items, 1).await.len(), 1, "connected frame");
-    let sse = tokio::spawn({
-        let http = http.clone();
-        async move { sse_first_payloads(&http, "/status/stream", 2).await }
-    });
-    for _ in 0..200 {
-        if state.events.receiver_count() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 
     let emitted = DaemonEvent::IndexRegistered {
         id: "streams-6285".to_string(),
@@ -541,23 +414,13 @@ async fn a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream() {
     state
         .events
         .send(emitted.clone())
-        .expect("two subscribers are attached");
+        .expect("the socket subscriber is attached");
 
     let over_socket = take_items(&mut items, 1).await;
-    let over_sse = tokio::time::timeout(GENEROUS, sse)
-        .await
-        .expect("the SSE reader must finish rather than hang")
-        .expect("the SSE reader task must not panic");
-
     assert_eq!(
         over_socket,
         vec![serde_json::to_value(&emitted).expect("a DaemonEvent serialises")],
         "the socket must carry the event's own JSON"
-    );
-    assert_eq!(
-        over_sse.last(),
-        over_socket.first(),
-        "and it must be the document the SSE body carries"
     );
 }
 
@@ -691,7 +554,7 @@ async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
 #[tokio::test]
 #[serial_test::parallel]
 async fn file_events_replays_the_ring_then_streams_live() {
-    let (state, _http, rpc) = routers(&["feed-6524"]).await;
+    let (state, rpc) = routers(&["feed-6524"]).await;
     let handle = state
         .registry
         .get(&IndexId::new("feed-6524"))
@@ -735,7 +598,7 @@ async fn file_events_replays_the_ring_then_streams_live() {
 #[tokio::test]
 #[serial_test::parallel]
 async fn an_unknown_index_is_refused_before_the_file_events_stream_opens() {
-    let (_state, _http, rpc) = routers(&["feed-known-6524"]).await;
+    let (_state, rpc) = routers(&["feed-known-6524"]).await;
 
     let mut items = open_stream(
         &rpc,
