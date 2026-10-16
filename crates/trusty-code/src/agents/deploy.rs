@@ -289,7 +289,8 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
 
     // #9011 D5: load content BEFORE pinning anything. Pinning creates the agents
     // directory and the lock, so with no content those were left behind empty.
-    let staged = stage_embedded_sources()?;
+    // #9013: the skill-ref texts come from the same content read.
+    let (staged, refs) = stage_embedded_sources()?;
 
     // #7779: both write targets are PINNED here, not merely checked. Opening
     // them creates every missing component with `mkdirat`/`O_NOFOLLOW`, so the
@@ -333,7 +334,7 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
     let skill_refs = NativeWriteDir::open(project_root, Path::new(SKILL_REFS_DIRNAME))?;
 
     // #7727: the roster's skill pointers resolve to files this project holds.
-    super::skill_refs::materialize_skill_refs(&skill_refs)?;
+    super::skill_refs::materialize_skill_refs(&skill_refs, &refs)?;
     let result = deploy_agents_filtered(staged.path(), shadow.path(), skill_refs.path(), |stem| {
         roster.contains(stem) && !is_user_edited(&manifest, shadow.path(), stem)
     })
@@ -491,33 +492,35 @@ fn is_user_edited(manifest: &AgentManifest, target: &Path, stem: &str) -> bool {
     }
 }
 
-/// Write every compiled-in agent source into a throwaway directory.
+/// Write every built-in agent source into a throwaway directory.
 ///
 /// Why: the shared deployer composes from a source DIRECTORY, and tcode's roster
-/// is a set of `&'static str`s. Staging them is what lets the deployer be reused
-/// verbatim instead of growing a second, pre-composed entry point — a shared
-/// library change this slice deliberately avoided.
-/// What: loads the catalog once ([`crate::assets::load_tm_agent_sources`],
-/// #9011; a content error is [`RosterDeployError::Content`] and nothing is
-/// staged), then one `.md` per entry (keyed by its filename, so
-/// `extends: base-qa` resolves against `BASE-QA.md`) plus
-/// one per [`EmbeddedAgent::Direct`] in [`DEFAULT_AGENTS`]. The `TempDir` is
-/// returned so the caller keeps it alive across the deploy; dropping it removes
-/// the scratch tree.
+/// is read from content into memory. Staging it is what lets the deployer be
+/// reused verbatim instead of growing a second, pre-composed entry point — a
+/// shared library change this slice deliberately avoided.
+/// What: resolves content once and reads every roster text
+/// ([`crate::assets::content::AgentSources`], #9011/#9013) and the skill-ref
+/// files ([`super::skill_refs::SkillRefs`]); a content error is
+/// [`RosterDeployError::Content`] and nothing is staged. Then one `.md` per
+/// catalog entry (keyed by its filename, so `extends: base-qa` resolves
+/// against `BASE-QA.md`) plus one per [`EmbeddedAgent::Direct`] in
+/// [`DEFAULT_AGENTS`]. The `TempDir` is returned so the caller keeps it alive
+/// across the deploy; dropping it removes the scratch tree.
 /// Test: `staged_sources_cover_every_roster_name_and_base_template`.
-fn stage_embedded_sources() -> Result<tempfile::TempDir, RosterDeployError> {
-    let catalog = crate::assets::load_tm_agent_sources()?;
+fn stage_embedded_sources()
+-> Result<(tempfile::TempDir, super::skill_refs::SkillRefs), RosterDeployError> {
+    let content = crate::assets::content::resolve_for_process()?;
+    let sources = crate::assets::content::AgentSources::from_content(&content)?;
+    let refs = super::skill_refs::SkillRefs::from_content(&content)?;
     let dir = tempfile::tempdir().map_err(RosterDeployError::Stage)?;
-    for (filename, content) in &catalog {
+    for (filename, content) in sources.catalog() {
         std::fs::write(dir.path().join(filename), content).map_err(RosterDeployError::Stage)?;
     }
-    for embedded in DEFAULT_AGENTS {
-        if let EmbeddedAgent::Direct { name, md } = embedded {
-            std::fs::write(dir.path().join(format!("{name}.md")), md)
-                .map_err(RosterDeployError::Stage)?;
-        }
+    for (name, md) in sources.directs() {
+        std::fs::write(dir.path().join(format!("{name}.md")), md)
+            .map_err(RosterDeployError::Stage)?;
     }
-    Ok(dir)
+    Ok((dir, refs))
 }
 
 #[cfg(test)]

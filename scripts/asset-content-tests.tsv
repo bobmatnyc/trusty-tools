@@ -5,9 +5,9 @@
 # 2026-09-27, until PHASE_3). "Cargo-inert" is what
 # `scripts/detect-docs-only.sh --instruction-assets` accepts: the .md files
 # under crates/trusty-mpm/src/assets, and content/** (the agents and harness
-# docs since #9011). A reader of any other asset (a hook script, a TOML or JSON
-# file, trusty-code's own copies) needs no row: an edit to that asset is code,
-# so its crate's tests run in the affected-crates job.
+# docs since #9011, trusty-code's own agents and skills since #9013). A reader
+# of any other asset (a hook script, a TOML or JSON file) needs no row: an edit
+# to that asset is code, so its crate's tests run in the affected-crates job.
 #
 # scripts/check_asset_test_filter.py `check` fails that job when test code
 # reads such an asset outside this list; `run` executes it and fails on a row
@@ -27,15 +27,24 @@ trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_t
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
 trusty-code	lib	agents::deploy::deploy_tests	runtime: stages load_tm_agent_sources (content/agents via the cwd checkout) and composes the roster
 trusty-code	lib	agents::md_loader::tests::embedded_agent_skill_pointers_open_with_read_file	runtime: composes rust-engineer from trusty-agents-common .md, asserts its skill pointers
+trusty-code	lib	agents::md_loader::tests::deployed_roster_copy_recovers_the_cards_permissions	runtime: recovers the stock pm card's permissions from content/agents/trusty-code/pm.md via resolve_for_process (#9013)
+trusty-code	lib	agents::md_loader::tests::quoted_provenance_still_recovers_the_cards_permissions	runtime: recovers the stock pm card's permissions from content/agents/trusty-code/pm.md via resolve_for_process (#9013)
 trusty-code	lib	agents::protocol::tests::list_disk_only_entries_are_additive	runtime: projects Composed agents from trusty-agents-common .md
 trusty-code	lib	agents::protocol::tests::list_returns_embedded_when_disk_empty	runtime: projects Composed agents from trusty-agents-common .md
 trusty-code	lib	agents::protocol::tests::list_still_lists_other_agents_when_one_disk_file_is_unparseable	runtime: projects Composed agents from trusty-agents-common .md
 trusty-code	lib	agents::skill_refs::tests	reads checkout_content, AgentRoster::load, literal '../../content/skills'
+trusty-code	lib	agents::tests	runtime: load_all_agents/resolve_agent read tcode's own agents from content/agents/trusty-code via the cwd checkout (#9013)
+trusty-code	lib	assets::content::tests	reads checkout_content over fake checkouts lacking one tcode agent or skill (#9013)
 trusty-code	lib	assets::tests	reads test_catalog (checkout_content), resolve_agent at runtime
 trusty-code	lib	events::tests::sm_harness_doc_documents_the_prefix_tcode_emits	reads HarnessDoc::load over the checkout content
+trusty-code	lib	permissions::tests::gate_tests	reads checkout_content — the stock pm.md card (#9013)
 trusty-code	lib	run_task::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
+trusty-code	lib	skills	runtime: the default skill catalog from content/instructions/trusty-code/skills via the cwd checkout (#9013)
 trusty-code	lib	task::executor::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
+trusty-code	lib	tools::fs::read::tests::skill_ref_pointer_is_served_outside_the_working_dir	runtime: serves a referenced skill from content/skills via the cwd checkout (#9013)
+trusty-code	test:integration	agent_fallback_e2e	runtime: the spawned tcode resolves its built-in agents from the cwd checkout (#9013)
 trusty-code	test:integration	paths_import_mpm_catalog_e2e	reads checkout_content, AgentRoster::load (a module of the integration target since #9302)
+trusty-code	test:integration	roster_deploy_e2e	runtime: the spawned tcode stages its roster and skill refs from the cwd checkout (#9013)
 trusty-common	lib	content::tests	14 reads: find_dev_checkout, DEV_CLASS_SOURCES, literal 'content/skills' (#8378)	content-resolver
 trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template from content through ArchitectSeed::resolve_in (#8436, #9132)
 trusty-mpm	bin:tm	commands::install::tests::install_without_the_bundled_docs_fails_naming_the_doc	reads install::test_content_ref into a docs-less checkout (#9012)

@@ -815,7 +815,7 @@ fn build_engineer_runner(
 /// always the case projectless, since the scratch root has none);
 /// `skills_catalog` is the rendered skill-metadata catalog from either the
 /// project's `.claude/skills/` or, when that is empty or absent,
-/// `crate::assets::DEFAULT_SKILLS` — the embedded default catalog
+/// `crate::assets::DEFAULT_SKILL_NAMES` — the embedded default catalog
 /// (`skills::discover_skill_metadata`'s embedded-fallback, #2895). `None`
 /// only in `HarnessMode::Parity` (which never discovers skills at all, disk
 /// or embedded); in `DailyDriver` the embedded fallback means this is
@@ -842,7 +842,7 @@ struct EngineerPromptContext {
 /// `Some((rendered_catalog, resolver))` — the resolver backs the `use_skill`
 /// tool registration. `skills::discover_skill_metadata` (the source behind
 /// `resolver.metadata()`) falls back to the embedded default skill catalog
-/// (`crate::assets::DEFAULT_SKILLS`, #2895) when the project has no (or an
+/// (`crate::assets::DEFAULT_SKILL_NAMES`, #2895) when the project has no (or an
 /// empty) `.claude/skills/` directory, so in `HarnessMode::DailyDriver` the
 /// catalog is no longer ever empty — a projectless run (scratch root, no
 /// `.claude/skills/`) now resolves to the embedded catalog rather than

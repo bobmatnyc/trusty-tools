@@ -167,7 +167,7 @@ pub(crate) type ReadinessObserver =
 /// the PM's `use_skill` tool registration and the rendered catalog feeds
 /// `assemble_system_prompt_for_mode`. `skills::discover_skill_metadata` (the
 /// source behind `resolver.metadata()`) falls back to the embedded default
-/// skill catalog (`crate::assets::DEFAULT_SKILLS`, #2895) when `project` has
+/// skill catalog (`crate::assets::DEFAULT_SKILL_NAMES`, #2895) when `project` has
 /// no (or an empty) `.claude/skills/` directory, so `catalog.is_empty()`
 /// below is no longer reachable in practice — this path effectively always
 /// returns `Some` now, the same as `task::executor`'s

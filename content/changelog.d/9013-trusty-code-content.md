@@ -1,0 +1,2 @@
+Added
+- `agents/trusty-code/` (12 agents) and `instructions/trusty-code/skills/` (28 skills with their references): trusty-code's own agents and default skill catalog, moved out of the `tcode` binary. Each agent declares `metadata: {version: "0.1.0"}` and each skill's top-level `version:` became `metadata: {version}`; the text is otherwise unchanged. The agents sit beneath `agents/`, so the shared roster does not list them; the skills sit beneath `instructions/`, so `tm` does not deploy them (#9013).

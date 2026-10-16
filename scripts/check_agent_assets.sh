@@ -81,7 +81,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-TCODE_DIR="crates/trusty-code/src/assets/agents"
+TCODE_DIR="content/agents/trusty-code"  # #9013: moved out of the crate
 SHARED_DIR="content/agents"
 PINS="scripts/agent-asset-pins.tsv"
 

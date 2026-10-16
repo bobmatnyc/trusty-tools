@@ -176,33 +176,33 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// format changed, the embedded-fallback behavior did not), while the 28 tm
 /// roster agents inherit from `BASE-*` templates and must be composed
 /// in-memory first.
-/// What: For each `EmbeddedAgent::Direct { name, md }`, calls
-/// [`md_loader::project_embedded_md`] directly, which fails only on a
-/// malformed `permissions:` block (#7948). For each
-/// `EmbeddedAgent::Composed { name }`, composes against the catalog
-/// [`crate::assets::load_tm_agent_sources`] reads from content ONCE (#9011),
-/// which also fails on an unresolvable `extends:` chain. With no content the
-/// composed agents are skipped under one ERROR per process naming `tm content
-/// install` (#9011 D4) and the `Direct` agents still load. Any per-agent failure is logged at
+/// What: reads every text ONCE through [`crate::assets::content::AgentSources`]
+/// (#9011, #9013: tcode's own agents are content too). For each
+/// `EmbeddedAgent::Direct { name }`, calls [`md_loader::project_embedded_md`]
+/// on its body, which fails only on a malformed `permissions:` block (#7948).
+/// For each `EmbeddedAgent::Composed { name }`, composes against the catalog,
+/// which also fails on an unresolvable `extends:` chain. With no content
+/// nothing loads: the result is empty under one ERROR per process naming
+/// `tm content update` (#9011 D4). Any per-agent failure is logged at
 /// ERROR level and the agent is skipped rather than panicking, exactly like
 /// the disk-parsing path in [`load_all_agents`] does for a malformed on-disk
 /// config.
 /// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 /// `assets::tests::default_agents_field_identical_to_retired_toml`,
-/// `assets::tests::default_agents_parse_and_names_match`.
+/// `assets::tests::default_agents_parse_and_names_match`,
+/// `no_content_logs_one_error_naming_tm_content_install` (`tests/no_content_e2e.rs`).
 pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
-    // #9011: the composed agents' shared texts are instructional content,
-    // loaded ONCE; without it only the `Direct` agents load, under one error.
+    // #9013: every built-in agent text is instructional content, loaded ONCE;
+    // without it no built-in agent loads (ADR-0064: runtime-only, fail closed).
     // #9011 D4: no content at all is one ERROR per process, not one per call.
-    const UNAVAILABLE: &str =
-        "tcode's shared agents are unavailable, so only its built-in agents load";
-    let catalog = crate::assets::load_tm_agent_sources()
-        .inspect_err(|e| {
-            if !trusty_agents_common::agent_content::report_not_installed(e, UNAVAILABLE) {
-                tracing::error!("{UNAVAILABLE}: {e}");
-            }
-        })
-        .ok();
+    const UNAVAILABLE: &str = "tcode's built-in agents are unavailable";
+    let Ok(sources) = crate::assets::content::AgentSources::load().inspect_err(|e| {
+        if !trusty_agents_common::agent_content::report_not_installed(e, UNAVAILABLE) {
+            tracing::error!("{UNAVAILABLE}: {e}");
+        }
+    }) else {
+        return Vec::new();
+    };
     let skill_refs_root = skill_refs::user_skill_refs_dir();
     crate::assets::DEFAULT_AGENTS
         .iter()
@@ -210,13 +210,14 @@ pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
             // #7948: a `Direct` agent is fallible too — a malformed
             // `permissions:` block skips the agent rather than dropping the map.
             let loaded = match embedded {
-                crate::assets::EmbeddedAgent::Direct { name, md } => {
-                    md_loader::project_embedded_md(name, md)
+                crate::assets::EmbeddedAgent::Direct { name } => {
+                    // `AgentSources::load` read every `Direct` body or failed.
+                    md_loader::project_embedded_md(name, sources.direct(name)?)
                 }
                 crate::assets::EmbeddedAgent::Composed { name } => {
                     md_loader::project_embedded_md_with_extends_from(
                         name,
-                        catalog.as_deref()?,
+                        sources.catalog(),
                         &skill_refs_root,
                     )
                 }
@@ -355,13 +356,18 @@ pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgent
         .find(|a| a.name() == name)
     {
         match embedded {
-            crate::assets::EmbeddedAgent::Direct { name: n, md } => {
+            crate::assets::EmbeddedAgent::Direct { name: n } => {
+                // #9013: the body is content; none installed is a load failure
+                // naming the remedy, never a "not found".
                 // #7948: a malformed `permissions:` block fails the load.
-                return md_loader::project_embedded_md(n, md).map_err(|source| {
-                    ResolveAgentError::Load {
-                        name: name.to_string(),
-                        source,
-                    }
+                let load = || -> anyhow::Result<AgentConfig> {
+                    let md = crate::assets::content::load_direct_agent(n)?
+                        .ok_or_else(|| anyhow::anyhow!("'{n}' is not a built-in agent"))?;
+                    md_loader::project_embedded_md(n, &md)
+                };
+                return load().map_err(|source| ResolveAgentError::Load {
+                    name: name.to_string(),
+                    source,
                 });
             }
             crate::assets::EmbeddedAgent::Composed { name: n } => {

@@ -117,8 +117,9 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 /// the emitter cannot silently turn this into a no-op — whose stem names a
 /// `Direct` embedded agent, and ONLY when the file declares no block of its
 /// own. A hand-authored card, or a deployed one a user has since given rules,
-/// is never second-guessed. A malformed block in the embedded source is an
-/// `Err`, same fail-closed contract as `parse_permissions` above.
+/// is never second-guessed. A malformed block in the source card, or no
+/// content to read it from (#9013), is an `Err`, same fail-closed contract as
+/// `parse_permissions` above.
 /// Test: `deployed_roster_copy_recovers_the_cards_permissions`,
 /// `hand_authored_file_gets_no_embedded_permissions`.
 fn deployed_roster_permissions(
@@ -130,13 +131,12 @@ fn deployed_roster_permissions(
     {
         return Ok(None);
     }
-    let Some(md) = crate::assets::DEFAULT_AGENTS.iter().find_map(|a| match a {
-        crate::assets::EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
-        _ => None,
-    }) else {
+    // #9013: the source card is content. Without it the block cannot be
+    // restored, so the load fails rather than running with no permissions.
+    let Some(md) = crate::assets::content::load_direct_agent(name)? else {
         return Ok(None);
     };
-    Ok(crate::permissions::parse_permissions(name, md)?)
+    Ok(crate::permissions::parse_permissions(name, &md)?)
 }
 
 /// Project an embedded (in-memory, no source directory) `.md` agent document
@@ -749,7 +749,6 @@ mod tests {
     /// scratch dir, although the refs root is outside both and never written.
     #[tokio::test]
     async fn embedded_agent_skill_pointers_open_with_read_file() {
-        use crate::agents::skill_refs::REFERENCED_SKILL_FILES;
         use crate::tools::ReadFileTool;
         use crate::tools::traits::ToolExecutor;
         use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
@@ -768,12 +767,12 @@ mod tests {
         let scratch = tempfile::tempdir().expect("projectless scratch");
         for root in [project.path(), scratch.path()] {
             let tool = ReadFileTool::new(root).with_skill_refs(&refs_root);
-            for (relative, content) in REFERENCED_SKILL_FILES {
+            for (relative, content) in crate::agents::skill_refs::tests::test_refs().iter() {
                 let pointer = refs_root.join(relative).display().to_string();
                 assert!(body.contains(&format!("Read `{pointer}`")), "{pointer}");
                 let out = tool.execute(serde_json::json!({ "path": pointer })).await;
                 assert!(!out.is_error(), "{pointer}: {}", out.content());
-                assert_eq!(out.content(), *content);
+                assert_eq!(out.content(), content);
             }
         }
         assert!(

@@ -38,8 +38,9 @@
   styles (`crates/trusty-mpm/src/assets/`), and the generated
   `tm-capabilities` catalog. `sm_instructions/` and `harness_understanding/`
   move to `content/instructions/`, per the 2026-09-23 ruling on #8387.
-  trusty-code's own 12 agents and skills stay in
-  `crates/trusty-code/src/assets/` until PHASE_4 (#8390). trusty-code's
+  trusty-code's own 12 agents and 28 skills moved to
+  `content/agents/trusty-code/` and `content/instructions/trusty-code/skills/`
+  (#9013, PHASE_4, #8390) and are read at runtime. trusty-code's
   re-export of trusty-agents-common's agent consts switches to `content/`
   in PHASE_3. A supervisor ruling (2026-09-27) holds that the #8389
   non-goal covers only trusty-code's own asset tree, not that re-export.

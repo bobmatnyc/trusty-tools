@@ -1,14 +1,19 @@
-//! Embedded default agents & skills for trusty-code (#2895).
+//! Built-in default agents & skills for trusty-code (#2895), read from
+//! instructional content at runtime since #9013.
 //!
 //! Why: A fresh project has no `.claude/agents/` or `.claude/skills/` yet, so
 //! `tcode` would otherwise start with zero agents and zero skills — a cold,
-//! unusable default. Bundling a working default set at compile time (mirroring
-//! the embed pattern `trusty-mpm` uses in `crates/trusty-mpm/src/core/bundle.rs`,
-//! but without trusty-mpm's disk-materialize install step — these are parsed
-//! in-memory only) gives every project a usable harness out of the box while
-//! disk-based `.claude/agents/` and `.claude/skills/` always take precedence
-//! when present (see `agents::load_all_agents` and
-//! `skills::discover_skill_metadata`'s embedded-fallback branches).
+//! unusable default. A built-in default set (parsed in-memory, without
+//! trusty-mpm's disk-materialize install step) gives every project a usable
+//! harness out of the box while disk-based `.claude/agents/` and
+//! `.claude/skills/` always take precedence when present (see
+//! `agents::load_all_agents` and `skills::discover_skill_metadata`'s
+//! fallback branches). #9013 (ADR-0064): nothing here is compiled in any more.
+//! These tables name the defaults; their texts live in the content tree —
+//! tcode's own agents under `content/agents/trusty-code/`, its skill catalog
+//! under `content/instructions/trusty-code/skills/` — and [`content`] reads
+//! them through the shared resolver. No content means no defaults, under one
+//! error naming `tm content update` / `tm content install --from`.
 //! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 34-agent dispatchable
 //! roster (Slice E3, #2958, plus `pm` added for #3437, `ticketing` for
 //! #4027, and the four delivery-workflow agents for #8129): tcode's own 8
@@ -18,28 +23,29 @@
 //! `agents::md_loader::project_embedded_md`) plus the 26 tm agents (`extends:`-chained
 //! through the 5 `BASE-*` templates — projected via
 //! `agents::md_loader::project_embedded_md_with_extends`, which resolves
-//! against [`tm_agent_sources`]). Authored as Markdown+frontmatter
+//! against the tm agent catalog). Authored as Markdown+frontmatter
 //! (`.md`) as of #2897 Slice C (previously native TOML; Slice D subsequently
 //! retired the TOML loader for USER `.claude/agents/*.toml` configs entirely
 //! — see `agents::mod`'s docs). Both projection paths share one
 //! frontmatter->`AgentConfig` mapping with the disk `.md` loader
 //! (`agents::md_loader::load_md_agent`) — see that module's docs.
-//! [`EmbeddedSkill`]/[`DEFAULT_SKILLS`] — trusty-mpm's universal skill set
-//! (format-identical `SKILL.md` files), reused verbatim per Bob's reuse
-//! directive; the `tm-*` orchestration skills are excluded because they drive
-//! trusty-mpm MCP tools tcode does not have.
+//! [`DEFAULT_SKILL_NAMES`] — tcode's copy of trusty-mpm's universal skill set
+//! (format-identical `SKILL.md` files), reused per Bob's reuse directive; the
+//! `tm-*` orchestration skills are excluded because they drive trusty-mpm MCP
+//! tools tcode does not have. The copies have drifted from `content/skills/`;
+//! #9013 moved them as they were.
 //!
 //! ## Tools-restriction deviation (Slice E3, #2958, Bob's 2026-07-18 ruling)
 //!
 //! Four of the 26 roster agents — `qa`, `code-critic`, `code-analyzer`,
 //! `web-qa` — carry an explicit restrictive `tools:` override in their tcode
-//! FORK (`assets/agents/{qa,code-critic,code-analyzer,web-qa}.md`) that is NOT
+//! FORK (`content/agents/trusty-code/{qa,code-critic,code-analyzer,web-qa}.md`) that is NOT
 //! present in the shared agent they were derived from (`content/agents`,
 //! read at runtime since #9011). These four are the only agent `.md` files
-//! trusty-code still embeds a second copy of: every other roster agent is read
-//! from instructional content through [`tm_agent_sources`], so it cannot
+//! trusty-code keeps a second copy of: every other roster agent is read
+//! from instructional content through the tm agent catalog, so it cannot
 //! drift. (#8129's four
-//! delivery-workflow agents also live in `assets/agents/`, but they are
+//! delivery-workflow agents also live in `content/agents/trusty-code/`, but they are
 //! tcode-AUTHORED, not copies — see the "Delivery-workflow agents" section
 //! below.) This is a
 //! deliberate, Bob-approved deviation, not drift: those four are
@@ -122,7 +128,7 @@
 //! grant its author wrote.
 //!
 //! All four are therefore tcode-NATIVE [`EmbeddedAgent::Direct`] agents in
-//! `assets/agents/`, authored the way `pm.md`/`engineer.md` are: a short body
+//! `content/agents/trusty-code/`, authored the way `pm.md`/`engineer.md` are: a short body
 //! scoped to tcode's actual tool surface, with an explicit `tcode_tools:`
 //! allowlist that carries `bash` (for `git`/`gh`/`cargo`) and `finish_task`.
 //! They are NOT forks of the same-named shared assets and are NOT pinned
@@ -155,15 +161,13 @@
 //! [`EmbeddedAgent`]: crate::assets::EmbeddedAgent
 //! [`EmbeddedAgent::Direct`]: crate::assets::EmbeddedAgent::Direct
 //! [`DEFAULT_AGENTS`]: crate::assets::DEFAULT_AGENTS
-//! [`tm_agent_sources`]: crate::assets::tm_agent_sources
 //! [`SHARED_TM_AGENT_FILES`]: crate::assets::SHARED_TM_AGENT_FILES
-//! [`EmbeddedSkill`]: crate::assets::EmbeddedSkill
-//! [`DEFAULT_SKILLS`]: crate::assets::DEFAULT_SKILLS
+//! [`content`]: crate::assets::content
+//! [`DEFAULT_SKILL_NAMES`]: crate::assets::DEFAULT_SKILL_NAMES
 
-/// One embedded default agent: either self-contained (tcode's own 3
+/// One built-in default agent: either self-contained (tcode's own 8
 /// defaults, no `extends:` chain) or a roster agent whose `extends:` chain is
-/// resolved at load time against [`tm_agent_sources`] (Slice E3,
-/// #2958).
+/// resolved at load time against the tm agent catalog (Slice E3, #2958).
 ///
 /// Why: `agents::mod`'s embedded-fallback needs a single ordered table
 /// ([`DEFAULT_AGENTS`]) covering both projection strategies tcode's embedded
@@ -174,28 +178,26 @@
 /// projection. One enum keeps both variants in the same ordered slice rather
 /// than two parallel tables that could silently drift out of sync in count
 /// or ordering.
-/// What: [`EmbeddedAgent::Direct`] carries the dispatch name and the raw
-/// `.md` source (frontmatter fence + prose body) verbatim. [`EmbeddedAgent::Composed`]
-/// carries only the dispatch name — its content is resolved from
-/// [`tm_agent_sources`] at load time, since the whole point of the
-/// in-memory composer is that no second copy of the raw bytes is needed here.
+/// What: both variants carry only the dispatch name (#9013). A
+/// [`EmbeddedAgent::Direct`] body is `content/agents/trusty-code/<name>.md`,
+/// read by [`content::AgentSources`]; a [`EmbeddedAgent::Composed`] body is
+/// composed from the catalog [`content::AgentSources::catalog`] holds.
 /// [`EmbeddedAgent::name`] reads the name back out of either variant.
 /// Test: `assets::tests::default_agents_parse_and_names_match`.
 #[derive(Debug, Clone, Copy)]
 pub enum EmbeddedAgent {
-    /// A self-contained agent: raw `.md` source, no `extends:` chain.
+    /// A self-contained agent, no `extends:` chain; its `.md` is read from
+    /// content (#9013) and projected via `agents::md_loader::project_embedded_md`.
     Direct {
-        /// Dispatch key, matching the frontmatter `name:` inside `md`.
+        /// Dispatch key, matching the frontmatter `name:` inside the `.md`
+        /// and its file stem.
         name: &'static str,
-        /// Raw `.md` source (frontmatter fence + prose body), projectable
-        /// via `agents::md_loader::project_embedded_md`.
-        md: &'static str,
     },
     /// A roster agent resolved via `agents::md_loader::project_embedded_md_with_extends`
-    /// against [`tm_agent_sources`] at load time.
+    /// against the tm agent catalog at load time.
     Composed {
-        /// Dispatch key, and the lookup key into `tm_agent_sources`
-        /// (after that table's own case-folding).
+        /// Dispatch key, and the lookup key into the catalog (after its own
+        /// case-folding).
         name: &'static str,
     },
 }
@@ -210,35 +212,12 @@ impl EmbeddedAgent {
     /// Test: `assets::tests::default_agents_parse_and_names_match`.
     pub fn name(&self) -> &'static str {
         match self {
-            EmbeddedAgent::Direct { name, .. } => name,
+            EmbeddedAgent::Direct { name } => name,
             EmbeddedAgent::Composed { name } => name,
         }
     }
 }
 
-/// One embedded default skill: its catalog name and raw `SKILL.md` source.
-///
-/// Why: `skills::mod`'s embedded-fallback needs both the name (for the
-/// `SkillMetadata` catalog) and the raw Markdown (frontmatter + body, parsed
-/// the same way a disk-based `SKILL.md` is).
-/// What: `name` matches the frontmatter `name:` inside `skill_md`; `skill_md`
-/// is the verbatim embedded file contents (frontmatter fence + body).
-/// Test: `assets::tests::default_skills_names_are_unique`.
-#[derive(Debug, Clone, Copy)]
-pub struct EmbeddedSkill {
-    /// Catalog name, matching the frontmatter `name:` inside `skill_md`.
-    pub name: &'static str,
-    /// Raw `SKILL.md` source (frontmatter fence + Markdown body).
-    pub skill_md: &'static str,
-}
-
-const ENGINEER_MD: &str = include_str!("agents/engineer.md");
-const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
-const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
-const PM_MD: &str = include_str!("agents/pm.md");
-// #8129: the four delivery-workflow agents. tcode-NATIVE, not forks of the
-// shared roster's same-named files — see this module's "Delivery-workflow
-// agents" doc section.
 /// Opening marker of `pm.md`'s contiguous agent-routing block (#8287).
 ///
 /// Why: DOC-75 §4b row 3 ([#8293](https://github.com/bobmatnyc/trusty-tools/issues/8293))
@@ -300,16 +279,11 @@ pub fn pm_routing_block(card: &str) -> Option<&str> {
     Some(after_begin.split_once(PM_ROUTING_BLOCK_END)?.0.trim())
 }
 
-const TICKETING_MD: &str = include_str!("agents/ticketing.md");
-const VERSION_CONTROL_MD: &str = include_str!("agents/version-control.md");
-const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
-const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
-
-/// The 34-agent dispatchable default roster, embedded at compile time
+/// The 34-agent dispatchable default roster, its texts read from content (#9013)
 /// (Slice E3, #2958, plus `pm` added for #3437, `ticketing` for #4027, and
 /// the four #8129 delivery-workflow agents):
 /// tcode's 8 own `Direct` defaults plus the 26 tm roster agents. The 5
-/// `BASE-*` extends templates in [`tm_agent_sources`] are
+/// `BASE-*` extends templates in the tm agent catalog are
 /// deliberately NOT entries here — they are extends-sources only, never
 /// dispatchable — and trusty-mpm's own `engineer` agent is excluded from the
 /// roster upstream (#2958's roster decision) precisely because it would
@@ -330,13 +304,13 @@ const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 /// hands bugs back to the engineer rather than fixing them), `code-reviewer`
 /// (adversarial, read-only review, no `bash`), `pm` (orchestrator/default —
 /// delegates when `delegate_to_agent` is available, executes directly
-/// otherwise; see `assets/agents/pm.md`), plus the four #8129
+/// otherwise; see `content/agents/trusty-code/pm.md`), plus the four #8129
 /// delivery-workflow agents `ticketing` (issues via `gh`), `version-control`
 /// (branch/commit/push/PR via `git`+`gh`), `local-ops` (build, test, version
 /// bump, changelog) and `documentation` (prose) — all eight
 /// [`EmbeddedAgent::Direct`], interleaved alphabetically from
 /// `documentation` onward. Then the 26 [`EmbeddedAgent::Composed`] roster
-/// agents, alphabetical, matching [`tm_agent_sources`]'s roster
+/// agents, alphabetical, matching the tm agent catalog's roster
 /// ordering. Four of them (`qa`, `code-critic`, `code-analyzer`, `web-qa`)
 /// carry a tcode-only restrictive `tcode_tools:` override in their `.md`
 /// source — see this module's "Tools-restriction deviation" doc section above.
@@ -350,17 +324,10 @@ const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 /// `assets::tests::default_task_run_agent_resolves_against_default_agents`,
 /// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
 pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
-    EmbeddedAgent::Direct {
-        name: "engineer",
-        md: ENGINEER_MD,
-    },
-    EmbeddedAgent::Direct {
-        name: "qa-agent",
-        md: QA_AGENT_MD,
-    },
+    EmbeddedAgent::Direct { name: "engineer" },
+    EmbeddedAgent::Direct { name: "qa-agent" },
     EmbeddedAgent::Direct {
         name: "code-reviewer",
-        md: CODE_REVIEWER_MD,
     },
     // #8184: `pm` is the default agent of an INTERACTIVE session, which runs
     // SOLO since #8184 — it edits and runs commands itself, in the user's real
@@ -371,10 +338,7 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     // #8287: in DELEGATE mode the same card is the only routing text the PM has,
     // so its contiguous routing block (see [`PM_ROUTING_BLOCK_BEGIN`]) is what
     // decides whether `research`/`engineer`/`qa-agent` get dispatched at all.
-    EmbeddedAgent::Direct {
-        name: "pm",
-        md: PM_MD,
-    },
+    EmbeddedAgent::Direct { name: "pm" },
     EmbeddedAgent::Composed { name: "api-qa" },
     EmbeddedAgent::Composed {
         name: "code-analyzer",
@@ -391,7 +355,6 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     // #8129: tcode-native, not the shared roster's `documentation.md`.
     EmbeddedAgent::Direct {
         name: "documentation",
-        md: DOCUMENTATION_MD,
     },
     EmbeddedAgent::Composed {
         name: "golang-engineer",
@@ -403,10 +366,7 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
         name: "javascript-engineer",
     },
     // #8129: tcode-native build/test/version-bump/changelog agent.
-    EmbeddedAgent::Direct {
-        name: "local-ops",
-        md: LOCAL_OPS_MD,
-    },
+    EmbeddedAgent::Direct { name: "local-ops" },
     EmbeddedAgent::Composed {
         name: "nextjs-engineer",
     },
@@ -450,17 +410,13 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     // widened cross-product bridge (#4026). See this module's "Non-coding
     // cross-product roster addition" doc section. #8129 replaced the shared
     // copy with a tcode-native one carrying a `tcode_tools:` allowlist.
-    EmbeddedAgent::Direct {
-        name: "ticketing",
-        md: TICKETING_MD,
-    },
+    EmbeddedAgent::Direct { name: "ticketing" },
     EmbeddedAgent::Composed {
         name: "typescript-engineer",
     },
     // #8129: the branch/commit/push/PR half of the delivery workflow.
     EmbeddedAgent::Direct {
         name: "version-control",
-        md: VERSION_CONTROL_MD,
     },
     EmbeddedAgent::Composed { name: "web-qa" },
     EmbeddedAgent::Composed {
@@ -500,11 +456,6 @@ pub const BASE_AGENT_NAMES: &[&str] = &[
     "base-research",
 ];
 
-const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
-const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");
-const QA_MD: &str = include_str!("agents/qa.md");
-const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
-
 /// The 27 shared agent files tcode composes from: the 5 `BASE-*` extends
 /// templates plus 22 roster agents (#9011).
 ///
@@ -515,7 +466,7 @@ const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
 /// `"rust-engineer.md"`), which
 /// `trusty_agents_common::agents::builder_in_memory::InMemorySources::insert`
 /// lowercases and strips, so `extends: base-qa` resolves with no extra work.
-/// What: file names only; [`tm_agent_sources`] reads them from a roster.
+/// What: file names only; [`content::catalog_from`] reads them from a roster.
 /// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`.
 pub const SHARED_TM_AGENT_FILES: &[&str] = &[
     "BASE-AGENT.md",
@@ -547,200 +498,63 @@ pub const SHARED_TM_AGENT_FILES: &[&str] = &[
     "web-ui-engineer.md",
 ];
 
-/// tcode's 4 read-only forks of shared roster agents, still embedded until
-/// PHASE_4 (#8390) — see this module's "Tools-restriction deviation" section.
-pub const LOCAL_TM_AGENT_FORKS: &[(&str, &str)] = &[
-    ("code-analyzer.md", CODE_ANALYZER_MD),
-    ("code-critic.md", CODE_CRITIC_MD),
-    ("qa.md", QA_MD),
-    ("web-qa.md", WEB_QA_MD),
-];
+/// tcode's 4 read-only forks of shared roster agents, read from
+/// `content/agents/trusty-code/` (#9013) — see this module's
+/// "Tools-restriction deviation" section. Each shadows the shared file of the
+/// same name in the catalog.
+pub const LOCAL_TM_AGENT_FORKS: &[&str] =
+    &["code-analyzer.md", "code-critic.md", "qa.md", "web-qa.md"];
 
-/// The 31-entry tm agent catalog the extends-composer resolves against: every
-/// [`SHARED_TM_AGENT_FILES`] entry read from `roster`, then
-/// [`LOCAL_TM_AGENT_FORKS`].
-///
-/// Why: `agents::md_loader` and the roster deploy need one batch source of
-/// `(file name, markdown)` pairs, as the compiled-in table used to be.
-/// What: `Err(AgentContentError::Missing)` when `roster` lacks a shared file,
-/// so a partial catalog never composes.
-/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`.
-pub fn tm_agent_sources(
-    roster: &trusty_agents_common::agent_content::AgentRoster,
-) -> Result<Vec<(String, String)>, trusty_agents_common::agent_content::AgentContentError> {
-    let mut out = Vec::with_capacity(SHARED_TM_AGENT_FILES.len() + LOCAL_TM_AGENT_FORKS.len());
-    for file in SHARED_TM_AGENT_FILES {
-        out.push(((*file).to_string(), roster.require(file)?.to_string()));
-    }
-    for (file, md) in LOCAL_TM_AGENT_FORKS {
-        out.push(((*file).to_string(), (*md).to_string()));
-    }
-    Ok(out)
-}
-
-/// [`tm_agent_sources`] over the roster resolved for this process: the
-/// trusty-tools checkout above the cwd, else the installed content bundle.
-/// Every failure names `tm content install` or `tm content update`.
+/// [`content::AgentSources::catalog`] over the content resolved for this
+/// process: the trusty-tools checkout above the cwd, else the installed
+/// content bundle. Every failure names `tm content update` or
+/// `tm content install --from`.
 pub fn load_tm_agent_sources()
 -> Result<Vec<(String, String)>, trusty_agents_common::agent_content::AgentContentError> {
-    use trusty_agents_common::agent_content::{AgentRoster, DevOverride, resolve_content};
-    let dev = std::env::current_dir().map_or(DevOverride::Off, DevOverride::DetectFrom);
-    tm_agent_sources(&AgentRoster::load(&resolve_content(dev)?)?)
+    content::catalog_from(&content::resolve_for_process()?)
 }
 
-const API_DESIGN_PATTERNS_SKILL: &str = include_str!("skills/api-design-patterns/SKILL.md");
-const API_DOCUMENTATION_SKILL: &str = include_str!("skills/api-documentation/SKILL.md");
-const ARTIFACTS_BUILDER_SKILL: &str = include_str!("skills/artifacts-builder/SKILL.md");
-const BRAINSTORMING_SKILL: &str = include_str!("skills/brainstorming/SKILL.md");
-const CODE_PRODUCTION_PROCESS_SKILL: &str = include_str!("skills/code-production-process/SKILL.md");
-const CODE_REVIEW_STANDARDS_SKILL: &str = include_str!("skills/code-review-standards/SKILL.md");
-const CONDITION_BASED_WAITING_SKILL: &str = include_str!("skills/condition-based-waiting/SKILL.md");
-const CONTRACT_DRIVEN_TESTING_SKILL: &str = include_str!("skills/contract-driven-testing/SKILL.md");
-const DATABASE_MIGRATION_SKILL: &str = include_str!("skills/database-migration/SKILL.md");
-const DOCUMENTATION_STYLE_SKILL: &str = include_str!("skills/documentation-style/SKILL.md");
-const ENV_MANAGER_SKILL: &str = include_str!("skills/env-manager/SKILL.md");
-const GIT_WORKFLOW_SKILL: &str = include_str!("skills/git-workflow/SKILL.md");
-const INTERNAL_COMMS_SKILL: &str = include_str!("skills/internal-comms/SKILL.md");
-const JSON_DATA_HANDLING_SKILL: &str = include_str!("skills/json-data-handling/SKILL.md");
-const MODEL_CONTEXT_BUILDER_SKILL: &str = include_str!("skills/model-context-builder/SKILL.md");
-const REQUESTING_CODE_REVIEW_SKILL: &str = include_str!("skills/requesting-code-review/SKILL.md");
-const ROOT_CAUSE_TRACING_SKILL: &str = include_str!("skills/root-cause-tracing/SKILL.md");
-const SECURITY_SCANNING_SKILL: &str = include_str!("skills/security-scanning/SKILL.md");
-const SOFTWARE_PATTERNS_SKILL: &str = include_str!("skills/software-patterns/SKILL.md");
-const SYSTEMATIC_DEBUGGING_SKILL: &str = include_str!("skills/systematic-debugging/SKILL.md");
-const TEST_DRIVEN_DEVELOPMENT_SKILL: &str = include_str!("skills/test-driven-development/SKILL.md");
-const TEST_QUALITY_INSPECTOR_SKILL: &str = include_str!("skills/test-quality-inspector/SKILL.md");
-const TESTING_ANTI_PATTERNS_SKILL: &str = include_str!("skills/testing-anti-patterns/SKILL.md");
-const VERIFICATION_BEFORE_COMPLETION_SKILL: &str =
-    include_str!("skills/verification-before-completion/SKILL.md");
-const WEB_PERFORMANCE_OPTIMIZATION_SKILL: &str =
-    include_str!("skills/web-performance-optimization/SKILL.md");
-const WEBAPP_TESTING_SKILL: &str = include_str!("skills/webapp-testing/SKILL.md");
-const WRITING_PLANS_SKILL: &str = include_str!("skills/writing-plans/SKILL.md");
-const XLSX_SKILL: &str = include_str!("skills/xlsx/SKILL.md");
-
-/// trusty-mpm's universal skill set, embedded at compile time (`tm-*`
-/// orchestration skills excluded — see module docs).
+/// tcode's default skill catalog, by name (#9013: the texts live in
+/// `content/instructions/trusty-code/skills/<name>/SKILL.md`).
 ///
-/// Why: gives `skills::discover_skill_metadata`'s embedded-fallback branch a
-/// fixed, ordered table to build a `SkillMetadata` catalog from when the disk
-/// `.claude/skills/` directory is empty or absent.
-/// What: 28 skills, sorted by name, each an `EmbeddedSkill { name, skill_md }`.
+/// Why: gives `skills::discover_skill_metadata`'s fallback branch a fixed,
+/// ordered list of the skills content must supply when the disk
+/// `.claude/skills/` directory is empty or absent; a listed skill the content
+/// lacks is an error, never a shorter catalog.
+/// What: 28 names, sorted; [`content::default_skills_from`] reads them.
 /// Test: `assets::tests::default_skills_names_are_unique`.
-pub const DEFAULT_SKILLS: &[EmbeddedSkill] = &[
-    EmbeddedSkill {
-        name: "api-design-patterns",
-        skill_md: API_DESIGN_PATTERNS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "api-documentation",
-        skill_md: API_DOCUMENTATION_SKILL,
-    },
-    EmbeddedSkill {
-        name: "artifacts-builder",
-        skill_md: ARTIFACTS_BUILDER_SKILL,
-    },
-    EmbeddedSkill {
-        name: "brainstorming",
-        skill_md: BRAINSTORMING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "code-production-process",
-        skill_md: CODE_PRODUCTION_PROCESS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "code-review-standards",
-        skill_md: CODE_REVIEW_STANDARDS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "condition-based-waiting",
-        skill_md: CONDITION_BASED_WAITING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "contract-driven-testing",
-        skill_md: CONTRACT_DRIVEN_TESTING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "database-migration",
-        skill_md: DATABASE_MIGRATION_SKILL,
-    },
-    EmbeddedSkill {
-        name: "documentation-style",
-        skill_md: DOCUMENTATION_STYLE_SKILL,
-    },
-    EmbeddedSkill {
-        name: "env-manager",
-        skill_md: ENV_MANAGER_SKILL,
-    },
-    EmbeddedSkill {
-        name: "git-workflow",
-        skill_md: GIT_WORKFLOW_SKILL,
-    },
-    EmbeddedSkill {
-        name: "internal-comms",
-        skill_md: INTERNAL_COMMS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "json-data-handling",
-        skill_md: JSON_DATA_HANDLING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "model-context-builder",
-        skill_md: MODEL_CONTEXT_BUILDER_SKILL,
-    },
-    EmbeddedSkill {
-        name: "requesting-code-review",
-        skill_md: REQUESTING_CODE_REVIEW_SKILL,
-    },
-    EmbeddedSkill {
-        name: "root-cause-tracing",
-        skill_md: ROOT_CAUSE_TRACING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "security-scanning",
-        skill_md: SECURITY_SCANNING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "software-patterns",
-        skill_md: SOFTWARE_PATTERNS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "systematic-debugging",
-        skill_md: SYSTEMATIC_DEBUGGING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "test-driven-development",
-        skill_md: TEST_DRIVEN_DEVELOPMENT_SKILL,
-    },
-    EmbeddedSkill {
-        name: "test-quality-inspector",
-        skill_md: TEST_QUALITY_INSPECTOR_SKILL,
-    },
-    EmbeddedSkill {
-        name: "testing-anti-patterns",
-        skill_md: TESTING_ANTI_PATTERNS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "verification-before-completion",
-        skill_md: VERIFICATION_BEFORE_COMPLETION_SKILL,
-    },
-    EmbeddedSkill {
-        name: "web-performance-optimization",
-        skill_md: WEB_PERFORMANCE_OPTIMIZATION_SKILL,
-    },
-    EmbeddedSkill {
-        name: "webapp-testing",
-        skill_md: WEBAPP_TESTING_SKILL,
-    },
-    EmbeddedSkill {
-        name: "writing-plans",
-        skill_md: WRITING_PLANS_SKILL,
-    },
-    EmbeddedSkill {
-        name: "xlsx",
-        skill_md: XLSX_SKILL,
-    },
+pub const DEFAULT_SKILL_NAMES: &[&str] = &[
+    "api-design-patterns",
+    "api-documentation",
+    "artifacts-builder",
+    "brainstorming",
+    "code-production-process",
+    "code-review-standards",
+    "condition-based-waiting",
+    "contract-driven-testing",
+    "database-migration",
+    "documentation-style",
+    "env-manager",
+    "git-workflow",
+    "internal-comms",
+    "json-data-handling",
+    "model-context-builder",
+    "requesting-code-review",
+    "root-cause-tracing",
+    "security-scanning",
+    "software-patterns",
+    "systematic-debugging",
+    "test-driven-development",
+    "test-quality-inspector",
+    "testing-anti-patterns",
+    "verification-before-completion",
+    "web-performance-optimization",
+    "webapp-testing",
+    "writing-plans",
+    "xlsx",
 ];
+
+pub mod content;
 
 // -- Tests --------------------------------------------------------------------
 // Split into `tests.rs` (not inlined) to keep this include-table file thin;

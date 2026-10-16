@@ -60,7 +60,7 @@ fn roster_target_is_under_the_native_config_dir() {
 
 #[test]
 fn staged_sources_cover_every_roster_name_and_base_template() {
-    let staged = stage_embedded_sources().expect("stage");
+    let (staged, _refs) = stage_embedded_sources().expect("stage");
     for name in roster_names() {
         assert!(
             staged.path().join(format!("{name}.md")).is_file(),
@@ -550,7 +550,8 @@ fn swapped_skill_refs_dir_never_reaches_the_victim() {
 
     swap_for_symlink(refs.path(), victim.path());
 
-    let err = super::super::skill_refs::materialize_skill_refs(&refs)
+    let texts = super::super::skill_refs::tests::test_refs();
+    let err = super::super::skill_refs::materialize_skill_refs(&refs, &texts)
         .expect_err("a swapped component must be reported");
 
     assert!(
