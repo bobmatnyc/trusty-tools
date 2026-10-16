@@ -52,7 +52,7 @@ async fn write(
     content: &str,
     fact_key: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
-) -> anyhow::Result<Uuid> {
+) -> Result<Uuid, crate::engine::EngineError> {
     handle
         .remember_with_options(
             content.to_string(),

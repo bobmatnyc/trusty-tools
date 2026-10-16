@@ -320,7 +320,7 @@ impl SmMemory {
             .map(|id| id.to_string())
             .map_err(|source| SmMemoryError::Operation {
                 op: "remember",
-                source,
+                source: source.into(),
             })
     }
 
@@ -346,7 +346,10 @@ impl SmMemory {
             )
             .await
             .map(|id| id.to_string())
-            .map_err(|source| SmMemoryError::Operation { op: "note", source })
+            .map_err(|source| SmMemoryError::Operation {
+                op: "note",
+                source: source.into(),
+            })
     }
 
     /// Remember a tagged, short-fact-tolerant entry into the SM palace.
@@ -382,7 +385,7 @@ impl SmMemory {
             .map(|id| id.to_string())
             .map_err(|source| SmMemoryError::Operation {
                 op: "remember_tagged",
-                source,
+                source: source.into(),
             })
     }
 

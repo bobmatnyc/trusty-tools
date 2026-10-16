@@ -58,8 +58,11 @@ trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per typ
 trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::EngineError	enum	KEEP	error of PalaceHandle::open and open_with_intent (#9278 T3b-1)	T3b
+trusty_memory::engine::EngineError::Hnsw	variant	KEEP	member of EngineError (error of the PalaceHandle write paths (#9278 T3c-1))	T3c
+trusty_memory::engine::EngineError::Kg	variant	KEEP	member of EngineError (error of the PalaceHandle write paths (#9278 T3c-1))	T3c
 trusty_memory::engine::EngineError::Other	variant	KEEP	member of EngineError (error of PalaceHandle::open and open_with_intent (#9278 T3b-1))	T3b
 trusty_memory::engine::EngineError::Palace	variant	KEEP	member of EngineError (error of PalaceHandle::open and open_with_intent (#9278 T3b-1))	T3b
+trusty_memory::engine::EngineError::VerifyNotStored	variant	KEEP	member of EngineError (error of the PalaceHandle write paths (#9278 T3c-1))	T3c
 trusty_memory::engine::ExistingPalaces	enum	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::Listed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::ExistingPalaces::Listed::shown	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
@@ -815,8 +818,8 @@ trusty_memory::engine::retrieval::PalaceHandle::decay_config	field	NARROW	no con
 trusty_memory::engine::retrieval::PalaceHandle::drawer_load_degraded	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::drawers	field	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::embed_health	method	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	anyhow-pending T3: tests/memory_palace.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::forget_for_maintenance	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::id	field	KEEP	tests/alias_lane/mod.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::identity	field	KEEP	tests/bm25_alias_recall.rs	A4
@@ -837,8 +840,8 @@ trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no
 trusty_memory::engine::retrieval::PalaceHandle::recall_log	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	anyhow-pending T3: tests/http_recall_bm25_fusion.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::remember_with_options_within	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::repair_aliases	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::snapshot	method	KEEP	tests/palace_backup_9282.rs	A4

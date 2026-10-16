@@ -484,7 +484,8 @@ pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
 /// `count_refusal_sees_a_kg_error_palace`,
 /// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`,
 /// `share_error_keeps_typed_sources_visible_to_the_classifiers`,
-/// `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`.
+/// `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`,
+/// `classifiers_see_a_refusal_through_kg_and_hnsw_variants`.
 pub(crate) fn palace_store_errors(
     err: &anyhow::Error,
 ) -> Box<dyn Iterator<Item = &PalaceStoreError> + '_> {
@@ -511,6 +512,9 @@ pub(crate) fn palace_store_errors(
             })
             .or_else(|| match e.downcast_ref::<EngineError>()? {
                 EngineError::Palace(p) => Some(p),
+                // #9278 T3c-1: the write paths carry both wrappers too.
+                EngineError::Kg(k) => k.as_palace_store(),
+                EngineError::Hnsw(h) => hnsw(h),
                 _ => None,
             })
             .into_iter()
