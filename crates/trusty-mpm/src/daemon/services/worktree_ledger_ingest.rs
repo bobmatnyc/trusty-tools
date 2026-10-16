@@ -20,9 +20,13 @@
 //! one retry per stop event, never per tool call — observes every pending tree
 //! again. The sidecar is cleared only by an ingest that appends successfully
 //! while `pending` is empty: an unrelated success never hides a tree that is
-//! still missing. A registry-read failure skips only the observe step; the
-//! reconcile still runs, and the `reconcile_queued` flag is reset on every exit
-//! path (a drop guard), so a failed task cannot absorb later stop events.
+//! still missing. Every task reads the project registry, so a tree drained
+//! from `pending` is judged only against a real read, never an empty list; a
+//! drained tree leaves `pending` only with an `observed` record or a verdict
+//! from that read. A registry-read failure skips only the observe step (the
+//! trees go back to `pending` and the sidecar records it); the reconcile still
+//! runs, and the `reconcile_queued` flag is reset on every exit path (a drop
+//! guard), so a failed task cannot absorb later stop events.
 //! Nothing here deletes a worktree.
 //! Test: `daemon::services::worktree_ledger_ingest::tests`.
 
@@ -54,7 +58,8 @@ use crate::daemon::state::DaemonState;
 /// lock held for the whole of one task's ledger work.
 /// Test: `repeated_events_record_a_tree_once`,
 /// `a_failed_registry_read_does_not_absorb_later_stops`,
-/// `a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success`.
+/// `a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success`,
+/// `a_tree_pending_after_a_stop_is_spawned_is_never_dropped`.
 #[derive(Debug, Default)]
 pub(crate) struct IngestTracker {
     seen: Mutex<HashSet<PathBuf>>,
@@ -201,15 +206,12 @@ pub fn spawn_for_event(
         tracker: Some(Arc::clone(&tracker)),
     });
     Some(runtime.spawn(async move {
-        // Only the observe and retry steps need the project registry.
-        let needs_checkouts = tree.is_some() || (reconcile && tracker.has_pending());
-        let checkouts = if needs_checkouts {
-            registered_checkouts(&registry_dir)
-                .await
-                .map_err(|e| format!("project registry unreadable: {e}"))
-        } else {
-            Ok(Vec::new())
-        };
+        // See #8994: every task reads the registry, a reconcile included. A
+        // tree can join `pending` after this point and before the write lock,
+        // so "nothing pending yet" never justifies an empty checkout list.
+        let checkouts = registered_checkouts(&registry_dir)
+            .await
+            .map_err(|e| format!("project registry unreadable: {e}"));
         let work = move || ingest(&tracker, &ledger, tree, guard, checkouts, &session);
         tokio::task::spawn_blocking(work)
             .await
@@ -279,7 +281,8 @@ impl Pass<'_> {
 /// sidecar only when something was appended, nothing failed and nothing is
 /// still pending.
 /// Test: `a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success`,
-/// `a_failed_registry_read_does_not_absorb_later_stops`.
+/// `a_failed_registry_read_does_not_absorb_later_stops`,
+/// `a_tree_pending_after_a_stop_is_spawned_is_never_dropped`.
 fn ingest(
     tracker: &IngestTracker,
     ledger: &WorktreeLedger,

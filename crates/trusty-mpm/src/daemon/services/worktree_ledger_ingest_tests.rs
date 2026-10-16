@@ -323,3 +323,81 @@ async fn a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success() 
     assert!(live.contains_key(&crate::core::worktree_ledger::ledger_key(&a)));
     assert_eq!(h.count(|k| matches!(k, EventKind::Observed { .. })), 3);
 }
+
+/// #8994: a tree that joins `pending` after a tree-less stop (A) was spawned,
+/// but before A takes the write lock, must not be judged against an empty
+/// checkout list and dropped as `Unregistered`. The lock is held by a thread
+/// that runs tree B's failing pass on cue, so the interleaving is fixed.
+#[tokio::test]
+async fn a_tree_pending_after_a_stop_is_spawned_is_never_dropped() {
+    let fixture = GitWorktreeFixture::new();
+    let seed = agent_tree(&fixture, "agent-seed");
+    let b = agent_tree(&fixture, "agent-b");
+    let unrelated = agent_tree(&fixture, "agent-unrelated");
+    let h = Harness::new(&fixture.repo).await;
+    h.event(HookEvent::PreToolUse, tool_call(&seed)).await;
+    let ledger = h.ledger();
+    let registry = crate::project::registry_data_dir_under(h.state.framework_root());
+    let checkouts = registered_checkouts(&registry).await.expect("registry");
+    make_read_only(ledger.path());
+    let tracker = h.state.worktree_ingest();
+    // B's ingest: holds the write lock; on cue its append fails and B goes pending.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let (tracker, ledger, b) = (Arc::clone(&tracker), h.ledger(), b.clone());
+        std::thread::spawn(move || {
+            let _write = tracker.write.lock().unwrap_or_else(PoisonError::into_inner);
+            locked_tx.send(()).expect("signal locked");
+            go_rx.recv().expect("cue");
+            assert!(tracker.claim(&b));
+            let mut pass = Pass {
+                tracker: &tracker,
+                ledger: &ledger,
+                checkouts: &Ok(checkouts),
+                session: "b",
+                report: IngestReport::default(),
+                appended: false,
+            };
+            assert_eq!(pass.observe(&b), None, "B's append fails");
+        })
+    };
+    locked_rx.recv().expect("lock held");
+    // A: a tree-less stop, spawned while nothing is pending yet.
+    let a = spawn_for_event(
+        &h.state,
+        SessionId::new(),
+        HookEvent::SubagentStop,
+        &json!({}),
+    )
+    .expect("a stop queues a reconcile");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    go_tx.send(()).expect("cue B");
+    holder.join().expect("B's pass");
+    let a = a.await.expect("A's task");
+    let key = crate::core::worktree_ledger::ledger_key(&b);
+    let recorded = |l: &WorktreeLedger| fold(&l.read().unwrap().events).live.contains_key(&key);
+    let pending = || tracker.pending.lock().unwrap().contains(&b);
+    assert!(
+        pending() || recorded(&ledger),
+        "B left `pending` with no record: {a:?}"
+    );
+    // An unrelated append must not clear the alarm while B is still missing.
+    make_writable(ledger.path());
+    let ok = h
+        .event(HookEvent::PreToolUse, tool_call(&unrelated))
+        .await
+        .expect("a new tree");
+    assert!(matches!(ok.observed, Some(ObserveOutcome::Recorded { .. })));
+    assert!(read_ingest_failure(&ledger).unwrap().is_some());
+    let row =
+        crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    assert_ne!(row.status, CheckStatus::Ok, "{}", row.message);
+    // The next stop records B and the alarm clears.
+    let stopped = h.event(HookEvent::SubagentStop, json!({})).await.unwrap();
+    assert_eq!(stopped.error, None, "{stopped:?}");
+    assert!(recorded(&ledger));
+    assert!(read_ingest_failure(&ledger).unwrap().is_none());
+}
