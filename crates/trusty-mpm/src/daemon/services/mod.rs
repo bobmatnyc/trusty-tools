@@ -40,6 +40,8 @@ pub(crate) mod sweep_state_file;
 // last-pass timings `tm doctor` reports.
 pub(crate) mod sweep_status;
 pub mod tmux_service;
+// #8994 S2b: records `git worktree add|remove|prune` run in a Bash tool call.
+pub mod worktree_command_ingest;
 // #8994 S2a: records agent-isolation trees in the worktree ledger from hooks.
 pub mod worktree_ledger_ingest;
 

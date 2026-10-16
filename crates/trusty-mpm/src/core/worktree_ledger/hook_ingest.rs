@@ -78,6 +78,9 @@ pub enum ObserveOutcome {
     NotADirectory,
     /// The tree resolves outside every registered project; nothing appended.
     Unregistered,
+    /// The directory exists but `git worktree list` does not name it as a
+    /// worktree (#8994 S2b: a `git worktree add` that failed); nothing appended.
+    NotListed,
 }
 
 /// Append one `observed` event for `tree`, unless it is already live.

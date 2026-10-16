@@ -28,6 +28,8 @@
 //! Test: `worktree_ledger::tests`.
 
 pub mod backfill;
+pub mod bash_worktree;
+pub mod command_ingest;
 pub mod fold;
 pub mod hook_ingest;
 pub mod reconcile;
@@ -58,6 +60,8 @@ pub enum Origin {
     Backfill,
     /// A Claude Code agent-isolation tree (`.claude/worktrees/<name>`).
     AgentIsolation,
+    /// A tree a Bash tool call made with `git worktree add` (#8994 S2b).
+    GitCommand,
 }
 
 /// What happened to the worktree at [`LedgerEvent::path`].
