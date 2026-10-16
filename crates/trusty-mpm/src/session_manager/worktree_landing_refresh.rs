@@ -14,8 +14,12 @@
 //! `origin/main`, and only a fetch puts it where the gate can see it.
 //!
 //! What: one bounded `git fetch --prune origin` per repository, run ONCE per
-//! destructive sweep before anything is classified. A report-only pass does not
-//! fetch, so it mutates no refs.
+//! destructive merged-PR sweep before anything is classified. A report-only
+//! pass is NOT fetch-free (#8994 S3a): the merged-PR report still fetches for
+//! gate 5's landed-content admission, `tm worktrees` fetches once per
+//! repository it asks about a branch (`--no-fetch` skips it), and the ledger
+//! reclaim pass refreshes each candidate's repository in both modes. A fetch
+//! writes remote-tracking refs only, never the working tree.
 //!
 //! **A failed refresh advances nothing.** Every failure arm returns `Err` and
 //! leaves the existing refs exactly as they were, which leaves gate 6 counting

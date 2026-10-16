@@ -33,16 +33,40 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// pass over many trees of one repository costs one `gh` call and one fetch.
 /// Test: `branch_state_reads_gone_present_unpushed_and_no_upstream_from_git`,
 /// `branch_state_is_unresolved_when_git_cannot_answer`,
-/// `pr_for_a_repository_without_a_github_origin_is_unresolved`.
+/// `pr_for_a_repository_without_a_github_origin_is_unresolved`,
+/// `an_offline_probe_never_answers_gone_or_merged`.
 #[derive(Debug, Default)]
 pub struct GitGhStaleProbe {
     indexes: RefCell<BTreeMap<PathBuf, PrIndex>>,
     fetched: RefCell<BTreeMap<PathBuf, Result<(), String>>>,
+    /// `tm worktrees --no-fetch`: no fetch and no `gh` call (#8994 S3a).
+    offline: bool,
 }
 
+/// Why an offline probe leaves a lookup unanswered.
+pub const OFFLINE_REASON: &str = "--no-fetch: the remote and GitHub were not asked";
+
 impl GitGhStaleProbe {
+    /// A probe that runs no `git fetch` and no `gh` (#8994 S3a).
+    ///
+    /// Why: `tm worktrees --no-fetch` must not touch the network, and a local
+    /// remote-tracking ref may be stale, so "gone" and "merged" cannot be told.
+    /// What: every PR lookup, and every branch lookup that would fetch, is
+    /// unresolved with [`OFFLINE_REASON`]; never gone, never merged.
+    /// Test: `an_offline_probe_never_answers_gone_or_merged`.
+    pub fn offline() -> Self {
+        Self {
+            offline: true,
+            ..Self::default()
+        }
+    }
+
     /// `repo`'s `git fetch --prune origin`, once per probe.
     fn fetch(&self, repo: &Path) -> Result<(), String> {
+        // #8994 S3a: offline answers nothing that needs the remote.
+        if self.offline {
+            return Err(OFFLINE_REASON.into());
+        }
         self.fetched
             .borrow_mut()
             .entry(repo.to_path_buf())
@@ -53,6 +77,10 @@ impl GitGhStaleProbe {
 
 impl StaleProbe for GitGhStaleProbe {
     fn pr_for(&self, repo: &Path, branch: &str) -> PrAnswer {
+        // #8994 S3a: `--no-fetch` makes no `gh` call.
+        if self.offline {
+            return PrAnswer::Unresolved(OFFLINE_REASON.into());
+        }
         let mut indexes = self.indexes.borrow_mut();
         let index = indexes
             .entry(repo.to_path_buf())
@@ -123,7 +151,7 @@ fn branch_state_in(
 }
 
 /// A plain branch name: no option shape, no revision syntax, no whitespace.
-fn is_branch_name(branch: &str) -> bool {
+pub(super) fn is_branch_name(branch: &str) -> bool {
     !branch.is_empty()
         && !branch.starts_with('-')
         && !branch.contains("..")
