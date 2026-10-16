@@ -172,7 +172,7 @@ fn mpm_bundled_skills() -> Vec<String> {
 }
 
 /// The Architect-only skill names trusty-mpm ships, one per
-/// `src/assets/architect/skills/<name>.md` (#8436 P4).
+/// `content/instructions/architect/skills/<name>.md` (#8436 P4, #9132).
 ///
 /// Why: those skills are outside the framework manifest, which lists only
 /// what deploys to every session; enumerating the directory is what makes a
@@ -182,7 +182,8 @@ fn mpm_bundled_skills() -> Vec<String> {
 fn mpm_architect_skills() -> Vec<String> {
     let dir = trusty_common::test_harness::test_repo_root()
         .expect("the running checkout's workspace root")
-        .join("crates/trusty-mpm/src/assets/architect/skills");
+        // #9132: the Architect seed skills moved from crate assets into content.
+        .join("content/instructions/architect/skills");
     let entries =
         std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
     let out: Vec<String> = entries

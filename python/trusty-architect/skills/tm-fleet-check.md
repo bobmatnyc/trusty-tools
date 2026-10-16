@@ -2,7 +2,8 @@
 name: tm-fleet-check
 description: The Architect's supervision pass. Discover the live tmux sessions, read the poller's alerts and any push events, capture the panes that need it (a full poll when there are no events), answer high-confidence prompts, escalate the rest to the user, and update the records in `records/`. Architect only.
 user-invocable: true
-version: "0.1.0"
+metadata:
+  version: "0.1.0"
 category: monitoring
 tags: [architect, fleet, monitoring, tmux]
 effort: high

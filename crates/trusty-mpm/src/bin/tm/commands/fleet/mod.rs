@@ -33,7 +33,9 @@ pub(crate) mod status;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
+use trusty_mpm::core::project_skill_tier::architect_seed::{ArchitectSeed, ArchitectSeedError};
 
 use self::config::Edit;
 use self::session_name::SessionNames;
@@ -276,6 +278,27 @@ pub(crate) fn init_with_session(
     probe: Probe,
     session: Option<&SessionNames>,
 ) -> anyhow::Result<InitReport> {
+    // #9132: like a launch, a first run fetches the content release once.
+    init_with_seed(dir, home, launch, probe, session, |dir| {
+        ArchitectSeed::resolve_for(dir, Fetch::OnFirstUse)
+    })
+}
+
+/// [`init_with_session`] with the seed loader named.
+///
+/// Why: #9132 — the template and skills are read from content, and a missing
+/// seed file must refuse the run before it writes anything.
+/// What: runs `load_seed` on the checked path right after the config reads,
+/// before the first write; its error ends the run.
+/// Test: `a_seed_that_does_not_resolve_writes_nothing`.
+pub(crate) fn init_with_seed(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+    session: Option<&SessionNames>,
+    load_seed: impl FnOnce(&Path) -> Result<ArchitectSeed, ArchitectSeedError>,
+) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
     let checked = preflight::check(dir, home)?;
@@ -296,6 +319,8 @@ pub(crate) fn init_with_session(
         refuse_rename(&current, &names, probe)?;
     }
     refuse_second_architect(&user_config, dir, probe, &names)?;
+    // #9132: fail closed before the first write; the seed is all or nothing.
+    let seed = load_seed(dir).context("tm fleet init writes nothing without its seed files")?;
 
     let mut report = InitReport::default();
     report.steps.push(if dir.is_dir() {
@@ -337,7 +362,7 @@ pub(crate) fn init_with_session(
 
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
-    report.steps.extend(seed::deploy(dir)?);
+    report.steps.extend(seed::deploy(dir, &seed)?);
     // #8942 ruling 2: before the launch writes this run's sidecar.
     report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;

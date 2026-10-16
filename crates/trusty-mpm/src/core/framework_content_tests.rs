@@ -76,6 +76,24 @@ fn the_repository_content_carries_the_architect_md_and_its_core() {
     }
 }
 
+/// #9132: the Architect seed files ship as content, not compiled in, so the
+/// repository's content carries each one, non-empty.
+#[test]
+fn the_repository_content_carries_the_architect_seed_files() {
+    let content = repo_content();
+    for rel in [
+        "architect/templates/CLAUDE.md",
+        "architect/skills/tm-fleet-check.md",
+        "architect/skills/tm-context-refresh.md",
+    ] {
+        let body = content.instruction(rel).unwrap_or_default();
+        assert!(
+            !body.trim().is_empty(),
+            "instructions/{rel} is missing or empty"
+        );
+    }
+}
+
 /// #8436 (PR A fix round): `architect.md` carries the operating manual that
 /// `python/trusty-architect/ARCHITECT.md` held (Mandate, Strategic management,
 /// the skill index), not only the eight legacy supervisor sections, and the
