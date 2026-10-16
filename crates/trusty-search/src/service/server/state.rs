@@ -311,6 +311,15 @@ pub struct SearchAppState {
     /// see a cloneable `Arc<EmbedPool>`.
     /// Test: covered indirectly — `start_brings_pool_online`.
     pub embed_pool: Arc<RwLock<Option<Arc<crate::service::embed_pool::EmbedPool>>>>,
+    /// Prometheus recorder handle, populated by `start.rs` when the recorder
+    /// is installed. `None` in tests / when the recorder is skipped.
+    ///
+    /// Why: `start` installs the recorder at startup; a state built without it
+    /// (tests) carries `None`. #9535 removed the `/metrics` route.
+    /// What: `Some(MetricsState)` holds the render handle (`PrometheusHandle`
+    /// is Clone and lock-free); `None` means no recorder was wired.
+    /// Test: `install_recorder_renders_a_recorded_counter`.
+    pub metrics: Option<crate::service::metrics::MetricsState>,
     /// Current OS PID of the `trusty-embedderd` sidecar process (issue #282).
     ///
     /// Why: the daemon's own RSS (`rss_mb` on `/health`) excludes the sidecar,
