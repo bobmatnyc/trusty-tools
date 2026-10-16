@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::fold::LedgerState;
-use super::{LedgerError, WorktreeLedger};
+use super::{EventKind, LedgerAppender, LedgerError, LedgerEvent, WorktreeLedger};
 
 /// What the pull-request lookup said about one branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,13 +105,82 @@ impl StaleReport {
 
 /// Link each live tree's pull request and classify stale candidates.
 ///
-/// Test: see the module doc.
+/// Why: see the module doc.
+/// What: for each live tree, in path order: no recorded branch, or no
+/// directory on disk, is listed with the reason and asked nothing. Otherwise
+/// the probe's PR answer sets the tree's PR — appending one `pr_linked` when
+/// it differs from the folded one — and a merged PR makes it a
+/// [`StaleReason::MergedPr`] candidate. A tree that is not yet a candidate is
+/// then asked about its branch, and only [`BranchAnswer::Gone`] makes it a
+/// [`StaleReason::BranchGone`] candidate. Every unresolved answer is listed in
+/// [`TreeView::unresolved`] and never makes a candidate. A ledger write error
+/// is `Err`.
+/// Test: `a_merged_pr_is_linked_once_and_lists_the_tree_as_a_candidate`,
+/// `only_an_answered_fact_makes_a_stale_candidate`,
+/// `a_missing_or_branchless_tree_is_not_a_candidate`.
 pub fn link_prs_and_find_stale(
-    _ledger: &WorktreeLedger,
-    _state: &LedgerState,
-    _probe: &dyn StaleProbe,
+    ledger: &WorktreeLedger,
+    state: &LedgerState,
+    probe: &dyn StaleProbe,
 ) -> Result<StaleReport, LedgerError> {
-    Ok(StaleReport::default())
+    let mut report = StaleReport::default();
+    let mut appender: Option<LedgerAppender> = None;
+    for wt in state.live.values() {
+        let mut view = TreeView {
+            path: wt.path.clone(),
+            repo: wt.repo.clone(),
+            branch: wt.branch.clone(),
+            pr: wt.pr,
+            stale: None,
+            unresolved: Vec::new(),
+        };
+        let Some(branch) = wt.branch.as_deref() else {
+            view.unresolved
+                .push("no branch is recorded, so there is nothing to look up".into());
+            report.trees.push(view);
+            continue;
+        };
+        if !wt.path.is_dir() {
+            view.unresolved.push("the directory is not on disk".into());
+            report.trees.push(view);
+            continue;
+        }
+        let answer = probe.pr_for(&wt.repo, branch);
+        match &answer {
+            PrAnswer::Merged(pr) | PrAnswer::Open(pr) | PrAnswer::Closed(pr) => {
+                let pr = *pr;
+                if wt.pr != Some(pr) {
+                    if appender.is_none() {
+                        appender = Some(ledger.open_appender()?);
+                    }
+                    if let Some(writer) = appender.as_mut() {
+                        writer.append(&LedgerEvent::now(
+                            wt.path.clone(),
+                            EventKind::PrLinked { pr },
+                        ))?;
+                    }
+                    report.pr_linked += 1;
+                }
+                view.pr = Some(pr);
+                if matches!(answer, PrAnswer::Merged(_)) {
+                    view.stale = Some(StaleReason::MergedPr { pr });
+                }
+            }
+            PrAnswer::NoPr => {}
+            PrAnswer::Unresolved(why) => view.unresolved.push(format!("pull request: {why}")),
+        }
+        if view.stale.is_none() {
+            match probe.branch_state(&wt.repo, &wt.path, branch) {
+                BranchAnswer::Gone => view.stale = Some(StaleReason::BranchGone),
+                BranchAnswer::Present | BranchAnswer::NoUpstream | BranchAnswer::Unpushed(_) => {}
+                BranchAnswer::Unresolved(why) => {
+                    view.unresolved.push(format!("remote branch: {why}"));
+                }
+            }
+        }
+        report.trees.push(view);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

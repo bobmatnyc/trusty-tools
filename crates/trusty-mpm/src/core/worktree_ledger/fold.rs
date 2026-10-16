@@ -122,7 +122,12 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                     entry.measured_at = Some(event.ts);
                 }
             }
-            EventKind::PrLinked { .. } => {}
+            // #8994 S2c: a PR is an attribute of a live tree, never a record.
+            EventKind::PrLinked { pr } => {
+                if let Some(entry) = live.get_mut(&event.path) {
+                    entry.pr = Some(*pr);
+                }
+            }
             EventKind::Removed => {
                 live.remove(&event.path);
             }
