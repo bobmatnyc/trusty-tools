@@ -4,14 +4,16 @@ use super::*;
 /// `trusty-mpm` set MUST include `tm` (#2721) — omitting it left the primary
 /// `tm` binary ad-hoc and the App-Data TCC prompt kept recurring. Order
 /// matters: `trusty-mpm` first so it stays the guidance/prompt "primary".
-/// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers
-/// `trusty-mpm` then `tm`, in that order.
+/// What: Asserts `trusty-search` covers exactly search, embedderd and the
+/// `trusty-embedderd-py` launcher (#9973), `trusty-mpm` covers `trusty-mpm`
+/// then `tm`, in that order.
 /// Test: This is the test.
 #[test]
 fn binaries_for_set_covers_search_and_mpm() {
+    // #9973: three members since the launcher bin moved into trusty-search (#9468).
     assert_eq!(
         binaries_for_set(SEARCH_SET),
-        vec!["trusty-search", "trusty-embedderd"]
+        vec!["trusty-search", "trusty-embedderd", "trusty-embedderd-py"]
     );
     assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm", "tm"]);
 }
@@ -52,6 +54,10 @@ fn identifier_map_covers_all_signable_binaries() {
         codesign_identifier("trusty-embedderd"),
         "com.trusty.trusty-embedderd"
     );
+    assert_eq!(
+        codesign_identifier("trusty-embedderd-py"),
+        "com.trusty.trusty-embedderd-py"
+    );
     assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
     assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
     assert_eq!(codesign_identifier("tagent"), "com.trusty.tagent");
@@ -85,6 +91,32 @@ fn every_set_member_has_a_real_identifier() {
     }
 }
 
+/// Why (#9973): a signing set names the binaries `tctl` signs after an
+/// install, while trusty-common's `installed_binaries` names the binaries the
+/// install places. A binary in the second list and not the first stays ad-hoc
+/// signed and loses its TCC grant on every reinstall (#2721). #9468 moved the
+/// `trusty-embedderd-py` launcher into trusty-search and updated only the
+/// install table.
+/// What: For every set in `SIGNABLE_BINARIES` (each named after its crate),
+/// asserts the set's members equal `installed_binaries(set)`, order ignored.
+/// Test: This is the test.
+#[test]
+fn every_set_signs_every_binary_its_crate_installs() {
+    for set in declared_sets() {
+        let mut signed: Vec<String> = binaries_for_set(set)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        signed.sort();
+        let mut installed = trusty_common::bin_resolve::installed_binaries(set);
+        installed.sort();
+        assert_eq!(
+            signed, installed,
+            "signing set {set} must cover exactly the binaries its crate installs"
+        );
+    }
+}
+
 /// Every distinct set name declared in `SIGNABLE_BINARIES`, in table order.
 ///
 /// Why: Several guards below must cover EVERY set, and a hardcoded list is the
@@ -94,6 +126,7 @@ fn every_set_member_has_a_real_identifier() {
 /// What: Walks `SIGNABLE_BINARIES`, collecting each set name the first time it
 /// appears.
 /// Test: Used by `every_set_member_has_a_real_identifier`,
+/// `every_set_signs_every_binary_its_crate_installs`,
 /// `every_declared_set_is_a_named_constant`,
 /// `signing_persistence_tip_names_every_signable_set`,
 /// `every_sign_target_arg_resolves_to_a_real_set`.
@@ -145,6 +178,11 @@ fn signable_binaries_table_is_pinned() {
                 "trusty-embedderd",
                 SEARCH_SET,
                 "com.trusty.trusty-embedderd"
+            ),
+            (
+                "trusty-embedderd-py",
+                SEARCH_SET,
+                "com.trusty.trusty-embedderd-py"
             ),
             ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
             ("tm", MPM_SET, "com.trusty.tm"),

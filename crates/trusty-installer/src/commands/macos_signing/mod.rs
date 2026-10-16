@@ -110,7 +110,8 @@
 //! generation as pure functions; `codesign` / `security` are not invoked in
 //! tests (side-effecting, macOS-only).
 
-/// The `trusty-search` signable set: `trusty-search` + its bundled `trusty-embedderd`.
+/// The `trusty-search` signable set: `trusty-search` + its bundled
+/// `trusty-embedderd` and `trusty-embedderd-py` (#9973).
 pub const SEARCH_SET: &str = "trusty-search";
 
 /// The `trusty-mpm` signable set: both binaries `cargo install --path
@@ -204,6 +205,13 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
         SEARCH_SET,
         "com.trusty.trusty-embedderd",
     ),
+    // #9973: `cargo install trusty-search` places the Python/MPS launcher
+    // since #9468, so it is signed with the rest of the set (#2721).
+    (
+        "trusty-embedderd-py",
+        SEARCH_SET,
+        "com.trusty.trusty-embedderd-py",
+    ),
     ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
     // `tm` is installed alongside `trusty-mpm` by the same `cargo install --path
     // crates/trusty-mpm` and is the primary user-facing/daemon binary. It MUST
@@ -238,9 +246,9 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
 ///
-/// Why: `trusty-search` ships two binaries that must be signed together
-/// (`trusty-search` + the bundled `trusty-embedderd`); `trusty-mpm` is signed
-/// alone. Centralising the set membership means every caller (the fail-soft
+/// Why: `trusty-search` ships three binaries that must be signed together
+/// (`trusty-search` + the bundled `trusty-embedderd` and, #9973,
+/// `trusty-embedderd-py`); `trusty-mpm` is signed alone. Centralising the set membership means every caller (the fail-soft
 /// install hooks and the strict `tctl sign` command) agrees on exactly which
 /// binaries a target name covers.
 ///
