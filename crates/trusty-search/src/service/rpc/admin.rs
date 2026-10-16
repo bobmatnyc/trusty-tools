@@ -155,6 +155,20 @@ pub struct LogsTail {
     pub n: Option<usize>,
 }
 
+impl LogsTail {
+    /// The core's params for one decoded call; an absent call or `n` is the
+    /// route's default, [`LogsTailParams::default`].
+    ///
+    /// #9535: one function so the parity tests decode exactly as this method
+    /// does. Test: `logs_tail_clamps_n_on_the_socket_too`.
+    pub(crate) fn into_report_params(call: Option<Self>) -> LogsTailParams {
+        match call.and_then(|c| c.n) {
+            Some(n) => LogsTailParams { n },
+            None => LogsTailParams::default(),
+        }
+    }
+}
+
 /// Mount every method in [`METHODS`] onto `router`.
 ///
 /// Why: the route-specific half of the operational routes with a named consumer,
@@ -199,13 +213,7 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     let router =
         router.typed::<Option<LogsTail>, serde_json::Value, _, _>(METHOD_LOGS_TAIL, move |p| {
             let state = Arc::clone(&held);
-            async move {
-                let params = match p.and_then(|p| p.n) {
-                    Some(n) => LogsTailParams { n },
-                    None => LogsTailParams::default(),
-                };
-                Ok(logs_tail_report(&state, &params))
-            }
+            async move { Ok(logs_tail_report(&state, &LogsTail::into_report_params(p))) }
         });
 
     let router = router.typed::<super::super::socket::NoParams, serde_json::Value, _, _>(

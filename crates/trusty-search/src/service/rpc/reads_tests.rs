@@ -33,6 +33,7 @@ use crate::core::indexer::CodeIndexer;
 use crate::core::memguard::{set_index_memory_limit_mb, set_memory_limit_mb};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT};
+use crate::service::rpc::test_support::{http_body, params};
 use crate::service::rpc::RestoreLimits;
 use crate::service::server::{
     call_chain_report, config_report, graph_neighbors_report, graph_report, graph_stats_report,
@@ -133,18 +134,6 @@ async fn fixture() -> (Arc<SearchAppState>, RpcRouter) {
 
     let rpc = reads::register(RpcRouter::new(), &state);
     (state, rpc)
-}
-
-/// A core's 200 body as JSON, asserting it answered (#9535).
-fn http_body<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> serde_json::Value {
-    serde_json::to_value(answer.expect("the core must answer 200")).expect("encode the body")
-}
-
-/// Socket-shaped params decoded as the core's param type.
-fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
-    serde_json::from_value(json).expect("decode the params")
 }
 
 /// One RPC call against the real router, asserting a result frame.
