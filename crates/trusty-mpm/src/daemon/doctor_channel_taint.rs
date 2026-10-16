@@ -9,7 +9,8 @@
 //! when the directory cannot be listed; `Fail` when the hook recorded a
 //! double failure or (#9877) its record exists but cannot be read, or
 //! (#9873) an inbound answer was resolved but its delivery
-//! failed, never settled, or left no line, or a trace line is malformed;
+//! failed, never settled, or left no line, or a trace line is malformed,
+//! or (#9923 Q4) a Slack event was claimed and never settled;
 //! `Unknown` when the delivery trace or the question log cannot be read and
 //! nothing grades `Fail` (the unreadable part is named either way, #9873 fix
 //! round); `Warn` naming each orphaned file or marker (its managed session is
@@ -18,7 +19,8 @@
 //! Test: `doctor_lists_orphan_taint_files_and_deletes_none`,
 //! `doctor_row_is_unknown_when_taint_cannot_be_listed`,
 //! `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`,
-//! `delivery_failed_line_is_a_doctor_fail_naming_question_and_asker`.
+//! `delivery_failed_line_is_a_doctor_fail_naming_question_and_asker`,
+//! `claimed_never_settled_event_is_a_doctor_fail`.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -220,7 +222,37 @@ fn delivery_problems_in(dir: &Path) -> (Vec<String>, Vec<String>) {
     });
     let mut problems = channels_delivery::delivery_problems(&trace.lines, &resolved);
     problems.extend(trace.malformed);
+    // #9923 Q4: an event claimed and never settled is an answer lost.
+    match lost_claims_beside(dir) {
+        Ok(lost) => problems.extend(lost.into_iter().map(|id| {
+            format!(
+                "Slack event {id} was claimed but never settled; its answer is lost (#9923 Q4)."
+            )
+        })),
+        Err(e) => unreadable.push(format!(
+            "The inbound claim log is unreadable ({e}); a lost Slack event cannot be listed."
+        )),
+    }
     (problems, unreadable)
+}
+
+/// The event ids claimed over two minutes ago with no settle, in the claim
+/// log beside `dir` (`channels/inbound_claims.jsonl`).
+#[cfg(feature = "channels")]
+fn lost_claims_beside(dir: &Path) -> Result<Vec<String>, String> {
+    let log = dir.with_file_name("inbound_claims.jsonl");
+    crate::channels::question_table::claims::claimed_never_done(
+        &log,
+        chrono::Utc::now(),
+        chrono::TimeDelta::minutes(2),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// A build without the `channels` feature holds no claim log.
+#[cfg(not(feature = "channels"))]
+fn lost_claims_beside(_dir: &Path) -> Result<Vec<String>, String> {
+    Ok(Vec::new())
 }
 
 /// The answered questions (id, asker) in the question log beside `dir`.

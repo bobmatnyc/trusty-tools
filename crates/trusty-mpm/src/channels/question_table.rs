@@ -33,6 +33,9 @@ use replay::{Book, LineOut, Record, decode, replay_line, validate};
 // #9815: the open-time seal check on the log and its lock.
 mod seal;
 
+// #9923: the inbound event claim log reuses this table's flock and seal.
+pub mod claims;
+
 /// The record format version every line carries.
 pub const FORMAT_VERSION: u32 = 1;
 

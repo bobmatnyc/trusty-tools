@@ -6,7 +6,8 @@
 //! The taint anchor seals only `channels/taint/`, and only while a taint is
 //! live; the Architect did not accept that gap (22:51Z 2026-10-12).
 //! What: [`QuestionsAnchor::locate`] resolves the log, the lock and the
-//! torn-line file the daemon appends to. The parent adds them to every
+//! torn-line file the daemon appends to, and (#9923 Q3) the inbound event
+//! claim log with its lock, torn and prune files. The parent adds them to every
 //! session's anchor set, so for a PM or agent they are anchors under the
 //! #8878 rules: each file, every directory above it, and a hard link to an
 //! existing one are refused, and a location that does not resolve refuses
@@ -22,6 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
+use trusty_mpm::channels::question_table::claims::{claims_path, prune_path};
 use trusty_mpm::channels::question_table::{lock_path, questions_path, torn_path};
 
 use super::{
@@ -51,7 +53,16 @@ impl QuestionsAnchor {
             paths: Vec::new(),
             ids: Vec::new(),
         };
-        for lexical in [lock_path(&log), torn_path(&log), log] {
+        // #9923 Q3: the inbound event claim log is sealed beside the table.
+        let claims = claims_path(home);
+        let files = [lock_path(&log), torn_path(&log), log];
+        let claim_files = [
+            lock_path(&claims),
+            torn_path(&claims),
+            prune_path(&claims),
+            claims,
+        ];
+        for lexical in files.into_iter().chain(claim_files) {
             // #9815: a location that does not resolve refuses every write.
             let Resolved::Path(resolved) = resolve(&lexical) else {
                 return Err(lexical);
@@ -113,6 +124,7 @@ fn questions_reason(what: &str) -> String {
     format!(
         "Trust-anchor write denied (#9815): {what} could change \
          `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`, its `.lock` or its `.torn` file, \
+         or `inbound_claims.jsonl` and its `.lock`, `.torn` or `.prune` file (#9923), \
          which decide which channel answer resolves an owner question. No session may write, \
          move or delete them — the Architect included, with or without a live taint, and \
          `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift this rule. Only \

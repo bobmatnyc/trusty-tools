@@ -1,0 +1,6 @@
+Added
+- The daemon now holds the trusty Slack app's Socket Mode connection and feeds each owner DM reply into the inbound answer path, using the app token named by the host ceiling's `app_ref` only. It holds no socket while the channel policy cannot serve, while Slack names no `app_ref`, or while the claim log cannot open, and a dropped socket reconnects after a doubling wait (1 s to 60 s) without closing any open question (#9923, #8433).
+- Each Slack event id is claimed in `~/.trusty-tools/trusty-mpm/channels/inbound_claims.jsonl` before its envelope is acked and before any effect. A redelivered event is acked and dropped, also after a daemon restart. A claim that cannot be written is not acked and nothing acts on it, so Slack redelivers it. Claims older than 7 days are pruned when the log opens; a failed prune deletes nothing (#9923).
+- `tm hook --pm-guard` seals the claim log and its `.lock`, `.torn` and `.prune` files as trust anchors, as it does the question table (#9923).
+- The `channel_taint` row of `tm doctor` fails when a Slack event was claimed more than two minutes ago and never settled: its answer is lost (#9923).
+- A `tm daemon --sandbox` whose home holds `channels/socket_mode_fake_url` (a `ws://127.0.0.1:<port>` URL) connects to that loopback server instead of Slack, for live checks. No other daemon reads the file (#9923).
