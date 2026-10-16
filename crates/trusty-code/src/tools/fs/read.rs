@@ -36,7 +36,7 @@ pub const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
 /// Test: `cargo test -p trusty-code -- tools::fs::read`.
 pub struct ReadFileTool {
     working_dir: PathBuf,
-    /// #7727: skill-refs root whose embedded files this tool serves.
+    /// #7727: skill-refs root whose referenced skill files this tool serves.
     skill_refs: Option<PathBuf>,
 }
 
@@ -59,10 +59,11 @@ impl ReadFileTool {
     /// Why: an in-process compose resolves `{{TM_SKILLS}}` to
     /// `crate::agents::skill_refs::user_skill_refs_dir`, which lies outside the
     /// working directory; without this the scope check refuses every pointer.
-    /// What: a request whose absolute path is exactly `dir/<entry>` for an
-    /// entry of `crate::agents::skill_refs::REFERENCED_SKILL_FILES` returns that
-    /// entry's embedded content — no disk read, so nothing else outside the
-    /// working directory becomes readable and nothing has to be written first.
+    /// What: a request whose absolute path is exactly `dir/<skill>/SKILL.md`
+    /// for an entry of `crate::agents::skill_refs::REFERENCED_SKILLS` returns
+    /// that skill's text from content (#9013) — no read beneath `dir`, so
+    /// nothing else outside the working directory becomes readable and nothing
+    /// has to be written first. No content is an error naming the remedy.
     /// Test: `skill_ref_pointer_is_served_outside_the_working_dir`,
     /// `skill_refs_do_not_widen_the_scope`.
     pub fn with_skill_refs(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -70,11 +71,17 @@ impl ReadFileTool {
         self
     }
 
-    /// The embedded skill file `path` names, when it is one this tool serves.
-    fn skill_ref(&self, path: &std::path::Path) -> Option<&'static str> {
-        let dir = self.skill_refs.as_deref().filter(|d| d.is_absolute())?;
-        let relative = path.strip_prefix(dir).ok()?;
-        crate::agents::skill_refs::embedded_skill_ref(relative)
+    /// The referenced skill text `path` names, when it is one this tool serves.
+    fn skill_ref(&self, path: &std::path::Path) -> Result<Option<String>, FsError> {
+        let Some(dir) = self.skill_refs.as_deref().filter(|d| d.is_absolute()) else {
+            return Ok(None);
+        };
+        let Ok(relative) = path.strip_prefix(dir) else {
+            return Ok(None);
+        };
+        // #9013: the text is content; none installed fails the read, naming the remedy.
+        crate::agents::skill_refs::skill_ref(relative)
+            .map_err(|e| FsError::io(path, std::io::Error::other(e.to_string())))
     }
 
     /// Read file contents with optional line-range slicing.
@@ -89,8 +96,8 @@ impl ReadFileTool {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Result<String, FsError> {
-        let content = match self.skill_ref(path) {
-            Some(embedded) => embedded.to_string(),
+        let content = match self.skill_ref(path)? {
+            Some(text) => text,
             None => self.read_scoped(path)?,
         };
 
@@ -330,12 +337,11 @@ mod tests {
     /// line ranges included, with nothing on disk.
     #[tokio::test]
     async fn skill_ref_pointer_is_served_outside_the_working_dir() {
-        use crate::agents::skill_refs::REFERENCED_SKILL_FILES;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let refs = tempfile::tempdir().expect("refs");
         let tool = make_tool(&tmp).with_skill_refs(refs.path());
-        let (relative, content) = REFERENCED_SKILL_FILES[0];
+        let skill_refs = crate::agents::skill_refs::tests::test_refs();
+        let (relative, content) = skill_refs.iter().next().expect("a referenced skill");
         let path = refs.path().join(relative).display().to_string();
         let result = tool.execute(json!({ "path": path })).await;
         assert!(!result.is_error(), "unexpected error: {}", result.content());

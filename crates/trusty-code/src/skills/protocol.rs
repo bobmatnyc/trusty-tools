@@ -8,7 +8,7 @@
 //! doesn't exist. `crate::skills::discover_skill_metadata` (the ONLY
 //! consumer of a project's `.claude/skills/`, wired at `run_task`/
 //! `task::executor` time) recognises exactly TWO tiers: the embedded/bundled
-//! catalog (`crate::assets::DEFAULT_SKILLS`, trusty-mpm's universal set
+//! catalog (`crate::assets::DEFAULT_SKILL_NAMES`, trusty-mpm's universal set
 //! minus `tm-*` orchestration skills) and ONE project-scoped disk directory
 //! (`<project_root>/.claude/skills/<name>/SKILL.md`) — there is NO
 //! user-level `~/.claude/skills` tier the way `crate::agents::agents_dir`
@@ -244,10 +244,7 @@ async fn skills_create(
         ));
     };
 
-    if super::embedded_skill_metadata()
-        .iter()
-        .any(|m| m.name == p.name)
-    {
+    if is_bundled_skill_name(&p.name) {
         return Err(RpcError::permission_denied(format!(
             "'{}' is a bundled skill and cannot be overridden by name via this endpoint",
             p.name
@@ -263,6 +260,18 @@ async fn skills_create(
     })?;
 
     Ok(json!({ "name": p.name, "tier": "project" }))
+}
+
+/// Whether `name` is one of tcode's bundled default skills.
+///
+/// Why: the 403 guards on `skills.create`/`skills.delete` must hold with no
+/// content installed (#9013); the content-backed catalog is empty then.
+/// What: matches the static `crate::assets::DEFAULT_SKILL_NAMES` table.
+/// Test: `tests::create_rejects_bundled_name_collision`,
+/// `tests::delete_bundled_name_returns_permission_denied`, and the no-content
+/// `no_content_bundled_skill_name_guard_still_answers_403` e2e.
+fn is_bundled_skill_name(name: &str) -> bool {
+    crate::assets::DEFAULT_SKILL_NAMES.contains(&name)
 }
 
 /// `params` shape for `skills.delete`.
@@ -299,10 +308,7 @@ async fn skills_delete(
 
     let skill_dir = dir.join(&p.name);
     if !skill_dir.exists() {
-        if super::embedded_skill_metadata()
-            .iter()
-            .any(|m| m.name == p.name)
-        {
+        if is_bundled_skill_name(&p.name) {
             return Err(RpcError::permission_denied(format!(
                 "'{}' is a bundled skill and cannot be deleted",
                 p.name
@@ -345,7 +351,7 @@ mod tests {
         let s = SkillsCatalogState::new(None);
         let result = skills_list(&s, Value::Null, ctx()).await.expect("list");
         let skills = result["skills"].as_array().expect("array");
-        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILLS.len());
+        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILL_NAMES.len());
         assert!(skills.iter().all(|sk| sk["tier"] == "bundled"));
     }
 
@@ -362,7 +368,7 @@ mod tests {
         };
         let result = skills_list(&s, Value::Null, ctx()).await.expect("list");
         let skills = result["skills"].as_array().expect("array");
-        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILLS.len());
+        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILL_NAMES.len());
         assert!(skills.iter().all(|sk| sk["tier"] == "bundled"));
     }
 
@@ -434,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_bundled_name_collision() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let bundled_name = crate::assets::DEFAULT_SKILLS[0].name;
+        let bundled_name = crate::assets::DEFAULT_SKILL_NAMES[0];
         let s = SkillsCatalogState {
             dir: Some(tmp.path().to_path_buf()),
         };
@@ -532,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn delete_bundled_name_returns_permission_denied() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let bundled_name = crate::assets::DEFAULT_SKILLS[0].name;
+        let bundled_name = crate::assets::DEFAULT_SKILL_NAMES[0];
         let s = SkillsCatalogState {
             dir: Some(tmp.path().to_path_buf()),
         };

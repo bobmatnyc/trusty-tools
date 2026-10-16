@@ -164,19 +164,20 @@ pub mod rbac;
 /// live provider tests.
 pub mod llm;
 
-/// Embedded default agents & skills (#2895; roster expanded to 31 agents in
-/// Slice E3, #2958; `pm` added as a 4th tcode-own default for #3437).
+/// Built-in default agents & skills (#2895; roster expanded to 31 agents in
+/// Slice E3, #2958; `pm` added as a 4th tcode-own default for #3437), read from
+/// instructional content at runtime since #9013.
 ///
-/// Why: A fresh project has no `.claude/agents/` or `.claude/skills/` yet;
-/// bundling a working default set at compile time (mirroring, not sharing,
-/// `trusty-mpm`'s embed pattern) gives every project a usable harness before
-/// any project-level config exists. Disk-based config always wins when present.
+/// Why: A fresh project has no `.claude/agents/` or `.claude/skills/` yet; a
+/// working default set gives every project a usable harness before any
+/// project-level config exists. Disk-based config always wins when present.
+/// ADR-0064: nothing is compiled in; `assets::content` reads the texts.
 /// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (32 dispatchable tcode agents: the
 /// original 4 (`engineer`/`qa-agent`/`code-reviewer`/`pm`), authored as
 /// Markdown+frontmatter as of #2897 Slice C, plus 28 coding-relevant tm
 /// agents wired in as of Slice E, #2958, whose shared texts are read from
 /// instructional content since #9011);
-/// `EmbeddedSkill`/`DEFAULT_SKILLS` (trusty-mpm's universal skill set, minus
+/// `DEFAULT_SKILL_NAMES` (trusty-mpm's universal skill set, minus
 /// the `tm-*` orchestration skills).
 /// Test: `assets::tests::*`.
 pub mod assets;

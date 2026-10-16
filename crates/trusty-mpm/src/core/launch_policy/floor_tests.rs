@@ -27,11 +27,17 @@ fn md_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every token on an agent frontmatter `<key>:` line, e.g. `tools:`/`skills:`.
+/// Every token on an agent frontmatter `<key>:` line, e.g. `tools:`/`skills:`,
+/// across the roster tm launches: the top-level `content/agents/*.md`.
 fn agent_frontmatter_tokens(key: &str) -> BTreeSet<String> {
     let prefix = format!("{key}:");
     let mut tokens = BTreeSet::new();
-    for path in md_files(&content("agents")) {
+    // #9013: a product subtree (`agents/trusty-code/`) is another harness's
+    // roster, which `AgentRoster` never serves to tm, so tm's floors do not cover it.
+    let roster = md_files(&content("agents"))
+        .into_iter()
+        .filter(|path| path.parent() == Some(content("agents").as_path()));
+    for path in roster {
         let text = std::fs::read_to_string(&path).expect("read agent file");
         for line in text.lines().filter(|l| l.starts_with(&prefix)) {
             let list = &line[prefix.len()..];

@@ -189,7 +189,7 @@ fn daily_driver_skills_catalog_none_in_parity() {
 ///
 /// Why: `skills::discover_skill_metadata`'s embedded-fallback (#2895) means
 /// a project with no disk skills is no longer catalog-empty — it now
-/// resolves to `crate::assets::DEFAULT_SKILLS`. This test previously asserted
+/// resolves to `crate::assets::DEFAULT_SKILL_NAMES`. This test previously asserted
 /// `None` here; that assumption is exactly what #2895 changes, so the
 /// assertion now pins the new (intended) behavior instead.
 /// Test: this test.
@@ -332,7 +332,7 @@ async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
 /// they lie outside the project root.
 #[tokio::test]
 async fn engineer_registry_reads_embedded_agent_skill_pointers() {
-    use crate::agents::skill_refs::{REFERENCED_SKILL_FILES, user_skill_refs_dir};
+    use crate::agents::skill_refs::user_skill_refs_dir;
 
     let project = tempfile::tempdir().expect("project tempdir");
     let agent = crate::agents::resolve_agent(project.path(), "rust-engineer")
@@ -344,14 +344,14 @@ async fn engineer_registry_reads_embedded_agent_skill_pointers() {
         mcp: tokio::sync::OnceCell::new(),
     };
     let registry = factory.build(&agent, &RunContext::default()).await;
-    for (relative, content) in REFERENCED_SKILL_FILES {
+    for (relative, content) in crate::agents::skill_refs::tests::test_refs().iter() {
         let pointer = user_skill_refs_dir().join(relative).display().to_string();
         assert!(agent.system_prompt.content.contains(&pointer), "{pointer}");
         let out = registry
             .dispatch("read_file", serde_json::json!({ "path": pointer }))
             .await;
         assert!(!out.is_error(), "{pointer}: {}", out.content());
-        assert_eq!(out.content(), *content);
+        assert_eq!(out.content(), content);
     }
 }
 

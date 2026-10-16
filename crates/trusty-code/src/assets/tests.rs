@@ -1,4 +1,5 @@
-//! Tests for the embedded default agents & skills tables.
+//! Tests for the built-in default agents & skills tables, whose texts are
+//! read from the running checkout's content (#9013).
 //!
 //! Why: kept out of `mod.rs` so the include-table file stays thin per the
 //! module's own "keep it lean" convention; test/benchmark files get the
@@ -12,6 +13,21 @@
 
 use super::*;
 use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_extends};
+
+/// The running checkout's content (#9298), so no test depends on the cwd,
+/// HOME or an installed bundle.
+fn checkout() -> trusty_agents_common::agent_content::ResolvedContent {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root");
+    trusty_agents_common::agent_content::checkout_content(&root).expect("repo content")
+}
+
+/// The `.md` of the `Direct` agent `name`, from the checkout (#9013).
+fn direct_md(name: &str) -> String {
+    content::direct_agent_from(&checkout(), name)
+        .unwrap_or_else(|e| panic!("content carries '{name}': {e}"))
+        .unwrap_or_else(|| panic!("'{name}' is not a Direct agent"))
+}
 
 /// Every embedded agent `.md` parses (directly for the 8 tcode-native
 /// `Direct` agents, via the in-memory extends composer for the 26 roster
@@ -35,7 +51,7 @@ fn default_agents_parse_and_names_match() {
     );
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
-            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
+            EmbeddedAgent::Direct { name } => project_embedded_md(name, &direct_md(name))
                 .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
             EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
                 .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
@@ -78,7 +94,7 @@ fn default_agents_parse_and_names_match() {
 /// Test: this test.
 #[test]
 fn default_agents_field_identical_to_retired_toml() {
-    let engineer = project_embedded_md("engineer", ENGINEER_MD).expect("engineer loads");
+    let engineer = project_embedded_md("engineer", &direct_md("engineer")).expect("engineer loads");
     assert_eq!(engineer.agent.name, "engineer");
     assert_eq!(engineer.agent.model, None);
     assert_eq!(engineer.llm.max_tokens, Some(8192));
@@ -101,7 +117,7 @@ fn default_agents_field_identical_to_retired_toml() {
     let engineer_toml_content = "You are a software engineer sub-agent. You implement the task you are given: read the existing code before writing new code, follow the project's established patterns and naming conventions, and prefer editing existing files over creating new ones.\n\nRules:\n- Correct, complete implementations over minimal ones. Do not sacrifice correctness for brevity.\n- Fix root causes, not symptoms.\n- Include error handling and input validation where it affects reliability.\n- Never leave dead code, commented-out blocks, or duplicate implementations of the same logic behind.\n- Write tests that cover the behavior you added or changed, then run them and report the actual (not assumed) results.\n- Never fabricate command output. If a command's output is empty or unavailable, say so rather than inventing a result.\n\nWhen you believe the task is complete, call `finish_task` with a summary of what changed and how you verified it.\n";
     assert_eq!(engineer.system_prompt.content, engineer_toml_content.trim());
 
-    let qa_agent = project_embedded_md("qa-agent", QA_AGENT_MD).expect("qa-agent loads");
+    let qa_agent = project_embedded_md("qa-agent", &direct_md("qa-agent")).expect("qa-agent loads");
     assert_eq!(qa_agent.agent.name, "qa-agent");
     assert_eq!(qa_agent.agent.model, None);
     assert_eq!(qa_agent.llm.max_tokens, Some(8192));
@@ -121,8 +137,8 @@ fn default_agents_field_identical_to_retired_toml() {
     let qa_agent_toml_content = "You are a QA sub-agent. Your job is to verify that an implementation actually does what it claims, not to trust the implementer's summary.\n\nRules:\n- Run the project's real test suite and quote the raw output; never summarize a test run in your own words in place of the output.\n- Treat \"0 tests ran\" or a suspiciously small number of skipped/ignored tests as a failure to investigate, not a pass.\n- Test the entry point end-to-end (the binary starts, the CLI runs, the endpoint responds) in addition to unit-level checks.\n- Cover edge cases and error paths, not just the happy path.\n- When you find a bug, report it precisely: the failing command, the actual output, and the expected output. Do not attempt to fix production code yourself — hand findings back to the engineer.\n\nWhen your verification pass is complete, call `finish_task` with a pass/fail verdict and the evidence behind it.\n";
     assert_eq!(qa_agent.system_prompt.content, qa_agent_toml_content.trim());
 
-    let code_reviewer =
-        project_embedded_md("code-reviewer", CODE_REVIEWER_MD).expect("code-reviewer loads");
+    let code_reviewer = project_embedded_md("code-reviewer", &direct_md("code-reviewer"))
+        .expect("code-reviewer loads");
     assert_eq!(code_reviewer.agent.name, "code-reviewer");
     assert_eq!(code_reviewer.agent.model, None);
     assert_eq!(code_reviewer.llm.max_tokens, Some(8192));
@@ -353,17 +369,13 @@ fn delivery_workflow_agents_are_dispatchable_with_bash() {
     ];
 
     for (name, model) in expected_models {
-        let md = DEFAULT_AGENTS
-            .iter()
-            .find_map(|a| match a {
-                EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                panic!("'{name}' must be a tcode-native Direct entry in DEFAULT_AGENTS")
-            });
+        assert!(
+            content::is_direct(name),
+            "'{name}' must be a tcode-native Direct entry in DEFAULT_AGENTS"
+        );
+        let md = direct_md(name);
 
-        let cfg = project_embedded_md(name, md)
+        let cfg = project_embedded_md(name, &md)
             .unwrap_or_else(|e| panic!("delivery-workflow agent '{name}' failed to load: {e}"));
 
         assert_eq!(
@@ -400,22 +412,23 @@ fn delivery_workflow_agents_are_dispatchable_with_bash() {
 /// Test: this test.
 #[test]
 fn workflow_agents_declare_the_prefixes_the_pm_parses() {
+    let pm_md = direct_md("pm");
     assert!(
-        TICKETING_MD.contains("ISSUE:"),
+        direct_md("ticketing").contains("ISSUE:"),
         "ticketing must report its issue URL on an `ISSUE:` line"
     );
     assert!(
-        VERSION_CONTROL_MD.contains("PR:"),
+        direct_md("version-control").contains("PR:"),
         "version-control must report its PR URL on a `PR:` line"
     );
     for token in ["ticketing", "version-control", "local-ops", "documentation"] {
         assert!(
-            PM_MD.contains(token),
+            pm_md.contains(token),
             "pm.md's delegation guidance must name '{token}'"
         );
     }
     assert!(
-        PM_MD.contains("ISSUE:") && PM_MD.contains("PR:"),
+        pm_md.contains("ISSUE:") && pm_md.contains("PR:"),
         "pm.md must name both parseable result prefixes"
     );
 }
@@ -519,7 +532,7 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
 
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
-            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
+            EmbeddedAgent::Direct { name } => project_embedded_md(name, &direct_md(name))
                 .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
             EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
                 .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
@@ -540,7 +553,7 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
     // The new `pm` agent (#3437) specifically: its declared `model: sonnet`
     // must resolve, end-to-end through `resolve_model`, to a concrete slug —
     // not the bare alias — closing #3438 for the exact agent #3437 adds.
-    let pm_cfg = project_embedded_md("pm", PM_MD).expect("pm loads");
+    let pm_cfg = project_embedded_md("pm", &direct_md("pm")).expect("pm loads");
     let resolved = crate::provider::resolve_model(&pm_cfg, None);
     assert!(
         resolved.contains('/'),
@@ -559,17 +572,28 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
 /// Test: this test.
 #[test]
 fn default_skills_names_are_unique() {
-    assert_eq!(DEFAULT_SKILLS.len(), 28);
-    let mut names: Vec<&str> = DEFAULT_SKILLS.iter().map(|s| s.name).collect();
+    assert_eq!(DEFAULT_SKILL_NAMES.len(), 28);
+    let mut names: Vec<&str> = DEFAULT_SKILL_NAMES.to_vec();
     let before = names.len();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), before, "no duplicate embedded skill names");
-    for skill in DEFAULT_SKILLS {
+    assert_eq!(names.len(), before, "no duplicate default skill names");
+    // #9013: every default skill is present in content, fenced, and named.
+    let skills = content::default_skills_from(&checkout()).expect("every default skill");
+    assert_eq!(skills.len(), DEFAULT_SKILL_NAMES.len());
+    for skill in &skills {
         assert!(!skill.name.is_empty());
         assert!(
             skill.skill_md.trim_start().starts_with("---"),
-            "embedded skill '{}' must open with a frontmatter fence",
+            "default skill '{}' must open with a frontmatter fence",
+            skill.name
+        );
+        assert_eq!(
+            crate::skills::frontmatter::parse_frontmatter(&skill.skill_md)
+                .get("name")
+                .map(String::as_str),
+            Some(skill.name),
+            "default skill '{}' must declare its own name",
             skill.name
         );
     }
@@ -616,13 +640,7 @@ fn embedded_tm_agent_sources_has_31_entries_and_unique_keys() {
 /// The tm agent catalog over the checkout's `content/agents` (#9011), so no
 /// test depends on the cwd, HOME or an installed bundle.
 fn test_catalog() -> Vec<(String, String)> {
-    let root = trusty_common::test_harness::test_repo_root()
-        .expect("the running checkout's workspace root"); // #9298
-    let content =
-        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
-    let roster =
-        trusty_agents_common::agent_content::AgentRoster::load(&content).expect("repo roster");
-    tm_agent_sources(&roster).expect("the checkout carries every shared file")
+    content::catalog_from(&checkout()).expect("the checkout carries every shared file")
 }
 
 /// #4027 (epic #4021): the ported `ticketing` agent is a real, dispatchable
@@ -659,7 +677,7 @@ fn ticketing_is_dispatchable_for_cross_product_delegation() {
 /// Why: #8129 replaced three shared bodies with tcode-native ones under the
 /// same dispatch names. Leaving the shared entry in the source table would
 /// make `project_embedded_md_with_extends("ticketing")` and
-/// `project_embedded_md("ticketing", TICKETING_MD)` return DIFFERENT prompts
+/// `project_embedded_md("ticketing", ..)` return DIFFERENT prompts
 /// and different tool grants for the same name — which one a caller got
 /// would depend on which projection path it happened to take. This replaces
 /// #4027's `ticketing_copy_carries_no_tcode_only_tools_restriction`, whose
@@ -682,7 +700,7 @@ fn delivery_workflow_names_resolve_to_exactly_one_body() {
         assert!(
             DEFAULT_AGENTS
                 .iter()
-                .any(|a| matches!(a, EmbeddedAgent::Direct { name: n, .. } if *n == name)),
+                .any(|a| matches!(a, EmbeddedAgent::Direct { name: n } if *n == name)),
             "'{name}' must be a Direct roster entry"
         );
     }
@@ -749,7 +767,7 @@ fn card_source(name: &str) -> String {
     DEFAULT_AGENTS
         .iter()
         .find_map(|a| match a {
-            EmbeddedAgent::Direct { name: n, md } if *n == name => Some((*md).to_string()),
+            EmbeddedAgent::Direct { name: n } if *n == name => Some(direct_md(name)),
             _ => None,
         })
         .or_else(|| {
@@ -808,14 +826,15 @@ fn declared_tool_grant(md: &str) -> Option<Vec<String>> {
 /// assertion on the verification target is what pins `qa-agent` over `qa`:
 /// DOC-75 §6 requires real test output in the transcript, and tcode's `qa` fork
 /// carries no `bash`.
-/// What: extracts the block from `PM_MD` via [`pm_routing_block`], asserts every
+/// What: extracts the block from `pm.md` via [`pm_routing_block`], asserts every
 /// backticked agent-shaped token in it resolves and is delegable, asserts
 /// [`PM_ROUTING_ORDER`]'s three names appear in that relative order, and asserts
 /// the third one can run commands.
 /// Test: this test.
 #[test]
 fn pm_routing_block_names_only_delegable_roster_agents() {
-    let block = pm_routing_block(PM_MD).unwrap_or_else(|| {
+    let pm_md = direct_md("pm");
+    let block = pm_routing_block(&pm_md).unwrap_or_else(|| {
         panic!(
             "pm.md carries no routing block — #8287 requires one delimited by \
              {PM_ROUTING_BLOCK_BEGIN:?} .. {PM_ROUTING_BLOCK_END:?}"
@@ -890,16 +909,17 @@ fn pm_routing_block_names_only_delegable_roster_agents() {
 /// card is resident in every delegate-mode turn. #8293 and #8294 both add to it
 /// next, so the cap needs a mechanical floor now rather than after the third
 /// edit.
-/// What: asserts `PM_MD.len()` is at most twice [`PM_CARD_BASELINE_BYTES`].
+/// What: asserts `pm.md`'s length is at most twice [`PM_CARD_BASELINE_BYTES`].
 /// Test: this test.
 #[test]
 fn pm_card_stays_within_the_doc_75_size_cap() {
     let cap = PM_CARD_BASELINE_BYTES * 2;
+    let pm_md = direct_md("pm");
     assert!(
-        PM_MD.len() <= cap,
+        pm_md.len() <= cap,
         "pm.md is {} bytes, over DOC-75 §4b's cap of {cap} (2x the \
          {PM_CARD_BASELINE_BYTES}-byte 2026-09-19 baseline)",
-        PM_MD.len()
+        pm_md.len()
     );
 }
 
