@@ -58,6 +58,10 @@ pub mod file;
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
 
+/// The HTTP-side adapters every family's parity tests share (#9535).
+#[cfg(test)]
+mod test_support;
+
 /// Restore both process-global memory limits when a test that touches them ends.
 ///
 /// Why: `core::memguard`'s two limits are `AtomicU64` cells shared by the whole

@@ -33,13 +33,14 @@ use crate::core::memguard::{
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::orphan_report::registry_orphans_report;
 use crate::service::persistence::{self, PersistedIndex};
-use crate::service::rpc::admin;
+use crate::service::rpc::admin::{self, LogsTail};
 use crate::service::rpc::error::CODE_NOT_FOUND;
+use crate::service::rpc::test_support::{http_body, params};
 use crate::service::rpc::RestoreLimits;
 use crate::service::server::tests_components::IsolatedDataDir;
 use crate::service::server::{
     admin_stop_report, logs_tail_report, patch_config_report, patch_index_config_report,
-    LogsTailParams, PatchConfigRequest, SearchAppState,
+    PatchConfigRequest, SearchAppState,
 };
 
 // ---------------------------------------------------------------- fixtures ---
@@ -68,22 +69,13 @@ fn routers(ids: &[&str]) -> (Arc<SearchAppState>, RpcRouter) {
 
 // ------------------------------------------------------------- transports ---
 
-/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
-fn http_body<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> serde_json::Value {
-    let bytes = serde_json::to_vec(&answer.expect("the core must answer 200")).expect("encode");
-    serde_json::from_slice(&bytes).expect("decode the body")
-}
-
-/// A JSON request decoded as the core's request type, as the HTTP extractor did.
-fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
-    serde_json::from_value(json).expect("decode the request")
-}
-
-/// The `GET /logs/tail` page for `query`, decoded as its `Query` extractor did.
+/// The `GET /logs/tail` page for `query`, decoded as the socket decodes it.
+///
+/// #9535: `Option<LogsTail>` through [`LogsTail::into_report_params`] is the
+/// one decode production runs; the axum `Query` extractor is test-only.
 fn logs_tail(state: &Arc<SearchAppState>, query: serde_json::Value) -> serde_json::Value {
-    http_body(Ok(logs_tail_report(state, &params(query))))
+    let decoded = LogsTail::into_report_params(params(query));
+    http_body(Ok(logs_tail_report(state, &decoded)))
 }
 
 async fn dispatch(
@@ -462,13 +454,12 @@ async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
         state.log_buffer.push(format!("line {i}"));
     }
 
-    // Both transports refuse a non-numeric `n` — axum's `Query` extractor on one
-    // side, the router's decoder on the other. The two STATUSES are deliberately
-    // not compared: each is its own transport's layer answering, not a decision
-    // either core made. Same reasoning as the config.set sibling.
+    // #9535: the decode `logs_tail` runs is the socket's own — `Option<LogsTail>`
+    // — so it must refuse a non-numeric `n` before any core is reached. The loop
+    // below then proves the router answers that refusal as `invalid_params`.
     assert!(
-        serde_json::from_value::<LogsTailParams>(serde_json::json!({ "n": "lots" })).is_err(),
-        "HTTP must refuse a non-numeric n"
+        serde_json::from_value::<Option<LogsTail>>(serde_json::json!({ "n": "lots" })).is_err(),
+        "the socket's decode must refuse a non-numeric n"
     );
 
     for malformed in [
