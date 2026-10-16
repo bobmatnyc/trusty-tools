@@ -37,6 +37,8 @@ pub use trusty_common::embedder_client::EmbedderSupervisor;
 // `switchable` module docs for why this exists and how it wires into
 // `build_embedder()`.
 pub mod switchable;
+// #9949: the python bootstrap's retry detail and stop handle.
+pub mod bootstrap_control;
 pub use switchable::{ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder};
 
 // ── Configuration ────────────────────────────────────────────────────────────

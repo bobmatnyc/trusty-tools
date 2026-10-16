@@ -149,7 +149,7 @@ impl CyclingBootstrap {
 }
 
 impl PythonBootstrap for CyclingBootstrap {
-    fn ensure_venv(&self) -> anyhow::Result<()> {
+    fn ensure_venv(&self, _check: super::graceful_bootstrap::VenvCheck) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -160,6 +160,7 @@ impl PythonBootstrap for CyclingBootstrap {
     fn build_adapter(
         &self,
         _launcher: PathBuf,
+        _startup_budget: std::time::Duration,
     ) -> (
         Arc<dyn CoreEmbedder>,
         Option<Arc<AtomicU32>>,
