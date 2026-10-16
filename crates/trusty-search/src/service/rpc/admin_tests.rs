@@ -40,7 +40,7 @@ use crate::service::rpc::RestoreLimits;
 use crate::service::server::tests_components::IsolatedDataDir;
 use crate::service::server::{
     admin_stop_report, logs_tail_report, patch_config_report, patch_index_config_report,
-    PatchConfigRequest, SearchAppState,
+    LogsTailParams, PatchConfigRequest, SearchAppState,
 };
 
 // ---------------------------------------------------------------- fixtures ---
@@ -432,9 +432,15 @@ async fn logs_tail_clamps_n_on_the_socket_too() {
     );
 
     // Absent: the socket must reach the route's own default, not `usize`'s zero.
+    // The planted buffer holds 3 lines, so a default of 0 (clamped to 1) fails.
+    let defaulted = rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::Value::Null).await;
+    assert_eq!(defaulted["lines"].as_array().map(Vec::len), Some(3));
+    assert_eq!(defaulted, logs_tail(&state, serde_json::json!({})));
+
+    // `Default` is pinned to the serde default the route's `?n=` absence takes.
     assert_eq!(
-        rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::Value::Null).await,
-        logs_tail(&state, serde_json::json!({})),
+        LogsTail::into_report_params(None).n,
+        params::<LogsTailParams>(serde_json::json!({})).n,
     );
 }
 
