@@ -1047,7 +1047,10 @@ impl SessionManager {
     /// Test: `prune_include_active_never_decommissions_an_architect_record`,
     /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`,
     /// `decommission_with_an_unlistable_pane_set_changes_nothing`.
-    pub(super) async fn decommission_with_root_checked(
+    ///
+    /// #8994 S2c: reached only through `decommission_with_root_checked`
+    /// (`decommission_ledger.rs`), which records a removal in the ledger.
+    pub(super) async fn decommission_with_root_checked_unrecorded(
         &self,
         id: &ManagedSessionId,
         managed_root: &Path,

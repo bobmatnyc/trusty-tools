@@ -282,6 +282,8 @@ pub async fn serve_with_shutdown(
         let dir = crate::core::channels_taint::taint_dir(&home);
         state.session_manager().await.install_taint_dir(dir);
     }
+    // #8994 S2c: decommission's removals reach the worktree ledger.
+    services::worktree_removal_ledger::install(&state).await;
     // #8233 review round 2 (finding 4): sweep launch specs abandoned by an
     // earlier process. Each carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
     // cleartext, and the per-launch sweep only runs when a NEXT launch happens.

@@ -241,6 +241,8 @@ pub(crate) async fn reclaim(
     // #5661: the other gates read SESSION records, and a dispatched agent has
     // none — which is how this path once deleted three live agents' worktrees.
     let state_for_agents = Arc::clone(state);
+    // #8994 S2c: the ledger hears of each removal, on evidence only.
+    let recorder = super::worktree_removal_ledger::recorder_for(state);
     tokio::task::spawn_blocking(move || {
         let in_use_now = move || -> Option<LiveClaims> {
             // `None` means "could not be determined", which REFUSES the delete.
@@ -266,7 +268,7 @@ pub(crate) async fn reclaim(
         // which is how a vetoed worktree could be deleted; this one keeps
         // everything instead.
         let keep_list = crate::core::trusty_tools_config::load_disk_keep_list;
-        reclaim_merged_pr_worktrees(
+        let outcome = reclaim_merged_pr_worktrees(
             &repos_root,
             &in_use_now,
             &agent_state,
@@ -275,7 +277,9 @@ pub(crate) async fn reclaim(
             &adopted,
             &launched_from,
             &scope,
-        )
+        );
+        super::worktree_removal_ledger::record_reclaimed(&recorder, &outcome);
+        outcome
     })
     .await
     .map_err(|e| e.to_string())
