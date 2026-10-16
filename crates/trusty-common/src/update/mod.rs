@@ -412,7 +412,8 @@ pub mod upgrade;
 pub(crate) mod cargo_guard;
 
 pub use upgrade::{
-    is_launchd_supervised, perform_upgrade, perform_upgrade_captured, upgrade_and_restart,
+    is_launchd_supervised, perform_upgrade, perform_upgrade_captured,
+    perform_upgrade_captured_with_force, perform_upgrade_with_force, upgrade_and_restart,
     verify_installed_binary, verify_installed_binary_at_path,
 };
 

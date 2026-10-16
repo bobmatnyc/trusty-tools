@@ -934,7 +934,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             // `Outcome::Fallback` fires on ANY prebuilt-download failure, not
             // just an unsupported platform, so this is reachable on a Tier-1
             // machine too (traced by code-critic on PR #3834).
-            // #9974: removes a standalone trusty-embedderd-py install first.
+            // #9974: --force over a standalone trusty-embedderd-py launcher record.
             super::standalone_launcher::cargo_install(&m.crate_name, true).await?;
             // #3554: `cargo install` always lands in the cargo bin dir
             // (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`) — resolve

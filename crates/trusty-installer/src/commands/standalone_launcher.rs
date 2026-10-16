@@ -1,23 +1,23 @@
-//! Remove a standalone `trusty-embedderd-py` install before `cargo install`
-//! of a package that now ships its launcher binary (#9974).
+//! Take the `trusty-embedderd-py` launcher binary over from a standalone
+//! `trusty-embedderd-py` install during `cargo install` (#9974).
 //!
 //! Why: trusty-embedderd-py 0.2.0 is library-only; trusty-search ships the
 //! `trusty-embedderd-py` launcher binary instead (#9468, owner ruling D94). A
 //! machine that ran `cargo install trusty-embedderd-py` 0.1.x still has cargo
-//! install metadata naming that package as the binary's owner, and
-//! `cargo install trusty-search` refuses to write a binary another package
-//! owns.
+//! install metadata naming that package as the binary's owner, and cargo
+//! refuses to install a binary another package owns unless `--force` is given.
+//! `--force` (Architect ruling, option b) replaces an earlier
+//! uninstall-then-install: the uninstall ran outside the #5777 ownership guard,
+//! so a failed install afterwards lost the launcher for good.
 //!
-//! What: reads `<cargo root>/.crates2.json`, plans
-//! `cargo uninstall trusty-embedderd-py --root <root>` ahead of the install
-//! when the old package owns the launcher, and runs the plan through an
-//! injectable [`CargoRunner`]. A failed uninstall stops the plan with
-//! [`StandaloneLauncherError`] before the install runs.
+//! What: asks `cargo install --list` whether the standalone package owns the
+//! launcher, and when it does, runs the crate's install with `--force`
+//! through the guarded `trusty_common::update::perform_upgrade*_with_force`.
+//! tctl never runs `cargo uninstall`. Every other install is unchanged:
+//! `cargo install <crate> --locked`, no `--force`.
 //!
 //! Test: `standalone_launcher_tests.rs`.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// The package that owned the launcher binary before 0.2.0.
@@ -26,284 +26,172 @@ pub(crate) const STANDALONE_PACKAGE: &str = "trusty-embedderd-py";
 /// The launcher binary whose ownership moved to trusty-search.
 pub(crate) const LAUNCHER_BIN: &str = "trusty-embedderd-py";
 
-/// The metadata file cargo keeps in its install root (format v2).
-const CRATES2_FILE: &str = ".crates2.json";
-
-/// A failure that stops the cargo-install plan before the install runs.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum StandaloneLauncherError {
-    /// `cargo uninstall` of the standalone package failed, so the install
-    /// that follows would refuse on the binary's ownership.
-    #[error(
-        "`cargo uninstall {package} --root {}` failed: {detail}. The standalone \
-         `{package}` package still owns the `{LAUNCHER_BIN}` binary, so \
-         `cargo install {crate_name}` would refuse. Remove it by hand with \
-         `cargo uninstall {package}`, then rerun the install.",
-        .root.display()
-    )]
-    UninstallFailed {
-        package: String,
-        crate_name: String,
-        root: PathBuf,
-        detail: String,
-    },
-}
-
 /// Whether cargo's install metadata records the standalone launcher package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LauncherRecord {
     /// The standalone package is recorded as the owner of the launcher bin.
     Recorded,
-    /// No such record, or no readable metadata.
+    /// No such record, or the metadata could not be listed.
     NotRecorded,
 }
 
-/// One cargo command in an install plan, in execution order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CargoStep {
-    /// `cargo uninstall <package> --root <root>`, run so `for_crate` can
-    /// take over the launcher binary.
-    Uninstall {
-        package: String,
-        root: PathBuf,
-        for_crate: String,
-    },
-    /// `cargo install <crate_name> --locked`.
-    Install { crate_name: String },
-}
-
-/// The slice of `.crates2.json` this module reads. Unknown fields are ignored.
-#[derive(serde::Deserialize)]
-struct Crates2 {
-    #[serde(default)]
-    installs: BTreeMap<String, Crates2Entry>,
-}
-
-/// One `installs` entry, keyed by `"<name> <version> (<source>)"`.
-#[derive(serde::Deserialize)]
-struct Crates2Entry {
-    #[serde(default)]
-    bins: Vec<String>,
-}
-
-/// Runs the cargo commands of a plan. Tests inject a recording fake.
+/// Runs cargo for one install. Tests inject a recording fake.
 pub(crate) trait CargoRunner {
-    /// Run `cargo uninstall <package> --root <root>`; `Err` carries cargo's
-    /// stderr or the spawn failure.
-    async fn uninstall(&self, package: &str, root: &Path) -> Result<(), String>;
-    /// Run `cargo install <crate_name> --locked`.
-    async fn install(&self, crate_name: &str) -> anyhow::Result<()>;
+    /// The stdout of `cargo install --list`.
+    async fn list_installed(&self) -> anyhow::Result<String>;
+    /// The guarded `cargo install <crate_name> --locked`, plus `--force` when
+    /// `force` is set.
+    async fn install(&self, crate_name: &str, force: bool) -> anyhow::Result<()>;
 }
 
-/// Whether `.crates2.json` text records the standalone package as the owner
-/// of the launcher binary.
+/// Whether `cargo install --list` output records the standalone package as
+/// the owner of the launcher binary.
 ///
-/// Why: the uninstall must only run when cargo would refuse the install, and
-/// only for the one package D94 retired — never for another crate.
-/// What: matches the package name (the first word of the `installs` key)
-/// exactly, and requires `bins` to contain the launcher.
-/// Test: `fixture_with_standalone_launcher_plans_uninstall_before_install`,
-/// `fixture_without_standalone_launcher_plans_no_uninstall`.
-///
-/// # Errors
-/// Returns the JSON error when `json` does not parse as v2 install metadata.
-pub(crate) fn launcher_recorded(json: &str) -> Result<bool, serde_json::Error> {
-    let parsed: Crates2 = serde_json::from_str(json)?;
-    Ok(parsed.installs.iter().any(|(pkg_id, entry)| {
-        pkg_id.split_whitespace().next() == Some(STANDALONE_PACKAGE)
-            && entry.bins.iter().any(|b| b == LAUNCHER_BIN)
-    }))
-}
-
-/// Read `<root>/.crates2.json` and report whether the standalone launcher is
-/// recorded.
-///
-/// Why: a malformed file is treated as "no record" with a logged warning, not
-/// as an error. Cargo reads the same file during `cargo install` and stops
-/// with its own "failed to parse crate metadata" error naming it, so the
-/// install still fails loudly and nothing is silently skipped. Failing here
-/// instead would block installs cargo itself accepts whenever this narrower
-/// reader disagrees with a future cargo format.
-/// What: a missing file is `NotRecorded` silently; an unreadable or malformed
-/// file is `NotRecorded` with a `warn` log.
-/// Test: `missing_crates2_is_not_recorded`, `malformed_crates2_is_not_recorded`.
-pub(crate) fn read_launcher_record(root: &Path) -> LauncherRecord {
-    let path = root.join(CRATES2_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LauncherRecord::NotRecorded,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "cannot read cargo install metadata; assuming no standalone {STANDALONE_PACKAGE} install");
-            return LauncherRecord::NotRecorded;
+/// Why: `--force` must only be added when cargo would otherwise refuse, and
+/// only for the one package D94 retired.
+/// What: a package line (`<name> v<version>[ (<source>)]:`) starts a block of
+/// indented binary lines. Returns true when the block whose name is exactly
+/// `trusty-embedderd-py` lists the launcher, after stripping the platform's
+/// `EXE_SUFFIX` (cargo records `trusty-embedderd-py.exe` on Windows).
+/// Test: `record_with_standalone_launcher_forces_the_install`,
+/// `no_record_installs_without_force`,
+/// `real_cargo_force_install_drops_the_standalone_record` (ignored).
+pub(crate) fn launcher_recorded_in_list(list: &str) -> bool {
+    let mut in_standalone = false;
+    for line in list.lines() {
+        if line.starts_with(char::is_whitespace) {
+            let bin = line.trim();
+            let bin = bin
+                .strip_suffix(std::env::consts::EXE_SUFFIX)
+                .unwrap_or(bin);
+            if in_standalone && bin == LAUNCHER_BIN {
+                return true;
+            }
+        } else {
+            in_standalone = line.split_whitespace().next() == Some(STANDALONE_PACKAGE);
         }
-    };
-    match launcher_recorded(&text) {
-        Ok(true) => LauncherRecord::Recorded,
-        Ok(false) => LauncherRecord::NotRecorded,
+    }
+    false
+}
+
+/// Whether `crate_name` ships the launcher binary and so may take it over.
+///
+/// What: per the shared `installed_binaries` table, never for the standalone
+/// package itself.
+/// Test: `crate_without_the_launcher_never_lists_or_forces`.
+fn ships_launcher(crate_name: &str) -> bool {
+    crate_name != STANDALONE_PACKAGE
+        && trusty_common::bin_resolve::installed_binaries(crate_name)
+            .iter()
+            .any(|b| b == LAUNCHER_BIN)
+}
+
+/// Ask cargo whether the standalone launcher is recorded.
+///
+/// Why: `cargo install --list` reads the metadata of the same install root
+/// the following `cargo install` uses — same environment, so the same
+/// `CARGO_INSTALL_ROOT`, `[install] root` config and `CARGO_HOME` precedence —
+/// so tctl never resolves that root itself. A failed listing (including
+/// malformed metadata, which cargo refuses to parse) is treated as "no
+/// record" with a logged warning, not as an error: the install that follows
+/// reads the same metadata and fails loudly with cargo's own error, so
+/// nothing is silently skipped, and an error here would block an install
+/// cargo itself accepts.
+/// What: `Recorded` when [`launcher_recorded_in_list`] matches; otherwise
+/// `NotRecorded`.
+/// Test: `failed_listing_installs_without_force`.
+async fn read_record<R: CargoRunner>(runner: &R) -> LauncherRecord {
+    match runner.list_installed().await {
+        Ok(list) if launcher_recorded_in_list(&list) => LauncherRecord::Recorded,
+        Ok(_) => LauncherRecord::NotRecorded,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "malformed cargo install metadata; assuming no standalone {STANDALONE_PACKAGE} install");
+            tracing::warn!(error = %e, "`cargo install --list` failed; assuming no standalone {STANDALONE_PACKAGE} install");
             LauncherRecord::NotRecorded
         }
     }
 }
 
-/// Pure resolution of cargo's install root.
+/// Install `crate_name`, adding `--force` only to take the launcher over.
 ///
-/// Why: the metadata read must look where `cargo install` writes, and the
-/// uninstall must act on the same root.
-/// What: a non-empty `CARGO_INSTALL_ROOT` wins; otherwise the parent of
-/// [`trusty_common::bin_resolve::canonical_bin_dir_from`] (`$CARGO_HOME`, else
-/// `~/.cargo`) — the rule `self_update::cargo_install_dir` uses. Cargo's
-/// `install.root` config key is not read.
-/// Test: `install_root_prefers_cargo_install_root`,
-/// `install_root_falls_back_to_cargo_home_then_home`.
-pub(crate) fn cargo_install_root_from(
-    home: Option<&Path>,
-    install_root: Option<&str>,
-    cargo_home: Option<&str>,
-) -> Option<PathBuf> {
-    match install_root {
-        Some(r) if !r.is_empty() => Some(PathBuf::from(r)),
-        _ => trusty_common::bin_resolve::canonical_bin_dir_from(home, cargo_home)
-            .and_then(|bin| bin.parent().map(Path::to_path_buf)),
-    }
-}
-
-/// The cargo commands that install `crate_name`, in order.
-///
-/// Why: a recorded standalone launcher makes `cargo install` refuse, so its
-/// uninstall must come first; with no record nothing extra may run.
-/// What: prepends `Uninstall` only when `crate_name` ships the launcher bin
-/// (per the shared `installed_binaries` table), is not the standalone package
-/// itself, the record is `Recorded` and a root is known. Always ends with
-/// `Install`.
-/// Test: `fixture_with_standalone_launcher_plans_uninstall_before_install`,
-/// `fixture_without_standalone_launcher_plans_no_uninstall`,
-/// `crate_without_the_launcher_plans_no_uninstall`.
-pub(crate) fn plan_cargo_install(
-    crate_name: &str,
-    root: Option<&Path>,
-    record: LauncherRecord,
-) -> Vec<CargoStep> {
-    let ships_launcher = crate_name != STANDALONE_PACKAGE
-        && trusty_common::bin_resolve::installed_binaries(crate_name)
-            .iter()
-            .any(|b| b == LAUNCHER_BIN);
-    let mut steps = Vec::with_capacity(2);
-    if let (true, LauncherRecord::Recorded, Some(root)) = (ships_launcher, record, root) {
-        steps.push(CargoStep::Uninstall {
-            package: STANDALONE_PACKAGE.to_owned(),
-            root: root.to_path_buf(),
-            for_crate: crate_name.to_owned(),
-        });
-    }
-    steps.push(CargoStep::Install {
-        crate_name: crate_name.to_owned(),
-    });
-    steps
-}
-
-/// Run a plan in order, stopping at the first failure.
-///
-/// Why: Fail-Open Check — an install after a failed uninstall is certain to
-/// refuse, so the operator gets the manual fix instead of cargo's ownership
-/// error.
-/// What: a failed `Uninstall` returns [`StandaloneLauncherError::UninstallFailed`]
-/// and no later step runs; `Install` errors propagate unchanged.
-/// Test: `uninstall_failure_is_typed_and_skips_the_install`.
+/// Why: one decision point for every tctl cargo fallback, so neither path
+/// can drop or widen `--force`. A record whose binary file is missing needs
+/// nothing extra: `--force` skips cargo's ownership check and rewrites the
+/// metadata either way.
+/// What: lists installs only when `crate_name` ships the launcher; forces
+/// the guarded install only when the standalone record exists. No other
+/// cargo command runs, so a failed install leaves every binary where the
+/// #5777 guard restored it.
+/// Test: `record_with_standalone_launcher_forces_the_install`,
+/// `no_record_installs_without_force`,
+/// `failed_install_keeps_the_launcher`,
+/// `crate_without_the_launcher_never_lists_or_forces`.
 ///
 /// # Errors
-/// The first step's failure.
-pub(crate) async fn run_cargo_steps<R: CargoRunner>(
-    steps: &[CargoStep],
+/// The install's failure.
+pub(crate) async fn install_crate<R: CargoRunner>(
+    crate_name: &str,
     runner: &R,
 ) -> anyhow::Result<()> {
-    for step in steps {
-        match step {
-            CargoStep::Uninstall {
-                package,
-                root,
-                for_crate,
-            } => {
-                tracing::info!(%package, root = %root.display(), %for_crate, "removing standalone launcher package before cargo install");
-                runner.uninstall(package, root).await.map_err(|detail| {
-                    StandaloneLauncherError::UninstallFailed {
-                        package: package.clone(),
-                        crate_name: for_crate.clone(),
-                        root: root.clone(),
-                        detail,
-                    }
-                })?;
-            }
-            CargoStep::Install { crate_name } => runner.install(crate_name).await?,
-        }
+    let record = if ships_launcher(crate_name) {
+        read_record(runner).await
+    } else {
+        LauncherRecord::NotRecorded
+    };
+    let force = record == LauncherRecord::Recorded;
+    if force {
+        tracing::info!(crate_name, "standalone {STANDALONE_PACKAGE} owns {LAUNCHER_BIN}; installing with --force to take it over");
     }
-    Ok(())
+    runner.install(crate_name, force).await
 }
 
 /// The real cargo, spawned as a child process.
 pub(crate) struct SystemCargo {
-    /// Capture the install's stdio ([`trusty_common::update::perform_upgrade_captured`])
-    /// instead of inheriting it, for callers driving a live terminal display.
+    /// Capture the install's stdio instead of inheriting it, for callers
+    /// driving a live terminal display (#3830).
     pub(crate) captured: bool,
 }
 
 impl CargoRunner for SystemCargo {
-    async fn uninstall(&self, package: &str, root: &Path) -> Result<(), String> {
+    async fn list_installed(&self) -> anyhow::Result<String> {
         let out = tokio::process::Command::new("cargo")
-            .arg("uninstall")
-            .arg(package)
-            .arg("--root")
-            .arg(root)
+            .args(["install", "--list"])
             .stdin(Stdio::null())
             .output()
             .await
-            .map_err(|e| format!("could not run cargo: {e}"))?;
-        if out.status.success() {
-            return Ok(());
+            .map_err(|e| anyhow::anyhow!("could not run `cargo install --list`: {e}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "`cargo install --list` exited with {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
-        Err(format!(
-            "{} ({})",
-            String::from_utf8_lossy(&out.stderr).trim(),
-            out.status
-        ))
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    async fn install(&self, crate_name: &str) -> anyhow::Result<()> {
+    async fn install(&self, crate_name: &str, force: bool) -> anyhow::Result<()> {
+        // #9974: --force still goes through the #5777 ownership guard.
         if self.captured {
-            trusty_common::update::perform_upgrade_captured(crate_name).await
+            trusty_common::update::perform_upgrade_captured_with_force(crate_name, force).await
         } else {
-            trusty_common::update::perform_upgrade(crate_name).await
+            trusty_common::update::perform_upgrade_with_force(crate_name, force).await
         }
     }
 }
 
-/// `cargo install <crate_name> --locked`, first removing a standalone
-/// `trusty-embedderd-py` install that would make cargo refuse (#9974).
+/// `cargo install <crate_name> --locked` for the tctl cargo fallbacks,
+/// taking the launcher over from a standalone install when needed (#9974).
 ///
-/// Why: the tctl install and upgrade cargo-fallback paths share one entry so
-/// neither can skip the ownership cleanup.
-/// What: resolves the install root from the environment, reads its
-/// `.crates2.json`, plans with [`plan_cargo_install`] and runs the plan with
-/// [`SystemCargo`].
-/// Test: the decision and ordering are covered by
-/// `fixture_with_standalone_launcher_plans_uninstall_before_install` and
-/// `uninstall_failure_is_typed_and_skips_the_install`; this wrapper is the
-/// env read and the real spawn.
+/// Why: `tctl install` and `tctl upgrade` share this one entry, so neither
+/// can skip the takeover decision.
+/// What: [`install_crate`] with [`SystemCargo`].
+/// Test: `cargo_fallbacks_route_through_the_takeover_decision`; the decision
+/// is covered by [`install_crate`]'s tests.
 ///
 /// # Errors
-/// [`StandaloneLauncherError::UninstallFailed`], or the install's failure.
+/// The install's failure.
 pub(crate) async fn cargo_install(crate_name: &str, captured: bool) -> anyhow::Result<()> {
-    let root = cargo_install_root_from(
-        dirs::home_dir().as_deref(),
-        std::env::var("CARGO_INSTALL_ROOT").ok().as_deref(),
-        std::env::var("CARGO_HOME").ok().as_deref(),
-    );
-    let record = root
-        .as_deref()
-        .map_or(LauncherRecord::NotRecorded, read_launcher_record);
-    let steps = plan_cargo_install(crate_name, root.as_deref(), record);
-    run_cargo_steps(&steps, &SystemCargo { captured }).await
+    install_crate(crate_name, &SystemCargo { captured }).await
 }
 
 #[cfg(test)]
