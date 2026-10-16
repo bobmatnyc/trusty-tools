@@ -391,7 +391,10 @@ fn cli_parses_serve() {
     let cli = Cli::try_parse_from(["trusty-mpm", "serve"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Serve { stdio: false }
+        Command::Serve {
+            stdio: false,
+            allow_chat: false
+        }
     ));
 }
 
@@ -401,8 +404,25 @@ fn cli_parses_serve_stdio() {
     let cli = Cli::try_parse_from(["trusty-mpm", "serve", "--stdio"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Serve { stdio: true }
+        Command::Serve {
+            stdio: true,
+            allow_chat: false
+        }
     ));
+}
+
+/// #9979: `--allow-chat` is opt-in and needs `--stdio`.
+#[test]
+fn cli_parses_serve_stdio_allow_chat() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "serve", "--stdio", "--allow-chat"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Serve {
+            stdio: true,
+            allow_chat: true
+        }
+    ));
+    assert!(Cli::try_parse_from(["trusty-mpm", "serve", "--allow-chat"]).is_err());
 }
 
 #[test]

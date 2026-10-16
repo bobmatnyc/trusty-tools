@@ -75,6 +75,8 @@ pub mod manager;
 pub mod mcp_ask_owner;
 pub mod mcp_backend;
 pub mod mcp_bugreport;
+// #9979: the `sessions_chat` MCP tool's daemon body.
+pub mod mcp_chat;
 pub mod mcp_console;
 // #6927: the Disk dashboard survey backing the `disk_survey` MCP tool.
 pub mod mcp_context;
