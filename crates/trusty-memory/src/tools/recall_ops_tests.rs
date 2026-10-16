@@ -39,8 +39,9 @@ fn the_rulings_floor_never_lifts_a_superseded_ruling_above_its_replacement() {
         degraded: Vec::new(),
         floored: vec![old_id],
         superseded: Supersessions::from([(old_id, new_id)]),
+        owners: Default::default(),
     };
-    let out = RecallCut::new(6, None, false).rank_and_serialize(
+    let (out, _) = RecallCut::new(6, None, false).rank_and_serialize(
         "project-a",
         "maximum concurrent rust builders",
         results,

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::super::kg::{KgError, Triple};
+use super::access_ops::{merge_access, read_access, read_access_map};
 use super::store::KgStoreRedb;
 use super::types::{drawer_from_row, triple_from_parts};
 
@@ -288,6 +289,8 @@ impl KgStoreRedb {
     pub(crate) fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
         let rtx = self.db().begin_read().context("begin load_drawers txn")?;
         let drawers = rtx.open_table(DRAWERS).context("open drawers table")?;
+        // #9881: recall access counts live beside the rows; same snapshot.
+        let mut accesses = read_access_map(&rtx);
         let mut out = Vec::new();
         let mut skipped = 0usize;
         for entry in drawers.iter().context("iter drawers")? {
@@ -306,7 +309,12 @@ impl KgStoreRedb {
             // the point-read reports as undecodable, so the Tier C retirement
             // path never reads an unreadable incumbent as an absent one.
             match drawer_from_row(id, v.value()) {
-                Ok(drawer) => out.push(drawer),
+                Ok(mut drawer) => {
+                    if let Some(rec) = accesses.remove(&id) {
+                        merge_access(&mut drawer, rec);
+                    }
+                    out.push(drawer);
+                }
                 Err(e) => {
                     tracing::warn!(id = %id, "skip unreadable drawer row: {e:#}");
                     skipped += 1;
@@ -347,9 +355,13 @@ impl KgStoreRedb {
         else {
             return Ok(None);
         };
-        drawer_from_row(id, guard.value())
-            .map(Some)
-            .with_context(|| format!("hydrate drawer row {id}"))
+        let mut drawer = drawer_from_row(id, guard.value())
+            .with_context(|| format!("hydrate drawer row {id}"))?;
+        // #9881: the access fields, so a write-back of this row keeps them.
+        if let Some(rec) = read_access(&rtx, id) {
+            merge_access(&mut drawer, rec);
+        }
+        Ok(Some(drawer))
     }
 
     /// Load just the set of drawer IDs.

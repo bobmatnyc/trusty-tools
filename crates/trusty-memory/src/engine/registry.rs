@@ -424,6 +424,20 @@ impl PalaceRegistry {
         // `_evicted` drops here, outside the lock, closing fds.
     }
 
+    /// The open-queue mutex of `palace_id`, for a test that must stall an open.
+    ///
+    /// Why (#9881, M2): proving a caller does not wait on a reopen needs a
+    /// reopen that cannot finish until the test says so.
+    /// What: the same per-palace mutex [`Self::open_palace`] serialises on.
+    /// Test: `recall_access_tests::a_released_palace_is_recorded_off_the_response_path`.
+    #[cfg(test)]
+    pub(crate) fn open_lock_for_test(&self, palace_id: &PalaceId) -> Arc<Mutex<()>> {
+        self.open_locks
+            .entry(palace_id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// Insert an already-shared handle.
     ///
     /// Why: Useful when the caller wants to keep its own `Arc` reference

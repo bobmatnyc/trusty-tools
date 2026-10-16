@@ -13,6 +13,8 @@
 //! across reopen, drawer CRUD, count_active.
 
 // #4884 slot-index maintenance; split out of `write_ops` for the SLOC cap.
+// #9881: recall access counts in the `drawer_access` side table.
+mod access_ops;
 mod drawer_ops;
 // #9722: the marker that retires the L1 snapshot gap-fill.
 mod drawer_authority;
