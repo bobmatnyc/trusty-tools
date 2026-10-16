@@ -432,6 +432,46 @@ async fn a_guard_drop_during_a_live_stream_delivers_its_error_then_ends() {
     );
 }
 
+/// Why: when every `try_lock` in `push_terminal_from_drop` fails, the guard
+/// emits with no lock. A stream that waited for the status or the lock could
+/// then park after the error frame, so the stream must end on the fatal frame
+/// it delivers (#9933).
+/// What: holds the `events` lock across the guard drop, which forces the
+/// unlocked arm, and keeps holding it while the live stream is drained: that
+/// stream must deliver exactly one `error` frame and end without the lock. A
+/// stream opened after the lock is released must end too.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn a_guard_drop_that_cannot_take_the_lock_still_ends_the_stream_on_its_error() {
+    use crate::service::reindex::ReindexTerminationGuard;
+
+    let (state, rpc) = routers(&["rs"]).await;
+    let progress = plant_progress(&state, "rs", ReindexStatus::Running, &[]).await;
+    let request = serde_json::json!({ "index_id": "rs" });
+    let live = open_stream(&rpc, streams::METHOD_INDEX_REINDEX_STREAM, request.clone()).await;
+
+    let held = progress.events.lock().await;
+    drop(ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id("rs"));
+    assert_eq!(progress.status.load(), ReindexStatus::Failed);
+
+    let delivered = drain(live).await;
+    assert_eq!(
+        delivered.len(),
+        1,
+        "one error frame, then the end: {delivered:?}"
+    );
+    assert_eq!(delivered[0]["event"], "error");
+    assert_eq!(delivered[0]["fatal"], true);
+    drop(held);
+
+    let late = drain(open_stream(&rpc, streams::METHOD_INDEX_REINDEX_STREAM, request).await).await;
+    assert!(
+        late.is_empty(),
+        "the unlocked arm writes no replay entry; a later stream just ends: {late:?}"
+    );
+}
+
 /// Why: `reindex_stream` opens through `ReindexProgress::subscribe_with_replay`,
 /// which takes the replay buffer and the live subscription under one lock hold
 /// that `push` also takes across its append and its broadcast — so no event can

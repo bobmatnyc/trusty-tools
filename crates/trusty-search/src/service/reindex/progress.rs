@@ -161,10 +161,11 @@ impl ReindexProgress {
     /// What: tries the `events` lock up to [`DROP_LOCK_ATTEMPTS`] times and, on
     /// success, does exactly what `push_terminal` does under it. Every hold of
     /// that lock is synchronous, so the attempts only fail while another task is
-    /// mid-hold. If they all fail it broadcasts and THEN stores the status, so a
-    /// reader that sees the status also finds the frame in its receiver; the
-    /// frame then misses the replay buffer, as it did before #9933.
-    /// Test: `a_guard_drop_during_a_live_stream_delivers_its_error_then_ends`.
+    /// mid-hold. If they all fail it broadcasts, stores the status, and
+    /// broadcasts again; the comment at that arm says why both sends. The frame
+    /// then misses the replay buffer, as it did before #9933.
+    /// Test: `a_guard_drop_during_a_live_stream_delivers_its_error_then_ends`,
+    /// `a_guard_drop_that_cannot_take_the_lock_still_ends_the_stream_on_its_error`.
     pub(super) fn push_terminal_from_drop(&self, status: ReindexStatus, line: String) {
         for _ in 0..DROP_LOCK_ATTEMPTS {
             if let Ok(mut buf) = self.events.try_lock() {
@@ -174,9 +175,14 @@ impl ReindexProgress {
             }
             std::thread::yield_now();
         }
-        // #9933: send before store, so a terminal status implies a queued frame.
-        let _ = self.sender.send(line);
+        // #9933: send, store, send again. A reader that sees the status finds
+        // the first frame queued; a stream ends on a fatal frame it delivers,
+        // so it takes one copy. A stream that opened after the first send read
+        // `Running` after subscribing (`subscribe_with_replay`'s order), so it
+        // is subscribed before the second send.
+        let _ = self.sender.send(line.clone());
         self.status.store(status);
+        let _ = self.sender.send(line);
     }
 
     /// Append to the replay buffer and broadcast, under a lock the caller holds.
@@ -246,11 +252,12 @@ impl ReindexProgress {
         &self,
     ) -> (Vec<String>, ReindexStatus, broadcast::Receiver<String>) {
         let buffered = self.events.lock().await;
-        (
-            buffered.as_slice().to_vec(),
-            self.status.load(),
-            self.sender.subscribe(),
-        )
+        // #9933: subscribe BEFORE reading the status. The guard's unlocked
+        // fallback stores `Failed` between two sends, so a `Running` read here
+        // proves this receiver will see the second one.
+        let live = self.sender.subscribe();
+        let status = self.status.load();
+        (buffered.as_slice().to_vec(), status, live)
     }
 
     /// Load the current `indexed` counter with `Acquire` ordering.

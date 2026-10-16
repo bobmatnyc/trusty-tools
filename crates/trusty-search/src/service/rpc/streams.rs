@@ -286,7 +286,13 @@ async fn reindex_stream(
                 // The reindex task dropped its sender: the run is over.
                 Err(RecvError::Closed) => return,
             };
+            let fatal = is_fatal_frame(&value);
             if tx.send(Ok(value)).await.is_err() {
+                return;
+            }
+            // #9933: a fatal frame ends the run even before its status is
+            // visible — the guard's unlocked fallback sends before it stores.
+            if fatal {
                 return;
             }
             // #9933: the sender stays in `ReindexProgress` for replay, so
@@ -323,10 +329,22 @@ async fn deliver_backlog(
             Err(TryRecvError::Lagged(skipped)) => lag(skipped),
             Err(TryRecvError::Empty | TryRecvError::Closed) => return,
         };
-        if tx.send(Ok(value)).await.is_err() {
+        // #9933: stop at a fatal frame; the guard's fallback sends it twice.
+        let fatal = is_fatal_frame(&value);
+        if tx.send(Ok(value)).await.is_err() || fatal {
             return;
         }
     }
+}
+
+/// Whether `value` is a fatal `error` frame (#9933).
+///
+/// Why: every fatal frame is terminal — each is emitted by `push_terminal` or
+/// the reindex guard's `Drop` — so a stream may end on one without reading the
+/// status, which the guard's unlocked fallback stores after its first send.
+/// Test: `a_guard_drop_that_cannot_take_the_lock_still_ends_the_stream_on_its_error`.
+fn is_fatal_frame(value: &serde_json::Value) -> bool {
+    value["event"] == "error" && value["fatal"] == true
 }
 
 /// `search.index.file_events` — this index's recent changes, then its live ones
