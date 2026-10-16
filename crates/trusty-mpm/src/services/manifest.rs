@@ -66,9 +66,11 @@ pub enum PortDiscovery {
 /// What: `Http` GETs the expanded `health_url`. `UdsSearch` calls
 /// `search.health` on the trusty-search socket, resolved as the trusty-search
 /// client resolves it; it needs no `default_port` and no `health_url`, and the
-/// service reports no port and no URL.
+/// service reports no port and no URL. `UdsMpm` (#6288) is the same shape
+/// for the trusty-mpm daemon's `mpm.health`.
 /// Test: `default_manifest_declares_trusty_search_by_socket`,
-/// `uds_search_is_up_against_a_socket_only_daemon`.
+/// `uds_search_is_up_against_a_socket_only_daemon`,
+/// `default_manifest_declares_the_mpm_daemon_by_socket`.
 // #9543: non_exhaustive so a later probe variant is not a breaking change.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,12 +81,19 @@ pub enum HealthProbe {
     Http,
     /// `search.health` over the trusty-search Unix socket.
     UdsSearch,
+    /// `mpm.health` over the trusty-mpm daemon socket (#6288).
+    UdsMpm,
 }
 
 impl HealthProbe {
     /// True for the default, so serialisation omits it.
     fn is_http(&self) -> bool {
         *self == HealthProbe::Http
+    }
+
+    /// True for a probe that dials a Unix socket: no port, no URL, no HTTP.
+    pub fn is_socket(self) -> bool {
+        matches!(self, HealthProbe::UdsSearch | HealthProbe::UdsMpm)
     }
 }
 

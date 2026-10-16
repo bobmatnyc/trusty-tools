@@ -13,22 +13,15 @@
 //! one exists.
 //!
 //! **Consumption path (survey result, issue #3435 design question 1):** a
-//! loopback HTTP call to the mpm daemon's `GET /api/v1/projects`
-//! (`http://127.0.0.1:7880` by default, overridable via `TRUSTY_MPM_URL` —
-//! the same env var `tm` reads, so operators have exactly one knob for
-//! "where is the mpm daemon"), NOT
-//! a direct read of `projects.json`. Two reasons: (1) every existing
-//! cross-daemon consumer in this workspace goes over loopback HTTP —
-//! the retired `trusty-mpm-gui`'s "1:1 proxy layer, never embed business
-//! logic" pattern (#7964) was the precedent this module mirrors — and there is no
-//! workspace precedent for one daemon reading a sibling daemon's on-disk
-//! store directly; (2) ADR-0018 (the loopback-only doctrine; ADR-0011 is
-//! amended by it) explicitly sanctions same-machine loopback HTTP between
-//! sibling daemons, including for "same-machine GUI clients" — a daemon-to-
-//! daemon read is the same shape, one hop earlier. `crate::serve::mod` also
-//! already documents port 7880 as trusty-mpm's reserved port in this crate's
-//! own sibling-port table, so this module introduces no new fact, just a
-//! caller.
+//! call to the mpm daemon's registry — NOT a direct read of `projects.json`,
+//! because there is no workspace precedent for one daemon reading a sibling
+//! daemon's on-disk store. #6288 PR 1b moved the call from loopback HTTP
+//! (`GET http://127.0.0.1:7880/api/v1/projects`, `TRUSTY_MPM_URL`) onto the
+//! daemon's Unix socket: `mpm.projects.registry.list`, the same route served
+//! as a JSON-RPC method, on the socket `trusty_common::mpm_rpc::mpm_socket`
+//! resolves — honouring `TRUSTY_MPM_SOCKET`, the one knob every mpm client
+//! reads. PR 1a moved every tm client there with no TCP fallback, and PR 2
+//! retires the daemon's 7880 bind.
 //!
 //! **Merged view (design question 2):** the registry is keyed on
 //! `name`/`repo_url`, not a local filesystem path, and does not know about
@@ -71,7 +64,7 @@
 //! when `source` is `fs_only`.
 //!
 //! What: [`merged_roster`] is the real entry point `fs.list_projects`
-//! (`super::protocol::list_projects`) calls — it resolves the mpm daemon URL,
+//! (`super::protocol::list_projects`) calls — it resolves the mpm daemon socket,
 //! runs the existing fs scan, and fetches the registry, then delegates to the
 //! two testable pure/near-pure pieces: [`fetch_registry_projects`] (the one
 //! network call) and [`merge`] (the merge logic, a plain function of already-
@@ -86,31 +79,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::json;
+use trusty_common::uds::send_framed_request;
+use trusty_common::uds::server::{JSONRPC_VERSION, RpcResponse};
 
 use super::is_git_repo;
 use super::roster::{MAX_ENTRIES, ProjectCandidate, ProjectRoster, RosterSource};
 
-/// Default loopback base URL for the trusty-mpm daemon's REST API.
-///
-/// Why: `crate::serve::mod`'s sibling-port table already reserves 7880 for
-/// trusty-mpm; this is that same fact, scoped to this module's one caller.
-/// Test: `tests::mpm_daemon_url_defaults_when_env_var_unset`.
-pub const DEFAULT_MPM_DAEMON_URL: &str = "http://127.0.0.1:7880";
-
-/// Env var overriding the mpm daemon's base URL.
-///
-/// Why: the SAME variable `tm` already reads — reusing it (rather than
-/// inventing a `tcode`-specific name) means an operator who points one client
-/// at a non-default mpm daemon does not also have to remember a second env var.
-const MPM_DAEMON_URL_ENV: &str = "TRUSTY_MPM_URL";
+/// The registry method: `GET /api/v1/projects`, served on the daemon socket
+/// (#6288; `trusty-mpm`'s `daemon::rpc::registry::projects`).
+const METHOD_REGISTRY_LIST: &str = "mpm.projects.registry.list";
 
 /// Timeout budget for the registry call.
 ///
 /// Why: this method backs an interactive picker modal — the operator must
 /// never be left staring at a spinner because a sibling daemon is wedged
-/// rather than simply down. A closed port fails near-instantly (connection
-/// refused); this bound only matters for a daemon that accepted the TCP
-/// connection but never answers.
+/// rather than simply down. An absent socket fails near-instantly; this
+/// bound only matters for a daemon that accepted the connection but never
+/// answers.
 const REGISTRY_FETCH_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The subset of trusty-mpm's `Project` registry record this module needs.
@@ -136,50 +122,41 @@ struct RegistryProjectsResponse {
     projects: Vec<RegistryProject>,
 }
 
-/// Resolve the mpm daemon's base URL for THIS call.
-///
-/// Why: split out so [`merged_roster`] stays a one-line "resolve, then
-/// delegate" wrapper, matching `super::roster::list_projects`'s own shape.
-/// What: `TRUSTY_MPM_URL` if set (trailing slash trimmed), else
-/// [`DEFAULT_MPM_DAEMON_URL`].
-/// Test: `tests::mpm_daemon_url_defaults_when_env_var_unset`.
-fn mpm_daemon_url() -> String {
-    std::env::var(MPM_DAEMON_URL_ENV)
-        .unwrap_or_else(|_| DEFAULT_MPM_DAEMON_URL.to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-/// `GET {base_url}/api/v1/projects` — the one network call this module
+/// `mpm.projects.registry.list` on `socket` — the one daemon call this module
 /// makes.
 ///
 /// Why: isolated from [`merge`] so the merge logic is testable without any
 /// I/O, and this call is testable without any filesystem setup — see module
 /// docs.
-/// What: any transport failure, non-2xx status, or malformed body collapses
-/// to a single `Err(String)` — the caller ([`merged_roster_with`]) treats
-/// every failure mode identically (degrade to fs-only), so there is no value
-/// in a typed error here.
+/// What: a dial failure, a timeout, a JSON-RPC error frame, or a result that
+/// does not decode collapses to a single `Err(String)` — the caller
+/// ([`merged_roster_with`]) treats every failure mode identically (degrade to
+/// fs-only, `RosterSource::FsOnly`), so there is no value in a typed error.
 /// Test: `tests::merged_roster_with_uses_registry_when_daemon_reachable`,
-/// `tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`.
-async fn fetch_registry_projects(
-    client: &reqwest::Client,
-    base_url: &str,
-) -> Result<Vec<RegistryProject>, String> {
-    let url = format!("{base_url}/api/v1/projects");
-    let resp = client
-        .get(&url)
-        .timeout(REGISTRY_FETCH_TIMEOUT)
-        .send()
+/// `tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`,
+/// `tests::merged_roster_with_degrades_when_the_daemon_answers_an_error`.
+async fn fetch_registry_projects(socket: &Path) -> Result<Vec<RegistryProject>, String> {
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 1,
+        "method": METHOD_REGISTRY_LIST,
+        "params": {},
+    });
+    let response: RpcResponse = send_framed_request(socket, &request, REGISTRY_FETCH_TIMEOUT)
         .await
         .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("mpm daemon returned HTTP {}", resp.status()));
+    match (response.result, response.error) {
+        (_, Some(e)) => Err(format!(
+            "{METHOD_REGISTRY_LIST} answered error {}: {}",
+            e.code, e.message
+        )),
+        (Some(result), None) => serde_json::from_value::<RegistryProjectsResponse>(result)
+            .map(|body| body.projects)
+            .map_err(|e| e.to_string()),
+        (None, None) => Err(format!(
+            "{METHOD_REGISTRY_LIST} answered neither a result nor an error"
+        )),
     }
-    resp.json::<RegistryProjectsResponse>()
-        .await
-        .map(|body| body.projects)
-        .map_err(|e| e.to_string())
 }
 
 /// Parse `(owner, repo)` out of a registry `repo_url`.
@@ -348,25 +325,25 @@ fn merge(
 /// spawning a real mpm daemon, mirroring `super::roster`'s
 /// `list_projects`/`list_projects_in` split.
 /// What: on a successful fetch, delegates to [`merge`] (stamps
-/// `RosterSource::Registry`). On ANY failure (unreachable daemon, non-2xx,
-/// malformed body), logs a `tracing::warn!` and returns `fs_roster`
+/// `RosterSource::Registry`). On ANY failure (absent or refused socket, an
+/// error answer, a malformed body), logs a `tracing::warn!` and returns `fs_roster`
 /// unchanged — already all `registered: false` AND already
 /// `RosterSource::FsOnly` (`super::roster::list_projects_in` sets it), i.e.
 /// exactly the graceful-degradation view module docs describe.
 /// Test: `tests::merged_roster_with_uses_registry_when_daemon_reachable`,
-/// `tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`.
+/// `tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`,
+/// `tests::merged_roster_with_degrades_when_the_daemon_answers_an_error`.
 async fn merged_roster_with(
-    client: &reqwest::Client,
-    base_url: &str,
+    socket: &Path,
     fs_roster: ProjectRoster,
     workspace_root: Option<&Path>,
 ) -> ProjectRoster {
-    match fetch_registry_projects(client, base_url).await {
+    match fetch_registry_projects(socket).await {
         Ok(registry_projects) => merge(fs_roster, &registry_projects, workspace_root),
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                mpm_daemon_url = base_url,
+                mpm_socket = %socket.display(),
                 "mpm project registry unavailable; falling back to filesystem-only roster"
             );
             fs_roster
@@ -378,13 +355,9 @@ async fn merged_roster_with(
 /// filesystem-scan secondary/fallback.
 ///
 /// Why: the one function `super::protocol::list_projects` calls; resolves
-/// every real input (a fresh `reqwest::Client`, the mpm daemon URL, the real
-/// filesystem scan, the real home directory) so the RPC handler itself stays
-/// a one-liner, exactly like `super::roster::list_projects`'s own shape. A
-/// fresh `Client` per call (rather than a pooled, shared one) matches this
-/// module family's existing "no shared state" design
-/// (`super::protocol`'s own module docs) and is appropriate for an
-/// interactive, low-frequency, user-triggered call — not a hot path.
+/// every real input (the mpm daemon socket, the real filesystem scan, the
+/// real home directory) so the RPC handler itself stays a one-liner,
+/// exactly like `super::roster::list_projects`'s own shape.
 /// What: delegates to [`merged_roster_with`].
 /// Test: exercised indirectly via `super::protocol::tests::
 /// list_projects_returns_entries_array` (this function's own behavior beyond
@@ -392,8 +365,8 @@ async fn merged_roster_with(
 /// real mpm daemon; [`merged_roster_with`] carries the real coverage).
 pub async fn merged_roster() -> ProjectRoster {
     merged_roster_with(
-        &reqwest::Client::new(),
-        &mpm_daemon_url(),
+        // #6288: the daemon socket, as every mpm client resolves it.
+        &trusty_common::mpm_rpc::mpm_socket(),
         super::roster::list_projects(),
         // #5203: the same resolver `roster::list_projects` scans with.
         Some(trusty_common::workspace_layout::workspace_root().as_path()),
@@ -403,11 +376,8 @@ pub async fn merged_roster() -> ProjectRoster {
 
 #[cfg(test)]
 mod tests {
-    use axum::extract::State;
-    use axum::routing::get;
-    use axum::{Json, Router};
     use serde_json::{Value, json};
-    use tokio::net::TcpListener;
+    use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_until};
 
     use super::*;
 
@@ -689,30 +659,34 @@ mod tests {
         assert!(merged.entries[0].registered);
     }
 
-    // ── `merged_roster_with` (network integration) ──────────────────────
+    // ── `merged_roster_with` (socket integration) ───────────────────────
 
-    /// Spin up a one-route mock mpm daemon serving `GET /api/v1/projects`
-    /// and return its base URL.
-    async fn spawn_mock_mpm(projects: Value) -> String {
-        async fn handle(State(projects): State<Value>) -> Json<Value> {
-            Json(json!({"projects": projects, "count": 1}))
-        }
-        let app = Router::new()
-            .route("/api/v1/projects", get(handle))
-            .with_state(projects);
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+    /// A mock mpm daemon on a temp socket answering
+    /// `mpm.projects.registry.list` with `answer`. Returns the socket path and
+    /// the temp dir that holds it.
+    fn spawn_mock_mpm(answer: Result<Value, RpcError>) -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("s").join("trusty-mpm.sock");
+        std::fs::create_dir_all(socket.parent().expect("parent")).expect("mkdir");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let router = RpcRouter::new().typed(METHOD_REGISTRY_LIST, move |_params: Value| {
+            let answer = answer.clone();
+            async move { answer }
         });
-        format!("http://{addr}")
+        tokio::spawn(async move {
+            serve_until(
+                &listener,
+                std::sync::Arc::new(router),
+                RpcServeOptions::default(),
+                std::future::pending::<()>(),
+            )
+            .await;
+        });
+        (socket, dir)
     }
 
-    /// When the mpm daemon is reachable, its registry data must be used as
-    /// the merge's primary source end-to-end (real HTTP round trip, not just
-    /// the pure `merge` unit).
-    #[tokio::test]
-    async fn merged_roster_with_uses_registry_when_daemon_reachable() {
+    /// A one-checkout fs roster under a temp home, plus that home.
+    fn one_checkout_roster() -> (ProjectRoster, tempfile::TempDir) {
         let home = tempfile::tempdir().expect("tempdir");
         mk_git_repo(
             &home
@@ -725,14 +699,24 @@ mod tests {
             home.path(),
             &home.path().join("trusty-mpm-projects"),
         );
-        let base_url = spawn_mock_mpm(json!([
-            {"name": "trusty-tools", "repo_url": "https://github.com/bobmatnyc/trusty-tools"}
-        ]))
-        .await;
+        (fs_roster, home)
+    }
+
+    /// When the mpm daemon answers on its socket, its registry data must be
+    /// used as the merge's primary source end-to-end (#6288: a real socket
+    /// round trip, not just the pure `merge` unit).
+    #[tokio::test]
+    async fn merged_roster_with_uses_registry_when_daemon_reachable() {
+        let (fs_roster, home) = one_checkout_roster();
+        let (socket, _dir) = spawn_mock_mpm(Ok(json!({
+            "projects": [
+                {"name": "trusty-tools", "repo_url": "https://github.com/bobmatnyc/trusty-tools"}
+            ],
+            "count": 1,
+        })));
 
         let roster = merged_roster_with(
-            &reqwest::Client::new(),
-            &base_url,
+            &socket,
             fs_roster,
             Some(&home.path().join("trusty-mpm-projects")),
         )
@@ -747,35 +731,15 @@ mod tests {
         );
     }
 
-    /// When the mpm daemon is unreachable, the merge must degrade to the
-    /// plain filesystem roster rather than erroring or returning an empty
-    /// picker.
+    /// When no daemon serves the socket, the merge must degrade to the plain
+    /// filesystem roster rather than erroring or returning an empty picker.
     #[tokio::test]
     async fn merged_roster_with_degrades_to_fs_only_when_daemon_unreachable() {
-        let home = tempfile::tempdir().expect("tempdir");
-        mk_git_repo(
-            &home
-                .path()
-                .join("trusty-mpm-projects")
-                .join("bobmatnyc")
-                .join("trusty-tools"),
-        );
-        let fs_roster = super::super::roster::list_projects_in(
-            home.path(),
-            &home.path().join("trusty-mpm-projects"),
-        );
-
-        // Grab a port and immediately drop the listener so nothing answers —
-        // a fast, deterministic "connection refused" rather than a real
-        // timeout.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let dead_addr = listener.local_addr().expect("addr");
-        drop(listener);
-        let dead_url = format!("http://{dead_addr}");
+        let (fs_roster, home) = one_checkout_roster();
+        let absent = home.path().join("absent.sock");
 
         let roster = merged_roster_with(
-            &reqwest::Client::new(),
-            &dead_url,
+            &absent,
             fs_roster,
             Some(&home.path().join("trusty-mpm-projects")),
         )
@@ -794,24 +758,22 @@ mod tests {
         );
     }
 
-    // ── `mpm_daemon_url` ─────────────────────────────────────────────────
+    /// #6288 Fail-Open Check: a daemon that answers with an error frame is not
+    /// a registry answer. The roster must degrade and say so (`FsOnly`), never
+    /// report `Registry` over an empty list.
+    #[tokio::test]
+    async fn merged_roster_with_degrades_when_the_daemon_answers_an_error() {
+        let (fs_roster, home) = one_checkout_roster();
+        let (socket, _dir) = spawn_mock_mpm(Err(RpcError::internal("registry lock poisoned")));
 
-    /// Without `TRUSTY_MPM_URL` set, the default loopback URL is used.
-    ///
-    /// Why serial-unsafe env mutation is acceptable here: this crate's test
-    /// binary runs each `#[test]`/`#[tokio::test]` in its own thread but
-    /// shares process-wide env state; this test only READS the env var
-    /// (never sets it), so it cannot race a hypothetical other test that
-    /// does set it, and no other test in this module touches
-    /// `TRUSTY_MPM_URL`.
-    #[test]
-    fn mpm_daemon_url_defaults_when_env_var_unset() {
-        // Best-effort: only assert when the var is genuinely unset in this
-        // process, so this test cannot flake under an operator's shell that
-        // happens to export it.
-        if std::env::var(MPM_DAEMON_URL_ENV).is_ok() {
-            return;
-        }
-        assert_eq!(mpm_daemon_url(), DEFAULT_MPM_DAEMON_URL);
+        let roster = merged_roster_with(
+            &socket,
+            fs_roster,
+            Some(&home.path().join("trusty-mpm-projects")),
+        )
+        .await;
+
+        assert_eq!(roster.source, RosterSource::FsOnly);
+        assert!(!roster.entries[0].registered);
     }
 }

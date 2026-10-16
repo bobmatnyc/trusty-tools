@@ -336,7 +336,7 @@ mod tests {
     /// #6661: this used to bind `127.0.0.1:0`, drop the listener, and assert
     /// nothing answered on the freed port. Dropping a listener returns its port
     /// to the OS ephemeral pool, so a parallel test that binds `127.0.0.1:0` —
-    /// `mpm_connector_surfaces_url_via_http_addr` does exactly that — can be
+    /// `agents_connector_surfaces_url_via_http_addr` does exactly that — can be
     /// handed the same port and start listening on it before the probe runs.
     /// The premise "nothing can be here" then does not hold and the probe
     /// correctly returns `true`.

@@ -25,8 +25,8 @@ const TAILNET_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9));
 const READS: &[&str] = &[
     "/api/console/sessions",
     "/api/console/services",
-    "/api/mpm/health",
-    "/proxy/mpm/health",
+    "/api/review/health",
+    "/proxy/review/health",
     "/api/console/machine-status/stream",
 ];
 

@@ -18,6 +18,10 @@
 #                   (plus the names /bin/sh adds itself), `daemon --sandbox`,
 #                   and TMUX_TMPDIR=<dir>/data/tmux (#9557)
 #     no-leak       no fake secret value appears in the launcher's output
+#     daemon-socket the launcher prints <dir>/data/trusty-mpm/trusty-mpm.sock
+#                   and the TRUSTY_MPM_SOCKET pin for it (#6288)
+#     daemon-socket-too-long  a --dir whose daemon socket path is over
+#                   sun_path refuses, even where the tmux path fits (#6288)
 #     dry-run       prints the names, creates and starts nothing
 #     subset        with every name the daemon allows set, the launcher passes
 #                   only names on the daemon's closed allowlist
@@ -151,6 +155,31 @@ case "$OUT1" in
   *"$FAKE_TOKEN"*|*"$FAKE_KEY"*|*"$FAKE_LC"*) fail no-leak "a fake secret value reached the output" ;;
   *) pass no-leak ;;
 esac
+# #6288: the launcher names the daemon socket every tm client dials, and the
+# TRUSTY_MPM_SOCKET pin that reaches it.
+if printf '%s' "$OUT1" | grep -qxF "sandbox_daemon: daemon socket: $DIR1/data/trusty-mpm/trusty-mpm.sock" \
+  && printf '%s' "$OUT1" | grep -qF "TRUSTY_MPM_SOCKET=$DIR1/data/trusty-mpm/trusty-mpm.sock"; then
+  pass daemon-socket
+else
+  fail daemon-socket "the launcher did not print <dir>/data/trusty-mpm/trusty-mpm.sock"
+fi
+
+# 1b. daemon-socket-too-long (#6288): a --dir whose daemon socket path is over
+# sun_path refuses before anything starts, even where the tmux path still fits.
+LONG_PAD="$(printf 'x%.0s' $(seq 1 $((75 - ${#TMP_ROOT} - 1))))"
+DIR1B="$TMP_ROOT/$LONG_PAD"
+mkdir -p "$DIR1B"
+set +e
+OUT1B="$(run_launcher --bin "$STUB" --dir "$DIR1B" --dry-run 2>&1)"
+STATUS1B=$?
+set -e
+if [ "$STATUS1B" -ne 1 ]; then
+  fail daemon-socket-too-long "exit $STATUS1B (want 1) for a ${#DIR1B}-byte --dir"
+elif ! printf '%s' "$OUT1B" | grep -qF "the daemon socket path is"; then
+  fail daemon-socket-too-long "output lacks the daemon socket refusal: $OUT1B"
+else
+  pass daemon-socket-too-long
+fi
 
 # 2. dry-run: names printed, nothing created or started.
 DIR2="$TMP_ROOT/case2"

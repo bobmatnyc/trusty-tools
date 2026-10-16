@@ -1210,6 +1210,13 @@ _verify_probe_liveness() {
     local vm="$1" d="$2"
     PROBE_ADDR=''; PROBE_CODE=''; PROBE_BODY=''; PROBE_STATUS=''; PROBE_REASON=''
 
+    # #6288: trusty-mpm's clients all reach it over its Unix socket, and its
+    # HTTP bind on 7880 is retired. Its liveness is the product's own socket
+    # probe, not GET /health on an address `tctl port` reads off `http_addr`.
+    case "$d" in
+        trusty-mpm) _verify_probe_liveness_socket "$vm" "$d"; return $? ;;
+    esac
+
     # PORT DISCOVERY — polled, never slept (DOC-1 §4.3). §10.1's daemon-health
     # row: 1 s interval, 60 s maximum, and §10.1 labels that maximum "WHOLLY
     # UNMEASURED". Both are `health_interval` / `health_timeout` in
@@ -1260,6 +1267,49 @@ _verify_probe_liveness() {
     esac
     log "  ${d}: LIVE — HTTP ${PROBE_CODE}, JSON parses, .status='${PROBE_STATUS}'"
     return 0
+}
+
+# _verify_probe_liveness_socket <vm_name> <member>
+# §1.3's INTERIM predicate for a daemon that serves a Unix socket and no HTTP
+# client address (#6288: trusty-mpm). Same value channel and return contract
+# as `_verify_probe_liveness`.
+#
+# WHY THE PRODUCT'S PROBE AND NOT A HAND-ROLLED ONE: a socket answers JSON-RPC
+# frames, not `GET /health`, and the frame shape, the socket path and its
+# `TRUSTY_MPM_SOCKET` override are the product's to define. `tctl stack health
+# --json` asks `mpm.health` on that socket through `probe_http.rs`'s
+# `uds_socket_for` / `classify_rpc_response`, with the same body-is-the-signal
+# rule this oracle adopts for HTTP members. The rows it renders are the
+# product's `health_str` vocabulary; `healthy` and `stale` are the two its own
+# `ready` verdict accepts.
+#
+# Polled at §10.1's daemon-health interval and maximum, as the address wait is.
+# `stack health` exits 2 or 4 when ANY member is not ready, so its exit code is
+# not this member's verdict and is ignored; the member's own row is.
+_verify_probe_liveness_socket() {
+    local vm="$1" d="$2" budget interval t0 out health
+    budget=$(conf_get health_timeout)
+    interval=$(conf_get health_interval)
+    t0=$(date '+%s')
+    PROBE_ADDR='socket'
+    while :; do
+        out=$(vm_exec "$vm" 'tctl stack health --json' 2>/dev/null) || :
+        health=$(printf '%s' "$out" | jq -r --arg m "$d" \
+            '[.members[]? | select(.member == $m) | .health][0] // ""' 2>/dev/null || :)
+        case "$health" in
+            healthy|stale)
+                PROBE_STATUS="$health"
+                log "  ${d}: LIVE — tctl stack health reports '${health}' over its socket"
+                return 0 ;;
+        esac
+        if [ $(( $(date '+%s') - t0 )) -ge "$budget" ]; then
+            PROBE_STATUS="$health"
+            PROBE_BODY="$out"
+            PROBE_REASON="${d}: \`tctl stack health --json\` never reported it healthy over its socket within $(conf_get health_timeout)s (last health '${health}')"
+            return 1
+        fi
+        sleep "$interval"
+    done
 }
 
 # _verify_wait_for_addr <vm_name> <member>
