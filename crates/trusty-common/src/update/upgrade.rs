@@ -9,7 +9,8 @@
 //!   inheriting stdio (for the standalone `upgrade` commands); the
 //!   [`perform_upgrade_captured`] sibling captures stdio instead, for a
 //!   caller (trusty-installer) that may be driving its own live terminal
-//!   display concurrently (#3830).
+//!   display concurrently (#3830). The `_with_force` forms add `--force`
+//!   (#9974).
 //! - [`verify_installed_binary`] — health-gate via `<bin> --version`.
 //! - [`is_launchd_supervised`] — authoritative launchd-supervision check
 //!   (delegates to [`crate::supervision`]; issue #4469 replaced the env-var
@@ -114,30 +115,39 @@ pub(crate) async fn run_with_mode(
     }
 }
 
-fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("cargo");
-    cmd.args(["install", crate_name, "--locked"]);
-    cmd
+/// The argv after `cargo` for one install.
+///
+/// Why (#9974): the `--force` takeover must leave every other install
+/// byte-identical to the `cargo install <crate> --locked` it always was.
+/// What: `install <crate> --locked`, plus `--force` when `force` is set.
+/// Test: `cargo_install_args_add_force_only_when_asked`.
+pub(crate) fn cargo_install_args(crate_name: &str, force: bool) -> Vec<&str> {
+    let mut args = vec!["install", crate_name, "--locked"];
+    if force {
+        args.push("--force");
+    }
+    args
 }
 
-/// Run `cargo install <crate_name> --locked` under the cargo ownership guard.
+/// Run `cmd` (an install of `crate_name`) under the cargo ownership guard.
 ///
 /// Why (#5777): `cargo install` exits 101 on any destination binary Cargo's
 /// `.crates2.json` does not record — exactly what a prebuilt-download install
 /// leaves in `$CARGO_HOME/bin`. Every one of the nine cargo reach points in
 /// the workspace funnels through this function (via [`perform_upgrade`] /
-/// [`perform_upgrade_captured`]), so guarding here covers them all by
-/// construction — including the in-daemon `upgrade` commands and MCP tools
-/// that never consult the downloader.
+/// [`perform_upgrade_captured`] and their `_with_force` forms), so guarding
+/// here covers them all by construction — including the in-daemon `upgrade`
+/// commands and MCP tools that never consult the downloader. `bin_dir` is a
+/// parameter (#9974) so a test can drive the real guard over a temp dir.
 ///
-/// What: resolves the canonical bin dir and the crate's FULL binary set
+/// What: moves each existing `bin_dir/<bin>` of the crate's FULL binary set
 /// ([`crate::bin_resolve::installed_binaries`] — alias and multi-binary
 /// crates like `tctl`/`tm`/`trusty-embedderd`/`tagent` collide on names the
-/// crate name alone would miss), moves each existing destination file aside,
-/// runs cargo, then settles: commit on success (restoring any file cargo's
-/// already-installed skip did not rewrite), restore on failure. A restore
-/// failure is folded into the returned error rather than masking cargo's own
-/// failure.
+/// crate name alone would miss) aside, runs `cmd`, then settles: commit on
+/// success (restoring any file cargo's already-installed skip did not
+/// rewrite), restore on failure. A restore failure is folded into the
+/// returned error rather than masking cargo's own failure. `None` for
+/// `bin_dir` runs `cmd` unguarded.
 ///
 /// # Errors
 /// Returns cargo's failure (with any restore failure appended), or the
@@ -145,26 +155,51 @@ fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
 /// binaries are either back in place or still on disk under the hidden aside
 /// name the error message names.
 ///
-/// Test: guard semantics in `cargo_guard::tests`; the wiring is shared by
-/// [`perform_upgrade`] / [`perform_upgrade_captured`] and exercised by the
-/// ignore-tagged `perform_upgrade_fails_cleanly_on_nonexistent_crate`.
-async fn run_cargo_install(crate_name: &str, mode: UpgradeOutput) -> anyhow::Result<()> {
-    let label = format!("`cargo install {crate_name} --locked`");
+/// Test: guard semantics in `cargo_guard::tests`; the wiring by
+/// `failed_guarded_install_keeps_the_launcher` and the ignore-tagged
+/// `perform_upgrade_fails_cleanly_on_nonexistent_crate`.
+pub(crate) async fn run_guarded_install(
+    bin_dir: Option<&std::path::Path>,
+    crate_name: &str,
+    cmd: tokio::process::Command,
+    mode: UpgradeOutput,
+    label: &str,
+) -> anyhow::Result<()> {
     // #5777: clear cargo-untracked binaries out of the destination first.
-    let guard = match crate::bin_resolve::canonical_bin_dir() {
+    let guard = match bin_dir {
         Some(dir) => super::cargo_guard::OwnershipGuard::move_aside(
-            &dir,
+            dir,
             &crate::bin_resolve::installed_binaries(crate_name),
         )?,
         None => super::cargo_guard::OwnershipGuard::inert(),
     };
-    match run_with_mode(cargo_install_cmd(crate_name), mode, &label).await {
+    match run_with_mode(cmd, mode, label).await {
         Ok(()) => guard.commit(),
         Err(e) => match guard.restore() {
             Ok(()) => Err(e),
             Err(restore_err) => Err(e.context(format!("additionally, {restore_err}"))),
         },
     }
+}
+
+/// `cargo install <crate_name> --locked [--force]` in the canonical bin dir,
+/// under the guard, logging start and success.
+async fn run_cargo_install(
+    crate_name: &str,
+    mode: UpgradeOutput,
+    force: bool,
+) -> anyhow::Result<()> {
+    let args = cargo_install_args(crate_name, force);
+    let label = format!("`cargo {}`", args.join(" "));
+    tracing::info!(crate_name, ?mode, "running: {label}");
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.args(&args);
+    let bin_dir = crate::bin_resolve::canonical_bin_dir();
+    let result = run_guarded_install(bin_dir.as_deref(), crate_name, cmd, mode, &label).await;
+    if result.is_ok() {
+        tracing::info!(crate_name, "cargo install succeeded");
+    }
+    result
 }
 
 /// Run `cargo install <crate_name> --locked` to upgrade the named crate.
@@ -189,13 +224,19 @@ async fn run_cargo_install(crate_name: &str, mode: UpgradeOutput) -> anyhow::Res
 /// Test: `perform_upgrade_fails_cleanly_on_nonexistent_crate` (ignore-tagged —
 /// no real cargo-install in CI); manual validation via `trusty-memory upgrade --yes`.
 pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
-    tracing::info!(crate_name, "running: cargo install {} --locked", crate_name);
-    // #5777: routed through the cargo ownership guard — see run_cargo_install.
-    let result = run_cargo_install(crate_name, UpgradeOutput::Inherit).await;
-    if result.is_ok() {
-        tracing::info!(crate_name, "cargo install succeeded");
-    }
-    result
+    perform_upgrade_with_force(crate_name, false).await
+}
+
+/// [`perform_upgrade`], adding `--force` when `force` is set (#9974).
+///
+/// Why: trusty-installer takes the `trusty-embedderd-py` launcher over from
+/// the retired standalone package with `--force`, and that install must still
+/// run under the #5777 ownership guard.
+/// What: `cargo install <crate_name> --locked [--force]`, stdio inherited.
+/// Test: `cargo_install_args_add_force_only_when_asked`.
+pub async fn perform_upgrade_with_force(crate_name: &str, force: bool) -> anyhow::Result<()> {
+    // #5777: routed through the cargo ownership guard — see run_guarded_install.
+    run_cargo_install(crate_name, UpgradeOutput::Inherit, force).await
 }
 
 /// Run `cargo install <crate_name> --locked`, CAPTURING stdout/stderr instead
@@ -221,17 +262,19 @@ pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
 /// wiring itself mirrors `perform_upgrade`'s (untested beyond that — no real
 /// network install in CI).
 pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
-    tracing::info!(
-        crate_name,
-        "running (captured): cargo install {} --locked",
-        crate_name
-    );
-    // #5777: routed through the cargo ownership guard — see run_cargo_install.
-    let result = run_cargo_install(crate_name, UpgradeOutput::Capture).await;
-    if result.is_ok() {
-        tracing::info!(crate_name, "cargo install succeeded");
-    }
-    result
+    perform_upgrade_captured_with_force(crate_name, false).await
+}
+
+/// [`perform_upgrade_captured`], adding `--force` when `force` is set (#9974).
+///
+/// Why/What: as [`perform_upgrade_with_force`], with stdio captured.
+/// Test: `cargo_install_args_add_force_only_when_asked`.
+pub async fn perform_upgrade_captured_with_force(
+    crate_name: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    // #5777: routed through the cargo ownership guard — see run_guarded_install.
+    run_cargo_install(crate_name, UpgradeOutput::Capture, force).await
 }
 
 /// Resolve the ordered list of directories a binary might have been

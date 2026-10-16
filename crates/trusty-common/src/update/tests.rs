@@ -989,3 +989,61 @@ async fn live_crates_io_with_old_version_returns_some() {
     assert!(n.contains(&info.latest), "notice missing latest version");
     assert!(n.contains("0.0.1"), "notice missing current version");
 }
+
+// ── #9974: `--force` takeover of the trusty-embedderd-py launcher ─────────
+
+/// Why (#9974): `--force` may appear only when the caller asks for it; every
+/// other install stays `cargo install <crate> --locked`.
+/// What: the argv with and without `force`.
+/// Test: this is the test.
+#[test]
+fn cargo_install_args_add_force_only_when_asked() {
+    assert_eq!(
+        super::upgrade::cargo_install_args("trusty-search", false),
+        ["install", "trusty-search", "--locked"]
+    );
+    assert_eq!(
+        super::upgrade::cargo_install_args("trusty-search", true),
+        ["install", "trusty-search", "--locked", "--force"]
+    );
+}
+
+/// Why (#9974): the `--force` takeover replaced an uninstall that ran outside
+/// the ownership guard and lost the launcher when the install then failed.
+/// The guarded path must leave every pre-existing binary in place on failure.
+/// What: puts trusty-search's three binaries in a temp bin dir, runs a
+/// failing command through `run_guarded_install`, and asserts each file is
+/// back with its old bytes and no aside is left.
+/// Test: this is the test.
+#[tokio::test]
+async fn failed_guarded_install_keeps_the_launcher() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bins = crate::bin_resolve::installed_binaries("trusty-search");
+    assert!(bins.iter().any(|b| b == "trusty-embedderd-py"), "{bins:?}");
+    for bin in &bins {
+        std::fs::write(dir.path().join(bin), format!("old {bin}")).expect("seed bin");
+    }
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", "echo 'error: offline' >&2; exit 101"]);
+    let err = super::upgrade::run_guarded_install(
+        Some(dir.path()),
+        "trusty-search",
+        cmd,
+        super::upgrade::UpgradeOutput::Capture,
+        "`cargo install trusty-search --locked --force`",
+    )
+    .await
+    .expect_err("a failing install must return Err");
+    assert!(err.to_string().contains("offline"), "{err}");
+    for bin in &bins {
+        let text = std::fs::read_to_string(dir.path().join(bin))
+            .unwrap_or_else(|e| panic!("{bin} must survive a failed install: {e}"));
+        assert_eq!(text, format!("old {bin}"));
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read bin dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "asides left behind: {leftovers:?}");
+}

@@ -49,6 +49,8 @@ pub mod shadow_check;
 pub mod sign;
 pub mod stable_set;
 pub mod stack;
+// #9974: cargo-install fallback takes the launcher over from a standalone install.
+pub(crate) mod standalone_launcher;
 pub mod status;
 // #9613: an address whose connect fails in the kernel, on every host.
 #[cfg(test)]
