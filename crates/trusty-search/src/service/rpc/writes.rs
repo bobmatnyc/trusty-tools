@@ -3,16 +3,15 @@
 //! Why: slices 2 and 3 moved the routes that ASK something of an index. This
 //! slice moves the seven that CHANGE one — registration, deregistration,
 //! relocation, the two per-file writes, the reindex trigger, and
-//! contributed-graph ingest. HTTP is untouched and still serves every one of
-//! them; the socket is an ADDITIONAL way to reach the same body until the retire
-//! slice.
+//! contributed-graph ingest. Since #9214 the socket is the only transport;
+//! the route column below names the retired HTTP route each method replaced.
 //!
 //! What: the method-to-route table below, the params each method decodes, the
 //! two lane wrappers (`bulk_guarded` and `unguarded`), and [`register`].
 //!
 //! ## Method → route
 //!
-//! | Method | HTTP route | Lane |
+//! | Method | Former HTTP route | Lane |
 //! |---|---|---|
 //! | `search.index.create` | `POST /indexes` | free |
 //! | `search.index.delete` | `DELETE /indexes/{id}` | free |
@@ -56,22 +55,15 @@
 //!
 //! ## The frame cap bites `search.graph.ingest`, and only it
 //!
-//! `RpcServeOptions::max_frame_bytes` is 8 MiB in both directions — the same cap
-//! slice 3 documented for large query RESPONSES. On this surface the exposure is
-//! a REQUEST: `POST /indexes/{id}/graph` carries an explicit
-//! `DefaultBodyLimit::max(64 * 1024 * 1024)`, so HTTP accepts a contributed
-//! graph eight times larger than a socket frame. A producer whose document
-//! exceeds 8 MiB — PR #1129 recorded ~20 MB maxima from large pilot corpora, so
-//! this is a real payload rather than a hypothetical one — is refused LOUDLY:
-//! the listener stops reading at the budget and answers a parse error, and a
-//! `trusty_common::uds` client reports `FrameTooLarge` rather than truncating.
-//! Nothing partial is stored, because the refusal happens before the frame is
-//! ever dispatched to a method.
-//!
-//! No consumer dials these names yet, and the remedy is not local: the retire
-//! slice raises the budget on the listener and the client together, since
-//! raising it here alone would only move which end refuses. Until then a large
-//! ingest uses the HTTP route, which is still mounted.
+//! The listener's frame budget is `service::socket::MAX_FRAME_BYTES`, 64 MiB —
+//! the body limit the retired `POST /indexes/{id}/graph` route carried. PR #1129
+//! recorded ~20 MB maxima from large pilot corpora. A document over 64 MiB is
+//! refused LOUDLY: the listener stops reading at the budget and answers a parse
+//! error, and a `trusty_common::uds` client reports `FrameTooLarge` rather than
+//! truncating. Nothing partial is stored, because the refusal happens before the
+//! frame is ever dispatched to a method. A client must dial through
+//! `send_framed_request_capped` with the same figure; the plain helper applies
+//! the shared 8 MiB default to the response it reads.
 //!
 //! Test: `writes_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
 //! family plus, for every mutating core, a failure arm proving the refusal is
@@ -228,16 +220,15 @@ pub struct QuantizeParams {
 
 /// Run one write body behind the admission limiter, with NO query deadline.
 ///
-/// Why: the four per-index writes are axum's `bulk_limited` group. The limiter
-/// is there because each in-flight write holds a parsed batch, an embedding
-/// buffer and an indexer lock, so an unbounded burst degrades every other
-/// response including `/health` (#41). The deadline is deliberately absent:
-/// `apply_query_timeout` is mounted on `interactive_limited` only, and a reindex
-/// or a large ingest legitimately outruns any interactive budget. Adding one
-/// here would abort on the socket a walk the HTTP route completes.
+/// Why: the four per-index writes were the retired router's `bulk_limited`
+/// group. The limiter is there because each in-flight write holds a parsed
+/// batch, an embedding buffer and an indexer lock, so an unbounded burst
+/// degrades every other response including `search.health` (#41). The deadline
+/// is deliberately absent: a reindex or a large ingest legitimately outruns any
+/// interactive budget.
 /// What: `admit` on the ONE `SearchAppState` limiter, permit held until the body
-/// finishes. Refusals keep HTTP's status, so a queue-full `503` reads the same
-/// on both transports.
+/// finishes. A refusal's status becomes the JSON-RPC code, so a queue-full
+/// `503` reads the same as on the query methods.
 /// Test: `writes_are_refused_when_the_shared_limiter_is_saturated`,
 /// `a_registry_level_write_is_not_admission_limited`.
 async fn bulk_guarded<T, F>(state: &Arc<SearchAppState>, body: F) -> Result<T, RpcError>
@@ -253,10 +244,9 @@ where
 
 /// Run one registry-level write with no limiter and no deadline.
 ///
-/// Why: `POST /indexes`, `DELETE /indexes/{id}` and `PATCH /indexes/{id}` are in
-/// axum's `free` group — no `apply_limiter`, no `apply_query_timeout`. Mirroring
-/// that exactly is what keeps a delete from queueing behind a running reindex on
-/// one transport and not the other; see the module doc's lane section.
+/// Why: create, delete and relocate were the retired router's `free` group —
+/// no limiter, no deadline — so a delete never queues behind a running reindex;
+/// see the module doc's lane section.
 /// What: the refusal mapping [`bulk_guarded`] also applies, and nothing else.
 /// Test: `create_over_the_socket_matches_the_http_body` and its siblings.
 async fn unguarded<T, F>(body: F) -> Result<T, RpcError>
@@ -273,13 +263,12 @@ where
 /// `queries` so each slice adds one file rather than editing one.
 /// What: one `typed` registration per method, each cloning the `Arc` handle to
 /// the shared [`SearchAppState`] and running its `*_report` core through the
-/// wrapper that matches its axum lane. Every core is the SAME function the axum
-/// handler wraps, so a write cannot land one way over HTTP and another here —
-/// and, more to the point for this family, cannot be REFUSED one way and
-/// accepted the other.
+/// wrapper that matches its lane. Every fallible body returns the
+/// `(status, body)` pair its core returns, and [`rpc_error_from_http`] turns
+/// that into the error frame.
 /// Test: `rpc_router_registers_every_documented_method` in `socket_tests.rs`;
 /// the `*_over_the_socket_matches_the_http_body` cases and their failure-arm
-/// siblings drive each registration against its HTTP twin.
+/// siblings drive each registration against its `*_report` core.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     /// One `free`-lane method whose core answers a `serde_json::Value`.
     macro_rules! free_write {

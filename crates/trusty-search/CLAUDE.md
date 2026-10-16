@@ -18,8 +18,8 @@ serves multiple named indexes (one per project) via HTTP daemon and MCP server.
 - **MCP server**: stdio for Claude Code integration (#9542 retired HTTP/SSE)
 - **Zero cold-start**: HNSW stays hot (Duration::MAX cool-after), LRU embedding cache
   (256 entries) skips re-embedding on repeated queries
-- **Native multi-request**: `Arc<SearchAppState>`, concurrent reads via `RwLock`,
-  axum HTTP/2 — many concurrent readers never block each other
+- **Native multi-request**: `Arc<SearchAppState>`, concurrent reads via `RwLock`
+  — many concurrent socket callers never block each other
 - **Zero dependency on trusty-memory**: bundles its own storage layer
   (redb + usearch + fastembed) — `cargo install trusty-search` works standalone
 
@@ -79,23 +79,29 @@ pub struct CodeChunk {
 }
 ```
 
-### HTTP API (axum, single daemon, multi-index)
+### Socket API (JSON-RPC 2.0, single daemon, multi-index)
 
-**Audience**: integrators (e.g. trusty-agents) calling the daemon's REST API.
+**Audience**: integrators (e.g. trusty-agents, trusty-console) calling the
+daemon.
 
-**Transport conventions** (apply to every endpoint below):
+The daemon serves JSON-RPC 2.0 on its Unix socket only and binds no TCP port
+(#9214). The method table is `service::socket::METHODS`
+(`src/service/socket.rs`); each `service::rpc::*` module documents its methods
+and the retired HTTP route each one replaced. The endpoint catalogue below
+still names each body by that former route; the socket method carries the same
+request and response body.
 
-- **Base URL**: `http://127.0.0.1:<port>` — daemon binds loopback only; resolve
-  the live port from `~/Library/Application Support/trusty-search/port.lock` (macOS)
-  or `$XDG_DATA_HOME/trusty-search/port.lock` (Linux).
-- **Authentication**: none. The daemon is localhost-only and trusts every caller;
-  do **not** bind it to a non-loopback interface.
-- **Content-Type**: `application/json` for all request and response bodies (SSE
-  endpoint excepted — it returns `text/event-stream`).
-- **Error response**: any 4xx / 5xx returns a JSON body whose `error` field is a
-  machine-readable code. Status codes follow standard HTTP semantics
-  (`404` = the index exists nowhere, `503` = exists but cannot serve this
-  request, `500` = internal error).
+**Transport conventions**:
+
+- **Socket**: `service::socket::socket_path()` resolves it; trusty-common's
+  `search_rpc` client derives the same path. The socket is `0600` in a `0700`
+  directory, and the daemon checks the peer uid.
+- **Frame budget**: `service::socket::MAX_FRAME_BYTES` (64 MiB) in both
+  directions.
+- **Error response**: a refusal is a JSON-RPC error whose `data` is the JSON
+  body below, with its `error` field a machine-readable code. The status named
+  below maps to the JSON-RPC code (`404` = the index exists nowhere, `503` =
+  exists but cannot serve this request, `500` = internal error).
 
   **Index-scoped error contract (#5061, #5068).** Every index-scoped endpoint
   reports the same daemon state the same way, because they all render it through
@@ -145,8 +151,6 @@ pub struct CodeChunk {
   `owner/repo`, or path), resolved by the daemon's `search.project.resolve`;
   a miss answers `PROJECT_UNRESOLVED` (bare-method code `-32014`) carrying the
   daemon's `candidates`.
-- **CORS**: permissive (`*`) for browser-based admin UIs.
-- **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 
 #### Endpoint catalogue
 
@@ -1161,10 +1165,10 @@ Delete a fact by its u64 hash id.
 
 - **Response 200**: `{ "id": 1234567890, "removed": true }`
 
-##### `POST /chat`
+##### `search.chat` (formerly `POST /chat`)
 
-OpenRouter conversational Q&A with auto-injected search context. Requires
-`OPENROUTER_API_KEY` in the daemon's environment.
+Conversational Q&A with auto-injected search context. Needs a local model
+server or `OPENROUTER_API_KEY` in the daemon's environment.
 
 - **Request body**:
   ```json
@@ -1179,10 +1183,6 @@ OpenRouter conversational Q&A with auto-injected search context. Requires
   ```
 - **Response 200**: forwarded OpenRouter chat-completion payload.
 - **Response 503**: `{ "error": "OpenRouter not configured" }` (API key missing).
-
-##### `GET /ui`, `GET /ui/`, `GET /ui/*path`
-
-Serves the embedded Svelte admin UI. Not part of the integration contract.
 
 ### MCP Tools
 
@@ -1235,7 +1235,6 @@ this table is generated from it, not maintained by hand.
 - **CLI**: clap 4 (derive)
 - **HTTP client**: reqwest 0.12 (rustls-tls, no native-tls dependency)
 - **Progress display**: indicatif (progress bars during reindex)
-- **Embedded assets**: include_dir (Svelte admin UI compiled into binary)
 - **Content hashing**: sha2 (stable file fingerprints for incremental reindex skip)
 
 ## Schema Versioning and Migrations
@@ -1287,14 +1286,15 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
 
 ## Multi-Request Design
 
-- `Arc<SearchAppState>` shared across all axum handlers
+- `Arc<SearchAppState>` shared by every socket method and ticker
 - `DashMap<IndexId, Arc<IndexHandle>>` is shard-locked — different indexes never
   contend for locks
 - `IndexHandle.indexer: Arc<RwLock<CodeIndexer>>` — reader-priority RwLock; many
   concurrent searches against the same index never block each other
 - Indexing operations use `tokio::sync::Semaphore` to prevent thread-pool starvation
   (carry-over fix from trusty-agents BUG-2)
-- HTTP/2 multiplexing: a single client connection can issue many concurrent searches
+- Each socket connection is served on its own task, so concurrent callers do not queue
+  behind each other
 
 ## Performance Targets
 
@@ -1584,7 +1584,7 @@ integration tests and downstream consumers can reach the internal APIs.
 trusty-search/
 ├── Cargo.toml                       single-crate manifest (lib + bin)
 ├── build.rs                         Svelte UI build wrapper (inert since #6155)
-├── ui-dist/                         compiled UI bundle (embedded via include_dir!),
+├── ui-dist/                         UI bundle mirror (no longer embedded, #9535),
 │                                    mirrored from crates/trusty-console/ui-search-dist
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
@@ -1596,7 +1596,7 @@ trusty-search/
 │   ├── detect.rs                    project auto-detection
 │   ├── doctor.rs                    diagnostic checks
 │   ├── core/                        CodeIndexer, BM25, HNSW, chunking, classifier
-│   ├── service/                     axum daemon, FileWatcher, socket client, Svelte UI
+│   ├── service/                     socket daemon, FileWatcher, socket client
 │   └── mcp/                         MCP server (stdio)
 └── tests/
     ├── integration_tests.rs         imports `trusty_search::core::*`
@@ -1639,7 +1639,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 ### Release Process
 
 Before publishing to crates.io, the Svelte admin UI must be built and synced
-into the crate-root `ui-dist/` so `include_dir!` embeds the latest bundle.
+into the crate-root `ui-dist/`. #9535 removed the `include_dir!` embed, so the
+binary no longer serves it; `build.rs` and this step remain until the
+Architect rules on them.
 `cargo publish` cannot reach files outside the crate tarball, so the sync
 step is mandatory.
 
@@ -1647,8 +1649,8 @@ step is mandatory.
 `crates/trusty-console/ui-search/`, where trusty-console builds it and serves it
 at `/tools/search/`. This crate no longer has a `ui/` tree, and `build.rs` no
 longer builds anything: `ui-dist/` is a mirror of the console's bundle, and both
-carry the same source digest. `/ui/` keeps serving exactly what it served
-before. #6285 deletes this crate's HTTP listener and `ui-dist/` with it.
+carry the same source digest. #9214 removed the HTTP listener and #9535 the
+`/ui/` handlers, so nothing serves `ui-dist/` from this binary.
 
 ```bash
 make release-prep                              # rebuild via trusty-console, then mirror → ui-dist/
@@ -1841,8 +1843,7 @@ via `cargo install trusty-search`.
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
 - MCP server: full JSON-RPC 2.0 stdio transport (see [MCP Tools](#mcp-tools))
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
-- Svelte 5 admin UI embedded in binary via `include_dir`
-- OpenRouter chat proxy with search context injection
+- Chat with search context injection (`search.chat`)
 - SSE reindex progress streaming with replay buffer
 - Incremental reindex skip via sha2 content fingerprinting
 - Parallel batch indexing (rayon + 256-chunk ONNX batches)

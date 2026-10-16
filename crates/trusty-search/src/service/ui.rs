@@ -1,170 +1,24 @@
-//! Embedded Svelte UI server.
+//! The `search.chat` core: answer one question grounded in an index.
 //!
-//! Why: We ship a single `trusty-search` binary that serves the management
-//! UI without requiring users to run a separate static-file server. The
-//! Svelte build output is baked into the binary at compile time via
-//! `include_dir!`, so the daemon is fully self-contained.
+//! Why: the socket method `search.chat` (`service::rpc::chat`) is the one door
+//! to the chat lane. #9214 removed the TCP listener and #9535 deleted the `/ui`
+//! handlers, the `include_dir!` embed of `ui-dist/`, `POST /chat` and
+//! `GET /api/chat/providers`; the search dashboard is served by trusty-console.
 //!
-//! #6155: the dashboard's Svelte source now lives in
-//! `crates/trusty-console/ui-search/`, which trusty-console builds and serves
-//! at `/tools/search/`. The crate-root `ui-dist/` this module embeds is a
-//! mirror of that bundle, refreshed by `make -C crates/trusty-search sync-ui`.
-//! Nothing about what `/ui` answers changed. #6285 removes this listener.
+//! What: the request types and [`chat_report`], which resolves the provider,
+//! gathers search context and collects the streamed reply into one envelope.
 //!
-//! What: Two route handlers serving the SPA:
-//!   - `GET /ui`       → index.html with runtime config injected
-//!   - `GET /ui/*path` → static asset, falling back to index.html for
-//!     client-side routes (e.g. `/ui/search`).
-//!
-//! Plus the OpenRouter-proxying `POST /chat` endpoint.
-//!
-//! Test: `cargo test -p trusty-search-service ui::` exercises the path
-//! resolver against the embedded directory.
+//! Test: `chat_without_a_provider_is_refused_identically_on_both_transports`.
 
-use axum::{
-    body::Body,
-    extract::{Path as AxumPath, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
-};
-use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use axum::http::StatusCode;
 
 use crate::service::server::SearchAppState;
 use trusty_common::{ChatEvent, ChatMessage as CommonChatMessage};
 
-/// Why: `include_dir!` walks at compile time and embeds every byte. We point
-/// it at `ui-dist/` inside this crate's directory (committed alongside the
-/// source so it is available during `cargo publish` packaging).
-/// What: `UI_DIR` is a static reference to the compiled tree.
-/// Test: `cargo build` produces a binary that, when run, serves `/ui` with
-/// the SPA shell. To regenerate: `make -C crates/trusty-search release-prep`.
-static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui-dist");
-
-/// Inject runtime configuration into index.html before serving.
-///
-/// Why: The browser needs to know (a) the daemon port (so it can reach
-/// the API at the right host:port even when the UI is opened directly via
-/// `file://` for local dev), and (b) whether the OpenRouter chat lane is
-/// enabled. We can't bake these in at compile time because they're chosen
-/// at runtime.
-/// What: Replaces the placeholder boot script with one that sets both
-/// globals before the bundle loads.
-/// Test: After serving, `view-source:` shows the correct port literal.
-fn inject_runtime_config(html: &str, port: u16, openrouter_enabled: bool) -> String {
-    let inject = format!(
-        "<script>\n\
-         window.__DAEMON_PORT__ = {};\n\
-         window.__OPENROUTER_ENABLED__ = {};\n\
-         </script>",
-        port,
-        if openrouter_enabled { "true" } else { "false" }
-    );
-    // Insert just before </head> so the inline script runs before the
-    // bundle. If </head> isn't found (shouldn't happen with vite output),
-    // prepend to keep behavior safe.
-    if let Some(idx) = html.find("</head>") {
-        let mut out = String::with_capacity(html.len() + inject.len());
-        out.push_str(&html[..idx]);
-        out.push_str(&inject);
-        out.push_str(&html[idx..]);
-        out
-    } else {
-        format!("{inject}{html}")
-    }
-}
-
-/// Serve `index.html` at `/ui`.
-pub async fn ui_index_handler(State(state): State<Arc<SearchAppState>>) -> Response {
-    serve_index(&state).await
-}
-
-/// Serve any file under `/ui/*path`, falling back to index.html for SPA
-/// routes that don't map to a real file.
-pub async fn ui_asset_handler(
-    State(state): State<Arc<SearchAppState>>,
-    AxumPath(path): AxumPath<String>,
-) -> Response {
-    // Strip leading slashes — include_dir paths are relative.
-    let trimmed = path.trim_start_matches('/');
-    if let Some(file) = UI_DIR.get_file(trimmed) {
-        let mime = mime_for(trimmed);
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, mime)
-            .header(header::CACHE_CONTROL, cache_control_for(trimmed))
-            .body(Body::from(file.contents()))
-            // Why: the builder only fails when an invalid status code or
-            // malformed header value is supplied. `StatusCode::OK` is a
-            // valid constant, and both `mime` and `cache_control_for` return
-            // `&'static str` literals verified at compile time — the builder
-            // cannot produce an error here. `expect` is correct; this is a
-            // genuine programmer-error invariant, not a runtime condition.
-            .expect("response builder fields are all valid static values");
-    }
-    // SPA fallback.
-    serve_index(&state).await
-}
-
-async fn serve_index(state: &SearchAppState) -> Response {
-    let Some(index_file) = UI_DIR.get_file("index.html") else {
-        return (
-            StatusCode::NOT_FOUND,
-            "UI assets not bundled — run `npm run build` in ui/ before `cargo build`.",
-        )
-            .into_response();
-    };
-    let html_bytes = index_file.contents();
-    let html = std::str::from_utf8(html_bytes).unwrap_or_default();
-    // #9214: the daemon binds no TCP port; `0` names none rather than `:7878`.
-    let port = state.daemon_port.unwrap_or(0);
-    let body = inject_runtime_config(html, port, state.openrouter_enabled);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(body))
-        // Why: the builder only fails on invalid status codes or malformed
-        // header values. `StatusCode::OK` is a compile-time constant and both
-        // header values are string literals — the builder cannot produce an
-        // error here. `expect` is the correct choice; this is a programmer-error
-        // invariant (the literals cannot change at runtime), not a recoverable
-        // condition.
-        .expect("response builder fields are all valid static values")
-}
-
-fn mime_for(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "map" => "application/json",
-        _ => "application/octet-stream",
-    }
-}
-
-fn cache_control_for(path: &str) -> &'static str {
-    // Vite hashes asset filenames, so /assets/* is safe to cache aggressively.
-    if path.starts_with("assets/") {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    }
-}
-
-// ── Chat endpoint ──────────────────────────────────────────────────────────
-
-/// Inbound payload for `POST /chat`.
+/// Inbound payload for `search.chat`.
 ///
 /// Why: The browser doesn't see the OpenRouter API key — the daemon proxies
 /// the request server-side using `OPENROUTER_API_KEY` from the environment.
@@ -172,8 +26,8 @@ fn cache_control_for(path: &str) -> &'static str {
 /// What: Caller supplies `index_id` (the collection to ground the question
 /// in), the new `message` (or `question`), optional prior `history`,
 /// optional `model` (default `anthropic/claude-haiku-4.5`), optional `top_k`
-/// (default 5), and optional `api_key`. The handler runs a search to gather
-/// context, then forwards a chat completion request to OpenRouter.
+/// (default 5), and optional `api_key`. [`chat_report`] runs a search to
+/// gather context, then forwards a chat completion request to the provider.
 /// Test: With `OPENROUTER_API_KEY` unset and no `api_key` in body →
 /// returns 503 + `{error}`. With both → uses env var.
 #[derive(Deserialize)]
@@ -211,43 +65,26 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-/// `POST /chat` — answer one grounded question, as a single JSON envelope.
+/// The answer `search.chat` serves (#6285 slice 5.6).
 ///
-/// Delegates to [`chat_report`] so `search.chat` cannot answer differently.
-pub async fn chat_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Json(req): Json<ChatRequest>,
-) -> Response {
-    match chat_report(&state, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
-/// The answer `POST /chat` serves, without the transport (#6285 slice 5.6).
-///
-/// Why: `search.chat` is the method the search UI dials once #6155 moves it into
-/// `trusty-console`, and the retire slice deletes the route this would otherwise
-/// be compared against. The provider resolution is the part that must not be
-/// re-implemented: it decides between the auto-detected local provider, a
-/// per-request `api_key`, and the daemon's env-configured OpenRouter key, and a
-/// second copy would let the two transports pick different providers for the
-/// same request.
+/// Why: `search.chat` is the method the search UI in `trusty-console` dials.
+/// The provider resolution is the part that must not be re-implemented: it
+/// decides between the auto-detected local provider, a per-request `api_key`,
+/// and the daemon's env-configured OpenRouter key.
 ///
 /// What: resolves the provider, searches `index_id` for grounding context,
-/// streams the completion, and collects the deltas into the one envelope both
-/// transports return — `{reply, answer, sources, model, provider}`. The stream
-/// is internal on both doors: HTTP never streamed this route, so neither does
-/// the socket (#6285 slice 5's streaming pair is reindex progress and the daemon
-/// status feed, not this).
+/// streams the completion, and collects the deltas into one envelope —
+/// `{reply, answer, sources, model, provider}`. The stream is internal: the
+/// socket answers one frame (#6285 slice 5's streaming pair is reindex progress
+/// and the daemon status feed, not this).
 ///
 /// # Errors
 ///
 /// `400` when neither `message` nor `question` carried text; `503` when no
 /// provider is configured at all; `502` when the provider failed or the stream
-/// reported an error; `500` when the collector task could not be joined. A
-/// search that fails is NOT an error — the question is answered without
-/// grounding context, exactly as the route always did.
+/// reported an error; `500` when the collector task could not be joined. The
+/// status becomes the JSON-RPC code. A search that fails is NOT an error — the
+/// question is answered without grounding context.
 ///
 /// Test: `an_empty_message_is_refused_identically_on_both_transports`,
 /// `chat_without_a_provider_is_refused_identically_on_both_transports`,
@@ -338,10 +175,9 @@ pub(crate) async fn chat_report(
         tool_calls: None,
     });
 
-    // 3. Stream from the provider and collect deltas. The HTTP response stays
-    //    a single JSON envelope (matching the prior `openrouter_chat`
-    //    contract) — the streaming abstraction is internal. SSE streaming to
-    //    the browser can be added later without breaking existing callers.
+    // 3. Stream from the provider and collect deltas. The answer stays a
+    //    single JSON envelope (matching the prior `openrouter_chat` contract);
+    //    the streaming abstraction is internal.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
     let provider_for_task = provider.clone();
     let stream_task =
@@ -394,47 +230,6 @@ pub(crate) async fn chat_report(
         "sources": sources,
         "model": model,
         "provider": provider.name(),
-    }))
-}
-
-/// GET /api/chat/providers — report provider availability + active choice.
-///
-/// Why: lets the Svelte UI (and CLI/MCP callers) show/hide the chat panel
-/// based on what's actually configured server-side. Mirrors the trusty-memory
-/// `/api/v1/chat/providers` shape so consumers can share UI code.
-/// What: probes Ollama (1s timeout) when `local_model.enabled`, checks for a
-/// non-empty OpenRouter key, and reports the active provider (lazily
-/// initialised — first call resolves it for the rest of the daemon's life).
-/// Test: integration tests build a fresh `SearchAppState` with neither
-/// provider configured and assert the endpoint returns a 200 + well-shaped
-/// JSON with `active: null`.
-pub async fn list_chat_providers(
-    State(state): State<Arc<SearchAppState>>,
-) -> Json<serde_json::Value> {
-    let ollama_available = if state.local_model.enabled {
-        trusty_common::auto_detect_local_provider(&state.local_model.base_url)
-            .await
-            .is_some()
-    } else {
-        false
-    };
-    let openrouter_available = !state.openrouter_api_key.is_empty();
-    let active = state.chat_provider().await.map(|p| p.name().to_string());
-    Json(serde_json::json!({
-        "providers": [
-            {
-                "name": "ollama",
-                "model": state.local_model.model,
-                "base_url": state.local_model.base_url,
-                "available": ollama_available,
-            },
-            {
-                "name": "openrouter",
-                "model": state.openrouter_model,
-                "available": openrouter_available,
-            }
-        ],
-        "active": active,
     }))
 }
 
@@ -503,45 +298,4 @@ async fn search_for_context(
         }));
     }
     Ok((out, sources))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Why: Verify the runtime config injection lands before </head> so the
-    /// inline globals execute before the bundle.
-    /// What: Inject into a minimal HTML and assert the script is present.
-    /// Test: this test.
-    #[test]
-    fn inject_runtime_config_inserts_before_head_close() {
-        let html = "<html><head><title>x</title></head><body></body></html>";
-        let out = inject_runtime_config(html, 7878, true);
-        let script_idx = out.find("__DAEMON_PORT__").expect("port global injected");
-        let head_close = out.find("</head>").expect("head close present");
-        assert!(script_idx < head_close, "script must be inside <head>");
-        assert!(out.contains("window.__OPENROUTER_ENABLED__ = true"));
-    }
-
-    #[test]
-    fn inject_runtime_config_handles_missing_head() {
-        let html = "<html><body></body></html>";
-        let out = inject_runtime_config(html, 1234, false);
-        assert!(out.starts_with("<script>"));
-        assert!(out.contains("window.__DAEMON_PORT__ = 1234"));
-    }
-
-    #[test]
-    fn mime_for_known_extensions() {
-        assert_eq!(mime_for("index.html"), "text/html; charset=utf-8");
-        assert_eq!(mime_for("a/b.js"), "application/javascript; charset=utf-8");
-        assert_eq!(mime_for("a/b.css"), "text/css; charset=utf-8");
-        assert_eq!(mime_for("nope"), "application/octet-stream");
-    }
-
-    #[test]
-    fn cache_control_assets_are_immutable() {
-        assert!(cache_control_for("assets/x.js").contains("immutable"));
-        assert_eq!(cache_control_for("index.html"), "no-cache");
-    }
 }

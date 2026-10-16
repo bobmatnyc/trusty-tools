@@ -1,23 +1,27 @@
-//! Integration tests for the typeahead endpoint and MCP tool (issue #1557).
+//! Tests for the `search.typeahead` core (issue #1557).
 //!
-//! Why: typeahead/autocomplete is a new capability that needs regression
-//! coverage for: (a) correct field population from `CodeChunk`, (b) empty-query
-//! short-circuit, (c) limit clamping, and (d) source-lane classification.
-//! ONNX-backed blended-mode tests are gated behind `#[ignore]` following the
-//! crate's existing convention.
+//! Why: typeahead/autocomplete needs regression coverage for: (a) correct
+//! field population from `CodeChunk`, (b) empty-query short-circuit, (c) limit
+//! clamping, and (d) source-lane classification. ONNX-backed blended-mode
+//! tests are gated behind `#[ignore]` following the crate's existing
+//! convention.
 //! What: each test stands up a minimal bare index, optionally adds a few
-//! fixture chunks via `CodeIndexer::index_file`, then calls the handler under
-//! test directly (not via a running HTTP server).
+//! fixture chunks via `CodeIndexer::index_file`, then calls
+//! [`typeahead_report`] directly. #9535 moved this file in from
+//! `tests/typeahead.rs` when the HTTP handler it called was deleted.
 //! Test: this file.
 
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use trusty_common::embedder::MockEmbedder;
-use trusty_search::core::embed::Embedder;
-use trusty_search::core::indexer::{CodeIndexer, TypeaheadHit};
-use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use trusty_search::core::store::{UsearchStore, VectorStore};
-use trusty_search::service::server::{SearchAppState, TypeaheadParamsForTests};
+
+use super::typeahead::{typeahead_report, TypeaheadParams};
+use super::SearchAppState;
+use crate::core::embed::Embedder;
+use crate::core::indexer::{CodeIndexer, TypeaheadHit};
+use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+use crate::core::store::{UsearchStore, VectorStore};
 
 /// Build a minimal bare-index state wired with a `MockEmbedder` and one
 /// registered index.
@@ -54,33 +58,26 @@ async fn make_state_with_index(
     (state, indexer_arc, tmp)
 }
 
-// ── Typeahead handler ─────────────────────────────────────────────────────────
+// ── Typeahead core ─────────────────────────────────────────────────────────
 
-/// Why: the typeahead handler must return HTTP 200 with an empty `hits` list
-/// for an empty `q` parameter without touching the index at all.
-/// What: calls the handler with `q = ""` and asserts `hits` is empty and
+/// Why: the typeahead core must answer with an empty `hits` list for an
+/// empty `q` parameter without touching the index at all.
+/// What: calls the core with `q = ""` and asserts `hits` is empty and
 /// `mode` is `"lexical"`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_empty_query_returns_empty_list() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, _idx, _tmp) = make_state_with_index("empty-q-idx").await;
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: String::new(),
         limit: None,
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("empty-q-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "empty-q-idx", params).await;
 
-    let axum::Json(resp) = result.expect("handler must succeed on empty q");
+    let resp = result.expect("handler must succeed on empty q");
     assert!(resp.hits.is_empty(), "empty q must return zero hits");
     assert_eq!(resp.mode, "lexical");
     assert_eq!(resp.latency_ms, 0, "empty-q fast path must be 0 ms");
@@ -88,28 +85,21 @@ async fn typeahead_empty_query_returns_empty_list() {
 
 /// Why: whitespace-only `q` should be treated like empty — do not hit the
 /// index with whitespace and risk returning noise.
-/// What: calls the handler with `q = "   "` and asserts empty result.
+/// What: calls the core with `q = "   "` and asserts empty result.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_whitespace_query_returns_empty_list() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, _idx, _tmp) = make_state_with_index("ws-q-idx").await;
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "   ".to_string(),
         limit: None,
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("ws-q-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "ws-q-idx", params).await;
 
-    let axum::Json(resp) = result.expect("handler must succeed");
+    let resp = result.expect("handler must succeed");
     assert!(resp.hits.is_empty(), "whitespace q must return zero hits");
 }
 
@@ -119,10 +109,8 @@ async fn typeahead_whitespace_query_returns_empty_list() {
 /// `limit = 999` — the response must have at most 25 hits.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_limit_clamped_to_max() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, idx_arc, _tmp) = make_state_with_index("clamp-idx").await;
 
     // Index several functions so the search engine has results.
@@ -136,19 +124,14 @@ async fn typeahead_limit_clamped_to_max() {
         }
     }
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "fn".to_string(),
         limit: Some(999),
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("clamp-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "clamp-idx", params).await;
 
-    let axum::Json(resp) = result.expect("handler must succeed");
+    let resp = result.expect("handler must succeed");
     assert!(
         resp.hits.len() <= 25,
         "hits must be clamped to MAX_TYPEAHEAD_LIMIT=25; got {}",
@@ -162,10 +145,8 @@ async fn typeahead_limit_clamped_to_max() {
 /// response must have at most 2 hits.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_respects_smaller_limit() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, idx_arc, _tmp) = make_state_with_index("small-limit-idx").await;
 
     {
@@ -181,19 +162,14 @@ async fn typeahead_respects_smaller_limit() {
         }
     }
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "authenticate".to_string(),
         limit: Some(2),
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("small-limit-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "small-limit-idx", params).await;
 
-    let axum::Json(resp) = result.expect("handler must succeed");
+    let resp = result.expect("handler must succeed");
     assert!(
         resp.hits.len() <= 2,
         "hits must be <= requested limit 2; got {}",
@@ -208,10 +184,8 @@ async fn typeahead_respects_smaller_limit() {
 /// `source` is one of the three valid tags.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_lexical_returns_hits_with_required_fields() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, idx_arc, _tmp) = make_state_with_index("fields-idx").await;
 
     {
@@ -224,19 +198,14 @@ async fn typeahead_lexical_returns_hits_with_required_fields() {
         .expect("index_file");
     }
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "authenticate".to_string(),
         limit: Some(6),
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("fields-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "fields-idx", params).await;
 
-    let axum::Json(resp) = result.expect("handler must succeed");
+    let resp = result.expect("handler must succeed");
     assert_eq!(resp.mode, "lexical");
 
     // The BM25/lexical search on a tiny index may or may not return results.
@@ -263,24 +232,16 @@ async fn typeahead_lexical_returns_hits_with_required_fields() {
 /// What: calls typeahead with a non-existent index id and asserts 404.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn typeahead_unknown_index_returns_404() {
-    use axum::extract::{Path, Query, State};
-    use axum::http::StatusCode;
-    use trusty_search::service::server::typeahead_handler_for_tests;
-
     let (state, _idx, _tmp) = make_state_with_index("real-idx").await;
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "fn".to_string(),
         limit: None,
         mode: None,
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("does-not-exist".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "does-not-exist", params).await;
 
     let (status, _) = result.expect_err("missing index must return Err");
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -292,6 +253,7 @@ async fn typeahead_unknown_index_returns_404() {
 /// What: exercises every documented `match_reason` value.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn classify_source_covers_all_known_match_reasons() {
     assert_eq!(TypeaheadHit::classify_source("hybrid+kg"), "kg");
     assert_eq!(TypeaheadHit::classify_source("kg"), "kg");
@@ -310,13 +272,12 @@ fn classify_source_covers_all_known_match_reasons() {
 /// What: indexes a fixture, calls typeahead with `mode=blended`, and asserts
 /// the response has results; also asserts `source` values are one of the three
 /// valid tags.
-/// Test: `cargo test -p trusty-search --test integration typeahead:: -- --include-ignored`.
+/// Test: `cargo test -p trusty-search --lib typeahead_tests:: -- --include-ignored`.
 #[tokio::test]
+#[serial_test::parallel]
 #[ignore = "loads the ONNX embedder; run by the pre-publish ignored-tests gate"]
 async fn typeahead_blended_mode_returns_results_tagged_by_source() {
-    use axum::extract::{Path, Query, State};
-    use trusty_search::core::indexer::typeahead::TypeaheadMode;
-    use trusty_search::service::server::typeahead_handler_for_tests;
+    use crate::core::indexer::typeahead::TypeaheadMode;
 
     let (state, idx_arc, _tmp) = make_state_with_index("blended-idx").await;
 
@@ -330,19 +291,14 @@ async fn typeahead_blended_mode_returns_results_tagged_by_source() {
         .expect("index_file");
     }
 
-    let params = TypeaheadParamsForTests {
+    let params = TypeaheadParams {
         q: "authenticate".to_string(),
         limit: Some(6),
         mode: Some(TypeaheadMode::Blended),
     };
-    let result = typeahead_handler_for_tests(
-        State(Arc::clone(&state)),
-        Path("blended-idx".to_string()),
-        Query(params),
-    )
-    .await;
+    let result = typeahead_report(&state, "blended-idx", params).await;
 
-    let axum::Json(resp) = result.expect("blended typeahead must succeed");
+    let resp = result.expect("blended typeahead must succeed");
     assert_eq!(resp.mode, "blended");
     // Blended mode should return at least one hit when there's matching content.
     assert!(!resp.hits.is_empty(), "blended mode must return results");

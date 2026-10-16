@@ -6,8 +6,8 @@
 //! module is the one door through which a root joins an index, so the
 //! one-index-per-tree rules (#2336, #3993, #4289) are re-asked here, for
 //! every root, before it does.
-//! What: [`add_index_roots_report`] (the transport-neutral core behind the
-//! HTTP route and the `search.index.roots.add` socket method),
+//! What: [`add_index_roots_report`] (the core behind the
+//! `search.index.roots.add` socket method),
 //! [`admit_create_roots`] (the same gate for `POST /indexes {roots}`) and
 //! [`refuse_unapplied_roots`] (an existing id never silently drops `roots`).
 //! Test: `tests_7434_roots.rs`.

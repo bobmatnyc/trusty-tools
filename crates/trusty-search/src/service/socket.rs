@@ -33,12 +33,9 @@
 //! readings were wrong. trusty-mpm's TUI drives the stop route from its `[X]`
 //! key (found by PR #6388's implementation pass), and #6155 moves the search UI
 //! — chat panel included — into `trusty-console`, which reaches this daemon over
-//! the socket. Two routes remain deliberately HTTP-only:
-//! `GET /api/chat/providers` and `POST /upgrade` are the same bucket: neither
-//! has an observed cross-process caller, only the browser-side UI shell reads
-//! `/api/chat/providers` today, and a method is added when a socket consumer
-//! actually needs one — not preemptively.
-//! `GET /metrics` is Prometheus text, which is HTTP-shaped by nature.
+//! the socket. `GET /api/chat/providers`, `POST /upgrade` and `GET /metrics`
+//! got no method: none had an observed cross-process caller, and #9535 deleted
+//! all three routes. A method is added when a socket consumer needs one.
 //! `GET /indexes/{id}/communities` is a DEAD route — `trusty-common`'s monitor
 //! calls it and the daemon has never served it — and is a pre-existing bug with
 //! its own ticket, not a gap this surface owes a method for.

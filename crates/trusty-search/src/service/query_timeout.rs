@@ -1,34 +1,24 @@
-//! Per-request deadline middleware scoped to interactive search/query routes
-//! (issue #907).
+//! Per-request deadline for the interactive query methods (issue #907).
 //!
-//! Why: Interactive search queries (`/search`, `/grep`, `/indexes/{id}/search`,
-//! etc.) must return within a bounded time — never hang. Long-running operations
-//! like `POST /indexes/{id}/reindex` and `POST /indexes/{id}/index-file` are
-//! explicitly excluded so a valid reindex is never cut off by this timer.
+//! Why: Interactive search queries (`search.query`, `search.grep`, etc.) must
+//! return within a bounded time — never hang. Long-running operations like
+//! reindex and index-file are explicitly excluded so a valid reindex is never
+//! cut off by this timer.
 //!
-//! What: The `apply_query_timeout` axum middleware wraps the downstream
-//! handler in `tokio::time::timeout`. On expiry it returns HTTP 408 Request
-//! Timeout with a JSON error body. The deadline is tunable via
-//! `TRUSTY_QUERY_TIMEOUT_SECS` (default 30 s).
-//!
-//! The middleware reads a `QueryTimeoutConfig` extension that is installed on
-//! the router, so the timeout value can be overridden per-test by injecting a
-//! short deadline without touching global env.
+//! What: [`with_query_deadline`] wraps a query future in `tokio::time::timeout`.
+//! On expiry it refuses with `query_timeout` (a 408 status). The deadline lives
+//! in a `QueryTimeoutConfig` on `SearchAppState`, tunable via
+//! `TRUSTY_QUERY_TIMEOUT_SECS` (default 30 s); tests inject a short one.
+//! #9535 deleted the axum middleware that wrapped it.
 //!
 //! Config:
 //!   - `TRUSTY_QUERY_TIMEOUT_SECS` (default 30) — max wall-clock seconds for
-//!     a single search/grep request before a 408 is returned.
+//!     a single search/grep request before it is refused.
 //!
 //! Test: `query_timeout_returns_408_when_handler_stalls`,
 //!        `query_timeout_passes_through_fast_response`.
 
-use axum::{
-    body::Body,
-    extract::Extension,
-    http::{Request, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Json, Response},
-};
+use axum::http::StatusCode;
 use std::sync::Arc;
 
 /// Default wall-clock timeout for interactive query routes (issue #907).
@@ -52,12 +42,11 @@ pub fn query_timeout_secs(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_QUERY_TIMEOUT_SECS)
 }
 
-/// Shared timeout config installed as an axum `Extension` on the interactive
-/// query router subtree.
+/// Shared timeout config, held once on `SearchAppState`.
 ///
-/// Why: storing the deadline in a router extension (rather than reading env
-/// vars inside the middleware function) lets tests inject a tiny timeout
-/// without touching global state or process-wide caches.
+/// Why: storing the deadline in state (rather than reading env vars per call)
+/// lets tests inject a tiny timeout without touching global state or
+/// process-wide caches.
 /// What: a single `Duration` wrapped in `Arc` so it can be cloned cheaply
 /// into every request.
 /// Test: `query_timeout_returns_408_when_handler_stalls` injects a 50 ms
@@ -111,25 +100,11 @@ pub fn timeout_refusal() -> (StatusCode, serde_json::Value) {
     )
 }
 
-/// Build the response body for a query-timeout expiry (HTTP 408).
-///
-/// Why: a consistent JSON error shape lets clients distinguish a query timeout
-/// (408) from a server error (500) or a busy-queue rejection (503).
-/// What: returns `{"error":"query_timeout","message":"…"}` with status 408.
-/// Test: `query_timeout_returns_408_when_handler_stalls`.
-fn timeout_response() -> Response {
-    let (status, body) = timeout_refusal();
-    (status, Json(body)).into_response()
-}
-
 /// Run `fut` under this daemon's interactive-query deadline (#6285 slice 3).
 ///
-/// Why: [`apply_query_timeout`] is an axum middleware, so a second transport
-/// serving the same query methods could not reach it — a socket search against
-/// a stalled embedder would hang with nothing to cancel it, while the HTTP
-/// route answered 408. This is the deadline with the axum shape stripped off,
-/// including the counter, so an expiry looks the same to an operator whichever
-/// door it arrived at.
+/// Why: a socket search against a stalled embedder would otherwise hang with
+/// nothing to cancel it. This is the deadline with no transport shape, so every
+/// query method applies the same one.
 /// What: `tokio::time::timeout` around `fut`; on expiry the future is dropped
 /// (cancelling it) and [`timeout_refusal`] is returned.
 /// Test: `query_timeout_returns_408_when_handler_stalls`,
@@ -154,127 +129,54 @@ where
     }
 }
 
-/// Axum middleware: enforce a per-request wall-clock deadline on interactive
-/// query routes (issue #907).
-///
-/// Why: without this, a stalled embedder sidecar call can block the search
-/// handler forever. The middleware wraps the downstream handler future in
-/// `tokio::time::timeout`; on expiry the handler is cancelled and the caller
-/// receives HTTP 408 immediately.
-/// What: reads `QueryTimeoutConfig` from the request extensions (installed by
-/// the router builder), runs `tokio::time::timeout(cfg.timeout, next.run(req))`,
-/// and returns either the real response or a 408 body.
-/// Test: `query_timeout_returns_408_when_handler_stalls` proves 408 fires;
-/// `query_timeout_passes_through_fast_response` proves normal paths return 200.
-pub async fn apply_query_timeout(
-    Extension(cfg): Extension<Arc<QueryTimeoutConfig>>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    // #6285 slice 3: the deadline itself is `with_query_deadline`, shared with
-    // the socket so one expiry decision serves both transports.
-    match with_query_deadline(&cfg, next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => timeout_response(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-        routing::post,
-        Router,
-    };
     use std::time::Duration;
-    use tower::ServiceExt;
 
-    fn query_router_with_timeout(cfg: Arc<QueryTimeoutConfig>) -> Router {
-        Router::new()
-            .route(
-                "/search",
-                post(|| async {
-                    // Handler completes immediately — normal fast path.
-                    "ok"
-                }),
-            )
-            .route(
-                "/search_slow",
-                post(|| async {
-                    // Handler stalls — simulates a blocked embedder call.
-                    std::future::pending::<&str>().await
-                }),
-            )
-            .route_layer(axum::middleware::from_fn(apply_query_timeout))
-            .layer(Extension(cfg))
-    }
-
-    /// Verify the happy path: a fast handler returns 200, not 408.
+    /// Verify the happy path: a fast query answers, not a 408.
     ///
-    /// Why: the timeout middleware must not break normal queries.
-    /// What: builds a router with a 100 ms deadline; the `/search` handler
-    /// returns immediately; assert the response is 200.
+    /// Why: the deadline must not break normal queries.
+    /// What: a 100 ms deadline around a future that completes immediately;
+    /// assert its value comes back.
     /// Test: this test.
     #[tokio::test]
     async fn query_timeout_passes_through_fast_response() {
         let cfg = QueryTimeoutConfig::from_duration(Duration::from_millis(100));
-        let app = query_router_with_timeout(cfg);
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/search")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let answered = with_query_deadline(&cfg, async { "ok" }).await;
 
         assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "fast query must return 200, not be cut off by timeout"
+            answered.expect("fast query must not be cut off by the deadline"),
+            "ok"
         );
     }
 
-    /// Prove that a stalled handler triggers HTTP 408 within the deadline.
+    /// Prove that a stalled query is refused with 408 within the deadline.
     ///
     /// Why: this is the invariant from issue #907 — interactive queries must
     /// never hang; the timeout MUST fire and return a clean error.
-    /// What: handler stalls with `pending()`; middleware timeout of 50 ms
-    /// fires; response must be 408 within ~1 s wall clock.
+    /// What: the future stalls with `pending()`; the 50 ms deadline fires; the
+    /// refusal must be 408 within ~1 s wall clock.
     /// Test: this test.
     #[tokio::test]
     async fn query_timeout_returns_408_when_handler_stalls() {
         let cfg = QueryTimeoutConfig::from_duration(Duration::from_millis(50));
-        let app = query_router_with_timeout(cfg);
 
         let start = std::time::Instant::now();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/search_slow")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let refused = with_query_deadline(&cfg, std::future::pending::<&str>()).await;
         let elapsed = start.elapsed();
 
+        let (status, body) = refused.expect_err("a stalled query must be refused");
         assert_eq!(
-            resp.status(),
+            status,
             StatusCode::REQUEST_TIMEOUT,
-            "stalled query must receive 408, not hang (elapsed: {:?})",
-            elapsed,
+            "stalled query must receive 408, not hang (elapsed: {elapsed:?})",
         );
+        assert_eq!(body["error"], "query_timeout");
         assert!(
             elapsed < Duration::from_secs(2),
-            "408 must arrive before the 2 s wall-clock guard (elapsed: {:?})",
-            elapsed,
+            "408 must arrive before the 2 s wall-clock guard (elapsed: {elapsed:?})",
         );
     }
 }

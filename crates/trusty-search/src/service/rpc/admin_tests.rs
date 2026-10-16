@@ -35,7 +35,7 @@ use crate::service::orphan_report::registry_orphans_report;
 use crate::service::persistence::{self, PersistedIndex};
 use crate::service::rpc::admin::{self, LogsTail};
 use crate::service::rpc::error::CODE_NOT_FOUND;
-use crate::service::rpc::test_support::{http_body, params};
+use crate::service::rpc::test_support::{http_body, params, rpc_err, rpc_ok};
 use crate::service::rpc::RestoreLimits;
 use crate::service::server::tests_components::IsolatedDataDir;
 use crate::service::server::{
@@ -69,42 +69,15 @@ fn routers(ids: &[&str]) -> (Arc<SearchAppState>, RpcRouter) {
 
 // ------------------------------------------------------------- transports ---
 
-/// The `GET /logs/tail` page for `query`, decoded as the socket decodes it.
+/// The page `logs_tail_report` serves for `query`, decoded as the socket
+/// decodes it.
 ///
 /// #9535: `Option<LogsTail>` through [`LogsTail::into_report_params`] is the
-/// one decode production runs; the axum `Query` extractor is test-only.
-fn logs_tail(state: &Arc<SearchAppState>, query: serde_json::Value) -> serde_json::Value {
+/// one decode production runs, so these tests compare the socket against its
+/// own decode and the core, not against an HTTP route.
+fn logs_tail_from_core(state: &Arc<SearchAppState>, query: serde_json::Value) -> serde_json::Value {
     let decoded = LogsTail::into_report_params(params(query));
     http_body(Ok(logs_tail_report(state, &decoded)))
-}
-
-async fn dispatch(
-    rpc: &RpcRouter,
-    method: &str,
-    params: serde_json::Value,
-) -> trusty_common::uds::server::RpcResponse {
-    let frame = serde_json::to_vec(&serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
-    }))
-    .expect("encode the frame");
-    rpc.dispatch(&frame).await
-}
-
-async fn rpc_ok(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let response = dispatch(rpc, method, params).await;
-    assert!(
-        response.error.is_none(),
-        "{method} must answer a result: {:?}",
-        response.error
-    );
-    response.result.expect("a non-error frame carries a result")
-}
-
-async fn rpc_err(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> RpcError {
-    let response = dispatch(rpc, method, params).await;
-    response
-        .error
-        .unwrap_or_else(|| panic!("{method} must be refused; got {:?}", response.result))
 }
 
 /// Assert the socket's error frame is the HTTP refusal, rendered.
@@ -400,7 +373,7 @@ async fn logs_tail_over_the_socket_matches_the_http_body() {
         state.log_buffer.push(format!("line {i}"));
     }
 
-    let over_http = logs_tail(&state, serde_json::json!({ "n": 3 }));
+    let from_core = logs_tail_from_core(&state, serde_json::json!({ "n": 3 }));
     let over_socket = rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await;
 
     assert_eq!(
@@ -408,7 +381,7 @@ async fn logs_tail_over_the_socket_matches_the_http_body() {
         Some(3),
         "n must bound the page: {over_socket}"
     );
-    assert_eq!(over_socket, over_http);
+    assert_eq!(over_socket, from_core);
 }
 
 /// Why: the clamp lives in the core precisely so it cannot be skipped by
@@ -428,14 +401,17 @@ async fn logs_tail_clamps_n_on_the_socket_too() {
     let huge = serde_json::json!({ "n": 10_000_000 });
     assert_eq!(
         rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, huge.clone()).await,
-        logs_tail(&state, huge),
+        logs_tail_from_core(&state, huge),
     );
 
     // Absent: the socket must reach the route's own default, not `usize`'s zero.
     // The planted buffer holds 3 lines, so a default of 0 (clamped to 1) fails.
     let defaulted = rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::Value::Null).await;
     assert_eq!(defaulted["lines"].as_array().map(Vec::len), Some(3));
-    assert_eq!(defaulted, logs_tail(&state, serde_json::json!({})));
+    assert_eq!(
+        defaulted,
+        logs_tail_from_core(&state, serde_json::json!({}))
+    );
 
     // `Default` is pinned to the serde default the route's `?n=` absence takes.
     assert_eq!(
@@ -460,7 +436,7 @@ async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
         state.log_buffer.push(format!("line {i}"));
     }
 
-    // #9535: the decode `logs_tail` runs is the socket's own — `Option<LogsTail>`
+    // #9535: the decode `logs_tail_from_core` runs is the socket's own — `Option<LogsTail>`
     // — so it must refuse a non-numeric `n` before any core is reached. The loop
     // below then proves the router answers that refusal as `invalid_params`.
     assert!(
@@ -484,7 +460,7 @@ async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
     // same page the HTTP route serves for the same request.
     assert_eq!(
         rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await,
-        logs_tail(&state, serde_json::json!({ "n": 3 })),
+        logs_tail_from_core(&state, serde_json::json!({ "n": 3 })),
     );
 }
 
