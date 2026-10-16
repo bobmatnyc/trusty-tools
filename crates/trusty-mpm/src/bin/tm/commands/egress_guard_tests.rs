@@ -159,14 +159,11 @@ fn egress_hook_timeout_exceeds_the_guard_budget() {
     use crate::commands::hook_stdin::PM_GUARD_STDIN_TIMEOUT;
     use crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
     use trusty_mpm::core::channels_readiness::HOOK_LOAD_LIMIT;
-    use trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT;
     use trusty_mpm::core::standalone::hooks::egress::EGRESS_GUARD_TIMEOUT_SECS;
 
-    let budget = GATEWAY_PROBE_TIMEOUT
-        + PM_GUARD_STDIN_TIMEOUT
-        + VERDICT_QUERY_TIMEOUT
-        + HOOK_LOAD_LIMIT
-        + AUDIT_POST_TIMEOUT;
+    // #6288: no console-gateway probe precedes dispatch any more.
+    let budget =
+        PM_GUARD_STDIN_TIMEOUT + VERDICT_QUERY_TIMEOUT + HOOK_LOAD_LIMIT + AUDIT_POST_TIMEOUT;
     let registered = std::time::Duration::from_secs(EGRESS_GUARD_TIMEOUT_SECS);
     assert!(
         registered > budget,

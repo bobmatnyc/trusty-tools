@@ -54,14 +54,15 @@ pub(crate) async fn project(
     match action {
         ProjectAction::Init { dir } => {
             let path = resolve_dir(dir)?;
-            let body: serde_json::Value = client
-                .post(format!("{url}/projects"))
-                .json(&serde_json::json!({ "path": path }))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let body: serde_json::Value =
+                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                    .post("/projects")
+                    .json(&serde_json::json!({ "path": path }))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
             let report = scaffold_project_dir(&path)?;
             for line in &report {
                 println!("  {line}");
@@ -78,8 +79,8 @@ pub(crate) async fn project(
         }
         ProjectAction::Info { dir } => {
             let path = resolve_dir(dir)?;
-            let resp = client
-                .get(format!("{url}/projects/current"))
+            let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                .get("/projects/current")
                 .query(&[("path", path.to_string_lossy().as_ref())])
                 .send()
                 .await?;

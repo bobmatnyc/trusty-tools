@@ -124,11 +124,9 @@ pub(crate) async fn session(
             // #1392: the coordinator TUI is `tm session tui` (formerly the
             // top-level `tm coordinator-tui`). It polls the daemon live, so its
             // `run` is async and runs on the tokio runtime like `tui::run`.
-            // `resolve_daemon_url` honours an explicit `--url`, then the lock
-            // file, then the default — so we resolve from this subcommand's own
-            // `--url`/`TRUSTY_MPM_URL` flag rather than the dispatcher's `url`.
-            // #9556: an explicit `--url` / `TRUSTY_MPM_URL` is pinned.
-            let client = trusty_mpm::tui::client_for(tui_url.as_deref());
+            // #6288: the daemon socket; this subcommand's own `--url` gets the
+            // shared Q3 rule (loopback ignored, remote refused).
+            let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
             trusty_mpm::tui::coordinator::run_with_client(client, interval_ms).await?;
         }
         SessionAction::Clean { dir } => {

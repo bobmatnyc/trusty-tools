@@ -8,12 +8,13 @@
 //! binary — including the env short-circuits, the native sub-agent `agent_id`
 //! exemption, and fail-open behaviour Claude Code will actually depend on.
 //! This file closes that gap.
-//! What: runs the built `tm` binary as `tm --url http://127.0.0.1:1 hook
-//! --pm-guard` with a `PreToolUse` stdin payload, then asserts the printed
+//! What: runs the built `tm` binary as `tm hook --pm-guard` with a
+//! `PreToolUse` stdin payload, then asserts the printed
 //! `hookSpecificOutput.permissionDecision` (or that nothing is printed, meaning
-//! ALLOW). The daemon URL is pointed at an unreachable address so the
-//! best-effort audit POST on the deny path fails fast without a real daemon —
-//! proving the deny still emits regardless.
+//! ALLOW). #6288: `TRUSTY_MPM_SOCKET` names an absent socket unless a test
+//! stands up a mock daemon socket, so the best-effort audit post on the deny
+//! path fails fast without a real daemon — proving the deny still emits
+//! regardless.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 //!
 //! Note: the deny JSON shape asserted below
@@ -135,8 +136,10 @@ fn spawn_pm_guard(
     // #7568: `tm_command_in` is also what keeps the child off the operator's
     // own `~/.trusty-mpm`.
     let mut command = common::tm_command_in(default_hook_home());
+    // #6288: `url` is a daemon socket locator; anything else reaches no daemon.
+    common::socket::aim(&mut command, url);
     command
-        .args(["--url", url, "hook", "--pm-guard"])
+        .args(["hook", "--pm-guard"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
@@ -1913,71 +1916,27 @@ enum MockAnswer {
     Silent,
 }
 
-/// One HTTP mock that serves connections in a loop.
+/// One daemon-socket mock that serves connections in a loop (#6288).
 ///
 /// Why: a one-shot listener is consumed by the first call; this serves every
 /// connection, which is what a daemon does.
-/// What: binds an ephemeral port; answers every request per `answer`, after
-/// publishing its body on the capture channel. The accept loop runs on a
-/// detached thread and ends with the test binary.
+/// What: a mock daemon socket; answers every request per `answer` (an HTTP
+/// status and body mapped onto the socket's frame), after publishing its
+/// params — the body the HTTP route took — on the capture channel.
 // #8261: round 4 — the builder-slot branch is gone; the guard never asks it.
 fn spawn_routed_mock(answer: MockAnswer) -> (String, CapturedRequest) {
-    use std::io::Read;
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("addr"));
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok((mut socket, _)) = listener.accept() {
-            // Read until the body is complete: `Content-Length` bounds it, and a
-            // single `read` is not guaranteed to return the whole request.
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            let request = loop {
-                match socket.read(&mut buf) {
-                    Ok(0) | Err(_) => break None,
-                    Ok(n) => raw.extend_from_slice(&buf[..n]),
-                }
-                let text = String::from_utf8_lossy(&raw).to_string();
-                let Some((head, rest)) = text.split_once("\r\n\r\n") else {
-                    continue;
-                };
-                let len: usize = head
-                    .lines()
-                    .find_map(|l| {
-                        l.strip_prefix("content-length: ")
-                            .or(l.strip_prefix("Content-Length: "))
-                    })
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(0);
-                if rest.len() >= len {
-                    break Some((head.to_string(), rest.to_string()));
-                }
-            };
-            let Some((_head, posted)) = request else {
-                continue;
-            };
-            let _ = tx.send(posted);
-            match answer {
-                MockAnswer::Http(status_line, body) => {
-                    let _ = socket.write_all(http_response(status_line, body).as_bytes());
-                }
-                // The guard's total budget is 2 s; this outlives it.
-                MockAnswer::Silent => std::thread::sleep(std::time::Duration::from_secs(10)),
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (url, _frames) = common::socket::spawn_mock(move |frame| {
+        let _ = tx.send(frame["params"].to_string());
+        match answer {
+            MockAnswer::Http(status_line, body) => {
+                common::socket::Reply::Frame(common::socket::frame_for_http(status_line, body))
             }
+            // The guard's total budget is 2 s; the mock outlives it.
+            MockAnswer::Silent => common::socket::Reply::Silent,
         }
     });
     (url, CapturedRequest(rx))
-}
-
-/// One HTTP/1.1 response with a bounded body and no keep-alive.
-fn http_response(status_line: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
 }
 
 /// The request body one [`spawn_capturing_writers_mock`] received.
@@ -1997,7 +1956,7 @@ impl CapturedRequest {
             .recv_timeout(std::time::Duration::from_secs(5))
             .ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&raw)
-            .unwrap_or_else(|e| panic!("the guard must POST valid JSON: {e}: {raw}"));
+            .unwrap_or_else(|e| panic!("the guard must send valid JSON: {e}: {raw}"));
         Some(parsed["payload"].clone())
     }
 }
@@ -2200,45 +2159,58 @@ fn pm_guard_warns_when_no_daemon_answers_the_claim() {
 /// thing under test. This stands up `delegation_routes::router()` over a real
 /// [`DaemonState`], which is what actually holds the claim.
 ///
-/// What: binds an ephemeral port, serves the delegation sub-router behind a
-/// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
-/// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
-/// immediately instead of waiting on a barrier no one else will reach. Returns
-/// the base URL and the temp dir backing the hermetic state. An `expected` of 1
-/// releases every request on arrival: the same router with no race held open.
-fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
-    use std::future::IntoFuture;
+/// What (#6288): serves a real [`DaemonState`] on its socket and fronts it
+/// with a proxy socket that holds every `mpm.delegation.shared_tree_dispatch`
+/// frame at a [`tokio::sync::Barrier`] before forwarding it — matched requests
+/// only, so the deny path's best-effort audit post goes straight through
+/// instead of waiting on a barrier no one else will reach. Returns the proxy's
+/// locator and what keeps both sockets alive. An `expected` of 1 releases
+/// every request on arrival: the same daemon with no race held open.
+async fn serve_delegation_router_behind_a_barrier(
+    expected: usize,
+) -> (String, (tempfile::TempDir, common::socket::DaemonSocket)) {
     use std::sync::Arc;
 
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
+    use trusty_mpm::daemon::state::DaemonState;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    let daemon = common::socket::serve_state(state).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(expected));
 
-    let app = delegation_routes::router()
-        .route_layer(axum::middleware::from_fn(
-            move |req: axum::extract::Request, next: axum::middleware::Next| {
-                let barrier = Arc::clone(&barrier);
-                async move {
+    let proxy = common::socket::socket_path();
+    let listener = trusty_common::uds::bind_hardened(&proxy).expect("bind the proxy socket");
+    let upstream = daemon.path.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (barrier, upstream) = (Arc::clone(&barrier), upstream.clone());
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                if line.contains("mpm.delegation.shared_tree_dispatch") {
                     // Barrier passed: every guard's claim has reached the
                     // daemon and none has been served. This is the exact state
                     // the race needs; only the daemon's own critical section
                     // decides what happens next.
                     barrier.wait().await;
-                    next.run(req).await
                 }
-            },
-        ))
-        .with_state(state);
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.set_nonblocking(true).expect("nonblocking");
-    let addr = listener.local_addr().expect("addr");
-    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
-    tokio::spawn(axum::serve(listener, app).into_future());
-    (format!("http://{addr}"), dir)
+                let Ok(real) = tokio::net::UnixStream::connect(&upstream).await else {
+                    return;
+                };
+                let mut real = BufReader::new(real);
+                let _ = real.get_mut().write_all(line.as_bytes()).await;
+                let mut answer = String::new();
+                let _ = real.read_line(&mut answer).await;
+                let _ = reader.get_mut().write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    (common::socket::locator(&proxy), (dir, daemon))
 }
 
 /// Run one throwaway `tm hook --pm-guard` so the next exec is not the cold one
@@ -2299,7 +2271,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // guard still admits at all, so a guard that denies everything cannot pass.
     // `prewarm_pm_guard_binary` and forking both children back to back keep the
     // race itself exercised on an idle machine, where exactly one is admitted.
-    let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
+    let (url, _dir) = serve_delegation_router_behind_a_barrier(2).await;
     let cwd = tempfile::tempdir().expect("tempdir");
     prewarm_pm_guard_binary();
 
@@ -2359,7 +2331,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // many race children reached the barrier. `documentation` takes the same
     // shared-tree claim path but no builder slot, so the load-throttled builder
     // cap (#8261) cannot refuse it either.
-    let (lone_url, _lone_dir) = serve_delegation_router_behind_a_barrier(1);
+    let (lone_url, _lone_dir) = serve_delegation_router_behind_a_barrier(1).await;
     let lone_cwd = tempfile::tempdir().expect("tempdir");
     let lone = finish_pm_guard(spawn_pm_guard(
         UNISOLATED_DOCUMENTATION_DISPATCH,

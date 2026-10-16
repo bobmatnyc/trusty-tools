@@ -3,8 +3,8 @@
 //! Why: the forward and the daemon ingest are only proven by the real path —
 //! stdin JSON → the built `tm` binary → the real `POST /hooks` router and its
 //! `HookPost` deserialize — not by a capture stub.
-//! What: serves `daemon::api::router` on a loopback port, runs `tm --url <it>
-//! hook` with a Claude Code `Notification` payload, and asserts the daemon
+//! What: serves the daemon state on its socket (#6288), runs `tm hook` aimed
+//! at it with a Claude Code `Notification` payload, and asserts the daemon
 //! recorded a `Notification` and the configured inbox got one line. The
 //! failure paths — no target, a stuck target, a down daemon, a `TMUX_PANE`
 //! that is not a `%N` pane id — each exit 0.
@@ -12,7 +12,6 @@
 
 use crate::common;
 
-use std::future::IntoFuture;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -20,20 +19,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use trusty_mpm::core::hook::HookEvent;
-use trusty_mpm::daemon::api;
 use trusty_mpm::daemon::state::DaemonState;
 
 const PAYLOAD: &str = r#"{"session_id":"7f3c0000-0000-4000-8000-000000000001","transcript_path":"/tmp/t.jsonl","cwd":"/work/my-app","hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#;
 
-/// Serve the real router on an ephemeral loopback port; return its base URL.
-async fn serve(state: Arc<DaemonState>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(axum::serve(listener, api::router(state)).into_future());
-    format!("http://{addr}")
-}
-
-/// Run `tm --url <url> hook` with [`PAYLOAD`] on stdin, `inbox` (if any) as
+/// Run `tm hook` aimed at the daemon `url` locates (#6288: a socket
+/// locator, or anything else for no daemon) with [`PAYLOAD`] on stdin, `inbox` (if any) as
 /// the push target and `pane` (if any) as `TMUX_PANE`; return the output and
 /// the wall time.
 fn run_hook(
@@ -43,7 +34,8 @@ fn run_hook(
     pane: Option<&str>,
 ) -> (Output, Duration) {
     let mut cmd = common::tm_command_in(home);
-    cmd.args(["--url", url, "hook"])
+    common::socket::aim(&mut cmd, url);
+    cmd.args(["hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("CLAUDE_PROJECT_DIR")
@@ -80,7 +72,8 @@ async fn a_notification_reaches_the_daemon_and_the_inbox() {
     let home = tempfile::tempdir().unwrap();
     let inbox = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::with_root_isolated_managed(home.path().join("root")).await);
-    let url = serve(state.clone()).await;
+    let daemon = common::socket::serve_state(state.clone()).await;
+    let url = daemon.url.clone();
 
     let (out, _) = tokio::task::spawn_blocking({
         let (url, home, inbox) = (

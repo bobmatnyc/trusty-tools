@@ -191,79 +191,6 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// Is `url` the trusty-console gateway base (`http://<console>/api/mpm`)? (#8347)
-fn is_gateway_url(url: &str) -> bool {
-    url.trim_end_matches('/')
-        .ends_with(trusty_mpm::core::discovery::GATEWAY_PATH)
-}
-
-/// The prune-worktrees endpoint, addressed to the daemon itself (#8347).
-///
-/// Why: `tm` resolves its base URL gateway-first, so with the console running
-/// the request went to `http://<console>/api/mpm/api/v1/…`. The console proxy
-/// cuts every forwarded call at its 30 s client timeout, and a merged-PR survey
-/// runs for minutes, so the proxy answered 502 for a healthy daemon.
-/// What: joins `/api/v1/sessions/managed/prune-worktrees` onto `direct` when
-/// `url` is the gateway base, else onto `url`, with any trailing `/` removed.
-/// The result always carries exactly one `/api/` prefix.
-/// Test: `prune_worktrees_url_bypasses_the_gateway_prefix`.
-pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
-    let base = if is_gateway_url(url) { direct } else { url };
-    format!("{}{PRUNE_WORKTREES_PATH}", base.trim_end_matches('/'))
-}
-
-/// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
-/// #6288: also `socket_dispatch`'s test for an explicit `--url`.
-pub(crate) fn is_loopback_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
-/// The prune-worktrees endpoint this invocation may POST to (#8347).
-///
-/// Why: the console gateway cuts a long survey at its 30 s proxy timeout, so a
-/// gateway base must be bypassed. But the bypass resolves the LOCAL daemon, and
-/// a gateway on another host fronts a different daemon: redirecting there would
-/// run a destructive prune against the wrong fleet, which #1737 forbids.
-/// What: a non-gateway `url` is used as given. A gateway on a loopback host is
-/// replaced by `direct()` (lock file, then default), which must answer
-/// `GET /health` before anything is posted. A gateway on any other host is an
-/// error that names the daemon URL to pass instead.
-/// Test: `prune_endpoint_refuses_a_remote_gateway`,
-/// `prune_endpoint_resolves_a_loopback_gateway_to_the_daemon`,
-/// `prune_endpoint_errors_when_the_direct_daemon_does_not_answer`.
-pub(crate) async fn prune_endpoint(
-    client: &reqwest::Client,
-    url: &str,
-    direct: impl FnOnce() -> String,
-) -> anyhow::Result<String> {
-    if !is_gateway_url(url) {
-        return Ok(prune_worktrees_url(url, url));
-    }
-    anyhow::ensure!(
-        is_loopback_url(url),
-        "prune-worktrees will not run through the console gateway at {url}: it cannot \
-         address that host's daemon directly, and it will not retarget the local one \
-         (#8347, #1737). Pass the daemon's own URL with --url or TRUSTY_MPM_URL."
-    );
-    let direct = direct();
-    // #8347: probe the daemon before a destructive POST is addressed to it.
-    let direct = trusty_mpm::core::resolve_daemon_url_probing(client, Some(&direct))
-        .await
-        .map_err(|e| anyhow::anyhow!("prune-worktrees bypasses the console gateway: {e}"))?;
-    Ok(prune_worktrees_url(url, &direct))
-}
-
 /// Turn a prune-worktrees transport failure into the operator's error (#7884).
 ///
 /// Why: a timed-out sweep printed reqwest's bare "error sending request for
@@ -332,21 +259,8 @@ pub(crate) async fn session_prune_worktrees(
     invoking_session: Option<String>,
     project_root: Option<String>,
 ) -> anyhow::Result<()> {
-    // #8347: a loopback gateway is bypassed for the local daemon; a remote one
-    // is refused rather than silently retargeted (#1737).
-    // #6288: a socket client never goes through the gateway, so only an HTTP
-    // client's base is checked.
-    let daemon = match daemon.socket_path() {
-        Some(_) => daemon.clone(),
-        None => {
-            let endpoint = prune_endpoint(daemon.http(), daemon.base_url(), || {
-                trusty_mpm::core::resolve_daemon_url(None)
-            })
-            .await?;
-            let base = endpoint.trim_end_matches(PRUNE_WORKTREES_PATH);
-            trusty_mpm::client::DaemonClient::with_client(daemon.http().clone(), base)
-        }
-    };
+    // #6288: no client resolves the console gateway any more, so the #8347
+    // gateway bypass is gone with it; the post goes to `daemon` as given.
     let post = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
         let mut request = daemon.post(PRUNE_WORKTREES_PATH).json(&serde_json::json!({
             "dry_run": dry_run,

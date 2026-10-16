@@ -20,6 +20,8 @@
 
 mod claude_config;
 mod config;
+// #6288: the `mpm.control.connect` frame stream.
+mod control_stream;
 pub mod deliverables;
 mod error;
 mod managed;
@@ -135,15 +137,17 @@ impl DaemonClient {
     /// the caller's client is cheap — `reqwest::Client` is an `Arc` internally,
     /// so cloning shares the same pool and settings.
     /// What: stores `base` and adopts the passed `client` verbatim as the HTTP
-    /// transport.
+    /// transport. #6288: a `unix:<path>` locator — what every client resolver
+    /// returns — makes a socket-only client instead, which never opens TCP.
     /// Test: `with_client_reuses_passed_client` asserts the base is stored and
-    /// the client is adopted.
+    /// the client is adopted; `a_socket_locator_builds_a_socket_only_client`.
     pub fn with_client(client: reqwest::Client, base: impl Into<String>) -> Self {
+        let base = base.into();
         Self {
-            base: base.into(),
+            socket: crate::core::socket_from_locator(&base),
+            base,
             http: client,
             home: None,
-            socket: None,
             base_url_pinned: false,
         }
     }
@@ -191,10 +195,12 @@ impl DaemonClient {
     /// in the lock file instead of being stuck on a stale URL and reporting
     /// "daemon unreachable" forever. The pooled `reqwest::Client` is kept; only
     /// the target address changes.
-    /// What: overwrites [`Self::base`] with `base`.
+    /// What: overwrites [`Self::base`] with `base`, and the socket with the one
+    /// a `unix:` locator names (#6288).
     /// Test: `set_base_url_repoints_client`.
     pub fn set_base_url(&mut self, base: impl Into<String>) {
         self.base = base.into();
+        self.socket = crate::core::socket_from_locator(&self.base);
     }
 
     /// Fetch the current session list from the daemon.

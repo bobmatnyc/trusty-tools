@@ -159,8 +159,8 @@ async fn spawn_managed(
         #[serde(default)]
         runtime: String,
     }
-    let resp: SpawnResp = client
-        .post(format!("{url}/api/v1/sessions/managed"))
+    let resp: SpawnResp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .post("/api/v1/sessions/managed")
         .json(&serde_json::json!({
             "repo_url": repo_url,
             "ref": base_ref,

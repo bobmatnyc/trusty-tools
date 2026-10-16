@@ -48,7 +48,7 @@ else's guard test too).
 |------|------------------|------------------------------|----------------------|
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
-| 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
+| 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) — **daemon bind only, pending removal**: since #6288 PR 1 no in-repo client dials it (they use the daemon socket); #6288 PR 2 retires the bind | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 

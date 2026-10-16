@@ -4,16 +4,15 @@
 //! trusty-mpm daemon must be a durable 24/7 process (it runs the supervisor, the
 //! reaper, the file watcher, and the Telegram bot — a stdio child would die with
 //! its client). So, exactly like `trusty-memory serve --stdio`, this is a thin
-//! PROXY: it ensures the HTTP daemon is up, then forwards every JSON-RPC request
-//! to the daemon's loopback `POST /rpc` and relays the response. It never holds
-//! daemon state itself; it exits when Claude Code closes the pipe, leaving the
-//! daemon running.
+//! PROXY: it ensures the daemon is up, then forwards every JSON-RPC request to
+//! the daemon and relays the response. It never holds daemon state itself; it
+//! exits when Claude Code closes the pipe, leaving the daemon running.
 //!
-//! What: [`run_stdio_bridge`] (1) ensures the daemon is reachable via the shared
-//! `trusty_mcp::ensure_daemon_up` helper (auto-starting `tm daemon`
-//! detached if absent, polling the lock file for the real dynamic port); (2)
-//! enters `run_stdio_loop`, forwarding each non-notification request to
-//! `POST /rpc` and returning the daemon's response verbatim. Transport errors
+//! What: [`run_stdio_bridge`] (1) ensures the daemon answers on its socket
+//! ([`ensure_daemon_up`], auto-starting `tm daemon` detached when allowed);
+//! (2) enters `run_stdio_loop`, forwarding each non-notification request as
+//! `mpm.mcp.dispatch` over the daemon socket (#6288 — the bridge opens no TCP
+//! connection) and returning the daemon's response verbatim. Transport errors
 //! become a JSON-RPC internal error rather than crashing the loop, so the bridge
 //! survives a daemon restart and the next request reconnects.
 //!
@@ -26,13 +25,13 @@
 //! Claude Code spawned it inside the managed pane, while the daemon it forwards
 //! to is long-lived and shared.
 //!
-//! #9856: an `ask_owner` call goes over the daemon socket instead
-//! ([`forward_over_socket`]): the daemon proves its asker from the kernel's
-//! peer pid, which only the socket carries.
+//! #9856: the daemon proves an `ask_owner` asker from the kernel's peer pid,
+//! which only the socket carries — since #6288 every call travels that way.
 //!
-//! Test: `is_notification_*`, `value_to_mcp_response_*`, `socket_tool_*`,
-//! `forward_rpc_errors_on_refused`, and `stamp_*` unit tests below; the
-//! daemon-side `POST /rpc` dispatch is covered by `daemon::api_tests::rpc_*`.
+//! Test: `is_notification_*`, `value_to_mcp_response_*`,
+//! `forward_errors_on_an_absent_socket_naming_it`, and `stamp_*` unit tests
+//! below; end to end in
+//! `tm_client_socket_cutover_6288::the_mcp_bridge_answers_over_the_socket_only`.
 
 use std::time::Duration;
 
@@ -45,28 +44,14 @@ use trusty_mcp::{DaemonBridgeConfig, Request, Response};
 /// Why: a session spawn provisions a workspace (git clone) and a tmux host,
 /// which can take many seconds; a generous ceiling prevents a slow-but-valid
 /// call from being cut off while still capping a truly hung request.
-/// Test: `forward_rpc_errors_on_refused` exercises the error path within bound.
+/// Test: `the_forwarding_timeout_leaves_headroom_over_the_disk_survey_budget_clamp`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Build the shared reqwest client used for every forwarded RPC call.
-///
-/// Why: one client enables HTTP keep-alive to the daemon, reducing latency.
-/// What: a blocking-free async client with the request + connect timeout set.
-/// Test: `build_rpc_client_succeeds`.
-fn build_rpc_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(REQUEST_TIMEOUT)
-        .build()
-        .context("build reqwest client for trusty-mpm stdio bridge")
-}
 
 /// Build the `DaemonBridgeConfig` for the trusty-mpm stdio bridge.
 ///
-/// Why: the daemon discovers its own (possibly ephemeral) port and records it in
-/// `~/.trusty-mpm/daemon.lock`. `resolve_daemon_url(None)` re-reads that lock on
-/// every call, so passing it as `base_url_fn` lets `ensure_daemon_up` track a
-/// dynamic port as soon as the daemon writes the lock.
+/// Why: the config carries the spawn and `no_spawn` decision [`ensure_daemon_up`]
+/// applies. #6288: `base_url_fn` yields the daemon socket locator, used only to
+/// name the daemon in messages; `health_path` is not read.
 ///
 /// `no_spawn` is now launchd-aware (issue #2486, precedent: trusty-memory's
 /// #1152 fix). The doc comment this replaced claimed singleton-guarding made
@@ -126,13 +111,7 @@ fn build_bridge_config_for(isolated: bool) -> DaemonBridgeConfig {
         // arg is passed (matches `tm start`).
         spawn_args: vec!["daemon".to_string()],
         health_path: "/health".to_string(),
-        // INTENTIONALLY kept on the sync direct-lock resolver (#1849 Phase 2):
-        // the stdio bridge calls this closure on every reconnect to track the
-        // daemon's current port. The gateway resolver is async and requires a
-        // reqwest::Client; the `base_url_fn` signature is synchronous. Routing
-        // the MCP bridge through the gateway would also add latency on every
-        // JSON-RPC call and create a dependency on the console being up — an
-        // unacceptable regression for the core MCP path.
+        // #6288: the socket locator; the bridge never resolves a TCP address.
         base_url_fn: Box::new(|| trusty_mpm::core::resolve_daemon_url(None)),
         startup_timeout: None, // shared 30s default
         poll_interval: None,   // shared 500ms default
@@ -242,27 +221,13 @@ fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
     );
 }
 
-/// MCP tools whose call must reach the daemon over its socket (#9856).
-const SOCKET_TOOLS: &[&str] = &["ask_owner"];
-
-/// True for a `tools/call` of one of [`SOCKET_TOOLS`].
-///
-/// Why: #9856 Q1, the daemon proves `ask_owner`'s asker from the socket
-/// peer; over HTTP the call is always refused as unproven.
-/// Test: `socket_tool_call_is_routed_over_the_socket`.
-fn routes_over_socket(req: &serde_json::Value) -> bool {
-    req.get("method").and_then(|m| m.as_str()) == Some("tools/call")
-        && req
-            .pointer("/params/name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|name| SOCKET_TOOLS.contains(&name))
-}
-
 /// Send one MCP request as `mpm.mcp.dispatch` over the daemon socket.
 ///
-/// What: the socket client's `POST /rpc` mapping; never a TCP fallback.
-async fn forward_over_socket(req: serde_json::Value) -> Result<serde_json::Value> {
-    let daemon = trusty_mpm::client::DaemonClient::from_resolved_socket()?;
+/// What: the socket client's `POST /rpc` mapping to the socket `url` locates;
+/// never a TCP fallback. A refusal sentinel `url` fails before any I/O.
+/// Test: `forward_errors_on_an_absent_socket_naming_it`.
+async fn forward_over_socket(url: &str, req: serde_json::Value) -> Result<serde_json::Value> {
+    let daemon = trusty_mpm::client::DaemonClient::new(url);
     daemon
         .post("/rpc")
         .json(&req)
@@ -307,37 +272,52 @@ fn value_to_mcp_response(v: serde_json::Value) -> Response {
     )
 }
 
-/// POST one JSON-RPC request to `{base_url}/rpc` and return the response body.
+/// Ensure the daemon answers on its socket, spawning it when allowed.
 ///
-/// Why: the core forwarding primitive — returns the daemon's response verbatim
-/// so MCP clients see real tool output, not a bridge-generated stand-in.
-/// What: serialises `req`, POSTs to `/rpc`, deserialises the JSON body.
-/// Transport errors (refused, timeout) and non-2xx statuses become `Err`.
-/// Test: `forward_rpc_errors_on_refused`.
-async fn forward_rpc(
-    client: &reqwest::Client,
-    base_url: &str,
-    req: serde_json::Value,
-) -> Result<serde_json::Value> {
-    let url = format!("{base_url}/rpc");
-    let resp = client
-        .post(&url)
-        .json(&req)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}: connection to trusty-mpm daemon failed"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+/// Why: `trusty_mcp::ensure_daemon_up` probes `{base_url}/health` over HTTP,
+/// and the bridge reaches the daemon over its socket only (#6288).
+/// What: resolves the socket locator (the #9556 sandbox refusal is an error),
+/// returns at once when `mpm.health` answers; with `config.no_spawn` set it
+/// errors naming the socket and the config's hint; otherwise it spawns
+/// `current_exe() + config.spawn_args` detached and polls the socket until
+/// healthy or the startup timeout (default 30 s) passes.
+/// Test: `tm_client_socket_cutover_6288::the_mcp_bridge_answers_over_the_socket_only`;
+/// the refusal by `the_mcp_bridge_refuses_a_missing_socket_without_spawning`.
+async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<()> {
+    let url = trusty_mpm::core::try_resolve_daemon_url(None).map_err(|e| anyhow!("{e}"))?;
+    let daemon = trusty_mpm::client::DaemonClient::new(url.clone());
+    if daemon.is_healthy().await {
+        return Ok(());
+    }
+    if config.no_spawn {
+        let hint = config.no_spawn_hint.clone().unwrap_or_default();
         return Err(anyhow!(
-            "daemon returned HTTP {status} for POST /rpc: {body}"
+            "{} daemon is not reachable at {url} — {hint}",
+            config.service_name
         ));
     }
-
-    resp.json::<serde_json::Value>()
-        .await
-        .context("deserialise JSON-RPC response from trusty-mpm daemon")
+    let exe = std::env::current_exe().context("resolve the current executable")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&config.spawn_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    trusty_common::daemon_guard::start_in_new_session(&mut cmd)
+        .spawn()
+        .context("spawn the trusty-mpm daemon")?;
+    let timeout = config.startup_timeout.unwrap_or(Duration::from_secs(30));
+    let poll = config.poll_interval.unwrap_or(Duration::from_millis(500));
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(poll).await;
+        if daemon.is_healthy().await {
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "{} daemon did not answer on {url} within {timeout:?}",
+        config.service_name
+    ))
 }
 
 /// Run the trusty-mpm MCP stdio bridge.
@@ -346,22 +326,18 @@ async fn forward_rpc(
 /// `trusty-memory serve --stdio` pattern so the three daemons share one mental
 /// model and the driver skill can call typed MCP tools instead of scraping CLI
 /// output.
-/// What: (1) ensures the daemon is up (auto-start + dynamic-port discovery via
-/// the lock file); (2) builds a shared HTTP client; (3) enters `run_stdio_loop`,
-/// suppressing notifications and forwarding every other request to `POST /rpc`,
-/// re-resolving the daemon URL each request so a daemon restart on a new port is
-/// picked up. A transport error returns a JSON-RPC internal error rather than
-/// crashing the loop — the next request reconnects.
+/// What: (1) ensures the daemon answers on its socket ([`ensure_daemon_up`]);
+/// (2) enters `run_stdio_loop`, suppressing notifications and forwarding every
+/// other request as `mpm.mcp.dispatch` over the socket, re-resolved per request.
+/// A transport error returns a JSON-RPC internal error rather than crashing the
+/// loop — the next request reconnects.
 /// Test: the helpers are unit-tested below; the end-to-end forward path is
 /// covered by the daemon's `rpc_*` integration tests.
 pub(crate) async fn run_stdio_bridge() -> Result<()> {
     // Step 1: ensure the daemon is reachable (auto-start if needed). Hard error
     // on failure — no silent fallback. All output goes to stderr.
     let config = build_bridge_config();
-    let _ = mcp::ensure_daemon_up(&config).await?;
-
-    // Step 2: shared HTTP client.
-    let client = build_rpc_client()?;
+    ensure_daemon_up(&config).await?;
 
     // #6888: this process, not the daemon, is the one Claude Code spawned inside
     // the managed pane, so it is the only place the caller's own managed session
@@ -369,25 +345,17 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
     // under a running bridge.
     let managed_session_id = trusty_common::catchup::session_id::managed_session_id_from_env();
 
-    // Step 3: forward loop. Re-resolve the base URL per request so a restarted
-    // daemon (possibly on a new ephemeral port) is followed automatically.
+    // Step 2: forward loop, over the socket re-resolved per request.
     mcp::run_stdio_loop(move |req| {
-        let client = client.clone();
         let managed_session_id = managed_session_id.clone();
         async move {
             if is_notification(&req) {
                 return Response::suppressed();
             }
-            let base_url = trusty_mpm::core::resolve_daemon_url(None);
+            let url = trusty_mpm::core::resolve_daemon_url(None);
             let mut req_value = req_to_value(&req);
             stamp_caller_session_id(&mut req_value, managed_session_id.as_deref());
-            // #9856: the asker of `ask_owner` is proven only over the socket.
-            let forwarded = if routes_over_socket(&req_value) {
-                forward_over_socket(req_value).await
-            } else {
-                forward_rpc(&client, &base_url, req_value).await
-            };
-            match forwarded {
+            match forward_over_socket(&url, req_value).await {
                 Ok(resp_value) => value_to_mcp_response(resp_value),
                 Err(e) => {
                     tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
@@ -407,23 +375,6 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// #9856: only an `ask_owner` call leaves over the socket.
-    #[test]
-    fn socket_tool_call_is_routed_over_the_socket() {
-        let call = |name: &str| json!({"method": "tools/call", "params": {"name": name}});
-        assert!(routes_over_socket(&call("ask_owner")));
-        assert!(!routes_over_socket(&call("session_list")));
-        assert!(!routes_over_socket(&json!({"method": "tools/list"})));
-        assert!(!routes_over_socket(
-            &json!({"method": "initialize", "params": {"name": "ask_owner"}})
-        ));
-    }
-
-    #[test]
-    fn build_rpc_client_succeeds() {
-        assert!(build_rpc_client().is_ok());
-    }
 
     /// This bridge's timeout must stay clear of `disk_survey`'s budget clamp.
     ///
@@ -470,10 +421,7 @@ mod tests {
         let cfg = build_bridge_config_for(true);
         assert!(cfg.no_spawn, "a sandboxed bridge never spawns a daemon");
         let hint = cfg.no_spawn_hint.unwrap_or_default();
-        assert!(
-            hint.contains("no daemon reachable for this sandbox"),
-            "{hint}"
-        );
+        assert!(hint.contains("no daemon for this sandbox"), "{hint}");
     }
 
     /// Why (#2491 review): the shared helper's generic `no_spawn` hint names a
@@ -565,11 +513,17 @@ mod tests {
         assert_eq!(v["id"], 5);
     }
 
+    /// #6288: with no daemon socket the forward fails naming the socket, and
+    /// an HTTP address is never dialled.
     #[tokio::test]
-    async fn forward_rpc_errors_on_refused() {
-        let client = build_rpc_client().expect("client");
-        let result = forward_rpc(&client, "http://127.0.0.1:65534", json!({"method":"ping"})).await;
-        assert!(result.is_err(), "must error when no daemon is listening");
+    async fn forward_errors_on_an_absent_socket_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("absent.sock");
+        let url = trusty_mpm::core::socket_locator(&socket);
+        let err = forward_over_socket(&url, json!({"method": "ping"}))
+            .await
+            .expect_err("nothing listens");
+        assert!(format!("{err:#}").contains("absent.sock"), "{err:#}");
     }
 
     fn call(tool: &str, args: serde_json::Value) -> serde_json::Value {

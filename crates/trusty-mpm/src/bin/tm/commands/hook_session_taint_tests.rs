@@ -271,3 +271,40 @@ async fn socket_exchange_failure_is_no_answer_without_http_fallback() {
     let delivery = deliver_session_start(Some(&socket), &url, &serde_json::json!({})).await;
     assert!(matches!(delivery, Delivery::NoAnswer(_)), "{delivery:?}");
 }
+
+/// #6288 fail-open check: a `SessionStart` whose socket is absent is no answer
+/// naming the socket — never a retry over TCP, even when a daemon answers 200
+/// there. Before the cutover the HTTP retry made this `Accepted`, so the
+/// unconfirmed start skipped the taint settle.
+#[tokio::test]
+async fn an_unreachable_socket_is_no_answer_without_http_fallback() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("absent.sock");
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind http");
+    let url = format!("http://{}", http.local_addr().expect("addr"));
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = http.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    let delivery = deliver_session_start(Some(&socket), &url, &serde_json::json!({})).await;
+    let Delivery::NoAnswer(why) = &delivery else {
+        panic!("an absent socket must be no answer: {delivery:?}");
+    };
+    assert!(why.contains("absent.sock"), "names the socket: {why}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "fell back to TCP"
+    );
+}

@@ -78,9 +78,11 @@ cp ~/.trusty-mpm/session-manager/sessions.json "$CKPT/sessions-before.json"
 - The old rev is in the `cargo install --list` line, for example
   `trusty-mpm v1.7.10 (https://github.com/bobmatnyc/trusty-tools?rev=<sha>#<sha8>)`.
   A registry install shows no URL. This line is your rollback target.
-- `/health` carries `version`, `build_id` and `pid`. Port 7880 is the default;
-  `TRUSTY_MPM_URL` overrides it. `tm status` prints `daemon: reachable (pid N,
-  version V)`.
+- `/health` carries `version`, `build_id` and `pid`. The `curl` reads the
+  daemon's TCP bind on 7880, which only this check still uses: every `tm`
+  client reaches the daemon over its unix socket, and `TRUSTY_MPM_URL` no
+  longer selects a daemon (#6288). The bind is retired by #6288 PR 2. `tm
+  status` prints `daemon: reachable (pid N, version V)` over the socket.
 - The `cp` copies a data file. The ban on `cp` applies to binaries.
 
 ## 3. Pre-install checkpoint: pause every live session

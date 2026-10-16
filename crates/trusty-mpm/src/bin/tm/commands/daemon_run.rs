@@ -133,13 +133,11 @@ pub(crate) async fn run_daemon(
     // alive (and clears stale lock files), so a `None`-ish result here means
     // either no lock exists or the recorded daemon is dead — proceed normally.
     //
-    // INTENTIONALLY kept on the sync direct-lock resolver (#1849 Phase 2): the
-    // daemon is starting up here; the console gateway isn't relevant — and its
-    // async probe would require bootstrapping a reqwest::Client before the bind
-    // address is even known. Bootstrap circularity means only the lock file
-    // is authoritative at this point.
-    let recorded_url = trusty_mpm::core::resolve_daemon_url(None);
-    if recorded_url != trusty_mpm::core::DEFAULT_DAEMON_URL
+    // #6288: the daemon still binds TCP until PR 2, so its duplicate guard
+    // reads the lock's recorded HTTP address directly; the client resolvers
+    // return the socket locator, which this TCP probe cannot dial.
+    if let Some(recorded_url) = trusty_mpm::core::client_lock_url()
+        && recorded_url != trusty_mpm::core::DEFAULT_DAEMON_URL
         && trusty_common::probe_health(&recorded_url, "/health").await
     {
         // #6869: the operator gets the fact; the URL goes to the log.
@@ -202,8 +200,10 @@ pub(crate) async fn run_daemon(
     // The returned token lets the shutdown handler stop the supervised bot
     // promptly so it never blocks (or outlives) graceful shutdown (#1499).
     // #9121: a sandbox starts no channel poller.
+    // #6288: the in-process bot reaches this daemon over its socket, not TCP.
+    let bot_url = trusty_mpm::core::socket_locator(&socket_path);
     let bot_shutdown = crate::commands::daemon_sandbox::gate_channel_pollers(sandbox, || {
-        spawn_telegram_bot(&base_url)
+        spawn_telegram_bot(&bot_url)
     });
 
     // Clean up the lock file on shutdown for BOTH Ctrl-C (SIGINT) and SIGTERM.

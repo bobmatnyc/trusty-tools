@@ -18,8 +18,8 @@ use trusty_mpm::daemon::services::delegation_records::{DelegationListing, Delega
 /// Fetch and print the listing for `dir`.
 pub(crate) async fn list(client: &reqwest::Client, url: &str, dir: &Path) -> anyhow::Result<()> {
     let dir = listing_dir(dir)?;
-    let resp = client
-        .get(format!("{url}/api/v1/delegations"))
+    let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .get("/api/v1/delegations")
         .query(&[("cwd", dir.display().to_string())])
         .send()
         .await?;

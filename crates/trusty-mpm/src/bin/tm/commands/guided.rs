@@ -58,45 +58,16 @@ use crate::formatters::info_box::DaemonInfo;
 /// info and exit 0 without hanging for input (#1705 AC-7). Subdir launches
 /// pass the git root as `repo_url` so the daemon sets `source_id` correctly.
 ///
-/// #1737: `url` is the already-resolved string every caller downstream of
-/// here uses (unchanged); `explicit` carries the ORIGINAL `Option::is_some`
-/// signal — `Some` iff the operator actually supplied `--url` /
-/// `TRUSTY_MPM_URL` (never a clap default, per the #2487 discipline — see
-/// `core::discovery`'s module doc). This function is the one LIVE,
-/// empirically-confirmed instance of the #1737 silent-fallback bug:
-/// [`super::guided_autostart::ensure_daemon_started`]'s auto-start step
-/// intentionally ignores whatever URL it is handed and always re-resolves
-/// IMPLICITLY (lock file → default) once *some* daemon is confirmed healthy
-/// — exactly right for the ordinary "daemon not started yet" first-run UX
-/// this function exists to smooth over, but it means an unreachable EXPLICIT
-/// `--url` silently ended up auto-starting (or reconnecting to) a completely
-/// different, real daemon and showing ITS live session list instead of
-/// erroring. Probing `explicit` up front — before in-place relaunch, the
-/// nested-session guard, the picker, or auto-start ever run — closes that
-/// gap without touching the implicit (unset URL) path at all.
+/// #6288: `url` is the daemon socket locator `main` resolved. An explicit
+/// `--url` / `TRUSTY_MPM_URL` no longer selects a daemon — a loopback one was
+/// ignored with a notice and a remote one refused before dispatch — so the
+/// #1737 explicit-URL probe that guarded the autostart below is gone: the
+/// autostart reaches the same socket `url` names.
 /// Test: `guided_derive_project_returns_none_for_non_git_dir`,
 /// `guided_non_tty_gate_returns_false_skips_stdin`,
 /// `guided_fallback_never_pollutes_github_git_checkout` (#1724);
-/// `tests/tm_guided_default_explicit_url.rs` end-to-end (#1737).
-pub(crate) async fn run_guided_default(
-    client: &reqwest::Client,
-    url: &str,
-    explicit: Option<&str>,
-) -> anyhow::Result<()> {
-    // #1737: verify an EXPLICIT URL's own reachability before anything below
-    // gets a chance to silently auto-start or reconnect to a DIFFERENT
-    // daemon. `resolve_daemon_url_for_cli` is a no-op passthrough to `Ok`
-    // when `explicit` is `None`/empty (implicit resolution, unaffected). The
-    // failure message is printed here (mirroring
-    // `commands::prune::prune_idle`'s `PruneError::SmUnavailable` handling)
-    // so `main`'s top-level exit-code translation only needs to downcast and
-    // `process::exit` — no double-print.
-    if explicit.is_some_and(|u| !u.is_empty())
-        && let Err(err) = trusty_mpm::core::resolve_daemon_url_for_cli(client, explicit).await
-    {
-        eprintln!("tm: {err}");
-        return Err(err.into());
-    }
+/// `tests/tm_guided_default_explicit_url.rs` end-to-end (#1737, #6288).
+pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // #9556: a sandbox with no daemon of its own stops before the picker, the
     // autostart and the offline fallback.
     if let Err(err) = trusty_mpm::core::refuse_isolated_no_daemon(url) {
@@ -665,8 +636,9 @@ async fn list_all_managed_sessions(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<Vec<trusty_mpm::client::ManagedSessionSummary>> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed?slim=true"))
+    let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .get("/api/v1/sessions/managed")
+        .query(&[("slim", true)])
         .timeout(std::time::Duration::from_secs(8))
         .send()
         .await?

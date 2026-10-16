@@ -34,16 +34,23 @@ fn rediscover_daemon_keeps_explicit_url() {
     assert_eq!(client.base_url(), dead);
 }
 
-/// Why (#9556): only an operator-supplied, non-empty URL is pinned; an empty
-/// or absent one keeps the lock-file / default discovery.
+/// Why (#6288 Q3): every TUI launch reaches the daemon socket; a loopback,
+/// empty or absent URL resolves it unpinned, and a remote URL is refused.
 /// Test: itself.
 #[test]
-fn client_for_pins_only_an_explicit_url() {
-    let explicit = client_for(Some(EXPLICIT_URL));
-    assert!(explicit.base_url_pinned());
-    assert_eq!(explicit.base_url(), EXPLICIT_URL);
-    assert!(!client_for(Some("")).base_url_pinned());
-    assert!(!client_for(None).base_url_pinned());
+#[serial_test::serial]
+fn client_for_resolves_the_socket_and_refuses_a_remote_url() {
+    use crate::secret_source::test_env::EnvVarGuard;
+    let _sandbox = EnvVarGuard::unset(trusty_common::credentials::SANDBOX_ENV_VAR);
+    for explicit in [Some(EXPLICIT_URL), Some(""), None] {
+        let client = client_for(explicit).expect("a local daemon socket");
+        assert!(
+            client.socket_path().is_some(),
+            "{explicit:?} must reach the socket"
+        );
+        assert!(!client.base_url_pinned());
+    }
+    assert!(client_for(Some("http://100.64.0.1:7880")).is_err());
 }
 
 /// Why (#9556): without an explicit URL the TUI still follows a restarted

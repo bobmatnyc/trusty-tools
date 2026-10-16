@@ -370,6 +370,17 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
     ("POST", "/api/v1/sessions/chat", "mpm.sessions.chat"),
     ("POST", "/api/v1/session-manager/chat", "mpm.sessions.chat"),
     ("POST", "/rpc", "mpm.mcp.dispatch"),
+    // ---- #6288 client cutover: the last client-reached HTTP-only routes ----
+    (
+        "POST",
+        "/api/v1/channels/egress-verdict",
+        "mpm.channels.egress_verdict",
+    ),
+    (
+        "GET",
+        "/api/v1/sessions/managed/{id}/files",
+        "mpm.managed.files",
+    ),
 ];
 
 /// The method and path captures for `method path`, or `None` when the socket

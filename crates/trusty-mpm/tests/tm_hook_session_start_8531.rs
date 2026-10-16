@@ -3,14 +3,13 @@
 //!
 //! Why: the daemon binds a session to its `claude` only from a socket
 //! `SessionStart`, so the hook's transport choice decides whether a session
-//! can ever end its own delegation record. `post_session_start_via` is that
-//! choice, and only the real binary proves the production wiring reaches it.
+//! can ever end its own delegation record. Only the real binary proves the
+//! production wiring reaches the socket.
 //! What: serves the real HTTP router on loopback and, in the first case, the
 //! real daemon socket from the same state. The built `tm` runs under a fake
 //! `claude` (`/bin/bash` exec'd under that name) with a `SessionStart` on
 //! stdin. Served socket: the session is bound to that `claude`, and ingested
-//! once. Nobody on the socket path: the HTTP fallback registers the session,
-//! which stays unbound.
+//! once. Nobody on the socket path: #6288, nothing reaches the HTTP router.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_session_start_8531::`.
 
 use crate::common;
@@ -155,10 +154,12 @@ async fn a_session_start_over_the_socket_binds_its_claude() {
     assert_eq!(session_starts(&state, session), 1, "ingested once");
 }
 
-/// #8531: with nobody listening on the socket path, `tm hook` falls back to
-/// HTTP. The session registers, and stays unbound: HTTP proves no process.
+/// 🔴 #6288 fail-open check: with nobody listening on the socket path, `tm
+/// hook` no longer falls back to HTTP — even with a daemon answering there.
+/// The event is not delivered; the hook still exits 0 (no taint to settle).
+/// Before the cutover the HTTP retry registered the session.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_session_start_with_no_socket_falls_back_to_http() {
+async fn a_session_start_with_no_socket_never_falls_back_to_http() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = daemon_state(&dir.path().join("root"));
     let url = serve_http(Arc::clone(&state)).await;
@@ -178,17 +179,8 @@ async fn a_session_start_with_no_socket_falls_back_to_http() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        state.session(session).is_some(),
-        "HTTP registered the session"
+        state.session(session).is_none(),
+        "the event reached the daemon over HTTP"
     );
-    assert_eq!(session_starts(&state, session), 1, "ingested once");
-    assert_eq!(
-        state.session_claudes().get(session),
-        None,
-        "HTTP binds nothing"
-    );
-    assert!(
-        state.session_claudes().is_settled(session),
-        "the unproven first announcement is final"
-    );
+    assert_eq!(session_starts(&state, session), 0, "never ingested");
 }

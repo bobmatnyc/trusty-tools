@@ -166,14 +166,11 @@ fn hook_stdin_only_the_advisory_read_uses_the_short_budget() {
 
 #[test]
 fn guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout() {
-    // A deny's worst case is THREE bounds. `main.rs` resolves the daemon URL
-    // through the console-gateway probe before it dispatches anything, and the
-    // registered guard command carries no `--url`, so that probe is a fixed
-    // prefix on every invocation — not an occasional one. All three are the
-    // real constants, not copies, so lowering any one of them trips this.
-    let worst_case = trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT
-        + PM_GUARD_STDIN_TIMEOUT
-        + crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
+    // A deny's worst case is two bounds. #6288: `main.rs` resolves the daemon
+    // socket without any probe, so the console-gateway probe that used to be a
+    // fixed prefix is gone. Both are the real constants, not copies.
+    let worst_case =
+        PM_GUARD_STDIN_TIMEOUT + crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
     assert!(
         worst_case < REGISTERED_HOOK_TIMEOUT,
         "{worst_case:?} must fit inside {REGISTERED_HOOK_TIMEOUT:?}"

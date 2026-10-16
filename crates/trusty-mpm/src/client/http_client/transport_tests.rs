@@ -200,3 +200,67 @@ async fn a_query_pair_with_a_non_string_key_is_refused() {
         "{err}"
     );
 }
+
+/// #6288: a daemon that answers "method not found" predates the method; the
+/// error says so through `is_method_missing`, and is not a dial failure.
+#[tokio::test]
+async fn a_method_the_daemon_lacks_is_reported_as_missing() {
+    let daemon = fake_daemon().await;
+    let client = DaemonClient::over_socket(&daemon.socket);
+    let err = client.get("/health").send().await.expect_err("not served");
+    assert!(err.is_method_missing(), "{err}");
+    assert!(!err.is_connect());
+    assert!(err.to_string().contains("mpm.health"), "{err}");
+}
+
+/// #6288: only an absent or stale socket is "nothing listening"; a socket the
+/// client may not dial is unreachable but not evidence the daemon is down.
+#[tokio::test]
+async fn nothing_listening_is_only_an_absent_or_stale_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A directory the hardened check would refuse (0755): the socket is still
+    // absent, so nothing listens.
+    std::fs::create_dir(dir.path().join("s")).expect("dir");
+    std::fs::set_permissions(
+        dir.path().join("s"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("0755");
+    let socket = dir.path().join("s").join("trusty-mpm.sock");
+    let absent = DaemonClient::over_socket(&socket)
+        .get("/health")
+        .send()
+        .await
+        .expect_err("absent");
+    assert!(
+        absent.is_connect() && absent.nothing_listening(),
+        "{absent}"
+    );
+    assert!(absent.socket_absent() && !absent.dial_refused(), "{absent}");
+
+    drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
+    let stale = DaemonClient::over_socket(&socket)
+        .get("/health")
+        .send()
+        .await
+        .expect_err("stale");
+    assert!(stale.is_connect() && stale.nothing_listening(), "{stale}");
+    // #6288: a stale file is a REFUSAL, the same errno a saturated live
+    // listener gives; the error alone cannot tell them apart.
+    assert!(stale.dial_refused() && !stale.socket_absent(), "{stale}");
+
+    // A socket with the wrong mode is refused before the dial: unreachable,
+    // and not evidence that nothing listens.
+    let wide = dir.path().join("w").join("trusty-mpm.sock");
+    std::fs::create_dir_all(wide.parent().expect("parent")).expect("dir");
+    let _listener = trusty_common::uds::bind_hardened(&wide).expect("bind");
+    std::fs::set_permissions(&wide, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+        .expect("widen");
+    let refused = DaemonClient::over_socket(&wide)
+        .get("/health")
+        .send()
+        .await
+        .expect_err("untrusted");
+    assert!(refused.is_connect(), "{refused}");
+    assert!(!refused.nothing_listening(), "{refused}");
+}

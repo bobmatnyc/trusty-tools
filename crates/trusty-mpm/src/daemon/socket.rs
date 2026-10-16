@@ -79,6 +79,8 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::cli_socket::register(router, state);
     // #6288 step 2a: MCP dispatch (`POST /rpc`) and the coordinator routes.
     let router = rpc::mcp::register(router, state);
+    // #6288 client cutover: the last routes an in-repo client reached on HTTP.
+    let router = rpc::client_cutover::register(router, state);
     rpc::coordinator::register(router, state)
 }
 

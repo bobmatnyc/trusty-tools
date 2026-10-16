@@ -219,16 +219,11 @@ pub(crate) async fn audit_envfile_allow(ctx: &DenyContext<'_>, gate: &ArchitectG
     let Some(body) = allow_audit_body(ctx, gate) else {
         return;
     };
-    let Ok(client) = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(AUDIT_POST_TIMEOUT)
-        .build()
-    else {
-        return;
-    };
-    let _ = client
-        .post(format!("{}/hooks", ctx.url))
+    // #6288: over the daemon socket `main` resolved; never TCP.
+    let _ = trusty_mpm::client::DaemonClient::new(ctx.url)
+        .post("/hooks")
         .json(&body)
+        .timeout(AUDIT_POST_TIMEOUT)
         .send()
         .await;
 }

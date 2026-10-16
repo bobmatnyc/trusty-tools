@@ -130,6 +130,7 @@ use trusty_mpm::core::dispatch_isolation::{
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
 use crate::commands::hook_payload::build_hook_payload;
+use crate::commands::pm_guard_daemon_live::daemon_live_for;
 // #8257: the writer-deny text lives beside this module, which is over cap.
 use crate::commands::pm_guard_dispatch_deny::{
     blocking_records, deny_reason, granted_deny_reason, records_in,
@@ -788,7 +789,11 @@ pub(crate) async fn post_shared_tree(
     post_shared_tree_with(shared_tree_client, url, session_id, cwd, payload, route).await
 }
 
-/// The shared-tree client: 500 ms to connect, 2 s for the whole request.
+/// The shared-tree request bound: 2 s for the whole exchange (#6288: over the
+/// daemon socket, which has no separate connect phase to bound).
+const SHARED_TREE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The shared-tree client (#8492's build seam): 500 ms to connect, 2 s total.
 fn shared_tree_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(500))
@@ -859,7 +864,10 @@ where
         // panicking build panics here, exactly as the inline build did.
         Err(_) => panic!("the guard's HTTP client build panicked"),
     };
-    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
+    // #6288: the route travels over the daemon socket `url` names; the built
+    // client is only the #8492 seam and is never sent to.
+    let endpoint = format!("/api/v1/sessions/{session_id}/delegations/{route}");
+    let daemon = trusty_mpm::client::DaemonClient::with_client(client, url);
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
     // #8161: the builder forwards known keys only, so the tree-holders marker is copied.
@@ -867,9 +875,15 @@ where
         forwarded[TREE_HOLDERS_MARKER] = marker.clone();
     }
     let body = serde_json::json!({ "payload": forwarded });
-    let response = match client.post(&endpoint).json(&body).send().await {
+    let response = match daemon
+        .post(endpoint.clone())
+        .json(&body)
+        .timeout(SHARED_TREE_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(response) => response,
-        Err(error) => return classify_transport_failure(&endpoint, &error),
+        Err(error) => return classify_transport_failure(url, &endpoint, &error),
     };
     let status = response.status();
     let response = match response.error_for_status() {
@@ -896,23 +910,57 @@ where
 
 /// Which arm a transport failure belongs to (#5923).
 ///
-/// Why: this is the split the reported bug turns on. A refused connection
-/// answers the question on its own — nothing is listening, so no delegation can
-/// be registered through this daemon at all, and the guard is structurally off.
+/// Why: this is the split the reported bug turns on. No connection answers the
+/// question on its own — nothing is listening, so no delegation can be
+/// registered through this daemon at all, and the guard is structurally off.
 /// A timeout does not: the daemon accepted the connection, so a writer may
 /// already be recorded and the answer simply did not arrive in time.
-/// What: `Unavailable` only for a connect-phase failure that is NOT a timeout.
-/// reqwest reports a refused connection and a connect TIMEOUT through the same
-/// `is_connect`, so the timeout is excluded explicitly: on loopback a connect
-/// that times out means a listener whose accept queue is saturated, which is a
-/// daemon under load rather than an absent one. Everything else — the total
-/// request timeout, a body error, a redirect failure — leaves the question
-/// open.
-/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` (refused),
-/// `claim_is_unknown_when_the_daemon_times_out` (accepted then silent).
-fn classify_transport_failure(endpoint: &str, error: &reqwest::Error) -> SharedTreeReply {
-    if error.is_connect() && !error.is_timeout() {
-        return SharedTreeReply::Unavailable(format!("nothing is listening at {endpoint}"));
+/// What (#6288, over the daemon socket): `Unavailable` only for positive
+/// evidence of no live daemon — an absent socket file, a refusal (`ECONNREFUSED`)
+/// while the daemon's lock names no live daemon (a stale socket file; owner
+/// ruling #8004: allow with a warning), and a daemon that predates the method
+/// (the socket form of the HTTP 404 below). A refusal is AMBIGUOUS: a saturated
+/// live listener refuses with the same errno after the retries, so a refusal
+/// opens the guard only when [`daemon_live_for`] finds no live daemon behind it
+/// (a pid reused by an unrelated program is not one). Everything else leaves
+/// the question open and denies: a timeout, a cut or unreadable frame, a socket
+/// refused by the owner/mode check or `EACCES`, and a refusal with a live
+/// daemon behind it.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` (absent),
+/// `claim_is_unknown_when_the_socket_is_refused_by_the_ownership_check`,
+/// `claim_is_unknown_when_the_daemon_times_out` (accepted then silent),
+/// `claim_is_empty_when_the_daemon_has_no_such_route` (method missing),
+/// and in `pm_guard_daemon_live_tests.rs`:
+/// `a_stale_socket_with_no_live_daemon_allows`,
+/// `a_refused_dial_with_a_live_daemon_denies`,
+/// `a_refused_dial_over_a_reused_pid_allows`.
+fn classify_transport_failure(
+    url: &str,
+    endpoint: &str,
+    error: &trusty_mpm::client::DaemonCallError,
+) -> SharedTreeReply {
+    classify_transport_failure_with(url, endpoint, error, &|| daemon_live_for(url))
+}
+
+/// [`classify_transport_failure`] with the "is a daemon alive?" probe injected.
+///
+/// Test: `pm_guard_daemon_live_tests.rs`.
+pub(super) fn classify_transport_failure_with(
+    url: &str,
+    endpoint: &str,
+    error: &trusty_mpm::client::DaemonCallError,
+    daemon_live: &dyn Fn() -> bool,
+) -> SharedTreeReply {
+    // #6288: positive evidence of no daemon opens the guard. A refusal counts
+    // only when no live daemon could be the one refusing; any other
+    // unreachable socket falls through to Unanswered (deny).
+    if error.socket_absent() || (error.dial_refused() && !daemon_live()) {
+        return SharedTreeReply::Unavailable(format!("nothing is listening at {url}"));
+    }
+    if error.is_method_missing() {
+        return SharedTreeReply::Unavailable(format!(
+            "the daemon has no {endpoint} method, so it is older than this `tm`"
+        ));
     }
     SharedTreeReply::Unanswered(format!(
         "the request to {endpoint} did not complete: {error}"
@@ -1056,7 +1104,6 @@ pub(crate) async fn evaluate_with_cwd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::dead_addr::dead_addr;
 
     /// The checkout roster (#9011) every classifier in this suite reads.
     fn r() -> &'static trusty_mpm::core::content_source::AgentRoster {
@@ -1275,26 +1322,11 @@ mod tests {
     /// test would stay green even if the cwd branch were deleted. A daemon that
     /// WOULD produce a deny makes the assertion causal: only the cwd
     /// short-circuit can keep the verdict `None`.
-    /// What: binds an ephemeral port, serves one request, returns the base URL.
-    fn spawn_denying_mock() -> String {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let url = format!("http://{}", listener.local_addr().expect("addr"));
-        std::thread::spawn(move || {
-            if let Ok((mut socket, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf);
-                let body = r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes());
-            }
-        });
-        url
+    /// What: a daemon socket serving one request (#6288).
+    fn spawn_denying_mock() -> MockSocket {
+        socket_mock::answering(socket_mock::result_frame(
+            r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#,
+        ))
     }
 
     #[tokio::test]
@@ -1345,52 +1377,31 @@ mod tests {
 
     /// A one-shot mock that ACCEPTS the connection and never answers (#5923).
     ///
-    /// Why: this is the arm the reported bug rides in on, and it is the one a
-    /// refused port cannot stand in for — the guard's whole new distinction is
+    /// Why: this is the arm the reported bug rides in on, and it is the one an
+    /// absent socket cannot stand in for — the guard's whole distinction is
     /// between a socket nobody is listening on and a daemon that took the
-    /// connection and went quiet. Only a real accepted-then-silent listener
-    /// exercises it.
-    /// What: binds an ephemeral port, accepts one connection, reads the request
-    /// and holds the socket open past the client's 2 s total budget. The
-    /// detached thread ends with the test binary.
-    fn spawn_silent_mock() -> String {
-        use std::io::Read;
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let url = format!("http://{}", listener.local_addr().expect("addr"));
-        std::thread::spawn(move || {
-            if let Ok((mut socket, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf);
-                std::thread::sleep(std::time::Duration::from_secs(10));
-            }
-        });
-        url
+    /// connection and went quiet.
+    /// What: a daemon socket that reads the request and holds the connection
+    /// past the 2 s budget (#6288).
+    fn spawn_silent_mock() -> MockSocket {
+        socket_mock::silent()
     }
 
-    /// A one-shot mock answering an arbitrary status line and body.
+    /// A one-shot mock answering the socket form of an HTTP status and body.
     ///
-    /// Why: [`spawn_denying_mock`] always answers 200 with a well-formed body,
-    /// so it cannot drive the non-2xx or unparseable-body arms.
-    fn spawn_mock_answering(status_line: &'static str, body: &'static str) -> String {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let url = format!("http://{}", listener.local_addr().expect("addr"));
-        std::thread::spawn(move || {
-            if let Ok((mut socket, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf);
-                let response = format!(
-                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes());
-            }
-        });
-        url
+    /// Why: [`spawn_denying_mock`] always answers with a well-formed body, so it
+    /// cannot drive the refusal or unparseable-body arms.
+    /// What (#6288): `200` is a result frame carrying `body` raw (invalid JSON
+    /// makes an unreadable frame); `404` is the daemon predating the method;
+    /// any other status is an error frame with the code it projects from.
+    fn spawn_mock_answering(status_line: &'static str, body: &'static str) -> MockSocket {
+        let frame = match status_line.split(' ').next() {
+            Some("200") => socket_mock::result_frame(body),
+            Some("404") => socket_mock::error_frame(-32601, "method not found"),
+            Some("503") => socket_mock::error_frame(-32002, body),
+            _ => socket_mock::error_frame(-32603, body),
+        };
+        socket_mock::answering(frame)
     }
 
     /// Claim against `url` with a fixed session, directory and payload.
@@ -1410,27 +1421,42 @@ mod tests {
         // delegation can be registered through this daemon at all and denying
         // would block every dispatch on a machine with no daemon running. The
         // reply must be an answered-shaped empty list, never `Unknown`.
-        // #9695: `127.0.0.1:1` can hang past the connect timeout on Linux.
-        let url = format!("http://{}", dead_addr());
+        // #6288: an absent daemon socket.
+        let url = socket_mock::absent();
         assert!(writers_of(claim_against(&url).await).is_empty());
     }
 
-    /// A bound listener that never accepts, and its base URL (#8492).
-    ///
-    /// Why: a dial completes its handshake into the kernel's accept queue with
-    /// no `accept` call, so whether anything dialled is a fact read afterwards
-    /// by [`was_dialled`] — not a stopwatch, which loses the race under load.
-    fn unaccepted_listener() -> (std::net::TcpListener, String) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let url = format!("http://{}", listener.local_addr().expect("addr"));
-        (listener, url)
+    /// #6288: a present socket the hardened dial refuses (mode `0666`) is not
+    /// "nothing listening" — a daemon may be serving it, so the claim must not
+    /// read as an empty tree (fail closed), unlike the absent socket above.
+    #[tokio::test]
+    async fn claim_is_unknown_when_the_socket_is_refused_by_the_ownership_check() {
+        let (listener, mock) = unaccepted_listener();
+        let path = listener
+            .local_addr()
+            .expect("addr")
+            .as_pathname()
+            .expect("path")
+            .to_path_buf();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .expect("widen");
+        assert!(
+            matches!(claim_against(&mock).await, SharedTreeClaim::Unknown(_)),
+            "a socket refused for its mode must not read as an absent daemon"
+        );
     }
 
-    /// Did anything connect to `listener`? A queued connection accepts at once.
-    fn was_dialled(listener: &std::net::TcpListener) -> bool {
-        listener.set_nonblocking(true).expect("nonblocking");
-        listener.accept().is_ok()
+    /// A bound socket that never accepts, and its locator (#8492, #6288).
+    ///
+    /// Why: a dial completes into the kernel's accept queue with no `accept`
+    /// call, so whether anything dialled is a fact read afterwards by
+    /// [`was_dialled`] — not a stopwatch, which loses the race under load.
+    fn unaccepted_listener() -> (std::os::unix::net::UnixListener, MockSocket) {
+        socket_mock::unaccepted()
     }
+
+    use super::super::socket_mock_tests as socket_mock;
+    use socket_mock::{MockSocket, was_dialled};
 
     #[tokio::test]
     async fn claim_shared_tree_is_empty_without_a_session_id() {
@@ -1526,10 +1552,7 @@ mod tests {
         let SharedTreeReply::Unavailable(detail) = &reply else {
             panic!("the sandbox refusal must be Unavailable");
         };
-        assert!(
-            detail.contains("no daemon reachable for this sandbox"),
-            "{detail}"
-        );
+        assert!(detail.contains("no daemon for this sandbox"), "{detail}");
     }
 
     /// #8492: a build that panics on its detached thread still panics the
@@ -1641,8 +1664,8 @@ mod tests {
         // dispatch at all.
         let verdict = evaluate_with_cwd(
             r(),
-            // #9695: a refusal that cannot time out, unlike `127.0.0.1:1`.
-            &format!("http://{}", dead_addr()),
+            // #6288: an absent daemon socket.
+            &socket_mock::absent(),
             Some(PathBuf::from("/repo")),
             &serde_json::json!({"tool_use_id": "toolu_X"}),
             "Agent",
@@ -1696,8 +1719,8 @@ mod tests {
         // every failure would have broken: with nothing listening the guard
         // cannot function at all, and denying would block every dispatch from a
         // main checkout on a machine running no daemon.
-        // #9695: a refusal that cannot time out, unlike `127.0.0.1:1`.
-        let url = format!("http://{}", dead_addr());
+        // #6288: an absent daemon socket.
+        let url = socket_mock::absent();
         assert_eq!(granted_against(&url).await, None);
     }
 

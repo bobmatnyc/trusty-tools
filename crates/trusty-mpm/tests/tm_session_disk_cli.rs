@@ -5,11 +5,10 @@
 //! BINARY reaches the daemon, sends `group_by: "session"`, or puts the report
 //! on stdout and its diagnostics on stderr. That wiring is what an operator
 //! actually runs, and it is exactly what a unit test cannot see.
-//! What: serves two axum routes — `/rpc`, which answers `tools/call` with a
-//! fixed `disk_survey` payload, and `GET /sessions`, which maps the survey's
-//! session UUID to its friendly name — points the binary at them with
-//! `TRUSTY_MPM_URL` (`--url`'s env form, which every resolver honours ahead of
-//! the lock file and the gateway probe), and asserts the JSON schema, the
+//! What: a mock daemon socket (#6288) answers `mpm.mcp.dispatch` (the socket
+//! form of `/rpc`) with a fixed `disk_survey` payload, and the session lists,
+//! which map the survey's session UUID to its friendly name; the binary is
+//! pointed at it with `TRUSTY_MPM_SOCKET`, and the test asserts the JSON schema, the
 //! table, the name resolution, and the two distinct error arms. The stub also
 //! RECORDS the arguments it was called with, so the `group_by` contract is
 //! asserted rather than assumed.
@@ -18,11 +17,8 @@
 
 use crate::common;
 
-use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde_json::{Value, json};
 
 /// The session the survey attributes bytes to — a raw UUID, which is the only
@@ -117,54 +113,40 @@ fn survey_payload() -> Value {
 async fn serve_stub() -> (String, Arc<Mutex<Vec<Value>>>) {
     let calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&calls);
-    let router = Router::new()
-        .route(
-            "/rpc",
-            post(move |Json(req): Json<Value>| {
-                let recorder = Arc::clone(&recorder);
-                async move {
-                    let args = req
-                        .pointer("/params/arguments")
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    recorder.lock().expect("record the call").push(args);
-                    Json(json!({
-                        "jsonrpc": "2.0",
-                        "id": req.get("id").cloned().unwrap_or(Value::Null),
-                        "result": {
-                            "content": [{
-                                "type": "text",
-                                "text": survey_payload().to_string()
-                            }],
-                            "isError": false
-                        }
-                    }))
-                }
+    // #6288: the three routes, as the daemon socket's methods.
+    let (url, _frames) = common::socket::spawn_mock(move |frame| {
+        let result = match frame["method"].as_str() {
+            Some("mpm.mcp.dispatch") => {
+                let args = frame
+                    .pointer("/params/params/arguments")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                recorder.lock().expect("record the call").push(args);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": frame.pointer("/params/id").cloned().unwrap_or(Value::Null),
+                    "result": {
+                        "content": [{"type": "text", "text": survey_payload().to_string()}],
+                        "isError": false
+                    }
+                })
+            }
+            // The MANAGED store is where an attributed session actually lives on
+            // a live machine (#7313); the project store answers empty beside it,
+            // so both halves of the directory are exercised.
+            Some("mpm.managed.list") => json!({
+                "sessions": [{
+                    "id": OWNER,
+                    "name": OWNER_NAME,
+                    "state": "active",
+                    "persisted_state": "active",
+                }]
             }),
-        )
-        // The MANAGED store is where an attributed session actually lives on a
-        // live machine (#7313); the project store answers empty beside it, so
-        // both halves of the directory are exercised.
-        .route(
-            "/api/v1/sessions/managed",
-            get(|| async {
-                Json(json!({
-                    "sessions": [{
-                        "id": OWNER,
-                        "name": OWNER_NAME,
-                        "state": "active",
-                        "persisted_state": "active",
-                    }]
-                }))
-            }),
-        )
-        .route("/sessions", get(|| async { Json(json!({"sessions": []})) }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral loopback port");
-    let addr = listener.local_addr().expect("read the bound address");
-    tokio::spawn(axum::serve(listener, router).into_future());
-    (format!("http://{addr}"), calls)
+            _ => json!({"sessions": []}),
+        };
+        common::socket::Reply::Frame(common::socket::result_frame(&result.to_string()))
+    });
+    (url, calls)
 }
 
 /// Run the built `tm` binary against the stub, from a hermetic temp cwd.
@@ -172,12 +154,12 @@ async fn serve_stub() -> (String, Arc<Mutex<Vec<Value>>>) {
 /// The cwd is outside any managed workspace root, so the project filter
 /// declines and the survey covers everything — which is what makes the
 /// assertions independent of the developer's own machine. `common::tm_command`
-/// does the same for the child's `$HOME` (#7568); the `TRUSTY_MPM_URL` below is
-/// set after it, so it survives the helper's scrub.
+/// does the same for the child's `$HOME` (#7568); the `TRUSTY_MPM_SOCKET` below
+/// is set after it, so it survives the helper's scrub.
 fn run_tm(url: &str, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    common::tm_command()
-        .env("TRUSTY_MPM_URL", url)
-        .args(args)
+    let mut cmd = common::tm_command();
+    common::socket::aim(&mut cmd, url);
+    cmd.args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .output()

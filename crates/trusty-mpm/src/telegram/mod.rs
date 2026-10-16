@@ -646,7 +646,11 @@ pub async fn run_alert_loop(
     // timeout, so a wedged daemon hangs the poll indefinitely inside the
     // `tokio::select!` arm below, delaying `shutdown.cancelled()` responsiveness
     // along with it — the same failure class as #2471's TUI freeze.
-    let client = crate::client::http_client::default_client();
+    // #6288: `daemon_url` is the daemon socket locator; the client never opens TCP.
+    let client = crate::client::DaemonClient::with_client(
+        crate::client::http_client::default_client(),
+        daemon_url,
+    );
     let last_seen = Arc::new(Mutex::new(LastSeen::new()));
     let mut session_tick = tokio::time::interval(SESSION_POLL_INTERVAL);
     let mut overseer_tick = tokio::time::interval(OVERSEER_POLL_INTERVAL);
@@ -658,7 +662,7 @@ pub async fn run_alert_loop(
                 return;
             }
             _ = session_tick.tick() => {
-                let alerts = poll_session_alerts(&client, &daemon_url, &config, &last_seen).await;
+                let alerts = poll_session_alerts(&client, &config, &last_seen).await;
                 for alert in alerts {
                     if let Err(e) = bot.send_message(chat_id, &alert.message).await {
                         tracing::warn!("failed to send alert: {e}");
@@ -666,7 +670,7 @@ pub async fn run_alert_loop(
                 }
             }
             _ = overseer_tick.tick() => {
-                if let Some(msg) = poll_overseer_alert(&client, &daemon_url).await
+                if let Some(msg) = poll_overseer_alert(&client).await
                     && let Err(e) = bot.send_message(chat_id, &msg).await {
                         tracing::warn!("failed to send overseer alert: {e}");
                     }
@@ -683,25 +687,25 @@ pub async fn run_alert_loop(
 /// [`alerts::check_and_alert`] which mutates `last_seen` and returns alerts.
 /// Test: the decision logic is covered by `alerts::check_and_alert` tests.
 async fn poll_session_alerts(
-    client: &reqwest::Client,
-    daemon_url: &str,
+    client: &crate::client::DaemonClient,
     config: &AlertConfig,
     last_seen: &Mutex<LastSeen>,
 ) -> Vec<alerts::PendingAlert> {
-    let sessions: Vec<serde_json::Value> =
-        match client.get(format!("{daemon_url}/sessions")).send().await {
-            Ok(r) => match r.json::<serde_json::Value>().await {
-                Ok(b) => b["sessions"].as_array().cloned().unwrap_or_default(),
-                Err(_) => return Vec::new(),
-            },
+    let sessions: Vec<serde_json::Value> = match client.get("/sessions").send().await {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(b) => b["sessions"].as_array().cloned().unwrap_or_default(),
             Err(_) => return Vec::new(),
-        };
+        },
+        Err(_) => return Vec::new(),
+    };
 
     let mut events_by_session = std::collections::HashMap::new();
     for s in &sessions {
         let Some(id) = s["id"].as_str() else { continue };
-        let url = format!("{daemon_url}/sessions/{id}/events/poll");
-        if let Ok(r) = client.get(&url).send().await
+        if let Ok(r) = client
+            .get(format!("/sessions/{id}/events/poll"))
+            .send()
+            .await
             && let Ok(body) = r.json::<serde_json::Value>().await
         {
             let events = body["events"].as_array().cloned().unwrap_or_default();
@@ -721,9 +725,9 @@ async fn poll_session_alerts(
 /// blocked session, returns a formatted alert.
 /// Test: exercised against a live daemon; the formatter is unit-tested as
 /// `alerts::format_overseer_block_alert`.
-async fn poll_overseer_alert(client: &reqwest::Client, daemon_url: &str) -> Option<String> {
+async fn poll_overseer_alert(client: &crate::client::DaemonClient) -> Option<String> {
     let body: serde_json::Value = client
-        .get(format!("{daemon_url}/overseer"))
+        .get("/overseer")
         .send()
         .await
         .ok()?

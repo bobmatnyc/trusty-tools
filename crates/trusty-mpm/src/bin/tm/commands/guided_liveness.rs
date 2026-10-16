@@ -89,16 +89,29 @@ pub(crate) struct HostProbe<'a> {
 /// Why: #9034 — "down" is the only verdict that may start a daemon or redirect
 /// to a managed clone, so it needs positive evidence. A timeout, an HTTP error
 /// status, or an unreadable body all mean a process answered the socket.
-/// What: a non-`reqwest` error is `Unknown`; a `reqwest` error is decided by
-/// [`reach_from_flags`].
+/// What: a daemon-socket failure (#6288) is decided by [`reach_from_flags`]
+/// with "connect" meaning nothing listens on the socket
+/// ([`DaemonCallError::nothing_listening`](trusty_mpm::client::DaemonCallError::nothing_listening));
+/// any other error that is not a `reqwest` one is `Unknown`; a `reqwest` error
+/// is decided by [`reach_from_flags`].
 /// Test: `classify_timeout_is_unknown_not_down`,
 /// `classify_refused_with_live_lock_pid_is_unknown`,
-/// `classify_refused_without_live_pid_is_down`.
+/// `classify_refused_without_live_pid_is_down`,
+/// `classify_an_absent_socket_is_down_and_a_refused_one_unknown`.
 pub(crate) fn classify_list_failure(
     err: &anyhow::Error,
     lock_evidence: Option<&str>,
 ) -> DaemonReach {
+    use trusty_mpm::client::DaemonCallError;
     let Some(re) = err.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()) else {
+        // #6288: a daemon-socket failure carries no `reqwest` error.
+        if let Some(dc) = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<DaemonCallError>())
+        {
+            let (timeout, absent) = (dc.is_timeout(), dc.nothing_listening());
+            return reach_from_flags(timeout, absent, lock_evidence, &dc.to_string());
+        }
         return DaemonReach::Unknown(format!("it answered with an unusable reply: {err}"));
     };
     reach_from_flags(
@@ -145,11 +158,15 @@ pub(crate) fn reach_from_flags(
 /// Why: a live pid is evidence about the daemon at the lock's own address
 /// only; a lock for port 7880 says nothing about an explicit `--url` elsewhere.
 /// #9034: the same rule as lock removal — a live pid counts unless it is
-/// positively dead, whether or not its identity is confirmed.
-/// What: `None` when the lock is absent, not ours, for another address, or
-/// stale; otherwise [`super::guided_autostart_plan::lock_evidence`] of
-/// [`super::guided_autostart_plan::lock_verdict`] (no mutation).
+/// positively dead, whether or not its identity is confirmed. #6288: `url` is
+/// now the socket locator, which the lock's `addr` never matches; matching it
+/// against the lock's `socket_path` keeps a live daemon's evidence, so a slow
+/// daemon is still not autostarted over.
+/// What: `None` when the lock is absent, not ours, for another socket or
+/// address, or stale; otherwise [`super::guided_autostart_plan::lock_evidence`]
+/// of [`super::guided_autostart_plan::lock_verdict`] (no mutation).
 /// Test: `live_pid_requires_matching_addr`,
+/// `live_pid_matches_the_socket_locator`,
 /// `unverified_lock_pid_is_evidence_not_absence`.
 pub(crate) fn lock_evidence_for(
     url: &str,
@@ -159,11 +176,31 @@ pub(crate) fn lock_evidence_for(
     use super::guided_autostart_plan::{lock_evidence, lock_verdict};
     let text = std::fs::read_to_string(lock_path).ok()?;
     let lock = trusty_mpm::core::daemon_identity::parse_lock(&text)?;
-    let addr = lock.addr.trim_end_matches('/');
-    if addr.is_empty() || !url.trim_end_matches('/').starts_with(addr) {
+    if !lock_names_target(url, &lock) {
         return None;
     }
     lock_evidence(lock_verdict(lock_path, identify))
+}
+
+/// Does `lock` describe the daemon `url` points at?
+///
+/// Why: a live pid is evidence about the daemon at the lock's own socket or
+/// address only (#9034, #6288). Shared by [`lock_evidence_for`] and the
+/// pm-guard's saturated-versus-stale rule.
+/// What: a socket locator matches the lock's non-empty `socket_path`; any other
+/// URL matches by the lock's `addr` prefix.
+/// Test: `live_pid_requires_matching_addr`, `live_pid_matches_the_socket_locator`.
+pub(crate) fn lock_names_target(
+    url: &str,
+    lock: &trusty_mpm::core::daemon_identity::DaemonLock,
+) -> bool {
+    match trusty_mpm::core::socket_from_locator(url) {
+        Some(socket) => !lock.socket_path.is_empty() && Path::new(&lock.socket_path) == socket,
+        None => {
+            let addr = lock.addr.trim_end_matches('/');
+            !addr.is_empty() && url.trim_end_matches('/').starts_with(addr)
+        }
+    }
 }
 
 /// The error bare `tm` stops with when the daemon may be running.

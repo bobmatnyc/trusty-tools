@@ -152,30 +152,26 @@ pub(crate) async fn print_sessions(
     Ok(())
 }
 
-/// Probe the daemon's `/health` endpoint for liveness.
+/// Probe the daemon for liveness over its socket.
 ///
 /// Why: both `start` (to decide whether to spawn) and the post-spawn wait loop
 /// need a single yes/no liveness check; factoring it out keeps the two call
 /// sites identical and the intent obvious.
-/// What: issues `GET {url}/health`, returning `true` only on a 2xx response and
-/// `false` on any transport error or non-success status.
+/// What: `mpm.health` then `mpm.sessions.list` over the socket `url` locates
+/// (#6288), `true` only when both answer. Over the socket nothing but the
+/// daemon can answer, so the second probe is no longer a port-sharing guard;
+/// it stays so a daemon that serves health but not its registry reads down.
 /// Test: covered indirectly by running `tm start` against a live/dead daemon;
 /// the logic mirrors the probe already used by `status`.
 pub(crate) async fn daemon_healthy(client: &reqwest::Client, url: &str) -> bool {
-    // Verify /health is 200 AND /sessions is 200. Code-intelligence on the same
-    // port returns 200 for /health but 404 for /sessions, so checking both
-    // discriminates our daemon from other HTTP servers on the same port.
-    let health_ok = match client.get(format!("{url}/health")).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => return false,
-    };
-    if !health_ok {
-        return false;
+    let daemon = trusty_mpm::client::DaemonClient::with_client(client.clone(), url);
+    for route in ["/health", "/sessions"] {
+        match daemon.get(route).send().await {
+            Ok(r) if r.status().is_success() => {}
+            _ => return false,
+        }
     }
-    match client.get(format!("{url}/sessions")).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
-    }
+    true
 }
 
 /// The line `tm start` prints when the daemon is already up.
@@ -218,28 +214,10 @@ fn already_running_line(_check_url: &str) -> String {
 /// covered by `launchd_probe`'s `daemon_label_*` and `cli_spawn_refusal_*` tests;
 /// the spawn/wait path is exercised by running `tm start` against a clean
 /// environment.
-/// The URL `tm start` health-checks: the lock's, else the one it was given.
-///
-/// Why (#9556): in a sandbox with no lock the resolver refuses; that refusal
-/// is not a lock, so an explicit `--url` naming a live sandbox daemon must be
-/// the one checked.
-/// What: `lock` when it is `Ok` and not [`trusty_mpm::core::DEFAULT_DAEMON_URL`]
-/// (or `url` is that default too), else `url`.
-/// Test: `start_checks_the_given_url_when_the_resolver_refuses`.
-fn start_check_url(lock: Result<String, trusty_mpm::core::DaemonUrlError>, url: &str) -> String {
-    use trusty_mpm::core::DEFAULT_DAEMON_URL;
-    match lock {
-        // #9556: only a real lock counts; the isolated refusal is not one.
-        Ok(lock_url) if lock_url != DEFAULT_DAEMON_URL || url == DEFAULT_DAEMON_URL => lock_url,
-        _ => url.to_string(),
-    }
-}
-
 pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    // Prefer the lock file URL — it's the address our daemon actually bound to,
-    // not whatever default URL the CLI was given (which may point at a different
-    // process on the same port, e.g. code-intelligence on :7880).
-    let check_url = start_check_url(trusty_mpm::core::try_resolve_daemon_url(None), url);
+    // #6288: `url` is the daemon socket locator; the lock file's TCP address
+    // is no longer read by any client.
+    let check_url = url.to_string();
     if daemon_healthy(client, &check_url).await {
         // #6869: the resolved URL goes to the log, not to the operator.
         tracing::debug!("daemon already running at {check_url}");
@@ -291,18 +269,15 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     // #8783: own session, so a group kill aimed at this CLI spares the daemon.
     trusty_common::daemon_guard::start_in_new_session(&mut cmd).spawn()?;
 
-    // Poll the lock file for up to 5 seconds. The daemon writes it as soon as
-    // it has a bound address — use that URL for the health check.
+    // Poll the daemon socket for up to 5 seconds (#6288: the socket path is
+    // fixed, so there is no address to rediscover).
     print!("Starting daemon... ");
     use std::io::Write as _;
     std::io::stdout().flush().ok();
     let mut healthy = false;
-    // Use the lock-file URL if available, fall back to the cli url.
-    let mut actual_url = url.to_string();
+    let actual_url = url.to_string();
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        // Re-resolve: once the lock file appears it wins over the default.
-        actual_url = trusty_mpm::core::resolve_daemon_url(None);
         if daemon_healthy(client, &actual_url).await {
             healthy = true;
             break;
@@ -566,28 +541,6 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Why (#9556 critic): an isolated `tm start --url <live sandbox>` with no
-    /// lock checked the refusal sentinel's health instead of its own URL.
-    /// Test: itself.
-    #[test]
-    fn start_checks_the_given_url_when_the_resolver_refuses() {
-        use trusty_mpm::core::{DEFAULT_DAEMON_URL, DaemonUrlError};
-        let sandbox = "http://127.0.0.1:17881";
-        assert_eq!(
-            start_check_url(Err(DaemonUrlError::NoSandboxDaemon), sandbox),
-            sandbox
-        );
-        // A real lock still wins over a default `url`, as before.
-        assert_eq!(
-            start_check_url(Ok(sandbox.to_string()), DEFAULT_DAEMON_URL),
-            sandbox
-        );
-        assert_eq!(
-            start_check_url(Ok(DEFAULT_DAEMON_URL.to_string()), sandbox),
-            sandbox
-        );
-    }
 
     /// Why (#6869): `tm start` was the third site still printing the daemon's
     /// address, after the welcome banner and the `tm daemon` startup guard.

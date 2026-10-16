@@ -73,12 +73,11 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     // bare TUI's poll loop, which shares a task with keyboard input
     // (`tui/project_ctl/mod.rs`), so a bare `reqwest::Client::new()` here
     // reproduces the exact #2471 freeze (a wedged daemon hangs `q`/Ctrl-C too).
+    // #6288: the daemon socket; `TRUSTY_MPM_URL` gets the shared Q3 rule.
     let client = trusty_mpm::client::http_client::default_client();
     let explicit = trusty_mpm::core::explicit_url_from_env();
-    let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, explicit.as_deref()).await;
-    // #9556: an explicit `TRUSTY_MPM_URL` is pinned against re-discovery.
-    let daemon =
-        trusty_mpm::client::DaemonClient::new(url).with_pinned_base_url(explicit.is_some());
+    let url = trusty_mpm::core::try_resolve_daemon_url(explicit.as_deref())?;
+    let daemon = trusty_mpm::client::DaemonClient::with_client(client, url);
     trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false).await
 }
 

@@ -1267,14 +1267,13 @@ async fn audit_agent_cost_warning(
             "pm_guard_reason": reason,
         }
     });
-    let Ok(client) = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
+    // #6288: over the daemon socket `main` resolved; never TCP.
+    let _ = trusty_mpm::client::DaemonClient::new(url)
+        .post("/hooks")
+        .json(&body)
         .timeout(std::time::Duration::from_secs(2))
-        .build()
-    else {
-        return;
-    };
-    let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
+        .send()
+        .await;
 }
 
 #[cfg(test)]

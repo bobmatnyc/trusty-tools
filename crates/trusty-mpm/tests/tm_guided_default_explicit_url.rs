@@ -1,67 +1,50 @@
-//! End-to-end regression test for issue #1737's one confirmed LIVE bug: the
-//! bare `tm` guided default silently auto-starting/reconnecting to a
-//! DIFFERENT daemon when given an unreachable, explicitly-supplied `--url`.
+//! End-to-end regression test for issue #1737's one confirmed LIVE bug — the
+//! bare `tm` guided default acting on a DIFFERENT daemon than the one an
+//! explicit `--url` named — under the #6288 client cutover.
 //!
-//! Why: `commands::guided::run_guided_default`'s daemon-unreachable branch
-//! calls `guided_autostart::ensure_daemon_started`, which intentionally
-//! ignores whatever URL it is handed and always re-resolves IMPLICITLY (lock
-//! file → default) once it has confirmed *some* daemon is healthy — correct
-//! for the ordinary "daemon not started yet" first-run UX (#1705), but it
-//! meant an unreachable EXPLICIT `--url`/`TRUSTY_MPM_URL` silently ended up
-//! using a completely different, real daemon instead of erroring. This was
-//! empirically confirmed on a dev host actually running `trusty-mpm daemon`:
-//! `tm --url http://127.0.0.1:1` (no subcommand) printed the REAL daemon's
-//! live session list rather than any indication the requested URL failed.
-//! `run_guided_default` now probes an explicit URL up front (before any of
-//! that fallback-prone logic runs) and errors with exit code 75 instead.
-//! What: spawns `tm --url http://127.0.0.1:1` (bare, no subcommand) with
-//! stdin closed and asserts exit 75 plus a stderr message naming the failed
-//! URL and stating no fallback occurred. The command comes from
-//! `common::tm_command`, so the child also gets a scratch `$HOME` (#7568).
-//! Runs from a hermetic, non-git temp directory so the test never depends on
-//! this repo's own git/GitHub-remote structure (`derive_project` never needs to
-//! run — the explicit-URL guard fires before it).
+//! Why: before #6288, `tm --url http://127.0.0.1:1` (no subcommand) probed the
+//! explicit URL and exited 75 rather than auto-starting or reconnecting to the
+//! real daemon. Since #6288 an explicit URL no longer selects a daemon at all:
+//! every client reaches the daemon over its unix socket. A loopback URL names
+//! the daemon that socket reaches, so it is ignored with a notice; a URL naming
+//! another host is the case #1737 guards, and it is refused before the guided
+//! flow — or anything else — runs.
+//! What: spawns `tm --url http://100.64.0.1:7880` (bare, no subcommand) with
+//! stdin closed, from a hermetic non-git temp directory, and asserts a
+//! non-zero exit, a stderr refusal naming the URL and #6288, and an empty
+//! stdout. The command comes from `common::tm_command`, so the child also gets
+//! a scratch `$HOME` (#7568).
 //! Test: this test.
 
 use crate::common;
 
 #[test]
-fn bare_tm_explicit_unreachable_url_errors_not_silent_fallback() {
+fn bare_tm_refuses_a_remote_url_before_the_guided_flow() {
     let tmp = tempfile::tempdir().expect("create temp cwd");
 
     let output = common::tm_command()
-        .args(["--url", "http://127.0.0.1:1"])
+        .args(["--url", "http://100.64.0.1:7880"])
         .current_dir(tmp.path())
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn tm binary");
 
-    assert_eq!(
-        output.status.code(),
-        Some(75),
-        "explicit unreachable --url on the bare guided default must exit 75; \
-         stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("http://127.0.0.1:1"),
-        "stderr must name the explicit unreachable URL; got: {stderr}"
+        !output.status.success(),
+        "a remote --url must stop bare `tm`; stderr={stderr}"
     );
     assert!(
-        stderr.contains("refusing to fall back"),
-        "stderr must state that no fallback was attempted; got: {stderr}"
+        stderr.contains("http://100.64.0.1:7880") && stderr.contains("#6288"),
+        "stderr must name the refused URL and the rule; got: {stderr}"
     );
-
-    // The whole point of the regression: no session data from a DIFFERENT
-    // daemon should ever reach stdout for this invocation.
+    assert!(
+        !stderr.contains("guided default"),
+        "the guided flow must not start; got: {stderr}"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.trim().is_empty(),
-        "no output must be printed when the explicit URL is unreachable \
-         (a non-empty stdout would indicate a silent fallback to a \
-         different daemon); got: {stdout}"
+        "nothing may reach stdout — any output means some daemon was used; got: {stdout}"
     );
 }
