@@ -29,13 +29,19 @@
 //! swaps back to ort if the python sidecar is ever confirmed dead beyond
 //! recovery. See that module's docs for the swap-back predicate.
 //!
+//! #9949: a probe that fails every startup attempt no longer pins the daemon
+//! to ort. [`drive_bootstrap`] keeps retrying in the background with capped
+//! backoff ([`background_retry_delay`]) until one attempt succeeds; only a
+//! decided failure (missing launcher, venv build error) is terminal.
+//!
 //! Test: `graceful_bootstrap_swaps_to_python_on_success`,
-//! `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`,
+//! `graceful_bootstrap_stays_ort_and_retrying_after_probe_failure`,
 //! `graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure`,
 //! `graceful_bootstrap_retries_before_giving_up`,
 //! `graceful_bootstrap_probe_failure_tears_down_the_handle`,
 //! `graceful_bootstrap_probe_timeout_tears_down_the_handle` in
-//! `start/tests.rs`.
+//! `start/tests.rs`; `graceful_bootstrap_promotes_to_python_after_contention_window`
+//! and its siblings in `start/tests_9949.rs`.
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
@@ -43,10 +49,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::Embedder;
+use crate::service::embedder_supervisor::bootstrap_control::BootstrapReport;
 use crate::service::embedder_supervisor::{
-    ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder,
+    ActiveBackend, BackendKind, BootstrapState, SupervisorConfig, SwitchableEmbedder,
 };
 use crate::service::SearchAppState;
 
@@ -78,6 +86,46 @@ const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 /// no matter how many are configured, while the default 2-retry case is
 /// unchanged (30 s + 60 s).
 const MAX_PROBE_TIMEOUT_MULTIPLIER: u32 = 3;
+
+/// #9949: delays before each background retry, once the startup attempts are
+/// spent. The last entry repeats for as long as the daemon runs.
+const BACKGROUND_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(10 * 60),
+    Duration::from_secs(30 * 60),
+];
+
+/// Delay before background retry `round` (0-based): 2, 5, 10, then 30
+/// minutes for every later round.
+/// Test: `background_retry_delay_holds_at_thirty_minutes` in `start/tests_9949.rs`.
+pub(super) fn background_retry_delay(round: usize) -> Duration {
+    let last = BACKGROUND_RETRY_DELAYS[BACKGROUND_RETRY_DELAYS.len() - 1];
+    BACKGROUND_RETRY_DELAYS.get(round).copied().unwrap_or(last)
+}
+
+/// Which venv recheck an attempt runs before spawning (#9949).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VenvCheck {
+    /// `ensure_venv_eager`: a full `import sentence_transformers` recheck,
+    /// about 70 s on a contended host. Only the daemon's first attempt.
+    FullImport,
+    /// `ensure_venv`: the torch-free liveness check the launcher itself runs
+    /// on every spawn. Every later attempt.
+    Liveness,
+}
+
+/// Why an attempt did not swap to python (#9949).
+#[derive(Debug)]
+enum AttemptError {
+    /// Retrying cannot help: the launcher is missing, or the venv build or
+    /// rebuild returned an error.
+    Decided(anyhow::Error),
+    /// The readiness probe failed or timed out; a slow host may pass later.
+    Transient(anyhow::Error),
+    /// Daemon shutdown cancelled the attempt.
+    Cancelled,
+}
 
 /// Abstracts "the thing that must be torn down if the readiness probe fails
 /// or times out after an adapter/handle has already been built" — real:
@@ -131,19 +179,22 @@ impl PythonAdapterTeardown for crate::service::embedder_supervisor::LazyEmbedder
 /// probe. None of that is available or desirable in CI. [`RealPythonBootstrap`]
 /// is the only production implementation; tests substitute fakes that fail or
 /// succeed deterministically at each step.
-/// What: `ensure_venv` (blocking bootstrap), `locate_launcher` (binary
-/// discovery), `build_adapter` (constructs the live `Arc<dyn Embedder>` +
-/// optional pid slot + the [`PythonAdapterTeardown`] handle for that same
-/// adapter, from the located launcher), `probe_timeout` (bound on the one
-/// real embed call `try_bootstrap_once` makes before hot-swapping).
+/// What: `ensure_venv` (blocking bootstrap, at the [`VenvCheck`] depth the
+/// attempt asks for), `locate_launcher` (binary discovery), `build_adapter`
+/// (constructs the live `Arc<dyn Embedder>` + optional pid slot + the
+/// [`PythonAdapterTeardown`] handle for that same adapter, from the located
+/// launcher, with `startup_budget` as the supervisor's own spawn timeout —
+/// #9949), `probe_timeout` (the BASE bound on the one real embed call
+/// `try_bootstrap_once` makes before hot-swapping; see [`probe_budget`]).
 /// Test: see the module-level `Test:` pointer.
 pub(crate) trait PythonBootstrap: Send + Sync {
-    fn ensure_venv(&self) -> Result<()>;
+    fn ensure_venv(&self, check: VenvCheck) -> Result<()>;
     fn locate_launcher(&self) -> Result<PathBuf>;
     #[allow(clippy::type_complexity)]
     fn build_adapter(
         &self,
         launcher: PathBuf,
+        startup_budget: Duration,
     ) -> (
         Arc<dyn Embedder>,
         Option<Arc<AtomicU32>>,
@@ -161,8 +212,13 @@ pub(crate) trait PythonBootstrap: Send + Sync {
 struct RealPythonBootstrap;
 
 impl PythonBootstrap for RealPythonBootstrap {
-    fn ensure_venv(&self) -> Result<()> {
-        trusty_embedderd_py::ensure_venv_eager()
+    fn ensure_venv(&self, check: VenvCheck) -> Result<()> {
+        // #9949: only the first attempt pays for the full-import recheck.
+        let ensured = match check {
+            VenvCheck::FullImport => trusty_embedderd_py::ensure_venv_eager(),
+            VenvCheck::Liveness => trusty_embedderd_py::ensure_venv(),
+        };
+        ensured
             .map(|_layout| ())
             .map_err(|e| e.context("py-embedder venv bootstrap"))
     }
@@ -174,6 +230,7 @@ impl PythonBootstrap for RealPythonBootstrap {
     fn build_adapter(
         &self,
         launcher: PathBuf,
+        startup_budget: Duration,
     ) -> (
         Arc<dyn Embedder>,
         Option<Arc<AtomicU32>>,
@@ -181,7 +238,10 @@ impl PythonBootstrap for RealPythonBootstrap {
     ) {
         use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
-        let config = super::embedder::resolve_python_supervisor_config();
+        let config = adapter_supervisor_config(
+            super::embedder::resolve_python_supervisor_config(),
+            startup_budget,
+        );
         let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
         let pid_slot = handle.app_pid_slot();
         let teardown: Arc<dyn PythonAdapterTeardown> = Arc::clone(&handle) as _;
@@ -197,6 +257,24 @@ impl PythonBootstrap for RealPythonBootstrap {
             super::embedder::resolve_python_supervisor_config().startup_timeout_secs,
         )
     }
+}
+
+/// The python supervisor config for one attempt: `base` with
+/// `startup_timeout_secs` raised to that attempt's budget (#9949).
+///
+/// Why: the attempt budget used to scale only the outer probe timeout. The
+/// supervisor kept the flat `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` and killed
+/// every spawn at 30 s, so attempt 2's advertised 60 s never took effect.
+/// What: sets `startup_timeout_secs` to `startup_budget` in whole seconds,
+/// rounded up and at least 1; every other field is kept.
+/// Test: `attempt_two_adapter_gets_twice_the_base_budget` in `start/tests_9949.rs`.
+pub(super) fn adapter_supervisor_config(
+    mut base: SupervisorConfig,
+    startup_budget: Duration,
+) -> SupervisorConfig {
+    let secs = startup_budget.as_secs() + u64::from(startup_budget.subsec_nanos() > 0);
+    base.startup_timeout_secs = secs.max(1);
+    base
 }
 
 /// The readiness-probe budget for one attempt, plus enough context for the
@@ -291,27 +369,35 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// Why: isolated from [`run_graceful_python_bootstrap`] so tests can inject
 /// a fake [`PythonBootstrap`] and a hand-built `SwitchableEmbedder` /
 /// `SearchAppState` without touching any real subprocess, venv, or GPU.
-/// What: retries up to `retries` times (linear backoff between attempts —
-/// `2 * attempt` seconds); on success hot-swaps `switchable` to the python
-/// adapter (`ActiveBackend::bootstrap = Ready`) and installs the pid slot on
-/// `state`; on final exhaustion marks `switchable`'s bootstrap state
-/// `Failed` via `SwitchableEmbedder::set_bootstrap_state` — the still-live
-/// ort backend (`inner`) is never touched, so search keeps serving on ort
-/// exactly as it was before this task ever ran.
+/// #9949: on a slow host every startup attempt can time out while python
+/// would answer minutes later; giving up then pinned the daemon to ort for
+/// its whole uptime.
+/// What: makes up to `retries` startup attempts (linear backoff, `2 *
+/// attempt` seconds). If the last one failed on a decided error (missing
+/// launcher, venv build error), marks the bootstrap `Failed` and returns. If
+/// it failed on the probe, marks it `Retrying` and keeps attempting in the
+/// background, waiting [`background_retry_delay`] between rounds, until an
+/// attempt succeeds, a decided error ends it, or the switchable's
+/// `BootstrapControl` is shut down. Every failed attempt records its error in
+/// that control's report before logging it. On success hot-swaps `switchable`
+/// to the python adapter (`ActiveBackend::bootstrap = Ready`) and installs the
+/// pid slot on `state`. The live ort backend (`inner`) is never touched
+/// otherwise, so search keeps serving on ort throughout.
 ///
 /// Returns the python adapter's [`PythonAdapterTeardown`] handle on a
-/// successful hot-swap (epic #3524 slice 6, PR 4/5) — `None` on exhaustion.
-/// [`run_graceful_python_bootstrap`] uses the `Some` case to hand the live
-/// python handle's teardown to the swap-back watchdog, which needs it to
-/// cleanly shut down the dead sidecar once IT confirms death and swaps back
-/// to ort. This is a pure return-type addition: every existing PR-3 test
-/// calls this function without using its return value, so none of them
-/// needed to change.
+/// successful hot-swap (epic #3524 slice 6, PR 4/5); `None` on a decided
+/// failure or a shutdown. [`run_graceful_python_bootstrap`] uses the `Some`
+/// case to hand the live python handle's teardown to the swap-back watchdog.
 ///
 /// Test: `graceful_bootstrap_swaps_to_python_on_success`,
-/// `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`,
+/// `graceful_bootstrap_stays_ort_and_retrying_after_probe_failure`,
 /// `graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure`,
-/// `graceful_bootstrap_retries_before_giving_up` in `start/tests.rs`.
+/// `graceful_bootstrap_retries_before_giving_up`,
+/// `graceful_bootstrap_gives_up_after_exhausting_retries` in `start/tests.rs`;
+/// `graceful_bootstrap_promotes_to_python_after_contention_window`,
+/// `graceful_bootstrap_missing_launcher_is_terminal_with_no_retry`,
+/// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
+/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`.
 pub(super) async fn drive_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
@@ -319,37 +405,144 @@ pub(super) async fn drive_bootstrap(
     retries: u32,
 ) -> Option<Arc<dyn PythonAdapterTeardown>> {
     let retries = retries.max(1);
-    let mut last_err = None;
+    let cancel = switchable.bootstrap_control().cancel_token();
+    let mut attempt = 0u32;
 
-    for attempt in 1..=retries {
-        // #4125: each retry gets a proportionally larger probe budget — see
-        // `try_bootstrap_once`.
-        match try_bootstrap_once(&switchable, &state, &ops, attempt).await {
-            Ok(python_teardown) => {
-                tracing::info!("embedder hot-swapped ort -> python/MPS (sidecar ready)");
-                return Some(python_teardown);
-            }
+    let last_err = loop {
+        attempt += 1;
+        match run_attempt(&switchable, &state, &ops, attempt, &cancel).await {
+            Ok(python_teardown) => return Some(python_teardown),
+            Err(AttemptError::Cancelled) => return None,
             Err(e) => {
                 tracing::warn!(
                     "graceful python bootstrap attempt {attempt}/{retries} failed \
-                     ({e:#}) — staying on the ort sidecar"
+                     ({}) — staying on the ort sidecar",
+                    attempt_error_text(&e)
                 );
-                last_err = Some(e);
-                if attempt < retries {
-                    tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
+                if attempt >= retries {
+                    break e;
+                }
+                let backoff = Duration::from_secs(2 * u64::from(attempt));
+                if !sleep_unless_cancelled(backoff, &cancel).await {
+                    return None;
                 }
             }
         }
+    };
+    if let AttemptError::Decided(e) = last_err {
+        give_up(&switchable, attempt, &e);
+        return None;
     }
 
+    // #9949: the probe failed, not the setup — keep retrying while ort serves.
+    let mut round = 0usize;
+    loop {
+        let delay = background_retry_delay(round);
+        round = round.saturating_add(1);
+        let next_retry_at = std::time::SystemTime::now() + delay;
+        switchable
+            .bootstrap_control()
+            .update_report(|r| BootstrapReport {
+                next_retry_at: Some(next_retry_at),
+                ..r.clone()
+            });
+        switchable.set_bootstrap_state(BootstrapState::Retrying);
+        tracing::warn!(
+            "graceful python bootstrap: {attempt} attempt(s) failed — still serving on \
+             the ort sidecar; retrying in {}s",
+            delay.as_secs()
+        );
+        if !sleep_unless_cancelled(delay, &cancel).await {
+            return None;
+        }
+        attempt += 1;
+        match run_attempt(&switchable, &state, &ops, attempt, &cancel).await {
+            Ok(python_teardown) => return Some(python_teardown),
+            Err(AttemptError::Cancelled) => return None,
+            Err(AttemptError::Decided(e)) => {
+                give_up(&switchable, attempt, &e);
+                return None;
+            }
+            Err(AttemptError::Transient(e)) => tracing::warn!(
+                "graceful python bootstrap background attempt {attempt} failed ({e:#}) — \
+                 staying on the ort sidecar"
+            ),
+        }
+    }
+}
+
+/// The log/report text for a failed attempt.
+fn attempt_error_text(e: &AttemptError) -> String {
+    match e {
+        AttemptError::Decided(e) | AttemptError::Transient(e) => format!("{e:#}"),
+        AttemptError::Cancelled => "cancelled by daemon shutdown".to_string(),
+    }
+}
+
+/// Sleep for `delay`; `false` when `cancel` fired first.
+async fn sleep_unless_cancelled(delay: Duration, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => false,
+        () = tokio::time::sleep(delay) => true,
+    }
+}
+
+/// Mark the bootstrap terminally `Failed` on a decided error (#9949).
+fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
+    switchable
+        .bootstrap_control()
+        .update_report(|r| BootstrapReport {
+            next_retry_at: None,
+            ..r.clone()
+        });
     switchable.set_bootstrap_state(BootstrapState::Failed);
     tracing::warn!(
-        "graceful python bootstrap exhausted {retries} attempt(s) — staying permanently \
-         on the ort sidecar for this daemon's lifetime (last error: {:#}); restart to \
-         retry, or set TRUSTY_EMBEDDER=python for the eager blocking path",
-        last_err.expect("at least one attempt runs when retries >= 1"),
+        "graceful python bootstrap gave up after {attempts} attempt(s) — staying \
+         permanently on the ort sidecar for this daemon's lifetime (last error: {e:#}); \
+         retrying cannot fix this, so fix the cause and restart, or set \
+         TRUSTY_EMBEDDER=python for the eager blocking path"
     );
-    None
+}
+
+/// One attempt plus its report bookkeeping (#9949).
+///
+/// Fail-open check: a failed attempt writes its error into the report BEFORE
+/// the caller logs it, so `/health` always says why, never only a WARN line.
+async fn run_attempt(
+    switchable: &SwitchableEmbedder,
+    state: &SearchAppState,
+    ops: &Arc<dyn PythonBootstrap>,
+    attempt: u32,
+    cancel: &CancellationToken,
+) -> std::result::Result<Arc<dyn PythonAdapterTeardown>, AttemptError> {
+    let control = switchable.bootstrap_control();
+    control.update_report(|r| BootstrapReport {
+        attempts: attempt,
+        next_retry_at: None,
+        ..r.clone()
+    });
+    let check = if attempt == 1 {
+        VenvCheck::FullImport
+    } else {
+        VenvCheck::Liveness
+    };
+    let outcome = try_bootstrap_once(switchable, state, ops, attempt, check, cancel).await;
+    match &outcome {
+        Ok(_) => control.update_report(|r| BootstrapReport {
+            last_error: None,
+            ..r.clone()
+        }),
+        Err(AttemptError::Cancelled) => {}
+        Err(e) => {
+            let text = attempt_error_text(e);
+            control.update_report(|r| BootstrapReport {
+                last_error: Some(text.clone()),
+                ..r.clone()
+            });
+        }
+    }
+    outcome
 }
 
 /// One bootstrap→probe→swap attempt. See [`drive_bootstrap`] for the retry
@@ -364,83 +557,100 @@ pub(super) async fn drive_bootstrap(
 /// forces a cold python spawn — torch import, model load, one real embed —
 /// while the daemon is simultaneously warm-booting its indexes, and the flat
 /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` budget is measurably too tight under
-/// that self-inflicted load (both attempts of the 2026-08-04T12:19:28 boot
-/// died at exactly 30 s with no child output, and the next daemon start
-/// succeeded unchanged). Unlike the venv recheck this timeout is NOT a
-/// misclassification — a sidecar that will not answer genuinely cannot serve
-/// this attempt — so the fix is not a new outcome but a budget that grows with
-/// the retry instead of failing the same way twice. That growth is bounded by
-/// [`MAX_PROBE_TIMEOUT_MULTIPLIER`]; see [`probe_budget`].
+/// that self-inflicted load. The budget grows with the retry, bounded by
+/// [`MAX_PROBE_TIMEOUT_MULTIPLIER`]; see [`probe_budget`]. #9949: the same
+/// budget now reaches the supervisor through `build_adapter`, so the spawn is
+/// not cut off at the flat base first.
+///
+/// Errors are classified for the retry loop: a venv or launcher error is
+/// [`AttemptError::Decided`], a probe error or timeout is
+/// [`AttemptError::Transient`], and `cancel` firing is
+/// [`AttemptError::Cancelled`]. A cancel during the probe tears the
+/// just-spawned handle down before returning, like a failed probe does.
 async fn try_bootstrap_once(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
     ops: &Arc<dyn PythonBootstrap>,
     attempt: u32,
-) -> Result<Arc<dyn PythonAdapterTeardown>> {
-    // Step a: blocking venv bootstrap off the async runtime — mirrors the
-    // eager `TRUSTY_EMBEDDER=python` arm's `ensure_venv_eager` off-thread call.
+    check: VenvCheck,
+    cancel: &CancellationToken,
+) -> std::result::Result<Arc<dyn PythonAdapterTeardown>, AttemptError> {
+    // Step a: blocking venv bootstrap off the async runtime. A shutdown does
+    // not wait for it: the blocking thread finishes on its own and spawns no
+    // sidecar.
     let venv_ops = Arc::clone(ops);
-    tokio::task::spawn_blocking(move || venv_ops.ensure_venv())
-        .await
-        .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"))??;
+    let venv = tokio::task::spawn_blocking(move || venv_ops.ensure_venv(check));
+    let venv = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(AttemptError::Cancelled),
+        joined = venv => joined,
+    };
+    match venv {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(AttemptError::Decided(e)),
+        Err(e) => {
+            return Err(AttemptError::Decided(anyhow::anyhow!(
+                "py-embedder bootstrap task panicked: {e}"
+            )))
+        }
+    }
 
     // Step b: locate the launcher binary.
-    let launcher = ops.locate_launcher()?;
+    let launcher = ops
+        .locate_launcher()
+        .map_err(|e| AttemptError::Decided(e.context("python sidecar launcher not found")))?;
 
-    // Step c: build the python `LazyEmbedderHandle` + adapter exactly like
-    // the existing eager `python` arm. `teardown` is the SAME underlying
-    // handle as `adapter` (just viewed through `PythonAdapterTeardown`
-    // instead of `Embedder`) — see that trait's doc for why an explicit,
-    // awaited teardown is required on every failure path below rather than
-    // relying on `Drop`.
-    let (adapter, pid_slot, teardown) = ops.build_adapter(launcher);
-    // #4125: a fixed budget under variable startup load is wrong again as soon
-    // as the load changes — give attempt N N x the base budget, bounded by
-    // MAX_PROBE_TIMEOUT_MULTIPLIER so it cannot grow without limit.
+    // Step c: build the python `LazyEmbedderHandle` + adapter. `teardown` is
+    // the SAME underlying handle as `adapter` (viewed through
+    // `PythonAdapterTeardown`) — see that trait's doc for why an explicit,
+    // awaited teardown is required on every failure path below.
+    // #4125: attempt N gets N x the base budget, bounded by
+    // MAX_PROBE_TIMEOUT_MULTIPLIER. #9949: the supervisor gets it too.
     let base = ops.probe_timeout();
     let budget = probe_budget(base, attempt);
+    let (adapter, pid_slot, teardown) = ops.build_adapter(launcher, budget.timeout);
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
-    // load + one real embed THROUGH the supervisor, bounded by a timeout.
-    let probe = tokio::time::timeout(
-        budget.timeout,
-        adapter.embed_batch(&["trusty readiness probe"]),
-    )
-    .await;
+    // load + one real embed THROUGH the supervisor, bounded by the budget.
+    let probe = tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        probed = tokio::time::timeout(
+            budget.timeout,
+            adapter.embed_batch(&["trusty readiness probe"]),
+        ) => Some(probed),
+    };
 
-    match probe {
-        Ok(Ok(_vectors)) => {}
-        Ok(Err(e)) => {
-            // code-critic HIGH fix (epic #3524 slice 6 PR-3): the probe call
-            // above may have forced a REAL child spawn. Cooperatively kill
-            // it now, BEFORE dropping our only references, so a
-            // probe-failure never leaves an orphaned python/MPS process
-            // alive for up to 1800s waiting on the idle watchdog.
-            teardown.teardown().await;
-            drop(adapter);
-            return Err(e.context("python readiness probe failed"));
-        }
-        Err(_elapsed) => {
-            // Same fix, timeout path: the probe may still be in flight
-            // against a live (just-spawned) child when the timeout fires —
-            // tear it down immediately rather than abandon it.
-            teardown.teardown().await;
-            drop(adapter);
-            // #4125: name the multiplier AND whether the ceiling decided it, so
-            // a capped probe is distinguishable from an uncapped one in the log.
-            anyhow::bail!(
-                "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
-                 base budget{})",
-                budget.timeout.as_secs(),
-                budget.multiplier,
-                base.as_secs(),
-                if budget.capped {
-                    format!(", capped at the {MAX_PROBE_TIMEOUT_MULTIPLIER}x ceiling")
-                } else {
-                    String::new()
-                }
-            );
-        }
+    let failure = match probe {
+        Some(Ok(Ok(_vectors))) => None,
+        // #9949: shutdown landed mid-probe; the dropped spawn future already
+        // killed a half-started child, and teardown stops a started one.
+        None => Some(AttemptError::Cancelled),
+        Some(Ok(Err(e))) => Some(AttemptError::Transient(
+            e.context("python readiness probe failed"),
+        )),
+        // #4125: name the multiplier AND whether the ceiling decided it.
+        Some(Err(_elapsed)) => Some(AttemptError::Transient(anyhow::anyhow!(
+            "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
+             base budget{})",
+            budget.timeout.as_secs(),
+            budget.multiplier,
+            base.as_secs(),
+            if budget.capped {
+                format!(", capped at the {MAX_PROBE_TIMEOUT_MULTIPLIER}x ceiling")
+            } else {
+                String::new()
+            }
+        ))),
+    };
+    if let Some(failure) = failure {
+        // code-critic HIGH fix (epic #3524 slice 6 PR-3): the probe may have
+        // forced a REAL child spawn. Kill it now, BEFORE dropping our only
+        // references, so a failed or cancelled attempt never orphans a
+        // python/MPS process waiting on the idle watchdog.
+        teardown.teardown().await;
+        drop(adapter);
+        return Err(failure);
     }
 
     // Step e: hot-swap. Read `provider()` before moving `adapter` into

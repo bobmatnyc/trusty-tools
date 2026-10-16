@@ -463,10 +463,14 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
                 // macOS) and the user did not force `TRUSTY_EMBEDDER=stdio`
                 // — see `resolve_default_embedder_mode_for`.
                 if needs_graceful_bootstrap {
-                    tokio::spawn(run_graceful_python_bootstrap(
+                    // #9949: the task can now outlive startup (background
+                    // retries), so shutdown needs its handle to stop it.
+                    let control_owner = Arc::clone(&switchable);
+                    let task = tokio::spawn(run_graceful_python_bootstrap(
                         switchable,
                         install_state.clone(),
                     ));
+                    control_owner.bootstrap_control().attach_task(task);
                 }
                 // Issue #41: worker pool — priority-aware dispatch, bounded queue.
                 let tracker = Arc::clone(&install_state.embedder_stall_tracker);
