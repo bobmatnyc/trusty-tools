@@ -136,3 +136,102 @@ fn pinned_table_parses_and_an_unknown_host_has_none() {
     let err = install_verified(tmp.path(), &path, &pinned);
     assert!(matches!(err, Err(UvError::Checksum { .. })));
 }
+
+/// The sorted entry names in the uv cache dir under `root`.
+fn leftovers(root: &Path) -> Vec<String> {
+    let dir = cache_path(root).parent().unwrap().to_path_buf();
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The cache dir under a fresh `py-embedder` root, with `stale` planted in it.
+fn root_with_stale(tmp: &Path, stale: &[&str]) -> PathBuf {
+    let root = tmp.join("py-embedder");
+    let dir = cache_path(&root).parent().unwrap().to_path_buf();
+    fs::create_dir_all(&dir).unwrap();
+    for name in stale {
+        fs::write(dir.join(name), b"half-written uv").unwrap();
+    }
+    root
+}
+
+#[test]
+fn resolve_uv_prefers_explicit_override_and_never_fetches() {
+    let (tmp, root, _placed) = installed();
+    let explicit = tmp.path().join("my-uv");
+    fs::write(&explicit, b"x").unwrap();
+    // The cache root is the only road to the cache (and, in B2, a fetch).
+    let asked = std::cell::Cell::new(false);
+    let root_fn = || -> anyhow::Result<PathBuf> {
+        asked.set(true);
+        Ok(root.clone())
+    };
+    let on_path = || Some(PathBuf::from("/opt/homebrew/bin/uv"));
+    let value = explicit.to_str().unwrap();
+    let got = resolve_uv(Some(value), &on_path, &root_fn).unwrap();
+    assert_eq!(
+        got, explicit,
+        "TRUSTY_UV_BIN wins over installed and cached"
+    );
+    assert!(!asked.get(), "an explicit uv must not consult the cache");
+}
+
+#[test]
+fn concurrent_fetches_download_once_and_place_a_whole_file() {
+    // B1 has no download: racing installs on one root must all succeed and
+    // leave one whole, verified uv. Without the flock they share a pid, so
+    // one thread's temp file is removed or renamed under another.
+    const THREADS: usize = 4;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("py-embedder");
+    let payload = vec![7u8; 1 << 20];
+    let (path, digest) = archive(tmp.path(), &[("uv-x/uv", Regular, &payload)]);
+    let barrier = std::sync::Barrier::new(THREADS);
+    for round in 0..8 {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        install_verified(&root, &path, &digest).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for h in handles {
+                assert_eq!(h.join().unwrap(), Ok(cache_path(&root)), "round {round}");
+            }
+        });
+    }
+    assert_eq!(cached_uv(&root).unwrap(), Some(cache_path(&root)));
+    assert_eq!(fs::read(cache_path(&root)).unwrap(), payload);
+    assert_eq!(leftovers(&root), [".fetch.lock", "uv", "uv.sha256"]);
+}
+
+#[test]
+fn stale_temp_files_are_swept_before_a_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    // What a SIGKILL mid-write by other pids leaves behind.
+    let root = root_with_stale(tmp.path(), &[".uv.tmp.99999", ".uv.tmp.12345"]);
+    let (path, digest) = good_archive(tmp.path());
+    let placed = install_verified(&root, &path, &digest).unwrap();
+    assert_eq!(fs::read(&placed).unwrap(), FAKE_UV);
+    assert_eq!(leftovers(&root), [".fetch.lock", "uv", "uv.sha256"]);
+}
+
+#[test]
+fn a_stale_temp_that_cannot_be_removed_stops_the_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_with_stale(tmp.path(), &[]);
+    // `remove_file` refuses a directory on every platform.
+    let stuck = cache_path(&root).with_file_name(".uv.tmp.4242");
+    fs::create_dir(&stuck).unwrap();
+    let (path, digest) = good_archive(tmp.path());
+    let err = install_verified(&root, &path, &digest).unwrap_err();
+    let shown = err.to_string();
+    assert!(shown.contains("remove stale uv temp file"), "{shown}");
+    assert!(!cache_path(&root).exists(), "nothing may be placed");
+}

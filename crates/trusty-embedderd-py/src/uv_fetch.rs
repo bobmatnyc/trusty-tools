@@ -16,6 +16,9 @@ use trusty_common::integrity::{IntegrityError, Sha256Digest};
 /// The pinned uv release (#9468, delivery plan of 2026-10-08).
 pub const UV_VERSION: &str = "0.12.23";
 
+/// Name prefix of an install's temp file, `.uv.tmp.<pid>`.
+const TEMP_PREFIX: &str = ".uv.tmp.";
+
 /// SHA-256 of `uv-<triple>.tar.gz` for [`UV_VERSION`] — the only trust root.
 /// Ported from PR #9473, checked there against Astral's `.sha256` sidecars.
 #[rustfmt::skip]
@@ -63,7 +66,8 @@ pub enum UvError {
 /// error, never a fall-through to something less trusted.
 /// What: `explicit` → `installed()` → [`cached_uv`] under `py_root()`, which
 /// runs only when no uv is installed.
-/// Test: `resolve_uv_prefers_path_then_the_verified_cache`,
+/// Test: `resolve_uv_prefers_explicit_override_and_never_fetches`,
+/// `resolve_uv_prefers_path_then_the_verified_cache`,
 /// `nothing_installed_or_cached_says_the_fetch_is_not_yet_available`.
 pub(crate) fn resolve_uv(
     explicit: Option<&str>,
@@ -133,12 +137,14 @@ pub fn cached_uv(py_root: &Path) -> Result<Option<PathBuf>, UvError> {
 ///
 /// Why: the cache must only ever hold a complete, verified binary.
 /// What: a digest mismatch returns `Checksum` (naming both digests) and
-/// creates nothing. Then, under `.fetch.lock`, writes the `uv` entry to a
-/// 0755 temp file (removed on failure), renames it into place, and records
-/// its digest in `uv.sha256`.
+/// creates nothing. Then, under `.fetch.lock`, sweeps every leftover temp
+/// file, writes the `uv` entry to a 0755 temp file (removed on failure),
+/// renames it into place, and records its digest in `uv.sha256`.
 /// Test: `digest_match_installs_an_executable_uv`,
 /// `digest_mismatch_places_nothing_and_names_both_digests`,
-/// `unsafe_archive_entries_are_refused`.
+/// `unsafe_archive_entries_are_refused`,
+/// `concurrent_fetches_download_once_and_place_a_whole_file`,
+/// `stale_temp_files_are_swept_before_a_fetch`.
 pub fn install_verified(
     py_root: &Path,
     archive: &Path,
@@ -158,8 +164,9 @@ pub fn install_verified(
     let lock_path = dir.join(".fetch.lock");
     let lock = fs::File::create(&lock_path).map_err(io_err("open uv lock", &lock_path))?;
     FileExt::lock_exclusive(&lock).map_err(io_err("flock uv lock", &lock_path))?;
+    sweep_stale_temps(dir)?;
     // Unique under the flock, which excludes every other installer.
-    let tmp = dir.join(format!(".uv.tmp.{}", std::process::id()));
+    let tmp = dir.join(format!("{TEMP_PREFIX}{}", std::process::id()));
     let placed = write_executable(&tmp, &uv)
         .and_then(|()| fs::rename(&tmp, &dest).map_err(io_err("rename uv to", &dest)));
     if placed.is_err() {
@@ -215,9 +222,29 @@ fn extract_uv(tarball: &[u8], archive: &Path) -> Result<Vec<u8>, UvError> {
     Err(err("no `uv` file in the archive".to_owned()))
 }
 
-/// Create `path` with mode 0755 (Unix), replacing a crashed run's leftover, and sync it.
+/// Remove every `.uv.tmp.*` entry in `dir`, whatever pid wrote it (#9468).
+///
+/// Why: an install killed mid-write never removes its temp file, which
+/// would stay for good and, under a reused pid, fail `create_new`.
+/// What: runs under the flock, so no live installer owns a match. A failed
+/// list or removal is an `Io` error and the install stops before writing.
+/// Test: `stale_temp_files_are_swept_before_a_fetch`,
+/// `a_stale_temp_that_cannot_be_removed_stops_the_install`.
+fn sweep_stale_temps(dir: &Path) -> Result<(), UvError> {
+    let entries = fs::read_dir(dir).map_err(io_err("list uv cache dir", dir))?;
+    for entry in entries {
+        let entry = entry.map_err(io_err("list uv cache dir", dir))?;
+        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(io_err("remove stale uv temp file", &path))?;
+        }
+    }
+    Ok(())
+}
+
+/// Create `path` with mode 0755 (Unix) and sync it; [`sweep_stale_temps`]
+/// has already removed any leftover at `path`.
 fn write_executable(path: &Path, data: &[u8]) -> Result<(), UvError> {
-    let _ = fs::remove_file(path);
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
