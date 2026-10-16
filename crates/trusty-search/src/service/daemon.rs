@@ -719,6 +719,14 @@ pub async fn run_daemon(
     // on an operator action, so a paused index would otherwise hold a background
     // task — and the flush behind it — open for a resume that is never coming.
     drain_paused_embedders(&flush_state);
+    // #9949: stop the python bootstrap's retry loop; an attempt in flight
+    // tears its sidecar down first, so no python child outlives the daemon.
+    if let Some(switchable) = flush_state.current_switchable_embedder() {
+        switchable
+            .bootstrap_control()
+            .shutdown(crate::service::embedder_supervisor::bootstrap_control::BOOTSTRAP_STOP_BUDGET)
+            .await;
+    }
     // #9828: the pid forwarder no longer stops at a 0 pid; end it here.
     flush_state.stop_embedderd_pid_forwarder().await;
     let joined = match rpc_joined {

@@ -92,8 +92,13 @@ pub enum BootstrapState {
     Bootstrapping,
     /// The bootstrap completed and the backend is ready to serve.
     Ready,
-    /// The bootstrap failed.
+    /// The bootstrap failed for a reason retrying cannot fix (launcher
+    /// missing, venv build error). Terminal for this daemon.
     Failed,
+    /// #9949: the startup attempts failed on a probe that may succeed later;
+    /// the bootstrap keeps retrying in the background while ort serves.
+    /// `BootstrapControl::report` carries the last error and next retry time.
+    Retrying,
     /// The bootstrap failed and the orchestrator fell back to the ort backend.
     FellBackToOrt,
 }
@@ -141,6 +146,8 @@ pub struct ActiveBackend {
 pub struct SwitchableEmbedder {
     inner: ArcSwap<Arc<dyn Embedder>>,
     active: ArcSwap<ActiveBackend>,
+    // #9949: retry detail for `/health` and the stop handle shutdown uses.
+    bootstrap: super::bootstrap_control::BootstrapControl,
 }
 
 impl SwitchableEmbedder {
@@ -155,7 +162,13 @@ impl SwitchableEmbedder {
         Self {
             inner: ArcSwap::new(Arc::new(inner)),
             active: ArcSwap::new(Arc::new(active)),
+            bootstrap: super::bootstrap_control::BootstrapControl::default(),
         }
+    }
+
+    /// The python bootstrap's retry detail and stop handle (#9949).
+    pub fn bootstrap_control(&self) -> &super::bootstrap_control::BootstrapControl {
+        &self.bootstrap
     }
 
     /// Atomically replace the live backend and its descriptive snapshot.

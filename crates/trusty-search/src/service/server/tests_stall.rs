@@ -175,6 +175,7 @@ fn health_response_contains_stall_fields() {
         boot_reconcile: None,
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",
+        python_bootstrap: None,
         transport: Default::default(),
         chat_available: false,
     };
@@ -247,6 +248,7 @@ fn health_response_omits_last_ok_when_none() {
         boot_reconcile: None,
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",
+        python_bootstrap: None,
         transport: Default::default(),
         chat_available: false,
     };

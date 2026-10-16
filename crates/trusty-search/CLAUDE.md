@@ -1328,9 +1328,17 @@ On Apple Silicon (aarch64 macOS), `trusty-search start` serves on the ort
 stdio sidecar immediately (zero HTTP-listener delay) while a detached
 background task bootstraps the python/MPS sidecar, proves it with one real
 readiness-probe embed call, and hot-swaps the running embedder over to it.
-On any bootstrap or probe failure the daemon stays permanently on ort for
-that daemon's lifetime and `/health`'s `embedder_bootstrap` reports
-`"failed"`. **This is now the default on Apple Silicon** — validated by the
+When every startup attempt fails on the readiness probe, the bootstrap keeps
+retrying in the background (#9949) after 2, 5 and 10 minutes, then every 30
+minutes, and hot-swaps on the first success; ort serves throughout.
+`/health`'s `embedder_bootstrap` reports `"retrying"` (and `status:
+"degraded"`), and its `python_bootstrap` object carries `state`, `attempts`,
+`last_error` and `next_retry_at` (RFC 3339 UTC). Only a decided failure — the
+launcher is missing, or the venv build returns an error — is terminal: the
+daemon stays on ort for its lifetime and `embedder_bootstrap` reports
+`"failed"`. Each attempt's budget (N x `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`,
+capped at 3x) is also the supervisor's spawn timeout, and only the first
+attempt runs the full-import venv recheck. **This is now the default on Apple Silicon** — validated by the
 epic #3524 slice 2-4 spike (numerically identical results, ~2.4x faster) and
 soaked per PR #3610 before this flip. The prior ship-gate env var
 (`TRUSTY_PY_DEFAULT`) has been retired; `TRUSTY_EMBEDDER=stdio` is now the
@@ -1341,7 +1349,7 @@ Silicon hosts are completely unaffected (unchanged ort default).
 |----------|---------|---------|
 | `TRUSTY_EMBEDDER=stdio` | — | **User escape hatch.** Forces the unchanged ort stdio sidecar on any platform, including Apple Silicon — bypasses the platform-aware default resolution entirely (see `is_forced_ort_override`). |
 | `TRUSTY_EMBEDDER_PYTHON_EAGER` | unset (off) | Reaches the existing eager, blocking `python` arm (identical to explicit `TRUSTY_EMBEDDER=python`) via unset/`auto` instead of an explicit value. Not platform-gated, but only reachable off Apple Silicon — on Apple Silicon the graceful default wins outright (see `resolve_default_embedder_mode_for`'s precedence doc). |
-| `TRUSTY_PY_BOOTSTRAP_RETRIES` | `2` | Number of bootstrap→probe attempts the background orchestrator makes (linear backoff between attempts) before giving up and marking the bootstrap `Failed` while staying on ort. A malformed or `0` value falls back to the default. |
+| `TRUSTY_PY_BOOTSTRAP_RETRIES` | `2` | Number of bootstrap→probe attempts the background orchestrator makes (linear backoff between attempts) before it either gives up (`Failed`, on a decided failure) or moves to background retries (`Retrying`, on a probe failure — #9949); ort serves throughout. A malformed or `0` value falls back to the default. |
 
 ### Python/MPS sidecar tuning (`TRUSTY_EMBEDDER=python` path only)
 

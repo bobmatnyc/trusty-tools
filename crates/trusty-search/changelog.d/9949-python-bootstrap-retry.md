@@ -1,0 +1,6 @@
+Fixed
+- On Apple Silicon, a python/MPS sidecar that starts too slowly for the startup attempts no longer pins the daemon to the ort sidecar for its whole uptime. The bootstrap keeps retrying in the background after 2, 5 and 10 minutes, then every 30 minutes, and switches to python on the first success; ort keeps serving throughout. Only a missing launcher or a venv build error is still a terminal `failed` (#9949).
+- Each bootstrap attempt's budget now reaches the sidecar supervisor as its startup timeout, so attempt 2 really gets the 2x budget its log line names instead of being cut off at the flat `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (#9949).
+- Only the first bootstrap attempt runs the full `import sentence_transformers` venv recheck (about 70 s on a busy host); later attempts use the cheap liveness check (#9949).
+- `search.health` reports `embedder_bootstrap: "retrying"` (with `status: "degraded"`) while background retries run, and a new `python_bootstrap` object with `state`, `attempts`, `last_error` and `next_retry_at`. Existing fields are unchanged (#9949).
+- Daemon shutdown stops the bootstrap retry task and tears down an attempt in flight, so no python sidecar outlives the daemon (#9949).

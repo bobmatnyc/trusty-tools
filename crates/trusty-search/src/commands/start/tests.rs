@@ -1475,7 +1475,7 @@ impl FakeBootstrap {
 }
 
 impl PythonBootstrap for FakeBootstrap {
-    fn ensure_venv(&self) -> anyhow::Result<()> {
+    fn ensure_venv(&self, _check: super::graceful_bootstrap::VenvCheck) -> anyhow::Result<()> {
         self.venv_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let remaining = self
@@ -1496,6 +1496,7 @@ impl PythonBootstrap for FakeBootstrap {
     fn build_adapter(
         &self,
         _launcher: std::path::PathBuf,
+        _startup_budget: std::time::Duration,
     ) -> (
         OrchestratorArc<dyn crate::core::Embedder>,
         Option<OrchestratorArc<OrchestratorAtomicU32>>,
@@ -1542,6 +1543,45 @@ fn test_ort_bootstrapping_active() -> SwitchableActiveBackend {
     }
 }
 
+/// #9949: run `drive_bootstrap` until it schedules its first background
+/// retry, leaving the task attached to the switchable's `BootstrapControl`.
+/// The caller asserts on the `Retrying` state, then stops the task with
+/// `BootstrapControl::shutdown`. Panics instead of hanging when no retry is
+/// ever scheduled.
+async fn drive_until_retry_scheduled(
+    switchable: &OrchestratorArc<SwitchableEmbedder>,
+    state: SearchAppState,
+    ops: OrchestratorArc<dyn PythonBootstrap>,
+    retries: u32,
+) {
+    let driven = OrchestratorArc::clone(switchable);
+    let task = tokio::spawn(async move {
+        drive_bootstrap(driven, state, ops, retries).await;
+    });
+    switchable.bootstrap_control().attach_task(task);
+    for _ in 0..10_000 {
+        if switchable.active().bootstrap == SwitchableBootstrapState::Retrying {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "drive_bootstrap never scheduled a background retry (state {:?})",
+        switchable.active().bootstrap
+    );
+}
+
+/// Stop the bootstrap task `drive_until_retry_scheduled` left running.
+async fn stop_bootstrap(switchable: &SwitchableEmbedder) {
+    assert!(
+        switchable
+            .bootstrap_control()
+            .shutdown(std::time::Duration::from_secs(5))
+            .await,
+        "the retry task must stop when shut down"
+    );
+}
+
 /// Happy path: a successful bootstrap + readiness probe must hot-swap the
 /// switchable from ort/Bootstrapping to python/Ready.
 #[tokio::test]
@@ -1569,9 +1609,11 @@ async fn graceful_bootstrap_swaps_to_python_on_success() {
 }
 
 /// A readiness-probe failure must leave the switchable on the still-installed
-/// ort backend, marked `Failed` — never a torn or missing backend.
+/// ort backend — never a torn or missing backend. #9949: a probe failure is
+/// not terminal, so the bootstrap is `Retrying` with the error and the next
+/// retry time recorded, not `Failed`.
 #[tokio::test]
-async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
+async fn graceful_bootstrap_stays_ort_and_retrying_after_probe_failure() {
     let ort = OrchestratorArc::new(FakeOrtEmbedder::new());
     let ort_dyn: OrchestratorArc<dyn crate::core::Embedder> = OrchestratorArc::clone(&ort) as _;
     let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
@@ -1582,7 +1624,7 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
     let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
     let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
-    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+    drive_until_retry_scheduled(&switchable, state, ops, 1).await;
 
     let active = switchable.active();
     assert_eq!(
@@ -1590,7 +1632,16 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
         SwitchableBackendKind::Ort,
         "must stay on the still-installed ort backend"
     );
-    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Retrying);
+    let report = switchable.bootstrap_control().report();
+    assert!(
+        report
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("fake readiness probe failure")),
+        "the report must say why the attempt failed: {report:?}"
+    );
+    assert!(report.next_retry_at.is_some(), "a retry must be scheduled");
 
     // Prove the ort backend is still live and serving (not swapped away).
     switchable
@@ -1598,6 +1649,7 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
         .await
         .expect("ort backend must still serve after a failed python bootstrap");
     assert_eq!(ort.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    stop_bootstrap(&switchable).await;
 }
 
 /// A venv-bootstrap failure (before a python adapter is even built) must
@@ -1637,7 +1689,8 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure() {
 /// proves the SWITCHABLE state; this test proves the TEARDOWN CALL itself
 /// fires exactly once per failed attempt.
 /// What: 2 retries, both probe failures — `teardown_calls()` must equal 2
-/// (one per attempt, each attempt builds a fresh adapter/handle).
+/// (one per attempt, each attempt builds a fresh adapter/handle) by the time
+/// the first background retry is scheduled (#9949).
 /// Test: this test.
 #[tokio::test(start_paused = true)]
 async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
@@ -1651,11 +1704,11 @@ async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
     let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
     let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
-    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
+    drive_until_retry_scheduled(&switchable, state, ops, 2).await;
 
     assert_eq!(
         switchable.active().bootstrap,
-        SwitchableBootstrapState::Failed
+        SwitchableBootstrapState::Retrying
     );
     assert_eq!(
         fake.teardown_calls(),
@@ -1663,6 +1716,7 @@ async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
         "teardown must fire once per failed attempt — a probe failure must \
          never leave a spawned handle un-shut-down"
     );
+    stop_bootstrap(&switchable).await;
 }
 
 /// code-critic HIGH fix, timeout variant: a probe TIMEOUT (not just an
@@ -1671,7 +1725,7 @@ async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
 /// fires.
 /// What: a hanging fake adapter + a short fake probe timeout, under paused
 /// virtual time so the test resolves instantly; asserts the switchable stays
-/// ort/Failed and `teardown_calls() == 1`.
+/// on ort, `Retrying` (#9949), and `teardown_calls() == 1`.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
 async fn graceful_bootstrap_probe_timeout_tears_down_the_handle() {
@@ -1685,16 +1739,17 @@ async fn graceful_bootstrap_probe_timeout_tears_down_the_handle() {
     let fake = OrchestratorArc::new(FakeBootstrap::probe_always_hangs());
     let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
-    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+    drive_until_retry_scheduled(&switchable, state, ops, 1).await;
 
     let active = switchable.active();
     assert_eq!(active.kind, SwitchableBackendKind::Ort);
-    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Retrying);
     assert_eq!(
         fake.teardown_calls(),
         1,
         "a probe TIMEOUT must also tear down the handle, not just a probe Err"
     );
+    stop_bootstrap(&switchable).await;
 }
 
 /// A transient failure on the first attempt must be retried, succeeding on
@@ -1730,11 +1785,15 @@ async fn graceful_bootstrap_retries_before_giving_up() {
     );
 }
 
-/// Exhausting every retry attempt must mark the switchable `Failed` while
-/// staying on ort — confirms the retry loop actually bounds itself at
-/// `retries` attempts rather than looping forever.
+/// #9949 rewrite: exhausting the startup attempts gives up only on a decided
+/// failure. A venv build that keeps failing ends `Failed` after exactly
+/// `retries` attempts with no retry scheduled; a probe that keeps failing
+/// does NOT give up — it ends the startup window `Retrying`, with the error
+/// and the next retry time recorded. Before #9949 both arms ended `Failed`.
+/// Test: this test.
 #[tokio::test(start_paused = true)]
 async fn graceful_bootstrap_gives_up_after_exhausting_retries() {
+    // Decided arm: venv build error.
     let ort: OrchestratorArc<dyn crate::core::Embedder> =
         OrchestratorArc::new(FakeOrtEmbedder::new());
     let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
@@ -1745,8 +1804,14 @@ async fn graceful_bootstrap_gives_up_after_exhausting_retries() {
     let fake = OrchestratorArc::new(FakeBootstrap::venv_always_fails());
     let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
-    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 3).await;
+    let promoted = tokio::time::timeout(
+        std::time::Duration::from_secs(24 * 3600),
+        drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 3),
+    )
+    .await
+    .expect("a decided failure must end the bootstrap, not retry forever");
 
+    assert!(promoted.is_none());
     let active = switchable.active();
     assert_eq!(active.kind, SwitchableBackendKind::Ort);
     assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
@@ -1756,6 +1821,42 @@ async fn graceful_bootstrap_gives_up_after_exhausting_retries() {
         3,
         "must attempt exactly `retries` times, no more, no less"
     );
+    let report = switchable.bootstrap_control().report();
+    assert_eq!(report.attempts, 3);
+    assert_eq!(
+        report.next_retry_at, None,
+        "a terminal failure schedules nothing"
+    );
+    assert!(
+        report
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("fake venv bootstrap failure")),
+        "the report must say why: {report:?}"
+    );
+
+    // Transient arm: the probe keeps failing — the startup window ends
+    // `Retrying`, not `Failed`.
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_until_retry_scheduled(&switchable, state, ops, 3).await;
+
+    let report = switchable.bootstrap_control().report();
+    assert_eq!(
+        report.attempts, 3,
+        "all `retries` startup attempts ran first"
+    );
+    assert!(report.next_retry_at.is_some());
+    assert_eq!(fake.teardown_calls(), 3);
+    stop_bootstrap(&switchable).await;
 }
 
 // ── Swap-BACK watchdog (epic #3524 slice 6, PR 4/5) ─────────────────────────

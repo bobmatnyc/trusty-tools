@@ -325,6 +325,18 @@ pub(super) struct HealthResponse {
     /// Test: `health_reports_embedder_bootstrap_state`,
     /// `health_is_degraded_when_the_embedder_backend_permanently_downgraded`.
     pub(super) embedder_bootstrap: &'static str,
+    /// #9949: the graceful python bootstrap's progress — `state` (the
+    /// `embedder_bootstrap` string), `attempts`, `last_error`, and
+    /// `next_retry_at` (RFC 3339 UTC, set while a background retry waits).
+    ///
+    /// Why: a bootstrap that failed its startup attempts now retries in the
+    /// background, so `"retrying"` alone does not say why or until when.
+    /// What: omitted when no switchable handle is installed or no bootstrap
+    /// applies (`"n/a"`). Additive — no existing key changes.
+    /// Test: `health_reports_the_python_bootstrap_retry_detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) python_bootstrap:
+        Option<crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth>,
     /// #9030: the listeners this daemon bound, `{socket_path, http_addr}`.
     ///
     /// Why: trusty-console's search dashboard showed a hardcoded port and URL
@@ -442,6 +454,7 @@ fn bootstrap_state_str(state: BootstrapState) -> &'static str {
         BootstrapState::Bootstrapping => "bootstrapping",
         BootstrapState::Ready => "ready",
         BootstrapState::Failed => "failed",
+        BootstrapState::Retrying => "retrying",
         BootstrapState::FellBackToOrt => "fell_back_to_ort",
     }
 }
@@ -611,6 +624,16 @@ pub(super) async fn health_handler(
         .as_ref()
         .map(|sw| bootstrap_state_str(sw.active().bootstrap))
         .unwrap_or("n/a");
+    // #9949: the retry detail behind `embedder_bootstrap`.
+    let python_bootstrap = switchable
+        .as_ref()
+        .filter(|sw| sw.active().bootstrap != BootstrapState::NotApplicable)
+        .map(|sw| {
+            crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth::new(
+                embedder_bootstrap,
+                &sw.bootstrap_control().report(),
+            )
+        });
     // #4125: a permanent embedder capability downgrade must reach `status`.
     //
     // Why: `embedder_bootstrap` was reported and then aggregated nowhere, so
@@ -623,14 +646,16 @@ pub(super) async fn health_handler(
     // CPU/ort instead of MPS/python, a real and permanent performance
     // regression, on the one field monitors gate on.
     // What: `Failed` and `FellBackToOrt` are terminal for this daemon (neither
-    // path ever re-attempts), so both are degraded. `Bootstrapping` is
+    // path ever re-attempts), so both are degraded. #9949: so is `Retrying` —
+    // not terminal, but every startup attempt failed and search runs on ort
+    // until a background retry succeeds. `Bootstrapping` is
     // transient and deliberately excluded — flagging it would make every
     // Apple-Silicon boot report degraded for its first few seconds.
     // `NotApplicable`/`Ready` are the healthy states.
     let embedder_capability_degraded = switchable.as_ref().is_some_and(|sw| {
         matches!(
             sw.active().bootstrap,
-            BootstrapState::Failed | BootstrapState::FellBackToOrt
+            BootstrapState::Failed | BootstrapState::Retrying | BootstrapState::FellBackToOrt
         )
     });
     // Issue #282: sample the sidecar's current RSS (None when not running).
@@ -1023,6 +1048,7 @@ pub(super) async fn health_handler(
         boot_reconcile,
         indexes_watcher_network_degraded,
         embedder_bootstrap,
+        python_bootstrap,
         // #9030: report the listeners bound, never a guessed default.
         transport: state.transport.clone(),
         // #9030: the same provider resolution `search.chat` decides on.
@@ -1228,6 +1254,7 @@ mod tests {
         );
         assert_eq!(bootstrap_state_str(BootstrapState::Ready), "ready");
         assert_eq!(bootstrap_state_str(BootstrapState::Failed), "failed");
+        assert_eq!(bootstrap_state_str(BootstrapState::Retrying), "retrying");
         assert_eq!(
             bootstrap_state_str(BootstrapState::FellBackToOrt),
             "fell_back_to_ort"

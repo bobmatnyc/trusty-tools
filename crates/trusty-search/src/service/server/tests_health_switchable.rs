@@ -116,6 +116,7 @@ async fn health_reports_embedder_bootstrap_state() {
         (BootstrapState::Bootstrapping, "bootstrapping"),
         (BootstrapState::Ready, "ready"),
         (BootstrapState::Failed, "failed"),
+        (BootstrapState::Retrying, "retrying"),
         (BootstrapState::FellBackToOrt, "fell_back_to_ort"),
     ] {
         let state = SearchAppState::new(IndexRegistry::new());
@@ -161,6 +162,9 @@ async fn health_is_degraded_when_the_embedder_backend_permanently_downgraded() {
     for (bootstrap, expected_status) in [
         (BootstrapState::Failed, "degraded"),
         (BootstrapState::FellBackToOrt, "degraded"),
+        // #9949: every startup attempt failed; search runs on ort until a
+        // background retry succeeds.
+        (BootstrapState::Retrying, "degraded"),
         (BootstrapState::Bootstrapping, "ok"),
         (BootstrapState::Ready, "ok"),
         (BootstrapState::NotApplicable, "ok"),
@@ -192,4 +196,67 @@ async fn health_is_degraded_when_the_embedder_backend_permanently_downgraded() {
     let Json(resp) = health_handler(State(state)).await;
     assert_eq!(resp.embedder_bootstrap, "n/a");
     assert_eq!(resp.status, "ok");
+}
+
+/// #9949: while the python bootstrap retries in the background, `/health`
+/// reports why the last attempt failed and when the next one runs, under
+/// `python_bootstrap`, beside the unchanged `embedder_bootstrap` string. With
+/// no bootstrap (`n/a`) the object is omitted.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn health_reports_the_python_bootstrap_retry_detail() {
+    let state = SearchAppState::new(IndexRegistry::new());
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
+    let active = ActiveBackend {
+        kind: BackendKind::Ort,
+        provider: trusty_common::embedder::ExecutionProvider::Cpu,
+        model: "all-MiniLM-L6-v2".to_string(),
+        quantized: false,
+        bootstrap: BootstrapState::Retrying,
+    };
+    let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
+    let next = std::time::SystemTime::now() + std::time::Duration::from_secs(300);
+    switchable.bootstrap_control().update_report(|_| {
+        crate::service::embedder_supervisor::bootstrap_control::BootstrapReport {
+            attempts: 3,
+            last_error: Some("python readiness probe timed out after 90s".to_string()),
+            next_retry_at: Some(next),
+        }
+    });
+    state.install_switchable_embedder(Arc::clone(&switchable));
+
+    let Json(resp) = health_handler(State(Arc::new(state))).await;
+    assert_eq!(resp.embedder_bootstrap, "retrying");
+    let json: Value = serde_json::to_value(&resp).expect("serialize");
+    let py = json
+        .get("python_bootstrap")
+        .expect("python_bootstrap must be present while a bootstrap applies");
+    assert_eq!(py["state"].as_str(), Some("retrying"));
+    assert_eq!(py["attempts"].as_u64(), Some(3));
+    assert_eq!(
+        py["last_error"].as_str(),
+        Some("python readiness probe timed out after 90s")
+    );
+    let at = py["next_retry_at"].as_str().expect("next_retry_at");
+    let parsed = chrono::DateTime::parse_from_rfc3339(at).expect("RFC 3339");
+    assert_eq!(
+        parsed.timestamp(),
+        chrono::DateTime::<chrono::Utc>::from(next).timestamp()
+    );
+
+    // No bootstrap applies: the object is omitted entirely.
+    let state = SearchAppState::new(IndexRegistry::new());
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
+    let active = ActiveBackend {
+        kind: BackendKind::Ort,
+        provider: trusty_common::embedder::ExecutionProvider::Cpu,
+        model: "all-MiniLM-L6-v2".to_string(),
+        quantized: false,
+        bootstrap: BootstrapState::NotApplicable,
+    };
+    state.install_switchable_embedder(Arc::new(SwitchableEmbedder::new(inner, active)));
+    let Json(resp) = health_handler(State(Arc::new(state))).await;
+    let json: Value = serde_json::to_value(&resp).expect("serialize");
+    assert!(json.get("python_bootstrap").is_none());
 }

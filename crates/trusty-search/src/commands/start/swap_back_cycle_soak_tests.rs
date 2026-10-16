@@ -51,6 +51,11 @@ use crate::service::SearchAppState;
 use super::graceful_bootstrap::{drive_bootstrap, PythonAdapterTeardown, PythonBootstrap};
 use super::swap_back_watchdog::{drive_swap_back_watchdog, SwapBackOps};
 
+/// #9949: wall-clock bound on one real `run_graceful_python_bootstrap` call.
+/// A warm venv bootstraps in well under a minute; a probe failure retries
+/// forever now, so the soak must not wait on it unbounded.
+const BOOTSTRAP_BOUND: Duration = Duration::from_secs(300);
+
 // ============================================================================
 // Fast, deterministic fakes.
 //
@@ -149,7 +154,7 @@ impl CyclingBootstrap {
 }
 
 impl PythonBootstrap for CyclingBootstrap {
-    fn ensure_venv(&self) -> anyhow::Result<()> {
+    fn ensure_venv(&self, _check: super::graceful_bootstrap::VenvCheck) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -160,6 +165,7 @@ impl PythonBootstrap for CyclingBootstrap {
     fn build_adapter(
         &self,
         _launcher: PathBuf,
+        _startup_budget: std::time::Duration,
     ) -> (
         Arc<dyn CoreEmbedder>,
         Option<Arc<AtomicU32>>,
@@ -502,9 +508,14 @@ async fn real_repeated_ort_python_ort_cycles_soak() {
 
     for cycle in 0..CYCLES {
         eprintln!("soak: cycle {cycle}/{CYCLES} — bootstrapping ort -> python");
-        super::graceful_bootstrap::run_graceful_python_bootstrap(
-            Arc::clone(&switchable),
-            state.clone(),
+        // #9949: a probe failure retries forever; bound it so the diagnostic
+        // panic below stays reachable. A timeout leaves the backend on ort.
+        let _ = tokio::time::timeout(
+            BOOTSTRAP_BOUND,
+            super::graceful_bootstrap::run_graceful_python_bootstrap(
+                Arc::clone(&switchable),
+                state.clone(),
+            ),
         )
         .await;
 
@@ -647,9 +658,13 @@ async fn real_build_ort_failure_leaves_no_orphan_and_recovers() {
 
     let baseline_python_procs = count_processes_matching("trusty-embedderd-py");
 
-    super::graceful_bootstrap::run_graceful_python_bootstrap(
-        Arc::clone(&switchable),
-        state.clone(),
+    // #9949: bound the retrying bootstrap; the assertion below reports a miss.
+    let _ = tokio::time::timeout(
+        BOOTSTRAP_BOUND,
+        super::graceful_bootstrap::run_graceful_python_bootstrap(
+            Arc::clone(&switchable),
+            state.clone(),
+        ),
     )
     .await;
     assert_eq!(
@@ -714,9 +729,13 @@ async fn real_build_ort_failure_leaves_no_orphan_and_recovers() {
 
     // Recovery: with a valid TRUSTY_EMBEDDERD_BIN restored, one more real
     // bootstrap cycle on the SAME switchable/state must succeed cleanly.
-    super::graceful_bootstrap::run_graceful_python_bootstrap(
-        Arc::clone(&switchable),
-        state.clone(),
+    // #9949: bound the retrying bootstrap; the assertion below reports a miss.
+    let _ = tokio::time::timeout(
+        BOOTSTRAP_BOUND,
+        super::graceful_bootstrap::run_graceful_python_bootstrap(
+            Arc::clone(&switchable),
+            state.clone(),
+        ),
     )
     .await;
     assert_eq!(
