@@ -246,14 +246,16 @@ pub(crate) async fn prune_worktrees_core(
 /// instead of the process-global one other tests share.
 /// What: when `merged_prs` is set, takes the permit with
 /// [`try_manual_permit`](crate::daemon::services::merged_pr_reclaim::try_manual_permit)
-/// before any work and holds it for the whole request. Busy is a 409 and a
-/// closed lane a 500; neither runs a pass.
+/// before any work and moves it into the task that runs the pass, so the lane
+/// stays held until the pass ends even when the caller's future is dropped.
+/// Busy is a 409 and a closed lane a 500; neither runs a pass.
 /// Test: `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`,
-/// `a_merged_prs_prune_fails_closed_on_a_closed_lane`.
+/// `a_merged_prs_prune_fails_closed_on_a_closed_lane`,
+/// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`.
 pub(crate) async fn prune_worktrees_core_in(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
-    lane: &tokio::sync::Semaphore,
+    lane: &'static tokio::sync::Semaphore,
 ) -> RouteOutcome {
     // #6806: reject a present-but-unparseable caller id before any work, for
     // the reason #6118 gives — dropping it would run the sweep with the
@@ -283,8 +285,8 @@ pub(crate) async fn prune_worktrees_core_in(
         }
     };
     // #8994: one maintenance permit for manual and timer reclaim, taken before
-    // any work and held until the reply. Every refusal returns here.
-    let _permit = if req.merged_prs {
+    // any work. Every refusal returns here.
+    let permit = if req.merged_prs {
         match crate::daemon::services::merged_pr_reclaim::try_manual_permit(lane) {
             Ok(permit) => Some(permit),
             Err(refusal) => return merged_prs_refusal(refusal),
@@ -292,6 +294,36 @@ pub(crate) async fn prune_worktrees_core_in(
     } else {
         None
     };
+    // See #8994: the pass runs in its own task that OWNS the permit. The
+    // reclaim and orphan loops run in `spawn_blocking`, which a dropped
+    // handler future (client disconnect) does not stop; a permit held by the
+    // handler would free the lane while those loops still remove worktrees,
+    // letting the timer sweep start a second pass. A dropped handler now only
+    // detaches the task, and the permit drops when the pass ends (#8451).
+    let state = Arc::clone(state);
+    match tokio::spawn(async move {
+        let _permit = permit;
+        prune_worktrees_pass(&state, req, scope).await
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            warn!("prune-worktrees route: the prune task failed: {e}");
+            RouteOutcome::text(500, format!("the prune task failed: {e}"))
+        }
+    }
+}
+
+/// The prune pass itself, run by [`prune_worktrees_core_in`] in a task that holds the permit (#8994).
+///
+/// Test: `prune_spares_a_stopped_records_workspace`,
+/// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`.
+async fn prune_worktrees_pass(
+    state: &Arc<DaemonState>,
+    req: PruneWorktreesRequest,
+    scope: PruneScope,
+) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -754,6 +786,12 @@ mod tests {
         }
     }
 
+    /// A lane that outlives the test: the route moves the permit into a task, so the
+    /// lane must be `'static` (#8994).
+    fn leaked_lane() -> &'static tokio::sync::Semaphore {
+        Box::leak(Box::new(tokio::sync::Semaphore::new(1)))
+    }
+
     /// The status and text body of a route outcome.
     async fn status_and_text(outcome: RouteOutcome) -> (StatusCode, String) {
         let resp = outcome.into_response();
@@ -770,17 +808,22 @@ mod tests {
     /// Fails when the route skips the permit: it then runs both passes and
     /// answers 200. A dry run on a local lane, so even that arm deletes nothing
     /// and no other test's use of the global lane can interfere.
+    #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane() {
         let root = crate::test_support::hermetic_temp_dir();
+        // #8994: a regressed route must never scan the operator's real fleet or
+        // call a real `gh`; the pinned root names an empty directory.
+        let _env = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(root.path());
         let state =
             Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
-        let lane = tokio::sync::Semaphore::new(1);
+        let lane = leaked_lane();
         // The timer sweep's own acquisition (`run_one_tick`).
         let _timer = lane.acquire().await.expect("a fresh lane is open");
 
         let (status, text) =
-            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), &lane).await)
+            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), lane).await)
                 .await;
         assert_eq!(status, StatusCode::CONFLICT, "body: {text}");
         assert!(
@@ -794,22 +837,75 @@ mod tests {
     ///
     /// Fails when the route proceeds without a permit on any refusal other
     /// than busy: it then answers 200 having run both passes.
+    #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn a_merged_prs_prune_fails_closed_on_a_closed_lane() {
         let root = crate::test_support::hermetic_temp_dir();
+        // #8994: a regressed route must never scan the operator's real fleet or
+        // call a real `gh`; the pinned root names an empty directory.
+        let _env = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(root.path());
         let state =
             Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
-        let lane = tokio::sync::Semaphore::new(1);
+        let lane = leaked_lane();
         lane.close();
 
         let (status, text) =
-            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), &lane).await)
+            status_and_text(prune_worktrees_core_in(&state, merged_prs_preview(), lane).await)
                 .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {text}");
         assert!(
             text.contains("lane is closed") && text.contains("nothing was pruned"),
             "the refusal must say the lane is closed and that nothing ran: {text}"
         );
+    }
+
+    /// 🔴 #8994: a client that disconnects mid-pass drops the handler future, but
+    /// the blocking reclaim and orphan loops keep removing worktrees, so the
+    /// lane must stay held until the pass ends or the timer sweep starts a
+    /// second pass beside it.
+    ///
+    /// The pass is held open by the session store's write lock, which its first
+    /// step (`SessionManager::list`) needs. The route future is dropped by a
+    /// timeout while blocked there; the lane must still refuse, and must free
+    /// once the store is released and the pass finishes.
+    ///
+    /// Fails when the permit is held by the handler future (the pre-fix shape)
+    /// or dropped at once (`let _ = permit`): the lane is then free after the drop.
+    /// Test: this function IS the test.
+    #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_dropped_prune_request_keeps_the_lane_until_the_pass_ends() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let _env = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(root.path());
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let lane = leaked_lane();
+        let mgr = state.session_manager().await;
+        let gate = mgr.store.write().await;
+
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            prune_worktrees_core_in(&state, merged_prs_preview(), lane),
+        )
+        .await;
+        assert!(
+            dropped.is_err(),
+            "the pass must still be blocked at the gate"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                lane.try_acquire(),
+                Err(tokio::sync::TryAcquireError::NoPermits)
+            ),
+            "the lane must stay held after the handler future is dropped mid-pass"
+        );
+
+        drop(gate);
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(30), lane.acquire()).await;
+        assert!(freed.is_ok(), "the lane must free once the pass ends");
     }
 
     /// Test: this function IS the test.
