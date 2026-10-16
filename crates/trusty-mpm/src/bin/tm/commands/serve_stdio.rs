@@ -592,8 +592,14 @@ mod tests {
     }
 
     /// A daemon socket (0600 in a 0700 directory, as the client dial requires)
-    /// that reads one request frame, waits `delay` of tokio time, then answers.
-    fn slow_socket(delay: Duration) -> (String, tempfile::TempDir) {
+    /// that reads one request frame, then answers once the returned sender
+    /// fires. It arms no timer of its own, so the paused clock only ever
+    /// advances to the client's bound or to the test's own sleep.
+    fn slow_socket() -> (
+        String,
+        tempfile::TempDir,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
         use std::os::unix::fs::PermissionsExt as _;
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
         let dir = tempfile::tempdir().expect("tempdir");
@@ -605,6 +611,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
         std_listener.set_nonblocking(true).expect("nonblocking");
         let listener = tokio::net::UnixListener::from_std(std_listener).expect("tokio listener");
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
             let Ok((socket, _)) = listener.accept().await else {
                 return;
@@ -612,26 +619,34 @@ mod tests {
             let mut reader = BufReader::new(socket);
             let mut line = String::new();
             let _ = reader.read_line(&mut line).await;
-            tokio::time::sleep(delay).await;
+            if released.await.is_err() {
+                return;
+            }
             let frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
             let _ = reader.get_mut().write_all(frame.as_bytes()).await;
         });
-        (trusty_mpm::core::socket_locator(&path), dir)
+        (trusty_mpm::core::socket_locator(&path), dir, release)
     }
 
     /// #9979: `forward_over_socket` applies `forwarding_timeout`, not a fixed
-    /// bound. A daemon that answers after 90 s of (paused) tokio time is
+    /// bound. A daemon that answers after 90 s of paused tokio time is
     /// outlived by the 60 s default but not by the chat bound.
     /// Red if `.timeout(bound)` reverts to `.timeout(REQUEST_TIMEOUT)`.
     #[tokio::test(start_paused = true)]
     async fn forward_over_socket_applies_the_per_request_bound() {
-        let (url, _dir) = slow_socket(Duration::from_secs(90));
-        let reply = forward_over_socket(&url, call("sessions_chat", json!({"message": "hi"})))
+        let (url, _dir, release) = slow_socket();
+        let chat = tokio::spawn(async move {
+            forward_over_socket(&url, call("sessions_chat", json!({"message": "hi"}))).await
+        });
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        release.send(()).expect("server still waiting");
+        let reply = chat
             .await
+            .expect("join")
             .expect("a chat turn outlasts 60 s inside the chat bound");
         assert_eq!(reply["result"]["ok"], true);
 
-        let (url, _dir) = slow_socket(Duration::from_secs(90));
+        let (url, _dir, _release) = slow_socket();
         let err = forward_over_socket(&url, call("session_list", json!({})))
             .await
             .expect_err("any other call is cut at 60 s");
@@ -642,7 +657,7 @@ mod tests {
     /// left the call running, not as an unreachable daemon.
     #[tokio::test(start_paused = true)]
     async fn a_forward_timeout_is_not_reported_as_an_unreachable_daemon() {
-        let (url, _dir) = slow_socket(Duration::from_secs(90));
+        let (url, _dir, _release) = slow_socket();
         let err = forward_over_socket(&url, call("session_list", json!({})))
             .await
             .expect_err("times out at 60 s");
