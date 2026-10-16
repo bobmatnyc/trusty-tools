@@ -277,6 +277,19 @@ impl HookService {
             ),
         );
 
+        // 1e (#8994 S2a): record an agent-isolation tree in the worktree ledger
+        // the first time an event's `cwd` names it, and reconcile `removed`
+        // after a stop or session end. Observe-only and detached, like 1d: all
+        // ledger I/O runs off this path and cannot change the verdict below.
+        drop(
+            crate::daemon::services::worktree_ledger_ingest::spawn_for_event(
+                &self.state,
+                session,
+                event,
+                &payload,
+            ),
+        );
+
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {
             let tool_name = payload

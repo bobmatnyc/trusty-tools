@@ -10,13 +10,15 @@
 //! Test: `worktree_registry_row_reports_count_and_gib_from_the_ledger_alone`,
 //! `worktree_registry_row_with_no_ledger_is_ok_and_names_the_backfill`,
 //! `worktree_registry_row_warns_on_malformed_lines`,
-//! `worktree_registry_row_drops_a_tree_reconciled_as_removed`.
+//! `worktree_registry_row_drops_a_tree_reconciled_as_removed`,
+//! `worktree_registry_row_warns_on_a_hook_ingest_failure`.
 
 use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::worktree_ledger::WorktreeLedger;
 use crate::core::worktree_ledger::fold::{fold, gib};
+use crate::core::worktree_ledger::hook_ingest::read_ingest_failure;
 
 /// The `tm doctor` row name.
 pub(crate) const CHECK_NAME: &str = "worktree_registry";
@@ -27,10 +29,37 @@ pub(crate) const CHECK_NAME: &str = "worktree_registry";
 /// What: absent ledger → `Ok` naming `tm worktrees` as the backfill; an
 /// unreadable one → `Unknown`; malformed lines → `Warn`; otherwise `Ok` with
 /// the total and the per-project count and GiB. Unmeasured trees are counted
-/// and named, never sized.
+/// and named, never sized. A hook-ingest failure record beside the ledger
+/// turns `Ok` into `Warn` and is appended to the message (#8994 S2a).
 /// Test: see the module doc.
 pub(crate) fn check_worktree_registry(home: &Path) -> DoctorCheck {
     let ledger = WorktreeLedger::under_home(home);
+    let row = ledger_row(&ledger);
+    // #8994 S2a: a hook-ingest write failure is never silent — the daemon
+    // records it beside the ledger and this row reports it.
+    let failure = match read_ingest_failure(&ledger) {
+        Ok(None) => return row,
+        Ok(Some(f)) => format!(
+            "hook ingest failed to write the ledger {} time(s), last at {}: {}",
+            f.failures,
+            f.ts.to_rfc3339(),
+            f.error
+        ),
+        Err(e) => format!("hook-ingest failure record unreadable: {e}"),
+    };
+    let status = match row.status {
+        CheckStatus::Ok => CheckStatus::Warn,
+        other => other,
+    };
+    let message = format!(
+        "{} — {failure}; `tm worktrees` backfills what was missed",
+        row.message
+    );
+    DoctorCheck::new(CHECK_NAME, status, message)
+}
+
+/// The row from the ledger alone, before the hook-ingest failure record.
+fn ledger_row(ledger: &WorktreeLedger) -> DoctorCheck {
     let read = match ledger.read() {
         Ok(read) => read,
         Err(e) => return DoctorCheck::new(CHECK_NAME, CheckStatus::Unknown, e.to_string()),

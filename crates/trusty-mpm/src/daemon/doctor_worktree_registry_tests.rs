@@ -172,3 +172,29 @@ fn worktree_registry_row_drops_a_tree_reconciled_as_removed() {
         after.message
     );
 }
+
+/// #8994 S2a: a hook-ingest write failure recorded beside the ledger turns
+/// the row to `Warn` and names it; clearing the record restores `Ok`.
+#[test]
+fn worktree_registry_row_warns_on_a_hook_ingest_failure() {
+    use crate::core::worktree_ledger::hook_ingest::{clear_ingest_failure, record_ingest_failure};
+    let home = tempfile::tempdir().unwrap();
+    let ledger = WorktreeLedger::under_home(home.path());
+    ledger
+        .append(&created(
+            "/nonexistent-8994/s2a/.worktrees/a",
+            "/nonexistent-8994/s2a",
+        ))
+        .unwrap();
+    record_ingest_failure(&ledger, "disk full").unwrap();
+    let row = check_worktree_registry(home.path());
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message.contains("hook ingest failed"),
+        "{}",
+        row.message
+    );
+    assert!(row.message.contains("disk full"), "{}", row.message);
+    clear_ingest_failure(&ledger).unwrap();
+    assert_eq!(check_worktree_registry(home.path()).status, CheckStatus::Ok);
+}
