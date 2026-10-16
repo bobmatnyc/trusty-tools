@@ -295,7 +295,8 @@ async fn writer_intent_open_fails_loud_on_locked_vector_file() {
 /// independently of the daemon-level `single_instance_check`.
 /// What: Seeds a vector file, drops the store so the cache expires,
 /// holds the lock, opens a snapshot handle, then asserts both write
-/// methods Err with the expected message.
+/// methods Err with the expected message, and `upsert_chunks` with the
+/// typed `HnswStoreError::ReadOnly` (#9278 M2).
 /// Test: this test — `vector_writes_rejected_on_snapshot`.
 #[tokio::test]
 async fn vector_writes_rejected_on_snapshot() {
@@ -336,6 +337,15 @@ async fn vector_writes_rejected_on_snapshot() {
         msg.contains("read-only"),
         "remove on snapshot must mention read-only, got: {msg}"
     );
+
+    // #9278 M2 (#9910): the typed chunk write refuses with `ReadOnly`, and its
+    // text is the canonical constant.
+    let err = snap
+        .upsert_chunks(Uuid::new_v4(), vec![unit_vec(384, 98)])
+        .await
+        .expect_err("a snapshot refuses a chunk write");
+    assert!(matches!(err, HnswStoreError::ReadOnly), "{err:?}");
+    assert_eq!(err.to_string(), READ_ONLY_ERROR_MSG);
 }
 
 /// Why (issue #59): reads must succeed on a snapshot handle — the

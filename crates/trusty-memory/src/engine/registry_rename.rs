@@ -92,6 +92,7 @@ pub(crate) struct RenameOutcome {
 /// `rename_palace_refuses_a_nonempty_target`,
 /// `rename_palace_refuses_a_referenced_handle_and_leaves_state_unchanged`,
 /// `rename_palace_failed_move_rolls_back_alias_keys`.
+// #9278 T3a: every struct variant is `non_exhaustive` too.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PalaceRenameError {
@@ -100,6 +101,7 @@ pub enum PalaceRenameError {
     NotFound(String),
     /// The source id is an alias; rename the palace it points at instead.
     #[error("palace id {alias:?} is an alias of palace {target:?}; rename {target:?} instead")]
+    #[non_exhaustive]
     SourceIsAlias {
         /// The requested source id.
         alias: String,
@@ -108,6 +110,7 @@ pub enum PalaceRenameError {
     },
     /// The new id is the old one or is not a valid palace id.
     #[error("cannot rename to {new:?}: {reason}")]
+    #[non_exhaustive]
     InvalidTarget {
         /// The requested new id.
         new: String,
@@ -116,6 +119,7 @@ pub enum PalaceRenameError {
     },
     /// The new id is a live alias of a palace other than the source.
     #[error("{new:?} is an alias of palace {target:?}; remove that alias first")]
+    #[non_exhaustive]
     TargetIsAlias {
         /// The requested new id.
         new: String,
@@ -124,12 +128,14 @@ pub enum PalaceRenameError {
     },
     /// The new id is an empty palace and `replace_empty` was not set.
     #[error("palace {new:?} already exists (it is empty; pass replace_empty to replace it)")]
+    #[non_exhaustive]
     TargetExists {
         /// The requested new id.
         new: String,
     },
     /// The new id is a palace that is not empty.
     #[error("palace {new:?} already exists and is not empty: {reason}")]
+    #[non_exhaustive]
     TargetNotEmpty {
         /// The requested new id.
         new: String,
@@ -139,6 +145,7 @@ pub enum PalaceRenameError {
     },
     /// A lock or a cached handle of either id stayed held past the wait bound.
     #[error("palace {palace:?} is busy ({detail}); retry when it is idle")]
+    #[non_exhaustive]
     Busy {
         /// The id that stayed busy.
         palace: String,
@@ -147,6 +154,7 @@ pub enum PalaceRenameError {
     },
     /// A filesystem or alias-file step failed.
     #[error("{context}: {source}")]
+    #[non_exhaustive]
     Io {
         /// The step that failed, and what was rolled back.
         context: String,
