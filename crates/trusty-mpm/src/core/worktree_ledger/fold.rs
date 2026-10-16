@@ -8,7 +8,8 @@
 //! [`ProjectSummary`] both reports print.
 //! Test: `fold_created_measured_removed_leaves_nothing_live`,
 //! `fold_keeps_one_live_entry_with_its_last_measured_size`,
-//! `fold_replay_of_the_same_file_is_identical`.
+//! `fold_replay_of_the_same_file_is_identical`,
+//! `a_pre_s2c_ledger_folds_to_the_golden_state`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -43,6 +44,11 @@ pub struct LiveWorktree {
     pub bytes: Option<u64>,
     /// When `bytes` was measured.
     pub measured_at: Option<DateTime<Utc>>,
+    /// Pull request for the tree's branch, once a `pr_linked` event named it
+    /// (#8994 S2c). Omitted from JSON while unknown, so a pre-S2c ledger
+    /// serializes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
 }
 
 /// The live set the ledger describes, keyed and ordered by path.
@@ -57,12 +63,15 @@ pub struct LedgerState {
 /// Why: see the module doc — state is derived, never stored.
 /// What: `created`/`observed` make a path live (a second one for a path that is
 /// already live is a no-op, so the first record keeps its attribution);
-/// `measured` updates a live path's size and is ignored for a path that is not
-/// live; `removed` drops the path. A path recorded again after `removed` is a
-/// new live entry.
+/// `measured` updates a live path's size and `pr_linked` its pull request
+/// (the latest wins); both are ignored for a path that is not live. `removed`
+/// drops the path. A path recorded again after `removed` is a new live entry
+/// with no size and no pull request.
 /// Test: `fold_created_measured_removed_leaves_nothing_live`,
 /// `fold_keeps_one_live_entry_with_its_last_measured_size`,
-/// `fold_replay_of_the_same_file_is_identical`.
+/// `fold_replay_of_the_same_file_is_identical`,
+/// `fold_carries_the_latest_pr_of_a_live_tree_only`,
+/// `a_pre_s2c_ledger_folds_to_the_golden_state`.
 pub fn fold(events: &[LedgerEvent]) -> LedgerState {
     let mut live: BTreeMap<PathBuf, LiveWorktree> = BTreeMap::new();
     for event in events {
@@ -84,6 +93,7 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                         first_seen: event.ts,
                         bytes: None,
                         measured_at: None,
+                        pr: None,
                     });
             }
             EventKind::Observed {
@@ -103,6 +113,7 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                         first_seen: event.ts,
                         bytes: None,
                         measured_at: None,
+                        pr: None,
                     });
             }
             EventKind::Measured { bytes } => {
@@ -111,6 +122,7 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                     entry.measured_at = Some(event.ts);
                 }
             }
+            EventKind::PrLinked { .. } => {}
             EventKind::Removed => {
                 live.remove(&event.path);
             }
@@ -167,3 +179,7 @@ impl LedgerState {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "fold_format_tests.rs"]
+mod format_tests;
