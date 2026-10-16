@@ -45,10 +45,18 @@
 #   value it inherited.
 #
 # Usage: scripts/sandbox_secrets_console.sh --secrets-bin PATH --console-bin PATH
-#            [--dir DIR] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]
+#            [--dir DIR] [--tm-bin PATH] [--bind HOST:PORT] [--projects N]
+#            [--idle-secs N] [--dry-run]
 #        scripts/sandbox_secrets_console.sh --stop DIR
 #   --secrets-bin PATH  absolute path of the trusty-secrets binary
 #   --console-bin PATH  absolute path of the trusty-console binary
+#   --tm-bin PATH       absolute path of a directory holding an executable `tm`
+#                       (and `trusty-mpm`), or of the `tm` file in it. The
+#                       console's PATH becomes <that dir>:/usr/bin:/bin so its
+#                       children find `tm` (chat) and `trusty-mpm` (shared
+#                       handle); nothing else from your PATH is added, and the
+#                       secrets server's PATH is unchanged. Without it the
+#                       console finds neither and every chat turn is a 503.
 #   --dir DIR           an existing sandbox directory (default: a new mktemp -d)
 #   --bind HOST:PORT    console listener, loopback only (default 127.0.0.1:17890)
 #   --projects N        sandbox projects to seed, 1-9 (default 2)
@@ -78,7 +86,9 @@ die() {
 
 usage() {
   echo "usage: scripts/sandbox_secrets_console.sh --secrets-bin PATH --console-bin PATH" >&2
-  echo "           [--dir DIR] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]" >&2
+  echo "           [--dir DIR] [--tm-bin PATH] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]" >&2
+  echo "  --tm-bin PATH  directory holding an executable tm (and trusty-mpm), or the tm file;" >&2
+  echo "                 prepended to the console's PATH only (default PATH: /usr/bin:/bin)" >&2
   echo "       scripts/sandbox_secrets_console.sh --stop DIR" >&2
   exit 2
 }
@@ -179,6 +189,7 @@ stop_recorded() {
 SECRETS_BIN=""
 CONSOLE_BIN=""
 DIR=""
+TM_BIN=""
 BIND="127.0.0.1:17890"
 PROJECTS=2
 IDLE=14400
@@ -189,6 +200,7 @@ while [ "$#" -gt 0 ]; do
     --secrets-bin) [ "$#" -ge 2 ] || usage; SECRETS_BIN="$2"; shift 2 ;;
     --console-bin) [ "$#" -ge 2 ] || usage; CONSOLE_BIN="$2"; shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
+    --tm-bin) [ "$#" -ge 2 ] || usage; TM_BIN="$2"; shift 2 ;;
     --bind) [ "$#" -ge 2 ] || usage; BIND="$2"; shift 2 ;;
     --projects) [ "$#" -ge 2 ] || usage; PROJECTS="$2"; shift 2 ;;
     --idle-secs) [ "$#" -ge 2 ] || usage; IDLE="$2"; shift 2 ;;
@@ -215,6 +227,27 @@ for bin in "$SECRETS_BIN" "$CONSOLE_BIN"; do
   case "$bin" in /*) ;; *) die "binary path is not absolute: $bin" ;; esac
   [ -f "$bin" ] && [ -x "$bin" ] || die "binary is not an executable file: $bin"
 done
+
+# --tm-bin: the console's only extra PATH entry, a physical directory holding
+# an executable `tm` (#9979 df-D4c).
+TM_DIR=""
+if [ -n "$TM_BIN" ]; then
+  case "$TM_BIN" in /*) ;; *) die "--tm-bin is not absolute: $TM_BIN" ;; esac
+  if [ -d "$TM_BIN" ]; then
+    resolve "$TM_BIN"
+    TM_DIR="$RESOLVED"
+  elif [ -f "$TM_BIN" ]; then
+    resolve "${TM_BIN%/*}/"
+    TM_DIR="$RESOLVED"
+  else
+    die "--tm-bin does not exist: $TM_BIN"
+  fi
+  [ -n "$TM_DIR" ] || die "--tm-bin cannot be resolved: $TM_BIN"
+  case "$TM_DIR" in
+    *:*|*[[:space:]]*|*[[:cntrl:]]*) die "--tm-bin directory holds a colon, whitespace or control character: $TM_DIR" ;;
+  esac
+  [ -f "$TM_DIR/tm" ] && [ -x "$TM_DIR/tm" ] || die "--tm-bin: no executable tm in $TM_DIR"
+fi
 
 # Loopback only: the page carries secret names and confirmations.
 case "$BIND" in
@@ -270,9 +303,11 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
 fi
 
 SOCKET="$SANDBOX/home/$SOCKET_SUBPATH"
-COMMON=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_SANDBOX=1" "TRUSTY_DATA_DIR_OVERRIDE=$SANDBOX/data")
-SECRETS_ENV=("${COMMON[@]}")
-CONSOLE_ENV=("${COMMON[@]}" "TRUSTY_MPM_ROOT=$SANDBOX/mpm" "TRUSTY_SECRETS_EXTERNAL=1")
+COMMON=("HOME=$SANDBOX/home" "TRUSTY_SANDBOX=1" "TRUSTY_DATA_DIR_OVERRIDE=$SANDBOX/data")
+CONSOLE_PATH="$SANDBOX_PATH"
+[ -z "$TM_DIR" ] || CONSOLE_PATH="$TM_DIR:$SANDBOX_PATH"
+SECRETS_ENV=("${COMMON[@]}" "PATH=$SANDBOX_PATH")
+CONSOLE_ENV=("${COMMON[@]}" "PATH=$CONSOLE_PATH" "TRUSTY_MPM_ROOT=$SANDBOX/mpm" "TRUSTY_SECRETS_EXTERNAL=1")
 SECRETS_ARGV=("$SECRETS_BIN" serve --idle-timeout-secs "$IDLE" --socket "$SOCKET")
 CONSOLE_ARGV=("$CONSOLE_BIN" serve --http "$BIND")
 
@@ -280,6 +315,7 @@ echo "$ME: sandbox dir: $SANDBOX"
 echo "$ME: secrets socket: $SOCKET"
 echo "$ME: console: http://$BIND/"
 echo "$ME: secrets env -i (names): HOME PATH TRUSTY_SANDBOX TRUSTY_DATA_DIR_OVERRIDE"
+echo "$ME: console PATH: $CONSOLE_PATH"
 echo "$ME: console env -i (names): HOME PATH TRUSTY_SANDBOX TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ROOT TRUSTY_SECRETS_EXTERNAL"
 echo "$ME: secrets argv: ${SECRETS_ARGV[*]}"
 echo "$ME: console argv: ${CONSOLE_ARGV[*]}"
