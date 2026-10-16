@@ -5,7 +5,8 @@
 //! What: [`locate_or_fetch_uv`] orders `TRUSTY_UV_BIN` → installed uv → the
 //! verified cache at `<data>/py-embedder/uv/<UV_VERSION>/uv` → an HTTPS
 //! download checked against [`PINNED_DIGESTS`] before anything is extracted.
-//! `TRUSTY_UV_FETCH=0` turns the download off.
+//! `TRUSTY_UV_FETCH=0` turns the download off. [`locate_installed_uv`] is the
+//! same lookup without the download, for read-only callers.
 //! Test: `uv_fetch_tests.rs`; `locate_uv_*` in `bootstrap_tests.rs`.
 
 mod http;
@@ -58,6 +59,15 @@ pub enum UvError {
         cache.display()
     )]
     Disabled { cache: PathBuf },
+    /// #9966: a lookup that never fetches found nothing, and the bootstrap would.
+    #[error(
+        "`uv` is not installed (not on PATH or in the well-known install dirs, and \
+         TRUSTY_UV_BIN is unset) and no verified uv is cached at {}. The venv bootstrap \
+         fetches the pinned uv {UV_VERSION} over HTTPS unless TRUSTY_UV_FETCH=0; install uv \
+         (https://docs.astral.sh/uv/) or set TRUSTY_UV_BIN=/path/to/uv to use your own.",
+        cache.display()
+    )]
+    NotInstalled { cache: PathBuf },
     #[error(
         "`uv` not found and no pinned uv {UV_VERSION} exists for host {triple}. Install uv \
          (https://docs.astral.sh/uv/) or set TRUSTY_UV_BIN=/path/to/uv."
@@ -117,12 +127,29 @@ pub fn locate_or_fetch_uv(
     )
 }
 
+/// Resolve an installed or verified cached `uv` without ever fetching (#9966).
+///
+/// Why: `trusty-search doctor` (without `--fix`) is read-only and fast; it
+/// must not download, write the uv cache, or block on the network.
+/// What: [`resolve_uv_offline`] over the same sources as
+/// [`locate_or_fetch_uv`]; `NotInstalled` when nothing is found and the
+/// bootstrap would fetch, `Disabled` when `TRUSTY_UV_FETCH=0`.
+/// Test: `locate_uv_with_no_uv_and_the_fetch_on_never_fetches` (bootstrap).
+pub fn locate_installed_uv(
+    py_root: &dyn Fn() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let explicit = std::env::var(UV_BIN_ENV).ok();
+    let installed = || trusty_common::bin_resolve::resolve_binary("uv");
+    let enabled = fetch_enabled(std::env::var(UV_FETCH_ENV).ok().as_deref());
+    resolve_uv_offline(explicit.as_deref(), &installed, py_root, enabled)
+}
+
 /// The resolution order behind [`locate_or_fetch_uv`], every source injected.
 ///
 /// Why: an installed uv always wins; a bad override is an error, never a
 /// fall-through to something less trusted.
-/// What: `explicit` → `installed()` → [`cached_uv`] under `py_root()` → a
-/// fetch for this host. A refused cache (#9966, 4c) is an error when `fetch`
+/// What: [`resolve_local`] (`explicit` → `installed()` → [`cached_uv`]), then
+/// a fetch for this host. A refused cache (#9966, 4c) is an error when `fetch`
 /// is `None` and is replaced by a verified download otherwise; it never runs.
 /// Test: `resolve_uv_prefers_explicit_override_and_never_fetches`,
 /// `resolve_uv_prefers_path_then_the_verified_cache`,
@@ -134,26 +161,10 @@ pub(crate) fn resolve_uv(
     py_root: &dyn Fn() -> anyhow::Result<PathBuf>,
     fetch: Option<Fetcher<'_>>,
 ) -> anyhow::Result<PathBuf> {
-    if let Some(value) = explicit {
-        let path = PathBuf::from(value);
-        if !path.is_file() {
-            let value = value.to_owned();
-            return Err(UvError::BadOverride { value }.into());
-        }
-        return Ok(path);
-    }
-    if let Some(found) = installed() {
-        return Ok(found);
-    }
-    let root = py_root()?;
-    match (cached_uv(&root), fetch) {
-        (Ok(Some(hit)), _) => return Ok(hit),
-        (Ok(None), _) => {}
-        (Err(refused), None) => return Err(refused.into()),
-        // #9966 (4c): the embedded archive digest, not the cache, is the trust
-        // root, so a verified re-download restores exactly the trusted state.
-        (Err(refused), Some(_)) => tracing::warn!("py-embedder: {refused}; fetching a replacement"),
-    }
+    let root = match resolve_local(explicit, installed, py_root, fetch.is_some())? {
+        Local::Found(path) => return Ok(path),
+        Local::Missing(root) => root,
+    };
     let Some(fetch) = fetch else {
         return Err(UvError::Disabled {
             cache: cache_path(&root),
@@ -161,6 +172,67 @@ pub(crate) fn resolve_uv(
         .into());
     };
     Ok(fetch_for_triple(&root, &host_triple(), fetch)?)
+}
+
+/// [`resolve_local`] alone; no fetcher exists on this path (#9966). A refused
+/// cache is an error. `fetch_enabled` picks `NotInstalled` or `Disabled`.
+/// Test: `locate_uv_with_no_uv_and_the_fetch_on_never_fetches` (bootstrap).
+pub(crate) fn resolve_uv_offline(
+    explicit: Option<&str>,
+    installed: &dyn Fn() -> Option<PathBuf>,
+    py_root: &dyn Fn() -> anyhow::Result<PathBuf>,
+    fetch_enabled: bool,
+) -> anyhow::Result<PathBuf> {
+    let root = match resolve_local(explicit, installed, py_root, false)? {
+        Local::Found(path) => return Ok(path),
+        Local::Missing(root) => root,
+    };
+    let cache = cache_path(&root);
+    let missing = if fetch_enabled {
+        UvError::NotInstalled { cache }
+    } else {
+        UvError::Disabled { cache }
+    };
+    Err(missing.into())
+}
+
+/// What [`resolve_local`] found: a usable uv, or nothing under this `py_root`.
+enum Local {
+    Found(PathBuf),
+    Missing(PathBuf),
+}
+
+/// `explicit` → `installed()` → [`cached_uv`] under `py_root()`; never fetches.
+/// A refused cache is an error unless `replace_refused`, when it is a miss.
+fn resolve_local(
+    explicit: Option<&str>,
+    installed: &dyn Fn() -> Option<PathBuf>,
+    py_root: &dyn Fn() -> anyhow::Result<PathBuf>,
+    replace_refused: bool,
+) -> anyhow::Result<Local> {
+    if let Some(value) = explicit {
+        let path = PathBuf::from(value);
+        if !path.is_file() {
+            let value = value.to_owned();
+            return Err(UvError::BadOverride { value }.into());
+        }
+        return Ok(Local::Found(path));
+    }
+    if let Some(found) = installed() {
+        return Ok(Local::Found(found));
+    }
+    let root = py_root()?;
+    match cached_uv(&root) {
+        Ok(Some(hit)) => Ok(Local::Found(hit)),
+        Ok(None) => Ok(Local::Missing(root)),
+        // #9966 (4c): the embedded archive digest, not the cache, is the trust
+        // root, so a verified re-download restores exactly the trusted state.
+        Err(refused) if replace_refused => {
+            tracing::warn!("py-embedder: {refused}; fetching a replacement");
+            Ok(Local::Missing(root))
+        }
+        Err(refused) => Err(refused.into()),
+    }
 }
 
 /// Is the download on for this `TRUSTY_UV_FETCH` value? Unset means yes.

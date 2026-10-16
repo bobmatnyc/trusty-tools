@@ -630,10 +630,11 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs
-/// → the verified pinned cache under `<data>/py-embedder/uv/` → a verified
-/// download of the pinned uv (#9966, see `uv_fetch`). With `TRUSTY_UV_FETCH=0`
-/// and nothing found, the error names `TRUSTY_UV_FETCH` and `TRUSTY_UV_BIN`
-/// and the caller falls back to ort.
+/// → the verified pinned cache under `<data>/py-embedder/uv/`. It never
+/// fetches (#9966): `trusty-search doctor` calls it and must stay read-only.
+/// With nothing found the error is `UvError::NotInstalled` (the bootstrap
+/// would fetch) or, with `TRUSTY_UV_FETCH=0`, `UvError::Disabled`.
+/// `build_venv` fetches through `uv_fetch::locate_or_fetch_uv` instead.
 ///
 /// Why (#4125): this used to be a bare `which::which("uv")`, i.e. live-`PATH`
 /// only. trusty-search's daemon runs under launchd, whose plist sets no `PATH`
@@ -650,12 +651,13 @@ fn human_bytes(n: u64) -> String {
 /// `~/.cargo/bin`, the system dirs).
 /// Test: `locate_uv_rejects_bad_explicit_override` (env-override arm),
 /// `locate_uv_refuses_a_tampered_cached_uv`,
-/// `a_build_with_no_uv_and_the_fetch_off_names_both_variables`. The fallback this now
+/// `locate_uv_with_no_uv_and_the_fetch_on_never_fetches`. The fallback this now
 /// depends on is covered by trusty-common's own
 /// resolve_binary_finds_a_binary_outside_the_process_path.
 pub fn locate_uv() -> Result<PathBuf> {
     // The `py-embedder` root is resolved lazily, so an installed uv needs no data dir.
-    crate::uv_fetch::locate_or_fetch_uv(&|| {
+    // #9966: no fetch here; only `build_venv` may download uv.
+    crate::uv_fetch::locate_installed_uv(&|| {
         let data = trusty_common::resolve_data_dir("trusty-search")
             .context("resolve trusty-search data dir for the uv cache")?;
         Ok(data.join("py-embedder"))
