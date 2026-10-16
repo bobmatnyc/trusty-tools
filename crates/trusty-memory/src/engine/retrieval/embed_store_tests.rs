@@ -12,6 +12,7 @@ use super::embed_store::{
     expected_chunk_count, plan_chunks,
 };
 use super::handle::PalaceHandle;
+use crate::engine::EngineError;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, PalaceId};
 use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
@@ -191,7 +192,9 @@ async fn embed_batch_returning_the_wrong_count_is_an_error_and_writes_nothing() 
     let id = Uuid::new_v4();
     let mut short_return = Counting::chunking(12);
     short_return.drop_one = true;
-    assert!(embed_chunks(&short_return, &words(50)).await.is_err());
+    // #9278 T3c-2: an embed failure is `EngineError::Embed`.
+    let err = embed_chunks(&short_return, &words(50)).await;
+    assert!(matches!(err, Err(EngineError::Embed(_))), "{err:?}");
     let e = arc(short_return);
     let loss = embed_and_store(&e, &h.vector_store, id, "one", &RetryPolicy::instant(2))
         .await
@@ -206,6 +209,7 @@ async fn unavailable_tokenizer_with_a_window_is_reported_not_swallowed() {
         .await
         .expect_err("a known window with no tokenizer must not embed");
     assert!(format!("{err:#}").contains("tokenizer"), "{err:#}");
+    assert!(matches!(err, EngineError::Embed(_)), "{err:?}");
 
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
