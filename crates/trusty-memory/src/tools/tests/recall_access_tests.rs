@@ -163,3 +163,96 @@ async fn a_failed_access_write_never_fails_the_recall() {
         .expect("row");
     assert_eq!(row.access_count, 2);
 }
+
+/// Poll a cold state until `drawer_id` shows an access in `palace`; the write
+/// is detached, so the test waits for it with a bound.
+async fn wait_for_persisted_access(
+    root: &std::path::Path,
+    palace: &str,
+    drawer_id: &str,
+) -> (u32, bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let seen = persisted_access(root, palace, drawer_id);
+        if seen.0 > 0 || tokio::time::Instant::now() >= deadline {
+            return seen;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Why (#9881, M2): `scope: "all"` releases each batch's palaces before the
+/// cut, so every served hit's palace is closed when the access is recorded.
+/// The reopen must still land the count and leave the registry as it was.
+/// What: one palace, released from the registry; `memory_recall_all` with
+/// `scope: "all"` serves its drawer. The count reaches disk and the palace is
+/// not resident afterwards.
+/// Test: this function.
+#[tokio::test]
+async fn recall_all_scope_all_records_into_a_released_palace() {
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "acc-rel"}))
+        .await
+        .expect("palace_create");
+    let text = "Scope all records the access in a palace the batch already released";
+    let id = remember(&state, "acc-rel", text).await;
+    state.registry.remove(&PalaceId::new("acc-rel"));
+    let baseline = state.registry.list().len();
+
+    let out = dispatch_tool(
+        &state,
+        "memory_recall_all",
+        json!({"q": text, "top_k": 5, "scope": "all"}),
+    )
+    .await
+    .expect("memory_recall_all scope all");
+    assert!(lane_hits(&out).iter().any(|(_, d)| *d == id), "{out:#}");
+
+    let (count, stamped) = wait_for_persisted_access(tmp.path(), "acc-rel", &id).await;
+    assert_eq!((count, stamped), (1, true), "{out:#}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while state.registry.list().len() != baseline && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(state.registry.list().len(), baseline, "back to baseline");
+    assert!(state.registry.peek(&PalaceId::new("acc-rel")).is_none());
+}
+
+/// Why (#9881, M2): the reopen is synchronous redb work and its release
+/// commits; run inline it parks the async worker and holds the recall
+/// response behind a slow or contended open.
+/// What: a closed palace whose open queue the test holds. Recording a served
+/// ruling for it must return at once; once the queue is released the detached
+/// reopen lands the count.
+/// Test: this function.
+#[tokio::test]
+async fn a_released_palace_is_recorded_off_the_response_path() {
+    let (state, tmp) = test_state();
+    for name in ["acc-own", "acc-other"] {
+        dispatch_tool(&state, "palace_create", json!({"name": name}))
+            .await
+            .expect("palace_create");
+    }
+    let id = remember(&state, "acc-own", "A ruling recorded without waiting").await;
+    let drawer = Uuid::parse_str(&id).expect("uuid");
+    state.registry.remove(&PalaceId::new("acc-own"));
+    let other = crate::tools::helpers::open_palace_handle(&state, "acc-other").expect("other");
+
+    let gate = state.registry.open_lock_for_test(&PalaceId::new("acc-own"));
+    let held = gate.lock();
+    let started = std::time::Instant::now();
+    let served = crate::tools::recall_access::ServedHits {
+        lane: Vec::new(),
+        rulings: vec![("acc-own".to_string(), drawer)],
+    };
+    served.record(&state, &other);
+    let waited = started.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "the recall waited {waited:?} on a reopen"
+    );
+    drop(held);
+
+    let (count, _) = wait_for_persisted_access(tmp.path(), "acc-own", &id).await;
+    assert_eq!(count, 1, "the detached reopen lands the count");
+}

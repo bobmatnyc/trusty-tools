@@ -94,29 +94,54 @@ fn group(pairs: impl IntoIterator<Item = (String, Uuid)>) -> HashMap<String, Vec
     by_palace
 }
 
-/// Record `ids` in `palace`, opening it only when it is no longer resident.
+/// Record `ids` in `palace`; a palace that is no longer resident is reopened
+/// off the response path.
 ///
 /// Why: a `scope: "all"` recall releases each batch's palaces before the cut,
-/// so a hit's palace may be closed by now (#7125). Reopening is bounded by
-/// `top_k` palaces.
-/// What: a resident handle records and keeps its debounced flush. A palace
-/// opened here records and is released again if nothing else holds it; its
-/// drop writes the accesses. An open failure is logged and skipped.
-/// Test: `recall_all_records_each_hit_in_its_own_palace`.
+/// so a hit's palace may be closed by now (#7125). Reopening it is
+/// synchronous redb work, and releasing the handle commits the pending
+/// accesses; neither may run on the async worker or hold the response
+/// (#9881, M2; cf. [`open_palaces_blocking`]). Bounded by `top_k` palaces.
+/// What: a resident handle records in memory only and keeps its debounced
+/// flush. Otherwise the reopen, the record and the release run on the
+/// blocking pool, detached: the recall does not wait for them. Outside a
+/// tokio runtime they run inline.
+/// Test: `recall_all_scope_all_records_into_a_released_palace`,
+/// `recall_all_records_each_hit_in_its_own_palace`.
+///
+/// [`open_palaces_blocking`]: crate::service::helpers::open_palaces_blocking
 fn record_in_palace(state: &AppState, palace: &str, ids: &[Uuid]) {
     let id = PalaceId::new(palace);
     if let Some(handle) = state.registry.peek(&id) {
         handle.record_accesses(ids);
         return;
     }
-    match open_palace_handle(state, palace) {
+    let (state, ids) = (state.clone(), ids.to_vec());
+    let work = move || reopen_and_record(&state, &id, &ids);
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn_blocking(work);
+        }
+        Err(_) => work(),
+    }
+}
+
+/// Open `id`, record `ids`, and release it again if nothing else holds it.
+///
+/// Why: the blocking half of [`record_in_palace`]; dropping the last handle
+/// writes the accesses (its `AccessLog` drop), so the count lands even though
+/// no debounce task outlives the release.
+/// What: an open failure is logged and skipped.
+/// Test: `recall_all_scope_all_records_into_a_released_palace`.
+fn reopen_and_record(state: &AppState, id: &PalaceId, ids: &[Uuid]) {
+    match open_palace_handle(state, id.as_str()) {
         Ok(handle) => {
             handle.record_accesses(ids);
             drop(handle);
-            state.registry.release_if_unreferenced(&id);
+            state.registry.release_if_unreferenced(id);
         }
         Err(e) => {
-            tracing::warn!(palace = %palace, "#9881: reopen to record accesses failed: {e:#}");
+            tracing::warn!(palace = %id, "#9881: reopen to record accesses failed: {e:#}");
         }
     }
 }
