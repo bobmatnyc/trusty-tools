@@ -36,7 +36,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Register `id` in a fresh app state and materialise its data directory with a
-/// marker file, mirroring `tests_4123::router_with_index_and_data`.
+/// marker file, mirroring `tests_4123::state_with_index_and_data`.
 ///
 /// The marker is what makes a "data survived" assertion meaningful: an empty
 /// directory could vanish for unrelated reasons, a directory holding a known

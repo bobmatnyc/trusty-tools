@@ -5,42 +5,31 @@
 //! indexer, a cold-store entry, or the DataDir default. Unit tests on
 //! `StorageLayout::remove_storage` do not prove the handler feeds it the right
 //! layout for each source.
-//! What: drives the real router with `oneshot` against a live colocated index
-//! and a cold `colocated=false` entry. `multi_thread` is required:
+//! What: calls the `delete_index_report` core (#9535) against a live colocated
+//! index and a cold `colocated=false` entry. `multi_thread` is required:
 //! `unregister_index` reaches `watcher_manager.stop_for_index`, whose teardown
 //! uses `block_in_place`.
 //! Test: this module. Run with `cargo test -p trusty-search tests_8438`.
 
-use super::build_router;
+use super::test_support::delete_answer;
 use super::tests_components::IsolatedDataDir;
+use super::DeleteIndexParams;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::persistence::PersistedIndex;
 use crate::service::server::SearchAppState;
 use crate::service::storage_layout::{StorageLayout, REDB_FILE};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use std::sync::Arc;
-use tower::ServiceExt;
 
-/// Issue the DELETE with `delete_data=true` and return `(status, body)`.
+/// Delete `id` with `delete_data=true` and return `(status, body)`.
 async fn delete_with_data(state: SearchAppState, id: &str) -> (StatusCode, serde_json::Value) {
-    let resp = build_router(state)
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/indexes/{id}?delete_data=true"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    (status, serde_json::from_slice(&bytes).expect("json body"))
+    let params = DeleteIndexParams {
+        delete_data: true,
+        ..Default::default()
+    };
+    delete_answer(&Arc::new(state), id, params).await
 }
 
 /// A root whose `.trusty-search/` already holds an `index.redb`.

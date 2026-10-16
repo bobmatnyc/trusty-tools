@@ -6,21 +6,20 @@
 //! `index.redb` open and `hnsw.usearch` mapped. The job then ran its embed
 //! pass against a deleted index — the #8232 SIGBUS shape.
 //! What: a real colocated index, parked in the cold store only, with one job
-//! pushed onto the deferred-embed heap. The test deletes it through the real
-//! router, then drives the queued job itself.
+//! pushed onto the deferred-embed heap. The test deletes it through the
+//! `delete_index_report` core (#9535), then drives the queued job itself.
 //! Test: this module.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use tokio::sync::RwLock;
-use tower::ServiceExt;
 use trusty_common::embedder::MockEmbedder;
 
-use super::build_router;
+use super::test_support::delete_answer;
 use super::tests_components::IsolatedDataDir;
+use super::DeleteIndexParams;
 use crate::core::indexer::{CodeIndexer, IndexDeleted};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::Embedder;
@@ -65,26 +64,16 @@ async fn delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index() {
     let redb = corpus_redb_path_for_entry(&entry).expect("redb path");
 
     // Cold-parked: the registry holds nothing, the queued job holds the handle.
-    let state = SearchAppState::new(IndexRegistry::new());
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     state.cold_store.register_cold_entries(vec![entry]);
-    let router = build_router(state);
     let job = push_job(handle, Arc::new(ReindexProgress::new()), 1);
     assert!(
         redb::Database::open(&redb).is_err(),
         "precondition: the queued job's handle holds index.redb open"
     );
 
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/indexes/{INDEX_ID}"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "delete must succeed");
+    let (status, body) = delete_answer(&state, INDEX_ID, DeleteIndexParams::default()).await;
+    assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
 
     let reopened = redb::Database::open(&redb);
     let closed = reopened.is_ok();
@@ -122,26 +111,12 @@ async fn a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index
     // A detached handle with its own indexer, as a job queued before a park holds.
     let job = Arc::new(bare());
     let queued = push_job(Arc::clone(&job), Arc::new(ReindexProgress::new()), 1);
-    let router = build_router(SearchAppState::new(registry.clone()));
+    let state = Arc::new(SearchAppState::new(registry.clone()));
 
     // Holding the job indexer's write lock makes its close time out.
     let held = job.indexer.write().await;
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/indexes/{ID}"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
+    let (status, body) = delete_answer(&state, ID, DeleteIndexParams::default()).await;
     drop(held);
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let hot_deleted = hot.indexer.read().await.is_deleted();
     let _ = job.indexer.write().await.detach_for_delete();
     let outcome = settle(queued).await;

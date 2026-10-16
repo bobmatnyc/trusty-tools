@@ -10,37 +10,37 @@
 //! index remove`'s help), so the destructive default was also a live
 //! documentation lie. These tests pin BOTH halves of the fix: the new default
 //! preserves, and the destructive capability is still reachable.
-//! What: drives the real router with `oneshot` so the `?delete_data=` query
-//! extractor and the route wiring are exercised end-to-end, not just the
-//! handler function. `TRUSTY_DATA_DIR` is redirected at a `TempDir` so
+//! What: calls the `delete_index_report` core (#9535) with the parsed
+//! `DeleteIndexParams`. `TRUSTY_DATA_DIR` is redirected at a `TempDir` so
 //! `remove_index_data_dir` / `remove_index_registry_entry` / `remove_root` all
 //! act inside the sandbox; `#[serial_test::serial]` guards that process-wide
 //! env var against the other tests that mutate it.
 //! Test: this module. Run with `cargo test -p trusty-search tests_4123`.
 
-use super::build_router;
+use super::test_support::delete_answer;
+use super::DeleteIndexParams;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::server::SearchAppState;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower::ServiceExt;
 
 /// Index id used by both tests. Deliberately `[A-Za-z0-9-]` only so
 /// `persistence::sanitize_id` is the identity function and the on-disk
 /// directory name is predictable.
 const INDEX_ID: &str = "delete-data-4123";
 
-/// Register `INDEX_ID` in a fresh router and materialise its app-data
+/// Register `INDEX_ID` in a fresh state and materialise its app-data
 /// directory with a marker file.
 ///
-/// Returns the router plus the path of the data directory the DELETE may or
+/// Returns the state plus the path of the data directory the DELETE may or
 /// may not destroy. The marker file is what makes the assertions meaningful:
 /// an empty directory could vanish for unrelated reasons, a directory holding
 /// a known byte string cannot.
-fn router_with_index_and_data(data_root: &std::path::Path) -> (axum::Router, std::path::PathBuf) {
+fn state_with_index_and_data(
+    data_root: &std::path::Path,
+) -> (Arc<SearchAppState>, std::path::PathBuf) {
     let registry = IndexRegistry::new();
     let root_path = data_root.join("corpus-root");
     std::fs::create_dir_all(&root_path).expect("create index root");
@@ -53,31 +53,22 @@ fn router_with_index_and_data(data_root: &std::path::Path) -> (axum::Router, std
     std::fs::create_dir_all(&index_data_dir).expect("create index data dir");
     std::fs::write(index_data_dir.join("corpus.marker"), b"real corpus bytes")
         .expect("write marker");
-    (build_router(SearchAppState::new(registry)), index_data_dir)
+    (Arc::new(SearchAppState::new(registry)), index_data_dir)
 }
 
-/// Issue the DELETE and return the decoded JSON body.
+/// Delete `INDEX_ID` and return the body, asserting the core answered `Ok`.
 /// Deliberately NOT named `delete_index`: that name is an allowlisted dangling
 /// doc-pointer in `mcp/tools/http.rs` (`Test: delete_index arm exercises this
 /// path`), and a helper by that name silently satisfies it — converting a
 /// KNOWN-dangling pointer into a falsely-resolved one and dropping the lint's
-/// signal. This helper drives the HTTP route; it does not exercise that arm.
-async fn send_delete_request(router: axum::Router, uri: &str) -> serde_json::Value {
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "DELETE {uri} must succeed");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    serde_json::from_slice(&bytes).expect("json body")
+/// signal. This helper drives the delete core; it does not exercise that arm.
+async fn send_delete_request(
+    state: &Arc<SearchAppState>,
+    params: DeleteIndexParams,
+) -> serde_json::Value {
+    let (status, body) = delete_answer(state, INDEX_ID, params).await;
+    assert_eq!(status, StatusCode::OK, "the delete must succeed: {body}");
+    body
 }
 
 /// Issue #4123: `DELETE /indexes/{id}` with NO parameter must deregister the
@@ -95,10 +86,10 @@ async fn delete_index_without_param_preserves_data() {
     // pointing at a deleted tempdir — that would cascade this one failure into
     // every later serial test in the binary.
     let isolated = super::tests_components::IsolatedDataDir::new();
-    let (router, index_data_dir) = router_with_index_and_data(isolated.path());
+    let (state, index_data_dir) = state_with_index_and_data(isolated.path());
     let marker = index_data_dir.join("corpus.marker");
 
-    let body = send_delete_request(router, &format!("/indexes/{INDEX_ID}")).await;
+    let body = send_delete_request(&state, DeleteIndexParams::default()).await;
 
     assert_eq!(
         body["removed"], true,
@@ -126,18 +117,21 @@ async fn delete_index_without_param_preserves_data() {
 /// Why: making the default safe is only half the fix — callers that genuinely
 /// reclaim disk (the `delete_index` MCP tool, `trusty-search cleanup`,
 /// trusty-mpm's worktree index GC) must still be able to opt in, or the fix
-/// trades a data-loss bug for a disk-leak bug. Driving the real router proves
-/// the flag survives routing and query extraction, not just the function
-/// signature.
+/// trades a data-loss bug for a disk-leak bug. Calling the delete core with
+/// the flag set proves it reaches the data-dir removal.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
 async fn delete_index_with_delete_data_true_destroys_data() {
     // RAII: see `delete_index_without_param_preserves_data`.
     let isolated = super::tests_components::IsolatedDataDir::new();
-    let (router, index_data_dir) = router_with_index_and_data(isolated.path());
+    let (state, index_data_dir) = state_with_index_and_data(isolated.path());
+    let params = DeleteIndexParams {
+        delete_data: true,
+        ..Default::default()
+    };
 
-    let body = send_delete_request(router, &format!("/indexes/{INDEX_ID}?delete_data=true")).await;
+    let body = send_delete_request(&state, params).await;
 
     assert_eq!(body["removed"], true, "registration removed: {body}");
     assert_eq!(
@@ -155,7 +149,7 @@ async fn delete_index_with_delete_data_true_destroys_data() {
 ///
 /// Why: a pin outliving its index kept a re-registered index of the same id
 /// pinned against eviction it never asked for, and the entry never left the map.
-/// What: pins the index for 10 min, deletes it over HTTP, and asserts the pin
+/// What: pins the index for 10 min, deletes it through the core, and asserts the pin
 /// is gone.
 /// Test: this test.
 #[tokio::test]
@@ -170,13 +164,12 @@ async fn delete_clears_a_warm_pin() {
         Arc::new(RwLock::new(CodeIndexer::new(INDEX_ID, root_path.clone()))),
         root_path,
     ));
-    let state = SearchAppState::new(registry);
+    let state = Arc::new(SearchAppState::new(registry));
     state
         .warm
         .pin_for_test(INDEX_ID, std::time::Duration::from_secs(600));
 
-    let body =
-        send_delete_request(build_router(state.clone()), &format!("/indexes/{INDEX_ID}")).await;
+    let body = send_delete_request(&state, DeleteIndexParams::default()).await;
 
     assert_eq!(body["removed"], true, "{body}");
     assert!(
