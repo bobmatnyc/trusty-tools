@@ -8,13 +8,14 @@
 //! ([`console`]), the project-registry + NL-resolver tools ([`project`],
 //! #1519 / #1517), the session-manager proxy tools ([`proxy`], #2550), the
 //! Disk-dashboard survey ([`disk`], #6927), the secrets reference tool
-//! ([`secrets`], #7522) and the owner question DM ([`channels`], #9856) — so this is a thin facade that re-exports all and
+//! ([`secrets`], #7522), the owner question DM ([`channels`], #9856) and the
+//! coordinator chat turn ([`chat`], #9979) — so this is a thin facade that re-exports all and
 //! concatenates their descriptors, keeping each leaf file well under the
 //! 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the thirty-seven MCP tool descriptors (nine core +
+//! What: [`tool_catalog`] builds the thirty-eight MCP tool descriptors (nine core +
 //! twelve session + five console + four project + four proxy + one disk + one
-//! secrets + one channel — #1222 / #1220 / #1508 / #1519 / #1517 WI-5 / #2012 /
-//! #2550 / #6927 / #7522 / #9856 / session-context tools); [`TOOL_CATALOG`]
+//! secrets + one channel + one chat — #1222 / #1220 / #1508 / #1519 / #1517 WI-5 /
+//! #2012 / #2550 / #6927 / #7522 / #9856 / #9979 / session-context tools); [`TOOL_CATALOG`]
 //! lists their names for tests and the startup log; `tool` is the shared
 //! descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
@@ -24,6 +25,8 @@ use serde_json::{Value, json};
 
 // #9856: `ask_owner`, the owner question DM.
 pub mod channels;
+// #9979: `sessions_chat`, the coordinator chat turn.
+pub mod chat;
 pub mod console;
 pub mod core;
 // #6927: the Disk dashboard's worktree survey.
@@ -39,13 +42,13 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the thirty-seven tool names — the nine core/bug tools,
+/// What: a static slice of the thirty-eight tool names — the nine core/bug tools,
 /// the twelve session-lifecycle tools, the five console-facing tools, the four
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), the four
 /// session-manager proxy tools (#2550), the Disk survey (#6927), and
-/// `secrets_get_ref` (#7522) and `ask_owner` (#9856).
+/// `secrets_get_ref` (#7522), `ask_owner` (#9856) and `sessions_chat` (#9979).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 37] = [
+pub const TOOL_CATALOG: [&str; 38] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -96,6 +99,8 @@ pub const TOOL_CATALOG: [&str; 37] = [
     "secrets_get_ref",
     // ── 1 channel tool (#9856, #8433 P4) ────────────────────────────────────
     "ask_owner",
+    // ── 1 chat tool (#9979, mirrors `mpm.sessions.chat`) ────────────────────
+    "sessions_chat",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -108,8 +113,8 @@ pub const TOOL_CATALOG: [&str; 37] = [
 /// (five descriptors), `project::project_tools` (four descriptors, WI-5 adds
 /// `project_resolve`), `proxy::proxy_tools` (four descriptors, #2550) and
 /// `disk::disk_tools` (one descriptor, #6927), `secrets::secrets_tools` (one
-/// descriptor, #7522) and `channels::channels_tools` (one descriptor, #9856) in
-/// catalog order, returning thirty-seven
+/// descriptor, #7522), `channels::channels_tools` (one descriptor, #9856) and
+/// `chat::chat_tools` (one descriptor, #9979) in catalog order, returning thirty-eight
 /// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -121,6 +126,7 @@ pub fn tool_catalog() -> Vec<Value> {
     tools.extend(disk::disk_tools());
     tools.extend(secrets::secrets_tools());
     tools.extend(channels::channels_tools());
+    tools.extend(chat::chat_tools());
     tools
 }
 
@@ -152,9 +158,9 @@ mod tests {
         // #6431 adds session_delete_records → 12)
         // #6927 adds disk_survey → 35.
         // #7522 adds secrets_get_ref → 36.
-        // #9856 adds ask_owner → 37.
-        assert_eq!(tool_catalog().len(), 37);
-        assert_eq!(TOOL_CATALOG.len(), 37);
+        // #9856 adds ask_owner → 37; #9979 adds sessions_chat → 38.
+        assert_eq!(tool_catalog().len(), 38);
+        assert_eq!(TOOL_CATALOG.len(), 38);
     }
 
     #[test]
@@ -375,6 +381,31 @@ mod tests {
         let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
         names.sort_unstable();
         assert_eq!(names, ["question", "recipient"], "{schema}");
+    }
+
+    /// #9979: the arguments are `mpm.sessions.chat`'s request fields, and the
+    /// description names the response fields it returns unchanged.
+    #[test]
+    fn sessions_chat_tool_mirrors_the_chat_request() {
+        let catalog = tool_catalog();
+        let tool = catalog
+            .iter()
+            .find(|t| t["name"] == "sessions_chat")
+            .expect("sessions_chat must be in the catalog");
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["required"], json!(["message"]), "{schema}");
+        let props = schema["properties"].as_object().expect("properties");
+        let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["actions", "conv_id", "history", "message"],
+            "{schema}"
+        );
+        let desc = tool["description"].as_str().expect("description");
+        for field in ["reply", "conv_id", "actions_taken", "cost", "503"] {
+            assert!(desc.contains(field), "the description omits `{field}`");
+        }
     }
 
     #[test]

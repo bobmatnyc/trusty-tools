@@ -4,6 +4,7 @@
 //! the bulk of the client; isolating them from the struct/types/Drop in
 //! `mod.rs` keeps both files under the 500-line cap.
 //! What: `StdioMcpClient::spawn`, `initialize`, `list_tools`, `call_tool`,
+//! `call_tool_with_timeout` (#9979),
 //! `ping`, `is_alive`, `respawn`, `ensure_alive` — and the low-level
 //! `send`/`recv` helpers — dispatching through `build_initialize_request` /
 //! `extract_result` defined in `mod.rs`.
@@ -11,6 +12,7 @@
 //! full spawn flow has an `#[ignore]`d integration test.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -205,7 +207,7 @@ impl StdioMcpClient {
     pub async fn initialize(&mut self) -> Result<ServerInfo> {
         let id = self.alloc_id();
         let req = build_initialize_request(id, &self.client_name);
-        let resp = self.request(&req).await?;
+        let resp = self.request(&req, CALL_TIMEOUT).await?;
         let result = extract_result(resp)?;
 
         let server_info = result
@@ -256,7 +258,7 @@ impl StdioMcpClient {
             "id": id,
             "method": "tools/list",
         });
-        let resp = self.request(&req).await?;
+        let resp = self.request(&req, CALL_TIMEOUT).await?;
         let result = extract_result(resp)?;
         let tools = result
             .get("tools")
@@ -289,9 +291,31 @@ impl StdioMcpClient {
     /// Why: The primary method for a console or agent to invoke a service's
     /// tools (e.g., `console_metrics` for health data).
     /// What: Sends `tools/call`, parses the result, and returns the raw JSON
-    /// value for the caller to interpret. Calls `ensure_alive` first.
+    /// value for the caller to interpret. Calls `ensure_alive` first. Bounded
+    /// by the 30 s default; [`Self::call_tool_with_timeout`] takes another.
     /// Test: End-to-end in trusty-agents integration tests.
     pub async fn call_tool(&mut self, name: &str, params: Value) -> Result<Value> {
+        self.call_tool_with_timeout(name, params, CALL_TIMEOUT)
+            .await
+    }
+
+    /// Invoke `tools/call` like [`Self::call_tool`], bounded by `call_timeout`.
+    ///
+    /// Why: #9979 — one tool can legitimately outlast the 30 s default (an
+    /// action-capable `sessions_chat` turn makes several model calls). The
+    /// caller of that one tool picks its bound; every other call keeps the
+    /// default.
+    /// What: the same request as `call_tool`; the round-trip errors with
+    /// "timed out after `call_timeout`" when no matching response arrives in
+    /// time.
+    /// Test: `call_tool_with_timeout_applies_the_callers_bound`,
+    /// `call_tool_with_timeout_returns_a_reply_inside_a_longer_bound`.
+    pub async fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        params: Value,
+        call_timeout: Duration,
+    ) -> Result<Value> {
         self.ensure_alive().await?;
         let id = self.alloc_id();
         let req = json!({
@@ -300,7 +324,7 @@ impl StdioMcpClient {
             "method": "tools/call",
             "params": { "name": name, "arguments": params },
         });
-        let resp = self.request(&req).await?;
+        let resp = self.request(&req, call_timeout).await?;
         extract_result(resp)
     }
 
@@ -319,7 +343,7 @@ impl StdioMcpClient {
             "id": id,
             "method": "ping",
         });
-        let _ = self.request(&req).await?;
+        let _ = self.request(&req, CALL_TIMEOUT).await?;
         Ok(())
     }
 
@@ -378,16 +402,17 @@ impl StdioMcpClient {
     /// A simple read-one-frame approach would misinterpret a notification as
     /// a response. This loop discards notifications and out-of-order ids
     /// (rare) until the matching response arrives.
-    /// What: Wraps the round-trip in a 30s timeout. Returns Err if the timeout
-    /// fires or if the frame cannot be parsed.
+    /// What: Wraps the round-trip in `bound` (`CALL_TIMEOUT` for every method
+    /// but `call_tool_with_timeout`, #9979). Returns Err if the timeout fires
+    /// or if the frame cannot be parsed.
     /// Test: Covered by every method that calls `request`.
-    async fn request(&mut self, req: &Value) -> Result<Value> {
+    async fn request(&mut self, req: &Value, bound: Duration) -> Result<Value> {
         let expected_id = req
             .get("id")
             .cloned()
             .ok_or_else(|| anyhow!("request must carry an id"))?;
 
-        timeout(CALL_TIMEOUT, async {
+        timeout(bound, async {
             self.write_line(req).await?;
             loop {
                 let frame = self.read_line().await?;
@@ -402,6 +427,6 @@ impl StdioMcpClient {
             }
         })
         .await
-        .map_err(|_| anyhow!("MCP request timed out after {:?}", CALL_TIMEOUT))?
+        .map_err(|_| anyhow!("MCP request timed out after {bound:?}"))?
     }
 }

@@ -158,7 +158,8 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Why: Servers that take longer than this are treated as failed; callers can
 /// retry or surface the error. 30s is generous enough for cold-start scenarios
 /// (e.g. a search daemon loading its HNSW index) without blocking indefinitely.
-/// What: Used by `StdioMcpClient::request` as the `tokio::time::timeout` bound.
+/// What: The `tokio::time::timeout` bound of every request except a
+/// `call_tool_with_timeout` call, which names its own (#9979).
 /// Test: `call_tool_errors_when_respawn_unavailable` verifies the client fails
 /// fast (< 5s) rather than blocking the full timeout when respawn fails.
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -440,6 +441,52 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "call_tool should fail fast (<5s), took {elapsed:?}"
         );
+    }
+
+    /// A server that answers request id 1 one second after reading it.
+    #[cfg(unix)]
+    const SLOW_REPLY: &str = r#"read -r line; sleep 1; printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'; sleep 5"#;
+
+    /// Why: #9979 — a caller's per-call bound must govern that call: a
+    /// shorter bound gives up on a reply the server has not sent yet.
+    /// What: the server replies after 1 s; a 300 ms bound errs well before
+    /// the reply and names the bound it applied.
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn call_tool_with_timeout_applies_the_callers_bound() {
+        let mut client = StdioMcpClient::spawn("sh", &["-c", SLOW_REPLY], "test-client")
+            .await
+            .unwrap();
+        let bound = std::time::Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let err = client
+            .call_tool_with_timeout("slow", json!({}), bound)
+            .await
+            .unwrap_err();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "the 300ms bound, not the reply, must end the call: {:?}",
+            start.elapsed()
+        );
+        assert!(err.to_string().contains("300ms"), "{err}");
+    }
+
+    /// Why: #9979 — a bound longer than the reply time must return the reply,
+    /// which is what lets one long tool outlast another tool's bound.
+    /// What: the same 1 s server; a 10 s bound returns the server's `result`.
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn call_tool_with_timeout_returns_a_reply_inside_a_longer_bound() {
+        let mut client = StdioMcpClient::spawn("sh", &["-c", SLOW_REPLY], "test-client")
+            .await
+            .unwrap();
+        let result = client
+            .call_tool_with_timeout("slow", json!({}), std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(result, json!({ "ok": true }));
     }
 
     /// Why: Issue #425 — some MCP servers (trusty-memory) print a human-readable

@@ -28,6 +28,9 @@
 //! #9856: the daemon proves an `ask_owner` asker from the kernel's peer pid,
 //! which only the socket carries — since #6288 every call travels that way.
 //!
+//! #9979: a `sessions_chat` call is forwarded under a longer bound than every
+//! other request — see [`forwarding_timeout`].
+//!
 //! Test: `is_notification_*`, `value_to_mcp_response_*`,
 //! `forward_errors_on_an_absent_socket_naming_it`, and `stamp_*` unit tests
 //! below; end to end in
@@ -46,6 +49,32 @@ use trusty_mcp::{DaemonBridgeConfig, Request, Response};
 /// call from being cut off while still capping a truly hung request.
 /// Test: `the_forwarding_timeout_leaves_headroom_over_the_disk_survey_budget_clamp`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Forwarding timeout for one `sessions_chat` turn (#9979).
+///
+/// Why: an action-capable turn runs up to nine model calls, each bounded at
+/// 120 s by the provider client, plus the session verbs it invokes, so 60 s
+/// cuts a valid turn short. The caller's own per-call bound (the console's
+/// `call_tool_with_timeout`) is the operative limit; this only ends a hung
+/// turn, and it applies to `sessions_chat` alone.
+/// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
+const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// The forwarding timeout for `req`: [`CHAT_REQUEST_TIMEOUT`] for a
+/// `sessions_chat` tool call, [`REQUEST_TIMEOUT`] for everything else.
+///
+/// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
+fn forwarding_timeout(req: &serde_json::Value) -> Duration {
+    let method = req.get("method").and_then(serde_json::Value::as_str);
+    let tool = req
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str);
+    if method == Some("tools/call") && tool == Some("sessions_chat") {
+        CHAT_REQUEST_TIMEOUT
+    } else {
+        REQUEST_TIMEOUT
+    }
+}
 
 /// Build the `DaemonBridgeConfig` for the trusty-mpm stdio bridge.
 ///
@@ -224,14 +253,16 @@ fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
 /// Send one MCP request as `mpm.mcp.dispatch` over the daemon socket.
 ///
 /// What: the socket client's `POST /rpc` mapping to the socket `url` locates;
-/// never a TCP fallback. A refusal sentinel `url` fails before any I/O.
+/// never a TCP fallback. A refusal sentinel `url` fails before any I/O. The
+/// bound is [`forwarding_timeout`] (#9979).
 /// Test: `forward_errors_on_an_absent_socket_naming_it`.
 async fn forward_over_socket(url: &str, req: serde_json::Value) -> Result<serde_json::Value> {
     let daemon = trusty_mpm::client::DaemonClient::new(url);
+    let bound = forwarding_timeout(&req);
     daemon
         .post("/rpc")
         .json(&req)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(bound)
         .send()
         .await?
         .error_for_status()?
@@ -511,6 +542,26 @@ mod tests {
         let v = req_to_value(&req);
         assert_eq!(v["method"], "session_list");
         assert_eq!(v["id"], 5);
+    }
+
+    /// #9979: only a `sessions_chat` call gets the chat bound; every other
+    /// call, including another tool and a non-call method, keeps 60 s.
+    #[test]
+    fn forwarding_timeout_widens_only_for_a_chat_turn() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert!(CHAT_REQUEST_TIMEOUT > REQUEST_TIMEOUT);
+        assert_eq!(
+            forwarding_timeout(&call("sessions_chat", json!({"message": "hi"}))),
+            CHAT_REQUEST_TIMEOUT
+        );
+        for req in [
+            call("session_list", json!({})),
+            call("disk_survey", json!({})),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "sessions_chat"}),
+        ] {
+            assert_eq!(forwarding_timeout(&req), REQUEST_TIMEOUT, "{req}");
+        }
     }
 
     /// #6288: with no daemon socket the forward fails naming the socket, and
