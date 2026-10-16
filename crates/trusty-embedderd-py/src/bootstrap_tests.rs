@@ -724,6 +724,8 @@ fn locate_uv_refuses_a_tampered_cached_uv() {
     // Empty PATH and HOME: only a system-dir uv can still be found, and it wins.
     unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
     unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    // #9966: locate_uv never fetches; the opt-out keeps a regression offline too.
+    unsafe { std::env::set_var("TRUSTY_UV_FETCH", "0") };
     let host = trusty_common::bin_resolve::resolve_binary("uv");
     match (with_data_override(tmp.path(), locate_uv), host) {
         (found, Some(host)) => assert_eq!(found.unwrap(), host, "installed uv wins"),
@@ -733,4 +735,96 @@ fn locate_uv_refuses_a_tampered_cached_uv() {
             "the error must name the refused cached uv, got: {e:#}"
         ),
     }
+}
+
+/// Why (#9966): `build_venv` must reach the fetch-aware uv lookup, and the
+/// one opt-out must fail loudly. On the B1 base the build's error said the
+/// fetch was "not yet available" and never named `TRUSTY_UV_FETCH`.
+/// What: no uv anywhere, `TRUSTY_UV_FETCH=0`, and a `.ready` venv whose
+/// recheck fails; the rebuild must fail naming both variables, with no uv
+/// cache dir created. A host uv in a system dir wins and is reported instead.
+/// Test: this test.
+#[test]
+fn a_build_with_no_uv_and_the_fetch_off_names_both_variables() {
+    // #9966: mutates PATH, HOME, TRUSTY_UV_FETCH, TRUSTY_DATA_DIR_OVERRIDE.
+    if !isolate_in_child_process(
+        "bootstrap::tests::a_build_with_no_uv_and_the_fetch_off_names_both_variables",
+    ) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
+    unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+    unsafe { std::env::set_var("TRUSTY_UV_FETCH", "0") };
+    if let Some(host) = trusty_common::bin_resolve::resolve_binary("uv") {
+        eprintln!(
+            "SKIP: a system-dir uv at {} wins; nothing to prove",
+            host.display()
+        );
+        return;
+    }
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+        fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
+        let err = format!("{:#}", ensure_venv().expect_err("no uv and no fetch"));
+        assert!(err.contains("TRUSTY_UV_FETCH=0"), "{err}");
+        assert!(err.contains("TRUSTY_UV_BIN"), "{err}");
+        let uv_dir = layout.base.parent().unwrap().join("uv");
+        assert!(!uv_dir.exists(), "the opt-out must not touch the uv cache");
+    });
+}
+
+/// Why (#9966): `locate_uv` backs the read-only `trusty-search doctor`, which
+/// must never download, write the uv cache, or block on the network. B2 had
+/// routed it through the fetch.
+/// What: no uv anywhere, `TRUSTY_UV_FETCH` unset (fetch on), and every proxy
+/// variable aimed at a closed local port so a regressed fetch fails fast
+/// instead of downloading. `locate_uv` must fail without creating the uv
+/// cache dir, and its error must say the bootstrap would fetch, not that a
+/// fetch failed. A host uv in a system dir wins and the test skips.
+/// Test: this test.
+#[test]
+fn locate_uv_with_no_uv_and_the_fetch_on_never_fetches() {
+    // #9966: mutates PATH, HOME, proxy vars, TRUSTY_UV_*, TRUSTY_DATA_DIR_OVERRIDE.
+    if !isolate_in_child_process(
+        "bootstrap::tests::locate_uv_with_no_uv_and_the_fetch_on_never_fetches",
+    ) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
+    unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+    unsafe { std::env::remove_var("TRUSTY_UV_FETCH") };
+    for var in ["NO_PROXY", "no_proxy"] {
+        unsafe { std::env::remove_var(var) };
+    }
+    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        unsafe { std::env::set_var(var, "http://127.0.0.1:9") };
+    }
+    if let Some(host) = trusty_common::bin_resolve::resolve_binary("uv") {
+        eprintln!(
+            "SKIP: a system-dir uv at {} wins; nothing to prove",
+            host.display()
+        );
+        return;
+    }
+    let err = format!(
+        "{:#}",
+        with_data_override(tmp.path(), locate_uv).expect_err("no uv is installed or cached")
+    );
+    let uv_dir = tmp.path().join("trusty-search/py-embedder/uv");
+    assert!(
+        !uv_dir.exists(),
+        "locate_uv must not fetch or touch the uv cache; {} exists ({err})",
+        uv_dir.display()
+    );
+    assert!(err.contains("not installed"), "{err}");
+    assert!(
+        err.contains("0.12.23") && err.contains("TRUSTY_UV_FETCH=0"),
+        "{err}"
+    );
+    assert!(!err.contains("failed"), "no fetch was tried: {err}");
 }

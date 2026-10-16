@@ -1357,7 +1357,8 @@ Silicon hosts are completely unaffected (unchanged ort default).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH`. Missing `uv` is a bootstrap failure that triggers the ort fallback. |
+| `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH` and the well-known install dirs, then in the verified cache `<data>/py-embedder/uv/0.12.23/uv`, and finally fetched over HTTPS and checked against an embedded SHA-256 (#9966). |
+| `TRUSTY_UV_FETCH` | unset (on) | `0`/`false`/`off`/`no` turns the uv download off (#9966). With no uv found the bootstrap then fails naming this variable and `TRUSTY_UV_BIN`, and the daemon stays on ort. |
 | `TRUSTY_EMBEDDERD_PY_BIN` | — (sibling/PATH search) | Explicit path to the `trusty-embedderd-py` launcher binary. Overrides the sibling-binary/PATH discovery `locate_launcher_binary` performs. **`cargo install trusty-search` installs the launcher next to `trusty-search`** (#9468), where the sibling search finds it; the trusty-embedderd-py crate is library-only. |
 | `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS` | `600` | Bounded timeout applied to each individual `uv` bootstrap step (python install, venv create, export, pip sync) and to the post-build import+embed smoke test. Each step gets one retry on a transient failure. |
 | `TRUSTY_DEVICE` | `auto` | Device selection inside the sidecar: `auto` (MPS if available, else CUDA, else CPU), `gpu` (same as `auto` but logs a warning if it falls back to CPU), or `cpu` (force CPU). |
