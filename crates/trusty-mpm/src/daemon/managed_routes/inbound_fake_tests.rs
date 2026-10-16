@@ -215,5 +215,15 @@ fn inbound_route_has_no_production_source() {
             "mounted without the latch: {line}"
         );
     }
-    assert_eq!(ops, [routes.join("inbound_fake.rs")], "inbound_op callers");
+    // #9923 (plan item 8): the Socket Mode loop's daemon env is the one
+    // production caller; it adds no route.
+    ops.sort();
+    assert_eq!(
+        ops,
+        [
+            routes.join("inbound_fake.rs"),
+            routes.join("socket_mode.rs")
+        ],
+        "inbound_op callers"
+    );
 }

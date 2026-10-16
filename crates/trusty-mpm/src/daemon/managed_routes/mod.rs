@@ -48,6 +48,9 @@ pub mod inbound;
 // #9873 Q1: the sandbox-only inbound source; see `channels_router`.
 #[cfg(feature = "channels")]
 pub mod inbound_fake;
+// #9923: the daemon side of the Socket Mode inbound source (P6); no route.
+#[cfg(feature = "channels")]
+pub mod socket_mode;
 // #9843: the FRONT gate's answer — launch or deny the withheld runtime.
 mod front_gate_answer;
 pub mod inproject;
