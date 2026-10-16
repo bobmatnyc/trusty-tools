@@ -519,7 +519,8 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
     precheck_disk_space(&layout.base)?;
     // #9468: the uv cache sits beside the per-hash dirs under `py-embedder/`.
     let py_root = layout.base.parent().context("venv base has no parent")?;
-    let uv = locate_uv_with(&|| Ok(py_root.to_path_buf()))?;
+    // #9966: with no uv anywhere, fetch the pinned one unless TRUSTY_UV_FETCH=0.
+    let uv = crate::uv_fetch::locate_or_fetch_uv(&|| Ok(py_root.to_path_buf()))?;
     materialize_project(&layout.project_dir)?;
 
     // Isolate uv's provisioned CPython + cache under the data dir so the venv
@@ -629,9 +630,10 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs
-/// → the verified pinned cache under `<data>/py-embedder/uv/` (#9468, see
-/// `uv_fetch`). Never downloads; with nothing found the error says the pinned
-/// fetch is not yet available and the caller falls back to ort.
+/// → the verified pinned cache under `<data>/py-embedder/uv/` → a verified
+/// download of the pinned uv (#9966, see `uv_fetch`). With `TRUSTY_UV_FETCH=0`
+/// and nothing found, the error names `TRUSTY_UV_FETCH` and `TRUSTY_UV_BIN`
+/// and the caller falls back to ort.
 ///
 /// Why (#4125): this used to be a bare `which::which("uv")`, i.e. live-`PATH`
 /// only. trusty-search's daemon runs under launchd, whose plist sets no `PATH`
@@ -647,24 +649,17 @@ fn human_bytes(n: u64) -> String {
 /// and then the well-known daemon bin dirs (Homebrew, `~/.local/bin`,
 /// `~/.cargo/bin`, the system dirs).
 /// Test: `locate_uv_rejects_bad_explicit_override` (env-override arm),
-/// `locate_uv_refuses_a_tampered_cached_uv`. The fallback this now depends on
-/// is covered by trusty-common's own
+/// `locate_uv_refuses_a_tampered_cached_uv`,
+/// `a_build_with_no_uv_and_the_fetch_off_names_both_variables`. The fallback this now
+/// depends on is covered by trusty-common's own
 /// resolve_binary_finds_a_binary_outside_the_process_path.
 pub fn locate_uv() -> Result<PathBuf> {
-    locate_uv_with(&|| {
+    // The `py-embedder` root is resolved lazily, so an installed uv needs no data dir.
+    crate::uv_fetch::locate_or_fetch_uv(&|| {
         let data = trusty_common::resolve_data_dir("trusty-search")
             .context("resolve trusty-search data dir for the uv cache")?;
         Ok(data.join("py-embedder"))
     })
-}
-
-/// [`locate_uv`] with the `py-embedder` root supplied lazily, so an installed
-/// uv needs no data dir.
-fn locate_uv_with(py_root: &dyn Fn() -> Result<PathBuf>) -> Result<PathBuf> {
-    let explicit = std::env::var("TRUSTY_UV_BIN").ok();
-    // #4125: PATH-only lookup misses Homebrew under launchd's minimal PATH.
-    let installed = || trusty_common::bin_resolve::resolve_binary("uv");
-    crate::uv_fetch::resolve_uv(explicit.as_deref(), &installed, py_root)
 }
 
 /// Materialize the embedded Python project to `dest` (overwrites in place so a
