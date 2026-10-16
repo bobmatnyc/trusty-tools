@@ -610,7 +610,8 @@ async fn upgrade_one(
                     c.crate_name
                 )
             })?;
-            trusty_common::update::perform_upgrade(&c.crate_name).await?;
+            // #9974: removes a standalone trusty-embedderd-py install first.
+            super::standalone_launcher::cargo_install(&c.crate_name, false).await?;
             // #3554: `cargo install` always lands in the cargo bin dir —
             // resolve that CONCRETE destination directly rather than a name
             // lookup.
