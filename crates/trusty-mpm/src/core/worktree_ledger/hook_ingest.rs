@@ -78,6 +78,12 @@ pub enum ObserveOutcome {
     NotADirectory,
     /// The tree resolves outside every registered project; nothing appended.
     Unregistered,
+    /// The directory exists but `git worktree list` does not name it as a
+    /// worktree (#8994 S2b: a `git worktree add` that failed); nothing appended.
+    NotListed,
+    /// The tree is listed but predates the Bash call (#8994 S2b: git refused a
+    /// duplicate `git worktree add`); nothing appended, the backfill owns it.
+    NotNew,
 }
 
 /// Append one `observed` event for `tree`, unless it is already live.
@@ -110,20 +116,44 @@ pub fn observe_agent_tree(
     let Some(repo) = repo_of(&key).filter(|_| registered) else {
         return Ok(ObserveOutcome::Unregistered);
     };
-    if fold(&ledger.read()?.events).live.contains_key(&key) {
+    let branch = || {
+        list_registered_worktrees(repo)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|w| ledger_key(&w.path) == key)
+            .and_then(|w| w.branch)
+    };
+    observe_key(ledger, &key, repo, Origin::AgentIsolation, session, branch)
+}
+
+/// Append one `observed` event for the canonical `key`, unless it is live.
+///
+/// Why: the one write path for hook-fed `observed` events — agent isolation
+/// (S2a) and Bash `git worktree add` (S2b) — so both dedup the same way.
+/// What: folds the ledger and returns [`ObserveOutcome::AlreadyLive`] for a
+/// live `key`; otherwise asks `branch` (git runs only then) and appends
+/// `observed` with `repo`, `origin` and `session`. The caller has already
+/// verified `key` and `repo`. A ledger read or write error is returned.
+/// Test: `observe_records_a_registered_tree_once`,
+/// `each_worktree_add_form_records_one_entry`.
+pub(crate) fn observe_key(
+    ledger: &WorktreeLedger,
+    key: &Path,
+    repo: &Path,
+    origin: Origin,
+    session: Option<&str>,
+    branch: impl FnOnce() -> Option<String>,
+) -> Result<ObserveOutcome, LedgerError> {
+    if fold(&ledger.read()?.events).live.contains_key(key) {
         return Ok(ObserveOutcome::AlreadyLive);
     }
-    let branch = list_registered_worktrees(repo)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|w| ledger_key(&w.path) == key)
-        .and_then(|w| w.branch);
+    let branch = branch();
     ledger.append(&LedgerEvent::now(
-        key.clone(),
+        key.to_path_buf(),
         EventKind::Observed {
             repo: repo.to_path_buf(),
             branch: branch.clone(),
-            origin: Origin::AgentIsolation,
+            origin,
             session: session.map(str::to_string),
         },
     ))?;
@@ -161,6 +191,10 @@ pub struct IngestFailure {
     pub error: String,
     /// Failures since the sidecar was last cleared.
     pub failures: u64,
+    /// A Bash-recorder miss (#8994 S2b): only a clean `tm worktrees` backfill
+    /// clears it, not a later S2a success. Absent in older records.
+    #[serde(default)]
+    pub sticky: bool,
 }
 
 /// The sidecar path for `ledger`: [`INGEST_FAILURE_FILE`] in its directory.
@@ -174,19 +208,32 @@ pub fn ingest_failure_path(ledger: &WorktreeLedger) -> PathBuf {
 /// failure must not stay in the daemon log alone — `tm doctor` may run in a
 /// process that never saw it.
 /// What: rewrites the sidecar with `error`, the current time, and the previous
-/// count plus one (an unreadable previous sidecar counts as zero).
-/// Test: `ingest_failure_sidecar_counts_and_clears`.
+/// count plus one (an unreadable previous sidecar counts as zero). A record
+/// that was sticky stays sticky.
+/// Test: `ingest_failure_sidecar_counts_and_clears`,
+/// `a_sticky_failure_survives_later_records_and_old_records_parse`.
 pub fn record_ingest_failure(ledger: &WorktreeLedger, error: &str) -> std::io::Result<()> {
+    write_failure(ledger, error, false)
+}
+
+/// [`record_ingest_failure`] for a missed Bash-made tree (#8994 S2b).
+///
+/// Why: the miss is not repaired by a later success, and the in-memory state
+/// that once remembered it dies with the daemon; the flag lives in the record.
+/// What: as [`record_ingest_failure`], with `sticky` set.
+/// Test: `a_sticky_failure_survives_later_records_and_old_records_parse`.
+pub fn record_sticky_ingest_failure(ledger: &WorktreeLedger, error: &str) -> std::io::Result<()> {
+    write_failure(ledger, error, true)
+}
+
+fn write_failure(ledger: &WorktreeLedger, error: &str, sticky: bool) -> std::io::Result<()> {
     let path = ingest_failure_path(ledger);
-    let failures = read_ingest_failure(ledger)
-        .ok()
-        .flatten()
-        .map_or(0, |f| f.failures)
-        + 1;
+    let previous = read_ingest_failure(ledger).ok().flatten();
     let record = IngestFailure {
         ts: Utc::now(),
         error: error.to_string(),
-        failures,
+        failures: previous.as_ref().map_or(0, |f| f.failures) + 1,
+        sticky: sticky || previous.is_some_and(|f| f.sticky),
     };
     let body = serde_json::to_vec(&record).map_err(std::io::Error::other)?;
     std::fs::write(path, body)
@@ -205,10 +252,34 @@ pub fn read_ingest_failure(ledger: &WorktreeLedger) -> Result<Option<IngestFailu
 }
 
 /// Remove the sidecar after a successful append; an absent one is fine.
+///
+/// Test: `ingest_failure_sidecar_counts_and_clears`.
 pub fn clear_ingest_failure(ledger: &WorktreeLedger) -> std::io::Result<()> {
     match std::fs::remove_file(ingest_failure_path(ledger)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
+    }
+}
+
+/// `true` when the sidecar holds a sticky (Bash-recorder) failure.
+///
+/// Test: `a_sticky_failure_survives_later_records_and_old_records_parse`.
+pub fn sticky_failure_recorded(ledger: &WorktreeLedger) -> bool {
+    matches!(read_ingest_failure(ledger), Ok(Some(f)) if f.sticky)
+}
+
+/// Remove the sidecar only when it is sticky: the Bash-recorder miss is repaired.
+///
+/// Why: #8994 S2b — a clean backfill is what records the missed tree, so it is
+/// the one thing allowed to clear a sticky record. A plain record, an absent
+/// one, or one that cannot be read is left alone.
+/// What: `Ok(true)` when a sticky record was removed.
+/// Test: `a_sticky_failure_survives_later_records_and_old_records_parse`,
+/// `tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill`.
+pub fn clear_sticky_ingest_failure(ledger: &WorktreeLedger) -> std::io::Result<bool> {
+    match read_ingest_failure(ledger) {
+        Ok(Some(f)) if f.sticky => clear_ingest_failure(ledger).map(|()| true),
+        _ => Ok(false),
     }
 }
 

@@ -203,3 +203,23 @@ fn ingest_failure_sidecar_counts_and_clears() {
     std::fs::write(ingest_failure_path(&ledger), b"{torn").unwrap();
     assert!(read_ingest_failure(&ledger).is_err());
 }
+
+#[test]
+fn a_sticky_failure_survives_later_records_and_old_records_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = WorktreeLedger::at(dir.path().join("worktrees.jsonl"));
+    record_sticky_ingest_failure(&ledger, "bash").unwrap();
+    record_ingest_failure(&ledger, "s2a").unwrap();
+    let failure = read_ingest_failure(&ledger).unwrap().unwrap();
+    assert!(failure.sticky && failure.failures == 2, "{failure:?}");
+    assert!(clear_sticky_ingest_failure(&ledger).unwrap());
+    assert_eq!(read_ingest_failure(&ledger), Ok(None));
+    // A plain record is not cleared by the sticky clear.
+    record_ingest_failure(&ledger, "s2a").unwrap();
+    assert!(!clear_sticky_ingest_failure(&ledger).unwrap());
+    assert!(read_ingest_failure(&ledger).unwrap().is_some());
+    // A record written before the field existed parses as not sticky.
+    let old = r#"{"ts":"2026-10-16T00:00:00Z","error":"x","failures":3}"#;
+    std::fs::write(ingest_failure_path(&ledger), old).unwrap();
+    assert!(!read_ingest_failure(&ledger).unwrap().unwrap().sticky);
+}
