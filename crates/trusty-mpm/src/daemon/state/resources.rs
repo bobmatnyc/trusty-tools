@@ -41,6 +41,13 @@ impl DaemonState {
         std::sync::Arc::clone(&self.disk.surveys)
     }
 
+    /// The worktree ledger's hook-ingest state (#8994 S2a).
+    pub(crate) fn worktree_ingest(
+        &self,
+    ) -> std::sync::Arc<crate::daemon::services::worktree_ledger_ingest::IngestTracker> {
+        std::sync::Arc::clone(&self.disk.worktree_ingest)
+    }
+
     // ---- circuit breakers ----------------------------------------------
 
     /// Get a snapshot of an agent's circuit breaker, creating a closed one if
