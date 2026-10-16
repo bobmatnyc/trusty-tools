@@ -13,7 +13,9 @@
 //! than [`RETENTION`] (Q5) by writing the kept lines to `.prune` and renaming
 //! it over the log, so a failed prune deletes nothing. A crash between claim
 //! and effect leaves `claimed` with no `done`: the answer is final and lost
-//! (Q4), and [`claimed_never_done`] lists it for `tm doctor`.
+//! (Q4), and [`claimed_never_done`] lists it for `tm doctor`; an effect
+//! that timed out is settled [`ACT_TIMED_OUT`] and [`timed_out_claims`]
+//! lists it.
 //! Test: `inbound_claims_tests.rs`.
 
 use std::collections::BTreeMap;
@@ -33,6 +35,11 @@ use super::{
 
 /// How long a claim is kept before an open prunes it (#9923 Q5).
 pub const RETENTION: chrono::TimeDelta = chrono::TimeDelta::days(7);
+
+/// The outcome a claim is settled with when its effect did not finish in
+/// time (#9923, `channels::socket_mode::ACT_TIMEOUT`); [`timed_out_claims`]
+/// lists it for `tm doctor`.
+pub const ACT_TIMED_OUT: &str = "act_timed_out";
 
 /// The claim log under `home`:
 /// `~/.trusty-tools/trusty-mpm/channels/inbound_claims.jsonl`.
@@ -372,9 +379,33 @@ pub fn claimed_never_done(
     now: DateTime<Utc>,
     min_age: chrono::TimeDelta,
 ) -> Result<Vec<String>, QuestionTableError> {
+    Ok(read_unlocked(path)?
+        .into_iter()
+        .filter(|(_, e)| e.done.is_none() && now.signed_duration_since(e.at) >= min_age)
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// The event ids settled [`ACT_TIMED_OUT`], read as [`claimed_never_done`]
+/// reads.
+///
+/// Why: #9923: a timed-out effect is final like a crash (Q4); the operator
+/// must see it.
+/// Test: `timed_out_event_is_a_doctor_fail`.
+pub fn timed_out_claims(path: &Path) -> Result<Vec<String>, QuestionTableError> {
+    Ok(read_unlocked(path)?
+        .into_iter()
+        .filter(|(_, e)| e.done.as_deref() == Some(ACT_TIMED_OUT))
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// The newline-terminated lines of `path` replayed without the lock; an
+/// absent log is empty.
+fn read_unlocked(path: &Path) -> Result<Book, QuestionTableError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Book::new()),
         Err(e) => return Err(io_err(path)(e)),
     };
     let mut book = Book::new();
@@ -383,11 +414,7 @@ pub fn claimed_never_done(
             apply_line(&mut book, line, path, n + 1)?;
         }
     }
-    Ok(book
-        .into_iter()
-        .filter(|(_, e)| e.done.is_none() && now.signed_duration_since(e.at) >= min_age)
-        .map(|(id, _)| id)
-        .collect())
+    Ok(book)
 }
 
 /// Replay the log at `path`, quarantining an undecodable final line.

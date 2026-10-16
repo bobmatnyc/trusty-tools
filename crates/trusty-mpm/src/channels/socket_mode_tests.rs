@@ -55,6 +55,8 @@ struct TestEnv {
     inbound: Option<Arc<Fake>>,
     /// Called inside `act`, before the effect, with the claim log's text.
     on_act: Hook<String>,
+    /// #9923: `act` on a message with this text never returns.
+    hang_on: Option<&'static str>,
 }
 
 impl TestEnv {
@@ -68,6 +70,7 @@ impl TestEnv {
             log: Arc::clone(log),
             inbound: None,
             on_act: None,
+            hang_on: None,
         }
     }
 
@@ -122,6 +125,9 @@ impl SocketEnv for TestEnv {
             check(std::fs::read_to_string(&self.path).unwrap_or_default());
         }
         self.log.lock().expect("log").push("act".to_owned());
+        if self.hang_on == Some(ev.text.as_str()) {
+            return std::future::pending().await;
+        }
         match &self.inbound {
             Some(fake) => match decide(&**fake, &ev) {
                 Verdict::Resolved(_) => "resolved".to_owned(),
@@ -650,6 +656,164 @@ async fn failed_ack_keeps_the_claim_so_the_redelivery_is_dropped() {
     handle_event(&env, &mut conn, envelope(&event_frame("E2", "Ev1", 1, "x"))).await;
     assert_eq!(env.acts(), 1);
     assert_eq!(conn.acks(), 2);
+}
+
+/// The `done` outcome the claim log at `path` holds for `event_id`.
+fn settled_outcome(path: &Path, event_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        (v["kind"] == "done" && v["event_id"] == event_id)
+            .then(|| v["outcome"].as_str().map(str::to_owned))
+            .flatten()
+    })
+}
+
+/// The index of `entry` in `log`; panics when it is absent.
+fn index_of(log: &[String], entry: &str) -> usize {
+    log.iter()
+        .position(|e| e == entry)
+        .unwrap_or_else(|| panic!("{entry} not in {log:?}"))
+}
+
+/// 🔴 #9923: an effect that never returns does not stop the reader. The
+/// next event on the same connection is claimed and acked while the first
+/// effect hangs, and is acted on; the hung claim is settled as timed out.
+/// The wait is bounded, so a reader stuck in the effect fails, not hangs.
+#[tokio::test(start_paused = true)]
+async fn hung_effect_does_not_stop_the_reader_and_settles_as_timed_out() {
+    let fx = fixture();
+    let mut env = TestEnv::new(&fx.path, &fx.log);
+    env.hang_on = Some("hang");
+    let conn = FakeConn::new(
+        &fx.log,
+        [
+            Some(Ok(r#"{"type":"hello"}"#.to_owned())),
+            Some(Ok(event_frame("E1", "Ev1", 0, "hang"))),
+            Some(Ok(event_frame("E2", "Ev2", 0, "yes"))),
+        ],
+    );
+    let transport = Arc::new(FakeTransport::new([conn]));
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(run(
+        Arc::new(env),
+        Arc::clone(&transport) as Arc<dyn SocketTransport>,
+        cancel.clone(),
+        fast(),
+    ));
+    let both_settled = async {
+        loop {
+            let log = entries(&fx.log);
+            if log.iter().any(|e| e == "settle:Ev1") && log.iter().any(|e| e == "settle:Ev2") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+    let finished = tokio::time::timeout(Duration::from_secs(3600), both_settled).await;
+    let log = entries(&fx.log);
+    assert!(
+        finished.is_ok(),
+        "the reader stopped in the effect: {log:?}"
+    );
+    assert!(
+        index_of(&log, "ack:E2") < index_of(&log, "settle:Ev1"),
+        "E2 was not acked while Ev1's effect hung: {log:?}"
+    );
+    assert!(index_of(&log, "claim:Ev2") < index_of(&log, "ack:E2"));
+    assert_eq!(log.iter().filter(|e| *e == "act").count(), 2, "{log:?}");
+    assert_eq!(
+        settled_outcome(&fx.path, "Ev1").as_deref(),
+        Some("act_timed_out")
+    );
+    assert_eq!(settled_outcome(&fx.path, "Ev2").as_deref(), Some("acted"));
+    cancel.cancel();
+    task.await.expect("run ends");
+}
+
+/// 🔴 #9923: while hung effects fill the queue, a further event is neither
+/// claimed nor acked (Slack redelivers it), and every claimed one is acked.
+#[tokio::test(start_paused = true)]
+async fn full_effect_queue_claims_and_acks_nothing() {
+    let fx = fixture();
+    let mut env = TestEnv::new(&fx.path, &fx.log);
+    env.hang_on = Some("hang");
+    let total = super::EFFECT_QUEUE + 4;
+    let frames = (1..=total).map(|n| {
+        Some(Ok(event_frame(
+            &format!("E{n}"),
+            &format!("Ev{n}"),
+            0,
+            "hang",
+        )))
+    });
+    let transport = Arc::new(FakeTransport::new([FakeConn::new(&fx.log, frames)]));
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(run(
+        Arc::new(env),
+        Arc::clone(&transport) as Arc<dyn SocketTransport>,
+        cancel.clone(),
+        fast(),
+    ));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let log = entries(&fx.log);
+    let claimed = log.iter().filter(|e| e.starts_with("claim:")).count();
+    assert!(
+        claimed <= super::EFFECT_QUEUE + 1,
+        "past the queue: {log:?}"
+    );
+    for n in 1..=total {
+        let (claim, ack) = (format!("claim:Ev{n}"), format!("ack:E{n}"));
+        assert_eq!(log.contains(&claim), log.contains(&ack), "{n}: {log:?}");
+    }
+    assert!(!log.contains(&format!("claim:Ev{total}")), "{log:?}");
+    cancel.cancel();
+    task.await.expect("run ends");
+}
+
+/// 🔴 #9923 (Q4): a retry of an event whose effect timed out is acked and
+/// acts on nothing; the timed-out settle stands. Bounded, as above.
+#[tokio::test(start_paused = true)]
+async fn retry_of_a_timed_out_event_is_acked_and_not_acted_again() {
+    let fx = fixture();
+    let mut env = TestEnv::new(&fx.path, &fx.log);
+    env.hang_on = Some("hang");
+    let mut conn = FakeConn::new(&fx.log, []);
+    let first = tokio::time::timeout(
+        Duration::from_secs(3600),
+        handle_event(
+            &env,
+            &mut conn,
+            envelope(&event_frame("E1", "Ev1", 0, "hang")),
+        ),
+    )
+    .await;
+    assert!(
+        first.is_ok(),
+        "the effect was not bounded: {:?}",
+        entries(&fx.log)
+    );
+    handle_event(
+        &env,
+        &mut conn,
+        envelope(&event_frame("E2", "Ev1", 1, "hang")),
+    )
+    .await;
+    assert_eq!(
+        entries(&fx.log),
+        [
+            "claim:Ev1",
+            "ack:E1",
+            "act",
+            "settle:Ev1",
+            "claim:Ev1",
+            "ack:E2"
+        ]
+    );
+    assert_eq!(
+        settled_outcome(&fx.path, "Ev1").as_deref(),
+        Some("act_timed_out")
+    );
 }
 
 /// 🔴 #9923 Q6: the fake server is named only in a sandbox, and only as a

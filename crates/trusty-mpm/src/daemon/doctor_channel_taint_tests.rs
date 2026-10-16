@@ -440,3 +440,23 @@ fn claimed_never_settled_event_is_a_doctor_fail() {
     let row = channel_taint_row(&dir, &live);
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
 }
+
+/// 🔴 #9923: a claim settled as `act_timed_out` is a `Fail` naming the
+/// event: its effect did not finish, so the answer may be lost.
+#[test]
+fn timed_out_event_is_a_doctor_fail() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = channels_taint::taint_dir(home.path());
+    std::fs::create_dir_all(&dir).expect("taint dir");
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let lines = format!(
+        "{{\"v\":1,\"kind\":\"claimed\",\"event_id\":\"EvSlow1\",\"at\":\"{at}\"}}\n\
+         {{\"v\":1,\"kind\":\"done\",\"event_id\":\"EvSlow1\",\"at\":\"{at}\",\
+         \"outcome\":\"act_timed_out\"}}\n"
+    );
+    std::fs::write(dir.with_file_name("inbound_claims.jsonl"), lines).expect("claim log");
+    let row = channel_taint_row(&dir, &HashSet::new());
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("EvSlow1"), "{}", row.message);
+    assert!(row.message.contains("did not finish"), "{}", row.message);
+}

@@ -11,17 +11,20 @@
 //! a dropped socket reconnects after a doubling [`Backoff`]. Each
 //! `events_api` frame goes through [`handle_event`] in the fixed order:
 //! ready, claim, ack, then, for a fresh claim, the effect and its settle.
-//! Nothing here touches the question table, so a lost socket closes and
-//! denies nothing (plan item 7).
+//! In [`run`] the reader does ready, claim and ack, and one effect task
+//! runs the effects in arrival order, each bounded by [`ACT_TIMEOUT`], so a
+//! hung effect never stops the reader (#9923). Nothing here touches the
+//! question table, so a lost socket closes and denies nothing (plan item 7).
 //! Test: `socket_mode_tests.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::channels::inbound::InboundEvent;
-use crate::channels::question_table::claims::Claim;
+use crate::channels::question_table::claims::{ACT_TIMED_OUT, Claim};
 
 // #9923 Q7: the daemon's own frame parser, not the `tm slack` product's.
 pub mod envelope;
@@ -32,6 +35,41 @@ pub mod transport;
 
 use envelope::{EventEnvelope, Frame, parse_frame};
 use transport::{SocketConn, SocketTransport};
+
+/// The longest one effect may run before its claim is settled
+/// [`ACT_TIMED_OUT`] (#9923).
+///
+/// Why: an `inbound_op` that never returns must not hold its claim open for
+/// ever, and the effect task must move on to the next answer. Slack's
+/// 3-second ack deadline does not bound it: the ack is sent after the claim
+/// and before the effect. A retry Slack sends anyway (about 1 and 5 minutes
+/// after the first try) finds the claim and is acked and dropped, in flight
+/// or timed out, so the value only trades a slow effect against a stuck
+/// queue. A normal effect (one table fsync, one pane write and its
+/// confirm) takes seconds. 60 s is below `tm doctor`'s 2-minute
+/// claimed-never-done age, so an effect still inside its bound is never
+/// listed as lost.
+/// What: [`run_effect`] wraps [`SocketEnv::act`] in `tokio::time::timeout`
+/// with this bound; on expiry the effect future is dropped and the claim is
+/// settled [`ACT_TIMED_OUT`]. A decision already on the blocking pool runs
+/// to its end, so the question may be resolved with no delivery, which
+/// `tm doctor` reports (Q4a).
+/// Test: `hung_effect_does_not_stop_the_reader_and_settles_as_timed_out`,
+/// `retry_of_a_timed_out_event_is_acked_and_not_acted_again`.
+pub const ACT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many claimed events may wait for the effect task (#9923).
+///
+/// What: a full queue claims and acks nothing, so Slack redelivers the
+/// event; owner replies arrive far slower than one per [`ACT_TIMEOUT`].
+pub const EFFECT_QUEUE: usize = 16;
+
+/// A claimed and acked event whose effect has not run yet.
+#[derive(Debug)]
+struct Effect {
+    event_id: String,
+    message: Option<InboundEvent>,
+}
 
 /// What the loop reads and writes outside itself.
 ///
@@ -107,15 +145,21 @@ impl Backoff {
 /// What: each round checks [`SocketEnv::ready`] (refused: wait
 /// `timing.poll`), connects (failed: wait the backoff), then serves the
 /// connection until it closes, errs, or Slack sends `disconnect`, and waits
-/// the backoff before the next round.
+/// the backoff before the next round. The effects run on one task of their
+/// own, which outlives a reconnect and stops on `cancel` (a queued effect
+/// is then never settled, as after a crash, and `tm doctor` lists it).
 /// Test: `socket_mode_source_absent_when_policy_not_ready`,
-/// `socket_loss_backs_off_and_denies_nothing_open`.
+/// `socket_loss_backs_off_and_denies_nothing_open`,
+/// `hung_effect_does_not_stop_the_reader_and_settles_as_timed_out`.
 pub async fn run(
     env: Arc<dyn SocketEnv>,
     transport: Arc<dyn SocketTransport>,
     cancel: CancellationToken,
     timing: Timing,
 ) {
+    // #9923: the reader claims and acks; the effects run off it, in order.
+    let (effects, queue) = mpsc::channel(EFFECT_QUEUE);
+    tokio::spawn(effect_task(Arc::clone(&env), queue, cancel.clone()));
     let mut backoff = Backoff::new(timing);
     let mut last_refusal: Option<String> = None;
     loop {
@@ -139,7 +183,8 @@ pub async fn run(
         };
         match connected {
             Ok(mut conn) => {
-                let Some(why) = serve(&*env, &mut *conn, &cancel, &mut backoff).await else {
+                let served = serve(&*env, &mut *conn, &effects, &cancel, &mut backoff).await;
+                let Some(why) = served else {
                     return;
                 };
                 tracing::warn!(%why, "socket mode: connection ended; reconnecting");
@@ -152,10 +197,32 @@ pub async fn run(
     }
 }
 
+/// Run queued effects in arrival order until the queue closes or `cancel`.
+async fn effect_task(
+    env: Arc<dyn SocketEnv>,
+    mut queue: mpsc::Receiver<Effect>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let effect = tokio::select! {
+            () = cancel.cancelled() => return,
+            next = queue.recv() => match next {
+                Some(effect) => effect,
+                None => return,
+            },
+        };
+        run_effect(&*env, effect).await;
+    }
+}
+
 /// Read `conn` until it ends; `None` when cancelled, else why it ended.
+///
+/// What: an event is admitted (ready, claim, ack) here and its effect is
+/// queued on `effects`. A full queue claims and acks nothing (#9923).
 async fn serve(
     env: &dyn SocketEnv,
     conn: &mut dyn SocketConn,
+    effects: &mpsc::Sender<Effect>,
     cancel: &CancellationToken,
     backoff: &mut Backoff,
 ) -> Option<String> {
@@ -174,7 +241,19 @@ async fn serve(
             Frame::Disconnect { reason } => return Some(format!("disconnect: {reason}")),
             // #9923: never claimed, so never acked (plan item 3).
             Frame::Other { kind } => tracing::debug!(kind, "socket mode: frame not acted on"),
-            Frame::Event(event) => handle_event(env, conn, event).await,
+            Frame::Event(event) => {
+                // #9923: no queue slot: not claimed, not acked; Slack retries.
+                let Ok(slot) = effects.try_reserve() else {
+                    tracing::warn!(
+                        "socket mode: no effect slot (queue full or effect task gone); \
+                         event neither claimed nor acked"
+                    );
+                    continue;
+                };
+                if let Some(effect) = admit(env, conn, event).await {
+                    slot.send(effect);
+                }
+            }
         }
     }
 }
@@ -188,29 +267,42 @@ async fn serve(
 /// effect (Slack redelivers). Else the ack; a failed ack is logged and the
 /// claim stands, so the redelivery is acked and dropped. A `Duplicate`
 /// stops there. A `Fresh` claim runs the effect (an owner DM message
-/// through [`SocketEnv::act`], anything else `ignored`), then the settle;
-/// a failed settle is logged, and `tm doctor` lists the id as claimed and
-/// never done.
+/// through [`SocketEnv::act`] within [`ACT_TIMEOUT`], anything else
+/// `ignored`), then the settle; a failed settle is logged, and `tm doctor`
+/// lists the id as claimed and never done. [`run`] does the same two halves
+/// on two tasks.
 /// Test: `claim_precedes_ack_in_event_order`,
 /// `retried_envelope_is_acked_and_not_redelivered`,
 /// `event_id_claimed_by_daemon_before_any_effect`,
-/// `claim_store_write_failure_acks_nothing_and_acts_on_nothing`.
+/// `claim_store_write_failure_acks_nothing_and_acts_on_nothing`,
+/// `retry_of_a_timed_out_event_is_acked_and_not_acted_again`.
 pub async fn handle_event(env: &dyn SocketEnv, conn: &mut dyn SocketConn, event: EventEnvelope) {
-    let Some(event_id) = event.event_id.as_deref() else {
+    if let Some(effect) = admit(env, conn, event).await {
+        run_effect(env, effect).await;
+    }
+}
+
+/// Ready, claim, ack; the effect still to run for a `Fresh` claim.
+async fn admit(
+    env: &dyn SocketEnv,
+    conn: &mut dyn SocketConn,
+    event: EventEnvelope,
+) -> Option<Effect> {
+    let Some(event_id) = event.event_id else {
         tracing::warn!("socket mode: events_api envelope without an event_id; not acked");
-        return;
+        return None;
     };
     // #9923 Q8: not ready: no claim, no ack; Slack retries.
     if let Err(why) = env.ready().await {
         tracing::warn!(%why, "socket mode: not ready; event neither claimed nor acked");
-        return;
+        return None;
     }
     // #9923 (plan item 6): a claim that is not durable acks and acts on nothing.
-    let claim = match env.claim(event_id).await {
+    let claim = match env.claim(&event_id).await {
         Ok(claim) => claim,
         Err(why) => {
             tracing::error!(%why, "socket mode: claim not written; event not acked");
-            return;
+            return None;
         }
     };
     if let Err(why) = conn.ack(&event.envelope_id).await {
@@ -221,13 +313,29 @@ pub async fn handle_event(env: &dyn SocketEnv, conn: &mut dyn SocketConn, event:
             retry_attempt = event.retry_attempt,
             "socket mode: event already claimed; acked, nothing done"
         );
-        return;
+        return None;
     }
-    let outcome = match event.message {
-        Some(ev) => env.act(ev).await,
+    Some(Effect {
+        event_id,
+        message: event.message,
+    })
+}
+
+/// The effect of one fresh claim, bounded by [`ACT_TIMEOUT`], then its
+/// settle.
+async fn run_effect(env: &dyn SocketEnv, effect: Effect) {
+    let outcome = match effect.message {
+        // #9923: a hung `inbound_op` is dropped and its claim settled as lost.
+        Some(ev) => match tokio::time::timeout(ACT_TIMEOUT, env.act(ev)).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                tracing::error!("socket mode: effect did not finish in time; settled as timed out");
+                ACT_TIMED_OUT.to_owned()
+            }
+        },
         None => "ignored".to_owned(),
     };
-    if let Err(why) = env.settle(event_id, &outcome).await {
+    if let Err(why) = env.settle(&effect.event_id, &outcome).await {
         tracing::error!(%why, "socket mode: settle not written; doctor lists the claim");
     }
 }

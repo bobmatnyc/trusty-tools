@@ -222,13 +222,10 @@ fn delivery_problems_in(dir: &Path) -> (Vec<String>, Vec<String>) {
     });
     let mut problems = channels_delivery::delivery_problems(&trace.lines, &resolved);
     problems.extend(trace.malformed);
-    // #9923 Q4: an event claimed and never settled is an answer lost.
+    // #9923 Q4: an event claimed and never settled, or settled as timed
+    // out, is an answer lost.
     match lost_claims_beside(dir) {
-        Ok(lost) => problems.extend(lost.into_iter().map(|id| {
-            format!(
-                "Slack event {id} was claimed but never settled; its answer is lost (#9923 Q4)."
-            )
-        })),
+        Ok(lost) => problems.extend(lost),
         Err(e) => unreadable.push(format!(
             "The inbound claim log is unreadable ({e}); a lost Slack event cannot be listed."
         )),
@@ -236,17 +233,26 @@ fn delivery_problems_in(dir: &Path) -> (Vec<String>, Vec<String>) {
     (problems, unreadable)
 }
 
-/// The event ids claimed over two minutes ago with no settle, in the claim
-/// log beside `dir` (`channels/inbound_claims.jsonl`).
+/// One problem per lost claim in the claim log beside `dir`
+/// (`channels/inbound_claims.jsonl`): claimed over two minutes ago with no
+/// settle, or settled as timed out (#9923).
 #[cfg(feature = "channels")]
 fn lost_claims_beside(dir: &Path) -> Result<Vec<String>, String> {
+    use crate::channels::question_table::claims::{claimed_never_done, timed_out_claims};
     let log = dir.with_file_name("inbound_claims.jsonl");
-    crate::channels::question_table::claims::claimed_never_done(
-        &log,
-        chrono::Utc::now(),
-        chrono::TimeDelta::minutes(2),
-    )
-    .map_err(|e| e.to_string())
+    let never = claimed_never_done(&log, chrono::Utc::now(), chrono::TimeDelta::minutes(2))
+        .map_err(|e| e.to_string())?;
+    let timed_out = timed_out_claims(&log).map_err(|e| e.to_string())?;
+    let never = never.into_iter().map(|id| {
+        format!("Slack event {id} was claimed but never settled; its answer is lost (#9923 Q4).")
+    });
+    let timed_out = timed_out.into_iter().map(|id| {
+        format!(
+            "Slack event {id} was claimed but its effect did not finish in time; its answer \
+             may be lost (#9923 Q4)."
+        )
+    });
+    Ok(never.chain(timed_out).collect())
 }
 
 /// A build without the `channels` feature holds no claim log.

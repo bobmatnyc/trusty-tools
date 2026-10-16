@@ -10,6 +10,8 @@
 //! log opening (its open prunes, Q5); claims and settles run on the
 //! blocking pool; the effect is `inbound_op`, settled with its code.
 //! Test: `daemon_socket_env_is_not_ready_without_policy`,
+//! `daemon_socket_env_refuses_while_the_policy_does_not_serve`,
+//! `daemon_socket_env_refuses_a_corrupt_or_unsealed_claim_log`,
 //! `daemon_socket_env_claims_once_across_a_reopen`,
 //! `inbound_route_has_no_production_source`.
 
