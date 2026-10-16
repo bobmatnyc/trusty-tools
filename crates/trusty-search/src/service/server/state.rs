@@ -115,19 +115,19 @@ pub struct SearchAppState {
     /// The ONE admission limiter gating the interactive query surface
     /// (#6285 slice 3).
     ///
-    /// Why here rather than a local in a router: a limiter built per router
-    /// would give each router its own N permits — the daemon would admit 2N
-    /// concurrent searches while reporting `TRUSTY_MAX_CONCURRENT_REQUESTS=N`.
-    /// That is the #2845 storm the limiter exists to stop.
-    /// What: `ConcurrencyLimiter::from_env`, resolved once per state. Both
-    /// routers clone this `Arc`; neither builds its own.
+    /// Why here rather than a local in a method: a limiter built per method
+    /// would give each its own N permits — the daemon would admit a multiple
+    /// of N concurrent searches while reporting
+    /// `TRUSTY_MAX_CONCURRENT_REQUESTS=N`. That is the #2845 storm the
+    /// limiter exists to stop.
+    /// What: `ConcurrencyLimiter::from_env`, resolved once per state. Every
+    /// socket query method admits through it; none builds its own.
     /// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`.
     pub query_limiter: Arc<crate::service::concurrency::ConcurrencyLimiter>,
-    /// The ONE interactive-query deadline both transports apply (#6285 slice 3).
+    /// The ONE interactive-query deadline the socket applies (#6285 slice 3).
     ///
-    /// Why: same reasoning as [`Self::query_limiter`] — a socket search with no
-    /// deadline hangs forever against a stalled embedder while the HTTP route
-    /// for the identical query answers 408 (#907).
+    /// Why: same reasoning as [`Self::query_limiter`] — a search with no
+    /// deadline hangs forever against a stalled embedder (#907).
     /// What: `QueryTimeoutConfig::from_env`, resolved once per state.
     /// Test: `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
     pub query_timeout: Arc<crate::service::query_timeout::QueryTimeoutConfig>,
@@ -311,16 +311,6 @@ pub struct SearchAppState {
     /// see a cloneable `Arc<EmbedPool>`.
     /// Test: covered indirectly — `start_brings_pool_online`.
     pub embed_pool: Arc<RwLock<Option<Arc<crate::service::embed_pool::EmbedPool>>>>,
-    /// Prometheus recorder handle, populated by `start.rs` when the recorder
-    /// is installed. `None` in tests / when the recorder is skipped.
-    ///
-    /// Why: routes `/metrics` only when the recorder has been wired so tests
-    /// constructing an AppState without metrics don't accidentally surface
-    /// an empty metrics endpoint.
-    /// What: `Some(MetricsState)` enables the `/metrics` route; `None` skips
-    /// it. The render itself is lock-free (PrometheusHandle is Clone).
-    /// Test: covered by `metrics_handler_returns_prometheus_text`.
-    pub metrics: Option<crate::service::metrics::MetricsState>,
     /// Current OS PID of the `trusty-embedderd` sidecar process (issue #282).
     ///
     /// Why: the daemon's own RSS (`rss_mb` on `/health`) excludes the sidecar,

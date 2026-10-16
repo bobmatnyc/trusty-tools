@@ -1,17 +1,17 @@
-//! A read-only census of orphaned index registrations, served over HTTP (#6371).
+//! A read-only census of orphaned index registrations (#6371).
 //!
 //! Why: `indexes.toml` accumulates registrations whose `root_path` was deleted —
 //! wiped `$TMPDIR` roots, removed worktrees, projects deleted from disk. The
 //! boot reaper heals the ones it is allowed to touch, but a registration the
 //! #767 allowlist excluded never reaches the in-memory registry, so it is
-//! invisible to `GET /indexes` and to every console roster built from it
+//! invisible to `search.indexes.list` and to every console roster built from it
 //! (#6363). An operator could see 60 of them keep `warm_boot_degraded` true and
 //! had no way to LIST them short of opening `indexes.toml` by hand.
 //!
-//! What: `GET /registry/orphans` reads `indexes.toml` — the registry file, not
-//! the live handles — classifies every row's root, and answers with the census.
-//! It removes nothing. Removal stays `DELETE /indexes/{id}`, which is the one
-//! deregistration path in this crate.
+//! What: `search.registry.orphans` reads `indexes.toml` — the registry file,
+//! not the live handles — classifies every row's root, and answers with the
+//! census. It removes nothing. Removal stays `search.index.delete`, which is
+//! the one deregistration path in this crate.
 //!
 //! The classification is three-valued on purpose. A root that is GONE and a
 //! root that cannot be CHECKED are different facts, and collapsing them is how
@@ -127,7 +127,7 @@ pub struct UnjudgedRow {
     pub repo_identity: Option<String>,
 }
 
-/// The census `GET /registry/orphans` answers with.
+/// The census `search.registry.orphans` answers with.
 ///
 /// Why: `orphans` is the deletion candidate list and `indeterminate` is
 /// deliberately a SEPARATE field rather than a flag on one list — a caller that
@@ -188,37 +188,16 @@ pub fn build_census(entries: &[PersistedIndex]) -> OrphanCensus {
     census
 }
 
-/// `GET /registry/orphans` — list the registrations whose root is gone (#6371).
+/// The census `search.registry.orphans` serves (#6285 slice 5.5, #6371).
 ///
-/// Why: this reads `indexes.toml` rather than `state.registry`, and that is the
-/// entire reason the route exists. A registration the allowlist excluded at
-/// warm boot is absent from the in-memory registry, so `GET /indexes` cannot
-/// show it and neither can anything built from it (#6363) — yet it is exactly
-/// the row an operator needs to see and remove.
-/// What: reads the registry file on a blocking worker (a root on a network
-/// mount can make a `stat` slow), builds the census, and answers with it. A
-/// registry that cannot be READ is a `500` carrying the reason — never an empty
-/// census, which would read as "nothing to clean up".
-/// Test: `census_separates_gone_from_unjudgeable` covers the body this handler
-/// serialises; the handler adds only the file read and the error mapping.
-pub async fn registry_orphans_handler() -> axum::response::Response {
-    use axum::response::IntoResponse as _;
-
-    match registry_orphans_report().await {
-        Ok(census) => axum::Json(census).into_response(),
-        Err((status, body)) => (status, axum::Json(body)).into_response(),
-    }
-}
-
-/// The census `GET /registry/orphans` serves, without the transport
-/// (#6285 slice 5.5).
-///
-/// Why: `search.registry.orphans` is what `trusty-console`'s cleanup tab dials
-/// once the retire slice moves it off HTTP, and it is the ONE method on this
-/// surface that reads the registry FILE rather than `SearchAppState` — which is
-/// why it takes no state. A second reader over the socket would be a second
-/// place deciding what `exists()` returning `false` means, and the whole point
-/// of #6371's three-valued classification is that the decision has one home.
+/// Why: `search.registry.orphans` is what `trusty-console`'s cleanup tab dials,
+/// and it is the ONE method on this surface that reads the registry FILE rather
+/// than `SearchAppState` — which is why it takes no state. A registration the
+/// #767 allowlist excluded at warm boot is absent from the in-memory registry,
+/// so `search.indexes.list` cannot show it — yet it is exactly the row an
+/// operator needs to see and remove. A second reader would be a second place
+/// deciding what `exists()` returning `false` means, and the whole point of
+/// #6371's three-valued classification is that the decision has one home.
 /// What: the blocking file read and the census, both off the runtime thread —
 /// a root on a network mount can make a `stat` slow enough to stall the reactor.
 ///

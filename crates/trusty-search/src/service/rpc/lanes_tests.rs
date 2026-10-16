@@ -409,8 +409,8 @@ async fn every_socket_method_takes_the_admission_lane_its_http_route_takes() {
     let state = state_with(1, Duration::from_secs(30));
     let rpc = router(&state);
 
-    // One permit, held for the whole sweep. Both transports read this limiter
-    // off the shared state, so this saturates the daemon rather than a copy.
+    // One permit, held for the whole sweep. Every socket method reads this
+    // limiter off the shared state, so this saturates the daemon, not a copy.
     let _held = crate::service::concurrency::admit(&state.query_limiter)
         .await
         .expect("the first admission must succeed");

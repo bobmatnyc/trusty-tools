@@ -220,7 +220,7 @@ scraper = { workspace = true }
 # was a no-op (trusty-common declares `default = []`) and Cargo ignores a
 # member's `default-features` override on an inherited dependency.
 trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
-trusty-common = { workspace = true, features = ["knowledge-document", "chat-attachments", "axum-server", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "crate-config", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "codex-config", "redb-open", "machine-tier"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier + quarantine-path helper, which `core::corpus_recovery` delegates to  # `config-cli` (#2405): implies `credentials`, giving both the shared `.env.local` loader `load_env_local_once` (retiring trusty-search's ad hoc dotenvy call) AND the embeddable `ConfigKeysCommand` nested under `trusty-search config keys …`  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478); `console-metrics` provides ConsoleMetricsReport for the trusty-console dashboard (issue #1104)
+trusty-common = { workspace = true, features = ["knowledge-document", "chat-attachments", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "crate-config", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "codex-config", "redb-open", "machine-tier"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier + quarantine-path helper, which `core::corpus_recovery` delegates to  # `config-cli` (#2405): implies `credentials`, giving both the shared `.env.local` loader `load_env_local_once` (retiring trusty-search's ad hoc dotenvy call) AND the embeddable `ConfigKeysCommand` nested under `trusty-search config keys …`  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478); `console-metrics` provides ConsoleMetricsReport for the trusty-console dashboard (issue #1104)
 
 # ── Bundled sidecars ─────────────────────────────────────────────────────────
 # Why: the trusty-embedderd binary is a required runtime dependency (issue
@@ -385,17 +385,10 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 # heap to the OS on its own — see `core::memguard::trim_heap`.
 libc = { workspace = true }
 
-# ── Metrics / Prometheus exporter (issue #41 Phase 1) ──────────────────────
-# Why: production observability for multi-user deployments — counters for
-# request totals, histograms for latency, gauges for queue depth + embed
-# pool utilisation. The `metrics` facade keeps emit sites cheap (one macro
-# call) while `metrics-exporter-prometheus` renders the recorder's snapshot
-# in Prometheus text format for `GET /metrics`.
+# ── Metrics facade (issue #41 Phase 1) ─────────────────────────────────────
+# Why: emit sites call the `metrics` macros. #9535 removed the Prometheus
+# exporter and `GET /metrics`; with no recorder installed the calls are no-ops.
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false }
-
-# ── Embedded UI ────────────────────────────────────────────────────────────
-include_dir = "0.7"
 
 # ── Optional ONNX NER (feature-gated) ──────────────────────────────────────
 ort = { version = "2.0.0-rc.12", optional = true }
@@ -425,10 +418,6 @@ serial_test = "3"
 # retry test (epic #3524 slice 6, PR 3/5) so the linear backoff between
 # attempts advances instantly instead of sleeping in real time.
 tokio = { version = "1", features = ["test-util"] }
-# Why: tower::ServiceExt::oneshot is used in the unit tests for the new
-# `service::concurrency` and `service::metrics` modules (issue #41 Phase 1)
-# to exercise router behaviour without binding a TCP port.
-tower = { version = "0.5", features = ["util"] }
 # Why: issue #1672 mtime reconcile tests need to set file mtimes precisely so
 # `collect_stale_files_by_mtime` returns the expected set.
 filetime = "0.2"

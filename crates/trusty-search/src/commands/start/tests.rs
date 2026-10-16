@@ -2085,8 +2085,8 @@ async fn swap_back_stops_watching_once_backend_already_moved() {
 /// this module drives the watchdog with fakes/spies; this is the one place
 /// that proves the FULL real stack — a real `trusty-embedderd-py` child,
 /// killed past `max_restarts`, the REAL `EmbedderSupervisor::terminated_signal`
-/// firing, the real `drive_swap_back_watchdog`, and a real axum router's
-/// `/health` + search endpoints — actually falls back and keeps serving.
+/// firing, the real `drive_swap_back_watchdog`, and the real socket router's
+/// `search.health` + search methods — actually falls back and keeps serving.
 ///
 /// Why: every other test substitutes a fake `SwapBackOps` / `PythonAdapterTeardown`
 /// so the pure predicate and state-machine logic can be verified

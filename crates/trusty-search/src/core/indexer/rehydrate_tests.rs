@@ -47,8 +47,8 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 ///
 /// Reproduces the exact production livelock shape: wrap the query in an
 /// OUTER `tokio::time::timeout` — mirroring
-/// `service::query_timeout::apply_query_timeout`'s middleware, which cancels
-/// (drops) the whole handler future on expiry — shorter than an artificially
+/// `service::query_timeout::with_query_deadline`, which cancels
+/// (drops) the whole query future on expiry — shorter than an artificially
 /// slowed rehydrate scan (standing in for the production 27-40s NFS scan on
 /// a 315K-chunk index). Asserts the query itself times out (simulating the
 /// 408), then proves the detached rehydrate task survived that cancellation:
@@ -84,7 +84,7 @@ async fn detached_rehydrate_survives_caller_cancellation() {
     // enough to still be running past the caller's own much shorter timeout.
     super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(300, Ordering::Relaxed);
 
-    // Mirror `apply_query_timeout`: wrap the WHOLE query in an outer timeout
+    // Mirror `with_query_deadline`: wrap the WHOLE query in an outer timeout
     // that cancels (drops) the handler future on expiry — this is exactly
     // what discarded the rehydrate's work before this fix. Goes through the
     // fully public `search()` entry point (not the private `bm25_search`

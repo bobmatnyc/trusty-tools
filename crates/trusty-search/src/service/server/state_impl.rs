@@ -98,7 +98,6 @@ impl SearchAppState {
                 trusty_common::sys_metrics::SysMetrics::new(),
             )),
             embed_pool: Arc::new(RwLock::new(None)),
-            metrics: None,
             embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             embedderd_pid_forwarder_handle: Arc::new(tokio::sync::Mutex::new(None)),
             update_available: Arc::new(std::sync::Mutex::new(None)),
@@ -207,14 +206,6 @@ impl SearchAppState {
         if let Ok(mut slot) = self.embed_pool.try_write() {
             *slot = Some(pool);
         }
-        self
-    }
-
-    /// Builder-style: attach the Prometheus recorder handle (issue #41
-    /// Phase 1).
-    #[must_use]
-    pub fn with_metrics(mut self, metrics: crate::service::metrics::MetricsState) -> Self {
-        self.metrics = Some(metrics);
         self
     }
 

@@ -440,8 +440,7 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 ///
 /// Public so that integration test can call it directly instead of racing real
 /// OS watcher events for a state the debouncer makes hard to hit on purpose;
-/// `#[doc(hidden)]` keeps it off the documented API surface, matching
-/// `server::typeahead_handler_for_tests`.
+/// `#[doc(hidden)]` keeps it off the documented API surface.
 #[doc(hidden)]
 pub async fn handle_modified(
     path: &Path,

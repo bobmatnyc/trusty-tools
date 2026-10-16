@@ -390,24 +390,12 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     // #9258: a bad `[search]` section stops startup; see `load_user_config`.
     let cfg = crate::service::load_user_config()?;
 
-    let metrics_state = match crate::service::metrics::install_recorder() {
-        Ok(state) => Some(state),
-        Err(e) => {
-            tracing::warn!("could not install prometheus recorder: {e} (metrics disabled)");
-            None
-        }
-    };
-
-    let mut state =
-        crate::service::SearchAppState::new(crate::core::registry::IndexRegistry::new())
-            .with_local_model(cfg.local_model)
-            .with_openrouter_model(cfg.openrouter_model)
-            .with_openrouter_api_key(cfg.openrouter_api_key)
-            .with_lexical_defaults(cfg.lexical_defaults)
-            .with_log_buffer(log_buffer);
-    if let Some(m) = metrics_state {
-        state = state.with_metrics(m);
-    }
+    let state = crate::service::SearchAppState::new(crate::core::registry::IndexRegistry::new())
+        .with_local_model(cfg.local_model)
+        .with_openrouter_model(cfg.openrouter_model)
+        .with_openrouter_api_key(cfg.openrouter_api_key)
+        .with_lexical_defaults(cfg.lexical_defaults)
+        .with_log_buffer(log_buffer);
 
     // Issue #110 Phase 2: the embedder init runs on a dedicated background
     // task so the socket can bind and accept requests while the ONNX
