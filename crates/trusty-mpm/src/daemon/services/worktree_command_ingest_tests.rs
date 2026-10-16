@@ -227,30 +227,64 @@ async fn remove_and_prune_record_removed_only_when_gone_from_disk_and_git() {
         .run("git worktree remove ../wt-a", &fixture.repo)
         .await
         .expect("work");
-    assert_eq!(report.reconciled.iter().map(|r| r.removed).sum::<usize>(), 1);
+    assert_eq!(
+        report.reconciled.iter().map(|r| r.removed).sum::<usize>(),
+        1
+    );
     // B: deleted from disk only; git still lists it, so it stays live.
     std::fs::remove_dir_all(root.join("wt-b")).unwrap();
     let report = h
-        .bash(HookEvent::PostToolUse, "git worktree remove ../wt-b", &fixture.repo)
+        .bash(
+            HookEvent::PostToolUse,
+            "git worktree remove ../wt-b",
+            &fixture.repo,
+        )
         .await
         .expect("work");
-    assert_eq!(report.reconciled.iter().map(|r| r.removed).sum::<usize>(), 0);
-    assert_eq!(report.reconciled.iter().map(|r| r.still_listed).sum::<usize>(), 1);
+    assert_eq!(
+        report.reconciled.iter().map(|r| r.removed).sum::<usize>(),
+        0
+    );
+    assert_eq!(
+        report
+            .reconciled
+            .iter()
+            .map(|r| r.still_listed)
+            .sum::<usize>(),
+        1
+    );
     // C: a remove that did not happen (the tree is still on disk).
     let report = h
-        .bash(HookEvent::PostToolUse, "git worktree remove ../wt-c", &fixture.repo)
+        .bash(
+            HookEvent::PostToolUse,
+            "git worktree remove ../wt-c",
+            &fixture.repo,
+        )
         .await
         .expect("work");
-    assert_eq!(report.reconciled.iter().map(|r| r.removed).sum::<usize>(), 0);
+    assert_eq!(
+        report.reconciled.iter().map(|r| r.removed).sum::<usize>(),
+        0
+    );
     // A dry-run prune runs no git worktree change and records nothing.
     assert!(
-        h.bash(HookEvent::PostToolUse, "git worktree prune -n", &fixture.repo)
-            .await
-            .is_none()
+        h.bash(
+            HookEvent::PostToolUse,
+            "git worktree prune -n",
+            &fixture.repo
+        )
+        .await
+        .is_none()
     );
     // A real prune drops B from git; now B is removed. C stays.
-    let report = h.run("git worktree prune", &fixture.repo).await.expect("work");
-    assert_eq!(report.reconciled.iter().map(|r| r.removed).sum::<usize>(), 1);
+    let report = h
+        .run("git worktree prune", &fixture.repo)
+        .await
+        .expect("work");
+    assert_eq!(
+        report.reconciled.iter().map(|r| r.removed).sum::<usize>(),
+        1
+    );
     assert_eq!(h.count(|k| *k == EventKind::Removed), 2);
     assert_eq!(h.live(), vec![ledger_key(&root.join("wt-c"))]);
     assert!(root.join("wt-c").is_dir(), "nothing is deleted");
@@ -284,10 +318,17 @@ async fn commands_that_only_mention_the_words_record_nothing() {
     assert_eq!(h.count(|_| true), 0, "nothing appended");
     // Control: the real call for the same path is recorded.
     let report = h
-        .bash(HookEvent::PostToolUse, &format!("git worktree add {t}"), &fixture.repo)
+        .bash(
+            HookEvent::PostToolUse,
+            &format!("git worktree add {t}"),
+            &fixture.repo,
+        )
         .await
         .expect("work");
-    assert!(matches!(report.added.as_slice(), [ObserveOutcome::Recorded { .. }]));
+    assert!(matches!(
+        report.added.as_slice(),
+        [ObserveOutcome::Recorded { .. }]
+    ));
 }
 
 /// Poll the sidecar written by a detached task, bounded.
@@ -321,9 +362,8 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
         .await
         .expect("a failed ledger write is recorded, never swallowed");
     assert!(error.contains("git worktree add"), "{error}");
-    let row = || {
-        crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path())
-    };
+    let row =
+        || crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
     assert_ne!(row().status, CheckStatus::Ok, "{}", row().message);
     // The ledger is writable again; an S2a success must not clear the alarm.
     std::fs::remove_dir(h.ledger().path()).unwrap();
@@ -337,7 +377,10 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
     .expect("an S2a observe")
     .await
     .expect("task");
-    assert!(matches!(s2a.observed, Some(ObserveOutcome::Recorded { .. })));
+    assert!(matches!(
+        s2a.observed,
+        Some(ObserveOutcome::Recorded { .. })
+    ));
     assert!(
         read_ingest_failure(&h.ledger()).unwrap().is_some(),
         "an unrelated success must not clear the S2b alarm"
@@ -345,10 +388,16 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
     assert_ne!(row().status, CheckStatus::Ok);
     // A command that cannot be parsed is reported the same way.
     let report = h
-        .bash(HookEvent::PostToolUse, "git worktree add \"$WT\"", &fixture.repo)
+        .bash(
+            HookEvent::PostToolUse,
+            "git worktree add \"$WT\"",
+            &fixture.repo,
+        )
         .await
         .expect("a parse failure spawns its report");
     assert_eq!(report.errors.len(), 1, "{report:?}");
-    let failures = read_ingest_failure(&h.ledger()).unwrap().map(|f| f.failures);
+    let failures = read_ingest_failure(&h.ledger())
+        .unwrap()
+        .map(|f| f.failures);
     assert_eq!(failures, Some(2));
 }

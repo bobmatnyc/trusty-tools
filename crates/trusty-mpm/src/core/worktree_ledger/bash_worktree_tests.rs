@@ -33,21 +33,51 @@ fn real_worktree_calls_resolve_to_absolute_paths() {
     let cases: &[(&str, &[(&str, &str)])] = &[
         ("git worktree add ../wt", &[("add", "/r/wt")]),
         ("git worktree add -b feat/x ../wt", &[("add", "/r/wt")]),
-        ("git worktree add -b feat/x /abs/wt main", &[("add", "/abs/wt")]),
+        (
+            "git worktree add -b feat/x /abs/wt main",
+            &[("add", "/abs/wt")],
+        ),
         ("git worktree add -bfeat ./wt", &[("add", "/r/main/wt")]),
-        ("git worktree add --lock --reason \"agent x\" wt", &[("add", "/r/main/wt")]),
-        ("git worktree add -B b --detach wt HEAD~1", &[("add", "/r/main/wt")]),
+        (
+            "git worktree add --lock --reason \"agent x\" wt",
+            &[("add", "/r/main/wt")],
+        ),
+        (
+            "git worktree add -B b --detach wt HEAD~1",
+            &[("add", "/r/main/wt")],
+        ),
         ("git worktree add -- wt", &[("add", "/r/main/wt")]),
-        ("git -C /other/repo worktree add wt", &[("add", "/other/repo/wt")]),
-        ("git -C sub -C deeper worktree add ../wt", &[("add", "/r/main/sub/wt")]),
-        ("git -c core.x=1 --no-pager worktree add wt", &[("add", "/r/main/wt")]),
-        ("cd /x/repo && git worktree add .worktrees/t", &[("add", "/x/repo/.worktrees/t")]),
+        (
+            "git -C /other/repo worktree add wt",
+            &[("add", "/other/repo/wt")],
+        ),
+        (
+            "git -C sub -C deeper worktree add ../wt",
+            &[("add", "/r/main/sub/wt")],
+        ),
+        (
+            "git -c core.x=1 --no-pager worktree add wt",
+            &[("add", "/r/main/wt")],
+        ),
+        (
+            "cd /x/repo && git worktree add .worktrees/t",
+            &[("add", "/x/repo/.worktrees/t")],
+        ),
         ("cd sub; git worktree add wt", &[("add", "/r/main/sub/wt")]),
         ("(cd /x && git worktree add wt)", &[("add", "/x/wt")]),
         ("FOO=1 git worktree add wt", &[("add", "/r/main/wt")]),
-        ("env GIT_TRACE=0 /usr/bin/git worktree add wt", &[("add", "/r/main/wt")]),
-        ("git worktree add wt 2>&1 | tail -3", &[("add", "/r/main/wt")]),
-        ("git fetch && git worktree add wt origin/main", &[("add", "/r/main/wt")]),
+        (
+            "env GIT_TRACE=0 /usr/bin/git worktree add wt",
+            &[("add", "/r/main/wt")],
+        ),
+        (
+            "git worktree add wt 2>&1 | tail -3",
+            &[("add", "/r/main/wt")],
+        ),
+        (
+            "git fetch && git worktree add wt origin/main",
+            &[("add", "/r/main/wt")],
+        ),
         (
             "git worktree add a\ngit worktree add /b",
             &[("add", "/r/main/a"), ("add", "/b")],
@@ -109,6 +139,9 @@ fn a_relative_cd_adds_the_unmoved_cwd_as_a_second_candidate() {
         parsed.ops,
         vec![WorktreeOp::Add(vec![p("/r/main/sub/wt"), p("/r/main/wt")])]
     );
+    // A `cd` the parser cannot follow still tries the hook's own cwd.
+    let unknown = parse("cd \"$DIR\" && git worktree add wt");
+    assert_eq!(unknown.ops, vec![WorktreeOp::Add(vec![p("/r/main/wt")])]);
     let plain = parse("git worktree add wt");
     assert_eq!(plain.ops, vec![WorktreeOp::Add(vec![p("/r/main/wt")])]);
 }
@@ -120,7 +153,6 @@ fn unresolvable_calls_are_reported_not_guessed() {
     let cases = [
         "git worktree add \"$WT\"",
         "git worktree add ~/wt",
-        "cd \"$DIR\" && git worktree add wt",
         "git -C $REPO worktree remove wt",
         "git worktree add \"unbalanced",
     ];
@@ -130,7 +162,10 @@ fn unresolvable_calls_are_reported_not_guessed() {
         assert_eq!(parsed.errors.len(), 1, "{command}: {parsed:?}");
     }
     let no_cwd = parse_worktree_command("git worktree add wt", None);
-    assert!(no_cwd.ops.is_empty() && no_cwd.errors.len() == 1, "{no_cwd:?}");
+    assert!(
+        no_cwd.ops.is_empty() && no_cwd.errors.len() == 1,
+        "{no_cwd:?}"
+    );
     let absolute = parse_worktree_command("git worktree add /abs/wt", None);
     assert_eq!(absolute.ops, vec![WorktreeOp::Add(vec![p("/abs/wt")])]);
 }

@@ -113,20 +113,44 @@ pub fn observe_agent_tree(
     let Some(repo) = repo_of(&key).filter(|_| registered) else {
         return Ok(ObserveOutcome::Unregistered);
     };
-    if fold(&ledger.read()?.events).live.contains_key(&key) {
+    let branch = || {
+        list_registered_worktrees(repo)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|w| ledger_key(&w.path) == key)
+            .and_then(|w| w.branch)
+    };
+    observe_key(ledger, &key, repo, Origin::AgentIsolation, session, branch)
+}
+
+/// Append one `observed` event for the canonical `key`, unless it is live.
+///
+/// Why: the one write path for hook-fed `observed` events — agent isolation
+/// (S2a) and Bash `git worktree add` (S2b) — so both dedup the same way.
+/// What: folds the ledger and returns [`ObserveOutcome::AlreadyLive`] for a
+/// live `key`; otherwise asks `branch` (git runs only then) and appends
+/// `observed` with `repo`, `origin` and `session`. The caller has already
+/// verified `key` and `repo`. A ledger read or write error is returned.
+/// Test: `observe_records_a_registered_tree_once`,
+/// `each_worktree_add_form_records_one_entry`.
+pub(crate) fn observe_key(
+    ledger: &WorktreeLedger,
+    key: &Path,
+    repo: &Path,
+    origin: Origin,
+    session: Option<&str>,
+    branch: impl FnOnce() -> Option<String>,
+) -> Result<ObserveOutcome, LedgerError> {
+    if fold(&ledger.read()?.events).live.contains_key(key) {
         return Ok(ObserveOutcome::AlreadyLive);
     }
-    let branch = list_registered_worktrees(repo)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|w| ledger_key(&w.path) == key)
-        .and_then(|w| w.branch);
+    let branch = branch();
     ledger.append(&LedgerEvent::now(
-        key.clone(),
+        key.to_path_buf(),
         EventKind::Observed {
             repo: repo.to_path_buf(),
             branch: branch.clone(),
-            origin: Origin::AgentIsolation,
+            origin,
             session: session.map(str::to_string),
         },
     ))?;

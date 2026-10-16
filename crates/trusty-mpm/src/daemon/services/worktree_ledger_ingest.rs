@@ -20,7 +20,9 @@
 //! one retry per stop event, never per tool call — observes every pending tree
 //! again. The sidecar is cleared only by an ingest that appends successfully
 //! while `pending` is empty: an unrelated success never hides a tree that is
-//! still missing. Every task reads the project registry, so a tree drained
+//! still missing; a Bash-command record failure (#8994 S2b,
+//! [`super::worktree_command_ingest`]) keeps it for the daemon's lifetime.
+//! Every task reads the project registry, so a tree drained
 //! from `pending` is judged only against a real read, never an empty list; a
 //! drained tree leaves `pending` only with an `observed` record or a verdict
 //! from that read. A registry-read failure skips only the observe step (the
@@ -66,6 +68,8 @@ pub(crate) struct IngestTracker {
     pending: Mutex<HashSet<PathBuf>>,
     reconcile_queued: AtomicBool,
     write: Mutex<()>,
+    /// A Bash-command record failed (#8994 S2b); never cleared in this daemon.
+    command_failed: AtomicBool,
 }
 
 impl IngestTracker {
@@ -99,12 +103,27 @@ impl IngestTracker {
             .collect()
     }
 
+    /// `true` while a failed record awaits a retry, or after any S2b failure.
+    ///
+    /// Why: #8994 S2b — the sidecar is cleared only when this is `false`, so
+    /// an unrelated success never hides a missed Bash-made tree.
     fn has_pending(&self) -> bool {
-        !self
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty()
+        self.command_failed.load(Ordering::SeqCst)
+            || !self
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+    }
+
+    /// Hold the ledger write lock (S2b serializes with S2a through it).
+    pub(super) fn lock_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Record that a Bash-command record failed (#8994 S2b).
+    pub(super) fn mark_command_failed(&self) {
+        self.command_failed.store(true, Ordering::SeqCst);
     }
 }
 
