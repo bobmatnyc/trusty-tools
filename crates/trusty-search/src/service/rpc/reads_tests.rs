@@ -26,14 +26,14 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
+use trusty_common::uds::server::{RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::indexer::CodeIndexer;
 use crate::core::memguard::{set_index_memory_limit_mb, set_memory_limit_mb};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT};
-use crate::service::rpc::test_support::{http_body, params};
+use crate::service::rpc::test_support::{http_body, params, rpc_err, rpc_ok};
 use crate::service::rpc::RestoreLimits;
 use crate::service::server::{
     call_chain_report, config_report, graph_neighbors_report, graph_report, graph_stats_report,
@@ -134,37 +134,6 @@ async fn fixture() -> (Arc<SearchAppState>, RpcRouter) {
 
     let rpc = reads::register(RpcRouter::new(), &state);
     (state, rpc)
-}
-
-/// One RPC call against the real router, asserting a result frame.
-async fn rpc_ok(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let response = dispatch(rpc, method, params).await;
-    assert!(
-        response.error.is_none(),
-        "{method} must answer a result: {:?}",
-        response.error
-    );
-    response.result.expect("a non-error frame carries a result")
-}
-
-/// One RPC call against the real router, asserting an error frame.
-async fn rpc_err(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> RpcError {
-    let response = dispatch(rpc, method, params).await;
-    response
-        .error
-        .unwrap_or_else(|| panic!("{method} must be refused; got {:?}", response.result))
-}
-
-async fn dispatch(
-    rpc: &RpcRouter,
-    method: &str,
-    params: serde_json::Value,
-) -> trusty_common::uds::server::RpcResponse {
-    let frame = serde_json::to_vec(&serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
-    }))
-    .expect("encode the frame");
-    rpc.dispatch(&frame).await
 }
 
 /// Drop the fields both sides sample from the host at answer time (#6358).

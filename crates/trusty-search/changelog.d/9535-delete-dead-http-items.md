@@ -1,0 +1,3 @@
+Removed
+- The public HTTP items the deleted test router left without a caller: the `/ui` handlers (`ui_index_handler`, `ui_asset_handler`) and the `include_dir!` embed of `ui-dist/`, `chat_handler`, `list_chat_providers`, `registry_orphans_handler`, `metrics_handler`, `request_metrics_middleware`, `apply_limiter`, `apply_query_timeout`, and the `typeahead_handler_for_tests` / `TypeaheadParamsForTests` re-export. The socket methods are unchanged; each still serves the core these wrapped (#9535).
+- The `include_dir` dependency, the `tower` dev-dependency, and trusty-search's request for trusty-common's `axum-server` feature. The Prometheus recorder (`install_recorder`, `MetricsState`) and `metrics-exporter-prometheus` stay: `start` still installs the recorder (#9535).

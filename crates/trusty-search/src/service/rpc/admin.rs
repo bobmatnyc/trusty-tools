@@ -158,8 +158,8 @@ impl LogsTail {
     /// The core's params for one decoded call; an absent call or `n` is the
     /// route's default, [`LogsTailParams::default`].
     ///
-    /// #9535: one function so the parity tests decode exactly as this method
-    /// does. Test: `logs_tail_clamps_n_on_the_socket_too`.
+    /// #9535: one function so the parity tests decode exactly as
+    /// `search.logs.tail` does. Test: `logs_tail_clamps_n_on_the_socket_too`.
     pub(crate) fn into_report_params(call: Option<Self>) -> LogsTailParams {
         match call.and_then(|c| c.n) {
             Some(n) => LogsTailParams { n },

@@ -806,9 +806,6 @@ crates/trusty-search/src/service/server/state.rs	health_reports_warmboot_failure
 crates/trusty-search/src/service/server/state.rs	health_rss_fallback_on_contention
 crates/trusty-search/src/service/server/state.rs	health_surfaces_warmboot_summary
 crates/trusty-search/src/service/server/state_impl.rs	emit_propagates_to_subscriber
-crates/trusty-search/src/service/server/typeahead.rs	typeahead_empty_query_returns_empty
-crates/trusty-search/src/service/server/typeahead.rs	typeahead_lexical_returns_hits
-crates/trusty-search/src/service/server/typeahead.rs	typeahead_query_params_parsed
 crates/trusty-search/src/service/walker.rs	test_default_excludes_markdown_and_changelog
 crates/trusty-search/src/service/walker.rs	test_include_docs_keeps_markdown
 crates/trusty-search/src/service/warm_boot/mod.rs	warm_boot_canonicalize_best_effort_*

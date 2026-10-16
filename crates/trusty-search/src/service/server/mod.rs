@@ -73,6 +73,9 @@ mod state_impl;
 mod status;
 mod tickers;
 mod typeahead;
+// #9535: the `search.typeahead` core's tests, moved in from `tests/typeahead.rs`.
+#[cfg(test)]
+mod typeahead_tests;
 // #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
 mod vector_health;
 // #9027: warm every registered index ahead of an all-index search.
@@ -296,19 +299,6 @@ use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,
     spawn_watcher_idle_suspend_ticker,
-};
-
-// Re-export for integration tests in `tests/typeahead.rs`.
-//
-// Why: the integration tests in `tests/typeahead.rs` call the handler directly
-// (not via a running HTTP router), which requires importing both the handler
-// function and its `TypeaheadParams` extractor. These names are public so the
-// integration-test crate can see them, but `#[doc(hidden)]` keeps them off the
-// crate's documented public API surface to avoid misleading downstream callers
-// (issue #1560 nit 1).
-#[doc(hidden)]
-pub use typeahead::{
-    typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
 };
 
 // #6285: the one seam `service::socket` reads the health report through, so the

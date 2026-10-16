@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
+use trusty_common::uds::server::{RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::embed::{Embedder, MockEmbedder};
@@ -37,7 +37,7 @@ use crate::service::concurrency::ConcurrencyLimiter;
 use crate::service::query_timeout::QueryTimeoutConfig;
 use crate::service::rpc::error::{CODE_DEADLINE_EXCEEDED, CODE_NOT_FOUND, CODE_UNAVAILABLE};
 use crate::service::rpc::queries;
-use crate::service::rpc::test_support::{http_body, params};
+use crate::service::rpc::test_support::{http_body, params, rpc_err, rpc_ok};
 use crate::service::server::{
     global_grep_report, global_search_report, grep_report, search_report, search_similar_report,
     typeahead_report, SearchAppState,
@@ -194,37 +194,6 @@ async fn grep_fixture() -> (tempfile::TempDir, Arc<SearchAppState>, RpcRouter) {
     let (state, rpc) = fixture_with(SearchAppState::new(registry)).await;
     state.install_embedder(embedder).await;
     (tmp, state, rpc)
-}
-
-async fn dispatch(
-    rpc: &RpcRouter,
-    method: &str,
-    params: serde_json::Value,
-) -> trusty_common::uds::server::RpcResponse {
-    let frame = serde_json::to_vec(&serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
-    }))
-    .expect("encode the frame");
-    rpc.dispatch(&frame).await
-}
-
-/// One RPC call against the real router, asserting a result frame.
-async fn rpc_ok(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> serde_json::Value {
-    let response = dispatch(rpc, method, params).await;
-    assert!(
-        response.error.is_none(),
-        "{method} must answer a result: {:?}",
-        response.error
-    );
-    response.result.expect("a non-error frame carries a result")
-}
-
-/// One RPC call against the real router, asserting an error frame.
-async fn rpc_err(rpc: &RpcRouter, method: &str, params: serde_json::Value) -> RpcError {
-    let response = dispatch(rpc, method, params).await;
-    response
-        .error
-        .unwrap_or_else(|| panic!("{method} must be refused; got {:?}", response.result))
 }
 
 /// Drop `latency_ms`, which both sides sample from the host clock (#6358).

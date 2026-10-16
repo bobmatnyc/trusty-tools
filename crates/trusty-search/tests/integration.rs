@@ -13,7 +13,7 @@
 //! targets named elsewhere keep a `[[test]]` target of their own.
 //! Test: `every_tests_file_is_mounted_9302` fails if a file under `tests/` is
 //! mounted by no target. Run one former binary with a module filter:
-//! `cargo test -p trusty-search --test integration typeahead::`.
+//! `cargo test -p trusty-search --test integration migration_e2e::`.
 
 // #9450: seeded clustered vectors shared by the HNSW recall tests.
 #[path = "../src/core/store/clustered_vectors.rs"]
@@ -49,7 +49,6 @@ mod reindex_quantize_env_conflict_8737;
 mod residency_cold_park;
 mod serve_no_http_9542;
 mod src_bin_coverage_7694;
-mod typeahead;
 mod warm_boot_corpus_open_failure;
 mod watcher_chunk_cap_orphans_100;
 

@@ -1023,7 +1023,7 @@ impl CodeIndexer {
     ///
     /// Why (issue #3683 slice 1): this used to run the redb scan + map
     /// publish inline, awaited directly by the caller — including interactive
-    /// query handlers wrapped in `apply_query_timeout`'s
+    /// query handlers wrapped in `with_query_deadline`'s
     /// `tokio::time::timeout`. On a query-deadline cancellation the whole
     /// awaited future (scan + publish) was dropped mid-flight, discarding
     /// completed work and leaving the index cold for the next query

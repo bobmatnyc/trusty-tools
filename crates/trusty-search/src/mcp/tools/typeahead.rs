@@ -7,8 +7,8 @@
 //! What: `dispatch_typeahead_tool` handles the `"typeahead"` tool name.
 //! It resolves the index, validates params, and calls `search.typeahead` on
 //! the daemon's socket (#9168).
-//! Test: `typeahead_mcp_tool_returns_hits` in `tests/typeahead.rs`
-//! (integration-level); `tests_typeahead` unit tests below.
+//! Test: `typeahead_mcp_tool_returns_hits`; `tests_typeahead` unit tests
+//! below; the core's tests in `service/server/typeahead_tests.rs`.
 
 use serde_json::Value;
 
@@ -25,8 +25,8 @@ use crate::service::rpc::queries::METHOD_TYPEAHEAD;
 /// full-search concerns.
 /// What: returns `None` when `tool != "typeahead"` so the `call_tool` chain
 /// can try other groups. On success, returns the daemon response as-is.
-/// Test: `tests_typeahead` below; integration-level tests in
-/// `crates/trusty-search/tests/typeahead.rs`.
+/// Test: `tests_typeahead` below; the core's tests in
+/// `crates/trusty-search/src/service/server/typeahead_tests.rs`.
 pub(super) async fn dispatch_typeahead_tool(
     server: &McpServer,
     tool: &str,

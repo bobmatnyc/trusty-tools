@@ -6,8 +6,8 @@
 //! ~150+ repo indexes issued ~150 per-index searches near-simultaneously, each
 //! one CPU/memory work competing for the same runtime, which produced the
 //! long-tail latency and resource pressure behind the `server_busy` storm
-//! observed in production 2026-07-16 (see `apply_limiter` in
-//! `service::concurrency` for the HTTP-layer admission limiter itself — the
+//! observed in production 2026-07-16 (see `admit` in
+//! `service::concurrency` for the request admission limiter itself — the
 //! per-index searches bounded here are in-process and never traverse it
 //! directly). Bounding the fan-out with a small semaphore-style cap lets a
 //! large fan-out degrade gracefully — results are still returned, just in
@@ -42,7 +42,7 @@ pub(super) const FANOUT_CONCURRENCY_ENV: &str = "TRUSTY_SEARCH_FANOUT_CONCURRENC
 /// `service::concurrency`) as a reasonable starting point — NOT a
 /// by-construction admission bound. Per-index `indexer.search()` calls inside
 /// a fan-out are in-process futures; they never traverse the HTTP layer and
-/// so never pass through `apply_limiter` / the admission semaphore. The two
+/// so never pass through `admit` / the admission semaphore. The two
 /// "8"s govern uncoupled resources (in-process fan-out breadth vs. inbound
 /// HTTP request admission). Bounding the fan-out relieves limiter pressure
 /// only *indirectly*: fewer concurrent per-index searches means each holds

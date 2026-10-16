@@ -1,28 +1,24 @@
-//! Concurrency limiter middleware for expensive HTTP endpoints (issue #41
-//! Phase 1).
+//! Concurrency limiter for the interactive query methods (issue #41 Phase 1).
 //!
-//! Why: Without bounded in-flight concurrency, a burst of `POST /search` or
-//! `POST /reindex` requests can saturate memory (each in-flight reindex holds
+//! Why: Without bounded in-flight concurrency, a burst of search requests can
+//! saturate memory (each in-flight reindex holds
 //! a parsed batch + embeddings + HNSW write lock) and degrade *every*
 //! response, including cheap ones like `/health`. A semaphore-based limiter
 //! caps in-flight work; a bounded waiting queue absorbs short bursts. Beyond
-//! the queue depth callers receive `503 Service Unavailable` with a
-//! `Retry-After` header so they back off and try again instead of piling up
-//! more pressure.
+//! the queue depth callers are refused `server_busy` (a 503 status) so they
+//! back off and try again instead of piling up more pressure.
 //!
 //! Additionally (issue #907): the semaphore `.acquire_owned().await` is now
 //! bounded by `TRUSTY_QUEUE_TIMEOUT_SECS` (default 30 s). When the wait
 //! exceeds the deadline the request returns 503 immediately rather than
 //! hanging indefinitely behind a stalled reindex or a burst that never clears.
 //!
-//! What: An `Arc<ConcurrencyLimiter>` installed as an axum `Extension`. The
-//! middleware fn `apply_limiter` reads it out of the request extensions,
+//! What: One `Arc<ConcurrencyLimiter>` on `SearchAppState`. [`admit`]
 //! attempts a non-blocking `Semaphore::try_acquire`, and if that fails,
 //! checks whether the bounded waiting queue still has room (via the
-//! `waiting` `AtomicUsize`). When the queue is also full it returns 503
+//! `waiting` `AtomicUsize`). When the queue is also full it refuses with 503
 //! immediately; otherwise it waits for a permit (bounded by the queue
-//! timeout). Light endpoints (`/health`, `/metrics`, `/indexes`) bypass this
-//! middleware entirely by not being wrapped in the limited router subtree.
+//! timeout). #9535 deleted the axum middleware that wrapped it.
 //!
 //! Config:
 //!   - `TRUSTY_MAX_CONCURRENT_REQUESTS` (default 8) — semaphore permits.
@@ -31,13 +27,7 @@
 //!
 //! Test: covered by `tests` at the bottom — limit, queue, 503, and queue-timeout paths.
 
-use axum::{
-    body::Body,
-    extract::Extension,
-    http::{Request, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Json, Response},
-};
+use axum::http::StatusCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -72,7 +62,7 @@ fn queue_timeout() -> std::time::Duration {
     })
 }
 
-/// Shared limiter state, cloned into every request via axum's `Extension`.
+/// Shared limiter state, held once on `SearchAppState`.
 ///
 /// Why: a single semaphore + atomic counter shared across handlers is the
 /// minimal correct implementation. We deliberately avoid Tower's
@@ -171,10 +161,8 @@ impl ConcurrencyLimiter {
 /// The refusal a caller that could not be admitted gets, without the transport
 /// (#6285 slice 3).
 ///
-/// Why: the socket serves the same six query methods this limiter gates on
-/// HTTP, and `RpcError` has nowhere to put a `Retry-After` header. Splitting
-/// the pair out lets the socket carry the same `error` and `message` while
-/// [`busy_response`] keeps the header HTTP callers already read.
+/// Why: the socket's query methods carry this `error` and `message` in the
+/// refusal's `data`; `RpcError` has nowhere to put a `Retry-After` header.
 /// What: `503` beside `{"error": "server_busy", …}`.
 /// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`.
 pub fn busy_refusal() -> (StatusCode, serde_json::Value) {
@@ -187,24 +175,10 @@ pub fn busy_refusal() -> (StatusCode, serde_json::Value) {
     )
 }
 
-/// Build the 503 response body used when the queue is full.
-fn busy_response() -> Response {
-    let (status, body) = busy_refusal();
-    let mut resp = (status, Json(body)).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::RETRY_AFTER,
-        axum::http::HeaderValue::from_static("2"),
-    );
-    resp
-}
-
 /// Take one admission slot, or report why the caller cannot have one.
 ///
-/// Why (#6285 slice 3): [`apply_limiter`] is an axum middleware, so a second
-/// transport serving the same routes could not reach it and would admit
-/// callers the HTTP door had already refused — two doors, each with its own
-/// idea of how loaded the daemon is. This is the whole admission decision with
-/// the axum shape stripped off, so the socket gates on the SAME semaphore.
+/// Why (#6285 slice 3): the admission decision with no transport shape, so
+/// every socket query method gates on the SAME semaphore.
 /// What: the fast-path `try_acquire_owned`, then the bounded queue — a full
 /// queue and a queue-wait that outlasts `queue_timeout` both answer
 /// [`busy_refusal`]. The returned permit holds the slot; dropping it releases
@@ -254,96 +228,10 @@ pub async fn admit(
     }
 }
 
-/// Axum middleware that gates the wrapped handler behind the limiter.
-///
-/// Why: applying the limiter selectively (only to expensive endpoints) means
-/// the middleware needs to be attachable to individual routes, not the whole
-/// router. axum's `from_fn_with_state`-style middleware is the cleanest fit.
-/// What: increments the waiter counter, fast-fails with 503 if the queue is
-/// already at depth, then awaits a semaphore permit. On admission, the
-/// `trusty_queue_depth` gauge is updated and the request flows downstream.
-/// On exit, the permit is automatically dropped (releasing the slot) and
-/// the gauge is decremented.
-/// Test: `limiter_returns_503_when_queue_full`.
-pub async fn apply_limiter(
-    Extension(limiter): Extension<Arc<ConcurrencyLimiter>>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    // #6285 slice 3: the decision itself is `admit`, shared with the socket.
-    // HTTP keeps the `Retry-After` header, which is what `busy_response` adds
-    // over the pair `admit` reports.
-    let Ok(permit) = admit(&limiter).await else {
-        return busy_response();
-    };
-
-    let response = next.run(request).await;
-    // Permit drops here, releasing the slot for the next waiter.
-    drop(permit);
-    response
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-        routing::get,
-        Router,
-    };
     use std::time::Duration;
-    use tower::ServiceExt;
-
-    fn limited_router(limiter: Arc<ConcurrencyLimiter>) -> Router {
-        Router::new()
-            .route(
-                "/slow",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    "ok"
-                }),
-            )
-            .route_layer(axum::middleware::from_fn(apply_limiter))
-            .layer(Extension(limiter))
-    }
-
-    /// Build a router whose `/forever` handler signals a oneshot once it holds
-    /// the permit, then stalls — simulates a blocked embedder call (issue #907).
-    ///
-    /// Why: the handler must notify the test harness *after* it acquires the
-    /// permit so the second request is sent only when the semaphore is
-    /// exhausted. This makes the test deterministic; a time-based sleep was
-    /// the flaky pattern this replaces.
-    /// What: returns the router and a oneshot receiver that fires when the
-    /// in-flight handler has acquired its permit.
-    /// Test: `queue_wait_returns_503_on_timeout`.
-    fn forever_router_with_signal(
-        limiter: Arc<ConcurrencyLimiter>,
-    ) -> (Router, tokio::sync::oneshot::Receiver<()>) {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        // Wrap in Arc<Mutex<Option<…>>> so we can move into the async closure
-        // and take the sender exactly once.
-        let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
-        let router = Router::new()
-            .route(
-                "/forever",
-                get(move || {
-                    let tx = std::sync::Arc::clone(&tx);
-                    async move {
-                        // Signal: we now hold the permit.
-                        if let Some(sender) = tx.lock().await.take() {
-                            let _ = sender.send(());
-                        }
-                        // Stall forever — never resolves during the test.
-                        std::future::pending::<&str>().await
-                    }
-                }),
-            )
-            .route_layer(axum::middleware::from_fn(apply_limiter))
-            .layer(Extension(limiter));
-        (router, rx)
-    }
 
     // #5937: removes TRUSTY_MAX_CONCURRENT_REQUESTS / TRUSTY_QUEUE_DEPTH; join the #[serial] env group.
     #[serial_test::serial]
@@ -362,111 +250,58 @@ mod tests {
     #[tokio::test]
     async fn limiter_admits_up_to_concurrency() {
         let limiter = ConcurrencyLimiter::with_limits(2, 4);
-        let app = limited_router(limiter);
 
-        let req = || {
-            Request::builder()
-                .uri("/slow")
-                .body(Body::empty())
-                .expect("valid request")
-        };
-        let r1 = app.clone().oneshot(req());
-        let r2 = app.clone().oneshot(req());
-        let (res1, res2) = tokio::join!(r1, r2);
-        assert_eq!(res1.unwrap().status(), StatusCode::OK);
-        assert_eq!(res2.unwrap().status(), StatusCode::OK);
+        let first = admit(&limiter).await.expect("first caller is admitted");
+        let second = admit(&limiter).await.expect("second caller is admitted");
+        assert_eq!(limiter.waiting(), 0, "neither caller had to queue");
+        drop((first, second));
     }
 
     #[tokio::test]
     async fn limiter_returns_503_when_queue_full() {
-        // 1 concurrent, queue depth 0 — the second simultaneous request
-        // should be rejected immediately.
+        // 1 concurrent, queue depth 0 — a second caller while the only permit
+        // is held is refused immediately.
         let limiter = ConcurrencyLimiter::with_limits(1, 0);
-        let app = limited_router(limiter);
+        let held = admit(&limiter).await.expect("first caller is admitted");
 
-        let req = || {
-            Request::builder()
-                .uri("/slow")
-                .body(Body::empty())
-                .expect("valid request")
-        };
-        // Kick off a slow request that holds the only permit for ~100ms.
-        let in_flight = tokio::spawn(app.clone().oneshot(req()));
-        // Yield once so the first request has a chance to grab the permit.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        // Second request: should 503 immediately.
-        let rejected = app.oneshot(req()).await.expect("oneshot returns");
-        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            rejected
-                .headers()
-                .get(axum::http::header::RETRY_AFTER)
-                .map(|v| v.to_str().unwrap()),
-            Some("2")
-        );
-        let _ = in_flight.await;
+        let (status, body) = admit(&limiter).await.expect_err("queue is full");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "server_busy");
+        assert_eq!(limiter.waiting(), 0, "a refused caller leaves the queue");
+        drop(held);
     }
 
-    /// Prove that a request waiting in the semaphore queue returns 503 (not a
-    /// hang) when the queue-wait deadline expires (issue #907 fix 2).
+    /// Prove that a caller waiting in the semaphore queue is refused with 503
+    /// (not a hang) when the queue-wait deadline expires (issue #907 fix 2).
     ///
     /// Why: before the fix `.acquire_owned().await` blocked forever when all
     /// permits were held by a stalled operation. The fix wraps the await in
     /// `tokio::time::timeout`; this test proves it fires deterministically.
-    /// What: 1 permit, queue depth 1, timeout 50 ms. A first request holds the
-    /// permit and fires a oneshot once admitted. Only after that signal is the
-    /// second request sent, guaranteeing the semaphore is exhausted. The second
-    /// request must receive 503 after ~50 ms, not hang.
+    /// What: 1 permit, queue depth 1, timeout 50 ms. The test holds the only
+    /// permit, so the second caller is admitted to the queue and must be
+    /// refused after ~50 ms rather than wait for a permit that never frees.
     /// Test: this test.
     #[tokio::test]
     async fn queue_wait_returns_503_on_timeout() {
-        // 1 permit, 1 queue slot, 50 ms deadline — the second request will be
-        // admitted to the queue but time out before the first request finishes.
         let limiter = ConcurrencyLimiter::with_limits_and_timeout(1, 1, Duration::from_millis(50));
-        let (app, permit_acquired) = forever_router_with_signal(limiter);
+        let held = admit(&limiter).await.expect("first caller is admitted");
 
-        let req = || {
-            Request::builder()
-                .uri("/forever")
-                .body(Body::empty())
-                .expect("valid request")
-        };
-
-        // Kick off the first request — it grabs the only permit and stalls.
-        let _in_flight = tokio::spawn(app.clone().oneshot(req()));
-
-        // Wait until the first request signals it holds the permit.  This
-        // replaces the timing-sensitive `sleep(5ms)` with a deterministic
-        // signal so the second request is sent only after admission is
-        // confirmed and the semaphore is definitely exhausted.
-        permit_acquired
-            .await
-            .expect("in-flight handler must send the permit-acquired signal");
-
-        // Second request: admitted to the queue but should 503 after ~50 ms.
         let start = std::time::Instant::now();
-        let waiting = app.oneshot(req()).await.expect("oneshot returns");
+        let refused = admit(&limiter).await;
         let elapsed = start.elapsed();
 
+        let (status, body) = refused.expect_err("queue-wait timeout must refuse");
         assert_eq!(
-            waiting.status(),
+            status,
             StatusCode::SERVICE_UNAVAILABLE,
-            "queue-wait timeout must return 503, got {} (elapsed: {:?})",
-            waiting.status(),
-            elapsed,
+            "queue-wait timeout must return 503, got {status} (elapsed: {elapsed:?})",
         );
+        assert_eq!(body["error"], "server_busy");
         assert!(
             elapsed < Duration::from_secs(2),
-            "queue-wait timeout must not block indefinitely (elapsed: {:?})",
-            elapsed,
+            "queue-wait timeout must not block indefinitely (elapsed: {elapsed:?})",
         );
-        assert_eq!(
-            waiting
-                .headers()
-                .get(axum::http::header::RETRY_AFTER)
-                .map(|v| v.to_str().unwrap()),
-            Some("2"),
-            "503 response must include Retry-After header"
-        );
+        assert_eq!(limiter.waiting(), 0, "a timed-out caller leaves the queue");
+        drop(held);
     }
 }

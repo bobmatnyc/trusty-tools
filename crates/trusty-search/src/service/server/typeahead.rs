@@ -1,22 +1,16 @@
-//! HTTP handler for `GET /indexes/{id}/typeahead`.
+//! The `search.typeahead` core.
 //!
-//! Why: typeahead/autocomplete needs a dedicated endpoint that is (1) fast
+//! Why: typeahead/autocomplete needs a dedicated method that is (1) fast
 //! enough for per-keystroke use in lexical mode (<30 ms, no ONNX call) and
 //! (2) richer in blended mode for debounced invocations (semantic + KG).
-//! Having a separate handler keeps the main `search_handler` uncomplicated and
-//! lets this endpoint use query params (GET) rather than a POST body, which
-//! maps naturally to browser `<input>` completion.
-//! What: `typeahead_handler` extracts `?q=`, `?limit=`, `?mode=` query
-//! params, runs `CodeIndexer::search` with the appropriate `SearchStage`,
-//! and maps the results to `TypeaheadHit` slices via the shared
-//! `TypeaheadHit::from_chunk` constructor.
-//! Test: `tests/typeahead.rs`.
+//! A separate core keeps the main search body uncomplicated.
+//! What: [`typeahead_report`] takes `q`, `limit` and `mode`, runs
+//! `CodeIndexer::search` with the appropriate `SearchStage`, and maps the
+//! results to `TypeaheadHit` slices via the shared `TypeaheadHit::from_chunk`
+//! constructor. #9535 deleted the HTTP handler that wrapped it.
+//! Test: `typeahead_tests.rs`.
 
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    Json,
-};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -34,19 +28,17 @@ use super::state::SearchAppState;
 /// prevents callers from accidentally running a full search through the
 /// typeahead endpoint.
 /// What: hard upper bound applied after parsing `?limit=`.
-/// Test: `typeahead_limit_clamped_to_max` in `tests/typeahead.rs`.
+/// Test: `typeahead_limit_clamped_to_max`.
 pub(super) const MAX_TYPEAHEAD_LIMIT: usize = 25;
 
 /// Default number of typeahead hits returned when `?limit=` is absent.
 const DEFAULT_TYPEAHEAD_LIMIT: usize = 6;
 
-/// Query parameters for the typeahead endpoint.
+/// Parameters for `search.typeahead`.
 ///
-/// Why: GET params rather than a JSON body so the endpoint is directly
-/// addressable from `<input oninput="fetch('/indexes/x/typeahead?q=...')">`.
 /// What: `q` (required prefix), `limit` (clamped to 1–25, default 6), `mode`
 /// (`lexical` default or `blended`).
-/// Test: `typeahead_query_params_parsed` in `tests/typeahead.rs`.
+/// Test: `typeahead_respects_smaller_limit`.
 #[derive(Debug, Deserialize)]
 pub struct TypeaheadParams {
     /// The prefix to search for. Empty or whitespace → empty response.
@@ -58,39 +50,19 @@ pub struct TypeaheadParams {
     pub mode: Option<TypeaheadMode>,
 }
 
-/// `GET /indexes/{id}/typeahead` — blended typeahead/autocomplete.
+/// The body `search.typeahead` serves (#6285 slice 3).
 ///
-/// Why: per-keystroke autocomplete needs a sub-30 ms endpoint in lexical mode
-/// (no embedding call). Blended mode adds semantic + KG for richer
-/// suggestions when the client debounces input.
-/// What: validates params, short-circuits on empty/whitespace `q`, calls
-/// `CodeIndexer::search` with the correct `SearchStage`, maps `CodeChunk`s
-/// to `TypeaheadHit`s, and returns a `TypeaheadResponse` envelope.
-/// Test: `typeahead_lexical_returns_hits`, `typeahead_empty_query_returns_empty`
-/// in `tests/typeahead.rs`.
-pub async fn typeahead_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<TypeaheadParams>,
-) -> Result<Json<TypeaheadResponse>, (StatusCode, Json<serde_json::Value>)> {
-    typeahead_report(&state, &id, params)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
-/// The body `GET /indexes/{id}/typeahead` serves, without the transport
-/// (#6285 slice 3).
-///
-/// Why: `search.typeahead` answers the same question over the socket. One body
-/// is what stops the two transports clamping `limit` differently or disagreeing
-/// about which lane a mode selects.
-/// What: [`typeahead_handler`]'s whole former body. A refusal keeps its HTTP
-/// status beside its body, because that status is what
-/// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
-/// code.
+/// Why: per-keystroke autocomplete needs a sub-30 ms answer in lexical mode
+/// (no embedding call); blended mode adds semantic + KG for richer suggestions
+/// when the client debounces input.
+/// What: short-circuits on empty/whitespace `q`, clamps `limit`, calls
+/// `CodeIndexer::search` with the mode's `SearchStage`, and maps chunks to
+/// `TypeaheadHit`s. A refusal keeps its status beside its body, because that
+/// status is what [`crate::service::rpc::error::rpc_error_from_http`] turns
+/// into the JSON-RPC code.
 /// Test: `typeahead_over_the_socket_matches_the_http_body`,
-/// `an_unknown_index_reports_not_found_on_every_query_method`.
+/// `an_unknown_index_reports_not_found_on_every_query_method`,
+/// `typeahead_unknown_index_returns_404`.
 pub(crate) async fn typeahead_report(
     state: &Arc<SearchAppState>,
     id: &str,
