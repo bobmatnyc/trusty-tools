@@ -11433,7 +11433,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flate2",

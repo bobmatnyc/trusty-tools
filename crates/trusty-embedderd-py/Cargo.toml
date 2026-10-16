@@ -1,6 +1,6 @@
 [package]
 name = "trusty-embedderd-py"
-version = "0.1.6"  # bump for the #5328 spawn-retry fix release
+version = "0.2.0"  # library-only: trusty-search ships the launcher (#9468)
 publish = true
 edition = "2021"
 license.workspace = true
