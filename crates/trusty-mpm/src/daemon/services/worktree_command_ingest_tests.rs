@@ -342,12 +342,9 @@ async fn sidecar(ledger: &WorktreeLedger) -> Option<String> {
     None
 }
 
-/// Criterion 6: a failed record never changes the verdict, reaches the sidecar
-/// and the doctor row, and an unrelated S2a success does not clear it.
-#[tokio::test]
-async fn a_failed_record_is_never_silent_and_never_blocks() {
-    let fixture = GitWorktreeFixture::new();
-    let h = Harness::new(&fixture.repo).await;
+/// Make the next ledger write fail, deliver one real add, and wait for the
+/// sidecar; the ledger is writable again on return.
+async fn fail_one_record(h: &Harness, fixture: &GitWorktreeFixture) {
     let command = "git worktree add -b s2b/unw ../wt-unwritable";
     assert!(sh(command, &fixture.repo));
     std::fs::create_dir_all(h.ledger().path()).unwrap();
@@ -362,14 +359,14 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
         .await
         .expect("a failed ledger write is recorded, never swallowed");
     assert!(error.contains("git worktree add"), "{error}");
-    let row =
-        || crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
-    assert_ne!(row().status, CheckStatus::Ok, "{}", row().message);
-    // The ledger is writable again; an S2a success must not clear the alarm.
     std::fs::remove_dir(h.ledger().path()).unwrap();
-    let agent = fixture.add_worktree_at(&fixture.repo.join(".claude/worktrees"), "agent-ok");
+}
+
+/// One S2a observe of a fresh agent-isolation tree, awaited.
+async fn s2a_success(state: &Arc<DaemonState>, fixture: &GitWorktreeFixture, name: &str) {
+    let agent = fixture.add_worktree_at(&fixture.repo.join(".claude/worktrees"), name);
     let s2a = crate::daemon::services::worktree_ledger_ingest::spawn_for_event(
-        &h.state,
+        state,
         SessionId::new(),
         HookEvent::PreToolUse,
         &json!({ "cwd": agent.display().to_string() }),
@@ -381,6 +378,19 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
         s2a.observed,
         Some(ObserveOutcome::Recorded { .. })
     ));
+}
+
+/// Criterion 6: a failed record never changes the verdict, reaches the sidecar
+/// and the doctor row, and an unrelated S2a success does not clear it.
+#[tokio::test]
+async fn a_failed_record_is_never_silent_and_never_blocks() {
+    let fixture = GitWorktreeFixture::new();
+    let h = Harness::new(&fixture.repo).await;
+    fail_one_record(&h, &fixture).await;
+    let row =
+        || crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    assert_ne!(row().status, CheckStatus::Ok, "{}", row().message);
+    s2a_success(&h.state, &fixture, "agent-ok").await;
     assert!(
         read_ingest_failure(&h.ledger()).unwrap().is_some(),
         "an unrelated success must not clear the S2b alarm"
@@ -400,4 +410,53 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
         .unwrap()
         .map(|f| f.failures);
     assert_eq!(failures, Some(2));
+}
+
+/// Criterion 6 across a restart: the S2b record is on disk, so a new daemon's
+/// S2a success (nothing pending, in-memory flag gone) must not clear it.
+#[tokio::test]
+async fn an_s2b_failure_survives_a_restart_and_an_s2a_success() {
+    let fixture = GitWorktreeFixture::new();
+    let h = Harness::new(&fixture.repo).await;
+    fail_one_record(&h, &fixture).await;
+    let restarted = Arc::new(DaemonState::with_root(h.state.framework_root().to_path_buf()));
+    s2a_success(&restarted, &fixture, "agent-after-restart").await;
+    assert!(
+        read_ingest_failure(&h.ledger()).unwrap().is_some(),
+        "a restart plus an S2a success must not hide the missed tree"
+    );
+    let row =
+        crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    assert_ne!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// Criterion 2: a `git worktree add` git refused because the path was already
+/// a registered worktree (made earlier, not yet in the ledger) records
+/// nothing: the tree is left for the backfill, never owned by this session.
+#[tokio::test]
+async fn an_add_refused_for_an_existing_worktree_records_nothing() {
+    let fixture = GitWorktreeFixture::new();
+    let root = root_of(&fixture);
+    let h = Harness::new(&fixture.repo).await;
+    let tree = fixture.add_worktree_at(&root, "wt-pre");
+    // Made an hour ago: its gitfile predates any Bash call that could be live.
+    let gitfile = std::fs::OpenOptions::new()
+        .write(true)
+        .open(tree.join(".git"))
+        .expect("gitfile");
+    let hour = std::time::SystemTime::now() - Duration::from_secs(3600);
+    gitfile.set_modified(hour).expect("backdate");
+    let command = "git worktree add -b s2b/dup ../wt-pre";
+    assert!(!sh(command, &fixture.repo), "git must refuse");
+    let report = h
+        .bash(HookEvent::PostToolUse, command, &fixture.repo)
+        .await
+        .expect("work");
+    assert!(
+        !matches!(report.added.as_slice(), [ObserveOutcome::Recorded { .. }]),
+        "{report:?}"
+    );
+    assert_eq!(observed_git_command(&h, &tree), 0, "no owner is claimed");
+    assert_eq!(h.count(|_| true), 0, "nothing appended");
+    assert_eq!(report.errors, Vec::<String>::new());
 }
