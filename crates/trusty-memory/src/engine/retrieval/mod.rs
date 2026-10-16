@@ -13,6 +13,8 @@
 // #4906: the deferred-embed lane (retry + durable failure ledger) and the
 // vector-coverage health/repair surface that answers "which drawers have no
 // vector" and re-embeds them.
+// #9881: recall access recording, buffered and flushed in batches.
+mod access;
 mod chunk_backfill;
 mod chunk_health;
 mod chunk_progress;

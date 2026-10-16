@@ -471,6 +471,32 @@ pub(super) struct CommitCtx {
     pub fail_next_verify_record: Arc<std::sync::atomic::AtomicBool>,
 }
 
+// #9881: moved from `handle.rs`, which the access log's field took to the cap.
+impl super::handle::PalaceHandle {
+    /// The owned slice of this palace a detached durable commit needs (#6366).
+    ///
+    /// Why: the commit tail runs in a task the caller's timeout cannot cancel,
+    /// so it cannot borrow the handle. Every field it touches is already
+    /// behind an `Arc`, so the tail needs a bundle of clones rather than an
+    /// `Arc<PalaceHandle>` — which would force `remember_with_options` to take
+    /// `self: &Arc<Self>` and break the in-memory `PalaceHandle::new` callers.
+    /// What: clones the palace id, the KG handle, and the in-memory drawer
+    /// table into a [`CommitCtx`].
+    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
+    pub(super) fn commit_ctx(&self) -> CommitCtx {
+        CommitCtx {
+            palace: self.id.clone(),
+            kg: Arc::clone(&self.kg),
+            drawers: Arc::clone(&self.drawers),
+            // Never stalled in production; a test opts in per commit.
+            #[cfg(test)]
+            commit_delay: None,
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::clone(&self.fail_next_verify_record),
+        }
+    }
+}
+
 /// Commit `drawer` durably and mirror the outcome into the in-memory table, as
 /// one step no caller's timeout can split (#6366).
 ///

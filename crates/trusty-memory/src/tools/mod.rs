@@ -66,6 +66,9 @@ pub mod palace_index;
 pub mod palace_ops;
 // Owner ruling 2026-09-14: the recall read family, split out of `memory_ops`
 // at the 500-SLOC cap, plus the projection that shapes what a hit shows.
+// #9881: which served recall hits record an access, per owning palace.
+#[cfg(feature = "server")]
+pub(crate) mod recall_access;
 #[cfg(feature = "server")]
 pub mod recall_ops;
 #[cfg(feature = "server")]

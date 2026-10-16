@@ -127,6 +127,33 @@ pub async fn recall(state: &AppState, palace: &str, query: &str, top_k: u64) -> 
     out["results"].as_array().expect("results").clone()
 }
 
+/// Recalls served before this many times carry the capped access boost.
+///
+/// `DecayConfig::default()`: 0.05 per access, capped at 0.3.
+pub const ACCESS_BOOST_SATURATION: usize = 6;
+
+/// Serve every drawer `query` reaches until its access boost is capped (#9881).
+///
+/// Why: a recall now records an access on each hit it serves, and the access
+/// boost moves the next recall's scores. A test that compares two recalls'
+/// exact scores saturates the boost first, so only the change under test moves
+/// them.
+/// What: `memory_recall` and `memory_recall_deep`, `top_k` 10,
+/// [`ACCESS_BOOST_SATURATION`] times each.
+pub async fn saturate_access_boost(state: &AppState, palace: &str, query: &str) {
+    for _ in 0..ACCESS_BOOST_SATURATION {
+        for tool in ["memory_recall", "memory_recall_deep"] {
+            dispatch_tool(
+                state,
+                tool,
+                json!({ "palace": palace, "query": query, "top_k": 10 }),
+            )
+            .await
+            .expect("warm-up recall");
+        }
+    }
+}
+
 /// Rank of the hit with drawer `id` (`drawer_id` or `id` key), or `None`.
 pub fn rank_of(results: &[Value], id: Uuid) -> Option<usize> {
     let id = id.to_string();

@@ -587,7 +587,7 @@ impl Drawer {
     /// access boost reflects real usage.
     /// What: Sets `last_accessed_at = now()` and saturates `access_count`.
     /// Test: After two `record_access()` calls, `access_count == 2`.
-    #[cfg(test)]
+    // #9881: live — `PalaceHandle::record_accesses` calls it on every served hit.
     pub(crate) fn record_access(&mut self) {
         self.last_accessed_at = Some(Utc::now());
         self.access_count = self.access_count.saturating_add(1);

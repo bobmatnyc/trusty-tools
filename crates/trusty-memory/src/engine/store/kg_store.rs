@@ -92,6 +92,19 @@ pub(crate) const DRAWERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("
 pub(crate) const DRAWERS_BY_FACT_KEY: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("drawers_by_fact_key");
 
+/// Per-drawer recall access: how often recall served a drawer, and when (#9881).
+///
+/// Why: `DrawerRecord` is positional postcard, so a new field there makes every
+/// row unreadable to an older binary, which ADR-0067 D3 says needs a format
+/// bump. A side table is the additive ADR-0027 pattern: an older binary never
+/// opens it and reads its drawers as before, with no access boost.
+/// What: Key = drawer uuid bytes (`[u8; 16]`). Value = postcard-encoded
+/// [`AccessRecord`]. Merged into each `Drawer` when rows load. A row whose
+/// drawer was forgotten is ignored.
+/// Test: `accesses_round_trip_and_merge_into_loaded_drawers`.
+pub(crate) const DRAWER_ACCESS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("drawer_access");
+
 /// Room registry (ADR-0027 D1.1).
 ///
 /// Why: rooms are stored in the SAME database as the drawers they index — not
@@ -379,6 +392,27 @@ pub(crate) struct DrawerRecord {
     /// predates defaulted. No existing row is rewritten to add the field.
     #[serde(default)]
     pub fact_key: Option<String>,
+}
+
+/// One [`DRAWER_ACCESS`] value (#9881): the access count and the last access
+/// time in unix epoch milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccessRecord {
+    pub count: u32,
+    pub last_ms: Option<i64>,
+}
+
+impl AccessRecord {
+    /// The larger count and the later access time of `self` and `other` (#9881).
+    ///
+    /// Why: a stored access value never goes backwards, whatever order writers land in.
+    /// Test: `a_lower_access_write_never_lowers_the_stored_value`.
+    pub(crate) fn max_with(self, other: Self) -> Self {
+        Self {
+            count: self.count.max(other.count),
+            last_ms: self.last_ms.max(other.last_ms),
+        }
+    }
 }
 
 // ── Key encoding helpers ─────────────────────────────────────────────────

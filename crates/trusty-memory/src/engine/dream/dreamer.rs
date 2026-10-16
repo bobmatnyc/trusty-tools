@@ -322,6 +322,10 @@ impl Dreamer {
     async fn run_claimed_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         let started = std::time::Instant::now();
         let budget = Duration::from_millis(self.config.max_cycle_ms);
+        // #9881 (Q5): persist recall accesses before prune and fading read them.
+        if let Err(e) = handle.flush_pending_accesses().await {
+            tracing::warn!(palace = %handle.id, "#9881: pre-dream access flush failed: {e:#}");
+        }
 
         // ── Effectiveness metric: pre-cycle snapshot (issue #1530) ────────────
         // Count drawers before any pass so we can compute the compression ratio.

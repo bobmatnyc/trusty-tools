@@ -229,6 +229,8 @@ pub struct PalaceHandle {
     /// `registry_tests::open_does_not_reset_idle_clock`,
     /// `registry_tests::touch_after_open_makes_handle_recent`.
     pub(crate) last_accessed: Arc<AtomicU64>,
+    /// #9881: recall accesses not yet written; see `access.rs`.
+    pub(crate) accesses: Arc<super::access::AccessLog>,
     /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub(crate) fail_next_verify_record: Arc<AtomicBool>,
@@ -277,29 +279,6 @@ impl PalaceHandle {
         Arc::clone(&self.write_mutex)
     }
 
-    /// The owned slice of this palace a detached durable commit needs (#6366).
-    ///
-    /// Why: the commit tail runs in a task the caller's timeout cannot cancel,
-    /// so it cannot borrow the handle. Every field it touches is already
-    /// behind an `Arc`, so the tail needs a bundle of clones rather than an
-    /// `Arc<PalaceHandle>` — which would force `remember_with_options` to take
-    /// `self: &Arc<Self>` and break the in-memory `PalaceHandle::new` callers.
-    /// What: clones the palace id, the KG handle, and the in-memory drawer
-    /// table into a [`tier_c::CommitCtx`].
-    /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
-    pub(super) fn commit_ctx(&self) -> super::tier_c::CommitCtx {
-        super::tier_c::CommitCtx {
-            palace: self.id.clone(),
-            kg: Arc::clone(&self.kg),
-            drawers: Arc::clone(&self.drawers),
-            // Never stalled in production; a test opts in per commit.
-            #[cfg(test)]
-            commit_delay: None,
-            #[cfg(any(test, feature = "embedder-test-support"))]
-            fail_next_verify_record: Arc::clone(&self.fail_next_verify_record),
-        }
-    }
-
     /// #9390 test seam: the next slot write's verify record fails after its
     /// drawer commits, as a failed KG write would.
     #[cfg(any(test, feature = "embedder-test-support"))]
@@ -321,13 +300,15 @@ impl PalaceHandle {
         vector_store: UsearchStore,
         kg: KnowledgeGraph,
     ) -> Self {
+        let (kg, drawers) = (Arc::new(kg), Arc::new(RwLock::new(Vec::new())));
         Self {
+            accesses: super::access::AccessLog::shared(&id, &kg, &drawers),
             id,
             identity,
             l1_drawers: Arc::default(),
             vector_store: Arc::new(vector_store),
-            kg: Arc::new(kg),
-            drawers: Arc::new(RwLock::new(Vec::new())),
+            kg,
+            drawers,
             // #6201: an in-memory handle never loaded a persisted table, so it
             // is empty-by-construction, not degraded.
             drawer_load_degraded: false,
@@ -480,6 +461,7 @@ impl PalaceHandle {
 
         let kg_path = data_dir.join("kg.db");
         let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
+            .map(Arc::new) // #9881: shared with the access log below.
             .with_context(|| format!("open KG for {}", palace.id))?;
 
         // Load full drawer table from redb (the persistent source of truth).
@@ -622,11 +604,12 @@ impl PalaceHandle {
         };
 
         let handle = PalaceHandle {
+            accesses: super::access::AccessLog::shared(&palace.id, &kg, &drawers),
             id: palace.id.clone(),
             identity,
             l1_drawers,
             vector_store: Arc::new(vector_store),
-            kg: Arc::new(kg),
+            kg,
             drawers,
             drawer_load_degraded,
             data_dir: Some(data_dir.clone()),
