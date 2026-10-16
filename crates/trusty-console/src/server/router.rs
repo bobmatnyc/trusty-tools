@@ -171,6 +171,15 @@ fn build_router_inner(
             "/api/console/sessions/bulk-delete",
             axum::routing::post(crate::routes::sessions::bulk_delete_handler),
         )
+        // #9979: the mpm chat turn behind /tools/mpm/chat/, on its own MCP
+        // handle. Static, so it wins over `{id}` — pinned by
+        // `chat_route_is_not_shadowed_by_the_id_capture`. Loopback-only.
+        .route(
+            crate::routes::chat::MPM_CHAT_API_PATH,
+            post(crate::routes::chat::chat_handler).layer(axum::middleware::from_fn(
+                crate::tools_ui_mpm::mpm_chat_guard,
+            )),
+        )
         .route(
             "/api/console/sessions/{id}",
             get(crate::routes::sessions::get_handler)
@@ -345,6 +354,20 @@ fn build_router_inner(
             "/tools/secrets/{*path}",
             get(crate::tools_ui::secrets_ui_asset).layer(axum::middleware::from_fn(
                 crate::tools_ui::secrets_page_guard,
+            )),
+        )
+        // #9979 (D96): the mpm chat page, moved from the daemon's `/web`. One
+        // embedded HTML file, so no asset wildcard; loopback-only, unframeable.
+        .route(
+            "/tools/mpm/chat",
+            get(crate::tools_ui_mpm::mpm_chat_redirect).layer(axum::middleware::from_fn(
+                crate::tools_ui_mpm::mpm_chat_guard,
+            )),
+        )
+        .route(
+            crate::tools_ui_mpm::MPM_CHAT_PAGE_PATH,
+            get(crate::tools_ui_mpm::mpm_chat_page).layer(axum::middleware::from_fn(
+                crate::tools_ui_mpm::mpm_chat_guard,
             )),
         )
         .route("/", get(crate::console_ui::spa_index_handler))

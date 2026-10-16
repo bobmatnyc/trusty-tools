@@ -278,7 +278,9 @@ pub async fn secrets_page_guard(request: Request, next: Next) -> Response {
 }
 
 /// Whether `request` came from off this machine (#9067 P5).
-fn is_off_loopback(request: &Request) -> bool {
+///
+/// #9979: `pub(crate)` so the mpm chat guard applies the same test.
+pub(crate) fn is_off_loopback(request: &Request) -> bool {
     let extensions = request.extensions();
     extensions
         .get::<crate::tailnet_peer::TailnetRequest>()

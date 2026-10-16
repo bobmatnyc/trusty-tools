@@ -1,0 +1,3 @@
+Added
+- The trusty-mpm Session Manager chat page, moved from the daemon's `/web`, is served at `/tools/mpm/chat/` (`/tools/mpm/chat` redirects). Its one call, `POST /api/console/sessions/chat`, sends the turn to the mpm `sessions_chat` MCP tool on a dedicated `tm serve --stdio --allow-chat` handle with a 20.5-minute bound and no retry, so a slow turn never blocks the Sessions, Disk and Config routes or the metrics poller. Both routes are loopback-only and unframeable; a turn that cannot run answers `503` with a text body (#9979, D96).
+- `McpServiceHandle::call_tool_enveloped`: a capability-gated tool call with a per-call timeout that returns the raw MCP result, `isError` included (#9979).

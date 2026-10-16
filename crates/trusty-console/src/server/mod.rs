@@ -20,6 +20,9 @@
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
 //!     session manager (#1222); handlers live in `crate::routes::sessions`.
+//!   - `POST /api/console/sessions/chat` + `GET /tools/mpm/chat/` — the mpm chat
+//!     page and its turn, on a dedicated MCP handle (#9979); see
+//!     `crate::routes::chat` and `crate::tools_ui_mpm`.
 //!   - `ANY /api/search/{*path}` — translate the request into a trusty-search
 //!     RPC call on its socket (#6285); see `crate::search_uds`.
 //!   - `ANY /api/memory/{*path}` — the same for trusty-memory (#6155); see
@@ -129,6 +132,10 @@ pub struct AppState {
     /// for every future service.
     /// What: Populated by `AppState::new`; read by `apply_handle_overrides`.
     mcp_handles: Arc<HashMap<String, Arc<McpServiceHandle>>>,
+    /// #9979: the dedicated `tm serve --stdio --allow-chat` handle behind
+    /// `POST /api/console/sessions/chat`, deliberately absent from
+    /// `mcp_handles` — see [`crate::routes::chat::MpmChat`].
+    pub(crate) mpm_chat: crate::routes::chat::MpmChat,
     /// Override for the trusty-search socket path (#6285).
     ///
     /// Why: `search_uds` and `detect::SearchConnector` resolve that path through
@@ -272,6 +279,7 @@ impl AppState {
             stream_client: Arc::new(stream_client),
             analyze_handle,
             mcp_handles: Arc::new(handles),
+            mpm_chat: crate::routes::chat::MpmChat::default(),
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
