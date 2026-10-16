@@ -2,45 +2,21 @@
 //!
 //! Why: the console reaches warm-all over the socket and the embedded UI over
 //! HTTP; the two must report the same state and refuse the same malformed start.
-//! What: one shared state behind the real axum router and the warm RPC family.
+//! What: one shared state read by the warm RPC family and by the cores the HTTP
+//! routes wrapped (#9535: the router is gone).
 //! Test: this module.
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt as _;
 use trusty_common::uds::server::{RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::warm;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::{warm_status_report, SearchAppState, WarmStartRequest};
 
 fn fixed_rss() -> Option<u64> {
     Some(1)
-}
-
-async fn http(
-    router: &axum::Router,
-    method: &str,
-    uri: &str,
-    body: &str,
-) -> (StatusCode, serde_json::Value) {
-    let request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .expect("request");
-    let response = router.clone().oneshot(request).await.expect("answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into()));
-    (status, value)
 }
 
 async fn rpc(
@@ -71,14 +47,9 @@ async fn warm_over_the_socket_matches_the_http_body() {
     ));
     let state = Arc::new(SearchAppState::new(registry));
     state.warm.set_rss_probe(fixed_rss);
-    let http_router = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc_router = warm::register(RpcRouter::new(), &state);
 
-    let (status, over_http) = http(&http_router, "GET", "/warm/status", "").await;
-    assert_eq!(status, StatusCode::OK);
+    let over_http = warm_status_report(&state);
     let over_socket = rpc(
         &rpc_router,
         warm::METHOD_WARM_STATUS,
@@ -102,16 +73,14 @@ async fn warm_over_the_socket_matches_the_http_body() {
     // going on another worker, so the HTTP and socket reads saw different
     // states. Wait on wall-clock time and fail loudly instead.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while crate::service::server::warm_status_report(&state)["run"]["running"]
-        != serde_json::json!(false)
-    {
+    while warm_status_report(&state)["run"]["running"] != serde_json::json!(false) {
         assert!(
             std::time::Instant::now() < deadline,
             "the warm run did not finish within 10 s"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let (_, over_http) = http(&http_router, "GET", "/warm/status", "").await;
+    let over_http = warm_status_report(&state);
     let over_socket = rpc(&rpc_router, warm::METHOD_WARM_STATUS, serde_json::json!({}))
         .await
         .result
@@ -124,10 +93,10 @@ async fn warm_over_the_socket_matches_the_http_body() {
         "{over_http}"
     );
 
-    let (status, _) = http(&http_router, "POST", "/warm", r#"{"bogus":1}"#).await;
+    // `POST /warm`'s extractor refused this decode before the core ran.
     assert!(
-        status.is_client_error(),
-        "HTTP refuses a stray field: {status}"
+        serde_json::from_value::<WarmStartRequest>(serde_json::json!({ "bogus": 1 })).is_err(),
+        "HTTP refuses a stray field"
     );
     let refused = rpc(
         &rpc_router,
@@ -159,8 +128,5 @@ async fn the_socket_refuses_a_warm_window_past_the_cap() {
     .error
     .expect("an oversized window is refused");
     assert_eq!(refused.code, CODE_INVALID_PARAMS);
-    assert_eq!(
-        crate::service::server::warm_status_report(&state)["run"],
-        serde_json::Value::Null
-    );
+    assert_eq!(warm_status_report(&state)["run"], serde_json::Value::Null);
 }

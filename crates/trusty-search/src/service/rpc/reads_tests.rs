@@ -1,11 +1,10 @@
-//! Socket-versus-HTTP parity for the read surface (#6285 slice 2).
+//! Socket-versus-HTTP-body parity for the read surface (#6285 slice 2).
 //!
-//! Why: the failure this rules out is the two transports answering differently
-//! — a consumer migrated onto the socket by the retire slice seeing a different
-//! index list, chunk page, graph, or refusal than the HTTP route it replaced.
-//! Every test here drives the REAL axum router and the REAL RPC router against
-//! ONE shared `SearchAppState`, so a `*_report` function that stopped being the
-//! body both transports serve fails these rather than surfacing in a consumer.
+//! Why: the failure this rules out is the socket answering differently from the
+//! HTTP body it replaced — a different index list, chunk page, graph, or
+//! refusal. #9535: the router is gone, so the HTTP body is the `*_report` core
+//! the handler tests pin, called on the SAME `SearchAppState` the RPC router
+//! reads, as `health_over_the_socket_matches_the_http_body` already did.
 //!
 //! What: one `*_over_the_socket_matches_the_http_body` per route family, plus
 //! the refusal classes — an unknown index, a cold-parked one, a KG-disabled
@@ -26,10 +25,7 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use tower::ServiceExt;
+use axum::http::StatusCode;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::chunker::{ChunkType, RawChunk};
@@ -38,7 +34,11 @@ use crate::core::memguard::{set_index_memory_limit_mb, set_memory_limit_mb};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT};
 use crate::service::rpc::RestoreLimits;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::{
+    call_chain_report, config_report, graph_neighbors_report, graph_report, graph_stats_report,
+    index_chunks_report, index_config_report, index_status_report, list_indexes_report,
+    SearchAppState,
+};
 
 use crate::service::rpc::reads;
 
@@ -84,13 +84,11 @@ fn raw(id: &str, function_name: Option<&str>) -> RawChunk {
     }
 }
 
-/// One state, both routers.
+/// One state, read by both the RPC router and the cores.
 ///
-/// Why both are built from the SAME `Arc`: that is the property under test at
-/// one level down — `build_router_on` and `reads::register` must read one
-/// registry. Two `Arc::new` calls here would make every assertion below pass
-/// against two independent daemons.
-async fn fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
+/// Why the SAME `Arc`: two `Arc::new` calls would make every assertion below
+/// pass against two independent daemons.
+async fn fixture() -> (Arc<SearchAppState>, RpcRouter) {
     let registry = IndexRegistry::new();
 
     let indexer = CodeIndexer::new(INDEX, "/nonexistent/parity-6285");
@@ -133,42 +131,20 @@ async fn fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
             ..Default::default()
         }]);
 
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc = reads::register(RpcRouter::new(), &state);
-    (state, http, rpc)
+    (state, rpc)
 }
 
-/// `GET uri` against the real router, as parsed JSON, asserting a 200.
-async fn http_json(router: &Router, uri: &str) -> serde_json::Value {
-    let (status, body) = http_raw(router, uri).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "GET {uri} answered {status}: {body}"
-    );
-    serde_json::from_str(&body)
-        .unwrap_or_else(|e| panic!("GET {uri} body is not JSON: {e}: {body}"))
+/// A core's 200 body as JSON, asserting it answered (#9535).
+fn http_body<T: serde::Serialize>(
+    answer: Result<T, (StatusCode, serde_json::Value)>,
+) -> serde_json::Value {
+    serde_json::to_value(answer.expect("the core must answer 200")).expect("encode the body")
 }
 
-/// `GET uri` against the real router, as `(status, body-text)`.
-async fn http_raw(router: &Router, uri: &str) -> (StatusCode, String) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::get(uri)
-                .body(Body::empty())
-                .expect("build the request"),
-        )
-        .await
-        .expect("the router must answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the body");
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+/// Socket-shaped params decoded as the core's param type.
+fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
+    serde_json::from_value(json).expect("decode the params")
 }
 
 /// One RPC call against the real router, asserting a result frame.
@@ -220,30 +196,17 @@ fn without_host_sampled(mut body: serde_json::Value, fields: &[&str]) -> serde_j
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn indexes_list_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let over_socket = rpc_ok(&rpc, reads::METHOD_INDEXES_LIST, serde_json::json!({})).await;
-    assert_eq!(over_socket, http_json(&http, "/indexes").await);
-
-    let over_socket = rpc_ok(
-        &rpc,
-        reads::METHOD_INDEXES_LIST,
-        serde_json::json!({ "details": true }),
-    )
-    .await;
-    assert_eq!(
-        over_socket,
-        http_json(&http, "/indexes?details=true").await,
-        "the details arm must carry the same size_bytes and root_path"
-    );
-
-    let over_socket = rpc_ok(
-        &rpc,
-        reads::METHOD_INDEXES_LIST,
-        serde_json::json!({ "format": "tree" }),
-    )
-    .await;
-    assert_eq!(over_socket, http_json(&http, "/indexes?format=tree").await);
+    for (args, arm) in [
+        (serde_json::json!({}), "flat"),
+        (serde_json::json!({ "details": true }), "details"),
+        (serde_json::json!({ "format": "tree" }), "tree"),
+    ] {
+        let over_socket = rpc_ok(&rpc, reads::METHOD_INDEXES_LIST, args.clone()).await;
+        let over_http = list_indexes_report(&state, &params(args)).await;
+        assert_eq!(over_socket, over_http, "the {arm} arm must match");
+    }
 }
 
 /// Why: `status` is the endpoint the MCP layer reads to decide whether an index
@@ -253,7 +216,7 @@ async fn indexes_list_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn index_status_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
     let over_socket = rpc_ok(
         &rpc,
@@ -261,7 +224,7 @@ async fn index_status_over_the_socket_matches_the_http_body() {
         serde_json::json!({ "index_id": INDEX }),
     )
     .await;
-    let over_http = http_json(&http, &format!("/indexes/{INDEX}/status")).await;
+    let over_http = http_body(index_status_report(&state, INDEX).await);
     assert_eq!(over_socket["chunk_count"], serde_json::json!(3));
     assert_eq!(over_socket, over_http);
 }
@@ -273,7 +236,7 @@ async fn index_status_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn index_config_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
     let over_socket = rpc_ok(
         &rpc,
@@ -281,7 +244,7 @@ async fn index_config_over_the_socket_matches_the_http_body() {
         serde_json::json!({ "index_id": INDEX }),
     )
     .await;
-    let over_http = http_json(&http, &format!("/indexes/{INDEX}/config")).await;
+    let over_http = http_body(index_config_report(&state, INDEX));
     assert_eq!(over_socket["kg"], serde_json::json!(true));
     assert_eq!(over_socket, over_http);
 }
@@ -304,7 +267,7 @@ async fn index_config_over_the_socket_matches_the_http_body() {
 #[serial_test::serial]
 async fn config_over_the_socket_matches_the_http_body() {
     let _restore = RestoreLimits::capture();
-    let (_state, http, rpc) = fixture().await;
+    let (_state, rpc) = fixture().await;
 
     // Two distinct values, neither the compiled-in 8192 default, so a body that
     // silently fell back to live detection could not pass by coincidence, and a
@@ -323,7 +286,7 @@ async fn config_over_the_socket_matches_the_http_body() {
         serde_json::json!(3072),
         "the socket must report the pinned indexing limit"
     );
-    assert_eq!(over_socket, http_json(&http, "/config").await);
+    assert_eq!(over_socket, http_body(Ok(config_report())));
 }
 
 /// Why: the two pagination modes order rows differently on purpose, so a socket
@@ -333,7 +296,11 @@ async fn config_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn chunks_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
+    let chunks = |args: serde_json::Value| {
+        let state = Arc::clone(&state);
+        async move { http_body(index_chunks_report(&state, INDEX, &params(args)).await) }
+    };
 
     // Offset mode.
     let over_socket = rpc_ok(
@@ -342,13 +309,15 @@ async fn chunks_over_the_socket_matches_the_http_body() {
         serde_json::json!({ "index_id": INDEX, "offset": 1, "limit": 2 }),
     )
     .await;
-    let over_http = http_json(&http, &format!("/indexes/{INDEX}/chunks?offset=1&limit=2")).await;
     assert_eq!(over_socket["total"], serde_json::json!(3));
     assert!(
         over_socket["next_cursor"].is_null(),
         "offset mode never surfaces a cursor"
     );
-    assert_eq!(over_socket, over_http);
+    assert_eq!(
+        over_socket,
+        chunks(serde_json::json!({ "offset": 1, "limit": 2 })).await
+    );
 
     // Cursor mode — opted into by sending `after` at all, empty included.
     let over_socket = rpc_ok(
@@ -357,8 +326,10 @@ async fn chunks_over_the_socket_matches_the_http_body() {
         serde_json::json!({ "index_id": INDEX, "after": "", "limit": 2 }),
     )
     .await;
-    let over_http = http_json(&http, &format!("/indexes/{INDEX}/chunks?after=&limit=2")).await;
-    assert_eq!(over_socket, over_http);
+    assert_eq!(
+        over_socket,
+        chunks(serde_json::json!({ "after": "", "limit": 2 })).await
+    );
 
     // The clamp is echoed post-clamp so a client can detect it; both transports
     // must clamp to the same number.
@@ -371,7 +342,7 @@ async fn chunks_over_the_socket_matches_the_http_body() {
     assert_eq!(over_socket["limit"], serde_json::json!(1_000));
     assert_eq!(
         over_socket,
-        http_json(&http, &format!("/indexes/{INDEX}/chunks?limit=9999")).await
+        chunks(serde_json::json!({ "limit": 9_999 })).await
     );
 }
 
@@ -382,35 +353,24 @@ async fn chunks_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn graph_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
     const HOST_SAMPLED: [&str; 1] = ["generated_at"];
 
-    let over_socket = rpc_ok(
-        &rpc,
-        reads::METHOD_GRAPH_GET,
+    // Unfiltered, then with every filter engaged, so the filter parsing is on
+    // both paths.
+    for args in [
         serde_json::json!({ "index_id": INDEX }),
-    )
-    .await;
-    let over_http = http_json(&http, &format!("/indexes/{INDEX}/graph")).await;
-    assert_eq!(
-        without_host_sampled(over_socket, &HOST_SAMPLED),
-        without_host_sampled(over_http, &HOST_SAMPLED)
-    );
-
-    // With every filter engaged, so the filter parsing is on both paths.
-    let params = serde_json::json!({
-        "index_id": INDEX, "types": "Symbol", "edge_types": "CallsFunction", "min_weight": 0.5,
-    });
-    let over_socket = rpc_ok(&rpc, reads::METHOD_GRAPH_GET, params).await;
-    let over_http = http_json(
-        &http,
-        &format!("/indexes/{INDEX}/graph?types=Symbol&edge_types=CallsFunction&min_weight=0.5"),
-    )
-    .await;
-    assert_eq!(
-        without_host_sampled(over_socket, &HOST_SAMPLED),
-        without_host_sampled(over_http, &HOST_SAMPLED)
-    );
+        serde_json::json!({
+            "index_id": INDEX, "types": "Symbol", "edge_types": "CallsFunction", "min_weight": 0.5,
+        }),
+    ] {
+        let over_socket = rpc_ok(&rpc, reads::METHOD_GRAPH_GET, args.clone()).await;
+        let over_http = http_body(graph_report(&state, INDEX, &params(args)).await);
+        assert_eq!(
+            without_host_sampled(over_socket, &HOST_SAMPLED),
+            without_host_sampled(over_http, &HOST_SAMPLED)
+        );
+    }
 }
 
 /// Why: `graph/stats` is the KG-health signal dashboards poll, and it carries
@@ -420,7 +380,7 @@ async fn graph_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn graph_stats_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
     let over_socket = rpc_ok(
         &rpc,
@@ -430,7 +390,7 @@ async fn graph_stats_over_the_socket_matches_the_http_body() {
     .await;
     assert_eq!(
         over_socket,
-        http_json(&http, &format!("/indexes/{INDEX}/graph/stats")).await
+        http_body(graph_stats_report(&state, INDEX).await)
     );
 }
 
@@ -441,19 +401,11 @@ async fn graph_stats_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn graph_neighbors_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let over_socket = rpc_ok(
-        &rpc,
-        reads::METHOD_GRAPH_NEIGHBORS,
-        serde_json::json!({ "index_id": INDEX, "node": "authenticate", "direction": "out", "max_hops": 9 }),
-    )
-    .await;
-    let over_http = http_json(
-        &http,
-        &format!("/indexes/{INDEX}/graph/neighbors?node=authenticate&direction=out&max_hops=9"),
-    )
-    .await;
+    let args = serde_json::json!({ "index_id": INDEX, "node": "authenticate", "direction": "out", "max_hops": 9 });
+    let over_socket = rpc_ok(&rpc, reads::METHOD_GRAPH_NEIGHBORS, args.clone()).await;
+    let over_http = http_body(graph_neighbors_report(&state, INDEX, &params(args)).await);
     assert_eq!(
         over_socket["max_hops"],
         serde_json::json!(4),
@@ -483,20 +435,13 @@ fn without_generated_line(report: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn call_chain_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let over_socket = rpc_ok(
-        &rpc,
-        reads::METHOD_CALL_CHAIN,
-        serde_json::json!({ "index_id": INDEX, "entry_point": "authenticate" }),
-    )
-    .await;
-    let (status, over_http) = http_raw(
-        &http,
-        &format!("/indexes/{INDEX}/call_chain?entry_point=authenticate"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "the entry point must resolve");
+    let args = serde_json::json!({ "index_id": INDEX, "entry_point": "authenticate" });
+    let over_socket = rpc_ok(&rpc, reads::METHOD_CALL_CHAIN, args.clone()).await;
+    let over_http = call_chain_report(&state, INDEX, params(args))
+        .await
+        .expect("the entry point must resolve");
 
     let over_socket = over_socket.as_str().expect("the frame carries a string");
     assert!(
@@ -517,7 +462,7 @@ async fn call_chain_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_unknown_index_reports_not_found_on_every_index_scoped_read() {
-    let (_state, _http, rpc) = fixture().await;
+    let (_state, rpc) = fixture().await;
 
     // Each entry carries the params that method needs BESIDES `index_id`, so a
     // refusal here is the index lookup rather than a decode failure.
@@ -574,16 +519,18 @@ async fn an_unknown_index_reports_not_found_on_every_index_scoped_read() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_cold_parked_index_reports_the_retryable_unavailable_code() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let (status, body) = http_raw(&http, &format!("/indexes/{COLD_INDEX}/status")).await;
+    let (status, body) = index_status_report(&state, COLD_INDEX)
+        .await
+        .expect_err("a non-resident index is refused");
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
         "fixture precondition: HTTP refuses a non-resident index with 503"
     );
-    assert!(
-        body.contains("\"retryable\":true"),
+    assert_eq!(
+        body["retryable"], true,
         "fixture precondition: the refusal says waiting can succeed: {body}"
     );
 
@@ -615,13 +562,12 @@ async fn a_cold_parked_index_reports_the_retryable_unavailable_code() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let (status, _body) = http_raw(
-        &http,
-        &format!("/indexes/{KG_OFF_INDEX}/call_chain?entry_point=authenticate"),
-    )
-    .await;
+    let args = serde_json::json!({ "entry_point": "authenticate" });
+    let (status, _body) = call_chain_report(&state, KG_OFF_INDEX, params(args))
+        .await
+        .expect_err("a skip_kg index is refused");
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -652,13 +598,12 @@ async fn call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable()
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_bad_direction_reports_invalid_params_on_both_transports() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let (status, _body) = http_raw(
-        &http,
-        &format!("/indexes/{INDEX}/graph/neighbors?node=authenticate&direction=sideways"),
-    )
-    .await;
+    let args = serde_json::json!({ "node": "authenticate", "direction": "sideways" });
+    let (status, _body) = graph_neighbors_report(&state, INDEX, &params(args))
+        .await
+        .expect_err("an unknown direction is refused");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let err = rpc_err(
@@ -679,7 +624,7 @@ async fn a_bad_direction_reports_invalid_params_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_index_scoped_method_without_an_index_id_reports_invalid_params() {
-    let (_state, _http, rpc) = fixture().await;
+    let (_state, rpc) = fixture().await;
 
     let err = rpc_err(&rpc, reads::METHOD_INDEX_STATUS, serde_json::json!({})).await;
     assert_eq!(err.code, CODE_INVALID_PARAMS, "{err}");

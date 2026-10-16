@@ -7,9 +7,9 @@
 //! also the arms a consumer branches on: an empty question and an unconfigured
 //! daemon are what the migrated UI has to render.
 //!
-//! Every case drives the REAL axum router and the REAL RPC router over ONE
-//! shared state, so a `chat_report` core that stopped being the body both
-//! transports serve fails here.
+//! Every case drives the REAL RPC router and, for the HTTP side, the
+//! `chat_report` core `POST /chat` wrapped, over ONE shared state (#9535: the
+//! router is gone), so a socket that stopped running that core fails here.
 //!
 //! **Every state below disables both providers explicitly.** `SearchAppState`
 //! reads `OPENROUTER_API_KEY` from the environment and `LocalModelConfig`
@@ -20,28 +20,24 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use tower::ServiceExt as _;
+use axum::http::StatusCode;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::chat;
 use crate::service::rpc::error::CODE_UNAVAILABLE;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::SearchAppState;
 
 /// The index every case names, registered so a call reaches the provider
 /// resolution rather than stopping at a registry lookup.
 const INDEX: &str = "chat-6285";
 
-/// One state with NO chat provider reachable, plus both routers on it.
+/// One state with NO chat provider reachable, plus the RPC router on it.
 ///
-/// Why both from the SAME `Arc`: the property under test one level down is that
-/// `build_router_on` and `chat::register` read ONE state. Two `Arc::new` calls
-/// would make every comparison below a comparison of two daemons.
-fn routers() -> (Router, RpcRouter) {
+/// Why the SAME `Arc`: two `Arc::new` calls would make every comparison below a
+/// comparison of two daemons.
+fn routers() -> (Arc<SearchAppState>, RpcRouter) {
     let registry = IndexRegistry::new();
     let root = "/nonexistent/chat-6285";
     registry.register(IndexHandle::bare(
@@ -58,33 +54,19 @@ fn routers() -> (Router, RpcRouter) {
             })
             .with_openrouter_api_key(""),
     );
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc = chat::register(RpcRouter::new(), &state);
-    (http, rpc)
+    (state, rpc)
 }
 
-async fn http_chat(router: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-    let request = Request::builder()
-        .method("POST")
-        .uri("/chat")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).expect("encode")))
-        .expect("build the request");
-    let response = router
-        .clone()
-        .oneshot(request)
+/// The `POST /chat` refusal: the extractor's decode, then the core (#9535).
+async fn http_chat(
+    state: &Arc<SearchAppState>,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = serde_json::from_value(body).expect("the HTTP extractor decodes the body");
+    crate::service::ui::chat_report(state, req)
         .await
-        .expect("the router must answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the body");
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let parsed = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-    (status, parsed)
+        .expect_err("chat must be refused")
 }
 
 async fn rpc_chat_err(rpc: &RpcRouter, params: serde_json::Value) -> RpcError {
@@ -137,10 +119,10 @@ fn assert_same_refusal(
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_empty_message_is_refused_identically_on_both_transports() {
-    let (http, rpc) = routers();
+    let (state, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "message": "" });
 
-    let over_http = http_chat(&http, body.clone()).await;
+    let over_http = http_chat(&state, body.clone()).await;
     let over_socket = rpc_chat_err(&rpc, body).await;
 
     assert_eq!(over_http.0, StatusCode::BAD_REQUEST);
@@ -161,10 +143,10 @@ async fn an_empty_message_is_refused_identically_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn chat_without_a_provider_is_refused_identically_on_both_transports() {
-    let (http, rpc) = routers();
+    let (state, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "message": "how does auth work?" });
 
-    let over_http = http_chat(&http, body.clone()).await;
+    let over_http = http_chat(&state, body.clone()).await;
     let over_socket = rpc_chat_err(&rpc, body).await;
 
     assert_eq!(over_http.0, StatusCode::SERVICE_UNAVAILABLE);
@@ -186,10 +168,10 @@ async fn chat_without_a_provider_is_refused_identically_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn the_question_alias_decodes_on_both_transports() {
-    let (http, rpc) = routers();
+    let (state, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "question": "how does auth work?" });
 
-    let over_http = http_chat(&http, body.clone()).await;
+    let over_http = http_chat(&state, body.clone()).await;
     let over_socket = rpc_chat_err(&rpc, body).await;
 
     assert_eq!(
