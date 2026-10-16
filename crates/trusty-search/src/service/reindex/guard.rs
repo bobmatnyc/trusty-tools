@@ -18,9 +18,9 @@
 //! `set_failure_reason` whenever it knows one (e.g. a captured producer-task
 //! panic). `Drop` checks the flag — if still armed, it (1) logs the captured
 //! reason (or a generic fallback) at `error!` to stderr so the daemon log is
-//! never silent, (2) pushes a blocking-channel send of the error event directly
-//! onto the broadcast sender (no `.await` in `Drop`; use the non-blocking
-//! `send`), and (3) marks the progress status as `Failed`.
+//! never silent, and (2) marks the progress status `Failed` and emits the error
+//! event through `ReindexProgress::push_terminal_from_drop`, which takes the
+//! `events` lock with a bounded `try_lock` rather than an `.await` (#9933).
 //!
 //! Test: `reindex_guard_fires_on_early_return`,
 //! `reindex_guard_uses_captured_failure_reason`,
@@ -189,9 +189,6 @@ impl Drop for ReindexTerminationGuard {
             }
         }
 
-        // Set the status and push the terminal error frame. `broadcast::send`
-        // is non-blocking, so this is `Drop`-safe (no `.await`).
-        self.progress.status.store(ReindexStatus::Failed);
         // #1451: omit `index_id` entirely when it was never stamped — an empty
         // string is a value a consumer routing on this field would act on.
         let mut payload = serde_json::Map::new();
@@ -202,11 +199,10 @@ impl Drop for ReindexTerminationGuard {
         payload.insert("message".into(), detail.into());
         payload.insert("fatal".into(), true.into());
         let msg = serde_json::Value::Object(payload).to_string();
-        // `send` returns Err when there are no receivers; ignore — the replay
-        // buffer is updated async by `push`, but Drop cannot be async. The
-        // broadcast path alone is sufficient for live subscribers; late
-        // subscribers reading the replay buffer will see the status as
-        // `Failed` (and now an `error!` line in the daemon log).
-        let _ = self.progress.sender.send(msg);
+        // #9933: status and frame in one hold of the `events` lock when it is
+        // free, so a live stream never reads `Failed` without the frame queued.
+        // Non-blocking: bounded `try_lock`, no `.await`.
+        self.progress
+            .push_terminal_from_drop(ReindexStatus::Failed, msg);
     }
 }

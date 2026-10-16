@@ -93,12 +93,12 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::{broadcast, mpsc};
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcStreamItems};
 
 use crate::core::registry::IndexId;
-use crate::service::reindex::ReindexStatus;
+use crate::service::reindex::{ReindexProgress, ReindexStatus};
 use crate::service::server::SearchAppState;
 use crate::service::socket::NoParams;
 
@@ -222,7 +222,10 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 ///
 /// A progress record whose status is no longer `Running` yields its replay and
 /// ends. Without that arm the stream would deliver the buffered `complete` event
-/// and then idle forever on a broadcast nothing will send to again.
+/// and then idle forever on a broadcast nothing will send to again. A LIVE
+/// stream ends the same way once the status turns terminal (#9933): the item
+/// that carried the terminal event is followed by the `end` frame, so the
+/// client hangs up on a finished stream rather than mid-stream.
 ///
 /// # Errors
 ///
@@ -234,6 +237,8 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 ///
 /// Test: `reindex_progress_events_replay_the_planted_sequence_frame_for_frame`,
 /// `a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted`,
+/// `a_live_reindex_stream_ends_with_an_end_frame_after_its_terminal_event`,
+/// `a_guard_drop_during_a_live_stream_delivers_its_error_then_ends`,
 /// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once`,
 /// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing`,
 /// `an_unknown_index_is_refused_before_the_reindex_stream_opens`.
@@ -281,13 +286,65 @@ async fn reindex_stream(
                 // The reindex task dropped its sender: the run is over.
                 Err(RecvError::Closed) => return,
             };
+            let fatal = is_fatal_frame(&value);
             if tx.send(Ok(value)).await.is_err() {
+                return;
+            }
+            // #9933: a fatal frame ends the run even before its status is
+            // visible — the guard's unlocked fallback sends before it stores.
+            if fatal {
+                return;
+            }
+            // #9933: the sender stays in `ReindexProgress` for replay, so
+            // `Closed` never fires; a terminal status is what ends the run.
+            if progress.status.load() != ReindexStatus::Running {
+                deliver_backlog(&progress, &mut events, &tx).await;
                 return;
             }
         }
     });
 
     Ok(items)
+}
+
+/// Forward what a finished run's broadcast still holds, then stop (#9933).
+///
+/// Why: `push_terminal` and `push_terminal_from_drop` store the status and then
+/// broadcast the terminal frame, both under the `events` lock, so a producer can
+/// read the terminal status while that frame is still in flight. Taking the
+/// lock waits that emission out; the frame is then in the receiver.
+/// What: takes and releases the `events` lock, then forwards every queued line
+/// (a lag frame for a gap) until the receiver is empty or the client is gone.
+/// Returning drops the item sender, so `write_stream` writes the `end` frame.
+/// Test: `a_terminal_frame_emitted_under_the_lock_is_delivered_before_the_end`.
+async fn deliver_backlog(
+    progress: &ReindexProgress,
+    events: &mut broadcast::Receiver<String>,
+    tx: &mpsc::Sender<Result<serde_json::Value, RpcError>>,
+) {
+    drop(progress.events.lock().await);
+    loop {
+        let value = match events.try_recv() {
+            Ok(line) => item(line),
+            Err(TryRecvError::Lagged(skipped)) => lag(skipped),
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return,
+        };
+        // #9933: stop at a fatal frame; the guard's fallback sends it twice.
+        let fatal = is_fatal_frame(&value);
+        if tx.send(Ok(value)).await.is_err() || fatal {
+            return;
+        }
+    }
+}
+
+/// Whether `value` is a fatal `error` frame (#9933).
+///
+/// Why: every fatal frame is terminal — each is emitted by `push_terminal` or
+/// the reindex guard's `Drop` — so a stream may end on one without reading the
+/// status, which the guard's unlocked fallback stores after its first send.
+/// Test: `a_guard_drop_that_cannot_take_the_lock_still_ends_the_stream_on_its_error`.
+fn is_fatal_frame(value: &serde_json::Value) -> bool {
+    value["event"] == "error" && value["fatal"] == true
 }
 
 /// `search.index.file_events` — this index's recent changes, then its live ones
