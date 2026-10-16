@@ -5,97 +5,124 @@
 //! records in `records/` (ruling C), and runs the Architect-only skills
 //! `tm-fleet-check` and `tm-context-refresh` (rulings D, E). Without them a
 //! fresh Architect has instructions that point at files that do not exist.
-//! What: [`FILES`] embeds each file; the canonical copies live in
-//! `python/trusty-architect/` and `scripts/check_architect_subproject.sh`
-//! fails when a shipped copy drifts. The two skills are not in the framework
-//! bundle (`core::bundle::ALL`): that bundle deploys to every session's user
-//! tier, and these must reach the Architect only. [`deploy`] writes each file
-//! only when it is absent. A file with other bytes is someone's edit and is
-//! reported skipped, never overwritten. The two skills' bytes come from
-//! `architect_skills::SKILLS`, which every Architect launch also deploys
-//! (#9540).
+//! What: [`files`] lists each file in write order. The `CLAUDE.md` template
+//! and the two skills come from an [`ArchitectSeed`] read from content at
+//! runtime (#9132, ADR-0064); the scripts and the other templates are still
+//! embedded. The canonical copies live in `python/trusty-architect/` and
+//! `scripts/check_architect_subproject.sh` fails when a shipped copy drifts.
+//! The two skills are not in the framework bundle (`core::bundle::ALL`): that
+//! bundle deploys to every session's user tier, and these must reach the
+//! Architect only. [`deploy`] writes each file only when it is absent. A file
+//! with other bytes is someone's edit and is reported skipped, never
+//! overwritten. The two skills' bytes are the ones every Architect launch
+//! also deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
-//! `every_script_a_seeded_script_loads_by_path_is_seeded`.
+//! `every_script_a_seeded_script_loads_by_path_is_seeded`,
+//! `a_seed_that_does_not_resolve_writes_nothing`.
 
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use trusty_mpm::core::project_skill_tier::architect_skills;
+use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 
 use super::Step;
 
 /// One file `tm fleet init` writes, relative to the Architect directory.
-pub(crate) struct Seeded {
+pub(crate) struct Seeded<'a> {
     /// Destination below the Architect directory.
-    pub(crate) dest: &'static str,
+    pub(crate) dest: String,
     /// The shipped bytes.
-    pub(crate) contents: &'static str,
+    pub(crate) contents: &'a str,
     /// Whether the file is written with mode `0755`.
     pub(crate) executable: bool,
 }
 
-/// Build one [`FILES`] row from a path under `src/assets/architect/`.
-macro_rules! seeded {
+/// One embedded [`files`] row: destination, bytes, executable.
+type Embedded = (&'static str, &'static str, bool);
+
+/// Build one [`EMBEDDED`] row from a path under `src/assets/architect/`.
+macro_rules! embedded {
     ($dest:literal, $asset:literal, $exec:literal) => {
-        Seeded {
-            dest: $dest,
-            contents: include_str!(concat!("../../../../assets/architect/", $asset)),
-            executable: $exec,
-        }
+        (
+            $dest,
+            include_str!(concat!("../../../../assets/architect/", $asset)),
+            $exec,
+        )
     };
 }
 
-/// Every file `tm fleet init` writes, in write order.
-pub(crate) const FILES: &[Seeded] = &[
-    seeded!("CLAUDE.md", "templates/CLAUDE.md", false),
-    seeded!(".gitignore", "templates/gitignore", false),
-    seeded!("records/state.md", "templates/records/state.md", false),
-    seeded!("records/actions.md", "templates/records/actions.md", false),
-    seeded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
+/// The files still compiled in, in write order, after `CLAUDE.md`.
+const EMBEDDED: &[Embedded] = &[
+    embedded!(".gitignore", "templates/gitignore", false),
+    embedded!("records/state.md", "templates/records/state.md", false),
+    embedded!("records/actions.md", "templates/records/actions.md", false),
+    embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
     // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
-    seeded!(
+    embedded!(
         "scripts/fleet-classify.py",
         "scripts/fleet-classify.py",
         false
     ),
-    seeded!("scripts/input-state.py", "scripts/input-state.py", true),
-    seeded!(
+    embedded!("scripts/input-state.py", "scripts/input-state.py", true),
+    embedded!(
         "scripts/quiet-sessions.py",
         "scripts/quiet-sessions.py",
         false
     ),
-    seeded!("scripts/self-ctx.py", "scripts/self-ctx.py", false),
-    seeded!(
+    embedded!("scripts/self-ctx.py", "scripts/self-ctx.py", false),
+    embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
         true
     ),
-    // #9540: the skill bytes come from the one table the launch deploys.
-    Seeded {
-        dest: ".claude/skills/tm-fleet-check/SKILL.md",
-        contents: architect_skills::FLEET_CHECK.contents,
-        executable: false,
-    },
-    Seeded {
-        dest: ".claude/skills/tm-context-refresh/SKILL.md",
-        contents: architect_skills::CONTEXT_REFRESH.contents,
-        executable: false,
-    },
 ];
+
+/// Every file `tm fleet init` writes, in write order.
+///
+/// Why: #9132 — the template and the skills are read from content, so the
+/// table is built from `seed` instead of being a compiled-in constant.
+/// What: `CLAUDE.md` from `seed`, then [`EMBEDDED`], then each seed skill at
+/// `.claude/skills/<stem>/SKILL.md`.
+/// Test: `a_first_run_seeds_the_architect_project`.
+pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
+    let template = Seeded {
+        dest: "CLAUDE.md".to_owned(),
+        contents: &seed.claude_md,
+        executable: false,
+    };
+    let embedded = EMBEDDED.iter().map(|&(dest, contents, executable)| Seeded {
+        dest: dest.to_owned(),
+        contents,
+        executable,
+    });
+    // #9540: the skill bytes are the ones the launch deploys.
+    let skills = seed.skills.iter().map(|skill| Seeded {
+        dest: format!(".claude/skills/{}/SKILL.md", skill.stem),
+        contents: &skill.contents,
+        executable: false,
+    });
+    std::iter::once(template)
+        .chain(embedded)
+        .chain(skills)
+        .collect()
+}
 
 /// Directories `tm fleet init` creates that start with no file in them.
 pub(crate) const DIRS: &[&str] = &["records/projects"];
 
-/// Write every [`FILES`] entry and [`DIRS`] entry under `dir`; one step each.
+/// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
 ///
-/// Why/What: see the module doc. `dir` is the preflight-checked path.
+/// Why/What: see the module doc. `dir` is the preflight-checked path; `seed`
+/// was read before any write, so a missing seed file never leaves a partial
+/// project (#9132).
 /// Test: `a_first_run_seeds_the_architect_project`,
 /// `an_edited_seed_or_script_is_never_overwritten`.
-pub(crate) fn deploy(dir: &Path) -> anyhow::Result<Vec<Step>> {
-    let mut steps = Vec::with_capacity(FILES.len() + DIRS.len());
-    for file in FILES {
+pub(crate) fn deploy(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Vec<Step>> {
+    let files = files(seed);
+    let mut steps = Vec::with_capacity(files.len() + DIRS.len());
+    for file in &files {
         steps.push(deploy_file(dir, file)?);
     }
     for rel in DIRS {
@@ -112,10 +139,10 @@ pub(crate) fn deploy(dir: &Path) -> anyhow::Result<Vec<Step>> {
 }
 
 /// Write one file when absent; never replace bytes that differ.
-fn deploy_file(dir: &Path, file: &Seeded) -> anyhow::Result<Step> {
-    let path = dir.join(file.dest);
+fn deploy_file(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<Step> {
+    let path = dir.join(&file.dest);
     match std::fs::read(&path) {
-        Ok(bytes) if bytes == file.contents.as_bytes() => Ok(Step::Unchanged(file.dest.to_owned())),
+        Ok(bytes) if bytes == file.contents.as_bytes() => Ok(Step::Unchanged(file.dest.clone())),
         Ok(_) => Ok(Step::Skipped(format!(
             "{}: differs from the shipped copy (edited), so it is left as is",
             file.dest

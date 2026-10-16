@@ -2,7 +2,8 @@
 name: tm-context-refresh
 description: The Architect's context refresh for a watched trusty-mpm session. Checkpoint with /tm-session-pause, verify the snapshot, /clear, then /tm-session-resume, each step verified before the next. Default threshold 50% context. Architect only.
 user-invocable: true
-version: "0.1.0"
+metadata:
+  version: "0.1.0"
 category: monitoring
 tags: [architect, context, pause, resume, tmux]
 effort: high

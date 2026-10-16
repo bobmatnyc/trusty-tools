@@ -75,7 +75,8 @@ fn skills_the_prompts_load() -> BTreeSet<String> {
             }
         }
     }
-    let seeds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/skills");
+    // #9132: the seeded skills ship as content, under `instructions/architect/`.
+    let seeds = content("instructions/architect/skills");
     for path in md_files(&seeds) {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             names.insert(stem.to_string());

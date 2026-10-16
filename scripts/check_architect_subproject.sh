@@ -58,15 +58,15 @@ SUB="$ROOT/$SUB_REL"
 # one per line. P4 added what `tm fleet init` writes into the Architect.
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
-skills/tm-fleet-check.md|crates/trusty-mpm/src/assets/architect/skills/tm-fleet-check.md
-skills/tm-context-refresh.md|crates/trusty-mpm/src/assets/architect/skills/tm-context-refresh.md
+skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
+skills/tm-context-refresh.md|content/instructions/architect/skills/tm-context-refresh.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
 scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
-templates/CLAUDE.md|crates/trusty-mpm/src/assets/architect/templates/CLAUDE.md
+templates/CLAUDE.md|content/instructions/architect/templates/CLAUDE.md
 templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
 templates/records/state.md|crates/trusty-mpm/src/assets/architect/templates/records/state.md
 templates/records/actions.md|crates/trusty-mpm/src/assets/architect/templates/records/actions.md

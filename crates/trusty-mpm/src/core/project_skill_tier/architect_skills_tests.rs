@@ -9,6 +9,7 @@
 //! Test: this is the test module.
 
 use super::*;
+use crate::core::project_skill_tier::architect_seed::test_support::shipped;
 use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 
@@ -24,7 +25,7 @@ fn one_with_history(
 ) -> [ArchitectSkill; 1] {
     [ArchitectSkill {
         stem: "tm-probe",
-        contents,
+        contents: contents.to_owned(),
         previous,
     }]
 }
@@ -54,8 +55,8 @@ fn mtime(path: &Path) -> SystemTime {
 #[test]
 fn an_absent_skill_is_written_byte_equal() {
     let project = tempdir().unwrap();
-    let report = deploy_architect_skills(project.path(), &[]);
-    for skill in SKILLS {
+    let report = deploy_architect_skills(project.path(), &[], &shipped());
+    for skill in shipped() {
         let path = skill_path(&project_tier(project.path()), skill.stem);
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -73,7 +74,7 @@ fn an_edited_copy_is_kept_and_reported() {
     use tracing_subscriber::layer::SubscriberExt;
 
     let project = tempdir().unwrap();
-    deploy_architect_skills(project.path(), &[]);
+    deploy_architect_skills(project.path(), &[], &shipped());
     let path = skill_path(&project_tier(project.path()), FLEET_CHECK.stem);
     std::fs::write(&path, "PROJECT EDIT\n").unwrap();
 
@@ -83,7 +84,7 @@ fn an_edited_copy_is_kept_and_reported() {
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     let report = tracing::subscriber::with_default(subscriber, || {
-        deploy_architect_skills(project.path(), &[])
+        deploy_architect_skills(project.path(), &[], &shipped())
     });
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "PROJECT EDIT\n");
@@ -149,13 +150,13 @@ fn a_byte_equal_seed_is_adopted_then_refreshed() {
 fn a_second_run_writes_nothing() {
     let project = tempdir().unwrap();
     let tier = project_tier(project.path());
-    let first = deploy_architect_skills(project.path(), &[]);
-    assert_eq!(first.written.len(), SKILLS.len());
-    let mut files: Vec<PathBuf> = SKILLS.iter().map(|s| skill_path(&tier, s.stem)).collect();
+    let first = deploy_architect_skills(project.path(), &[], &shipped());
+    assert_eq!(first.written.len(), SHIPPED.len());
+    let mut files: Vec<PathBuf> = SHIPPED.iter().map(|s| skill_path(&tier, s.stem)).collect();
     files.push(tier.join(RECORD_FILE));
     let pinned: Vec<SystemTime> = files.iter().map(|f| age(f)).collect();
 
-    let second = deploy_architect_skills(project.path(), &[]);
+    let second = deploy_architect_skills(project.path(), &[], &shipped());
 
     assert_eq!(second, DeployReport::default());
     let after: Vec<SystemTime> = files.iter().map(|f| mtime(f)).collect();
@@ -170,7 +171,7 @@ fn a_blocked_skill_dir_is_an_error_line() {
     std::fs::create_dir_all(&tier).unwrap();
     std::fs::write(tier.join(FLEET_CHECK.stem), "not a dir").unwrap();
 
-    let report = deploy_architect_skills(project.path(), &[]);
+    let report = deploy_architect_skills(project.path(), &[], &shipped());
 
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
@@ -192,7 +193,7 @@ fn health_names_each_skill_that_is_not_current() {
     assert!(detail.contains("tm-fleet-check: missing"), "{detail}");
     assert!(detail.contains("tm-context-refresh: missing"), "{detail}");
 
-    deploy_architect_skills(project.path(), &[]);
+    deploy_architect_skills(project.path(), &[], &shipped());
     let (ok, detail) = health(project.path());
     assert!(ok, "{detail}");
 }
@@ -249,15 +250,15 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 2] = [
         (
             "tm-fleet-check",
-            "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
+            "7535d8bc496f17cd1a9d80e461073aa9539fd070329231cb2508a6e65981287a",
         ),
         (
             "tm-context-refresh",
-            "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
+            "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
         ),
     ];
-    assert_eq!(PINNED.len(), SKILLS.len());
-    for (skill, (stem, pinned)) in SKILLS.iter().zip(PINNED) {
+    assert_eq!(PINNED.len(), SHIPPED.len());
+    for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {
         assert_eq!(skill.stem, stem);
         assert_eq!(
             sha256_hex(skill.contents.as_bytes()),
@@ -297,7 +298,7 @@ fn a_malformed_record_keeps_a_differing_copy_and_names_the_record() {
 #[test]
 fn the_skills_row_names_a_malformed_record() {
     let project = tempdir().unwrap();
-    deploy_architect_skills(project.path(), &[]);
+    deploy_architect_skills(project.path(), &[], &shipped());
     std::fs::write(project_tier(project.path()).join(RECORD_FILE), "{ not json").unwrap();
 
     let (ok, detail) = health(project.path());
@@ -315,7 +316,7 @@ fn a_record_write_failure_is_an_error_and_the_row_does_not_say_current() {
     let project = tempdir().unwrap();
     std::fs::create_dir_all(project_tier(project.path()).join(RECORD_FILE)).unwrap();
 
-    let report = deploy_architect_skills(project.path(), &[]);
+    let report = deploy_architect_skills(project.path(), &[], &shipped());
 
     assert!(
         report.errors.iter().any(|e| e.contains(RECORD_FILE)),
@@ -363,7 +364,7 @@ fn a_tier_resolving_onto_a_reserved_dir_is_refused() {
             "no error line for {}",
             reserved.display()
         );
-        for skill in SKILLS {
+        for skill in SHIPPED {
             let landed = skill_path(&reserved, skill.stem);
             assert!(
                 !landed.exists(),
@@ -382,10 +383,11 @@ fn the_skills_row_names_a_refused_reserved_tier() {
     std::fs::create_dir_all(project.path().join(".claude")).unwrap();
     std::os::unix::fs::symlink(reserved.path(), project_tier(project.path())).unwrap();
 
-    let (ok, detail) = health_with(project.path(), &[reserved.path().to_path_buf()]);
+    let (ok, detail) = health_with(project.path(), &[reserved.path().to_path_buf()], &shipped());
     assert!(!ok, "{detail}");
     assert!(detail.contains("deploy refused"), "{detail}");
-    let report = deploy_architect_skills(project.path(), &[reserved.path().to_path_buf()]);
+    let report =
+        deploy_architect_skills(project.path(), &[reserved.path().to_path_buf()], &shipped());
     assert!(report.written.is_empty(), "{:?}", report.written);
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
@@ -401,7 +403,7 @@ fn architect_skills_never_join_the_bundled_pm_roster() {
         crate::core::content_source::test_support::rc(),
     );
     assert!(!bundled.is_empty(), "the bundled roster read as empty");
-    for skill in SKILLS {
+    for skill in SHIPPED {
         assert!(
             !bundled.contains(skill.stem),
             "{} is in the bundled PM skill roster",

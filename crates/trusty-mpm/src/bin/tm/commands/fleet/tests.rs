@@ -13,6 +13,8 @@ use super::launch::PaneState;
 use super::session_name::SessionNames;
 use super::*;
 use crate::cli::{Cli, Command};
+use trusty_mpm::core::content_source::Fetch;
+use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 
 /// A tmux with no session and no stamp; the preflight tests use it too.
 pub(super) const NO_TMUX: Probe = Probe {
@@ -527,10 +529,24 @@ fn a_nested_claude_under_the_architect_is_not_this_session() {
 
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
+/// The checkout's Architect seed, read from content once (#9132).
+fn seed() -> &'static ArchitectSeed {
+    static SEED: std::sync::OnceLock<ArchitectSeed> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| {
+        let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+        ArchitectSeed::resolve_in(&root, None, None, Fetch::Never).expect("the checkout seed")
+    })
+}
+
+/// Every file `tm fleet init` seeds from the checkout's content.
+fn seeded_files() -> Vec<super::seed::Seeded<'static>> {
+    super::seed::files(seed())
+}
+
 /// The two Architect-only skills, as shipped.
-fn ported_skills() -> Vec<&'static super::seed::Seeded> {
-    super::seed::FILES
-        .iter()
+fn ported_skills() -> Vec<super::seed::Seeded<'static>> {
+    seeded_files()
+        .into_iter()
         .filter(|f| f.dest.starts_with(".claude/skills/"))
         .collect()
 }
@@ -541,8 +557,8 @@ fn a_first_run_seeds_the_architect_project() {
     let fx = Fixture::new();
     let report = fx.init().unwrap();
     let dir = fx.dir();
-    for file in super::seed::FILES {
-        let path = dir.join(file.dest);
+    for file in seeded_files() {
+        let path = dir.join(&file.dest);
         assert_eq!(
             std::fs::read(&path).unwrap(),
             file.contents.as_bytes(),
@@ -587,16 +603,31 @@ fn a_first_run_seeds_the_architect_project() {
     );
 }
 
+/// #9132: with no content to read the seed from, `tm fleet init` refuses,
+/// names the remedy, and writes nothing: no project dir, no user config.
+#[test]
+fn a_seed_that_does_not_resolve_writes_nothing() {
+    let fx = Fixture::new();
+    let cache = tempfile::tempdir().unwrap();
+    let err = init_with_seed(&fx.dir(), fx.home(), false, NO_TMUX, None, |dir| {
+        ArchitectSeed::resolve_in(dir, None, Some(cache.path()), Fetch::Never)
+    })
+    .expect_err("no content serves the seed");
+    let text = format!("{err:#}");
+    assert!(text.contains("writes nothing"), "{text}");
+    assert!(text.contains("tm content"), "{text}");
+    assert!(!fx.dir().exists(), "the project directory was created");
+    assert!(!fx.config_path().exists(), "the user config was written");
+}
+
 /// #8891: a sibling the poller loads by path must be seeded beside it, or the
 /// deployed poller fails at import.
 #[test]
 fn every_script_a_seeded_script_loads_by_path_is_seeded() {
-    let seeded: Vec<&str> = super::seed::FILES.iter().map(|f| f.dest).collect();
+    let files = seeded_files();
+    let seeded: Vec<&str> = files.iter().map(|f| f.dest.as_str()).collect();
     let mut checked = 0;
-    for file in super::seed::FILES
-        .iter()
-        .filter(|f| f.dest.ends_with(".py"))
-    {
+    for file in files.iter().filter(|f| f.dest.ends_with(".py")) {
         for call in file.contents.split("_load_by_path(").skip(1) {
             let args = call.split(')').next().unwrap_or_default();
             let Some(arg) = args.split(',').nth(1).map(str::trim) else {
@@ -725,8 +756,8 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
 #[test]
 fn the_seeded_instructions_never_hard_code_the_poller_session() {
     let seeded = |dest: &str| {
-        super::seed::FILES
-            .iter()
+        seeded_files()
+            .into_iter()
             .find(|f| f.dest == dest)
             .unwrap_or_else(|| panic!("{dest} is not seeded"))
             .contents
@@ -892,8 +923,8 @@ fn the_start_command_drops_tmux_socket() {
 #[test]
 fn the_seeded_skills_run_tm_architect_input_state_not_python() {
     let seeded = |dest: &str| {
-        super::seed::FILES
-            .iter()
+        seeded_files()
+            .into_iter()
             .find(|f| f.dest == dest)
             .unwrap()
             .contents
@@ -935,10 +966,13 @@ fn a_pane_answer_parses_to_its_state() {
 }
 
 /// #8436 P4 fix, item 7: every Architect-only skill asset is seeded to
-/// `.claude/skills/`, and every seeded skill has an asset.
+/// `.claude/skills/`, and every seeded skill has an asset. #9132: the assets
+/// are content files under `instructions/architect/skills/`.
 #[test]
 fn every_architect_skill_asset_is_seeded() {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/skills");
+    let assets = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("content/instructions/architect/skills");
     let mut on_disk: Vec<String> = std::fs::read_dir(&assets)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

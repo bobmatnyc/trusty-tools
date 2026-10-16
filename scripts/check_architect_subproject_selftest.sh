@@ -74,7 +74,8 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     drift) printf 'edited\n' >>"$t/$SKILL_DST" ;;
     drift:*) printf 'edited\n' >>"$t/${1#drift:}" ;;
     shipped-missing) rm "$t/$SKILL_DST" ;;
-    unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/skills/extra.md" ;;
+    # #9132: scripts/ still holds shipped copies, so the directory exists.
+    unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/scripts/extra.py" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
     # #9822: the Rust crate crates/trusty-architect is not the sub-project.
     crate-dependency)

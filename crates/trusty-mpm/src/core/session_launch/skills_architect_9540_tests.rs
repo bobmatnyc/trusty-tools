@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime};
 use super::super::tests::EnvVarGuard;
 use super::super::{HostInputs, PrepReport, prepare_session_inner};
 use crate::core::paths::FrameworkPaths;
-use crate::core::project_skill_tier::architect_skills::{self, SKILLS};
+use crate::core::project_skill_tier::architect_seed::test_support::{shipped, shipped_text};
+use crate::core::project_skill_tier::architect_skills::{self, SHIPPED};
 use crate::core::session_profile::SessionProfile;
 use tempfile::tempdir;
 
@@ -61,7 +62,7 @@ fn request_supervisor(project: &Path) {
 
 /// `<tier>/<stem>/SKILL.md` for every shipped skill.
 fn copies(tier: &Path) -> Vec<PathBuf> {
-    SKILLS
+    SHIPPED
         .iter()
         .map(|s| architect_skills::skill_path(tier, s.stem))
         .collect()
@@ -84,7 +85,7 @@ fn an_architect_launch_writes_both_skills_byte_equal() {
 
     assert_eq!(report.profile, SessionProfile::Architect);
     let tier = architect_skills::project_tier(project.path());
-    for skill in SKILLS {
+    for skill in shipped() {
         let path = architect_skills::skill_path(&tier, skill.stem);
         let bytes =
             std::fs::read(&path).unwrap_or_else(|e| panic!("{} not deployed: {e}", path.display()));
@@ -139,7 +140,7 @@ fn a_deleted_copy_returns_on_the_next_launch_and_on_sync_assets() {
     launch(project.path(), home.path());
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        architect_skills::FLEET_CHECK.contents
+        shipped_text(architect_skills::FLEET_CHECK.stem)
     );
 
     std::fs::remove_file(&path).unwrap();
@@ -154,7 +155,7 @@ fn a_deleted_copy_returns_on_the_next_launch_and_on_sync_assets() {
     }
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        architect_skills::FLEET_CHECK.contents,
+        shipped_text(architect_skills::FLEET_CHECK.stem),
         "the mid-session refresh did not restore the deleted copy"
     );
 }

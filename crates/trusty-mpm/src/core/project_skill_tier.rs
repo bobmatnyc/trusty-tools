@@ -309,6 +309,8 @@ pub fn ensure_project_skill_tier_for_version(
 
 // #9540: the Architect-only skills share this tier; see the module.
 pub mod architect_skills;
+// #9132: the Architect seed files, read from content instead of compiled in.
+pub mod architect_seed;
 
 #[cfg(test)]
 #[path = "project_skill_tier_tests.rs"]
