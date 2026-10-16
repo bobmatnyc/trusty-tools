@@ -71,7 +71,7 @@ scenario_install_released() {
 
     # 2. Install each in-scope PACKAGE from crates.io — `cargo install <pkg>
     #    --locked`, once per package (EIGHT today), never once per binary
-    #    (TWELVE today) and never `--bin` (DOC-2 §12.2).
+    #    (THIRTEEN today, #9973) and never `--bin` (DOC-2 §12.2).
     #
     #    Install order is TSV row order (§F-10(b)); `trusty-installer` precedes
     #    N2 in row order already, which is what N2 needs.
@@ -110,13 +110,13 @@ scenario_install_released() {
 
     # 4. Expectations that follow from those steps (DOC-1 §3.6).
     #
-    #    `expect_a` is `present` on all TWELVE in-scope rows — including `tm`
+    #    `expect_a` is `present` on all THIRTEEN in-scope rows (#9973) — including `tm`
     #    and `trusty-mpm`. That is the D2 reversal, asserted rather than
     #    described.
     verify_binaries "$VMTEST_VM" a
 
     #    DOC-1 §7.4's Single-Install Convention gate, once per MULTI-BINARY
-    #    in-scope package — four today: trusty-search (2), trusty-memory (3),
+    #    in-scope package — four today: trusty-search (3, #9973), trusty-memory (3),
     #    trusty-installer (2) and trusty-mpm (2). The set is DERIVED, not listed.
     #
     #    UNDER (a) THIS GATE IS ASSERTING SOMETHING THE OTHER TWO PATTERNS CANNOT:

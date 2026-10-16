@@ -37,6 +37,14 @@ release tag, and no `changelog.d/` fragment directory (the per-PR fragment gate 
   credential was actually written into the guest, so a no-token run and every
   `local` / `released` run stay silent.
 
+### Changed
+
+- `expected-binaries.tsv` lists `trusty-embedderd-py` as a third in-scope trusty-search binary
+  (`src/bin/trusty-embedderd-py.rs`), replacing its out-of-scope row for the
+  `trusty-embedderd-py` package, which is library-only since #9468
+  ([#9973](https://github.com/bobmatnyc/trusty-tools/issues/9973)). Every pattern now
+  asserts thirteen in-scope binaries.
+
 ### Fixed
 
 - A failing `git clone` under pattern (b) no longer asserts flatly that the failure

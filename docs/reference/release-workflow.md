@@ -672,13 +672,15 @@ make install-search-signed
 ```
 
 The script:
-1. Runs `cargo install --path crates/trusty-search --locked` (installs both
-   `trusty-search` and the bundled `trusty-embedderd` to `~/.cargo/bin/`).
+1. Runs `cargo install --path crates/trusty-search --locked` (installs
+   `trusty-search` and the bundled `trusty-embedderd` and `trusty-embedderd-py`
+   to `~/.cargo/bin/`; the launcher joined the set in #9468 and #9973).
 2. Shells out to `tctl sign trusty-search --dir ~/.cargo/bin`, which:
    - Auto-detects the Developer ID identity from the login keychain (or honours
      `TRUSTY_SIGN_IDENTITY`).
-   - Codesigns both binaries with:
-     - `--identifier com.trusty.trusty-search` / `com.trusty.trusty-embedderd`
+   - Codesigns all three binaries with:
+     - `--identifier com.trusty.trusty-search` / `com.trusty.trusty-embedderd` /
+       `com.trusty.trusty-embedderd-py`
      - `--options runtime` (Hardened Runtime — required for notarization)
      - `--timestamp` (secure timestamp from Apple's servers)
    - Verifies signatures with `codesign --verify --deep --strict`.

@@ -9,7 +9,7 @@
 # the FDA grant persists permanently.
 #
 # What: Runs `cargo install` for trusty-search from local source (which also
-# installs the bundled trusty-embedderd binary) — this script's one job that
+# installs the bundled trusty-embedderd and trusty-embedderd-py binaries) — this script's one job that
 # `tctl install` cannot replace, since `tctl install` only pulls prebuilt or
 # crates.io releases, never a local working tree. The actual codesign +
 # identity-detection + verification step (previously duplicated here in bash)
@@ -58,6 +58,8 @@ set -euo pipefail
 CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 readonly SEARCH_BIN="$CARGO_BIN_DIR/trusty-search"
 readonly EMBEDDERD_BIN="$CARGO_BIN_DIR/trusty-embedderd"
+# #9973: the Python/MPS launcher ships with trusty-search since #9468.
+readonly EMBEDDERD_PY_BIN="$CARGO_BIN_DIR/trusty-embedderd-py"
 
 # Sign identity: auto-detected by `tctl sign` if not set
 TRUSTY_SIGN_IDENTITY="${TRUSTY_SIGN_IDENTITY:-}"
@@ -140,7 +142,7 @@ run_cargo_install() {
 
     info "cargo install complete."
     info "Installed binaries:"
-    for bin in "$SEARCH_BIN" "$EMBEDDERD_BIN"; do
+    for bin in "$SEARCH_BIN" "$EMBEDDERD_BIN" "$EMBEDDERD_PY_BIN"; do
         if [[ -f "$bin" ]]; then
             printf '  %s\n' "$bin"
         else

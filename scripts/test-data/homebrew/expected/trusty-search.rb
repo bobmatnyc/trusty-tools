@@ -26,6 +26,7 @@ class TrustySearch < Formula
   def install
     bin.install "trusty-search"
     bin.install "trusty-embedderd"
+    bin.install "trusty-embedderd-py"
   end
 
   test do

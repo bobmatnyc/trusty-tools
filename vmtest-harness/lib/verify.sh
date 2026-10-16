@@ -713,7 +713,7 @@ _verify_package_expectation() {
 #
 # WHAT THIS DOES NOT NARROW, so nobody over-reads it: `on_path == true` and
 # `version != null` are STILL ASSERTED for every in-scope member doctor reports;
-# all 12 binaries are still asserted present; all 4 Single-Install gates still
+# all 13 binaries (#9973) are still asserted present; all 4 Single-Install gates still
 # run; §1.3's RC-1 liveness-only rule is untouched. DAEMON HEALTH, and nothing
 # else, is what narrowed.
 #
