@@ -233,7 +233,12 @@ async fn a_released_palace_is_recorded_off_the_response_path() {
             .await
             .expect("palace_create");
     }
-    let id = remember(&state, "acc-own", "A ruling recorded without waiting").await;
+    let id = remember(
+        &state,
+        "acc-own",
+        "A served ruling is recorded in its owning palace without making the recall wait",
+    )
+    .await;
     let drawer = Uuid::parse_str(&id).expect("uuid");
     state.registry.remove(&PalaceId::new("acc-own"));
     let other = crate::tools::helpers::open_palace_handle(&state, "acc-other").expect("other");
