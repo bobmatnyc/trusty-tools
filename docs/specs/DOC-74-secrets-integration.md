@@ -1275,8 +1275,18 @@ reached only through `secrets.copy` with `to_backend` set to
 - Each CLI uses its own stored login. Every inherited `GH_*` and `VERCEL_*`
   variable, and `GITHUB_TOKEN`, is removed from the child's environment.
 - The value goes on the CLI's stdin. A key counts as copied only after a
-  post-write metadata read shows the write (GitHub: `updated_at` advanced);
-  exit 0 alone never counts.
+  post-write metadata read shows the write (GitHub: `updated_at` advanced;
+  Vercel: `vercel env ls` names the key on every target); exit 0 alone never
+  counts.
+- Vercel (#9069 PR 2): the CLI runs in an empty 0700 directory passed as
+  `--cwd`, with `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the mapping. It
+  also loses every inherited `NODE_*`, `NOW_*`, `npm_config_*`,
+  `NPM_CONFIG_*`, proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY`, either case), `SSL_CERT_FILE` and `SSL_CERT_DIR` variable,
+  always (D3, D4). It pushes `production` then `preview`; a failing target
+  fails the key. An existing variable is overwritten in place with `--force`, never removed
+  and re-added; because a listing is presence only, such a key is reported
+  failed until the live check shows how to prove an update (D9).
 - A sync target is never a configured backend, never read back, never swept
   by `delete`, and never written to the names-only index. A sandboxed server
   opens none.

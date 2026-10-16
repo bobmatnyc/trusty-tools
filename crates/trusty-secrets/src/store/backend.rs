@@ -232,12 +232,13 @@ pub fn cli_backends() -> Vec<BackendId> {
 ///
 /// Why: D12 — a sync target is never swept by `delete` and never a store,
 /// so it stays out of [`cli_backends`], which drives the delete sweep.
-/// What: `github-actions` on a build that links the CLI backends; empty
-/// otherwise.
-/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+/// What: `github-actions` and `vercel` on a build that links the CLI
+/// backends; empty otherwise.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`,
+/// `server_doctor_lists_the_vercel_target_without_spawning`.
 pub fn sync_targets() -> Vec<BackendId> {
     if CLI_BACKENDS_COMPILED {
-        vec![BackendId::github_actions()]
+        vec![BackendId::github_actions(), BackendId::vercel()]
     } else {
         Vec::new()
     }
@@ -253,16 +254,21 @@ pub fn sync_targets() -> Vec<BackendId> {
 /// `secrets.github_actions:` section is present, else
 /// [`SecretsError::BackendNotEnabled`]; `gh` comes from the section's
 /// `program` pin or the first of the fixed system directories that holds
-/// one, never a `PATH`, else [`SecretsError::CliNotInstalled`]. Any other
-/// id, and every id on a build without `cli-backends`, is
+/// one, never a `PATH`, else [`SecretsError::CliNotInstalled`]. `vercel`
+/// opens only when its `secrets.vercel:` section maps the checkout's
+/// `<owner>/<repo>` to a project and pins `program`; each push runs in an
+/// empty directory under `work_root` (#9069 PR 2). Any other id, and every
+/// id on a build without `cli-backends`, is
 /// [`SecretsError::UnknownBackend`]. Opening spawns nothing.
-/// Test: `github_open_requires_the_machine_section`.
+/// Test: `github_open_requires_the_machine_section`,
+/// `vercel_without_a_mapping_is_refused_before_any_spawn`.
 pub fn open_sync_target_at(
     id: &BackendId,
     machine_config: &Path,
     identity: &RemoteIdentity,
+    work_root: &Path,
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
-    open_sync_target_at_in(id, machine_config, identity, &onepassword_dirs())
+    open_sync_target_at_in(id, machine_config, identity, work_root, &onepassword_dirs())
 }
 
 /// [`open_sync_target_at`], searching `dirs` for the CLI.
@@ -273,10 +279,12 @@ pub(crate) fn open_sync_target_at_in(
     id: &BackendId,
     machine_config: &Path,
     identity: &RemoteIdentity,
+    work_root: &Path,
     dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     match id.as_str() {
         BackendId::GITHUB_ACTIONS => open_github_actions(machine_config, identity, dirs),
+        BackendId::VERCEL => open_vercel(machine_config, identity, work_root),
         _ => Err(SecretsError::UnknownBackend {
             backend: id.to_string(),
         }),
@@ -301,6 +309,8 @@ pub(crate) fn sync_target_ready(
         BackendId::GITHUB_ACTIONS => {
             super::github_actions::ready(machine_config, &onepassword_dirs())
         }
+        #[cfg(all(unix, feature = "cli-backends"))]
+        BackendId::VERCEL => super::vercel::ready(machine_config),
         _ => {
             let _ = machine_config;
             Err(SecretsError::UnknownBackend {
@@ -329,6 +339,29 @@ fn open_github_actions(
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     Err(SecretsError::UnknownBackend {
         backend: BackendId::GITHUB_ACTIONS.to_string(),
+    })
+}
+
+/// The Vercel sync target, when this machine enables it and maps the
+/// checkout (#9069 PR 2).
+#[cfg(all(unix, feature = "cli-backends"))]
+fn open_vercel(
+    machine_config: &Path,
+    identity: &RemoteIdentity,
+    work_root: &Path,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    super::vercel::open_in(machine_config, identity, work_root)
+}
+
+/// No Vercel sync target without `cli-backends`.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn open_vercel(
+    _machine_config: &Path,
+    _identity: &RemoteIdentity,
+    _work_root: &Path,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    Err(SecretsError::UnknownBackend {
+        backend: BackendId::VERCEL.to_string(),
     })
 }
 
