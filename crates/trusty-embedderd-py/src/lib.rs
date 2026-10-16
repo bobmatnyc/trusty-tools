@@ -17,9 +17,11 @@
 //! Public surface consumed by trusty-search:
 //!   * [`bootstrap::ensure_venv_eager`] — eager, once-per-daemon-start venv
 //!     bootstrap at `start` (full torch-importing `.ready` recheck).
-//!   * [`bootstrap::ensure_venv`] — per-respawn venv bootstrap, called by this
-//!     crate's own launcher binary (cheap, torch-free `.ready` recheck).
-//!   * [`launcher::locate_launcher_binary`] — sibling/PATH/env discovery.
+//!   * [`bootstrap::ensure_venv`] — per-respawn venv bootstrap, called by the
+//!     launcher binary via [`run`] (cheap, torch-free `.ready` recheck).
+//!   * [`launcher::locate_launcher_binary`] — env/sibling/PATH discovery.
+//!   * [`run`] — the whole launcher; trusty-search's `trusty-embedderd-py`
+//!     binary is a one-line shim over it. This crate is library-only (#9468).
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -35,3 +37,44 @@ pub mod uv_fetch;
 
 pub use bootstrap::{ensure_venv, ensure_venv_eager, resolve_layout, VenvLayout};
 pub use launcher::{exec_sidecar, locate_launcher_binary};
+
+use std::process::ExitCode;
+
+/// Run the `trusty-embedderd-py` launcher: ensure the venv, then `exec` the
+/// sidecar.
+///
+/// Why (#9468): the launcher binary moved to trusty-search so
+/// `cargo install trusty-search` installs it next to the daemon that spawns
+/// it; the logic stays here so the shim is one line.
+/// What: logs to stderr only (stdout carries the sidecar's JSON-RPC frames),
+/// forwards every argument after argv\[0\] (notably `--stdio`) to
+/// `python -m trusty_embed_sidecar`, and returns `ExitCode::FAILURE` when the
+/// venv bootstrap or the exec fails. A successful exec never returns.
+/// Test: the `#[ignore]`d e2e `supervisor_spawns_launcher_and_embeds_batch`
+/// runs it; a trusty-search integration test pins the packaging.
+pub fn run() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let layout = match ensure_venv() {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("trusty-embedderd-py: venv bootstrap failed: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // exec replaces this process on success; only returns on failure.
+    if let Err(e) = exec_sidecar(&layout, &args) {
+        tracing::error!("trusty-embedderd-py: failed to exec sidecar: {e:#}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}

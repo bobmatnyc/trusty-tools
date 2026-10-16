@@ -1358,7 +1358,7 @@ Silicon hosts are completely unaffected (unchanged ort default).
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH`. Missing `uv` is a bootstrap failure that triggers the ort fallback. |
-| `TRUSTY_EMBEDDERD_PY_BIN` | — (sibling/PATH search) | Explicit path to the `trusty-embedderd-py` launcher binary. Overrides the sibling-binary/PATH discovery `locate_launcher_binary` performs. |
+| `TRUSTY_EMBEDDERD_PY_BIN` | — (sibling/PATH search) | Explicit path to the `trusty-embedderd-py` launcher binary. Overrides the sibling-binary/PATH discovery `locate_launcher_binary` performs. **`cargo install trusty-search` installs the launcher next to `trusty-search`** (#9468), where the sibling search finds it; the trusty-embedderd-py crate is library-only. |
 | `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS` | `600` | Bounded timeout applied to each individual `uv` bootstrap step (python install, venv create, export, pip sync) and to the post-build import+embed smoke test. Each step gets one retry on a transient failure. |
 | `TRUSTY_DEVICE` | `auto` | Device selection inside the sidecar: `auto` (MPS if available, else CUDA, else CPU), `gpu` (same as `auto` but logs a warning if it falls back to CPU), or `cpu` (force CPU). |
 | `TRUSTY_PY_EMBED_FP16` | unset (fp32) | Set to `1`/`true`/`yes`/`on` to opt into fp16 on MPS/CUDA (~1.3x faster; cosine similarity still >= 0.9999 vs the fp32 reference per the spike). fp32 is the default everywhere, including MPS/CUDA. |

@@ -16,8 +16,7 @@ wire protocol of `trusty-embedderd` — so the trusty-search `EmbedderSupervisor
 ```
 trusty-embedderd-py/
 ├── src/
-│   ├── main.rs        launcher binary: ensure venv → exec python -m trusty_embed_sidecar --stdio
-│   ├── lib.rs         public surface consumed by trusty-search
+│   ├── lib.rs         public surface consumed by trusty-search; `run()` is the launcher
 │   ├── bootstrap.rs   slice 4 — uv/venv bootstrap (flock, .ready, disk precheck, retry)
 │   └── launcher.rs    slice 3 — sibling/PATH discovery + exec
 ├── python/            slice 2 — the sidecar, embedded via include_dir!
@@ -37,10 +36,13 @@ TRUSTY_EMBEDDER=python trusty-search start
 ```
 
 Requires `uv` on `PATH` (or `TRUSTY_UV_BIN`) and ~3 GB free disk for the
-one-time torch + sentence-transformers download. The launcher binary must be
-installed **alongside** `trusty-search` (a sibling of `current_exe()`) or on
-`PATH` — that is how `EmbedderSupervisor` discovers it. Override with
-`TRUSTY_EMBEDDERD_PY_BIN`.
+one-time torch + sentence-transformers download.
+
+This crate is a library (0.2.0+, #9468). The `trusty-embedderd-py` launcher
+binary ships with trusty-search: `cargo install trusty-search` installs it
+next to `trusty-search` (a sibling of `current_exe()`), which is where the
+daemon looks first, before `PATH`. Do not install this crate on its own.
+Override the location with `TRUSTY_EMBEDDERD_PY_BIN`.
 
 ## How it works
 
@@ -51,7 +53,7 @@ installed **alongside** `trusty-search` (a sibling of `current_exe()`) or on
    and writes a `.ready` sentinel. Disk precheck + bounded timeout + one retry +
    `flock` against concurrent bootstraps. A two-tier `.ready` recheck rebuilds a
    corrupted venv rather than serving from a broken interpreter.
-2. **Launch** (`launcher.rs` / `main.rs`): the supervisor spawns
+2. **Launch** (`launcher.rs` / `run()`): the supervisor spawns
    `trusty-embedderd-py --stdio`; the launcher ensures the venv (cheap
    torch-free `.ready` recheck on respawn) then **`exec`s** the venv's
    `python -m trusty_embed_sidecar --stdio`, inheriting stdio and env.
@@ -95,6 +97,9 @@ cd python && PYTHONPATH=. python -m pytest tests/
 # Real-model correctness gate (needs torch + a built model):
 cd python && TRUSTY_RUN_REAL_MODEL=1 PYTHONPATH=. python -m pytest tests/ -m real_model
 
-# Full real-venv e2e through the real supervisor:
-TRUSTY_RUN_PY_E2E=1 cargo test -p trusty-embedderd-py --test e2e -- --ignored
+# Full real-venv e2e through the real supervisor (trusty-search builds the
+# launcher):
+cargo build -p trusty-search --bin trusty-embedderd-py
+TRUSTY_EMBEDDERD_PY_BIN="$CARGO_TARGET_DIR/debug/trusty-embedderd-py" \
+  TRUSTY_RUN_PY_E2E=1 cargo test -p trusty-embedderd-py --test e2e -- --ignored
 ```

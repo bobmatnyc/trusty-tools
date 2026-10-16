@@ -35,7 +35,7 @@ versions, publishability, and targets.
 | `trusty-crate-contracts` | [`crates/trusty-crate-contracts/`](../../crates/trusty-crate-contracts/) | test-only, never published — the home for tests spanning two production crates (#8341) | [crate README](../../crates/trusty-crate-contracts/README.md) |
 | `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |
 | `trusty-embedderd` | [`crates/trusty-embedderd/`](../../crates/trusty-embedderd/) | library; bundled binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd/README.md), [extended docs](../trusty-embedderd/README.md) |
-| `trusty-embedderd-py` | [`crates/trusty-embedderd-py/`](../../crates/trusty-embedderd-py/) | library, `trusty-embedderd-py` | [crate README](../../crates/trusty-embedderd-py/README.md) |
+| `trusty-embedderd-py` | [`crates/trusty-embedderd-py/`](../../crates/trusty-embedderd-py/) | library; launcher binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd-py/README.md) |
 | `trusty-events` | crates/trusty-events (planned; created by #9075, not yet in the tree) | library, `trusty-events` daemon binary — internal 0.x with no stability promise for its Rust API; no other crate links it; the wire contract lives in `trusty-common::control_bus`; supervised by launchd ([ADR-0065](../adr/0065-trusty-events-process-placement.md)) | [ADR-0065](../adr/0065-trusty-events-process-placement.md) |
 | `trusty-gworkspace` | [`crates/trusty-gworkspace/`](../../crates/trusty-gworkspace/) | library, `trusty-gworkspace-mcp` | [crate README](../../crates/trusty-gworkspace/README.md), [extended docs](../trusty-gworkspace/README.md) |
 | `trusty-installer` | [`crates/trusty-installer/`](../../crates/trusty-installer/) | library, `trusty-installer`, `tctl` | [crate README](../../crates/trusty-installer/README.md) |
@@ -46,7 +46,7 @@ versions, publishability, and targets.
 | `trusty-progress` | [`crates/trusty-progress/`](../../crates/trusty-progress/) | library | [crate README](../../crates/trusty-progress/README.md) |
 | `trusty-publish-guard` | [`crates/trusty-publish-guard/`](../../crates/trusty-publish-guard/) | library, `publish-guard` | [crate README](../../crates/trusty-publish-guard/README.md) |
 | `trusty-review` | [`crates/trusty-review/`](../../crates/trusty-review/) | library, `trusty-review` | [crate README](../../crates/trusty-review/README.md) |
-| `trusty-search` | [`crates/trusty-search/`](../../crates/trusty-search/) | library, `trusty-search`, bundled `trusty-embedderd` | [crate README](../../crates/trusty-search/README.md), [extended docs](../trusty-search/README.md) |
+| `trusty-search` | [`crates/trusty-search/`](../../crates/trusty-search/) | library, `trusty-search`, bundled `trusty-embedderd` and `trusty-embedderd-py` | [crate README](../../crates/trusty-search/README.md), [extended docs](../trusty-search/README.md) |
 | `trusty-secrets` | [`crates/trusty-secrets/`](../../crates/trusty-secrets/) | library, `trusty-secrets` (on-demand socket server) | [crate README](../../crates/trusty-secrets/README.md), [extended docs](../trusty-secrets/README.md) |
 | `trusty-sld-lint` | [`crates/trusty-sld-lint/`](../../crates/trusty-sld-lint/) | library, `sld-lint` | [crate README](../../crates/trusty-sld-lint/README.md) |
 

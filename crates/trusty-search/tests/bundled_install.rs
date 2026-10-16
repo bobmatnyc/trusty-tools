@@ -8,9 +8,9 @@
 //! invisible until a user hit it.
 //!
 //! What: shells out to `cargo install --path . --locked --root <tempdir>
-//! --force` from the trusty-search crate directory, then asserts both
-//! `<tempdir>/bin/trusty-search` and `<tempdir>/bin/trusty-embedderd` exist
-//! and are executable.
+//! --force` from the trusty-search crate directory, then asserts
+//! `trusty-search`, `trusty-embedderd` and (since #9468) the
+//! `trusty-embedderd-py` launcher exist in `<tempdir>/bin` and are executable.
 //!
 //! Test: this file. The test is `#[ignore]` because it does a full release
 //! build (~minutes) and should only run in explicit release-validation
@@ -86,6 +86,26 @@ fn cargo_install_trusty_search_produces_both_binaries() {
                 .collect::<Vec<_>>())
             .unwrap_or_default()
     );
+
+    // #9468: the Python/MPS sidecar launcher is the third bundled binary.
+    let py_bin = bin_dir.join(if cfg!(windows) {
+        "trusty-embedderd-py.exe"
+    } else {
+        "trusty-embedderd-py"
+    });
+    assert!(
+        py_bin.is_file(),
+        "expected the trusty-embedderd-py launcher at {py_bin:?}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = py_bin.metadata().unwrap().permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{py_bin:?} is not executable ({mode:#o})"
+        );
+    }
 
     // On Unix: assert both are executable.
     #[cfg(unix)]

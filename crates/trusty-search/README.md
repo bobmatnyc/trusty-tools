@@ -54,7 +54,7 @@ Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked
 ```
 
-This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
+This builds from the latest commit on `main` and installs `trusty-search`, `trusty-embedderd` and `trusty-embedderd-py` to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH. If you earlier ran `cargo install trusty-embedderd-py`, run `cargo uninstall trusty-embedderd-py` first (#9468).
 
 To install a specific release, replace `<version>` with its tag version:
 ```bash
@@ -126,9 +126,11 @@ to start the embedding daemon. Two working options, in order of preference:
    export ORT_DYLIB_PATH=/opt/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2
    ```
 
-Both binaries this crate installs (`trusty-search` and the bundled
-`trusty-embedderd` sidecar) honour the same feature selection — you do not
-need to configure them separately. If you install the default `bundled-ort`
+Both ONNX Runtime binaries this crate installs (`trusty-search` and the
+bundled `trusty-embedderd` sidecar) honour the same feature selection — you
+do not need to configure them separately. The third binary, the
+`trusty-embedderd-py` Python/MPS sidecar launcher (#9468), links no ONNX
+Runtime; install nothing else to get it. If you install the default `bundled-ort`
 build on a glibc < 2.38 host anyway, the daemon now fails fast at startup
 with an explicit glibc-version error (instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`, default 180 s) naming both remediations

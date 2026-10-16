@@ -543,9 +543,10 @@ pub fn canonical_bin_dir_from(home: Option<&Path>, cargo_home: Option<&str>) -> 
 /// deliberately not folded in.
 ///
 /// What: `(crate_name, bin targets)` pairs mirroring each crate's `[[bin]]`
-/// tables (and, for trusty-search, the bundled `trusty-embedderd` binary its
-/// release tarball ships). Crates absent from this table install exactly one
-/// binary named after the crate — [`installed_binaries`] supplies that default.
+/// tables (for trusty-search, the bundled `trusty-embedderd` and, since
+/// #9468, `trusty-embedderd-py`). Crates absent from this table install
+/// exactly one binary named after the crate — [`installed_binaries`] supplies
+/// that default.
 ///
 /// Test: `installed_binaries_covers_multi_binary_crates`,
 /// `installed_binaries_defaults_to_crate_name`.
@@ -556,7 +557,10 @@ const CRATE_BINARIES: &[(&str, &[&str])] = &[
         "trusty-memory",
         &["trusty-memory", "trusty-memory-mcp-bridge"],
     ),
-    ("trusty-search", &["trusty-search", "trusty-embedderd"]),
+    (
+        "trusty-search",
+        &["trusty-search", "trusty-embedderd", "trusty-embedderd-py"],
+    ),
     ("trusty-agents", &["tagent"]),
     ("trusty-audit", &["trusty-audit", "taudit"]),
     ("trusty-code", &["tcode"]),
@@ -1115,6 +1119,7 @@ mod tests {
             ("trusty-installer", "tctl"),
             ("trusty-mpm", "tm"),
             ("trusty-search", "trusty-embedderd"),
+            ("trusty-search", "trusty-embedderd-py"),
             ("trusty-agents", "tagent"),
         ] {
             assert!(

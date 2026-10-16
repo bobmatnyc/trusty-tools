@@ -525,7 +525,7 @@ async fn real_repeated_ort_python_ort_cycles_soak() {
                 "cycle {cycle}: real python bootstrap failed (bootstrap={:?}) — \
                  is the uv venv actually bootstrapped? Run \
                  `trusty-embedderd-py --stdio` once by hand first, or \
-                 `cargo run -p trusty-embedderd-py --bin trusty-embedderd-py -- --bootstrap-only` \
+                 `cargo run -p trusty-search --bin trusty-embedderd-py -- --bootstrap-only` \
                  if that flag exists, to warm the venv before soaking.",
                 active.bootstrap
             );
