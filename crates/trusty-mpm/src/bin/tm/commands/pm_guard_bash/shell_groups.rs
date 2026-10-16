@@ -58,6 +58,14 @@ pub(super) enum Step {
     /// The operator after the segment just emitted (#9146): whether a `cd`
     /// before it ran, and in which shell, depends on it.
     Then(Sep),
+    /// A `!` was peeled off the next command (#9146): its status is inverted,
+    /// so `! cd <dir> && git …` runs the git verb when the `cd` FAILED.
+    Not,
+    /// A `{ … }` brace group opens. It runs in the current shell, but under a
+    /// preceding `&&`/`||`/`|`/`&` it may not run at all (#9146).
+    OpenGroup,
+    /// The brace group [`Step::OpenGroup`] opened ends.
+    CloseGroup,
 }
 
 /// A composition operator between two segments (#9146).
@@ -126,6 +134,8 @@ struct Peeled {
     command: Option<String>,
     leaves: usize,
     coproc: bool,
+    /// A `!` keyword preceded the command (#9146).
+    negated: bool,
 }
 
 /// Walk `command` into [`Step`]s (#9127).
@@ -180,6 +190,13 @@ fn steps_into(
     let heredocs = HeredocBodies::scan(command);
     let mut shell_body_end = None;
     for raw in split_shell_segments_raw(command) {
+        // #9146: a blank or comment-only segment (`false &&⏎cd <wt>` has one
+        // between `&&` and the newline) carries no operator of its own; its
+        // `Then(Seq)` would erase the pending `&&`/`||`/`|`.
+        let text = raw.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
         let start =
             raw.as_ptr() as usize - command.as_ptr() as usize + raw.len() - raw.trim_start().len();
         if shell_body_end.is_some_and(|end| start >= end) {
@@ -204,6 +221,9 @@ fn steps_into(
             };
             if peeled.coproc {
                 out.push(Step::Enter);
+            }
+            if peeled.negated {
+                out.push(Step::Not);
             }
             out.push(Step::Command(text));
             if let Some(inner) = inner {
@@ -255,6 +275,7 @@ fn peel_segment(
     let mut rest = raw;
     let mut closed = false;
     let mut coproc = false;
+    let mut negated = false;
     loop {
         let t = rest.trim_start();
         let word = first_word(t);
@@ -273,11 +294,13 @@ fn peel_segment(
             if coproc {
                 out.push(Step::Enter);
             }
+            out.push(Step::OpenGroup);
             coproc = false;
             &t[1..]
         } else if word == "}" {
             match open.pop() {
                 Some(Group::Brace { scoped }) => {
+                    out.push(Step::CloseGroup);
                     if scoped {
                         out.push(Step::Leave);
                     }
@@ -290,6 +313,7 @@ fn peel_segment(
             return Err(Unbalanced);
         } else if KEYWORDS.contains(&word) {
             let after = t[word.len()..].trim_start();
+            negated |= word == "!";
             if word == "coproc" {
                 coproc = true;
                 *opaque = true;
@@ -309,6 +333,7 @@ fn peel_segment(
             command: None,
             leaves: 0,
             coproc: false,
+            negated: false,
         });
     }
     let body = rest.trim();
@@ -319,6 +344,7 @@ fn peel_segment(
         command: (!command.is_empty()).then(|| command.to_string()),
         leaves,
         coproc,
+        negated,
     })
 }
 

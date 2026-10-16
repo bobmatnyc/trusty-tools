@@ -16,19 +16,33 @@
 //! the destination and keeps the directories it had. A `cd` that is a pipeline
 //! stage or backgrounded leaves the set alone. The rules judge a git verb
 //! against every candidate, so an uncertain `cd` can only add a deny.
+//! The `&&` narrowing needs the `cd` to head its and-or list: not the right
+//! operand of `||`, not negated by `!`. A `cd` in a brace group opened after an
+//! operator is never sure, and the set is capped at [`MAX_CANDIDATES`]; past
+//! the cap it is one unresolved stand-in that every rule refuses (#9146).
 //! Residual: a `cd` behind `then`/`do` counts as unconditional, so `if false;
 //! then cd <existing-wt>; fi; git reset --hard` is still judged against the
 //! worktree; `pushd`/`popd` are not tracked.
 //! Test: `a_cd_that_may_not_run_or_fail_keeps_the_old_directory_9146`,
 //! `a_cd_that_surely_ran_still_moves_the_directory_9146`,
 //! `a_cd_in_a_shell_heredoc_body_does_not_leak_9146`,
-//! `cd_tracker_candidates_per_operator_9146`.
+//! `cd_tracker_candidates_per_operator_9146`, `cd_tracker_bounds_the_candidate_set_9146`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard_bash::shell_groups::{Sep, Step};
 use crate::commands::pm_guard_bash::{PathEnv, resolve_target_path};
+
+/// The most directories the tracker keeps as candidates (#9146).
+const MAX_CANDIDATES: usize = 8;
+
+/// The one candidate that stands for a set grown past [`MAX_CANDIDATES`].
+///
+/// An unexpanded `$NAME` component: [`crate::commands::pm_guard_bash::unresolved_target`]
+/// refuses any verb judged against it, and the name says why.
+const OVERFLOW_DIR: &str = "$TM_PM_GUARD_CD_CANDIDATES_OVERFLOW";
 
 /// A `cd` whose following operator has not been read yet.
 struct PendingCd {
@@ -36,6 +50,9 @@ struct PendingCd {
     after: Vec<PathBuf>,
     /// Ran unconditionally into directories that exist now.
     sure: bool,
+    /// Neither the right operand of `||` nor negated: when `&&` follows, the
+    /// commands after it ran only if this `cd` did.
+    head: bool,
 }
 
 /// The state a child shell restores when it ends.
@@ -56,6 +73,10 @@ pub(super) struct CwdTracker<'a> {
     prev: Option<Sep>,
     pending: Option<PendingCd>,
     stack: Vec<Frame>,
+    /// A `!` was read for the next command.
+    negated: bool,
+    /// One entry per open brace group: whether it may not run at all.
+    groups: Vec<bool>,
 }
 
 impl<'a> CwdTracker<'a> {
@@ -68,6 +89,8 @@ impl<'a> CwdTracker<'a> {
             prev: None,
             pending: None,
             stack: Vec::new(),
+            negated: false,
+            groups: Vec::new(),
         }
     }
 
@@ -103,6 +126,22 @@ impl<'a> CwdTracker<'a> {
                 self.prev = Some(sep);
                 None
             }
+            // #9146: `! cd <dir> && git …` runs the verb when the `cd` failed.
+            Step::Not => {
+                self.negated = true;
+                None
+            }
+            // #9146: a group opened after an operator may be skipped whole, so
+            // no `cd` inside it is sure to have run.
+            Step::OpenGroup => {
+                let skippable = self.may_not_run() || self.prev.is_some_and(|s| s != Sep::Seq);
+                self.groups.push(skippable);
+                None
+            }
+            Step::CloseGroup => {
+                self.groups.pop();
+                None
+            }
             Step::Command(text) => {
                 self.settle(None);
                 let trimmed = text.trim();
@@ -113,6 +152,7 @@ impl<'a> CwdTracker<'a> {
                     self.cd(trimmed);
                     return None;
                 }
+                self.negated = false;
                 Some(text)
             }
         }
@@ -127,18 +167,29 @@ impl<'a> CwdTracker<'a> {
         let Some(dest) = cd_destination(segment) else {
             return;
         };
-        let after = dedup(
-            self.cwds
-                .iter()
-                .map(|cwd| resolve_target_path(&dest, cwd, self.env)),
-        );
-        let unconditional = !matches!(self.prev, Some(Sep::And | Sep::Or));
-        let sure = unconditional && after.iter().all(|dir| dir.is_dir());
+        let negated = std::mem::take(&mut self.negated);
+        // #9146: an overflowed set stays overflowed; `..` must not cancel it.
+        let after = merge(self.cwds.iter().map(|cwd| {
+            if is_overflow(cwd) {
+                cwd.clone()
+            } else {
+                resolve_target_path(&dest, cwd, self.env)
+            }
+        }));
+        let unconditional = !self.may_not_run() && !matches!(self.prev, Some(Sep::And | Sep::Or));
+        let sure =
+            unconditional && !negated && after.iter().all(|dir| !is_overflow(dir) && dir.is_dir());
         self.pending = Some(PendingCd {
             before: self.cwds.clone(),
             after,
             sure,
+            head: !negated && self.prev != Some(Sep::Or),
         });
+    }
+
+    /// Whether the current command sits in a brace group that may be skipped.
+    fn may_not_run(&self) -> bool {
+        self.groups.last().copied().unwrap_or(false)
     }
 
     /// Apply a pending `cd` now that the operator after it is known (`None`
@@ -151,19 +202,21 @@ impl<'a> CwdTracker<'a> {
                 _ if cd.sure => cd.after,
                 // The commands after `&&` run only once the `cd` succeeded;
                 // the first other operator brings the old directory back.
-                Some(Sep::And) => {
+                // #9146: not when `||` or `!` precedes the `cd`: then
+                // `true || cd <wt> && git …` skips it and runs the verb.
+                Some(Sep::And) if cd.head => {
                     let broken = self.broken.take().unwrap_or_default();
-                    self.broken = Some(dedup(broken.into_iter().chain(cd.before)));
+                    self.broken = Some(merge(broken.into_iter().chain(cd.before)));
                     cd.after
                 }
                 // #9146: it may have been skipped or failed.
-                _ => dedup(cd.after.into_iter().chain(cd.before)),
+                _ => merge(cd.after.into_iter().chain(cd.before)),
             };
         }
         if sep.is_some_and(|sep| sep != Sep::And)
             && let Some(broken) = self.broken.take()
         {
-            self.cwds = dedup(self.cwds.drain(..).chain(broken));
+            self.cwds = merge(self.cwds.drain(..).chain(broken));
         }
     }
 }
@@ -186,15 +239,29 @@ fn cd_destination(segment: &str) -> Option<String> {
     None
 }
 
-/// `paths` in order, each once.
-fn dedup(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+/// `paths` in order, each once, and no more than [`MAX_CANDIDATES`].
+///
+/// Why: every uncertain `cd` doubles the set, so a run of `cd a; cd b; …` over
+/// directories that do not exist made it 2^n and the hook could hang (#9146).
+/// What: past the bound the set is the single [`OVERFLOW_DIR`], which no verb
+/// is allowed to run against (fail closed). Linear in `paths`.
+fn merge(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
     for path in paths {
-        if !out.contains(&path) {
+        if seen.insert(path.clone()) {
             out.push(path);
         }
     }
+    if out.len() > MAX_CANDIDATES {
+        return vec![PathBuf::from(OVERFLOW_DIR)];
+    }
     out
+}
+
+/// Whether `path` is the [`OVERFLOW_DIR`] stand-in.
+pub(super) fn is_overflow(path: &Path) -> bool {
+    path == Path::new(OVERFLOW_DIR)
 }
 
 #[cfg(test)]
@@ -236,6 +303,24 @@ mod tests {
             (format!("cd {r} | git x"), vec![&home]),
             (format!("true | cd {r}; git x"), vec![&home]),
             (format!("cd {r} & git x"), vec![&home]),
+            // #9146: a `cd` behind `||` or `!` can be skipped under `&&` too.
+            (format!("true || cd {r} && git x"), vec![&real, &home]),
+            (format!("! cd {g} && git x"), vec![&gone, &home]),
+            (format!("! cd {r}; git x"), vec![&real, &home]),
+            // #9146: a newline after `&&`/`||` continues the list.
+            (format!("false &&\ncd {r}; git x"), vec![&real, &home]),
+            (format!("false ||\ncd {r}; git x"), vec![&real, &home]),
+            (format!("true |\ncd {r}; git x"), vec![&home]),
+            // #9146: a group opened under an operator may be skipped whole.
+            (
+                format!("false && {{ true; cd {r}; }}; git x"),
+                vec![&real, &home],
+            ),
+            (
+                format!("false || {{ true; cd {r}; }}; git x"),
+                vec![&real, &home],
+            ),
+            (format!("{{ true; cd {r}; }}; git x"), vec![&real]),
         ];
         for (command, expected) in rows {
             let found = candidates(&command, &home);
@@ -243,5 +328,24 @@ mod tests {
             let expected: Vec<PathBuf> = expected.into_iter().cloned().collect();
             assert_eq!(last.1, expected, "{command}");
         }
+    }
+
+    /// #9146: a run of uncertain `cd`s collapses to the one overflow candidate
+    /// instead of doubling the set each time.
+    #[test]
+    fn cd_tracker_bounds_the_candidate_set_9146() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let command = (0..20)
+            .map(|i| format!("cd nowhere{i}"))
+            .chain(["git x".to_string()])
+            .collect::<Vec<_>>()
+            .join("; ");
+        let found = candidates(&command, home.path());
+        let set = &found.last().expect("a command").1;
+        assert_eq!(set.len(), 1, "{set:?}");
+        assert!(is_overflow(&set[0]), "{set:?}");
+        // A `..` after the overflow cannot cancel it.
+        let found = candidates(&format!("{command}; cd ..; git y"), home.path());
+        assert!(is_overflow(&found.last().expect("a command").1[0]));
     }
 }

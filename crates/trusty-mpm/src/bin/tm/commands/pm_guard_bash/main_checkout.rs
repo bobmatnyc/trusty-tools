@@ -378,12 +378,24 @@ fn evaluate_main_checkout_commit_command_in(
     // #8485 review: the first commit aimed at a main checkout, not the first
     // commit segment — `git -C <worktree> commit && git -C <main> commit -a`
     // returned early on the worktree and never reached the lone-commit check.
-    let (verb, target, tail, root) =
-        git_verb_targets_with_tail(command, cwd, env, |verb, _| verb == "commit")
-            .into_iter()
-            .find_map(|(verb, target, tail)| {
-                main_checkout_root(&target).map(|root| (verb, target, tail, root))
-            })?;
+    let targets = git_verb_targets_with_tail(command, cwd, env, |verb, _| verb == "commit");
+    // #9146: past the `cd` candidate bound the directory is unplaced, and the
+    // stand-in names no checkout, so it must be refused before the root walk.
+    if let Some((verb, target, _)) = targets
+        .iter()
+        .find(|(_, target, _)| cd_tracking::is_overflow(target))
+        && let Some(unresolved) = unresolved_target(target)
+    {
+        return Some(CommitVerdict::Deny(unresolved_directory_deny_reason(
+            COMMIT_UNRESOLVED_HEADLINE,
+            verb,
+            &unresolved.shown,
+            &unresolved.token,
+        )));
+    }
+    let (verb, target, tail, root) = targets.into_iter().find_map(|(verb, target, tail)| {
+        main_checkout_root(&target).map(|root| (verb, target, tail, root))
+    })?;
     // #7234: that upward walk is exactly what an unresolved component subverts.
     // `git -C ~/scratch/repo commit` with `$HOME` unset leaves `~` literal, the
     // path is joined onto the launch directory, and the walk finds the LAUNCH
@@ -2976,5 +2988,83 @@ mod tests {
         assert!(evaluate_main_checkout_destructive_command(&inner, &wt).is_some());
         let body_only = format!("bash <<'EOF'\ncd {w}\ngit reset --hard\nEOF");
         assert!(evaluate_main_checkout_destructive_command(&body_only, main.path()).is_none());
+    }
+
+    /// 🔴 REGRESSION (#9146 critic r1 HIGH 1-3): from a main checkout each of
+    /// these runs the verb there, while the guard read the `cd` as sure.
+    /// `true || cd <wt> && …` and `! cd … && …` skip or invert the `cd`; a
+    /// newline after `&&`/`||`/`|` continues the list; a `cd` in a group
+    /// opened under `&&`/`||` is skipped with the group. All were allowed at
+    /// 3ff07af902.
+    #[test]
+    fn a_cd_behind_or_negation_newline_or_group_is_not_sure_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path()).display().to_string();
+        let gone = main.path().join(".claude/worktrees/agent-gone");
+        let gone = gone.display();
+        let shapes = [
+            format!("true || cd {wt} && git VERB"),
+            format!("! cd {gone} && git VERB"),
+            format!("! cd {wt} && git VERB"),
+            format!("false &&\ncd {wt}; git VERB"),
+            format!("false ||\ncd {wt}; git VERB"),
+            format!("true |\ncd {wt}; git VERB"),
+            format!("false && # note\ncd {wt}; git VERB"),
+            format!("false && {{ true; cd {wt}; }}; git VERB"),
+            format!("false || {{ true; cd {wt}; }}; git VERB"),
+            format!("false && {{ true; {{ cd {wt}; }}; }}; git VERB"),
+            format!("false && ( true; cd {wt} ); git VERB"),
+        ];
+        let mut missed: Vec<String> = Vec::new();
+        for shape in &shapes {
+            let commit = shape.replace("VERB", "commit -a -m x");
+            missed.extend(commits_not_denied(&[commit], main.path()));
+            let reset = shape.replace("VERB", "reset --hard");
+            if evaluate_main_checkout_destructive_command(&reset, main.path()).is_none() {
+                missed.push(reset);
+            }
+        }
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        // The sure shapes stay allowed: a group that runs unconditionally.
+        let w = &wt;
+        for command in [
+            format!("{{ cd {w}; }} && git reset --hard"),
+            format!("{{ cd {w}; git reset --hard; }}"),
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(&command, main.path()).is_none(),
+                "must stay allowed: {command}"
+            );
+        }
+    }
+
+    /// 🔴 REGRESSION (#9146 critic r1 HIGH 4): a run of `cd`s into directories
+    /// that do not exist doubled the candidate set each time, so 20 of them
+    /// meant 2^20 paths and a quadratic dedup. The set is bounded; past the
+    /// bound the verb is refused as unplaced, from any directory.
+    #[test]
+    fn a_long_run_of_uncertain_cds_is_refused_not_enumerated_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        for n in [5, 20] {
+            let cds = (0..n)
+                .map(|i| format!("cd nowhere{i}; "))
+                .collect::<String>();
+            for cwd in [main.path(), wt.as_path()] {
+                let reset = format!("{cds}git reset --hard");
+                assert!(
+                    evaluate_main_checkout_destructive_command(&reset, cwd).is_some(),
+                    "reset not denied from {} after {n} cds",
+                    cwd.display()
+                );
+            }
+            let commit = format!("{cds}git commit -a -m x");
+            let missed = commits_not_denied(&[commit], main.path());
+            assert!(
+                missed.is_empty(),
+                "commit not denied:\n{}",
+                missed.join("\n")
+            );
+        }
     }
 }
