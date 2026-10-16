@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use trusty_common::uds::server::{RpcOutcome, RpcRouter, RpcStreamItems};
+use trusty_common::uds::{FramedStream, UdsRpcError};
 
 use crate::core::file_events::FileEventKind;
 use crate::core::indexer::CodeIndexer;
@@ -126,6 +127,62 @@ async fn drain(mut items: RpcStreamItems) -> Vec<serde_json::Value> {
     all
 }
 
+/// `rpc` served on a real Unix socket until [`Served::stop`].
+struct Served {
+    _dir: tempfile::TempDir,
+    socket: std::path::PathBuf,
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Served {
+    /// Stop the server and wait, bounded, for it to drain.
+    async fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = tokio::time::timeout(GENEROUS, self.task).await;
+    }
+}
+
+/// Bind a fresh socket, serve `rpc` on it, and return once it answers.
+async fn serve_on_socket(rpc: Arc<RpcRouter>) -> Served {
+    use trusty_common::uds::server::{serve_until, RpcServeOptions};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("streams.sock");
+    let listener = trusty_common::uds::bind_singleton_hardened(&socket)
+        .await
+        .expect("bind a fresh socket path");
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        serve_until(&listener, rpc, RpcServeOptions::default(), async {
+            let _ = stop_rx.await;
+        })
+        .await;
+    });
+    for _ in 0..200 {
+        if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(50)).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Served {
+        _dir: dir,
+        socket,
+        stop_tx,
+        task,
+    }
+}
+
+/// One frame off a real-socket stream. The client's per-frame budget is
+/// `GENEROUS`, so a stuck stream reads as `Some(Err(Timeout))` before this bound.
+async fn next_frame(
+    stream: &mut FramedStream<serde_json::Value>,
+) -> Option<Result<serde_json::Value, UdsRpcError>> {
+    tokio::time::timeout(GENEROUS * 2, stream.next_frame())
+        .await
+        .expect("the client's per-frame read budget answers first")
+}
+
 // ------------------------------------------------------- reindex streams ---
 
 /// Why: the replay buffer is the whole reason a late subscriber sees the `start`
@@ -221,6 +278,79 @@ async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
         live,
         "live events must arrive in emission order"
     );
+}
+
+/// Why: `ReindexProgress` keeps its broadcast sender for replay, so a live
+/// stream never saw `Closed` and stayed open after `complete`. The CLI then hung
+/// up mid-stream and the daemon logged `uds rpc connection failed` once per
+/// reindex (#9933).
+/// What: over a real socket, a stream opened while the run is live delivers the
+/// terminal event and then reads `None` — the client's reading of the server's
+/// `end` frame. A server whose write failed would leave no terminal frame, and
+/// the read would report `NoResponse` instead. The producer must also drop its
+/// broadcast subscription on its own, with the client still connected.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_live_reindex_stream_ends_with_an_end_frame_after_its_terminal_event() {
+    let (state, rpc) = routers(&["rs"]).await;
+    let start = serde_json::json!({ "event": "start", "total_files": 1 });
+    let progress = plant_progress(
+        &state,
+        "rs",
+        ReindexStatus::Running,
+        std::slice::from_ref(&start),
+    )
+    .await;
+    let served = serve_on_socket(Arc::new(rpc)).await;
+
+    let mut stream: FramedStream<serde_json::Value> =
+        trusty_common::uds::send_framed_stream_request(
+            &served.socket,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 9933,
+                "method": streams::METHOD_INDEX_REINDEX_STREAM,
+                "params": { "index_id": "rs" }, "stream": true,
+            }),
+            GENEROUS,
+        )
+        .await
+        .expect("open the reindex stream over a real socket");
+    let first = next_frame(&mut stream)
+        .await
+        .expect("the replayed start event must arrive");
+    assert_eq!(first.expect("not an error frame"), start);
+
+    let complete = serde_json::json!({ "event": "complete", "indexed": 1, "elapsed_ms": 5 });
+    progress
+        .push_terminal(ReindexStatus::Complete, complete.clone())
+        .await;
+    let terminal = next_frame(&mut stream)
+        .await
+        .expect("the terminal event must arrive");
+    assert_eq!(terminal.expect("not an error frame"), complete);
+
+    let after = next_frame(&mut stream).await;
+    assert!(
+        after.is_none(),
+        "the stream must end with an `end` frame after its terminal event, got {after:?}"
+    );
+
+    let mut unsubscribed = false;
+    for _ in 0..400 {
+        if progress.sender.receiver_count() == 0 {
+            unsubscribed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        unsubscribed,
+        "the producer must drop its subscription once the run is terminal"
+    );
+
+    drop(stream);
+    served.stop().await;
 }
 
 /// Why: `reindex_stream` opens through `ReindexProgress::subscribe_with_replay`,
@@ -444,39 +574,18 @@ async fn a_daemon_event_reaches_the_socket_stream() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
-    use trusty_common::uds::server::{serve_until, RpcServeOptions};
-
     // One permit, so a stream that took one would make the admissions below
     // fail outright rather than merely queue behind something.
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()).with_query_guards(
         ConcurrencyLimiter::with_limits(1, 0),
         QueryTimeoutConfig::from_duration(Duration::from_secs(30)),
     ));
-    let rpc = Arc::new(streams::register(RpcRouter::new(), &state));
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("streams.sock");
-    let listener = trusty_common::uds::bind_singleton_hardened(&socket)
-        .await
-        .expect("bind a fresh socket path");
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let served = tokio::spawn(async move {
-        serve_until(&listener, rpc, RpcServeOptions::default(), async {
-            let _ = stop_rx.await;
-        })
-        .await;
-    });
-    for _ in 0..200 {
-        if trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(50)).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let served = serve_on_socket(Arc::new(streams::register(RpcRouter::new(), &state))).await;
 
     let before = state.events.receiver_count();
-    let mut stream: trusty_common::uds::FramedStream<serde_json::Value> =
+    let mut stream: FramedStream<serde_json::Value> =
         trusty_common::uds::send_framed_stream_request(
-            &socket,
+            &served.socket,
             &serde_json::json!({
                 "jsonrpc": "2.0", "id": 7,
                 "method": streams::METHOD_STATUS_STREAM,
@@ -534,8 +643,7 @@ async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
         .expect("no permit may be leaked by an abandoned stream");
     drop(held);
 
-    let _ = stop_tx.send(());
-    let _ = tokio::time::timeout(GENEROUS, served).await;
+    served.stop().await;
 }
 
 // ------------------------------------------------- #6524 file-change feed ---
