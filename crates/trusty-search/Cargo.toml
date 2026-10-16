@@ -60,7 +60,7 @@ name = "trusty-search"
 # public `DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`,
 # `write_http_addr_file` and `DaemonHandle` are removed. crates.io is at
 # 0.57.3; 0.58.0 is unpublished on main and the Architect set 0.59.0.
-version = "0.60.1"
+version = "0.61.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -69,14 +69,11 @@ repository = "https://github.com/bobmatnyc/trusty-tools"
 homepage = "https://trustytools.dev"
 keywords = ["search", "code-search", "mcp", "vector-search", "bm25"]
 categories = ["command-line-utilities", "development-tools"]
-build = "build.rs"
 # #9302: `tests/*.rs` files are modules of the targets below, not one binary
 # each; every new macOS executable pays an XProtect scan on its first exec.
 autotests = false
 include = [
     "src/**/*",
-    "build.rs",
-    "ui-dist/**/*",
     "help.yaml",
     "Cargo.toml",
     "README.md",
@@ -390,7 +387,7 @@ libc = { workspace = true }
 # request totals, histograms for latency, gauges for queue depth + embed
 # pool utilisation. The `metrics` facade keeps emit sites cheap (one macro
 # call) while `metrics-exporter-prometheus` renders the recorder's snapshot
-# in Prometheus text format for `GET /metrics`.
+# in Prometheus text format.
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 

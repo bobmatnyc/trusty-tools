@@ -269,10 +269,11 @@ Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and
 - **Zero cold-start queries** — HNSW kept hot (`Duration::MAX` cool-after),
   LRU embedding cache (256+ entries) skips re-embedding on repeat queries
 - **Native multi-request** — `Arc<SearchAppState>`, reader-priority `RwLock`,
-  axum HTTP/2 — many concurrent searches against the same index never block
+  one task per socket connection — many concurrent searches against the same
+  index never block
 - **MCP server** — stdio transport, drop-in for Claude Code ([tool roster](#mcp-tools))
-- **Embedded Svelte 5 admin UI** — Collections, Search, Chat, Admin panels
-  compiled into the binary via `include_dir!`; open with `trusty-search ui`
+- **Search dashboard** — Collections, Search, Chat and Admin panels, served by
+  trusty-console at `/tools/search/`
 - **Migration path** — `trusty-search convert` reads `mcp-vector-search`
   configs and re-registers each project as a named index
 
@@ -717,7 +718,7 @@ the full request/response shapes and a worked example script.
 |-----------------|-----------------------------------------------------|
 | Language        | Rust 2021                                           |
 | Async runtime   | tokio (full features)                               |
-| HTTP            | axum 0.7 + tower-http (CORS, trace, gzip), HTTP/2   |
+| Transport       | JSON-RPC 2.0 on a Unix socket; axum 0.8 types only  |
 | Vector store    | usearch 2.25 (HNSW, in-memory, `Arc<RwLock<>>`)     |
 | Embeddings      | fastembed 5.x (ONNX, all-MiniLM-L6-v2 INT8, 384-dim)|
 | Lexical         | Custom BM25 (zero-dep port, camelCase splitting)    |

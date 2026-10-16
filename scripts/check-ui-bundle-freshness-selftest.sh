@@ -24,11 +24,6 @@
 #   commit touching only ui/src while the committed bundle stays put, which is
 #   exactly what trusty-search 0.37.0 published.
 #
-#   Case 18 runs against THIS repo rather than a fixture: the real 0.37.0
-#   publish commit fc7f396f, with real objects. Corroboration, not the
-#   load-bearing coverage — it self-skips in a shallow clone that lacks the
-#   commit.
-#
 # Test: this IS the test. Run directly:
 #   bash scripts/check-ui-bundle-freshness-selftest.sh
 #
@@ -400,23 +395,6 @@ commit_all "$R" "workspace with one UI crate"
 run_case "case17 non-UI crate is N/A" 0 "tracks no committed UI bundle" "$R" plainlib
 
 # ---------------------------------------------------------------------------
-# Case 18 — the real incident, against this repo's real objects: trusty-search
-# at fc7f396f, the commit 0.37.0 was published from.
-# ---------------------------------------------------------------------------
-if git -C "$REPO_ROOT" rev-parse --verify --quiet 'fc7f396f^{commit}' > /dev/null; then
-  # Every commit before this gate landed predates the stamp, so the real
-  # incident reports STAMP-MISSING rather than a digest mismatch. The commit
-  # diagnostic is what carries the finding for pre-stamp history, and asserting
-  # it is what keeps this case about #3509 rather than about a missing file.
-  run_case "case18 real 0.37.0 publish commit" 1 "STAMP-MISSING" \
-    "$REPO_ROOT" --rev fc7f396f trusty-search
-  run_case "case18 names the source change the bundle missed" 1 \
-    "Foundry v2 tokens (#3509)" "$REPO_ROOT" --rev fc7f396f trusty-search
-else
-  skip_case "case18 real 0.37.0 publish commit (fc7f396f not in this clone)"
-fi
-
-# ---------------------------------------------------------------------------
 # Case 19 — THE LAUNDERING REGRESSION. A review broke the ancestry version of
 # this gate in three commits: real source change (caught), then one unrelated
 # line appended to the bundle's index.html — and the still-stale bundle passed,
@@ -515,13 +493,8 @@ run_case "case22 stamp with no digest" 1 "STAMP-MISSING" "$R"
 
 # Rows whose committed bundle is NOT its Vite outDir, so a mirror step owns the
 # stamp instead. Space-separated manifest row keys; everything else is in scope.
-#
-# trusty-search: ui-dist/ is a mirror of the console's ui-search-dist/, stamped
-# by `make -C crates/trusty-search sync-ui` (#6155). Its source_dir names the
-# console's Vite project, whose outDir is that OTHER bundle — so reading the
-# config would place this row out of scope for a reason that is true by
-# accident. Exempting it says so on purpose.
-STAMP_WIRING_EXEMPT="trusty-search"
+# Empty since #9535 deleted trusty-search's mirrored ui-dist/ and its row.
+STAMP_WIRING_EXEMPT=""
 
 # stamp_wiring_report <repo_root> <manifest_path> <exempt_keys>
 #
@@ -609,7 +582,9 @@ fi
 # An exemption that names a row the manifest no longer has is dead text, and
 # dead text in a scope list is how a real row gets exempted by a later rename.
 SW_EXEMPT_LIVE=1
+SW_EXEMPT_COUNT=0
 for exempt_key in $STAMP_WIRING_EXEMPT; do
+  SW_EXEMPT_COUNT=$((SW_EXEMPT_COUNT + 1))
   if ! awk -F'\t' -v k="$exempt_key" '$1 == k { found = 1 } END { exit !found }' \
     "${SCRIPT_DIR}/ui-bundle-manifest.tsv"; then
     fail_case "case23 STAMP_WIRING_EXEMPT names '${exempt_key}', which has no manifest row" \
@@ -617,7 +592,7 @@ for exempt_key in $STAMP_WIRING_EXEMPT; do
     SW_EXEMPT_LIVE=0
   fi
 done
-[ "$SW_EXEMPT_LIVE" -eq 1 ] && pass_case "case23 every STAMP_WIRING_EXEMPT key has a live manifest row"
+[ "$SW_EXEMPT_LIVE" -eq 1 ] && pass_case "case23 all ${SW_EXEMPT_COUNT} STAMP_WIRING_EXEMPT key(s) have a live manifest row"
 
 # ---------------------------------------------------------------------------
 # Case 25 — #6155: the row-selection mechanism itself must not fail open.

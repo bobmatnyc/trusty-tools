@@ -207,8 +207,8 @@ fi
 # "cannot update the lock file ... because --locked was passed". Letting cargo
 # regenerate the lock against the registry is exactly what a downstream consumer
 # sees, so it is the correct publish-time resolution.
-# SKIP_UI_BUILD=1 avoids re-running the Svelte build in build.rs (the embedded
-# ui-dist/ is already committed; see crate CLAUDE.md).
+# SKIP_UI_BUILD=1 is inert here: #9535 deleted this crate's build.rs, and no
+# build script in its dependency graph reads the variable.
 SKIP_UI_BUILD="${SKIP_UI_BUILD:-1}" cargo "${PUBLISH_ARGS[@]}"
 
 # Restore happens via the EXIT trap.

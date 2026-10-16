@@ -415,9 +415,8 @@ Single crate; three module trees (`core`, `service`, `mcp`) plus `commands`,
 | **`src/mcp/`** | MCP server: `mod.rs`, `tools.rs` (19 tools), `stdio.rs`, `sse.rs`, `openrpc.rs`. |
 | **`src/commands/`** | One handler per CLI subcommand + shared helpers. Key new additions: `port.rs` (daemon port reporting), `prune_orphans.rs` (offline orphan cleanup), `upgrade.rs` (self-update + restart), `reindex_ui.rs` (4-phase MultiProgress UI, #401), `migrate_storage/` (colocated-storage migration), `discover/` (submodule split: `mod.rs`, `http.rs`, `marker.rs`, #473). |
 
-Supporting trees: `ui/` (Svelte 5 sources), `ui-dist/` (compiled bundle embedded
-via `include_dir!`), `build.rs` (UI build wrapper, `SKIP_UI_BUILD=1` to skip),
-`tests/` (integration + benchmark harnesses).
+Supporting tree: `tests/` (integration + benchmark harnesses). #9535 deleted
+the UI bundle and `build.rs`; the search dashboard lives in trusty-console.
 
 ---
 

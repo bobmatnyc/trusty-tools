@@ -77,9 +77,7 @@ impl SearchAppState {
             embedder_ready: ready_rx,
             embedder_ready_tx: Arc::new(ready_tx),
             embedder_error: Arc::new(RwLock::new(None)),
-            daemon_port: None,
             transport: Default::default(),
-            openrouter_enabled: !openrouter_api_key.is_empty(),
             started_at: Instant::now(),
             local_model: LocalModelConfig::default(),
             openrouter_model: "anthropic/claude-haiku-4.5".to_string(),
@@ -292,9 +290,7 @@ impl SearchAppState {
 
     /// Builder-style: set the OpenRouter API key (loaded from config or env).
     pub fn with_openrouter_api_key(mut self, api_key: impl Into<String>) -> Self {
-        let api_key_str = api_key.into();
-        self.openrouter_enabled = !api_key_str.is_empty();
-        self.openrouter_api_key = api_key_str;
+        self.openrouter_api_key = api_key.into();
         self
     }
 
@@ -351,13 +347,6 @@ impl SearchAppState {
             )) as Arc<dyn ChatProvider>);
         }
         None
-    }
-
-    /// Builder-style: record the actual port the daemon bound. Used by
-    /// the UI handler to inject `window.__DAEMON_PORT__`.
-    pub fn with_daemon_port(mut self, port: u16) -> Self {
-        self.daemon_port = Some(port);
-        self
     }
 
     /// Builder-style: record the listeners the daemon bound, for

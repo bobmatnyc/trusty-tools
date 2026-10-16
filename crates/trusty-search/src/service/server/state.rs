@@ -226,16 +226,9 @@ pub struct SearchAppState {
     /// `/health` response includes `embedder: "error"` and an `embedder_error`
     /// string after the init task sets an error.
     pub embedder_error: Arc<RwLock<Option<String>>>,
-    /// Port the daemon ended up listening on. Injected into the served
-    /// `index.html` as `window.__DAEMON_PORT__` so the SPA knows which host
-    /// to call when opened directly. `None` falls back to 7878 in the UI.
-    pub daemon_port: Option<u16>,
     /// The listeners this daemon bound, reported by `search.health` (#9030).
     /// Default (both `None`) until `run_daemon` stamps it.
     pub transport: DaemonTransport,
-    /// Whether `OPENROUTER_API_KEY` is set when the daemon starts. Toggles
-    /// the Chat panel in the SPA via `window.__OPENROUTER_ENABLED__`.
-    pub openrouter_enabled: bool,
     /// Monotonic timestamp captured when the AppState was constructed.
     /// Used to compute `uptime_secs` in the `/health` response (issue #34).
     pub started_at: Instant,

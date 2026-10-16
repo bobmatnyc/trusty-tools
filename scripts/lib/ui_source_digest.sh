@@ -140,8 +140,8 @@ EOF_SPECS
 #   Listing the old path after the new one keeps `--rev` replay working across
 #   the move; the current path is always tried first, so HEAD is unaffected.
 # What: splits on commas, tries each in order, first non-empty wins.
-# Test: scripts/check-ui-bundle-freshness-selftest.sh case 18 replays the real
-#   #3606 publish commit, which predates the #6155 move.
+# Test: the `trusty-console-*` manifest rows take the first-entry path on every
+#   gate run. No selftest case drives the fallback since #9535 deleted case 18.
 ui_source_digest_any() {
   local repo="$1" rev="$2" list="$3" bundle_dir="$4" shared="${5:-}"
   local dir rest pair
@@ -173,9 +173,9 @@ ui_source_digest_any() {
 
 # ui_stamp_path <bundle_dir> — where the recorded digest lives.
 #
-# Inside the bundle so it travels with it: `sync-ui` mirrors the directory,
-# trusty-search's Cargo.toml `include` ships `ui-dist/**/*`, so the published
-# tarball records what it was built from and stays checkable after the fact.
+# Inside the bundle so it travels with it: a crate's Cargo.toml `include` ships
+# the bundle directory, so the published tarball records what it was built from
+# and stays checkable after the fact.
 # Deliberately not a dotfile — cargo's include globs and `cp -r` treat hidden
 # entries inconsistently enough that it is not worth finding out.
 ui_stamp_path() {

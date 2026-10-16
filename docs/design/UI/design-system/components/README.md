@@ -45,8 +45,7 @@ A Tailwind app whose tokens are `--color-*` RGB triples sets the
   checked by `src/lib/foundry/vendored.test.ts`, which fails on any drift.
   After editing a file here, copy it there in the same change.
 
-The search bundle rows in `scripts/ui-bundle-manifest.tsv` list this directory
-in column 4 (`shared_dirs`), so an edit here makes both search bundles stale in
-`scripts/check-ui-bundle-freshness.sh`. Rebuild them with
-`make -C crates/trusty-console search-ui`, then
-`make -C crates/trusty-search sync-ui`.
+The search bundle row in `scripts/ui-bundle-manifest.tsv` lists this directory
+in column 4 (`shared_dirs`), so an edit here makes the search bundle stale in
+`scripts/check-ui-bundle-freshness.sh`. Rebuild it with
+`make -C crates/trusty-console search-ui`.

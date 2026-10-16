@@ -15,10 +15,10 @@
 #   building the bundle, never on its own; the file is a claim about a build
 #   that happened.
 #
-#   trusty-search's `make sync-ui` calls it, so `make release-prep` covers that
-#   crate end to end. The other three commit ui/dist/ straight out of
-#   `pnpm build` with no make target in between, so there it is a second command
-#   — which the gate's failure message names when it fires.
+#   trusty-console's Vite configs call it through
+#   scripts/lib/vite-stamp-bundle.mjs, so `pnpm build` stamps each bundle. Run
+#   by hand, it is a second command after the build — which the gate's failure
+#   message names when it fires.
 #
 # Usage:
 #   scripts/stamp-ui-bundle.sh <crate-name-or-dir>   # after building the bundle

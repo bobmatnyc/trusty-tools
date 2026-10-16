@@ -631,9 +631,8 @@ echo "live: this repo's own scripts/** literal edges (#7777 ruling)"
 live_run() { (cd "${REPO_ROOT}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
 assert_eq "live: check_changelog_fragment.sh -> trusty-mpm" \
   "trusty-mpm" "$(live_run scripts/check_changelog_fragment.sh)"
-assert_eq "live: check-ui-bundle-freshness.sh -> trusty-console + trusty-search" \
-  "trusty-console
-trusty-search" "$(live_run scripts/check-ui-bundle-freshness.sh)"
+assert_eq "live: check-ui-bundle-freshness.sh -> trusty-console" \
+  "trusty-console" "$(live_run scripts/check-ui-bundle-freshness.sh)"
 assert_eq "live: codesign build-console-saver.sh -> trusty-common" \
   "trusty-common" "$(live_run scripts/build-console-saver.sh)"
 assert_eq "live: codesign install-trusty-mpm-signed.sh -> trusty-common" \

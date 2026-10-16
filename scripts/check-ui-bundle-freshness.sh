@@ -4,11 +4,11 @@
 # bundle was built from older source than the crate currently carries (#3606).
 #
 # Why: `cargo publish` ships whatever is COMMITTED under a crate's bundle
-#   directory, verbatim. crates/trusty-search/Cargo.toml lists "ui-dist/**/*"
-#   in `include`, build.rs is short-circuited by SKIP_UI_BUILD=1 on every
-#   release path, and the mirror step that refreshes the bundle
-#   (`make -C crates/trusty-search sync-ui`) is a human-remembered one. Skip it
-#   and the tarball carries a bundle built from source that no longer exists.
+#   directory, verbatim. Until #9535, crates/trusty-search/Cargo.toml listed
+#   "ui-dist/**/*" in `include`, build.rs was short-circuited by SKIP_UI_BUILD=1
+#   on every release path, and the mirror step that refreshed the bundle was a
+#   human-remembered one. Skip it and the tarball carried a bundle built from
+#   source that no longer existed.
 #   That has now happened three times — v0.12.1 (2026-05-26), v0.13.1
 #   (2026-05-27), and 0.37.0 (2026-07-21), which shipped an admin dashboard
 #   with no dark mode because #3509's tokens.css/theme-bootstrap.js rewrite
@@ -85,9 +85,7 @@
 #   1 = at least one finding — DO NOT PUBLISH. 2 = usage error.
 #
 # Test: scripts/check-ui-bundle-freshness-selftest.sh drives every finding code
-#   against synthetic repos, including the vacuous-scan refusals. The #3606
-#   incident itself replays with
-#   `scripts/check-ui-bundle-freshness.sh --rev fc7f396f trusty-search`.
+#   against synthetic repos, including the vacuous-scan refusals.
 #
 # Portability: POSIX tools only, bash 3.2 (macOS) and bash 5 (Linux CI).
 
