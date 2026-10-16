@@ -17,13 +17,16 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{
-    HealthProbe, PortDiscovery, ServiceDecl, ServicesManifest, expand_tilde_owned,
-};
+use super::manifest::{PortDiscovery, ServiceDecl, ServicesManifest, expand_tilde_owned};
 
 // #9543: trusty-search is probed over its socket, never over TCP.
 mod search_socket;
 pub use search_socket::{RealSearchSocketProber, SearchSocketProber};
+// #6288: the trusty-mpm daemon is probed over its socket too.
+mod mpm_socket;
+#[cfg(test)]
+pub(crate) use mpm_socket::METHOD_MPM_HEALTH;
+pub use mpm_socket::{MpmSocketProber, RealMpmSocketProber};
 
 #[cfg(test)]
 mod tests;
@@ -324,6 +327,8 @@ pub struct Discoverer {
     version_runner: Box<dyn VersionRunner>,
     /// #9543: socket health for `health_probe: uds_search` services.
     socket_prober: Box<dyn SearchSocketProber>,
+    /// #6288: socket health for `health_probe: uds_mpm` services.
+    mpm_prober: Box<dyn MpmSocketProber>,
 }
 
 impl Discoverer {
@@ -343,6 +348,7 @@ impl Discoverer {
             http_prober: Box::new(RealHttpProber),
             version_runner: Box::new(RealVersionRunner),
             socket_prober: Box::new(RealSearchSocketProber),
+            mpm_prober: Box::new(RealMpmSocketProber),
         }
     }
 
@@ -370,7 +376,18 @@ impl Discoverer {
             // #9543: no test reaches the operator's real trusty-search socket
             // unless it injects a prober with `with_socket_prober`.
             socket_prober: Box::new(search_socket::NoSearchDaemon),
+            mpm_prober: Box::new(mpm_socket::NoMpmDaemon),
         }
+    }
+
+    /// Replace the trusty-mpm socket prober (for testing).
+    ///
+    /// Why (#6288): as [`Discoverer::with_socket_prober`], for `uds_mpm`.
+    /// Test: `uds_mpm_is_up_against_a_socket_only_daemon`.
+    #[cfg(test)]
+    pub fn with_mpm_prober(mut self, mpm_prober: Box<dyn MpmSocketProber>) -> Self {
+        self.mpm_prober = mpm_prober;
+        self
     }
 
     /// Replace the socket prober (for testing).
@@ -425,8 +442,8 @@ impl Discoverer {
         let decl = self.manifest.services.get(name)?.clone();
 
         // #9543: a socket-probed service re-probes the socket, never a URL.
-        if decl.health_probe == HealthProbe::UdsSearch {
-            let status = self.probe_uds_search(name, &decl);
+        if decl.health_probe.is_socket() {
+            let status = self.probe_socket(name, &decl);
             return Some(self.finish_health(name, status));
         }
 
@@ -506,8 +523,8 @@ impl Discoverer {
     /// Test: covered by the mock-based discoverer unit tests.
     fn probe(&mut self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
         // #9543: a socket-probed service has no port, URL or HTTP probe.
-        if decl.health_probe == HealthProbe::UdsSearch {
-            return self.probe_uds_search(name, decl);
+        if decl.health_probe.is_socket() {
+            return self.probe_socket(name, decl);
         }
         let port = self.probe_port(decl);
         let pid = self.probe_pid(decl, port);

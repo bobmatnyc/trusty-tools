@@ -14,8 +14,8 @@
 //! `ProcessCpuSampler::rss_bytes`. Microseconds apart, at 1 s resolution.)
 //!
 //! Why pid discovery is a separate step from sampling: a pid costs I/O to find
-//! (a lock file to read, a socket to dial) and a reading costs a syscall on
-//! an already-known pid. Doing both every tick would put a file read and six
+//! (a socket to dial) and a reading costs a syscall on
+//! an already-known pid. Doing both every tick would put several
 //! socket dials on a one-second loop. [`ServiceMetricsSampler::pending_lookups`]
 //! names the services that still need a pid, [`resolve_pid`] does the I/O off
 //! the reactor, and [`ServiceMetricsSampler::record_lookups`] feeds the answers
@@ -25,7 +25,7 @@
 //!
 //! | Service | pid source |
 //! |---|---|
-//! | `trusty-mpm` | the `pid = N` line in its `daemon.lock` |
+//! | `trusty-mpm` | `LOCAL_PEERPID` / `SO_PEERCRED` on its Unix socket (#6288) |
 //! | `trusty-search` | `LOCAL_PEERPID` / `SO_PEERCRED` on its Unix socket |
 //! | `trusty-memory` | the same, on its own Unix socket |
 //! | `trusty-console` | `std::process::id()` — the console IS this process (#6908) |
@@ -64,19 +64,20 @@ const LOOKUP_BACKOFF: Duration = Duration::from_secs(15);
 
 /// Read a service's pid, or `None` when it cannot be identified.
 ///
-/// Why free rather than a method: it does blocking I/O (a file read, a socket
-/// dial) and the caller runs it on the blocking pool, away from the sampler's
+/// Why free rather than a method: it does blocking I/O (a socket dial) and the caller runs it on the blocking pool, away from the sampler's
 /// borrowed state.
 /// What: dispatches on the service id to the one discovery artifact that service
 /// actually publishes — see the table in the module docs. An id with no known
 /// source returns `None` immediately, doing no I/O at all.
 /// Test: `resolve_pid_is_none_for_a_service_with_no_source`,
-/// `mpm_pid_is_read_from_the_lock_file`,
+/// `mpm_pid_is_the_peer_of_its_socket`,
 /// `console_pid_is_this_process`.
 #[must_use]
 pub fn resolve_pid(service_id: &str) -> Option<u32> {
     match service_id {
-        "trusty-mpm" => mpm_lock_pid(&mpm_lock_path()?),
+        // #6288: the daemon's socket, as every mpm client resolves it — not the
+        // lock file, whose `addr` names the HTTP bind PR 2 retires.
+        "trusty-mpm" => socket_peer_pid(trusty_common::mpm_rpc::mpm_socket()),
         "trusty-search" => socket_peer_pid(crate::search_uds::socket_path().ok()?),
         "trusty-memory" => {
             socket_peer_pid(trusty_common::daemon_socket_path("trusty-memory").ok()?)
@@ -87,39 +88,6 @@ pub fn resolve_pid(service_id: &str) -> Option<u32> {
         "trusty-console" => Some(std::process::id()),
         _ => None,
     }
-}
-
-/// Where trusty-mpm's daemon lock lives.
-fn mpm_lock_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".trusty-mpm").join("daemon.lock"))
-}
-
-/// Extract the `pid` field from a trusty-mpm `daemon.lock` TOML body.
-///
-/// Why a line scan rather than a TOML parse: `detect::mpm` already reads this
-/// same file for its `addr` field with a line scan, for the reason recorded
-/// there — one field does not justify a TOML dependency in the console.
-/// What: splits each line on the FIRST `=`, matches the key EXACTLY against
-/// `pid` (so `pid_file` is rejected), and parses the value. Returns `None` when
-/// the file is absent, unreadable, or carries no well-formed `pid`.
-/// Test: `mpm_pid_is_read_from_the_lock_file`,
-/// `mpm_pid_rejects_a_prefixed_key`, `mpm_pid_is_none_for_a_missing_file`.
-fn mpm_lock_pid(path: &std::path::Path) -> Option<u32> {
-    let body = std::fs::read_to_string(path).ok()?;
-    for line in body.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "pid" {
-            continue;
-        }
-        if let Ok(pid) = value.trim().trim_matches('"').parse::<u32>()
-            && pid > 0
-        {
-            return Some(pid);
-        }
-    }
-    None
 }
 
 /// Dial `socket` and ask the kernel which process is listening.
@@ -694,46 +662,29 @@ mod tests {
         assert_eq!(resolve_pid("not-a-service"), None);
     }
 
-    /// Why: trusty-mpm is the one member that publishes its pid on disk, so the
-    /// parse is the whole discovery path for it.
-    /// What: writes a lock file in the shape the daemon writes and asserts the
-    /// pid comes back.
+    /// Why (#6288): trusty-mpm's pid came from the lock file, whose `addr` names
+    /// the HTTP bind PR 2 retires; it now comes from the daemon's socket, the
+    /// same `TRUSTY_MPM_SOCKET`-aware path every mpm client dials.
+    /// What: binds a socket in this process, points `TRUSTY_MPM_SOCKET` at it
+    /// under the crate's env lock, and asserts the pid is this process's own.
     /// Test: this test itself.
-    #[test]
-    fn mpm_pid_is_read_from_the_lock_file() {
+    #[tokio::test]
+    async fn mpm_pid_is_the_peer_of_its_socket() {
+        let _guard = crate::detect::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        let lock = tmp.path().join("daemon.lock");
-        std::fs::write(
-            &lock,
-            "pid = 4242\naddr = \"http://127.0.0.1:7880\"\nstarted_at = \"x\"\n",
-        )
-        .expect("write");
-        assert_eq!(mpm_lock_pid(&lock), Some(4242));
-    }
+        let path = tmp.path().join("trusty-mpm.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).expect("bind");
+        // SAFETY: serialised by `ENV_LOCK`; restored before the guard drops.
+        unsafe { std::env::set_var(trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV, &path) };
+        let pid = resolve_pid("trusty-mpm");
+        unsafe { std::env::remove_var(trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV) };
 
-    /// Why: `pid_file = "…"` in the same TOML must not be read as the pid — the
-    /// sibling `addr` parser in `detect::mpm` records the same finding.
-    /// What: asserts a prefixed key, a zero pid, and a missing file all yield
-    /// `None`.
-    /// Test: this test itself.
-    #[test]
-    fn mpm_pid_rejects_a_prefixed_key() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let lock = tmp.path().join("daemon.lock");
-        std::fs::write(&lock, "pid_file = \"/tmp/x\"\npidx = 7\n").expect("write");
-        assert_eq!(mpm_lock_pid(&lock), None);
-
-        std::fs::write(&lock, "pid = 0\n").expect("write");
-        assert_eq!(mpm_lock_pid(&lock), None, "pid 0 is not a process");
-    }
-
-    /// Why: a stale lock file removed under the console must degrade to no
-    /// measurement, not to an error.
-    /// Test: this test itself.
-    #[test]
-    fn mpm_pid_is_none_for_a_missing_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert_eq!(mpm_lock_pid(&tmp.path().join("absent.lock")), None);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(pid, Some(std::process::id()));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert_eq!(pid, None);
     }
 
     /// Why (#6642): trusty-search and trusty-memory publish no pid anywhere, so

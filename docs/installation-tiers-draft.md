@@ -210,7 +210,7 @@ Persistent, searchable memory organized into named "palaces" (namespaces). Store
 **What it requires:**
 - **System**: None (pure Rust binary, but ships with 3 binaries: trusty-memory, trusty-memory-mcp-bridge (deprecated shim), trusty-bm25-daemon, trusty-console).
 - **Environment**: Optional `OPENROUTER_API_KEY` for inference-backed memory features (default: disabled). See **Credentials** below.
-- **Daemon**: Yes, launchd-managed on macOS (HTTP on `:7880`).
+- **Daemon**: Yes, launchd-managed on macOS (Unix socket under its data directory; no TCP port).
 - **Disk/RAM**: 512 MB minimum; 1 GB+ recommended. ~100 MB disk for model cache (`~/Library/Application Support/trusty-memory/`).
 
 **Credentials (Optional):**  
@@ -249,8 +249,8 @@ trusty-memory start
 
 sleep 3
 
-curl -s http://127.0.0.1:7880/health | jq .
-# Expected: {"status": "ok"} or similar health response
+tctl stack health
+# Expected: trusty-memory reported healthy (probed over its Unix socket)
 
 trusty-memory serve --stdio &
 # Expected: daemon responds to MCP stdio requests (confirms MCP bridge works)
@@ -283,7 +283,7 @@ LLM-backed PR review service. Fetches GitHub PR diffs, retrieves code context fr
 - **Environment**: 
   - **GitHub token**: `GITHUB_TOKEN` or authenticated `gh` (via `gh auth login`). Default: dry-run mode (no comment posting). Set `PR_INTELLIGENCE_DRY_RUN=false` to enable posting.
   - **LLM credentials**: AWS Bedrock (default) or OpenRouter. See **Credentials** below.
-- **Daemon**: Yes, launchd-managed on macOS (HTTP on `:7880` for webhook receiver).
+- **Daemon**: No resident daemon (per-invocation since #6290; it binds no port).
 - **Disk/RAM**: ~50 MB binary, <100 MB runtime.
 
 **Credentials:**
@@ -834,7 +834,7 @@ sleep 10
 curl http://127.0.0.1:7878/health
 trusty-memory start
 sleep 5
-curl http://127.0.0.1:7880/health
+tctl stack health   # each daemon is probed over its own Unix socket (#6288)
 ```
 
 ---

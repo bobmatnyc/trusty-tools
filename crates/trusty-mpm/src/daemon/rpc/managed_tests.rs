@@ -642,36 +642,10 @@ async fn rpc_ctl_connect_refuses_a_unary_request() {
 /// Test: this test.
 #[tokio::test]
 async fn rpc_ctl_connect_streams_events() {
-    use crate::control::id::ControlSessionId;
-    use crate::control::state::SessionMetadata;
-
     let (state, _dir) = test_state().await;
-    let id = ControlSessionId::new("stream-proj", 0);
-    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
-    let (event_tx, _) = tokio::sync::broadcast::channel(16);
-    let handle = crate::control::actor::SessionActorHandle {
-        command_tx,
-        event_tx: event_tx.clone(),
-        write_lock_held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        metadata: Arc::new(tokio::sync::RwLock::new(SessionMetadata::new(
-            id.clone(),
-            "stream-proj".into(),
-            crate::control::event::BackendKind::StreamJson,
-        ))),
-    };
-    state.session_registry.register(id.clone(), handle).await;
-
-    let router = rpc_router(&state);
-    let frame = json!({
-        "jsonrpc": "2.0", "id": 1, "stream": true,
-        "method": "mpm.control.connect", "params": {"id": id.to_string()},
-    });
-    let outcome = router
-        .dispatch_streaming(frame.to_string().as_bytes())
-        .await;
-    let trusty_common::uds::server::RpcOutcome::Stream { mut items, .. } = outcome else {
-        panic!("a streaming request must produce a stream outcome");
-    };
+    let session = register_control_session(&state, "stream-proj").await;
+    let (id, event_tx) = (session.id.clone(), session.event_tx.clone());
+    let mut items = open_connect_stream(&rpc_router(&state), &id.to_string()).await;
 
     let event = crate::control::event::SessionEvent::ObserverLagged {
         session_id: id.clone(),
@@ -684,6 +658,190 @@ async fn rpc_ctl_connect_streams_events() {
     assert_eq!(
         first, expected,
         "a stream frame must carry the SessionEvent verbatim"
+    );
+}
+
+/// A control session registered straight into the daemon's registry, with the
+/// two handles a connect test needs kept beside it.
+struct ControlSession {
+    id: crate::control::id::ControlSessionId,
+    /// A clone of the session's event channel; dropping every clone ends it.
+    event_tx: tokio::sync::broadcast::Sender<crate::control::event::SessionEvent>,
+    /// The session's write-lock flag, the one `mpm.control.connect` CASes.
+    lock: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ControlSession {
+    fn held(&self) -> bool {
+        self.lock.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Register a session under `project` whose actor is a pair of channels.
+///
+/// Nothing is spawned: the connect method reads only the handle's event
+/// channel and its write-lock flag.
+async fn register_control_session(state: &Arc<DaemonState>, project: &str) -> ControlSession {
+    use crate::control::state::SessionMetadata;
+
+    let id = crate::control::id::ControlSessionId::new(project, 0);
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = crate::control::actor::SessionActorHandle {
+        command_tx,
+        event_tx: event_tx.clone(),
+        write_lock_held: Arc::clone(&lock),
+        metadata: Arc::new(tokio::sync::RwLock::new(SessionMetadata::new(
+            id.clone(),
+            project.into(),
+            crate::control::event::BackendKind::StreamJson,
+        ))),
+    };
+    state.session_registry.register(id.clone(), handle).await;
+    ControlSession { id, event_tx, lock }
+}
+
+/// Open an `mpm.control.connect` stream on `router` without a socket.
+async fn open_connect_stream(
+    router: &RpcRouter,
+    id: &str,
+) -> trusty_common::uds::server::RpcStreamItems {
+    let frame = json!({
+        "jsonrpc": "2.0", "id": 1, "stream": true,
+        "method": "mpm.control.connect", "params": {"id": id},
+    });
+    let outcome = router
+        .dispatch_streaming(frame.to_string().as_bytes())
+        .await;
+    let trusty_common::uds::server::RpcOutcome::Stream { items, .. } = outcome else {
+        panic!("a streaming request must produce a stream outcome");
+    };
+    items
+}
+
+/// Wait up to `bound` for the session's lock to read `want`.
+async fn lock_reaches(session: &ControlSession, want: bool, bound: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    while tokio::time::Instant::now() < deadline {
+        if session.held() == want {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    session.held() == want
+}
+
+/// #6288 (1b): the first socket connect takes the write-lock, as the SSE route
+/// does; a second connect while it is open is an observer, and closing the
+/// observer leaves the writer's lock held.
+///
+/// Why: 1a shipped the socket form as observe-only, so no socket caller could
+/// ever be the writer. An observer whose guard released on drop would hand the
+/// lock away from a live writer.
+/// Test: this test.
+#[tokio::test]
+async fn rpc_ctl_connect_takes_the_write_lock_and_an_observer_leaves_it() {
+    let (state, _dir) = test_state().await;
+    let session = register_control_session(&state, "lock-proj").await;
+    let router = rpc_router(&state);
+
+    let writer = open_connect_stream(&router, &session.id.to_string()).await;
+    assert!(session.held(), "the first connect must take the write-lock");
+
+    let observer = open_connect_stream(&router, &session.id.to_string()).await;
+    drop(observer);
+    // The observer's task ends at once on the closed sender; give it time to
+    // run, then the writer's lock must still be held.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        session.held(),
+        "an observer leaving must not release the lock"
+    );
+
+    drop(writer);
+    assert!(
+        lock_reaches(&session, false, std::time::Duration::from_secs(5)).await,
+        "the writer leaving must release the lock"
+    );
+    let again = open_connect_stream(&router, &session.id.to_string()).await;
+    assert!(session.held(), "a released lock is acquirable again");
+    drop(again);
+}
+
+/// #6288 (1b): a writer that hangs up on a QUIET session releases the lock over
+/// a real socket — no event has to arrive to notice it left.
+///
+/// Why: the forwarding task learns of the departure only through its closed
+/// sender; without that arm the lock would stay held until the next event,
+/// which on an idle session may be never.
+/// What: serves the real control router on a temp socket, opens the stream as
+/// `tm sessctl connect` does, then drops the client and waits for the release.
+/// Test: this test.
+#[tokio::test]
+async fn rpc_ctl_connect_releases_the_write_lock_when_a_quiet_client_leaves() {
+    use trusty_common::uds::server::{RpcServeOptions, serve_until};
+
+    let (state, dir) = test_state().await;
+    let session = register_control_session(&state, "quiet-proj").await;
+    let socket = dir.path().join("s").join("trusty-mpm.sock");
+    std::fs::create_dir_all(socket.parent().expect("parent")).expect("socket dir");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let router = Arc::new(rpc_router(&state));
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_until(&listener, router, RpcServeOptions::default(), async {
+            let _ = shutdown.await;
+        })
+        .await;
+    });
+
+    let frame = json!({
+        "jsonrpc": "2.0", "id": 1, "stream": true,
+        "method": "mpm.control.connect", "params": {"id": session.id.to_string()},
+    });
+    let client = trusty_common::uds::send_framed_stream_request::<_, Value>(
+        &socket,
+        &frame,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect("the stream opens");
+    assert!(
+        lock_reaches(&session, true, std::time::Duration::from_secs(5)).await,
+        "a socket connect must take the write-lock"
+    );
+
+    drop(client);
+    assert!(
+        lock_reaches(&session, false, std::time::Duration::from_secs(5)).await,
+        "a client leaving a quiet stream must release the write-lock"
+    );
+    let _ = stop.send(());
+    server.await.expect("the serve loop ends");
+}
+
+/// #6288 (1b): the session ending ends the stream and releases the lock, as the
+/// SSE stream's `Err(_)` arm does.
+/// Test: this test.
+#[tokio::test]
+async fn rpc_ctl_connect_releases_the_write_lock_when_the_session_ends() {
+    let (state, _dir) = test_state().await;
+    let mut session = register_control_session(&state, "ending-proj").await;
+    let mut items = open_connect_stream(&rpc_router(&state), &session.id.to_string()).await;
+    assert!(session.held(), "the connect must take the write-lock");
+
+    state.session_registry.deregister(&session.id).await;
+    // Every sender gone: the registry's handle, and this test's clone.
+    let (unrelated, _) = tokio::sync::broadcast::channel(1);
+    drop(std::mem::replace(&mut session.event_tx, unrelated));
+    assert!(
+        items.recv().await.is_none(),
+        "a closed session ends the stream with no error frame"
+    );
+    assert!(
+        lock_reaches(&session, false, std::time::Duration::from_secs(5)).await,
+        "the stream ending must release the write-lock"
     );
 }
 

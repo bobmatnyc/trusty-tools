@@ -284,7 +284,7 @@ fn build_router_inner(
             any(crate::analyze_uds::routes::deprecated_analyze_api_handler),
         )
         // Primary reverse-proxy: /api/{service}/{*path} (#1849 Phase 2).
-        // {service} ∈ {review, mpm, agents}.
+        // {service} ∈ {review, agents}; #6288 PR 1b removed mpm.
         // No collision with /api/console/*: axum (matchit 0.8) routes literal
         // segments before wildcard captures, so /api/console/* always wins.
         // The proxy handler also rejects service_key == "console" explicitly as // pragma: allowlist secret

@@ -73,8 +73,10 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Default TCP port for `tcode serve --http` when `--port` is omitted.
 ///
 /// Why: the trusty-* family reserves a block of fixed local ports so
-/// operators/tooling can find a daemon without a discovery file
-/// (`trusty-search` 7878, `trusty-mpm` daemon 7880).
+/// operators/tooling can find a daemon without a discovery file. The
+/// `trusty-mpm` daemon still binds 7880 until #6288 PR 2, but no client reaches
+/// it there: this crate's project picker dials its socket (#6288 PR 1b,
+/// `fs_browse::mpm_registry`), and trusty-search binds no port (#9214).
 /// `trusty-review` used to hold 7891 and `trusty-embedderd` 7890; neither does
 /// now — #6277 moved review to a Unix socket and #6289 retired embedderd's
 /// `--http` mode outright (ADR-0032). This constant previously reused `7881`, which turned
@@ -452,6 +454,7 @@ mod tests {
             // it serves a Unix socket (ADR-0032), so 7879 is not reserved by
             // anything and listing it would forbid a future daemon from a free
             // port.
+            // #6288: kept while the daemon still binds 7880; PR 2 retires it.
             (
                 "trusty-mpm",
                 7880,

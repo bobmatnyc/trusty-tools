@@ -18,6 +18,9 @@ pub mod manifest;
 // #9543: trusty-search found by socket health, never by TCP.
 #[cfg(test)]
 mod uds_search_tests;
+// #6288: the trusty-mpm daemon found by socket health, never by 7880.
+#[cfg(test)]
+mod uds_mpm_tests;
 
 pub use discoverer::{
     CACHE_TTL, Discoverer, HEALTH_PROBE_TIMEOUT, HealthResult, HealthState, ServiceStatus,

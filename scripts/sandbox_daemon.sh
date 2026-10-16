@@ -42,6 +42,10 @@
 #   shorter --dir (e.g. under /tmp). Teardown: when the daemon exits, the script
 #   runs `tmux -S <that socket> kill-server`, which stops only the sandbox's
 #   server. SIGINT, SIGTERM and SIGHUP are passed to the daemon first.
+#   Socket (#6288): every tm client reaches the daemon over its Unix socket,
+#   <dir>/data/trusty-mpm/trusty-mpm.sock; the script prints that path and the
+#   TRUSTY_MPM_SOCKET pin a client uses to reach this sandbox. A --dir whose
+#   socket path exceeds 103 bytes refuses, as for tmux.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
@@ -176,6 +180,14 @@ SOCK="$TMUX_DIR/tmux-$(id -u)/default"
 if [ "${SANDBOX#<}" = "$SANDBOX" ] && [ "${#SOCK}" -gt 103 ]; then
   die "the tmux socket path is ${#SOCK} bytes, over the 103-byte sun_path limit: $SOCK; pick a shorter --dir"
 fi
+# #6288: the daemon socket every tm client dials, as
+# trusty_common::daemon_socket_path("trusty-mpm") derives it under
+# TRUSTY_DATA_DIR_OVERRIDE. It is longer than the tmux socket, so it is
+# checked against sun_path too: the daemon would refuse to bind it.
+DAEMON_SOCK="$SANDBOX/data/trusty-mpm/trusty-mpm.sock"
+if [ "${SANDBOX#<}" = "$SANDBOX" ] && [ "${#DAEMON_SOCK}" -gt 103 ]; then
+  die "the daemon socket path is ${#DAEMON_SOCK} bytes, over the 103-byte sun_path limit: $DAEMON_SOCK; pick a shorter --dir"
+fi
 
 # The FORWARDED names the caller exported, as NAME=value words for env -i.
 # `compgen -e` lists exported names only: bash itself sets SHELL and TERM as
@@ -192,7 +204,9 @@ for name in $FORWARDED; do
 done
 
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
-echo "sandbox_daemon: daemon address: $ADDR"
+echo "sandbox_daemon: daemon socket: $DAEMON_SOCK"
+echo "sandbox_daemon: client: TRUSTY_MPM_SOCKET=$DAEMON_SOCK tm <command>"
+echo "sandbox_daemon: daemon address: $ADDR (HTTP, no client uses it; retired by #6288)"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
 echo "sandbox_daemon: working directory: $SANDBOX/home"
 echo "sandbox_daemon: tmux socket: $SOCK"

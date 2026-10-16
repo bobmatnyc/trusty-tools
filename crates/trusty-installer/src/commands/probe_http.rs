@@ -16,7 +16,7 @@
 //! Every one of those daemons *does* answer a health query on a transport it
 //! actually serves, so this module replaces the subprocess contract with that
 //! transport. Since #6277 (ADR-0032) which transport that is varies per member:
-//! trusty-analyze, trusty-memory and trusty-search serve a hardened Unix
+//! trusty-analyze, trusty-memory, trusty-search and (#6288) trusty-mpm serve a hardened Unix
 //! socket and are probed through [`uds_socket_for`] / [`classify_rpc_response`]
 //! (trusty-search binds no TCP port since #9214); trusty-review has no
 //! transport at all since #6290 and is probed by presence ([`presence_only`]);
@@ -110,7 +110,9 @@ const DEGRADED: &str = "degraded";
 pub fn fixed_port_for(binary: &str) -> Option<u16> {
     match binary {
         "trusty-console" => Some(7788),
-        "trusty-mpm" => Some(7880),
+        // #6288 PR 1b: NO trusty-mpm row. Every mpm client reaches the daemon
+        // over its socket, and PR 2 retires the 7880 bind; see
+        // [`uds_socket_for`].
         // #6277 / #6287 / #6286 / #9214: NO trusty-review, trusty-analyze,
         // trusty-memory or trusty-search row. None serves a TCP port any more
         // (ADR-0032) — see [`uds_socket_for`]. Leaving 7891, 7879, 7070 or
@@ -172,6 +174,10 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
         "trusty-analyze" | "trusty-memory" | "trusty-search" => {
             trusty_common::daemon_socket_path(binary).ok()
         }
+        // #6288 PR 1b: the path every mpm client dials — `daemon_socket_path`,
+        // or the `TRUSTY_MPM_SOCKET` pin the tm CLI honours too. `mpm_socket`
+        // fails open to a path nothing serves, which probes as `Refused`.
+        "trusty-mpm" => Some(trusty_common::mpm_rpc::mpm_socket()),
         _ => None,
     }
 }
@@ -286,6 +292,9 @@ fn uds_health_method(binary: &str) -> Option<&'static str> {
         // same `health_report()` the axum route does, so the two legs of a
         // dual-transport probe cannot answer differently about the same daemon.
         "trusty-search" => Some("search.health"),
+        // #6288: `trusty-mpm`'s `daemon::rpc::core` registers it; it binds
+        // `NoParams`, so the `{}` this probe sends decodes.
+        "trusty-mpm" => Some("mpm.health"),
         _ => None,
     }
 }

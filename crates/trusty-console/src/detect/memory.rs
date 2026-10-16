@@ -21,12 +21,14 @@
 //! `memory_connector_accepts_the_envelope_a_real_daemon_sends`,
 //! `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
 
 use super::helpers::binary_on_path;
+// #6288: the health dial is shared with the trusty-mpm connector.
+use super::socket_health::{ProbeOutcome, probe_health};
 
 /// How long one health dial may take, end to end.
 ///
@@ -45,21 +47,6 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// copy, and the integration test in
 /// `trusty-memory/tests/uds_consumer_contract.rs` is what keeps them equal.
 const METHOD_HEALTH: &str = "memory.health";
-
-/// The `result` half of an `memory.health` response, as far as the console
-/// reads it.
-///
-/// Only `version` is consumed — the card renders it. `status` is deserialised
-/// too so a body that carries neither is refused as not-a-health-envelope
-/// rather than silently rendering a versionless Running card.
-#[derive(Debug, serde::Deserialize)]
-struct HealthEnvelope {
-    /// `"ok"` or `"degraded"`. Presence is what makes this a health answer.
-    #[allow(dead_code)]
-    status: String,
-    /// The daemon's own version, rendered on the service card.
-    version: Option<String>,
-}
 
 /// ServiceConnector for `trusty-memory`.
 ///
@@ -117,97 +104,6 @@ impl Default for MemoryConnector {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// What one `memory.health` dial observed.
-///
-/// Why (#6356): "the daemon did not answer" and "the daemon answered, but not
-/// with health" are different facts about a machine, and collapsing both into
-/// `None` is what let a live daemon render as "Binary found but daemon is not
-/// running" for as long as the request was malformed. A daemon that answers at
-/// all is running; only the first case is silence.
-/// What: three variants, one per verdict `detect_from` can reach.
-/// Test: `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
-enum ProbeOutcome {
-    /// The daemon answered with a readable health envelope.
-    Healthy(HealthEnvelope),
-    /// The daemon answered, but not with health. Carries the operator-facing
-    /// reason, which becomes the card's hint.
-    Unhealthy(String),
-    /// Nothing answered - no socket, no listener, or the dial timed out.
-    Silent,
-}
-
-/// Dial `memory.health` and report what came back.
-///
-/// Why: `ServiceConnector::detect` is synchronous — the poller calls it inside
-/// `spawn_blocking` — and the shared UDS client is async. The exchange runs on
-/// a dedicated thread with its own current-thread runtime rather than through
-/// `Handle::block_on`, for the reason `trusty-installer`'s
-/// `probe_member_http_blocking` records: building a runtime and blocking on it
-/// from inside another runtime's worker panics, and this way the call is safe
-/// from any caller regardless of what it is running on.
-///
-/// What: one `send_framed_request` bounded by [`HEALTH_TIMEOUT`], then a
-/// JSON-RPC envelope check, mapped onto [`ProbeOutcome`]. A response carrying
-/// an `error` is [`ProbeOutcome::Unhealthy`], not silence - the daemon is
-/// there, and reporting otherwise is what #6356 was.
-///
-/// Test: `memory_connector_reports_available_when_nothing_is_serving`,
-/// `memory_connector_sends_params_so_a_strict_health_handler_answers`,
-/// `memory_connector_reports_degraded_when_the_daemon_answers_with_an_error`.
-fn probe_health(socket: &Path) -> ProbeOutcome {
-    let socket = socket.to_path_buf();
-    let spawned = std::thread::Builder::new()
-        .name("console-memory-probe".to_owned())
-        .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return ProbeOutcome::Silent;
-            };
-            rt.block_on(async {
-                // #6356: `memory.health` binds `HealthQuery`, and
-                // `RpcRouter::typed` decodes an absent `params` as
-                // `Value::Null`, which a derived `Deserialize` refuses however
-                // many of its fields default. The sibling daemons bind
-                // `NoParams`, whose hand-written `Deserialize` accepts null,
-                // which is why only this connector was affected. `{}` takes
-                // every default - the cheap health path, not the embedder
-                // round-trip `probe`/`deep` would ask for.
-                let request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": METHOD_HEALTH,
-                    "params": {},
-                });
-                let sent = trusty_common::uds::send_framed_request::<
-                    _,
-                    trusty_common::uds::server::RpcResponse,
-                >(&socket, &request, HEALTH_TIMEOUT)
-                .await;
-                let Ok(response) = sent else {
-                    return ProbeOutcome::Silent;
-                };
-                if let Some(error) = response.error {
-                    return ProbeOutcome::Unhealthy(format!(
-                        "trusty-memory answered {METHOD_HEALTH} with an error (code {}): {}",
-                        error.code, error.message
-                    ));
-                }
-                match response.result.map(serde_json::from_value::<HealthEnvelope>) {
-                    Some(Ok(health)) => ProbeOutcome::Healthy(health),
-                    _ => ProbeOutcome::Unhealthy(format!(
-                        "trusty-memory answered {METHOD_HEALTH} with a body that is not a health envelope"
-                    )),
-                }
-            })
-        });
-    let Ok(handle) = spawned else {
-        return ProbeOutcome::Silent;
-    };
-    handle.join().unwrap_or(ProbeOutcome::Silent)
 }
 
 impl ServiceConnector for MemoryConnector {
@@ -276,7 +172,7 @@ impl MemoryConnector {
             Err(reason) => return base(ServiceStatus::Available, None, Some(reason)),
         };
 
-        match probe_health(&socket) {
+        match probe_health(&socket, "trusty-memory", METHOD_HEALTH, HEALTH_TIMEOUT) {
             ProbeOutcome::Healthy(health) => base(ServiceStatus::Running, health.version, None),
             // #6356: a daemon that answers is running, so the row says so
             // rather than repeating the "not running" line an operator has
@@ -294,6 +190,7 @@ impl MemoryConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// Bind `socket` and answer exactly one frame with whatever `reply` makes
     /// of the request it received.

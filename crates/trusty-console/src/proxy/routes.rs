@@ -53,8 +53,7 @@ static HOP_BY_HOP: &[&str] = &[
 /// Why: The URL uses short names (`search`, `memory`, …) while `ServiceInfo.id`
 /// uses the full `trusty-*` prefix.  This function is the single source of
 /// truth for the proxy allowlist: `None` means the key is not permitted.
-/// `mpm` is in the allowlist (#1849 Phase 1) so `/api/mpm/*path` forwards to
-/// the live trusty-mpm daemon URL resolved from the connector's `ServiceInfo`.
+/// `mpm` left the allowlist in #6288 PR 1b.
 /// What: Returns the full service ID, or `None` for unknown/disallowed keys.
 /// Test: `test_service_key_mapping` below.
 fn full_id(service_key: &str) -> Option<&'static str> {
@@ -88,10 +87,10 @@ fn full_id(service_key: &str) -> Option<&'static str> {
         // `http_addr` file predates the migration on every existing machine and
         // an inert row that can resolve a stale address is not inert.
         "review" => Some("trusty-review"),
-        // #1849 Phase 1: mpm added to the proxy allowlist so the console can
-        // forward requests to the live trusty-mpm HTTP daemon via its base URL
-        // resolved from the standard http_addr discovery file.
-        "mpm" => Some("trusty-mpm"),
+        // #6288 PR 1b: NO `mpm` row. Every in-repo mpm client moved to the
+        // daemon's Unix socket (PR 1a), so `/api/mpm/*` had no caller, and PR 2
+        // retires the daemon's 7880 bind. The console reaches mpm through its
+        // `tm serve --stdio` MCP handle and `mpm.health` on the socket.
         // #3331: agents added so the trusty-agents API surface is reachable via
         // `/api/agents/*`. Under the loopback-only doctrine (#3328) the agents
         // daemon binds 127.0.0.1 by default, so this console proxy is the
@@ -720,8 +719,8 @@ mod tests {
         // #6277: still allowlisted, but inert — trusty-review serves UDS and
         // writes no `http_addr` for the proxy to resolve. See `full_id`.
         assert_eq!(full_id("review"), Some("trusty-review"));
-        // #1849 Phase 1: mpm must be in the allowlist.
-        assert_eq!(full_id("mpm"), Some("trusty-mpm"));
+        // #6288 PR 1b: the mpm gateway is deleted; it had no caller.
+        assert_eq!(full_id("mpm"), None);
         // #3331: agents must be in the allowlist so `/api/agents/*` proxies.
         assert_eq!(full_id("agents"), Some("trusty-agents"));
         assert_eq!(full_id("unknown"), None);

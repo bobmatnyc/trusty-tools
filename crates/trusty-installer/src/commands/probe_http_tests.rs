@@ -556,7 +556,8 @@ fn fixed_ports_match_port_assignments_doc() {
     assert_eq!(fixed_port_for("trusty-console"), Some(7788));
     // #9214: trusty-search binds no TCP port; it is a UDS member now.
     assert_eq!(fixed_port_for("trusty-search"), None);
-    assert_eq!(fixed_port_for("trusty-mpm"), Some(7880));
+    // #6288 PR 1b: trusty-mpm is a UDS member; its 7880 bind is retiring.
+    assert_eq!(fixed_port_for("trusty-mpm"), None);
     // Never guess: `tga` is not a daemon, and `trusty-installer` binds nothing.
     assert_eq!(fixed_port_for("tga"), None);
     assert_eq!(fixed_port_for("trusty-installer"), None);
@@ -667,7 +668,12 @@ fn version_line_parses_the_clap_shape() {
 /// Test: This is the test.
 #[test]
 fn uds_members_have_no_fixed_port() {
-    for binary in ["trusty-analyze", "trusty-memory", "trusty-search"] {
+    for binary in [
+        "trusty-analyze",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-mpm",
+    ] {
         assert_eq!(
             fixed_port_for(binary),
             None,
@@ -699,7 +705,12 @@ fn uds_members_have_no_fixed_port() {
 /// Test: This is the test.
 #[test]
 fn every_uds_member_has_a_health_method() {
-    for binary in ["trusty-analyze", "trusty-memory", "trusty-search"] {
+    for binary in [
+        "trusty-analyze",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-mpm",
+    ] {
         let method = super::uds_health_method(binary)
             .unwrap_or_else(|| panic!("{binary} serves a socket but names no health method"));
         let domain = binary.trim_start_matches("trusty-");
@@ -729,7 +740,12 @@ fn uds_socket_for_matches_the_shared_entry_point() {
     // about a path neither side got wrong — a pre-existing flake (~1 run in 8
     // on main) that the socket-binding tests below make more likely.
     let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    for binary in ["trusty-analyze", "trusty-memory", "trusty-search"] {
+    for binary in [
+        "trusty-analyze",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-mpm",
+    ] {
         assert_eq!(
             uds_socket_for(binary),
             trusty_common::daemon_socket_path(binary).ok(),
@@ -924,7 +940,7 @@ async fn probe_uds_sends_explicit_empty_params_so_a_strict_handler_answers() {
 /// The caller MUST be holding [`ENV_TEST_LOCK`] — the override is process-global.
 /// # Postconditions
 /// Returns the created directory; teardown is `clear_data_dir_override`.
-/// Test: used by `search_is_probed_over_its_socket`.
+/// Test: used by `search_is_probed_over_its_socket`, `mpm_is_probed_over_its_socket`.
 fn short_data_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(format!("/tmp/tctl-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create short data dir");
@@ -1008,6 +1024,81 @@ async fn search_is_probed_over_its_socket() {
         !outcome.is_confirmed_down(),
         "a dead http_addr must not outrank a socket that answered"
     );
+}
+
+/// REGRESSION (#6288 PR 1b): trusty-mpm is probed over its socket alone; the
+/// `http_addr` its daemon still records for the retiring 7880 bind is never
+/// dialled.
+///
+/// Why: once PR 2 retires the bind, whatever answers on that recorded address
+/// is not trusty-mpm, and reading it as the daemon would report a stranger as
+/// healthy.
+/// What: no socket bound, a live HTTP stub answering trusty-mpm's own
+/// `/health` payload on the recorded `http_addr`; the verdict must NOT be
+/// `Serving` — it is the socket's refusal.
+/// Test: This is the test.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn mpm_never_dials_a_recorded_http_addr() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = stub_once(OK_LINE, REAL_MPM).await;
+    let dir = short_data_dir("6288");
+    trusty_common::write_daemon_addr("trusty-mpm", &recorded).expect("plant http_addr");
+    let socket = trusty_common::daemon_socket_path("trusty-mpm").expect("mpm socket path");
+    let _ = std::fs::remove_file(&socket);
+
+    let outcome = probe_daemon_http("trusty-mpm", "trusty-mpm").await;
+    crate::commands::test_support::clear_data_dir_override(&dir);
+
+    assert!(
+        !matches!(outcome, ProbeOutcome::Serving { .. }),
+        "an HTTP stub on the recorded http_addr must not read as trusty-mpm: {outcome:?}"
+    );
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Refused,
+        "an absent socket is a refusal"
+    );
+}
+
+/// REGRESSION (#6288 PR 1b): a trusty-mpm daemon answering `mpm.health` on its
+/// socket is `Serving`, whatever a dead `http_addr` says.
+/// What: binds the derived socket, answers one frame with trusty-mpm's real
+/// health payload, and plants an `http_addr` nothing listens on.
+/// Test: This is the test.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn mpm_is_probed_over_its_socket() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = short_data_dir("6288s");
+    trusty_common::write_daemon_addr("trusty-mpm", &dead_addr()).expect("plant http_addr");
+    let socket = trusty_common::daemon_socket_path("trusty-mpm").expect("mpm socket path");
+    let _ = std::fs::remove_file(&socket);
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+
+    let seen = tokio::spawn(async move {
+        let Ok((mut conn, _)) = listener.accept().await else {
+            return serde_json::Value::Null;
+        };
+        let mut raw = Vec::new();
+        let _ = conn.read_to_end(&mut raw).await;
+        let reply = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{REAL_MPM}}}\n");
+        let _ = conn.write_all(reply.as_bytes()).await;
+        let _ = conn.flush().await;
+        serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null)
+    });
+
+    let outcome = probe_daemon_http("trusty-mpm", "trusty-mpm").await;
+    crate::commands::test_support::clear_data_dir_override(&dir);
+
+    assert!(
+        matches!(outcome, ProbeOutcome::Serving { .. }),
+        "an mpm daemon answering mpm.health must be Serving; got {outcome:?}"
+    );
+    let request = seen.await.expect("the stub task");
+    assert_eq!(request["method"], "mpm.health", "{request}");
 }
 
 /// Why: a member that still serves TCP is probed at the address it recorded,

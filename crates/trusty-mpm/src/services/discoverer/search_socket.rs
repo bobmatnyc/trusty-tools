@@ -88,24 +88,18 @@ impl SearchSocketProber for NoSearchDaemon {
 }
 
 impl Discoverer {
-    /// Probe a `health_probe: uds_search` service.
+    /// Probe a socket-probed service (`uds_search`, or `uds_mpm` since #6288).
     ///
     /// Why (#9543): UP must not depend on a TCP port, a port-owner PID or HTTP.
-    /// What: health is `search.health` on the resolved socket, and `running`
-    /// is exactly "the socket answered". The PID is `pgrep -f` on
+    /// What: health is the service's own health method on its resolved socket,
+    /// and `running` is exactly "the socket answered". The PID is `pgrep -f` on
     /// `process_match`, for display only; `port` and `url` are always `None`.
     /// Test: `uds_search_is_up_against_a_socket_only_daemon`,
     /// `uds_search_is_down_on_a_dead_socket_even_when_pgrep_matches`,
-    /// `uds_search_never_calls_the_http_prober`.
-    pub(super) fn probe_uds_search(&self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
-        let health = match self.socket_prober.socket() {
-            Ok(socket) => self
-                .socket_prober
-                .search_health(&socket, HEALTH_PROBE_TIMEOUT),
-            Err(e) => HealthState::Fail {
-                detail: format!("cannot resolve the trusty-search socket: {e:#}"),
-            },
-        };
+    /// `uds_search_never_calls_the_http_prober`,
+    /// `uds_mpm_is_up_against_a_socket_only_daemon`.
+    pub(super) fn probe_socket(&self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
+        let health = self.socket_health(decl.health_probe);
         // #9543: a pgrep match is not liveness — `trusty-search serve` MCP
         // bridges match too. Only the socket's answer makes the service running.
         let running = health == HealthState::Ok;
@@ -133,16 +127,16 @@ impl Discoverer {
     ///
     /// Why (#9543): a socket-only service has no port, and `tm services port`
     /// must say so and name the socket rather than print a port nothing binds.
-    /// What: `None` for an undeclared service. A `uds_search` service is `Err`
+    /// What: `None` for an undeclared service. A socket-probed service is `Err`
     /// naming its socket, without probing; any other service is its probed port
     /// or `Err` when none was discovered.
     /// Test: `port_and_url_for_trusty_search_name_the_socket`.
     pub fn port(&mut self, name: &str) -> Option<Result<u16, String>> {
         let decl = self.manifest.services.get(name)?.clone();
-        if decl.health_probe == HealthProbe::UdsSearch {
+        if decl.health_probe.is_socket() {
             return Some(Err(format!(
                 "{name} has no TCP port ({})",
-                self.socket_label()
+                self.socket_label(decl.health_probe)
             )));
         }
         let status = self.probe_or_cached(name, &decl);
@@ -159,10 +153,10 @@ impl Discoverer {
     /// Test: `port_and_url_for_trusty_search_name_the_socket`.
     pub fn url(&mut self, name: &str) -> Option<Result<String, String>> {
         let decl = self.manifest.services.get(name)?.clone();
-        if decl.health_probe == HealthProbe::UdsSearch {
+        if decl.health_probe.is_socket() {
             return Some(Err(format!(
                 "{name} has no TCP URL ({})",
-                self.socket_label()
+                self.socket_label(decl.health_probe)
             )));
         }
         let status = self.probe_or_cached(name, &decl);
@@ -174,10 +168,32 @@ impl Discoverer {
     }
 
     /// `socket: <path>`, or why the path could not be resolved.
-    fn socket_label(&self) -> String {
+    fn socket_label(&self, probe: HealthProbe) -> String {
+        if probe == HealthProbe::UdsMpm {
+            return format!("socket: {}", self.mpm_prober.socket().display());
+        }
         match self.socket_prober.socket() {
             Ok(socket) => format!("socket: {}", socket.display()),
             Err(e) => format!("socket unresolved: {e:#}"),
+        }
+    }
+
+    /// Ask the socket `probe` names for its health.
+    ///
+    /// What: `uds_mpm` (#6288) calls `mpm.health` on the trusty-mpm socket;
+    /// every other socket probe is `uds_search`.
+    fn socket_health(&self, probe: HealthProbe) -> HealthState {
+        if probe == HealthProbe::UdsMpm {
+            let socket = self.mpm_prober.socket();
+            return self.mpm_prober.mpm_health(&socket, HEALTH_PROBE_TIMEOUT);
+        }
+        match self.socket_prober.socket() {
+            Ok(socket) => self
+                .socket_prober
+                .search_health(&socket, HEALTH_PROBE_TIMEOUT),
+            Err(e) => HealthState::Fail {
+                detail: format!("cannot resolve the trusty-search socket: {e:#}"),
+            },
         }
     }
 }

@@ -49,13 +49,14 @@ use crate::daemon::state::DaemonState;
 /// Test: `ctl_connect_write_lock_cas_first_caller_is_writer` verifies the
 /// acquire→observe→release→re-acquire cycle; the guard is the mechanism
 /// that makes the release happen in the stream closure.
-struct WriteLockGuard {
+// #6288: `pub(crate)` so the socket's `mpm.control.connect` holds the same guard.
+pub(crate) struct WriteLockGuard {
     flag: Arc<AtomicBool>,
     held: bool,
 }
 
 impl WriteLockGuard {
-    fn new(flag: Arc<AtomicBool>, held: bool) -> Self {
+    pub(crate) fn new(flag: Arc<AtomicBool>, held: bool) -> Self {
         Self { flag, held }
     }
 }

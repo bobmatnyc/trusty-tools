@@ -43,7 +43,8 @@ use trusty_common::uds::server::{RpcError, RpcRouter, RpcStreamItems};
 use super::outcome::{CODE_NOT_FOUND, RouteOutcome};
 use crate::control::ControlSessionId;
 use crate::daemon::api::control_routes::{
-    CtlListQuery, CtlRunRequest, ctl_auth_core, ctl_list_core, ctl_run_core, ctl_stop_core,
+    CtlListQuery, CtlRunRequest, WriteLockGuard, ctl_auth_core, ctl_list_core, ctl_run_core,
+    ctl_stop_core,
 };
 use crate::daemon::state::DaemonState;
 
@@ -261,21 +262,29 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
 /// is registered with `typed_stream` and answers in many frames.
 ///
 /// What: refuses an untrusted caller and an unknown id up front — before any
-/// frame is written — then forwards each broadcast event as one stream item.
-/// The write-lock CAS the HTTP route performs is NOT done here: the HTTP
-/// handler's `WriteLockGuard` is owned by the SSE stream and released when that
-/// stream drops, and this slice has no equivalent drop point on the socket. A
-/// socket connect is therefore an OBSERVER, and `writer` is reported false.
-/// That is a deliberate narrowing, not a parity gap to paper over — an RPC
-/// caller that acquired the lock with no drop path would leak it permanently.
+/// frame is written — then takes the write-lock by the same CAS the HTTP route
+/// performs and forwards each broadcast event as one stream item. The first
+/// connection is the writer; a later one, while the writer's stream is open, is
+/// an observer and leaves the lock alone.
+///
+/// #6288 (1b): the lock is released when the stream ends, however it ends. The
+/// `WriteLockGuard` lives in the forwarding task, the one owner of the stream's
+/// sender, and that task stops on the first of: the session's channel closing
+/// or lagging, a failed send, or the sender closing — which happens when the
+/// serve loop drops `items` because the peer left (`write_stream`, #7217). The
+/// last is the drop point an idle stream needs; without it a writer that hung
+/// up on a quiet session would hold the lock until the next event.
 ///
 /// # Errors
 ///
 /// [`CODE_NOT_FOUND`] for an unknown session; the shared 403 code for an
-/// untrusted caller.
+/// untrusted caller. Neither path touches the lock.
 ///
 /// Test: `rpc_ctl_connect_streams_events`,
-/// `rpc_ctl_connect_unknown_session_refuses_before_any_frame`.
+/// `rpc_ctl_connect_unknown_session_refuses_before_any_frame`,
+/// `rpc_ctl_connect_takes_the_write_lock_and_an_observer_leaves_it`,
+/// `rpc_ctl_connect_releases_the_write_lock_when_a_quiet_client_leaves`,
+/// `rpc_ctl_connect_releases_the_write_lock_when_the_session_ends`.
 async fn connect_stream(
     state: &Arc<DaemonState>,
     id_str: String,
@@ -291,14 +300,24 @@ async fn connect_stream(
         ));
     };
 
+    // #6288: the CAS of SPEC-SESSCTL-01 §6.2, as `ctl_connect_session` takes it.
+    let writer = handle.try_acquire_write_lock();
+    let guard = WriteLockGuard::new(Arc::clone(&handle.write_lock_held), writer);
     let rx = handle.event_tx.subscribe();
     let (tx, items) = mpsc::channel(64);
     tokio::spawn(async move {
+        // Owned here so it drops, and releases the lock, when this task ends.
+        let _guard = guard;
         let mut stream = BroadcastStream::new(rx);
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = tokio::select! {
+                // The serve loop dropped `items`: the peer is gone.
+                () = tx.closed() => break,
+                item = stream.next() => item,
+            };
             // A lag or a closed channel ends the stream, exactly as the SSE
             // `filter_map` ends it on `Err(_)`.
-            let Ok(event) = item else { break };
+            let Some(Ok(event)) = item else { break };
             let frame = match serde_json::to_value(&event) {
                 Ok(v) => Ok(v),
                 Err(e) => Err(RpcError::internal(format!("serialize session event: {e}"))),

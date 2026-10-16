@@ -6,6 +6,7 @@
 //! live daemon DOWN. The file belongs to the user: it is mapped in memory, with
 //! one warning, and never rewritten. The same holds for the `start --no-http`
 //! that trusty-mpm 1.8.x wrote into its start and restart commands (#9536).
+//! #6288 maps the `trusty-mpm-daemon` entry's HTTP probe of 7880 the same way.
 //! What: [`load_user_manifest`] parses, maps, strips, validates and
 //! tilde-expands one file, and falls back to the embedded default when the
 //! file is absent.
@@ -18,18 +19,42 @@ use std::path::Path;
 
 use super::manifest::{HealthProbe, PortDiscovery, ServiceDecl, ServicesManifest};
 
-/// The one service whose retired shape is mapped.
+/// The service whose start flags are stripped (#9536).
 const SEARCH_SERVICE: &str = "trusty-search";
 
-/// The TCP port the retired trusty-search entry probed.
-const LEGACY_SEARCH_PORT: u16 = 7878;
+/// One retired `tm services init` entry: a static HTTP probe of `port`, which
+/// is mapped on read to the socket probe `probe`, spelled `probe_name`.
+struct LegacyProbe {
+    service: &'static str,
+    port: u16,
+    probe: HealthProbe,
+    probe_name: &'static str,
+}
+
+/// Every entry an older `tm services init` wrote as an HTTP probe of a port
+/// its daemon no longer serves to clients.
+const LEGACY_PROBES: [LegacyProbe; 2] = [
+    LegacyProbe {
+        service: SEARCH_SERVICE,
+        port: 7878,
+        probe: HealthProbe::UdsSearch,
+        probe_name: "uds_search",
+    },
+    // #6288: every mpm client moved to the daemon socket; 7880 is retired.
+    LegacyProbe {
+        service: "trusty-mpm-daemon",
+        port: 7880,
+        probe: HealthProbe::UdsMpm,
+        probe_name: "uds_mpm",
+    },
+];
 
 /// Load the manifest `tm services` probes with.
 ///
 /// Why: the binary used to parse the user's file inline, twice; the legacy
 /// mapping has to apply to every read, and it needs a test.
-/// What: absent file → the embedded default. Otherwise parse, map a legacy
-/// trusty-search entry to `health_probe: uds_search`, strip the flags
+/// What: absent file → the embedded default. Otherwise parse, map each legacy
+/// HTTP entry (trusty-search, trusty-mpm-daemon) to its socket probe, strip the flags
 /// `trusty-search start` no longer accepts (#9536) — one `WARN` line naming
 /// the file to `warn` for each — then validate and expand `~/` paths. The
 /// file is only read.
@@ -49,14 +74,17 @@ pub fn load_user_manifest(path: &Path, warn: &mut dyn Write) -> anyhow::Result<S
     let text = std::fs::read_to_string(path)?;
     let mut manifest: ServicesManifest = serde_yaml::from_str(&text)
         .map_err(|e| anyhow::anyhow!("failed to parse services.yaml: {e}"))?;
-    if map_legacy_search_entry(&mut manifest) {
+    for legacy in map_legacy_entries(&mut manifest) {
         // A warning sink that cannot be written must not fail the load.
         let _ = writeln!(
             warn,
-            "WARN: {}: trusty-search probes port {LEGACY_SEARCH_PORT} over HTTP, which it no \
-             longer binds; probing its socket instead (health_probe: uds_search). The file is \
-             unchanged; `tm services init --force` rewrites it.",
-            path.display()
+            "WARN: {}: {} probes port {} over HTTP, which it no longer serves to clients; \
+             probing its socket instead (health_probe: {}). The file is unchanged; \
+             `tm services init --force` rewrites it.",
+            path.display(),
+            legacy.service,
+            legacy.port,
+            legacy.probe_name
         );
     }
     // #9536: a 1.8.x `start --no-http` restart_cmd would stop the daemon and
@@ -79,31 +107,37 @@ pub fn load_user_manifest(path: &Path, warn: &mut dyn Write) -> anyhow::Result<S
     Ok(manifest)
 }
 
-/// True for the trusty-search entry an older `tm services init` wrote: a
-/// static HTTP probe of port 7878.
-fn is_legacy_search_decl(decl: &ServiceDecl) -> bool {
+/// True for an entry an older `tm services init` wrote: a static HTTP probe
+/// of `port`.
+fn is_legacy_decl(decl: &ServiceDecl, port: u16) -> bool {
     decl.health_probe == HealthProbe::Http
         && decl.port_discovery == PortDiscovery::Static
-        && decl.default_port == Some(LEGACY_SEARCH_PORT)
+        && decl.default_port == Some(port)
         && decl
             .health_url
             .as_deref()
             .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"))
 }
 
-/// Map a legacy trusty-search entry to the socket probe; true when it did.
+/// Map each legacy entry in [`LEGACY_PROBES`] to its socket probe; returns
+/// the ones it mapped.
 ///
-/// Any other trusty-search shape, and every other service, is left as written.
-fn map_legacy_search_entry(manifest: &mut ServicesManifest) -> bool {
-    match manifest.services.get_mut(SEARCH_SERVICE) {
-        Some(decl) if is_legacy_search_decl(decl) => {
-            decl.health_probe = HealthProbe::UdsSearch;
+/// Any other shape of those services, and every other service, is left as
+/// written. Test: `legacy_search_entry_maps_to_socket_and_leaves_the_file_alone`,
+/// `legacy_mpm_daemon_entry_maps_to_its_socket`.
+fn map_legacy_entries(manifest: &mut ServicesManifest) -> Vec<&'static LegacyProbe> {
+    let mut mapped = Vec::new();
+    for legacy in &LEGACY_PROBES {
+        if let Some(decl) = manifest.services.get_mut(legacy.service)
+            && is_legacy_decl(decl, legacy.port)
+        {
+            decl.health_probe = legacy.probe;
             decl.default_port = None;
             decl.health_url = None;
-            true
+            mapped.push(legacy);
         }
-        _ => false,
     }
+    mapped
 }
 
 /// Shell operators that end one command inside a `start_cmd`/`restart_cmd`.

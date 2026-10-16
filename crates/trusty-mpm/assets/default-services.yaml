@@ -37,11 +37,14 @@ services:
     restart_cmd: "trusty-analyze stop && trusty-analyze start"
 
   trusty-mpm-daemon:
-    description: "MPM background orchestrator (sessions, hooks, circuit breaker)"
-    default_port: 7880
+    description: "MPM background orchestrator (sessions, hooks, circuit breaker; Unix socket)"
+    # #6288: every client reaches the daemon over its Unix socket, and its
+    # HTTP bind on 7880 is being retired. Health is `mpm.health` on that
+    # socket (TRUSTY_MPM_SOCKET, else its data directory); no port, no URL.
+    health_probe: uds_mpm
+    default_port: null
     port_discovery: static
-    # /health is confirmed at crates/trusty-mpm/src/daemon/api.rs:74
-    health_url: "http://localhost:{port}/health"
+    health_url: null
     log_path: "~/.trusty-mpm/logs/trusty-mpm.log"
     version_cmd: "tm --version"
     process_match: "trusty-mpm"

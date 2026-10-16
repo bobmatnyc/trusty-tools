@@ -119,7 +119,12 @@ fn default_manifest_declares_trusty_search_by_socket() {
         Some("trusty-search start"),
         "pgrep must match the daemon, never a `trusty-search serve` bridge"
     );
-    for (name, decl) in m.services.iter().filter(|(n, _)| *n != SEARCH) {
+    // #6288: the mpm daemon is socket-probed too; `uds_mpm_tests` covers it.
+    for (name, decl) in m
+        .services
+        .iter()
+        .filter(|(n, _)| *n != SEARCH && *n != "trusty-mpm-daemon")
+    {
         assert_eq!(decl.health_probe, HealthProbe::Http, "{name} keeps HTTP");
     }
 }
