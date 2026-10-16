@@ -14,68 +14,6 @@ use crate::service::server::{
     remove_file_report, search_report,
 };
 
-// #9535 S1c: the core-call helpers below match S1b's parent helpers by name and
-// shape, so they shadow its glob-imported copies once it merges; both children
-// use these until then.
-
-/// One state, read by both the RPC router and the cores.
-pub(super) async fn served(state: SearchAppState) -> (Arc<SearchAppState>, RpcRouter) {
-    let state = Arc::new(state);
-    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
-    state.install_embedder(embedder).await;
-    let rpc = writes::register(RpcRouter::new(), &state);
-    (state, rpc)
-}
-
-/// An empty-registry state whose allowlist approves `approved`.
-async fn empty_served(
-    allowlist_dir: &Path,
-    approved: &[&Path],
-) -> (Arc<SearchAppState>, RpcRouter) {
-    served(
-        SearchAppState::new(IndexRegistry::new())
-            .with_allowlist_paths(allowlist(allowlist_dir, approved)),
-    )
-    .await
-}
-
-/// A core's 200 body, encoded the way axum's `Json` writes it.
-pub(super) fn http_body<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> serde_json::Value {
-    match answer {
-        Ok(body) => {
-            let bytes = serde_json::to_vec(&body).expect("encode the body");
-            serde_json::from_slice(&bytes).expect("decode the body")
-        }
-        Err((status, body)) => panic!("the core must answer 200, got {status}: {body}"),
-    }
-}
-
-/// A core's refusal as `(status, body)`, asserting it is a 4xx or 5xx.
-pub(super) fn http_refusal<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> (StatusCode, serde_json::Value) {
-    match answer {
-        Ok(body) => panic!(
-            "the core must refuse, got 200: {}",
-            serde_json::to_value(body).expect("encode the body")
-        ),
-        Err((status, body)) => {
-            assert!(
-                status.is_client_error() || status.is_server_error(),
-                "a refusal must be 4xx/5xx, got {status}: {body}"
-            );
-            (status, body)
-        }
-    }
-}
-
-/// A JSON request decoded as the core's request type, as the extractor did.
-pub(super) fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
-    serde_json::from_value(json).expect("decode the request")
-}
-
 /// `POST /indexes`'s 200 body, from its core.
 async fn create(state: &Arc<SearchAppState>, body: serde_json::Value) -> serde_json::Value {
     http_body(create_index_report(state, params(body)).await)

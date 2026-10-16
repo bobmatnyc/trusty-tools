@@ -7,24 +7,14 @@
 //! core each route wraps (#9535: the router is going).
 //! Test: this file.
 
-use super::roots_7434::{http_body, http_refusal, params, served};
 use super::*;
-use crate::service::server::{index_chunks_report, index_file_report, search_report};
+use crate::service::server::{index_chunks_report, search_report};
 
 /// The `total` the chunk enumeration reports for index `id`.
 async fn total_chunks(state: &Arc<SearchAppState>, id: &str) -> u64 {
     // An empty `?` query: every `ChunksParams` field takes its serde default.
     let body = http_body(index_chunks_report(state, id, &params(serde_json::json!({}))).await);
     body["total"].as_u64().unwrap_or(0)
-}
-
-/// `POST /indexes/{id}/index-file`'s answer, from its core.
-async fn put_file(
-    state: &Arc<SearchAppState>,
-    id: &str,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    index_file_report(state, id, params(body)).await
 }
 
 /// True when a search for `term` scoped to `prefix` returns a chunk holding it.
