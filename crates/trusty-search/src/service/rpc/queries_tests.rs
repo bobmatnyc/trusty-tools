@@ -37,6 +37,7 @@ use crate::service::concurrency::ConcurrencyLimiter;
 use crate::service::query_timeout::QueryTimeoutConfig;
 use crate::service::rpc::error::{CODE_DEADLINE_EXCEEDED, CODE_NOT_FOUND, CODE_UNAVAILABLE};
 use crate::service::rpc::queries;
+use crate::service::rpc::test_support::{http_body, params};
 use crate::service::server::{
     global_grep_report, global_search_report, grep_report, search_report, search_similar_report,
     typeahead_report, SearchAppState,
@@ -193,19 +194,6 @@ async fn grep_fixture() -> (tempfile::TempDir, Arc<SearchAppState>, RpcRouter) {
     let (state, rpc) = fixture_with(SearchAppState::new(registry)).await;
     state.install_embedder(embedder).await;
     (tmp, state, rpc)
-}
-
-/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
-fn http_body<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> serde_json::Value {
-    let bytes = serde_json::to_vec(&answer.expect("the core must answer 200")).expect("encode");
-    serde_json::from_slice(&bytes).expect("decode the body")
-}
-
-/// A JSON request decoded as the core's request type, as the HTTP extractor did.
-fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
-    serde_json::from_value(json).expect("decode the request")
 }
 
 async fn dispatch(

@@ -43,6 +43,7 @@ use crate::service::rpc::error::{
     CODE_CONFLICT, CODE_FORBIDDEN, CODE_NOT_FOUND, CODE_TOO_MANY_REQUESTS, CODE_UNAVAILABLE,
     CODE_UNAVAILABLE_PERMANENT,
 };
+use crate::service::rpc::test_support::{http_body, http_refusal, params};
 use crate::service::rpc::writes;
 use crate::service::server::{
     create_index_report, delete_index_report, graph_neighbors_report, index_file_report,
@@ -139,43 +140,6 @@ fn index_with_corpus(
 }
 
 // ------------------------------------------------------------- transports ---
-
-/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
-fn http_body<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> serde_json::Value {
-    match answer {
-        Ok(body) => {
-            let bytes = serde_json::to_vec(&body).expect("encode the body");
-            serde_json::from_slice(&bytes).expect("decode the body")
-        }
-        Err((status, body)) => panic!("the core must answer 200, got {status}: {body}"),
-    }
-}
-
-/// A core's refusal as `(status, body)`, asserting it is a 4xx or 5xx (#9535).
-fn http_refusal<T: serde::Serialize>(
-    answer: Result<T, (StatusCode, serde_json::Value)>,
-) -> (StatusCode, serde_json::Value) {
-    match answer {
-        Ok(body) => panic!(
-            "the core must refuse, got 200: {}",
-            serde_json::to_value(body).expect("encode the body")
-        ),
-        Err((status, body)) => {
-            assert!(
-                status.is_client_error() || status.is_server_error(),
-                "a refusal must be 4xx/5xx, got {status}: {body}"
-            );
-            (status, body)
-        }
-    }
-}
-
-/// A JSON request decoded as the core's request type, as the extractor did.
-fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
-    serde_json::from_value(json).expect("decode the request")
-}
 
 /// `POST /indexes/{id}/index-file`'s answer, from its core.
 async fn put_file(
@@ -1271,11 +1235,11 @@ async fn an_unmerged_contribution_is_refused_identically_and_stays_unqueryable()
 
 // ------------------------------------------------------------------- lanes ---
 
-/// Why: the four per-index writes are axum's `bulk_limited` group, and the
-/// limiter is tower middleware a second transport cannot reach. Without
-/// `bulk_guarded` a socket write would bypass the admission cap that exists so a
-/// burst of writes cannot degrade every other response, `/health` included
-/// (#41).
+/// Why: the admission cap exists so a burst of writes cannot degrade every
+/// other response, `/health` included (#41). The four per-index socket writes
+/// take it through `bulk_guarded`; without that wrapper they would bypass it.
+/// What: saturates the state's `query_limiter`, then sends a `file.put` over the
+/// socket and asserts the retryable `CODE_UNAVAILABLE` refusal.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
@@ -1287,8 +1251,9 @@ async fn writes_are_refused_when_the_shared_limiter_is_saturated() {
     );
     let (state, rpc) = served(state).await;
 
-    // Hold the only permit. The socket and the axum router read the SAME
-    // limiter off the state, so this saturates both doors at once.
+    // Hold the only permit of the state's `query_limiter`, the one
+    // `bulk_guarded` admits a socket write through, so the write below has no
+    // permit left to take.
     let _held = crate::service::concurrency::admit(&state.query_limiter)
         .await
         .expect("the first admission must succeed");
@@ -1308,11 +1273,12 @@ async fn writes_are_refused_when_the_shared_limiter_is_saturated() {
     );
 }
 
-/// Why: the three registry-level routes are in axum's `free` group — no limiter,
-/// no deadline. Wrapping them for symmetry would make a `search.index.delete`
-/// queue behind a running reindex that `DELETE /indexes/{id}` sails straight
-/// past, which is a difference between the transports introduced by the fix for
-/// a difference that was not there.
+/// Why: the registry-level writes are in the `free` lane — no limiter, no
+/// deadline (`unguarded`). Admitting them through the limiter would make a
+/// `search.index.delete` queue behind a running reindex.
+/// What: saturates the state's `query_limiter`, then sends a delete for an
+/// unknown id over the socket and asserts the core's `CODE_NOT_FOUND`, not the
+/// limiter's `CODE_UNAVAILABLE`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
@@ -1329,8 +1295,8 @@ async fn a_registry_level_write_is_not_admission_limited() {
         .await
         .expect("the first admission must succeed");
 
-    // Reaches its core and answers the core's own verdict, rather than the
-    // limiter's `503`.
+    // The only permit is held, yet the delete reaches its core and answers the
+    // core's own `404` verdict rather than the saturated limiter's `503`.
     let answered = rpc_err(
         &rpc,
         writes::METHOD_INDEX_DELETE,
