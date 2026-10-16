@@ -30,18 +30,9 @@
 # scripts/stamp-ui-bundle.sh as part of the build. That file is the freshness
 # claim; the gate recomputes the digest and compares.
 #
-# trusty-search is the odd one out: its bundle lives at crate root as ui-dist/
-# and is reached by a mirror step (`make -C crates/trusty-search sync-ui`),
-# while the other three commit ui/dist/ directly. That extra mirror step is the
-# one that keeps getting skipped.
-#
-# #6155: trusty-search's row also names a source_dir in ANOTHER crate. The
-# search dashboard's Svelte source moved to crates/trusty-console/ui-search,
-# and trusty-search's ui-dist/ is now a mirror of the bundle the console builds
-# from it. Two rows therefore share one source_dir and record the same digest —
-# which is what makes an edit to the dashboard mark BOTH bundles stale, the
-# property this gate exists for. #6285 deletes trusty-search's HTTP listener
-# and this row with it.
+# #9535: trusty-search's row is GONE. #9953 deleted the last reader of its
+# crate-root ui-dist/ mirror, so the mirror, its build.rs and the row went
+# together. The search dashboard ships only as `trusty-console-search` below.
 #
 # #6155: trusty-memory's row is GONE, not moved. That crate no longer ships a
 # bundle at all — its embed, its build.rs and its ui/ tree were deleted when the
@@ -81,7 +72,6 @@
 # tarball carries. The stamper under-claims, the gate over-checks.
 #
 # crate_dir	source_dir	bundle_dir
-trusty-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-search/ui-dist	docs/design/UI/design-system/components
 trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist
 trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist	docs/design/UI/design-system/components
 trusty-console-memory	crates/trusty-console/ui-memory,crates/trusty-memory/ui	crates/trusty-console/ui-memory-dist

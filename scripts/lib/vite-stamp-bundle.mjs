@@ -14,10 +14,7 @@
 //   from disk when the file is there and falls back to `git show HEAD:<stamp>`
 //   when it is not — so a deleted stamp is answered from HEAD's copy, the
 //   bundle reports fresh, build.rs returns early, and the re-stamp never fires.
-//   Stamping here instead puts the repair at the step that does the damage —
-//   the same shape as
-//   `crates/trusty-search/Makefile`'s `sync-ui`, where the mirror that wipes
-//   `ui-dist/` is followed immediately by the stamp.
+//   Stamping here instead puts the repair at the step that does the damage.
 //
 // What: a build-only Vite plugin whose `closeBundle` hook shells out to
 //   `scripts/stamp-ui-bundle.sh <crate>`. `closeBundle` runs once, after every
