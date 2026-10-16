@@ -439,8 +439,8 @@ pub fn build_router(state: SearchAppState) -> Router {
 /// `with_standard_middleware`.
 /// Test: no test in this crate since #9535 removed the HTTP-only guard suite;
 /// the daemon serves only the socket, guarded by the peer-uid check
-/// (`peer_uid_verdict_refuses_a_foreign_uid` in trusty-common). The shared
-/// guard's 403 contract is pinned in trusty-agents (`cross_origin_write_rejected_403`).
+/// (trusty-common `src/uds/tests.rs`). The shared guard's 403 contract is
+/// pinned in trusty-agents `src/api/server/tests/guard.rs`.
 #[cfg(test)]
 pub fn build_router_with_self_origins(
     state: SearchAppState,
