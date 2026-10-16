@@ -96,6 +96,8 @@ fn mentions_of_the_words_are_not_calls() {
     for command in cases {
         assert_eq!(parse(command), ParsedCommand::default(), "{command}");
     }
+    // Control: the parser is not simply blind — the real call is found.
+    assert_eq!(parse("git worktree add x").ops.len(), 1);
 }
 
 /// A `cd` may already be reflected in the hook's `cwd`, so a relative `cd`
