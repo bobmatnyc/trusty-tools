@@ -265,7 +265,7 @@ impl ClaimStore {
     /// What: one `done` line. An id already done is `Ok` and writes nothing;
     /// an unclaimed id is `InvalidEventId`. An append error poisons the
     /// store. The claim stands either way, so a retry stays dropped.
-    /// Test: `settled_claim_is_not_listed_by_doctor`.
+    /// Test: `claimed_never_done_is_listed_for_doctor`.
     pub fn settle(&self, event_id: &str, outcome: &str) -> Result<(), ClaimError> {
         check_event_id(event_id)?;
         let mut state = self.lock()?;
