@@ -1,11 +1,14 @@
 [package]
 name = "trusty-embedderd-py"
-version = "0.1.6"  # bump for the #5328 spawn-retry fix release
+version = "0.2.0"  # library-only: trusty-search ships the launcher (#9468)
 publish = true
 edition = "2021"
 license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"
-description = "Opt-in Python/MPS embedding sidecar launcher for trusty-search: uv-bootstraps a pinned venv and execs the trusty_embed_sidecar stdio JSON-RPC server (epic #3524)."
+description = "Library behind trusty-search's Python/MPS embedding sidecar launcher: uv-bootstraps a pinned venv and execs the trusty_embed_sidecar stdio JSON-RPC server (epic #3524)."
+# #9468: library-only. A stray src/main.rs must not become a second owner of
+# the `trusty-embedderd-py` binary name.
+autobins = false
 readme = "README.md"
 homepage = "https://trustytools.dev"
 keywords = ["embeddings", "sidecar", "mps", "torch", "uv"]
@@ -15,12 +18,11 @@ categories = ["command-line-utilities", "artificial-intelligence"]
 name = "trusty_embedderd_py"
 path = "src/lib.rs"
 
-# The launcher binary the trusty-search EmbedderSupervisor spawns in place of
-# the Rust `trusty-embedderd`. It ensures the venv then execs the Python
-# sidecar. A real Mach-O (signable) discovered by the sibling/PATH logic.
-[[bin]]
-name = "trusty-embedderd-py"
-path = "src/main.rs"
+# #9468 (owner ruling D94, 2026-10-16): single owner per binary, as #1318 did
+# for trusty-embedderd. The `trusty-embedderd-py` launcher binary is built
+# ONLY by trusty-search (`src/bin/trusty-embedderd-py.rs`, a shim over
+# `trusty_embedderd_py::run`), so `cargo install trusty-search` installs it
+# next to the daemon that spawns it.
 
 [dependencies]
 # resolve_data_dir + TRUSTY_DATA_DIR_OVERRIDE honouring (venv placement). Only

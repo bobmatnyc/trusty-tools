@@ -101,6 +101,12 @@ path = "src/bin/trusty-embedderd.rs"
 # single command (issue #187 Phase 2 follow-up). The daemon's logic lives
 # entirely in the trusty-embedderd library crate; this is a thin shim.
 
+[[bin]]
+name = "trusty-embedderd-py"
+path = "src/bin/trusty-embedderd-py.rs"
+# #9468: the Python/MPS sidecar launcher, owned here for the same reason as
+# trusty-embedderd above; the trusty-embedderd-py package is library-only.
+
 # ── Integration tests (#9302) ─────────────────────────────────────────────────
 # `integration` mounts every module that leaves process-global state alone.
 # Each target below keeps a process of its own: it sets environment variables
@@ -252,7 +258,7 @@ trusty-embedderd = { path = "../trusty-embedderd", version = "0.4", default-feat
 # in NO torch/ORT — it is a lightweight uv/venv bootstrapper + launcher used
 # only when `TRUSTY_EMBEDDER=python` selects it (DEFAULT-OFF). Building it does
 # not require a venv; that is all runtime.
-trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.3" }
+trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.2" }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-search (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.
