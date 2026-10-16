@@ -25,7 +25,7 @@
 //!   - `ANY /api/memory/{*path}` — the same for trusty-memory (#6155); see
 //!     `crate::memory_uds`.
 //!   - `ANY /api/{service}/{*path}` — reverse-proxy to live daemon via clean path
-//!     (#1849 Phase 2); `{service}` ∈ {review, mpm, agents}.
+//!     (#1849 Phase 2); `{service}` ∈ {review, agents} (#6288 removed mpm).
 //!   - `ANY /proxy/{daemon}/{*path}` — DEPRECATED alias; routes to the same
 //!     handler with a trace-level deprecation note.
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA; the

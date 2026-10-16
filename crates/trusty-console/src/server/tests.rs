@@ -451,25 +451,26 @@ async fn test_api_proxy_known_service_cold_cache_returns_503() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
-/// Why: `mpm` must be reachable via the new `/api/mpm/*` path and must NOT
-/// return 400 (key absent from allowlist).
-/// What: issues GET /api/mpm/health on a fresh state (no poll),
-/// asserts 503 SERVICE_UNAVAILABLE (not 400 BAD_REQUEST).
-/// Test: this test itself (#1849 Phase 2).
+/// Why (#6288 PR 1b): the `/api/mpm/*` gateway is deleted — it had no caller
+/// once every mpm client moved to the daemon socket. Both the primary path and
+/// the deprecated alias must refuse the key, not report a cold cache.
+/// What: issues GET on both shapes on a fresh state, asserts 400.
+/// Test: this test itself.
 #[tokio::test]
-async fn test_api_proxy_mpm_is_in_allowlist_cold_cache_returns_503() {
-    let router = build_router(make_test_state());
-
-    let req = Request::builder()
-        .uri("/api/mpm/health")
-        .body(Body::empty())
-        .expect("request");
-    let resp = router.oneshot(req).await.expect("response");
-    assert_eq!(
-        resp.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "/api/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
-    );
+async fn test_api_proxy_refuses_the_mpm_key() {
+    for uri in ["/api/mpm/health", "/proxy/mpm/health"] {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be refused as an unknown daemon"
+        );
+    }
 }
 
 /// Why: the deprecated `/proxy/{daemon}/*` alias must still route to the
@@ -510,28 +511,6 @@ async fn test_deprecated_proxy_alias_unknown_key_returns_400() {
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-/// Why: #1849 Phase 1 adds `mpm` to the proxy allowlist. A request to
-/// `/proxy/mpm/health` must NOT return 400 (unknown daemon) — it must return
-/// 503 (cache not yet populated) which proves the key is now in the allowlist.
-/// What: issues GET /proxy/mpm/health on a fresh state (no poll),
-/// asserts 503 SERVICE_UNAVAILABLE (not 400 BAD_REQUEST).
-/// Test: this test itself (regression guard for #1849 Phase 1).
-#[tokio::test]
-async fn test_proxy_mpm_is_in_allowlist_cold_cache_returns_503() {
-    let router = build_router(make_test_state());
-
-    let req = Request::builder()
-        .uri("/proxy/mpm/health")
-        .body(Body::empty())
-        .expect("request");
-    let resp = router.oneshot(req).await.expect("response");
-    assert_eq!(
-        resp.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "/proxy/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
-    );
 }
 
 /// Why: the "console" service key is reserved for the console's own
@@ -1448,45 +1427,22 @@ impl ServiceConnector for MpmAt {
     }
 }
 
-/// 🔴 #8454 VC (R2): when `tm`'s resolved daemon URL is this console's
-/// `/api/mpm` gateway, the hook's egress verdict query is forwarded to the
-/// daemon's `/api/v1/channels/egress-verdict` — method, path and JSON body
-/// intact — and the daemon's reply comes back unchanged.
+/// #6288 PR 1b: the `/api/mpm` gateway #8454 used is deleted. Even with the
+/// poll cache naming a live trusty-mpm URL, a request to `/api/mpm/...` is
+/// refused and the daemon is never dialled.
 ///
-/// What: a one-connection loopback daemon records the request it receives
-/// and answers a verdict reply; the console's poll cache names it as
-/// trusty-mpm; the test POSTs through `/api/mpm/...` with no `Origin`, as the
-/// hook does.
+/// Why: PR 1a moved every in-repo mpm client — the egress-verdict hook
+/// included — onto the daemon socket, so the gateway had no caller, and PR 2
+/// retires the daemon's 7880 bind it forwarded to.
+/// What: a loopback listener stands in for the daemon and the cache names it as
+/// trusty-mpm; the POST must answer 400 and the listener must see no connection.
 /// Test: this test itself.
 #[tokio::test]
-async fn proxy_forwards_the_egress_verdict_query_to_the_mpm_daemon() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
+async fn proxy_never_forwards_to_the_mpm_daemon() {
     let daemon = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let url = format!("http://{}", daemon.local_addr().expect("addr"));
-    let reply = r#"{"answer":"ready","fingerprint":7,"age_ms":12}"#;
-    let server = tokio::spawn(async move {
-        let (mut sock, _) = daemon.accept().await.expect("accept");
-        let mut seen = Vec::new();
-        let mut chunk = [0u8; 4096];
-        // Read until the body (the hook's JSON) has arrived.
-        while !seen.ends_with(b"}") {
-            let n = sock.read(&mut chunk).await.expect("read");
-            if n == 0 {
-                break;
-            }
-            seen.extend_from_slice(&chunk[..n]);
-        }
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-             connection: close\r\n\r\n{reply}",
-            reply.len()
-        );
-        sock.write_all(response.as_bytes()).await.expect("write");
-        String::from_utf8_lossy(&seen).into_owned()
-    });
 
     let state = make_test_state();
     let connectors: Vec<Box<dyn ServiceConnector>> = vec![Box::new(MpmAt { url })];
@@ -1499,12 +1455,8 @@ async fn proxy_forwards_the_egress_verdict_query_to_the_mpm_daemon() {
         .body(Body::from(r#"{"home":"/home/tester"}"#))
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(get_bytes(resp).await, reply.as_bytes());
-    let seen = server.await.expect("daemon");
-    assert!(
-        seen.starts_with("POST /api/v1/channels/egress-verdict HTTP/1.1"),
-        "{seen}"
-    );
-    assert!(seen.ends_with(r#"{"home":"/home/tester"}"#), "{seen}");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let dialled =
+        tokio::time::timeout(std::time::Duration::from_millis(200), daemon.accept()).await;
+    assert!(dialled.is_err(), "the console must not dial the mpm daemon");
 }

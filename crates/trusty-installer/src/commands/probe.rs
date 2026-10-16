@@ -182,9 +182,10 @@ pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome
         return ProbeOutcome::NotInstalled;
     }
     match manage {
-        // #4925: BOTH daemon strategies take the HTTP transport. `OwnVerb` is
-        // process-managed, not transport-less — trusty-mpm answers `/health` on
-        // 7880 — and the `unknown` this arm used to return was a carve-out from
+        // #4925: BOTH daemon strategies take the daemon's transport. `OwnVerb`
+        // is process-managed, not transport-less — trusty-mpm answers
+        // `mpm.health` on its socket (#6288) — and the `unknown` this arm used
+        // to return was a carve-out from
         // #4246, not a fact about the daemon. `needs_kickstart` still gates the
         // destructive repair on `Launchd` alone, so widening this arm cannot arm
         // `kickstart -k` against mpm's nonexistent launchd label.

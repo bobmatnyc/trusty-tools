@@ -117,13 +117,15 @@ async fn sessctl_run(
 /// `mpm.control.connect` — stream a session's events over the daemon socket.
 ///
 /// Why: `tm sessctl connect <id>` lets an operator observe a running session in
-/// real-time. The socket form observes only: it takes no write-lock (see
-/// `daemon::rpc::managed::control::connect_stream`).
+/// real-time. The daemon takes the session's write-lock for the first open
+/// connect and holds it until this stream ends (#6288 1b; see
+/// `daemon::rpc::managed::control::connect_stream`); a later connect observes.
 /// What: opens the frame stream (#6288; the SSE route's socket form) and prints
 /// each event as one JSON line — the payload the SSE `data:` lines carried —
 /// until the stream ends. A refusal or a cut stream is an error.
 /// Test: `cli_parses_sessctl_connect`;
-/// `tm_client_socket_cutover_6288::sessctl_connect_streams_over_the_socket`.
+/// `tm_client_socket_cutover_6288::sessctl_connect_streams_over_the_socket`;
+/// the lock in `rpc_ctl_connect_takes_the_write_lock_and_an_observer_leaves_it`.
 async fn sessctl_connect(client: &DaemonClient, session_id: String) -> anyhow::Result<()> {
     let mut stream = client.connect_control_session(&session_id).await?;
     while let Some(frame) = stream.next_frame().await {
