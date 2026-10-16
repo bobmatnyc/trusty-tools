@@ -30,6 +30,8 @@
 pub mod bootstrap;
 pub mod launcher;
 mod spawn_retry;
+// #9468: the pinned, SHA-256-verified uv cache (offline half of D1a).
+pub mod uv_fetch;
 
 pub use bootstrap::{ensure_venv, ensure_venv_eager, resolve_layout, VenvLayout};
 pub use launcher::{exec_sidecar, locate_launcher_binary};
