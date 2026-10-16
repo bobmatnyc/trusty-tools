@@ -8,14 +8,17 @@
 //! What: [`taint_verdict`] judges a gated tool — the path-touching tools in
 //! [`GATED_TOOLS`] — by [`channels_taint::read_state`] for the payload's
 //! `session_id`, under the hook's home. A tainted session, a gated call with no
-//! string `session_id`, and an unknown home each deny; an untainted session
-//! and every other tool are not judged here. Bypass variables and `agent_id`
+//! string `session_id`, and an unknown home each deny; every other tool is not
+//! judged here. #9923: an untainted session under a live owner-answer mark,
+//! by its launch directory or live cwd, is tainted and denied; one no mark
+//! covers is not judged. Bypass variables and `agent_id`
 //! are never read. #9741 (#8454 S4, ruling a): before that deny the guard
 //! checks the route policy; a policy that is not ready denies as
 //! [`POLICY_CHECK`] with [`policy_not_ready_reason`].
 //! Test: `egress_guard_taint_tests.rs`, `egress_guard_policy_tests.rs`; end to
-//! end in `tests/tm_hook_session_start_taint_8433.rs` and
-//! `tests/tm_hook_egress_guard_8454.rs`.
+//! end in `tests/tm_hook_session_start_taint_8433.rs`,
+//! `tests/tm_hook_egress_guard_8454.rs` and
+//! `tests/tm_hook_egress_lazy_taint_9923.rs`.
 
 use std::path::Path;
 
@@ -69,12 +72,25 @@ const GATED_TOOLS: &[&str] = &[
 ///
 /// Why (fail closed): only a provably absent taint file allows. A payload
 /// that names no session, and a home the guard cannot find, could be a
-/// tainted session's, so they deny like one.
+/// tainted session's, so they deny like one. #9923: an id whose SessionStart
+/// never reached the daemon has no taint file either, so a live mark that
+/// covers its launch directory taints it here.
+/// What: a tainted session denies. An untainted one goes to
+/// [`channels_taint::taint_covered`] with `launch` (`CLAUDE_PROJECT_DIR`;
+/// a relative one is unknown, which every mark covers) and the payload's
+/// absolute `cwd`: a covering mark writes the id's taint file and denies this
+/// call, and any error denies. Only "no mark covers it" allows.
 /// Test: `untainted_session_gated_call_is_not_judged`,
 /// `tainted_session_gated_call_denies`, `gated_call_without_session_id_denies`,
 /// `unknown_home_denies_gated_call`, `non_gated_tool_is_not_judged`,
-/// `tainted_session_multiedit_denies`.
-pub(crate) fn taint_verdict(payload: &Value, home: Option<&Path>) -> Option<String> {
+/// `tainted_session_multiedit_denies`,
+/// `an_untainted_session_under_a_live_mark_is_tainted_and_denied`,
+/// `a_relative_launch_dir_under_a_live_mark_denies`.
+pub(crate) fn taint_verdict(
+    payload: &Value,
+    home: Option<&Path>,
+    launch: Option<&Path>,
+) -> Option<String> {
     let tool = payload.get("tool_name").and_then(Value::as_str)?;
     if !GATED_TOOLS.contains(&tool) {
         return None;
@@ -92,15 +108,38 @@ pub(crate) fn taint_verdict(payload: &Value, home: Option<&Path>) -> Option<Stri
              cannot read the channel taint for this session (#8433)."
         ));
     };
-    let state = channels_taint::read_state(&channels_taint::taint_dir(home), session);
-    state.is_tainted().then(|| {
-        format!(
+    let dir = channels_taint::taint_dir(home);
+    let state = channels_taint::read_state(&dir, session);
+    if state.is_tainted() {
+        return Some(format!(
             "tm hook --egress-guard denies `{tool}`: this session is channel-tainted ({state:?}) — \
              it received an answer through an outbound channel, or its taint could not be \
              re-applied at session start — so its path tool calls are refused until the managed \
              session ends (#8433). Ask the operator."
-        )
-    })
+        ));
+    }
+    // #9923: an id no SessionStart reached may run under a live owner-answer mark.
+    let launch = launch.filter(|dir| dir.is_absolute());
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .filter(|cwd| cwd.is_absolute());
+    match channels_taint::taint_covered(&dir, session, launch, cwd) {
+        Ok(None) => None,
+        Ok(Some(managed)) => Some(format!(
+            "tm hook --egress-guard denies `{tool}`: this session is now channel-tainted — it was \
+             launched under the workspace of managed session `{managed}`, which received an \
+             answer through an outbound channel, and no SessionStart re-applied that taint — so \
+             its path tool calls are refused until the managed session ends (#9923, #8433). Ask \
+             the operator."
+        )),
+        Err(err) => Some(format!(
+            "tm hook --egress-guard denies `{tool}`: the guard could not settle whether a live \
+             channel taint covers this session ({err}), so it refuses the call (#9923, #8433). \
+             `tm doctor` shows the taint state in its `channels_*` rows."
+        )),
+    }
 }
 
 #[cfg(test)]

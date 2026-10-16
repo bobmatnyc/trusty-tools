@@ -163,7 +163,8 @@ fn tainted_home() -> (tempfile::TempDir, PathBuf) {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
-        workspace: PathBuf::from("/"),
+        // #9923: scoped, so a session launched outside it stays untainted.
+        workspace: home.join("ws"),
     };
     taint_managed_session(&taint_dir(&home), "m-1", SESSION, &mark).expect("taint");
     (tmp, home)
@@ -204,7 +205,8 @@ async fn daemon_unreachable_falls_back_to_inline_load_never_allow() {
     let (_tmp, tainted) = tainted_home();
     let at = tainted.as_path();
     let ready = || cached_policy_ready(&down, Some(at), || policy_ready(Some(at)));
-    let verdict = with_taint_async(Verdict::Allow, &read_call(SESSION), Some(at), ready).await;
+    let verdict =
+        with_taint_async(Verdict::Allow, &read_call(SESSION), Some(at), None, ready).await;
     match verdict {
         Verdict::Deny { check, reason } => {
             assert_eq!(check, POLICY_CHECK);
@@ -378,17 +380,20 @@ async fn untainted_session_never_queries_the_daemon() {
     let (_tmp, tainted) = tainted_home();
     let at = Some(tainted.as_path());
     let never = || async { no_inline() };
-    let clean = with_taint_async(Verdict::Allow, &read_call("s-clean"), at, never).await;
+    // #9923: launched outside the mark's workspace, so no mark covers it.
+    let clean = with_taint_async(Verdict::Allow, &read_call("s-clean"), at, at, never).await;
     assert_eq!(clean, Verdict::Allow);
     let first = Verdict::Deny {
         check: "egress-family",
         reason: "x".into(),
     };
-    let kept = with_taint_async(first.clone(), &read_call(SESSION), at, never).await;
+    let kept = with_taint_async(first.clone(), &read_call(SESSION), at, None, never).await;
     assert_eq!(kept, first);
     // Control: the tainted session's call does ask.
-    let asked =
-        with_taint_async(Verdict::Allow, &read_call(SESSION), at, || async { Ok(()) }).await;
+    let asked = with_taint_async(Verdict::Allow, &read_call(SESSION), at, None, || async {
+        Ok(())
+    })
+    .await;
     assert!(matches!(
         asked,
         Verdict::Deny {
