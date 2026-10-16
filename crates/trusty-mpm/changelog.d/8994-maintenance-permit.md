@@ -1,0 +1,2 @@
+Fixed
+- `tm session prune-worktrees --merged-prs` now takes the daemon's one maintenance permit, the same one the timer-driven worktree reclaim sweep takes, so a manual reclaim and the timer sweep can no longer run at the same time. While another maintenance pass holds the permit, the route answers 409 and prunes nothing; retry when it finishes. If the permit cannot be taken for any other reason, the route answers 500 and prunes nothing. The permit is held until the pass itself ends, even if the client disconnects mid-pass. What gets reclaimed is unchanged (#8994).
