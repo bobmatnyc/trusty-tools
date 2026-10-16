@@ -3,9 +3,9 @@
 //! Why: the failure this rules out is not the two transports answering a
 //! question differently — it is one of them CHANGING something the other would
 //! have refused, or reporting a change that did not happen. Every case here
-//! drives the REAL axum router and the REAL RPC router, so a `*_report` function
-//! that stopped being the body both transports serve fails these rather than
-//! surfacing in a consumer.
+//! drives the REAL RPC router and, for the HTTP side, the `*_report` core each
+//! route wrapped (#9535: the router is going), so a socket that stopped running
+//! that core fails these rather than surfacing in a consumer.
 //!
 //! **Every mutating method has a failure arm, and each one checks state.** The
 //! repo's fail-open family is a failure branch that downgrades to success while
@@ -47,7 +47,11 @@ use crate::service::rpc::error::{
     CODE_UNAVAILABLE_PERMANENT,
 };
 use crate::service::rpc::writes;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::{
+    build_router_on, create_index_report, delete_index_report, graph_neighbors_report,
+    index_file_report, ingest_graph_report, patch_index_config_report, reindex_report,
+    relocate_index_report, remove_file_report, SearchAppState,
+};
 
 /// The vector dimensionality the mock embedder is built at.
 const DIM: usize = 8;
@@ -94,25 +98,43 @@ fn allowlist(dir: &Path, approved: &[&Path]) -> AllowlistPaths {
     paths
 }
 
-/// One state, both routers.
+/// One state, read by both the RPC router and the cores.
 ///
-/// Why both from the SAME `Arc`: that is the property under test one level down
-/// — `build_router_on` and `writes::register` must read one registry, one
-/// limiter and one cold store. Two `Arc::new` calls here would make every
+/// Why the SAME `Arc`: `writes::register` and the cores must read one registry,
+/// one limiter and one cold store. Two `Arc::new` calls here would make every
 /// assertion below pass against two independent daemons.
-async fn routers(state: SearchAppState) -> (Arc<SearchAppState>, Router, RpcRouter) {
+async fn served(state: SearchAppState) -> (Arc<SearchAppState>, RpcRouter) {
     let state = Arc::new(state);
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
     state.install_embedder(embedder).await;
+    let rpc = writes::register(RpcRouter::new(), &state);
+    (state, rpc)
+}
+
+/// [`served`] plus the axum router, for the child modules that still drive it.
+// #9535: S1c retires this with `build_router_on`.
+async fn routers(state: SearchAppState) -> (Arc<SearchAppState>, Router, RpcRouter) {
+    let (state, rpc) = served(state).await;
     let http = build_router_on(
         Arc::clone(&state),
         trusty_common::server::SelfOrigins::default(),
     );
-    let rpc = writes::register(RpcRouter::new(), &state);
     (state, http, rpc)
 }
 
 /// An empty-registry state whose allowlist approves `approved`.
+async fn empty_served(
+    allowlist_dir: &Path,
+    approved: &[&Path],
+) -> (Arc<SearchAppState>, RpcRouter) {
+    served(
+        SearchAppState::new(IndexRegistry::new())
+            .with_allowlist_paths(allowlist(allowlist_dir, approved)),
+    )
+    .await
+}
+
+/// [`empty_served`] plus the axum router, for the child modules (#9535 S1c).
 async fn empty_state(
     allowlist_dir: &Path,
     approved: &[&Path],
@@ -144,6 +166,8 @@ fn index_with_corpus(
 
 // ------------------------------------------------------------- transports ---
 
+// #9535: the `http_*` router helpers serve the child modules only; S1c retires
+// them with `build_router_on`. Cases in this file call the cores below them.
 async fn http_raw(router: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
@@ -212,6 +236,61 @@ async fn http_bodyless(
         .body(Body::empty())
         .expect("build the request");
     http_raw(router, request).await
+}
+
+/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
+fn http_body<T: serde::Serialize>(
+    answer: Result<T, (StatusCode, serde_json::Value)>,
+) -> serde_json::Value {
+    match answer {
+        Ok(body) => {
+            let bytes = serde_json::to_vec(&body).expect("encode the body");
+            serde_json::from_slice(&bytes).expect("decode the body")
+        }
+        Err((status, body)) => panic!("the core must answer 200, got {status}: {body}"),
+    }
+}
+
+/// A core's refusal as `(status, body)`, asserting it is a 4xx or 5xx (#9535).
+fn http_refusal<T: serde::Serialize>(
+    answer: Result<T, (StatusCode, serde_json::Value)>,
+) -> (StatusCode, serde_json::Value) {
+    match answer {
+        Ok(body) => panic!(
+            "the core must refuse, got 200: {}",
+            serde_json::to_value(body).expect("encode the body")
+        ),
+        Err((status, body)) => {
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "a refusal must be 4xx/5xx, got {status}: {body}"
+            );
+            (status, body)
+        }
+    }
+}
+
+/// A JSON request decoded as the core's request type, as the extractor did.
+fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
+    serde_json::from_value(json).expect("decode the request")
+}
+
+/// `POST /indexes/{id}/index-file`'s answer, from its core.
+async fn put_file(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    index_file_report(state, id, params(body)).await
+}
+
+/// `POST /indexes/{id}/remove-file`'s answer, from its core.
+async fn remove_file(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    remove_file_report(state, id, params(body)).await
 }
 
 async fn dispatch(
@@ -320,16 +399,11 @@ async fn create_over_the_socket_matches_the_http_body() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let over_http_root = safe_root("create-http");
     let over_socket_root = safe_root("create-socket");
-    let (state, http, rpc) =
-        empty_state(isolated.path(), &[&over_http_root, &over_socket_root]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[&over_http_root, &over_socket_root]).await;
 
-    let over_http = http_ok(
-        &http,
-        "POST",
-        "/indexes",
-        create_body("create-http", &over_http_root),
-    )
-    .await;
+    let over_http = http_body(
+        create_index_report(&state, params(create_body("create-http", &over_http_root))).await,
+    );
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_CREATE,
@@ -361,10 +435,10 @@ async fn a_root_the_allowlist_has_not_approved_is_refused_and_registers_nothing(
     let unapproved = safe_root("create-unapproved");
     // An EMPTY allowlist: nothing is approved, so the refusal is the #767 gate
     // rather than the hard denylist a `/var/folders` root would have tripped.
-    let (state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[]).await;
     let body = create_body("create-refused", &unapproved);
 
-    let over_http = http_err(&http, "POST", "/indexes", body.clone()).await;
+    let over_http = http_refusal(create_index_report(&state, params(body.clone())).await);
     assert_eq!(over_http.0, StatusCode::FORBIDDEN, "body: {}", over_http.1);
     let over_socket = rpc_err(&rpc, writes::METHOD_INDEX_CREATE, body).await;
 
@@ -398,7 +472,7 @@ async fn an_allowlist_excluded_registration_deletes_over_the_socket_too() {
     let root = safe_root("delete-excluded");
     // Empty allowlist: this is exactly the state `retain_approved_entries`
     // leaves behind — a row in the file, nothing in either store.
-    let (_state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[]).await;
 
     let mut data_dirs = Vec::new();
     for id in ["delete-http", "delete-socket"] {
@@ -411,9 +485,8 @@ async fn an_allowlist_excluded_registration_deletes_over_the_socket_too() {
         assert!(row_exists(id), "fixture must seed the {id} row");
     }
 
-    let (status, over_http) =
-        http_bodyless(&http, "DELETE", "/indexes/delete-http?delete_data=true").await;
-    assert_eq!(status, StatusCode::OK, "body: {over_http}");
+    let delete_data = params(serde_json::json!({ "delete_data": true }));
+    let over_http = http_body(delete_index_report(&state, "delete-http", delete_data).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_DELETE,
@@ -458,7 +531,7 @@ async fn a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transpo
 
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let root = safe_root("delete-failing");
-    let (_state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[]).await;
     persistence::upsert_index_registry_entry(persistence::PersistedIndex::new(
         "delete-failing",
         &root,
@@ -479,7 +552,8 @@ async fn a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transpo
     std::fs::set_permissions(isolated.path(), std::fs::Permissions::from_mode(0o555))
         .expect("make data dir read-only");
 
-    let over_http = http_bodyless(&http, "DELETE", "/indexes/delete-failing").await;
+    let over_http =
+        http_refusal(delete_index_report(&state, "delete-failing", Default::default()).await);
     assert_eq!(
         over_http.0,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -528,7 +602,7 @@ async fn a_failed_delete_reports_the_failure_and_keeps_the_row_on_either_transpo
 async fn a_delete_whose_expected_root_moved_is_refused_on_either_transport() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
     let live = safe_root("delete-moved-live");
-    let (_state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[]).await;
     persistence::upsert_index_registry_entry(persistence::PersistedIndex::new(
         "delete-moved",
         &live,
@@ -536,15 +610,8 @@ async fn a_delete_whose_expected_root_moved_is_refused_on_either_transport() {
     .expect("seed indexes.toml");
 
     let stale = live.join("recreated-elsewhere");
-    let over_http = http_bodyless(
-        &http,
-        "DELETE",
-        &format!(
-            "/indexes/delete-moved?expected_root_path={}",
-            stale.display().to_string().replace('/', "%2F")
-        ),
-    )
-    .await;
+    let expected = params(serde_json::json!({ "expected_root_path": stale }));
+    let over_http = http_refusal(delete_index_report(&state, "delete-moved", expected).await);
     assert_eq!(
         over_http.0,
         StatusCode::CONFLICT,
@@ -582,9 +649,10 @@ async fn a_delete_whose_expected_root_moved_is_refused_on_either_transport() {
 #[serial_test::serial]
 async fn a_delete_of_an_id_in_no_store_is_not_found_on_either_transport() {
     let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
-    let (_state, http, rpc) = empty_state(isolated.path(), &[]).await;
+    let (state, rpc) = empty_served(isolated.path(), &[]).await;
 
-    let over_http = http_bodyless(&http, "DELETE", "/indexes/never-existed-6285").await;
+    let over_http =
+        http_refusal(delete_index_report(&state, "never-existed-6285", Default::default()).await);
     assert_eq!(over_http.0, StatusCode::NOT_FOUND, "body: {}", over_http.1);
     let over_socket = rpc_err(
         &rpc,
@@ -617,21 +685,16 @@ async fn relocate_over_the_socket_matches_the_http_body() {
     let registry = IndexRegistry::new();
     let _http_corpus = index_with_corpus(&registry, "relo-http", &http_from);
     let _sock_corpus = index_with_corpus(&registry, "relo-sock", &sock_from);
-    let (state, http, rpc) = routers(SearchAppState::new(registry).with_allowlist_paths(
-        allowlist(
+    let (state, rpc) = served(
+        SearchAppState::new(registry).with_allowlist_paths(allowlist(
             isolated.path(),
             &[&http_from, &http_to, &sock_from, &sock_to],
-        ),
-    ))
-    .await;
-
-    let over_http = http_ok(
-        &http,
-        "PATCH",
-        "/indexes/relo-http",
-        serde_json::json!({ "root_path": http_to }),
+        )),
     )
     .await;
+
+    let to = params(serde_json::json!({ "root_path": http_to }));
+    let over_http = http_body(relocate_index_report(&state, "relo-http", to).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_RELOCATE,
@@ -668,14 +731,15 @@ async fn a_refused_relocate_leaves_the_root_where_it_was_on_either_transport() {
     let registry = IndexRegistry::new();
     let _mine_corpus = index_with_corpus(&registry, "relo-mine", &mine);
     let _taken_corpus = index_with_corpus(&registry, "relo-owner", &taken);
-    let (state, http, rpc) = routers(
+    let (state, rpc) = served(
         SearchAppState::new(registry)
             .with_allowlist_paths(allowlist(isolated.path(), &[&mine, &taken])),
     )
     .await;
 
     let body = serde_json::json!({ "root_path": taken });
-    let over_http = http_err(&http, "PATCH", "/indexes/relo-mine", body.clone()).await;
+    let over_http =
+        http_refusal(relocate_index_report(&state, "relo-mine", params(body.clone())).await);
     assert_eq!(over_http.0, StatusCode::CONFLICT, "body: {}", over_http.1);
     let over_socket = rpc_err(
         &rpc,
@@ -738,11 +802,10 @@ const CONTENT: &str = "fn authenticate(token: &str) -> bool { verify(token) }\n"
 #[serial_test::parallel]
 async fn index_file_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (_state, http, rpc) =
-        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let body = serde_json::json!({ "path": FILE, "content": CONTENT });
 
-    let over_http = http_ok(&http, "POST", "/indexes/wf/index-file", body.clone()).await;
+    let over_http = http_body(put_file(&state, "wf", body.clone()).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_FILE_PUT,
@@ -765,13 +828,12 @@ async fn index_file_over_the_socket_matches_the_http_body() {
 #[serial_test::parallel]
 async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, _rpc) =
-        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let entries: Vec<String> = (0..600).map(|i| format!("  \"key_{i}\": {i},")).collect();
     let big = format!("{{\n{}\n  \"last\": 0\n}}\n", entries.join("\n"));
     let body = serde_json::json!({ "path": "config/big.json", "content": big });
 
-    let landed = http_ok(&http, "POST", "/indexes/wf/index-file", body).await;
+    let landed = http_body(put_file(&state, "wf", body).await);
     assert_eq!(landed["indexed"], serde_json::json!(true), "{landed}");
     let chunks = landed["chunks"].as_u64().unwrap_or(0);
     assert!(
@@ -792,7 +854,7 @@ async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
     );
 
     let blank = serde_json::json!({ "path": "config/empty.json", "content": "  \n" });
-    let refused = http_ok(&http, "POST", "/indexes/wf/index-file", blank).await;
+    let refused = http_body(put_file(&state, "wf", blank).await);
     assert_eq!(refused["indexed"], serde_json::json!(false), "{refused}");
     assert_eq!(
         refused["reason"],
@@ -819,13 +881,14 @@ async fn index_file_error_arm_never_reports_indexed() {
         Arc::new(tokio::sync::RwLock::new(indexer)),
         tmp.path().to_path_buf(),
     ));
-    let (_state, http, _rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, _rpc) = served(SearchAppState::new(registry)).await;
     let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/cap/index-file", fits).await;
+    http_body(put_file(&state, "cap", fits).await);
 
     let over = serde_json::json!({ "path": "src/b.rs", "content": "fn b() -> u8 { 2 }\n" });
-    let (status, body) =
-        http_raw(&http, json_request("POST", "/indexes/cap/index-file", over)).await;
+    let (status, body) = put_file(&state, "cap", over)
+        .await
+        .expect_err("the chunk cap refuses the second file");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(
         body["error"],
@@ -845,14 +908,13 @@ async fn index_file_error_arm_never_reports_indexed() {
 #[serial_test::parallel]
 async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, _rpc) =
-        routers(SearchAppState::new(planted_registry("ts", tmp.path()))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("ts", tmp.path()))).await;
     let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/ts/index-file", fits).await;
+    http_body(put_file(&state, "ts", fits).await);
 
     let tombstone = "---\nsource_status: deleted\nsource_id: auth-8976\n---\n";
     let body = serde_json::json!({ "path": FILE, "content": tombstone });
-    let reply = http_ok(&http, "POST", "/indexes/ts/index-file", body).await;
+    let reply = http_body(put_file(&state, "ts", body).await);
     assert_eq!(reply["indexed"], serde_json::json!(true), "{reply}");
     assert_eq!(reply["chunks"], serde_json::json!(0), "{reply}");
     assert_eq!(reply["removed"], serde_json::json!(true), "{reply}");
@@ -871,20 +933,19 @@ async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
 #[serial_test::parallel]
 async fn remove_file_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (_state, http, rpc) =
-        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
     let remove = serde_json::json!({ "path": FILE });
 
-    http_ok(&http, "POST", "/indexes/wf/index-file", put.clone()).await;
-    let over_http = http_ok(&http, "POST", "/indexes/wf/remove-file", remove.clone()).await;
+    http_body(put_file(&state, "wf", put.clone()).await);
+    let over_http = http_body(remove_file(&state, "wf", remove.clone()).await);
     assert!(
         over_http["removed_chunks"].as_u64().unwrap_or(0) > 0,
         "the fixture must remove something, or this parity case proves nothing: {over_http}"
     );
 
     // Re-plant so the socket asks the identical question.
-    http_ok(&http, "POST", "/indexes/wf/index-file", put).await;
+    http_body(put_file(&state, "wf", put).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_FILE_REMOVE,
@@ -904,16 +965,10 @@ async fn remove_file_over_the_socket_matches_the_http_body() {
 #[serial_test::parallel]
 async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let body = serde_json::json!({ "path": FILE, "content": CONTENT });
 
-    let over_http = http_err(
-        &http,
-        "POST",
-        "/indexes/absent-6285/index-file",
-        body.clone(),
-    )
-    .await;
+    let over_http = http_refusal(put_file(&state, "absent-6285", body.clone()).await);
     assert_eq!(over_http.0, StatusCode::NOT_FOUND, "body: {}", over_http.1);
     let over_socket = rpc_err(
         &rpc,
@@ -946,14 +1001,14 @@ async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
 #[serial_test::parallel]
 async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let sops = crate::core::sops::sample_sops_yaml();
     for (path, content, reason) in [
         ("data/export.json", "{\"a\": 1}\n", "excluded_path"),
         ("config/secrets.yaml", sops.as_str(), "sops_encrypted"),
     ] {
         let body = serde_json::json!({ "path": path, "content": content });
-        let over_http = http_err(&http, "POST", "/indexes/wf/index-file", body.clone()).await;
+        let over_http = http_refusal(put_file(&state, "wf", body.clone()).await);
         assert_eq!(
             over_http.0,
             StatusCode::FORBIDDEN,
@@ -994,19 +1049,18 @@ async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transpor
 #[serial_test::parallel]
 async fn create_and_patch_reject_an_invalid_exclude_glob() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, _rpc) =
-        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let bad = serde_json::json!(["secrets/[unclosed"]);
 
     let mut create = create_body("bad-glob-8922", tmp.path());
     create["exclude_globs"] = bad.clone();
-    let (status, body) = http_err(&http, "POST", "/indexes", create).await;
+    let (status, body) = http_refusal(create_index_report(&state, params(create)).await);
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
     assert!(state.registry.get(&IndexId::new("bad-glob-8922")).is_none());
 
     let patch = serde_json::json!({ "exclude_globs": bad });
-    let (status, body) = http_err(&http, "PATCH", "/indexes/wf/config", patch).await;
+    let (status, body) = http_refusal(patch_index_config_report(&state, "wf", params(patch)).await);
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
     let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
@@ -1028,10 +1082,9 @@ async fn create_and_patch_reject_an_invalid_exclude_glob() {
 #[serial_test::parallel]
 async fn reindex_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (_state, http, rpc) =
-        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
 
-    let over_http = http_ok(&http, "POST", "/indexes/wf/reindex", serde_json::json!({})).await;
+    let over_http = http_body(reindex_report(&state, "wf", Some(Default::default())).await);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let over_socket = loop {
         let params = serde_json::json!({ "index_id": "wf" });
@@ -1067,12 +1120,12 @@ async fn reindex_over_the_socket_matches_the_http_body() {
 #[serial_test::parallel]
 async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     state
         .last_reindex_aborted_at
         .insert(IndexId::new("wf"), std::time::Instant::now());
 
-    let over_http = http_err(&http, "POST", "/indexes/wf/reindex", serde_json::json!({})).await;
+    let over_http = http_refusal(reindex_report(&state, "wf", Some(Default::default())).await);
     assert_eq!(
         over_http.0,
         StatusCode::TOO_MANY_REQUESTS,
@@ -1109,7 +1162,7 @@ async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport
 #[serial_test::parallel]
 async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wq", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wq", tmp.path()))).await;
     {
         let handle = state.registry.get(&IndexId::new("wq")).expect("planted");
         let mut indexer = handle.indexer.write().await;
@@ -1120,7 +1173,7 @@ async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_tra
         indexer.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
     }
 
-    let over_http = http_err(&http, "POST", "/indexes/wq/reindex", serde_json::json!({})).await;
+    let over_http = http_refusal(reindex_report(&state, "wq", Some(Default::default())).await);
     assert_eq!(over_http.0, StatusCode::CONFLICT, "body: {}", over_http.1);
     assert_eq!(over_http.1["error"], "index_write_quarantined");
     let over_socket = rpc_err(
@@ -1164,9 +1217,9 @@ async fn a_serve_only_reindex_is_refused_and_queues_nothing_on_either_transport(
             tmp.path().to_path_buf(),
         )
     });
-    let (state, http, rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, rpc) = served(SearchAppState::new(registry)).await;
 
-    let over_http = http_err(&http, "POST", "/indexes/so/reindex", serde_json::json!({})).await;
+    let over_http = http_refusal(reindex_report(&state, "so", Some(Default::default())).await);
     assert_eq!(over_http.0, StatusCode::FORBIDDEN, "body: {}", over_http.1);
     assert_eq!(over_http.1["error"], "index_serve_only");
     let over_socket = rpc_err(
@@ -1221,15 +1274,10 @@ async fn graph_ingest_over_the_socket_matches_the_http_body() {
     let registry = IndexRegistry::new();
     let _http_corpus = index_with_corpus(&registry, "gi-http", http_tree.path());
     let _sock_corpus = index_with_corpus(&registry, "gi-sock", sock_tree.path());
-    let (_state, http, rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, rpc) = served(SearchAppState::new(registry)).await;
 
-    let over_http = http_ok(
-        &http,
-        "POST",
-        "/indexes/gi-http/graph",
-        ingest_body("navigatsql"),
-    )
-    .await;
+    let ingest = params(ingest_body("navigatsql"));
+    let over_http = http_body(ingest_graph_report(&state, "gi-http", ingest).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_GRAPH_INGEST,
@@ -1262,15 +1310,10 @@ async fn an_unmerged_contribution_is_refused_identically_and_stays_unqueryable()
     // own write still succeeds, the load that follows cannot.
     crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "stale-producer")
         .expect("plant corrupt contrib row");
-    let (state, http, rpc) = routers(SearchAppState::new(registry)).await;
+    let (state, rpc) = served(SearchAppState::new(registry)).await;
 
-    let over_http = http_err(
-        &http,
-        "POST",
-        "/indexes/gi-fail/graph",
-        ingest_body("navigatsql"),
-    )
-    .await;
+    let ingest = params(ingest_body("navigatsql"));
+    let over_http = http_refusal(ingest_graph_report(&state, "gi-fail", ingest).await);
     assert_eq!(
         over_http.0,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1304,7 +1347,7 @@ async fn an_unmerged_contribution_is_refused_identically_and_stays_unqueryable()
     );
 
     // Corroboration: the verdict matches what a query can actually see.
-    let neighbors = crate::service::server::graph_neighbors_report(
+    let neighbors = graph_neighbors_report(
         &state,
         "gi-fail",
         &serde_json::from_value(serde_json::json!({ "node": "dbo.orders", "direction": "in" }))
@@ -1336,7 +1379,7 @@ async fn writes_are_refused_when_the_shared_limiter_is_saturated() {
         ConcurrencyLimiter::with_limits(1, 0),
         QueryTimeoutConfig::from_duration(std::time::Duration::from_secs(30)),
     );
-    let (state, _http, rpc) = routers(state).await;
+    let (state, rpc) = served(state).await;
 
     // Hold the only permit. The socket and the axum router read the SAME
     // limiter off the state, so this saturates both doors at once.
@@ -1375,7 +1418,7 @@ async fn a_registry_level_write_is_not_admission_limited() {
             ConcurrencyLimiter::with_limits(1, 0),
             QueryTimeoutConfig::from_duration(std::time::Duration::from_secs(30)),
         );
-    let (state, _http, rpc) = routers(state).await;
+    let (state, rpc) = served(state).await;
     let _held = crate::service::concurrency::admit(&state.query_limiter)
         .await
         .expect("the first admission must succeed");
@@ -1417,12 +1460,12 @@ async fn chunks_for(state: &SearchAppState, id: &str, key: &str) -> Vec<String> 
 #[serial_test::parallel]
 async fn remove_file_takes_an_absolute_in_root_path_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
 
-    http_ok(&http, "POST", "/indexes/rp/index-file", put.clone()).await;
+    http_body(put_file(&state, "rp", put.clone()).await);
     let relative = serde_json::json!({ "path": FILE });
-    let expected = http_ok(&http, "POST", "/indexes/rp/remove-file", relative).await;
+    let expected = http_body(remove_file(&state, "rp", relative).await);
     let expected = expected["removed_chunks"].as_u64().unwrap_or(0);
     assert!(
         expected > 0,
@@ -1439,16 +1482,16 @@ async fn remove_file_takes_an_absolute_in_root_path_9236() {
         canonical.display().to_string(),
         trailing,
     ] {
-        http_ok(&http, "POST", "/indexes/rp/index-file", put.clone()).await;
+        http_body(put_file(&state, "rp", put.clone()).await);
         let body = serde_json::json!({ "path": absolute });
-        let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+        let reply = http_body(remove_file(&state, "rp", body).await);
         assert_eq!(reply["removed_chunks"], expected, "{absolute}: {reply}");
         assert_eq!(reply["path"], absolute.as_str(), "{absolute}: {reply}");
         let left = chunks_for(&state, "rp", FILE).await;
         assert!(left.is_empty(), "{absolute} left {left:?}");
     }
 
-    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    http_body(put_file(&state, "rp", put).await);
     let over_socket = rpc_ok(
         &rpc,
         writes::METHOD_INDEX_FILE_REMOVE,
@@ -1470,9 +1513,9 @@ async fn remove_file_takes_an_absolute_in_root_path_9236() {
 #[serial_test::parallel]
 async fn remove_file_refuses_a_path_outside_the_root_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    http_body(put_file(&state, "rp", put).await);
     let before = chunks_for(&state, "rp", FILE).await;
     assert!(!before.is_empty(), "the fixture must index something");
 
@@ -1483,7 +1526,7 @@ async fn remove_file_refuses_a_path_outside_the_root_9236() {
         format!("{root}/"),
     ] {
         let body = serde_json::json!({ "path": outside });
-        let over_http = http_err(&http, "POST", "/indexes/rp/remove-file", body.clone()).await;
+        let over_http = http_refusal(remove_file(&state, "rp", body.clone()).await);
         assert_eq!(
             over_http.0,
             StatusCode::BAD_REQUEST,
@@ -1526,8 +1569,7 @@ async fn remove_file_refuses_a_path_outside_the_root_9236() {
 #[serial_test::parallel]
 async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, _rpc) =
-        routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
     let absolute = tmp.path().join(FILE).display().to_string();
     {
         let handle = state.registry.get(&IndexId::new("rp")).expect("resident");
@@ -1540,7 +1582,7 @@ async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
     assert!(!chunks_for(&state, "rp", &absolute).await.is_empty());
 
     let body = serde_json::json!({ "path": absolute });
-    let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+    let reply = http_body(remove_file(&state, "rp", body).await);
     assert!(reply["removed_chunks"].as_u64().unwrap_or(0) > 0, "{reply}");
     assert!(chunks_for(&state, "rp", &absolute).await.is_empty());
 }
@@ -1565,10 +1607,10 @@ async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
     let alias = tmp.path().join("alias");
     std::os::unix::fs::symlink(&root, &alias).expect("alias");
     std::fs::write(tmp.path().join("outside.rs"), "fn outside() {}\n").expect("outside");
-    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("rp", &root))).await;
+    let (state, _rpc) = served(SearchAppState::new(planted_registry("rp", &root))).await;
     let put_a = serde_json::json!({ "path": "a.rs", "content": CONTENT });
     let put_b = serde_json::json!({ "path": "b.rs", "content": "fn target_9236() {}\n" });
-    http_ok(&http, "POST", "/indexes/rp/index-file", put_b).await;
+    http_body(put_file(&state, "rp", put_b).await);
     let b_before = chunks_for(&state, "rp", "b.rs").await;
     assert!(!b_before.is_empty(), "the fixture must index b.rs");
 
@@ -1578,10 +1620,10 @@ async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
         canonical.join("a.rs"),
         alias.join("a.rs"),
     ] {
-        http_ok(&http, "POST", "/indexes/rp/index-file", put_a.clone()).await;
+        http_body(put_file(&state, "rp", put_a.clone()).await);
         let absolute = absolute.display().to_string();
         let body = serde_json::json!({ "path": absolute });
-        let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+        let reply = http_body(remove_file(&state, "rp", body).await);
         assert!(
             reply["removed_chunks"].as_u64() > Some(0),
             "{absolute}: {reply}"
@@ -1598,7 +1640,7 @@ async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
     ] {
         let outside = outside.display().to_string();
         let body = serde_json::json!({ "path": outside });
-        let refused = http_err(&http, "POST", "/indexes/rp/remove-file", body).await;
+        let refused = http_refusal(remove_file(&state, "rp", body).await);
         assert_eq!(
             refused.0,
             StatusCode::BAD_REQUEST,
@@ -1629,15 +1671,15 @@ async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
 #[serial_test::parallel]
 async fn remove_file_refuses_a_relative_path_outside_the_root_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let (state, rpc) = served(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
     let put = serde_json::json!({ "path": FILE, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    http_body(put_file(&state, "rp", put).await);
     let before = chunks_for(&state, "rp", FILE).await;
     assert!(!before.is_empty(), "the fixture must index something");
 
     for refused in ["", ".", "./", "../other/x.rs", "src/../../x.rs"] {
         let body = serde_json::json!({ "path": refused });
-        let over_http = http_err(&http, "POST", "/indexes/rp/remove-file", body.clone()).await;
+        let over_http = http_refusal(remove_file(&state, "rp", body.clone()).await);
         assert_eq!(
             over_http.0,
             StatusCode::BAD_REQUEST,
@@ -1665,7 +1707,7 @@ async fn remove_file_refuses_a_relative_path_outside_the_root_9236() {
     }
 
     let body = serde_json::json!({ "path": FILE });
-    let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+    let reply = http_body(remove_file(&state, "rp", body).await);
     assert!(reply["removed_chunks"].as_u64() > Some(0), "{reply}");
     assert!(chunks_for(&state, "rp", FILE).await.is_empty());
 }
