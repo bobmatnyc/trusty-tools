@@ -79,6 +79,7 @@ pub fn backfill_checkouts(
                     repo: repo.clone(),
                     branch: wt.branch,
                     origin: Origin::AgentIsolation,
+                    session: None,
                 }
             } else {
                 report.created += 1;

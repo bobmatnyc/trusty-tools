@@ -40,6 +40,8 @@ pub(crate) mod sweep_state_file;
 // last-pass timings `tm doctor` reports.
 pub(crate) mod sweep_status;
 pub mod tmux_service;
+// #8994 S2a: records agent-isolation trees in the worktree ledger from hooks.
+pub mod worktree_ledger_ingest;
 
 // #7965: the cross-sweep latency contract — a running sweep never pushes a
 // request past the client's discovery budget. It spans both sweeps, so it lives

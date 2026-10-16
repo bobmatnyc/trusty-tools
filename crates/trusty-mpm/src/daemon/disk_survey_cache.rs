@@ -37,7 +37,8 @@ pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(60);
 /// daemon's lifetime. The console and the CLI use two or three keys.
 pub(crate) const MAX_KEYS: usize = 16;
 
-/// The daemon's disk-survey resources: the size index and this cache.
+/// The daemon's disk resources: the size index, this cache and the worktree
+/// ledger's hook-ingest state.
 ///
 /// Why: one `DaemonState` field, so the two share one lifetime and the state
 /// struct does not grow per feature.
@@ -48,6 +49,10 @@ pub(crate) struct DiskResources {
     pub(crate) index: std::sync::Arc<Mutex<DirSizeIndex>>,
     /// The last complete pass per key (#8985).
     pub(crate) surveys: std::sync::Arc<DiskSurveyCache>,
+    /// Hook-fed worktree-ledger dedup and serialization (#8994 S2a): the
+    /// ledger is the per-project worktree disk record.
+    pub(crate) worktree_ingest:
+        std::sync::Arc<crate::daemon::services::worktree_ledger_ingest::IngestTracker>,
 }
 
 impl Default for DiskResources {
@@ -55,6 +60,7 @@ impl Default for DiskResources {
         Self {
             index: std::sync::Arc::new(Mutex::new(DirSizeIndex::new())),
             surveys: std::sync::Arc::default(),
+            worktree_ingest: std::sync::Arc::default(),
         }
     }
 }

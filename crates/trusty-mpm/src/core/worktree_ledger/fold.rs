@@ -34,7 +34,8 @@ pub struct LiveWorktree {
     pub origin: Origin,
     /// `true` for an `observed` tree tm did not create.
     pub observed_only: bool,
-    /// Managed session, for a `created` tree that had one.
+    /// Managed session for a `created` tree, or the session whose hook event
+    /// first named an `observed` one (#8994 S2a).
     pub session: Option<String>,
     /// When it was first recorded.
     pub first_seen: DateTime<Utc>,
@@ -89,6 +90,7 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                 repo,
                 branch,
                 origin,
+                session,
             } => {
                 live.entry(event.path.clone())
                     .or_insert_with(|| LiveWorktree {
@@ -97,7 +99,7 @@ pub fn fold(events: &[LedgerEvent]) -> LedgerState {
                         branch: branch.clone(),
                         origin: *origin,
                         observed_only: true,
-                        session: None,
+                        session: session.clone(),
                         first_seen: event.ts,
                         bytes: None,
                         measured_at: None,

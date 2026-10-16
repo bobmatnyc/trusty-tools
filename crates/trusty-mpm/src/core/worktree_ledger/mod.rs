@@ -29,6 +29,7 @@
 
 pub mod backfill;
 pub mod fold;
+pub mod hook_ingest;
 pub mod reconcile;
 pub mod record;
 
@@ -85,6 +86,10 @@ pub enum EventKind {
         branch: Option<String>,
         /// The route that recorded it.
         origin: Origin,
+        /// tm session whose hook event first named the tree (#8994 S2a);
+        /// `None` for a backfilled tree and for every slice-1 line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     /// The tree's allocated size at [`LedgerEvent::ts`].
     Measured {

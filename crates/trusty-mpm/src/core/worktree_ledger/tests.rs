@@ -58,6 +58,7 @@ fn append_then_read_round_trips_every_event_kind() {
                 repo: PathBuf::from("/r"),
                 branch: None,
                 origin: Origin::AgentIsolation,
+                session: None,
             },
         ),
         ev(2, "/w/a", EventKind::Measured { bytes: 42 }),
