@@ -110,14 +110,16 @@ pub fn spawn_for_bash(
         let checkouts = registered_checkouts(&registry_dir)
             .await
             .map_err(|e| format!("project registry unreadable: {e}"));
-        let work = move || ingest(
-            &tracker,
-            &ledger,
-            parsed,
-            &checkouts,
-            &session,
-            received.checked_sub(NEW_TREE_WINDOW),
-        );
+        let work = move || {
+            ingest(
+                &tracker,
+                &ledger,
+                parsed,
+                &checkouts,
+                &session,
+                received.checked_sub(NEW_TREE_WINDOW),
+            )
+        };
         tokio::task::spawn_blocking(work)
             .await
             .unwrap_or_else(|e| CommandReport {
@@ -147,17 +149,15 @@ fn ingest(
             WorktreeOp::Add(candidates) => {
                 let what = format!("`git worktree add` of {}", show(candidates));
                 let result = match checkouts {
-                    Ok(checkouts) => {
-                        observe_added_tree(
-                            ledger,
-                            candidates,
-                            checkouts,
-                            Some(session),
-                            not_before.unwrap_or(SystemTime::UNIX_EPOCH),
-                        )
-                            .map(|outcome| report.added.push(outcome))
-                            .map_err(|e| e.to_string())
-                    }
+                    Ok(checkouts) => observe_added_tree(
+                        ledger,
+                        candidates,
+                        checkouts,
+                        Some(session),
+                        not_before.unwrap_or(SystemTime::UNIX_EPOCH),
+                    )
+                    .map(|outcome| report.added.push(outcome))
+                    .map_err(|e| e.to_string()),
                     Err(e) => Err(e.clone()),
                 };
                 (what, result)
@@ -177,9 +177,7 @@ fn ingest(
         };
         match result {
             Ok(()) => tracing::info!("worktree ledger: read {what} (#8994)"),
-            Err(e) => report
-                .errors
-                .push(fail(ledger, &format!("{what}: {e}"))),
+            Err(e) => report.errors.push(fail(ledger, &format!("{what}: {e}"))),
         }
     }
     report

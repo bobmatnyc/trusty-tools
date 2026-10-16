@@ -420,7 +420,9 @@ async fn an_s2b_failure_survives_a_restart_and_an_s2a_success() {
     let fixture = GitWorktreeFixture::new();
     let h = Harness::new(&fixture.repo).await;
     fail_one_record(&h, &fixture).await;
-    let restarted = Arc::new(DaemonState::with_root(h.state.framework_root().to_path_buf()));
+    let restarted = Arc::new(DaemonState::with_root(
+        h.state.framework_root().to_path_buf(),
+    ));
     s2a_success(&restarted, &fixture, "agent-after-restart").await;
     assert!(
         read_ingest_failure(&h.ledger()).unwrap().is_some(),

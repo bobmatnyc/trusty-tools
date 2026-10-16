@@ -243,11 +243,16 @@ fn tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill() {
     assert!(plain.exists(), "a non-sticky record is not this command's");
 
     let sticky = seed_failure(home.path(), true);
-    let registry = home.path().join(".trusty-mpm/project-registry/projects.json");
+    let registry = home
+        .path()
+        .join(".trusty-mpm/project-registry/projects.json");
     std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
     std::fs::write(&registry, b"{torn").unwrap();
     let report = worktrees_json(home.path(), &["--no-size"]);
-    assert!(report["backfill"]["registry_error"].is_string(), "{report:#}");
+    assert!(
+        report["backfill"]["registry_error"].is_string(),
+        "{report:#}"
+    );
     assert!(sticky.exists(), "an unread registry repaired nothing");
 
     std::fs::remove_file(&registry).unwrap();
