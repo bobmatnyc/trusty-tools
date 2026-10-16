@@ -149,6 +149,30 @@ async fn classify_refused_without_live_pid_is_down() {
     assert_eq!(classify_list_failure(&err, None), DaemonReach::Down);
 }
 
+/// 🔴 #6288 fail-open check: over the daemon socket, an absent socket is the
+/// positive evidence that lets bare `tm` start the daemon, and a socket the
+/// client refuses to dial is not. Before the cutover every socket error was
+/// `Unknown`, so a first run never autostarted.
+#[tokio::test]
+async fn classify_an_absent_socket_is_down_and_a_refused_one_unknown() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let client = short_timeout_client();
+    let absent = trusty_mpm::core::socket_locator(&tmp.path().join("absent.sock"));
+    let err = listing_error(&client, &absent).await;
+    assert_eq!(classify_list_failure(&err, None), DaemonReach::Down);
+
+    let wide = tmp.path().join("w").join("trusty-mpm.sock");
+    std::fs::create_dir_all(wide.parent().expect("parent")).expect("dir");
+    let _listener = trusty_common::uds::bind_hardened(&wide).expect("bind");
+    std::fs::set_permissions(&wide, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+        .expect("widen");
+    let err = listing_error(&client, &trusty_mpm::core::socket_locator(&wide)).await;
+    assert!(
+        matches!(classify_list_failure(&err, None), DaemonReach::Unknown(_)),
+        "a socket the client refuses to dial is not a down daemon"
+    );
+}
+
 #[test]
 fn live_pid_requires_matching_addr() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -166,6 +190,35 @@ fn live_pid_requires_matching_addr() {
     assert!(lock.exists(), "classification must not delete the lock");
     let absent = tmp.path().join("absent");
     assert!(lock_evidence_for("http://127.0.0.1:47001", &absent, &daemon).is_none());
+}
+
+/// 🔴 #6288 fail-open check: the client's `url` is the daemon socket locator,
+/// so a live lock must be matched by its `socket_path`. Before the cutover the
+/// match read only `addr`, so a socket `url` saw no evidence and a slow daemon
+/// was autostarted over.
+#[test]
+fn live_pid_matches_the_socket_locator() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lock = tmp.path().join("daemon.lock");
+    let socket = tmp.path().join("trusty-mpm.sock");
+    let daemon = |_: u32| PidIdentity::Daemon;
+    std::fs::write(
+        &lock,
+        format!(
+            "product = \"trusty-mpm\"\npid = {}\naddr = \"http://127.0.0.1:47001\"\n\
+             started_at = \"\"\nsocket_path = \"{}\"\n",
+            std::process::id(),
+            socket.display()
+        ),
+    )
+    .expect("write lock");
+    let url = trusty_mpm::core::socket_locator(&socket);
+    assert!(lock_evidence_for(&url, &lock, &daemon).is_some());
+    let other = trusty_mpm::core::socket_locator(&tmp.path().join("other.sock"));
+    assert!(
+        lock_evidence_for(&other, &lock, &daemon).is_none(),
+        "a lock for another socket is no evidence about this one"
+    );
 }
 
 #[tokio::test]

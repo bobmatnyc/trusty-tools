@@ -76,35 +76,23 @@ impl DaemonInfo {
         }
     }
 
-    /// Probe daemon status via lock file addr + TCP connect (150 ms timeout).
+    /// Probe daemon status by dialling its unix socket (#6288).
     ///
     /// Why: `from_lock_file()` only checks PID liveness, which can disagree with
     /// `tm health` when the binary was reinstalled or the PID drifted (#1839).
-    /// A TCP connect to the lock-file address (or the env/default URL when absent)
-    /// gives the same "is the port alive?" answer that the HTTP health probe uses,
-    /// so the banner and `tm health` agree on the daemon status.
-    /// What: reads `read_lock_addr()` for the addr; the lock file stores a full
-    /// HTTP URL (e.g. `http://127.0.0.1:7880`), so the raw value is passed
-    /// through `url_to_probe_addr` to extract a bare `host:port` before handing
-    /// it to `tcp_probe` (`to_socket_addrs` rejects scheme-prefixed strings and
-    /// would silently return offline — #1847). When the lock file is absent or
-    /// the PID is stale, falls back to probing `TRUSTY_MPM_URL` or
-    /// `DEFAULT_DAEMON_URL`. Sets `online` from the TCP connect result (not the
-    /// PID check).
-    /// Test: `probe_with_nonlistening_addr_returns_offline`,
-    /// `probe_url_addr_from_lock_file_succeeds` (live daemon on :7880).
+    /// A connect to the daemon socket gives the same "is it serving?" answer
+    /// `tm health` gets, and — since #6288 — over the same transport, so the
+    /// banner never TCP-probes `127.0.0.1:7880`.
+    /// What: resolves the socket as every client does
+    /// ([`trusty_mpm::core::try_resolve_daemon_url`]; a #9556 sandbox refusal
+    /// is offline), then [`socket_probe`]s it. `addr` is the socket locator.
+    /// Test: `socket_probe_reports_a_listening_socket_online`,
+    /// `socket_probe_reports_an_absent_or_stale_socket_offline`.
     pub(crate) fn from_lock_file_with_probe() -> Self {
-        let addr = read_lock_addr().or_else(probe_default_addr);
-        let Some(addr) = addr else {
+        let Ok(addr) = trusty_mpm::core::try_resolve_daemon_url(None) else {
             return DaemonInfo::default();
         };
-        // The lock file stores a full HTTP URL such as `http://127.0.0.1:7880`.
-        // `tcp_probe` calls `to_socket_addrs` which rejects scheme-prefixed
-        // strings and would always return `false` for a URL, making the banner
-        // show "daemon offline" even when the daemon is healthy (#1847).
-        // `url_to_probe_addr` strips the scheme and path, yielding `host:port`.
-        let probe_addr = url_to_probe_addr(&addr).unwrap_or_else(|| addr.clone());
-        let online = tcp_probe(&probe_addr);
+        let online = trusty_mpm::core::socket_from_locator(&addr).is_some_and(|p| socket_probe(&p));
         DaemonInfo {
             addr,
             online,
@@ -330,75 +318,19 @@ pub(crate) fn tcp_probe(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the fallback addr string (host:port) from env or the default URL.
+/// Dial the daemon socket once: `true` when something accepts the connection.
 ///
-/// Why: when the lock file is absent, we still try to probe the well-known
-/// default address so the banner shows the correct online state even when the
-/// daemon was started without a lock file or with a stale PID.
-/// What: reads `TRUSTY_MPM_URL` via [`trusty_mpm::core::explicit_url_from_env`]
-/// (falls back to `DEFAULT_DAEMON_URL`), then calls `url_to_probe_addr` to
-/// extract host:port. Using the shared helper (#2487) — rather than a raw
-/// `std::env::var(...).unwrap_or_else(...)` — also fixes a latent edge case:
-/// a whitespace-only `TRUSTY_MPM_URL` now falls through to the default instead
-/// of being probed literally.
-/// Test: `probe_default_addr_handles_url_without_port` (via the inner helper),
-/// `probe_default_addr_skips_the_default_under_isolation`.
-fn probe_default_addr() -> Option<String> {
-    probe_default_addr_from(
-        trusty_mpm::core::explicit_url_from_env(),
-        trusty_mpm::core::isolated_environment(),
-    )
-}
-
-/// [`probe_default_addr`] with the env read and the isolation check injected.
-///
-/// Why (#9556): the banner TCP-probed 127.0.0.1:7880 — the host's live daemon
-/// — from a sandbox whose own daemon had no lock.
-/// What: the explicit URL's `host:port`; with none, `None` when `isolated`,
-/// else [`trusty_mpm::core::DEFAULT_DAEMON_URL`]'s.
-/// Test: `probe_default_addr_skips_the_default_under_isolation`.
-fn probe_default_addr_from(explicit: Option<String>, isolated: bool) -> Option<String> {
-    let url = match explicit {
-        Some(url) => url,
-        // #9556: an isolated process never probes the host's default daemon.
-        None if isolated => return None,
-        None => trusty_mpm::core::DEFAULT_DAEMON_URL.to_string(),
-    };
-    url_to_probe_addr(&url)
-}
-
-/// Extract a `host:port` string from an HTTP URL, defaulting the port when absent.
-///
-/// Why: `TRUSTY_MPM_URL` may carry a portless URL such as `http://localhost/`;
-/// bare-hostname `SocketAddr::parse` fails, making the banner show offline even
-/// when the daemon is up (#1839 review). Extracting this as a pure function also
-/// makes it unit-testable without env-var manipulation.
-/// What: strips `http(s)://`, takes the authority (everything before the first `/`),
-/// and appends the daemon's default port (from `DEFAULT_DAEMON_ADDR`) when no `:port`
-/// is present in the authority. IPv6 bracket notation (`[::1]:port`) always has `:`
-/// and is therefore unaffected.
-/// Test: `url_to_probe_addr_handles_url_without_port`,
-/// `url_to_probe_addr_preserves_explicit_port`.
-pub(crate) fn url_to_probe_addr(url: &str) -> Option<String> {
-    let without_scheme = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    // Authority ends at the first '/' (or at EOL when there is no path).
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if authority.is_empty() {
-        return None;
-    }
-    // Append the default port when none is present.
-    let with_port = if authority.contains(':') {
-        authority.to_string()
-    } else {
-        let default_port = trusty_mpm::core::DEFAULT_DAEMON_ADDR
-            .rsplit(':')
-            .next()
-            .unwrap_or("7880");
-        format!("{authority}:{default_port}")
-    };
-    Some(with_port)
+/// Why: the banner's daemon dot (#6288). The hardened pre-connect check runs
+/// first, so a foreign-owned or wrong-mode socket reads offline rather than
+/// being dialled.
+/// What: [`trusty_common::uds::verify_socket_for_connect`], then a blocking
+/// `UnixStream::connect`, which on a local socket returns at once: refused
+/// for a stale file, `ENOENT` for an absent one.
+/// Test: `socket_probe_reports_a_listening_socket_online`,
+/// `socket_probe_reports_an_absent_or_stale_socket_offline`.
+pub(crate) fn socket_probe(path: &std::path::Path) -> bool {
+    trusty_common::uds::verify_socket_for_connect(path).is_ok()
+        && std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -521,19 +453,27 @@ mod tests {
         assert!(info.addr.is_empty());
     }
 
-    /// Why (#9556): a sandbox banner must not TCP-probe the host default.
-    /// Test: itself.
-    #[test]
-    fn probe_default_addr_skips_the_default_under_isolation() {
-        assert_eq!(probe_default_addr_from(None, true), None);
-        assert_eq!(
-            probe_default_addr_from(None, false).as_deref(),
-            Some("127.0.0.1:7880")
-        );
-        assert_eq!(
-            probe_default_addr_from(Some("http://127.0.0.1:9911".into()), true).as_deref(),
-            Some("127.0.0.1:9911")
-        );
+    /// #6288: a hardened socket with a listener behind it reads online.
+    #[tokio::test]
+    async fn socket_probe_reports_a_listening_socket_online() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("s").join("trusty-mpm.sock");
+        std::fs::create_dir_all(socket.parent().expect("parent")).expect("dir");
+        let _listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        assert!(socket_probe(&socket));
+    }
+
+    /// #6288: an absent socket and a stale one (a file nothing serves) read
+    /// offline.
+    #[tokio::test]
+    async fn socket_probe_reports_an_absent_or_stale_socket_offline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("s").join("trusty-mpm.sock");
+        assert!(!socket_probe(&socket), "absent");
+        std::fs::create_dir_all(socket.parent().expect("parent")).expect("dir");
+        drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
+        assert!(socket.exists(), "the stale socket file stays behind");
+        assert!(!socket_probe(&socket), "stale");
     }
 
     fn online(port: u16) -> DaemonInfo {
@@ -634,82 +574,5 @@ mod tests {
             let result = abbreviate_home(&path);
             assert!(result.starts_with('~'), "expected ~ prefix: {result:?}");
         }
-    }
-
-    /// Portless URL yields a host:port with the default daemon port appended.
-    ///
-    /// Why: `TRUSTY_MPM_URL=http://localhost/` previously caused `SocketAddr::parse`
-    /// to fail in `tcp_probe`, making the banner show offline even when the daemon
-    /// was up (#1839 review). `tcp_probe` now uses `ToSocketAddrs` (supports hostnames),
-    /// so we verify that `url_to_probe_addr` adds a port — not that it produces a
-    /// numeric IP (hostnames like `localhost` are valid probe targets).
-    #[test]
-    fn url_to_probe_addr_handles_url_without_port() {
-        let addr = url_to_probe_addr("http://localhost/")
-            .expect("should return Some for http://localhost/");
-        assert!(
-            addr.contains(':'),
-            "addr must include a port separator: {addr:?}"
-        );
-        // The port portion must be a valid u16 — tcp_probe passes it to to_socket_addrs.
-        let port_str = addr.rsplit(':').next().expect("addr has a colon");
-        port_str
-            .parse::<u16>()
-            .expect("port portion of url_to_probe_addr output must be a valid u16");
-    }
-
-    /// URL with an explicit port must pass through unchanged (no double-port).
-    #[test]
-    fn url_to_probe_addr_preserves_explicit_port() {
-        let addr = url_to_probe_addr("http://127.0.0.1:9999/")
-            .expect("should return Some for http://127.0.0.1:9999/");
-        assert_eq!(addr, "127.0.0.1:9999");
-    }
-
-    /// Trailing path segments are stripped so only the authority remains.
-    #[test]
-    fn url_to_probe_addr_strips_path() {
-        let addr =
-            url_to_probe_addr("http://127.0.0.1:7880/api/v1/health").expect("should return Some");
-        assert_eq!(addr, "127.0.0.1:7880");
-    }
-
-    /// Empty or scheme-only input returns None.
-    #[test]
-    fn url_to_probe_addr_empty_returns_none() {
-        assert!(url_to_probe_addr("").is_none());
-        assert!(url_to_probe_addr("http://").is_none());
-        assert!(url_to_probe_addr("http:///").is_none());
-    }
-
-    /// A scheme-prefixed URL such as `http://127.0.0.1:7880` (the format the
-    /// daemon lock file stores) must NOT be passed directly to `tcp_probe` —
-    /// `to_socket_addrs` rejects it and always returns `false`, making the
-    /// banner show "daemon offline" even when the daemon is healthy (#1847).
-    /// `url_to_probe_addr` must extract a bare `host:port` from such URLs.
-    ///
-    /// Why: this test documents the exact bug fixed in #1847 and prevents it
-    /// from regressing.  The daemon lock file writes `addr = "http://..."`, so
-    /// `read_lock_addr` returns a full URL.  `from_lock_file_with_probe` must
-    /// normalise the URL before calling `tcp_probe`.
-    /// Test: direct unit test of the normalization helper used in the fix.
-    #[test]
-    fn url_to_probe_addr_strips_http_scheme_from_lock_file_format() {
-        // This is the exact string the daemon lock file stores.
-        let lock_file_addr = "http://127.0.0.1:7880";
-        let probe_addr = url_to_probe_addr(lock_file_addr)
-            .expect("must convert http://127.0.0.1:7880 to a probe addr");
-        // Must be a bare host:port, not a URL — `to_socket_addrs` requires this.
-        assert_eq!(
-            probe_addr, "127.0.0.1:7880",
-            "url_to_probe_addr must strip scheme from lock-file URL format"
-        );
-        // Confirm the bare addr is usable by to_socket_addrs (doesn't panic/error
-        // on the conversion itself — whether the port is listening is irrelevant here).
-        use std::net::ToSocketAddrs as _;
-        assert!(
-            probe_addr.to_socket_addrs().is_ok(),
-            "probe_addr must be parseable by to_socket_addrs: {probe_addr:?}"
-        );
     }
 }

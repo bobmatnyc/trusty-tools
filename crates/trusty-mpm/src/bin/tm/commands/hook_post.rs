@@ -29,13 +29,7 @@ use std::time::Duration;
 /// Why: an operator greps a session log for one string to find a lost stop.
 pub(crate) const HOOK_POST_LOG_PREFIX: &str = "trusty-mpm: SUBAGENT-STOP POST (#6556)";
 
-/// How long one attempt's TCP connect may take.
-///
-/// Why: unchanged from the pre-#6556 single-shot client — a pathological
-/// OS-level connect stall must not eat the whole budget.
-pub(crate) const HOOK_POST_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// How long one attempt may take end to end.
+/// How long one attempt may take end to end, the socket dial included.
 ///
 /// Why: three attempts have to fit inside [`HOOK_POST_BUDGET`], so the
 /// single-shot 2 s total of the pre-#6556 client is too long for one of them. A
@@ -63,16 +57,15 @@ pub(crate) const HOOK_POST_BACKOFF: Duration = Duration::from_millis(150);
 /// Why: the sum of the per-attempt bounds is not itself a guarantee — a
 /// `reqwest` client under a stalled DNS resolver can overrun one. This wraps the
 /// loop in `tokio::time::timeout` so the hook's worst case is a number, not an
-/// estimate. Chosen against the four bounds a `SubagentStop` invocation pays in
-/// series: the daemon-URL probe
-/// ([`trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT`], 500 ms), the stdin
+/// estimate. Chosen against the three bounds a `SubagentStop` invocation pays in
+/// series (#6288: `main` no longer probes the console gateway first): the stdin
 /// read ([`crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT`], 500 ms), the
 /// idle-parking detection
-/// ([`crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT`], 300 ms) and this — 3.8 s
-/// of the 5 s Claude Code is told to allow, leaving 1.2 s for exec, the spool
+/// ([`crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT`], 300 ms) and this — 3.3 s
+/// of the 5 s Claude Code is told to allow, leaving 1.7 s for exec, the spool
 /// write and process teardown.
 /// Test: `the_stop_post_budget_stays_inside_the_registered_hook_timeout`, which
-/// sums all four so lowering any one of them trips the gate.
+/// sums all three so lowering any one of them trips the gate.
 pub(crate) const HOOK_POST_BUDGET: Duration = Duration::from_millis(2500);
 
 /// The `timeout` Claude Code is told to allow the `SubagentStop` hook, in
@@ -168,22 +161,8 @@ pub(crate) async fn post_hook_with_retry(url: &str, body: &serde_json::Value) ->
 /// What: see [`post_hook_with_retry`]; appends one line per attempt to
 /// `outcome`.
 async fn attempt_loop(url: &str, body: &serde_json::Value, outcome: &mut HookPostOutcome) {
-    let client = match reqwest::Client::builder()
-        .connect_timeout(HOOK_POST_CONNECT_TIMEOUT)
-        .timeout(HOOK_POST_ATTEMPT_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            // Programmer-class: no client, so no attempt is possible. Say so
-            // rather than reporting zero attempts with no reason.
-            outcome
-                .lines
-                .push(format!("{HOOK_POST_LOG_PREFIX} client build failed: {e}"));
-            return;
-        }
-    };
-    let endpoint = format!("{url}/hooks");
+    // #6288: over the daemon socket `url` locates; never TCP.
+    let daemon = trusty_mpm::client::DaemonClient::new(url);
     for attempt in 1..=HOOK_POST_ATTEMPTS {
         if attempt > 1 {
             tokio::time::sleep(HOOK_POST_BACKOFF * (attempt - 1)).await;
@@ -191,7 +170,12 @@ async fn attempt_loop(url: &str, body: &serde_json::Value, outcome: &mut HookPos
         // Stamped AFTER the request returns, never before (critic LOW on PR
         // #8052): if the budget cancels this future mid-await the count must not
         // claim an attempt whose result nobody saw.
-        let result = client.post(&endpoint).json(body).send().await;
+        let result = daemon
+            .post("/hooks")
+            .json(body)
+            .timeout(HOOK_POST_ATTEMPT_TIMEOUT)
+            .send()
+            .await;
         outcome.attempts = attempt;
         match result {
             Ok(resp) if resp.status().is_success() => {

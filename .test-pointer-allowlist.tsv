@@ -381,8 +381,6 @@ crates/trusty-mpm/src/bin/tm/commands/statusline/compaction.rs	render_statusline
 crates/trusty-mpm/src/bin/tm/commands/watch/args.rs	looks_like_owner_repo_*
 crates/trusty-mpm/src/bin/tm/formatters/banner/mod.rs	daily_banner_two_panel_version_in_title_bar
 crates/trusty-mpm/src/bin/tm/formatters/banner/mod.rs	no_color_guard_restores_on_drop
-crates/trusty-mpm/src/bin/tm/formatters/info_box/mod.rs	probe_default_addr_handles_url_without_port
-crates/trusty-mpm/src/bin/tm/formatters/info_box/mod.rs	probe_url_addr_from_lock_file_succeeds
 crates/trusty-mpm/src/bin/tm/formatters/info_box/probes.rs	shorten_age_unknown
 crates/trusty-mpm/src/client/executor/managed.rs	execute_managed_answer_routes_to_answer_endpoint
 crates/trusty-mpm/src/client/executor/managed.rs	execute_managed_fleet_against_test_daemon

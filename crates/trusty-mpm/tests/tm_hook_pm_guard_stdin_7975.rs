@@ -38,8 +38,10 @@ fn guard_command(cwd: &std::path::Path) -> Command {
 /// Test: `pm_guard_denies_a_bash_payload_with_no_tool_input`.
 fn guard_command_against(cwd: &std::path::Path, url: &str) -> Command {
     let mut command = common::tm_command_in(common::tm_spawn_home());
+    // #6288: `url` is a daemon socket locator, or anything else for no daemon.
+    common::socket::aim(&mut command, url);
     command
-        .args(["--url", url, "hook", "--pm-guard"])
+        .args(["hook", "--pm-guard"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
@@ -68,41 +70,20 @@ fn run_with_stdin(stdin: Stdio) -> String {
     stdout
 }
 
-/// The audit POST body the guard sent, captured from a one-shot HTTP sink.
+/// The audit body the guard sent, captured from a one-shot daemon socket.
 ///
 /// Why (#7975 round 2, code-critic MEDIUM): on the unclassifiable-payload deny
 /// the audit record is the ONLY alarm — nothing else names which tool was
 /// refused — so a test has to read it rather than trust it. The decision tests
-/// point at a dead port on purpose; this one needs a listener.
-/// What: binds an ephemeral port, runs the guard against it with `bytes` on
-/// stdin, reads the single request, answers `200`, and returns the parsed JSON
-/// body. Raw `TcpListener` rather than a server framework: one request, no
-/// routing, and no runtime to start inside a `#[test]`.
+/// point at no daemon on purpose; this one needs a listener.
+/// What: a mock daemon socket (#6288) that answers every request; runs the
+/// guard against it with `bytes` on stdin and returns the params of the one
+/// `mpm.hooks.ingest` frame — the body the HTTP route took.
 /// Test: `pm_guard_denies_a_bash_payload_with_no_tool_input`.
 fn audit_record_for(bytes: &[u8]) -> serde_json::Value {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an audit sink");
-    let url = format!("http://{}", listener.local_addr().expect("sink address"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
-        };
-        let mut raw = Vec::new();
-        let mut chunk = [0u8; 4096];
-        while let Ok(n) = stream.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&chunk[..n]);
-            if request_is_complete(&raw) {
-                break;
-            }
-        }
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        let _ = stream.flush();
-        let _ = tx.send(raw);
+    let (url, frames) = common::socket::spawn_mock(|_| {
+        common::socket::Reply::Frame(common::socket::result_frame("{}"))
     });
-
     let dir = tempfile::tempdir().expect("tempdir");
     let mut child = guard_command_against(dir.path(), &url)
         .stdin(Stdio::piped())
@@ -116,39 +97,11 @@ fn audit_record_for(bytes: &[u8]) -> serde_json::Value {
         .expect("write stdin");
     child.wait_with_output().expect("wait for the guard");
 
-    let raw = rx
+    let frame = frames
         .recv_timeout(std::time::Duration::from_secs(8))
-        .expect("the guard must send exactly one audit POST");
-    let split = find_header_end(&raw).expect("the captured request must have a header block");
-    serde_json::from_slice(&raw[split..]).unwrap_or_else(|e| {
-        panic!(
-            "the audit body must be JSON ({e}): {}",
-            String::from_utf8_lossy(&raw)
-        )
-    })
-}
-
-/// Byte offset just past the request's `\r\n\r\n` header terminator.
-fn find_header_end(raw: &[u8]) -> Option<usize> {
-    raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
-}
-
-/// Whether `raw` holds a whole request — headers plus `Content-Length` bytes.
-fn request_is_complete(raw: &[u8]) -> bool {
-    let Some(body_start) = find_header_end(raw) else {
-        return false;
-    };
-    let headers = String::from_utf8_lossy(&raw[..body_start]).to_lowercase();
-    let Some(len) = headers
-        .split("content-length:")
-        .nth(1)
-        .and_then(|rest| rest.split(['\r', '\n']).next())
-        .and_then(|v| v.trim().parse::<usize>().ok())
-    else {
-        // No body declared: the headers alone are the whole request.
-        return true;
-    };
-    raw.len() - body_start >= len
+        .expect("the guard must send exactly one audit post");
+    assert_eq!(frame["method"], "mpm.hooks.ingest", "{frame}");
+    frame["params"].clone()
 }
 
 /// Run the guard with `bytes` written to a piped stdin that is then closed.

@@ -121,15 +121,20 @@ pub async fn run_initial_view(
 
 /// Build a TUI's daemon client from the operator's `--url` / `TRUSTY_MPM_URL`.
 ///
-/// Why (#9556): every TUI launch must agree on which URL counts as explicit,
-/// because only an explicit one is pinned against re-discovery.
-/// What: resolves via [`crate::core::resolve_daemon_url`] and pins the client
-/// when `explicit` is `Some` and non-empty — the same test that resolver
-/// applies.
-/// Test: `client_for_pins_only_an_explicit_url`.
-pub fn client_for(explicit: Option<&str>) -> DaemonClient {
-    let pinned = explicit.is_some_and(|u| !u.is_empty());
-    DaemonClient::new(crate::core::resolve_daemon_url(explicit)).with_pinned_base_url(pinned)
+/// Why (#6288): the TUI reaches the daemon over its socket like every other
+/// client, so an explicit URL no longer selects a daemon to pin (#9556): a
+/// loopback one is ignored with a notice and a remote one is refused.
+/// What: [`crate::core::try_resolve_daemon_url`] wrapped in a client.
+///
+/// # Errors
+///
+/// A remote URL, the #9556 sandbox refusal, or an unresolvable socket path.
+///
+/// Test: `client_for_resolves_the_socket_and_refuses_a_remote_url`.
+pub fn client_for(explicit: Option<&str>) -> anyhow::Result<DaemonClient> {
+    Ok(DaemonClient::new(crate::core::try_resolve_daemon_url(
+        explicit,
+    )?))
 }
 
 /// [`run_initial_view`] against a caller-built [`DaemonClient`].

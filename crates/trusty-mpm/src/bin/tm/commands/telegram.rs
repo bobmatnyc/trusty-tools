@@ -28,11 +28,9 @@ pub(crate) async fn telegram(url: &str, cmd: TelegramCmd) -> anyhow::Result<()> 
             allowed_user_id,
             check,
         } => {
-            // #2487: `start_url` is `Option<String>` (no clap `default_value`)
-            // — resolve through the shared `resolve_daemon_url` so an unset
-            // `--url`/`TRUSTY_MPM_URL` still finds a daemon on an ephemeral
-            // port via the lock file, matching every other command family.
-            let resolved_url = trusty_mpm::core::resolve_daemon_url(start_url.as_deref());
+            // #6288: the daemon socket, as every command family resolves it; a
+            // loopback `--url` is ignored with a notice, a remote one refused.
+            let resolved_url = trusty_mpm::core::try_resolve_daemon_url(start_url.as_deref())?;
             let token = token.or_else(|| trusty_mpm::telegram::resolve_token("TELEGRAM_BOT_TOKEN"));
             let options = trusty_mpm::telegram::BotOptions {
                 allowed_user_id,

@@ -1,70 +1,67 @@
 //! SESSCTL command handlers for the `tm sessctl` subcommand group (WI-2 #1593).
 //!
-//! Why: Phase 2 of epic #1590 wires the `tm sessctl` CLI surface to the daemon
-//! HTTP API (`/api/v1/control/sessions/*`) instead of embedding a local
-//! `SessionRegistry`. Each handler is a thin HTTP client wrapper so all session
-//! state lives in the single shared daemon registry.
+//! Why: Phase 2 of epic #1590 wires the `tm sessctl` CLI surface to the daemon's
+//! control-plane routes (`/api/v1/control/sessions/*`) instead of embedding a
+//! local `SessionRegistry`, so all session state lives in the single shared
+//! daemon registry. #6288: every verb reaches them over the daemon socket.
 //! What: five async handler functions (`run`, `connect`, `stop`, `auth`, `list`)
-//! plus a `dispatch` entry point that routes `SessctlAction` variants.
-//! Test: `cli_parses_sessctl_*` in tests.rs; HTTP round-trip integration tests
-//! require the daemon to be running.
+//! plus a `dispatch` entry point that routes `SessctlAction` variants. `connect`
+//! reads the `mpm.control.connect` frame stream.
+//! Test: `cli_parses_sessctl_*` in tests.rs; `session_path_encodes_the_id`;
+//! the stream in `tm_client_socket_cutover_6288::sessctl_connect_streams_over_the_socket`.
 
 use std::path::PathBuf;
 
+use trusty_mpm::client::DaemonClient;
+
 use crate::cli::SessctlAction;
 
-/// Percent-encode a session ID for safe inclusion in a URL path segment.
+/// The control route for `session_id`, with the id percent-encoded.
 ///
-/// Why: session IDs derive from project IDs which may contain characters that
-/// need encoding in a URL path (e.g. `/`, `?`, `#`, spaces). Using
-/// `reqwest::Url` path-segment API guarantees correct RFC 3986 encoding without
-/// adding an extra dependency.
-/// What: parses `base_url`, appends the static path segments and then the
-/// encoded `session_id` as the final dynamic segment, and returns the full URL.
-/// Test: this is a pure function; callers (`sessctl_connect`, `sessctl_stop`,
-/// `sessctl_auth`) pass it simple ASCII IDs in unit tests; the encoding is
-/// verified by reqwest's own test suite.
-fn session_url(base_url: &str, session_id: &str, suffix: &str) -> anyhow::Result<String> {
-    let mut url = reqwest::Url::parse(base_url)
-        .map_err(|e| anyhow::anyhow!("invalid daemon URL '{base_url}': {e}"))?;
-    {
-        let mut segs = url
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("daemon URL cannot-be-a-base: {base_url}"))?;
-        segs.extend(["api", "v1", "control", "sessions"]);
-        segs.push(session_id); // reqwest Url percent-encodes each segment
-        if !suffix.is_empty() {
-            segs.push(suffix);
+/// Why: session ids derive from project ids, which may hold `/`, `?`, `#` or
+/// spaces; the socket transport decodes each segment back.
+/// What: `/api/v1/control/sessions/<encoded id>[/<suffix>]`; every byte outside
+/// the RFC 3986 unreserved set is `%XX`.
+/// Test: `session_path_encodes_the_id`.
+fn session_path(session_id: &str, suffix: &str) -> String {
+    let mut encoded = String::with_capacity(session_id.len());
+    for byte in session_id.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
         }
     }
-    Ok(url.to_string())
+    match suffix {
+        "" => format!("/api/v1/control/sessions/{encoded}"),
+        _ => format!("/api/v1/control/sessions/{encoded}/{suffix}"),
+    }
 }
 
-/// Dispatch a `SessctlAction` to the appropriate HTTP handler.
+/// Dispatch a `SessctlAction` to the appropriate handler.
 ///
 /// Why: keeps `main.rs` thin — one match arm dispatches every sessctl verb.
-/// What: matches each `SessctlAction` variant and calls the corresponding
-/// handler function.
-/// Test: parse round-trips in `tests.rs`; live integration tests require daemon.
+/// What: builds the daemon client for `url` (the socket locator `main`
+/// resolved) and calls the handler for the variant.
+/// Test: parse round-trips in `tests.rs`.
 pub(crate) async fn dispatch(
     client: &reqwest::Client,
     url: &str,
     action: SessctlAction,
 ) -> anyhow::Result<()> {
+    let client = &DaemonClient::with_client(client.clone(), url);
     match action {
         SessctlAction::Run {
             project_id,
             tmux,
             prompt_file,
             workdir,
-        } => sessctl_run(client, url, project_id, tmux, prompt_file, workdir).await,
-        SessctlAction::Connect { session_id } => sessctl_connect(client, url, session_id).await,
-        SessctlAction::Stop { session_id, force } => {
-            sessctl_stop(client, url, session_id, force).await
-        }
-        SessctlAction::Auth { session_id } => sessctl_auth(client, url, session_id).await,
+        } => sessctl_run(client, project_id, tmux, prompt_file, workdir).await,
+        SessctlAction::Connect { session_id } => sessctl_connect(client, session_id).await,
+        SessctlAction::Stop { session_id, force } => sessctl_stop(client, session_id, force).await,
+        SessctlAction::Auth { session_id } => sessctl_auth(client, session_id).await,
         SessctlAction::List { project, format } => {
-            sessctl_list(client, url, project.as_deref(), &format).await
+            sessctl_list(client, project.as_deref(), &format).await
         }
     }
 }
@@ -77,8 +74,7 @@ pub(crate) async fn dispatch(
 /// spawn request, and prints the allocated session ID.
 /// Test: `cli_parses_sessctl_run`; live test requires daemon.
 async fn sessctl_run(
-    client: &reqwest::Client,
-    url: &str,
+    client: &DaemonClient,
     project_id: String,
     use_tmux: bool,
     prompt_file: Option<String>,
@@ -99,7 +95,7 @@ async fn sessctl_run(
     });
 
     let resp = client
-        .post(format!("{url}/api/v1/control/sessions/run"))
+        .post("/api/v1/control/sessions/run")
         .json(&body)
         .send()
         .await?;
@@ -118,38 +114,20 @@ async fn sessctl_run(
     Ok(())
 }
 
-/// POST /api/v1/control/sessions/{id}/connect — stream SSE events from a session.
+/// `mpm.control.connect` — stream a session's events over the daemon socket.
 ///
 /// Why: `tm sessctl connect <id>` lets an operator observe a running session in
-/// real-time. Acquiring the write-lock makes the caller the active writer.
-/// What: streams the SSE response body line by line and prints each event to
-/// stdout until the stream ends or is interrupted.
-/// Test: `cli_parses_sessctl_connect`; live test requires daemon.
-async fn sessctl_connect(
-    client: &reqwest::Client,
-    url: &str,
-    session_id: String,
-) -> anyhow::Result<()> {
-    let endpoint = session_url(url, &session_id, "connect")?;
-    let resp = client.post(&endpoint).send().await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("daemon returned {status}: {text}");
-    }
-
-    // Drain the SSE stream and print each data line.
-    let mut bytes_stream = resp.bytes_stream();
-    use futures::StreamExt as _;
-    while let Some(chunk) = bytes_stream.next().await {
-        let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
-        for line in text.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                println!("{data}");
-            }
-        }
+/// real-time. The socket form observes only: it takes no write-lock (see
+/// `daemon::rpc::managed::control::connect_stream`).
+/// What: opens the frame stream (#6288; the SSE route's socket form) and prints
+/// each event as one JSON line — the payload the SSE `data:` lines carried —
+/// until the stream ends. A refusal or a cut stream is an error.
+/// Test: `cli_parses_sessctl_connect`;
+/// `tm_client_socket_cutover_6288::sessctl_connect_streams_over_the_socket`.
+async fn sessctl_connect(client: &DaemonClient, session_id: String) -> anyhow::Result<()> {
+    let mut stream = client.connect_control_session(&session_id).await?;
+    while let Some(frame) = stream.next_frame().await {
+        println!("{}", frame?);
     }
     Ok(())
 }
@@ -160,15 +138,14 @@ async fn sessctl_connect(
 /// What: POSTs with `?force=<bool>` and prints a confirmation.
 /// Test: `cli_parses_sessctl_stop`; live test requires daemon.
 async fn sessctl_stop(
-    client: &reqwest::Client,
-    url: &str,
+    client: &DaemonClient,
     session_id: String,
     force: bool,
 ) -> anyhow::Result<()> {
-    let endpoint = session_url(url, &session_id, "stop")?;
+    // #6288: typed, so the socket's params struct decodes it.
     let resp = client
-        .post(&endpoint)
-        .query(&[("force", force.to_string().as_str())])
+        .post(session_path(&session_id, "stop"))
+        .query(&[("force", force)])
         .send()
         .await?;
 
@@ -189,13 +166,8 @@ async fn sessctl_stop(
 /// to the SSE stream.
 /// What: GETs the auth endpoint and prints the state label.
 /// Test: `cli_parses_sessctl_auth`; live test requires daemon.
-async fn sessctl_auth(
-    client: &reqwest::Client,
-    url: &str,
-    session_id: String,
-) -> anyhow::Result<()> {
-    let endpoint = session_url(url, &session_id, "auth")?;
-    let resp = client.get(&endpoint).send().await?;
+async fn sessctl_auth(client: &DaemonClient, session_id: String) -> anyhow::Result<()> {
+    let resp = client.get(session_path(&session_id, "auth")).send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -219,13 +191,11 @@ async fn sessctl_auth(
 /// and renders as a table or raw JSON.
 /// Test: `cli_parses_sessctl_list`; live test requires daemon.
 async fn sessctl_list(
-    client: &reqwest::Client,
-    url: &str,
+    client: &DaemonClient,
     project: Option<&str>,
     format: &str,
 ) -> anyhow::Result<()> {
-    let endpoint = format!("{url}/api/v1/control/sessions");
-    let mut req = client.get(&endpoint);
+    let mut req = client.get("/api/v1/control/sessions");
     if let Some(proj) = project {
         req = req.query(&[("project", proj)]);
     }
@@ -310,4 +280,20 @@ fn resolve_workdir_from_daemon(project_id: &str) -> Option<PathBuf> {
          (WI-3); using current directory as workdir for project '{project_id}'"
     );
     None
+}
+
+#[cfg(test)]
+mod tests {
+    /// #6288: an id with reserved characters reaches the socket as one segment.
+    #[test]
+    fn session_path_encodes_the_id() {
+        assert_eq!(
+            super::session_path("proj/a b?#", "stop"),
+            "/api/v1/control/sessions/proj%2Fa%20b%3F%23/stop"
+        );
+        assert_eq!(
+            super::session_path("p-1.x_y~", ""),
+            "/api/v1/control/sessions/p-1.x_y~"
+        );
+    }
 }

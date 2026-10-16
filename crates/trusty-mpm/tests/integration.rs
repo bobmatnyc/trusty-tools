@@ -56,6 +56,8 @@ mod sm_e2e_smoke;
 mod spawned_tm_home_isolation;
 mod tm_build_lease;
 mod tm_cli_socket;
+// #6288 client cutover: moved commands reach the socket only, failing closed.
+mod tm_client_socket_cutover_6288;
 mod tm_compress_pipe;
 mod tm_doctor_network;
 mod tm_doctor_standalone;

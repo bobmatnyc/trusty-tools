@@ -217,8 +217,8 @@ async fn an_unreachable_daemon_retries_and_reports_undelivered() {
 fn the_stop_post_budget_stays_inside_the_registered_hook_timeout() {
     let registered =
         registered_subagent_stop_timeout().expect("the SubagentStop group carries a timeout");
-    let worst_case = trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT
-        + crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT
+    // #6288: `main` no longer probes the console gateway before dispatch.
+    let worst_case = crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT
         + crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT
         + HOOK_POST_BUDGET;
     let headroom = registered.checked_sub(worst_case).unwrap_or_default();
@@ -257,7 +257,6 @@ fn the_attempt_bounds_fit_inside_the_budget() {
         "nominal worst case {nominal:?} overruns the {HOOK_POST_BUDGET:?} budget, so the budget \
          would truncate the third attempt while the log claimed it was made"
     );
-    assert!(HOOK_POST_CONNECT_TIMEOUT <= HOOK_POST_ATTEMPT_TIMEOUT);
 }
 
 /// 🔴 The park's last resort: an undelivered stop has to land in the directory

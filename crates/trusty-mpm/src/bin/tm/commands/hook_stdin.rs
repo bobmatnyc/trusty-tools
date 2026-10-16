@@ -49,16 +49,14 @@ pub(crate) const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// advisory budget would put every tool call behind a bound a PR #1968 review
 /// already called tight at 200 ms, with a megabyte-scale `tool_input` (a large
 /// `Write` `content`) to cross the pipe inside it.
-/// What: 5 s. A deny's worst case is three bounds, not two. `main.rs` resolves
-/// the daemon URL through
-/// [`trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT`] (500 ms) BEFORE
-/// dispatching, and the registered guard command carries no `--url`
-/// (`build_tree::PM_GUARD_SUFFIX`), so that probe is a fixed prefix on every
-/// invocation. 500 ms + 5 s + [`crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT`]
-/// (2 s) = 7.5 s of the 10 s `REGISTERED_HOOK_TIMEOUT` Claude Code is told to
-/// allow, leaving 2.5 s for exec and classification.
+/// What: 5 s. A deny's worst case is two bounds (#6288: `main.rs` resolves the
+/// daemon socket without any probe, so the console-gateway probe that used to
+/// prefix every invocation is gone): 5 s +
+/// [`crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT`] (2 s) = 7 s of the
+/// 10 s `REGISTERED_HOOK_TIMEOUT` Claude Code is told to allow, leaving 3 s for
+/// exec and classification.
 /// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`,
-/// which sums all three so lowering any one of them trips the gate;
+/// which sums both so lowering either trips the gate;
 /// `read_hook_stdin_reads_a_slow_megabyte_inside_the_guard_budget`.
 pub(crate) const PM_GUARD_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 
