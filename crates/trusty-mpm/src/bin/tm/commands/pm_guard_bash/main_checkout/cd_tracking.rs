@@ -259,9 +259,11 @@ fn merge(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-/// Whether `path` is the [`OVERFLOW_DIR`] stand-in.
+/// Whether `path` is the [`OVERFLOW_DIR`] stand-in, or sits under it.
+// #9146: a component-wise prefix test, not equality, so a path joined onto the
+// stand-in is still unplaced.
 pub(super) fn is_overflow(path: &Path) -> bool {
-    path == Path::new(OVERFLOW_DIR)
+    path.starts_with(OVERFLOW_DIR)
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@
 //! What: [`evaluate_main_checkout_destructive_command`] denies a `Bash` call
 //! when BOTH halves hold — the command names a whole-tree-destructive git verb
 //! ([`is_whole_tree_destructive`]) AND the directory that verb would act on
-//! ([`git_verb_target_dir`]) is a main checkout
+//! ([`git_verb_targets_with_tail`]) is a main checkout
 //! ([`trusty_mpm::core::project_aliases::is_main_checkout`]). Anything under
 //! `.claude/worktrees/**` or `.worktrees/**` is a worktree, never a main
 //! checkout, so delegated work stays fully writable — that is where it is
@@ -92,7 +92,7 @@
 //!   `git --git-dir=/repo/.git --work-tree=/repo pull`, run from anywhere,
 //!   resolves the running directory rather than `/repo` and is allowed when the
 //!   running directory is not itself a shared checkout. Closing it means
-//!   teaching [`git_verb_target_dir`] a third override, which the destructive
+//!   teaching [`git_verb_targets_with_tail`] a third override, which the destructive
 //!   and commit rules would inherit — a wider change than this rule.
 //! * The deny quotes the daemon's delegation records, and a record can be wrong
 //!   in the ALLOW direction as well as the deny one. A grant whose isolation
@@ -671,9 +671,26 @@ pub(crate) fn main_checkout_head_move(
     if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, starts_a_head_move) {
         return Some(Err(reason));
     }
-    let (verb, target) =
-        git_verb_target_dir(command, cwd, &PathEnv::from_process(), starts_a_head_move)?;
-    let root = main_checkout_root(&target)?;
+    let targets =
+        git_verb_targets_with_tail(command, cwd, &PathEnv::from_process(), starts_a_head_move);
+    // #9146: every candidate directory is refused when unplaced, before any
+    // root walk. Past the `cd` candidate bound the directory is the overflow
+    // stand-in, which names no checkout, so the walk below would find none and
+    // allow `cd a; cd b; cd c; cd d; git merge x` from the main checkout.
+    if let Some((verb, unresolved)) = targets
+        .iter()
+        .find_map(|(verb, target, _)| unresolved_target(target).map(|u| (verb, u)))
+    {
+        return Some(Err(unresolved_directory_deny_reason(
+            DESTRUCTIVE_UNRESOLVED_HEADLINE,
+            verb,
+            &unresolved.shown,
+            &unresolved.token,
+        )));
+    }
+    let (verb, target, root) = targets
+        .into_iter()
+        .find_map(|(verb, target, _)| main_checkout_root(&target).map(|r| (verb, target, r)))?;
     Some(Ok((verb, target, root)))
 }
 
@@ -982,44 +999,22 @@ fn unresolved_directory_deny_reason(
 }
 
 /// The directory the first git segment matching `matches` would act on, with
-/// that segment's verb.
+/// that segment's verb and argv tail.
 ///
 /// Why: split from the filesystem classification so the whole text-and-path
 /// half — which is where a false positive would come from — is a pure function
 /// with no filesystem or environment of its own. The classifier is a parameter
-/// rather than hardcoded so the destructive-verb rule and the commit rule share
-/// one walker: `cd` tracking, `git -C` resolution, and segment splitting are
-/// the parts a second copy would drift on, and they are identical for both.
-/// What: walks the composition segments ([`shell_groups::grouped_steps`], so
-/// `true && git reset --hard` is classified on its second segment and
-/// `(git reset --hard)` on its command, #9127), tracks the effective working
-/// directory across `cd` segments and a leading `git -C` — restoring it when a
-/// subshell, a coproc or a child-process wrapper's string ends, but not after
-/// an `eval`, which runs in the current shell — and returns the first segment
-/// whose `(verb, argv-tail)` satisfies `matches`. A `cd` that may be skipped,
-/// fail or run in a subshell leaves several candidate directories
-/// ([`CwdTracker`], #9146); this returns the first, which is the `cd`'s
-/// destination, and [`git_verb_targets_with_tail`] returns all of them.
-/// `None` when no segment qualifies — including a segment `shlex` cannot split,
-/// which yields no argv to classify.
-/// Test: `destructive_target_dir_*`, `commit_target_dir_*`.
-fn git_verb_target_dir(
-    command: &str,
-    cwd: &Path,
-    env: &PathEnv,
-    matches: impl Fn(&str, &[String]) -> bool,
-) -> Option<(String, PathBuf)> {
-    git_verb_target_dir_with_tail(command, cwd, env, matches).map(|(verb, dir, _)| (verb, dir))
-}
-
-/// [`git_verb_target_dir`], also handing back the matched segment's argv tail.
-///
-/// Why: the commit rule decides on the flags as well as the directory
-/// (ADR-0049 — `--amend` and `-a` commit content the index does not describe),
-/// and the tail was already computed here to run `matches`. Returning it beats
-/// a second lexer in the commit rule, which is the copy that would drift on
-/// `cd` tracking and `git -C` resolution.
-/// Test: as [`git_verb_target_dir`], plus
+/// so the destructive, commit, head-move and worktree-removal rules share one
+/// walker: `cd` tracking, `git -C` resolution and segment splitting are the
+/// parts a second copy would drift on. The commit rule also needs the tail
+/// (ADR-0049 — `--amend` and `-a` commit content the index does not describe).
+/// What: the first entry of [`git_verb_targets_with_tail`], which walks the
+/// composition segments ([`shell_groups::grouped_steps`], #9127) and tracks the
+/// directory across `cd` and `git -C`. A `cd` that may be skipped leaves several
+/// candidates ([`CwdTracker`], #9146); this returns only the first, so a rule
+/// that must judge them all calls [`git_verb_targets_with_tail`]. `None` when no
+/// segment qualifies.
+/// Test: `destructive_target_dir_*`, `commit_target_dir_*`,
 /// `commit_target_dir_hands_back_the_argv_tail`.
 // `pub(super)` since ADR-0057: the worktree-removal rule resolves the same
 // `cd`/`git -C` chain to find which directory a `git worktree remove` would
@@ -1088,6 +1083,15 @@ pub(super) fn git_verb_targets_with_tail(
                     (Some(at), _) => resolve_target_path(&argv[at], effective_cwd, env),
                     (None, Some(dash_c)) => resolve_target_path(dash_c, effective_cwd, env),
                     (None, None) => effective_cwd.clone(),
+                };
+                // #9146: a relative `-C` under the overflow stand-in stays the
+                // stand-in. Resolved against it, `..` would pop the marker and
+                // leave a path no rule recognises as unplaced. An absolute `-C`
+                // names its own directory and is kept.
+                let base = if cd_tracking::is_overflow(effective_cwd) && !base.is_absolute() {
+                    effective_cwd.clone()
+                } else {
+                    base
                 };
                 if !bases.contains(&base) {
                     bases.push(base);
@@ -1198,6 +1202,16 @@ mod tests {
 
     fn tail(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The first target [`git_verb_target_dir_with_tail`] finds, without its tail.
+    fn git_verb_target_dir(
+        command: &str,
+        cwd: &Path,
+        env: &PathEnv,
+        matches: impl Fn(&str, &[String]) -> bool,
+    ) -> Option<(String, PathBuf)> {
+        git_verb_target_dir_with_tail(command, cwd, env, matches).map(|(verb, dir, _)| (verb, dir))
     }
 
     /// The destructive-verb specialisation of [`git_verb_target_dir`], so the
@@ -3066,5 +3080,66 @@ mod tests {
                 missed.join("\n")
             );
         }
+    }
+
+    /// 🔴 REGRESSION (#9146 delta critic HIGH 1): the HEAD-move rule took the
+    /// first candidate and walked for a root without asking whether it was
+    /// placed, so four `cd`s into directories that do not exist (the overflow
+    /// stand-in) let `git merge` / `git rebase` through from the main checkout.
+    #[test]
+    fn head_move_refuses_the_overflow_stand_in_before_any_root_walk_9146() {
+        let main = main_checkout_dir();
+        let cds = "cd a; cd b; cd c; cd d; ";
+        for verb in ["merge x", "rebase origin/main"] {
+            let command = format!("{cds}git {verb}");
+            let verdict = main_checkout_head_move(&command, main.path());
+            assert!(
+                matches!(&verdict, Some(Err(reason)) if reason.contains("unresolvable")),
+                "`{command}` must be refused as unplaced: {verdict:?}"
+            );
+        }
+    }
+
+    /// 🔴 REGRESSION (#9146 delta critic HIGH 2): a relative `-C` resolved
+    /// against the overflow stand-in lost the marker (`..` popped it), so the
+    /// destructive and commit rules cleared it. A relative `-C` stays the
+    /// stand-in; an absolute one keeps naming its own directory.
+    #[test]
+    fn a_relative_dash_c_under_the_overflow_stand_in_stays_unplaced_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let cds = "cd a; cd b; cd c; cd d; ";
+        let env = PathEnv::from_process();
+        let any = |_: &str, _: &[String]| true;
+        for dash_c in ["..", "sub", "../.."] {
+            let found = git_verb_targets_with_tail(
+                &format!("{cds}git -C {dash_c} x"),
+                main.path(),
+                &env,
+                any,
+            );
+            assert!(
+                found.iter().all(|(_, t, _)| cd_tracking::is_overflow(t)),
+                "-C {dash_c}: {found:?}"
+            );
+            let reset = format!("{cds}git -C {dash_c} reset --hard");
+            assert!(
+                evaluate_main_checkout_destructive_command(&reset, main.path()).is_some(),
+                "`{reset}` must be refused"
+            );
+            let commit = format!("{cds}git -C {dash_c} commit -a -m x");
+            let missed = commits_not_denied(&[commit], main.path());
+            assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+            let merge = format!("{cds}git -C {dash_c} merge x");
+            assert!(matches!(
+                main_checkout_head_move(&merge, main.path()),
+                Some(Err(_))
+            ));
+        }
+        let absolute = format!("{cds}git -C {} reset --hard", wt.display());
+        assert_eq!(
+            evaluate_main_checkout_destructive_command(&absolute, main.path()),
+            None
+        );
     }
 }
