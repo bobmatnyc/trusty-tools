@@ -3,7 +3,7 @@
 //! loopback; no test here mutates the process environment.
 
 use super::*;
-use std::io::{BufRead as _, Write as _};
+use std::io::BufRead as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tar::EntryType::{self, Link, Regular, Symlink};
