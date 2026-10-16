@@ -353,6 +353,85 @@ async fn a_live_reindex_stream_ends_with_an_end_frame_after_its_terminal_event()
     served.stop().await;
 }
 
+/// Why: `push_terminal` stores the terminal status and then broadcasts the
+/// terminal frame under the `events` lock, so a producer can read the status
+/// before the frame is queued. `deliver_backlog` waits the lock out; a version
+/// that ended at once, or drained without the lock, would end the stream with no
+/// terminal frame (#9933).
+/// What: holds the lock, stores `Complete`, and broadcasts one progress line.
+/// On the current-thread runtime the producer runs uninterrupted from
+/// delivering that line to parking on the lock, so once the test reads the line
+/// the producer is waiting on it. The test then broadcasts `complete`, releases
+/// the lock, and asserts `complete` and then the end of the stream.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn a_terminal_frame_emitted_under_the_lock_is_delivered_before_the_end() {
+    let (state, rpc) = routers(&["rs"]).await;
+    let progress = plant_progress(&state, "rs", ReindexStatus::Running, &[]).await;
+    let mut items = open_stream(
+        &rpc,
+        streams::METHOD_INDEX_REINDEX_STREAM,
+        serde_json::json!({ "index_id": "rs" }),
+    )
+    .await;
+
+    let step = serde_json::json!({ "event": "progress", "indexed": 1, "total": 1 });
+    let complete = serde_json::json!({ "event": "complete", "indexed": 1, "elapsed_ms": 5 });
+
+    let mut held = progress.events.lock().await;
+    progress.status.store(ReindexStatus::Complete);
+    held.push(step.to_string());
+    let _ = progress.sender.send(step.to_string());
+    assert_eq!(take_items(&mut items, 1).await, vec![step]);
+
+    held.push(complete.to_string());
+    let _ = progress.sender.send(complete.to_string());
+    drop(held);
+
+    assert_eq!(
+        drain(items).await,
+        vec![complete],
+        "the terminal frame queued while the lock was held must arrive, then the end"
+    );
+}
+
+/// Why: `ReindexTerminationGuard::drop` used to store `Failed` and then
+/// broadcast its error frame with no lock, so a live stream could read the
+/// status first and end with no `error` frame (#9933). It now emits under the
+/// `events` lock, which also puts the frame in the replay buffer.
+/// What: drops an armed guard while a stream is live and asserts the stream
+/// carries the fatal `error` frame and then ends; then opens a second stream
+/// and asserts it replays that frame.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_guard_drop_during_a_live_stream_delivers_its_error_then_ends() {
+    use crate::service::reindex::ReindexTerminationGuard;
+
+    let (state, rpc) = routers(&["rs"]).await;
+    let progress = plant_progress(&state, "rs", ReindexStatus::Running, &[]).await;
+    let request = serde_json::json!({ "index_id": "rs" });
+    let live = open_stream(&rpc, streams::METHOD_INDEX_REINDEX_STREAM, request.clone()).await;
+
+    drop(ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id("rs"));
+
+    let delivered = drain(live).await;
+    assert_eq!(
+        delivered.len(),
+        1,
+        "one error frame, then the end: {delivered:?}"
+    );
+    assert_eq!(delivered[0]["event"], "error");
+    assert_eq!(delivered[0]["fatal"], true);
+
+    let late = drain(open_stream(&rpc, streams::METHOD_INDEX_REINDEX_STREAM, request).await).await;
+    assert_eq!(
+        late, delivered,
+        "a stream opened after the drop must replay the error frame"
+    );
+}
+
 /// Why: `reindex_stream` opens through `ReindexProgress::subscribe_with_replay`,
 /// which takes the replay buffer and the live subscription under one lock hold
 /// that `push` also takes across its append and its broadcast — so no event can

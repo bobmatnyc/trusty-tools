@@ -238,6 +238,7 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 /// Test: `reindex_progress_events_replay_the_planted_sequence_frame_for_frame`,
 /// `a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted`,
 /// `a_live_reindex_stream_ends_with_an_end_frame_after_its_terminal_event`,
+/// `a_guard_drop_during_a_live_stream_delivers_its_error_then_ends`,
 /// `an_event_either_side_of_the_stream_opening_is_delivered_exactly_once`,
 /// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing`,
 /// `an_unknown_index_is_refused_before_the_reindex_stream_opens`.
@@ -302,14 +303,14 @@ async fn reindex_stream(
 
 /// Forward what a finished run's broadcast still holds, then stop (#9933).
 ///
-/// Why: `push_terminal` stores the status and then broadcasts the terminal
-/// frame, both under the `events` lock, so a producer can read the terminal
-/// status while that frame is still in flight. Taking the lock waits that
-/// emission out; the frame is then in the receiver.
+/// Why: `push_terminal` and `push_terminal_from_drop` store the status and then
+/// broadcast the terminal frame, both under the `events` lock, so a producer can
+/// read the terminal status while that frame is still in flight. Taking the
+/// lock waits that emission out; the frame is then in the receiver.
 /// What: takes and releases the `events` lock, then forwards every queued line
 /// (a lag frame for a gap) until the receiver is empty or the client is gone.
 /// Returning drops the item sender, so `write_stream` writes the `end` frame.
-/// Test: `a_live_reindex_stream_ends_with_an_end_frame_after_its_terminal_event`.
+/// Test: `a_terminal_frame_emitted_under_the_lock_is_delivered_before_the_end`.
 async fn deliver_backlog(
     progress: &ReindexProgress,
     events: &mut broadcast::Receiver<String>,
