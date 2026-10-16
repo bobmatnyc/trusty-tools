@@ -38,6 +38,7 @@ mod hnsw_compact_9450;
 mod hnsw_recall_9414;
 mod index_remove_env_conflict_8175;
 mod integration_tests;
+mod launcher_packaging_9468;
 mod mcp_reindex_quarantine_8105;
 mod mcp_stdio_e2e_5264;
 mod mcp_structured_503_5350;

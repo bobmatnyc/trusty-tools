@@ -4,7 +4,11 @@
 //! Gated `#[ignore]` — it bootstraps a real venv (torch + sentence-transformers,
 //! ~2-3 GB, network on a cold cache) and runs it on MPS/CPU. Run explicitly:
 //!
-//!   TRUSTY_RUN_PY_E2E=1 cargo test -p trusty-embedderd-py --test e2e -- --ignored
+//!   cargo build -p trusty-search --bin trusty-embedderd-py
+//!   TRUSTY_EMBEDDERD_PY_BIN="$CARGO_TARGET_DIR/debug/trusty-embedderd-py" \
+//!     TRUSTY_RUN_PY_E2E=1 cargo test -p trusty-embedderd-py --test e2e -- --ignored
+//!
+//! trusty-search builds the launcher binary since #9468.
 //!
 //! It spawns the `trusty-embedderd-py` launcher exactly as the daemon does —
 //! via `EmbedderSupervisor::spawn_stdio(launcher_path, SupervisorConfig)` — and

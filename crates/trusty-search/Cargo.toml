@@ -101,6 +101,12 @@ path = "src/bin/trusty-embedderd.rs"
 # single command (issue #187 Phase 2 follow-up). The daemon's logic lives
 # entirely in the trusty-embedderd library crate; this is a thin shim.
 
+[[bin]]
+name = "trusty-embedderd-py"
+path = "src/bin/trusty-embedderd-py.rs"
+# #9468: the Python/MPS sidecar launcher, owned here for the same reason as
+# trusty-embedderd above; the trusty-embedderd-py package is library-only.
+
 # ── Integration tests (#9302) ─────────────────────────────────────────────────
 # `integration` mounts every module that leaves process-global state alone.
 # Each target below keeps a process of its own: it sets environment variables
