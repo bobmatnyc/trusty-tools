@@ -201,8 +201,125 @@ async fn an_unwritable_ledger_leaves_the_verdict_and_reaches_the_doctor_row() {
         .await
         .expect("reconcile queued");
     assert!(stopped.error.is_some(), "{stopped:?}");
+    // Observe (1), then the stop's retry of that pending tree (2) and its
+    // reconcile (3) — #8994 retries a failed tree once per stop event.
     assert_eq!(
         read_ingest_failure(&ledger).unwrap().map(|f| f.failures),
-        Some(2)
+        Some(3)
     );
+}
+
+/// Make the ledger file read-only: reads succeed, every append fails.
+fn make_read_only(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+}
+
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// #8994: the append-error arm — the ledger file exists and reads, but the
+/// append fails. The verdict is still `Allow` and the sidecar is written.
+#[tokio::test]
+async fn a_read_only_ledger_file_reaches_the_sidecar() {
+    let fixture = GitWorktreeFixture::new();
+    let first = agent_tree(&fixture, "agent-first");
+    let second = agent_tree(&fixture, "agent-second");
+    let h = Harness::new(&fixture.repo).await;
+    h.event(HookEvent::PreToolUse, tool_call(&first)).await;
+    assert!(h.ledger().read().unwrap().present, "the ledger file exists");
+    make_read_only(h.ledger().path());
+    let svc = HookService::new(Arc::clone(&h.state));
+    let verdict = svc.process(SessionId::new(), HookEvent::PreToolUse, tool_call(&second));
+    assert_eq!(verdict, HookDecision::Allow);
+    let ledger = h.ledger();
+    let mut failure = None;
+    for _ in 0..500 {
+        failure = read_ingest_failure(&ledger).expect("readable sidecar");
+        if failure.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let failure = failure.expect("a failed append is recorded, never swallowed");
+    assert!(failure.error.contains("observe"), "{failure:?}");
+    make_writable(ledger.path());
+}
+
+/// #8994 HIGH 1: a stop event that also claims a new tree, with an unreadable
+/// project registry, must not leave `reconcile_queued` set. The next
+/// `SessionEnd` still writes `removed` for a tree that is gone.
+#[tokio::test]
+async fn a_failed_registry_read_does_not_absorb_later_stops() {
+    let fixture = GitWorktreeFixture::new();
+    let gone = agent_tree(&fixture, "agent-gone");
+    let fresh = agent_tree(&fixture, "agent-fresh");
+    let h = Harness::new(&fixture.repo).await;
+    h.event(HookEvent::PreToolUse, tool_call(&gone)).await;
+    let registry = crate::project::registry_data_dir_under(h.state.framework_root());
+    std::fs::write(registry.join("projects.json"), b"{ not json").unwrap();
+    let failed = h
+        .event(HookEvent::SubagentStop, tool_call(&fresh))
+        .await
+        .expect("a stop naming a new tree queues work");
+    let message = failed.error.expect("the registry failure is reported");
+    assert!(message.contains("project registry unreadable"), "{message}");
+    // The harness removes `gone`; the registry is still unreadable.
+    let removed = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&gone)
+        .current_dir(&fixture.repo)
+        .status()
+        .expect("git");
+    assert!(removed.success());
+    let ended = h
+        .event(HookEvent::SessionEnd, json!({}))
+        .await
+        .expect("the failed task did not leave the reconcile queued");
+    assert_eq!(ended.reconciled.map(|r| r.removed), Some(1));
+    assert_eq!(h.count(|k| *k == EventKind::Removed), 1);
+    // Not silent: the sidecar records it and the doctor row leaves Ok.
+    assert!(read_ingest_failure(&h.ledger()).unwrap().is_some());
+    let row =
+        crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    assert_ne!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// #8994 HIGH 2: a tree whose `observed` write failed is retried at the next
+/// stop, and an unrelated success does not clear the sidecar or the doctor Warn.
+#[tokio::test]
+async fn a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success() {
+    let fixture = GitWorktreeFixture::new();
+    let seed = agent_tree(&fixture, "agent-seed");
+    let a = agent_tree(&fixture, "agent-a");
+    let b = agent_tree(&fixture, "agent-b");
+    let h = Harness::new(&fixture.repo).await;
+    h.event(HookEvent::PreToolUse, tool_call(&seed)).await;
+    let ledger = h.ledger();
+    let warn =
+        || crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    // Tree A: the append fails.
+    make_read_only(ledger.path());
+    let failed = h.event(HookEvent::PreToolUse, tool_call(&a)).await.unwrap();
+    assert!(failed.error.is_some(), "{failed:?}");
+    assert!(read_ingest_failure(&ledger).unwrap().is_some());
+    // Tree B succeeds; A is still missing, so the alarm stays.
+    make_writable(ledger.path());
+    let ok = h.event(HookEvent::PreToolUse, tool_call(&b)).await.unwrap();
+    assert!(matches!(ok.observed, Some(ObserveOutcome::Recorded { .. })));
+    assert!(
+        read_ingest_failure(&ledger).unwrap().is_some(),
+        "an unrelated success must not clear the alarm for tree A"
+    );
+    assert_ne!(warn().status, CheckStatus::Ok);
+    // The next stop retries A; with nothing pending the alarm clears.
+    let stopped = h.event(HookEvent::SubagentStop, json!({})).await.unwrap();
+    assert_eq!(stopped.error, None, "{stopped:?}");
+    assert!(read_ingest_failure(&ledger).unwrap().is_none());
+    assert_eq!(warn().status, CheckStatus::Ok);
+    let live = fold(&ledger.read().unwrap().events).live;
+    assert!(live.contains_key(&crate::core::worktree_ledger::ledger_key(&a)));
+    assert_eq!(h.count(|k| matches!(k, EventKind::Observed { .. })), 3);
 }
