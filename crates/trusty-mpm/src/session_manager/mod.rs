@@ -161,6 +161,8 @@ mod worktree_reclaim_unrecorded_owner_tests;
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #8994 S3a: the ledger reclaim sweep, through the same gates and remover.
+pub(crate) mod worktree_ledger_reclaim;
 // #8301: the preview's wall-clock bound and the one batched pull-request listing.
 pub(crate) mod worktree_reclaim_budget;
 // #7889: gate 5's landed-content admission and its pre-delete re-check.

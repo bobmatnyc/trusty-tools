@@ -590,7 +590,8 @@ pub(crate) struct FreshProbes<'a> {
 /// three gates re-asked here have no such backstop: nothing in git knows about
 /// a session's workspace claim.
 /// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`.
-fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<String> {
+// #8994 S3a: shared with the ledger reclaim's last gate.
+pub(super) fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<String> {
     let Some(claims) = claims else {
         return Some(
             "the live session set could not be re-read immediately before removal — refusing \

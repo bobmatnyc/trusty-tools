@@ -38,6 +38,9 @@ pub mod bash_worktree;
 pub mod command_ingest;
 pub mod fold;
 pub mod hook_ingest;
+// #8994 S3a: which stale candidates the ledger reclaim sweep may act on.
+pub mod reclaim_plan;
+pub mod reclaim_probe;
 pub mod reconcile;
 pub mod record;
 // #8994 S2c: `removed` from a removal route, on evidence only.

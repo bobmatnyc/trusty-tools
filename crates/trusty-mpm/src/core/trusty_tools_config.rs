@@ -308,6 +308,12 @@ pub struct DiskConfig {
     /// for why a nonsense threshold must not become a permissive one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_usage_pct: Option<u8>,
+
+    /// Let the ledger reclaim sweep REMOVE the trees it finds eligible
+    /// (#8994 S3a). Off by default: the sweep only reports what it would
+    /// remove until the Architect sets this to `true`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ledger_reclaim_remove: bool,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).
