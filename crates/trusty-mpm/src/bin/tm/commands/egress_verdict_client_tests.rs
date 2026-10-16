@@ -4,20 +4,20 @@
 //! that must run the inline load serves a verdict, if an unusable answer
 //! falls through to the inline load or to ready, or if an untainted session
 //! queries the daemon.
-//! What: a one-connection loopback HTTP server answers each canned reply;
-//! a closed port stands for a daemon that is down. The inline load is a
-//! closure that counts its runs, or panics where it must not run.
+//! What: a one-connection daemon socket answers each canned frame (#6288: the
+//! query travels over the socket only); an absent socket stands for a daemon
+//! that is down. The inline load is a closure that counts its runs, or panics
+//! where it must not run.
 //! Test: this is the test module.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use trusty_mpm::core::channels_readiness::{HostBranch, NotReady, policy_ready};
 use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
-use trusty_mpm::core::egress_verdict::{Unserved, VERDICT_ROUTE};
+use trusty_mpm::core::egress_verdict::Unserved;
 
 use super::*;
 use crate::commands::egress_guard::{Verdict, with_taint_async};
@@ -30,63 +30,57 @@ fn home() -> PathBuf {
     PathBuf::from("/home/tester")
 }
 
-/// An HTTP/1.1 response with a JSON `body`.
-fn http(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-         connection: close\r\n\r\n{body}",
-        body.len()
-    )
+/// One newline-terminated JSON-RPC frame.
+fn frame(value: &Value) -> String {
+    format!("{value}\n")
 }
 
+/// A result frame carrying `body`.
 fn ok(body: &Value) -> String {
-    http("200 OK", &body.to_string())
+    frame(&json!({"jsonrpc": "2.0", "id": 1, "result": body}))
 }
 
-/// Read one request: the head, then `content-length` body bytes.
-async fn read_request(sock: &mut TcpStream) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = sock.read(&mut chunk).await.expect("read");
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-            continue;
-        };
-        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
-        let len = head
-            .lines()
-            .find_map(|l| l.strip_prefix("content-length:"))
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        if buf.len() >= end + 4 + len {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
+/// A result frame carrying `text` — as JSON when it parses, else as a string.
+fn result_text(text: &str) -> String {
+    let value = serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
+    ok(&value)
 }
 
-/// A loopback daemon that answers one request with `response`; the handle
-/// yields the request it read. `None` holds the connection unanswered.
-async fn serve_once(response: Option<String>) -> (String, tokio::task::JoinHandle<String>) {
+/// An error frame: the refusal a daemon answers with `code`.
+fn refusal(code: i64) -> String {
+    frame(&json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": "refused"}}))
+}
+
+/// A fake daemon on a hardened socket, and the locator a client dials.
+struct Fake {
+    url: String,
+    server: tokio::task::JoinHandle<String>,
+    _dir: tempfile::TempDir,
+}
+
+/// A daemon socket that answers one request with `response`; the handle
+/// yields the request frame it read. `None` holds the connection unanswered.
+async fn serve_once(response: Option<String>) -> Fake {
     match response {
         Some(response) => serve_raw(response, false).await,
         None => serve_raw(String::new(), true).await,
     }
 }
 
-/// A loopback daemon that reads one request, writes `bytes` (any prefix of
-/// a reply, or nothing), then holds the connection open when `stall` or
+/// A daemon socket that reads one request frame, writes `bytes` (any prefix
+/// of a reply, or nothing), then holds the connection open when `stall` or
 /// closes it.
-async fn serve_raw(bytes: String, stall: bool) -> (String, tokio::task::JoinHandle<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("addr"));
+async fn serve_raw(bytes: String, stall: bool) -> Fake {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("mpm.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind socket");
+    let url = trusty_mpm::core::socket_locator(&socket);
     let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.expect("accept");
-        let request = read_request(&mut sock).await;
+        let (sock, _) = listener.accept().await.expect("accept");
+        let mut reader = BufReader::new(sock);
+        let mut request = String::new();
+        let _ = reader.read_line(&mut request).await;
+        let mut sock = reader.into_inner();
         sock.write_all(bytes.as_bytes()).await.expect("write");
         sock.flush().await.expect("flush");
         if stall {
@@ -96,38 +90,41 @@ async fn serve_raw(bytes: String, stall: bool) -> (String, tokio::task::JoinHand
         }
         request
     });
-    (url, server)
+    Fake {
+        url,
+        server,
+        _dir: dir,
+    }
 }
 
-/// A 200 head promising a 100-byte body.
-fn head_of_100() -> String {
-    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\
-     connection: close\r\n\r\n"
-        .to_owned()
+/// The first bytes of a result frame, cut before its end.
+fn cut_frame() -> String {
+    r#"{"jsonrpc":"2.0","id":1,"result":{"answer":"#.to_owned()
 }
 
 /// `cached_policy_ready` against a daemon writing `bytes` then stalling or
 /// closing; the result and the inline run count (the inline load refuses
 /// with `Stopped`).
 async fn ready_against_raw(bytes: String, stall: bool) -> (Result<(), NotReady>, usize) {
-    let (url, server) = serve_raw(bytes, stall).await;
+    let fake = serve_raw(bytes, stall).await;
     let mut runs = 0;
     let home = home();
-    let result = cached_policy_ready(&url, Some(&home), || {
+    let result = cached_policy_ready(&fake.url, Some(&home), || {
         runs += 1;
         Err(NotReady::Stopped)
     })
     .await;
-    server.abort();
+    fake.server.abort();
     (result, runs)
 }
 
-/// A URL on a loopback port nothing listens on: a daemon that is down.
+/// The locator of a socket nothing listens on: a daemon that is down.
 fn down_url() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
-    format!("http://{addr}")
+    trusty_mpm::core::socket_locator(
+        &std::env::temp_dir()
+            .join("tm-6288-no-such-dir")
+            .join("trusty-mpm.sock"),
+    )
 }
 
 /// `cached_policy_ready` against a daemon answering `response`, with
@@ -136,15 +133,15 @@ async fn ready_against(
     response: Option<String>,
     inline: impl FnOnce() -> Result<(), NotReady>,
 ) -> (Result<(), NotReady>, usize) {
-    let (url, server) = serve_once(response).await;
+    let fake = serve_once(response).await;
     let mut runs = 0;
     let home = home();
-    let result = cached_policy_ready(&url, Some(&home), || {
+    let result = cached_policy_ready(&fake.url, Some(&home), || {
         runs += 1;
         inline()
     })
     .await;
-    server.abort();
+    fake.server.abort();
     (result, runs)
 }
 
@@ -178,8 +175,9 @@ fn read_call(session: &str) -> Result<Value, crate::commands::hook_stdin::HookSt
     }))
 }
 
-/// 🔴 #8454 VC (plan :131, R2): with the daemon down — a closed port, or the
-/// sandbox's no-daemon URL — the inline load decides, once, and its refusal
+/// 🔴 #8454 VC (plan :131, R2): with the daemon down — an absent socket, the
+/// sandbox's no-daemon URL, or (#6288) a loopback HTTP URL, which is no socket
+/// — the inline load decides, once, and its refusal
 /// stands. Through the taint arm, a missing `config.yaml` still denies as
 /// `POLICY_CHECK`; nothing allows.
 #[tokio::test]
@@ -187,7 +185,7 @@ async fn daemon_unreachable_falls_back_to_inline_load_never_allow() {
     let home = home();
     let down = down_url();
     let sandbox = trusty_mpm::core::discovery::ISOLATED_NO_DAEMON_URL;
-    for url in [down.as_str(), sandbox] {
+    for url in [down.as_str(), sandbox, "http://127.0.0.1:7880"] {
         assert_eq!(
             verdict_query(url, &home).await,
             Err(QueryError::Unreachable),
@@ -229,12 +227,12 @@ async fn daemon_timeout_falls_back_to_inline_load() {
         "{:?}",
         started.elapsed()
     );
-    let (url, server) = serve_once(None).await;
+    let fake = serve_once(None).await;
     assert_eq!(
-        verdict_query(&url, &home()).await,
+        verdict_query(&fake.url, &home()).await,
         Err(QueryError::TimedOut(VERDICT_QUERY_TIMEOUT))
     );
-    server.abort();
+    fake.server.abort();
 }
 
 /// 🔴 #8454 VC (plan :132, R2): a 2xx reply that is not exactly one verdict
@@ -254,7 +252,7 @@ async fn malformed_daemon_answer_denies() {
         .to_string(),
     ];
     for body in bodies {
-        let (result, runs) = ready_against(Some(http("200 OK", &body)), no_inline).await;
+        let (result, runs) = ready_against(Some(result_text(&body)), no_inline).await;
         assert!(
             matches!(result, Err(NotReady::Unanswered { .. })),
             "{body:?}: {result:?}"
@@ -268,32 +266,23 @@ async fn malformed_daemon_answer_denies() {
     }
 }
 
-/// 🔴 #8454 VC (R2): a non-2xx status denies as not ready, a redirect too
-/// (it is never followed), and the inline load never runs.
+/// 🔴 #8454 VC (R2): a refusal denies as not ready, and the inline load
+/// never runs. #6288: over the socket a refusal is an RPC error code, which
+/// projects onto the HTTP status it stands for.
 #[tokio::test]
 async fn non_2xx_daemon_answer_denies() {
-    let ready = json!({"answer": "ready", "fingerprint": 1, "age_ms": 1}).to_string();
-    for (status, code) in [
-        ("404 Not Found", 404),
-        ("500 Internal Server Error", 500),
-        ("503 Service Unavailable", 503),
-    ] {
-        let (result, runs) = ready_against(Some(http(status, &ready)), no_inline).await;
+    for (code, status) in [(-32004, 404), (-32603, 500), (-32002, 503)] {
+        let (result, runs) = ready_against(Some(refusal(code)), no_inline).await;
         match result {
             Err(NotReady::Unanswered { detail }) => {
-                assert!(detail.contains(&code.to_string()), "{detail}");
+                assert!(detail.contains(&status.to_string()), "{detail}");
             }
-            other => panic!("{status}: {other:?}"),
+            other => panic!("{code}: {other:?}"),
         }
-        assert_eq!(runs, 0, "{status}");
+        assert_eq!(runs, 0, "{code}");
     }
-    let (url, server) = serve_once(None).await;
-    server.abort();
-    let redirect = format!(
-        "HTTP/1.1 307 Temporary Redirect\r\nlocation: {url}{VERDICT_ROUTE}\r\n\
-         content-length: 0\r\nconnection: close\r\n\r\n"
-    );
-    let (result, runs) = ready_against(Some(redirect), no_inline).await;
+    // A daemon that predates the method: answered, unusably — deny.
+    let (result, runs) = ready_against(Some(refusal(-32601)), no_inline).await;
     assert!(
         matches!(result, Err(NotReady::Unanswered { .. })),
         "{result:?}"
@@ -358,19 +347,18 @@ async fn unserved_answers_fall_back_to_inline_load() {
     }
 }
 
-/// 🔴 #8454 VC (R2): the query POSTs the hook's own home to the route.
+/// 🔴 #8454 VC (R2): the query sends the hook's own home to the route's
+/// socket method (#6288).
 #[tokio::test]
 async fn verdict_query_sends_its_home() {
     let reply = json!({"answer": "unserved", "why": "home_mismatch"});
-    let (url, server) = serve_once(Some(ok(&reply))).await;
-    let verdict = verdict_query(&url, Path::new("/home/tester")).await;
+    let fake = serve_once(Some(ok(&reply))).await;
+    let verdict = verdict_query(&fake.url, Path::new("/home/tester")).await;
     assert_eq!(verdict, Ok(DaemonVerdict::Unserved(Unserved::HomeMismatch)));
-    let request = server.await.expect("server");
-    assert!(
-        request.starts_with(&format!("POST {VERDICT_ROUTE} HTTP/1.1")),
-        "{request}"
-    );
-    assert!(request.ends_with(r#"{"home":"/home/tester"}"#), "{request}");
+    let request: Value =
+        serde_json::from_str(&fake.server.await.expect("server")).expect("a JSON frame");
+    assert_eq!(request["method"], "mpm.channels.egress_verdict");
+    assert_eq!(request["params"], json!({"home": "/home/tester"}));
 }
 
 /// 🔴 #8454 VC (R4): an untainted session's call, and a call already
@@ -439,36 +427,30 @@ async fn daemon_closing_without_a_reply_denies() {
     assert_eq!(runs, 0);
 }
 
-/// 🔴 #8454 VC (r-078): a body cut short of its `content-length` is a body
-/// read error that is not a timeout: `Unanswered`, and no inline load.
+/// 🔴 #8454 VC (r-078): a reply frame cut short is a read error that is not
+/// a timeout: `Unanswered`, and no inline load.
 #[tokio::test]
 async fn daemon_cutting_the_body_short_denies() {
-    let short = format!("{}{{\"answer\":", head_of_100());
-    assert_eq!(
-        short.len() - head_of_100().len(),
-        10,
-        "fixture: 10 body bytes"
-    );
-    let (result, runs) = ready_against_raw(short.clone(), false).await;
+    let (result, runs) = ready_against_raw(cut_frame(), false).await;
     assert!(
         matches!(result, Err(NotReady::Unanswered { .. })),
         "{result:?}"
     );
     assert_eq!(runs, 0);
-    let (url, server) = serve_raw(short, false).await;
+    let fake = serve_raw(cut_frame(), false).await;
     assert_eq!(
-        verdict_query(&url, &home()).await,
+        verdict_query(&fake.url, &home()).await,
         Err(QueryError::Malformed)
     );
-    server.abort();
+    fake.server.abort();
 }
 
-/// 🔴 #8454 VC (r-078): a daemon that sends its head and then stalls the
-/// body past the query timeout has not answered: the inline load runs once.
+/// 🔴 #8454 VC (r-078): a daemon that sends part of its frame and then
+/// stalls past the query timeout has not answered: the inline load runs once.
 #[tokio::test]
 async fn daemon_stalling_the_body_falls_back_to_inline_load() {
     let started = Instant::now();
-    let (result, runs) = ready_against_raw(head_of_100(), true).await;
+    let (result, runs) = ready_against_raw(cut_frame(), true).await;
     assert_eq!((result, runs), (Err(NotReady::Stopped), 1));
     assert!(
         started.elapsed() < Duration::from_secs(2),
@@ -481,23 +463,19 @@ async fn daemon_stalling_the_body_falls_back_to_inline_load() {
 /// fails to compile here until it has a row.
 fn row(e: &QueryError) -> usize {
     match e {
-        QueryError::Client => 0,
-        QueryError::Unreachable => 1,
-        QueryError::TimedOut(_) => 2,
-        QueryError::Status(_) => 3,
-        QueryError::Malformed => 4,
+        QueryError::Unreachable => 0,
+        QueryError::TimedOut(_) => 1,
+        QueryError::Status(_) => 2,
+        QueryError::Malformed => 3,
     }
 }
 
 /// 🔴 #8454 VC (r-078): every `QueryError` maps to its pinned outcome: no
-/// daemon answered (client fault, unreachable, timeout) runs the inline load
-/// once; an unusable answer (status, malformed) denies `Unanswered` without
-/// it. The `Client` arm cannot be induced through a query, so it is pinned
-/// here.
+/// daemon answered (unreachable, timeout) runs the inline load once; an
+/// unusable answer (status, malformed) denies `Unanswered` without it.
 #[test]
 fn every_query_error_maps_to_inline_or_deny() {
     let cases = [
-        (QueryError::Client, true),
         (QueryError::Unreachable, true),
         (QueryError::TimedOut(VERDICT_QUERY_TIMEOUT), true),
         (QueryError::Status(503), false),
@@ -505,7 +483,7 @@ fn every_query_error_maps_to_inline_or_deny() {
     ];
     let mut rows: Vec<usize> = cases.iter().map(|(e, _)| row(e)).collect();
     rows.sort_unstable();
-    assert_eq!(rows, [0, 1, 2, 3, 4], "every variant has exactly one row");
+    assert_eq!(rows, [0, 1, 2, 3], "every variant has exactly one row");
     for (e, inline) in cases {
         assert_eq!(e.asked_no_one(), inline, "{e:?}");
         let mut runs = 0;

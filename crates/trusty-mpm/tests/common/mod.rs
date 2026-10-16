@@ -34,6 +34,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+// #6288: daemon-socket fixtures for tests that spawn `tm`.
+pub mod socket;
+
 /// Arm `core::home_write_fence` for this integration target, before `main`
 /// (#8545).
 ///

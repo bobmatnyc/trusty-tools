@@ -265,8 +265,8 @@ async fn fetch_survey(
     if let (Some(project), Value::Object(map)) = (project, &mut arguments) {
         map.insert("project".to_string(), Value::String(project.to_string()));
     }
-    let body: Value = client
-        .post(format!("{url}/rpc"))
+    let body: Value = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .post("/rpc")
         .timeout(trusty_mpm::client::http_client::DISK_SURVEY_REQUEST_TIMEOUT)
         .json(&json!({
             "jsonrpc": "2.0",

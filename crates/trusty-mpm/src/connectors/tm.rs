@@ -10,9 +10,10 @@
 //! way the `serve --stdio` bridge reaches every other MCP tool). This module
 //! is a thin translation layer: build the request, POST/GET the route,
 //! translate the daemon's wire response into the trait's portable types.
-//! What: [`TmConnector::new`] resolves the daemon URL via the existing
-//! [`crate::core::discovery::resolve_daemon_url`] chain (default
-//! `http://127.0.0.1:7880`); [`TmConnector::with_daemon_url`] targets an
+//! What: [`TmConnector::new`] resolves the daemon via
+//! [`crate::core::discovery::resolve_daemon_url`] — the daemon socket since
+//! #6288, so every call travels as the route's JSON-RPC method over the
+//! socket; [`TmConnector::with_daemon_url`] targets an
 //! explicit daemon (used by every test in `tm_tests.rs` to point at an
 //! in-process test daemon on a random port). Every trait method maps 1:1 onto
 //! a daemon route — see each method's own doc comment for the exact mapping.
@@ -31,29 +32,27 @@ use trusty_agents_common::connectors::{
 };
 
 use crate::client::{
-    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputResponse, ManagedSessionSummary,
-    ManagedSpawnResponse,
+    DaemonCallError, DaemonClient, DaemonResponse, ManagedAttachCmdResponse, ManagedListResponse,
+    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnResponse,
     http_client::{PROVISION_REQUEST_TIMEOUT, default_client},
 };
 use crate::core::discovery::resolve_daemon_url;
 
-/// tm's [`WorkstreamConnector`] implementation over the daemon's HTTP API.
+/// tm's [`WorkstreamConnector`] implementation over the daemon's routes.
 ///
 /// Why/What: see module docs.
 pub struct TmConnector {
-    http: reqwest::Client,
-    daemon_url: String,
+    daemon: DaemonClient,
 }
 
 impl TmConnector {
     /// Build a connector targeting the daemon resolved via the standard
-    /// discovery chain (explicit override env var, then lock file, then
-    /// `http://127.0.0.1:7880`).
+    /// discovery chain — the daemon socket (#6288).
     ///
     /// Why: the common case — a caller (eventually the lead agent) that
     /// doesn't know or care which daemon address is in play.
     /// What: delegates to [`resolve_daemon_url`] with no explicit override.
-    /// Test: `default_returned_when_no_lock_and_no_explicit` (in
+    /// Test: `resolved_url_is_the_socket_locator` (in
     /// `core::discovery`) covers `resolve_daemon_url`'s no-override branch
     /// this method delegates to; `new()` itself has no dedicated test.
     pub fn new() -> Self {
@@ -90,8 +89,7 @@ impl TmConnector {
     /// `tm_tests::list_sessions_is_bound_by_the_client_level_timeout`.
     pub fn with_client(http: reqwest::Client, daemon_url: impl Into<String>) -> Self {
         Self {
-            http,
-            daemon_url: daemon_url.into(),
+            daemon: DaemonClient::with_client(http, daemon_url),
         }
     }
 }
@@ -114,7 +112,7 @@ impl Default for TmConnector {
 /// `tm_tests::create_session_wrong_backend_params_is_invalid_request`
 /// (client-side 400 equivalent, though that specific test never reaches HTTP
 /// — see its own docs).
-async fn map_error_response(resp: reqwest::Response) -> ConnectorError {
+async fn map_error_response(resp: DaemonResponse) -> ConnectorError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     let message = if body.trim().is_empty() {
@@ -131,16 +129,16 @@ async fn map_error_response(resp: reqwest::Response) -> ConnectorError {
     }
 }
 
-/// Map a `reqwest` transport-level failure (connection refused, timeout,
-/// DNS) onto [`ConnectorError::Transport`].
-fn transport_err(e: reqwest::Error) -> ConnectorError {
+/// Map a transport-level failure (no socket, refused, timeout) onto
+/// [`ConnectorError::Transport`].
+fn transport_err(e: DaemonCallError) -> ConnectorError {
     ConnectorError::Transport(e.to_string())
 }
 
 /// Map a JSON-body-parse failure onto [`ConnectorError::Transport`] — the
 /// daemon returned a success status but a response this connector could not
 /// decode, which is a transport-shape problem, not a domain rejection.
-fn decode_err(e: reqwest::Error) -> ConnectorError {
+fn decode_err(e: anyhow::Error) -> ConnectorError {
     ConnectorError::Transport(format!("failed to decode daemon response: {e}"))
 }
 
@@ -211,13 +209,13 @@ impl WorkstreamConnector for TmConnector {
             "runtime": runtime,
             "ephemeral": ephemeral,
         });
-        let url = format!("{}/api/v1/sessions/managed", self.daemon_url);
+        let url = "/api/v1/sessions/managed";
         // #4488: this route provisions SYNCHRONOUSLY (git clone + worktree add
         // + agent deploy + harness spawn), so it must use the provisioning
         // bound, not the 10s interactive default the client was built with.
         let resp = self
-            .http
-            .post(&url)
+            .daemon
+            .post(url)
             .json(&body)
             .timeout(PROVISION_REQUEST_TIMEOUT)
             .send()
@@ -243,8 +241,8 @@ impl WorkstreamConnector for TmConnector {
     /// Test: `tm_tests::create_session_full_lifecycle`,
     /// `tm_tests::list_sessions_empty_fleet_returns_empty_vec`.
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, ConnectorError> {
-        let url = format!("{}/api/v1/sessions/managed", self.daemon_url);
-        let resp = self.http.get(&url).send().await.map_err(transport_err)?;
+        let url = "/api/v1/sessions/managed";
+        let resp = self.daemon.get(url).send().await.map_err(transport_err)?;
         if !resp.status().is_success() {
             return Err(map_error_response(resp).await);
         }
@@ -262,8 +260,8 @@ impl WorkstreamConnector for TmConnector {
     /// via `ConnectorTestKit::assert_basic_lifecycle`),
     /// `tm_tests::session_status_unknown_id_is_not_found`.
     async fn session_status(&self, session_id: &str) -> Result<SessionStatus, ConnectorError> {
-        let url = format!("{}/api/v1/sessions/managed/{session_id}", self.daemon_url);
-        let resp = self.http.get(&url).send().await.map_err(transport_err)?;
+        let url = format!("/api/v1/sessions/managed/{session_id}");
+        let resp = self.daemon.get(url).send().await.map_err(transport_err)?;
         if !resp.status().is_success() {
             return Err(map_error_response(resp).await);
         }
@@ -283,13 +281,10 @@ impl WorkstreamConnector for TmConnector {
     /// `tmux_name` confirmation field is not surfaced through this trait.
     /// Test: `tm_tests::send_input_unknown_id_is_not_found`.
     async fn send_input(&self, session_id: &str, input: &str) -> Result<(), ConnectorError> {
-        let url = format!(
-            "{}/api/v1/sessions/managed/{session_id}/send",
-            self.daemon_url
-        );
+        let url = format!("/api/v1/sessions/managed/{session_id}/send");
         let resp = self
-            .http
-            .post(&url)
+            .daemon
+            .post(url)
             .json(&json!({ "text": input }))
             .send()
             .await
@@ -315,11 +310,8 @@ impl WorkstreamConnector for TmConnector {
     /// returned handle is a `ShellCommand` containing `tmux attach`),
     /// `tm_tests::attach_unknown_id_is_not_found`.
     async fn attach(&self, session_id: &str) -> Result<AttachHandle, ConnectorError> {
-        let url = format!(
-            "{}/api/v1/sessions/managed/{session_id}/attach-cmd",
-            self.daemon_url
-        );
-        let resp = self.http.get(&url).send().await.map_err(transport_err)?;
+        let url = format!("/api/v1/sessions/managed/{session_id}/attach-cmd");
+        let resp = self.daemon.get(url).send().await.map_err(transport_err)?;
         if !resp.status().is_success() {
             return Err(map_error_response(resp).await);
         }
@@ -379,10 +371,10 @@ impl WorkstreamConnector for TmConnector {
             "method": "tools/call",
             "params": { "name": "agent_delegate", "arguments": arguments },
         });
-        let url = format!("{}/rpc", self.daemon_url);
+        let url = "/rpc";
         let resp = self
-            .http
-            .post(&url)
+            .daemon
+            .post(url)
             .json(&rpc_req)
             .send()
             .await

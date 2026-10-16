@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
+use trusty_mpm::client::DaemonClient;
 
 use super::tmux_attach::tmux_pane_id_from_env;
 use trusty_mpm::core::standalone::hooks::notification::{
@@ -193,23 +194,20 @@ pub(crate) fn inbox_line(
     .to_string()
 }
 
-/// One fire-and-forget POST of `body` to `<url>/hooks`.
+/// One fire-and-forget `POST /hooks` of `body` to the daemon socket.
 ///
 /// Why: failing the hook would block the user's prompt, so every failure —
-/// daemon down, network blip, malformed url — is dropped.
-/// What: a 500 ms connect timeout and a 2 s total timeout; if the dedicated
-/// client cannot be built, the shared `client` with the same 2 s total bound.
-/// Test: `tm_hook_notification_8392::a_down_daemon_does_not_block_the_hook`.
+/// daemon down, socket absent, refused address — is dropped. #6288: `url` is
+/// the `unix:` locator `main` resolved; the post never opens TCP.
+/// What: one 2 s socket exchange through [`DaemonClient::with_client`]. A
+/// refusal sentinel is refused before any I/O.
+/// Test: `tm_hook_notification_8392::a_down_daemon_does_not_block_the_hook`,
+/// `tm_client_socket_cutover_6288::a_hook_reaches_the_daemon_over_the_socket_only`.
 pub(crate) async fn post_best_effort(client: &reqwest::Client, url: &str, body: &Value) {
-    let hook_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(500))
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap_or_else(|_| client.clone());
-    let _ = hook_client
-        .post(format!("{url}/hooks"))
-        .timeout(Duration::from_secs(2))
+    let _ = DaemonClient::with_client(client.clone(), url)
+        .post("/hooks")
         .json(body)
+        .timeout(Duration::from_secs(2))
         .send()
         .await;
 }
@@ -219,47 +217,15 @@ pub(crate) async fn post_best_effort(client: &reqwest::Client, url: &str, body: 
 ///
 /// Why: only the socket proves the sender's pid, and the daemon binds the
 /// session to the `claude` above that pid — the identity a later
-/// `tm repair delegation` is checked against. Over HTTP the session
-/// registers unbound, and its own repairs are refused. #8980: a `SessionEnd`
-/// stales the session's live delegations only when it arrives over the
-/// socket from under that bound `claude`.
-/// What: [`post_session_start_via`] over the resolved daemon socket when
-/// `url` names a loopback daemon; the plain [`post_best_effort`] otherwise.
+/// `tm repair delegation` is checked against. #8980: a `SessionEnd` stales the
+/// session's live delegations only when it arrives over the socket from under
+/// that bound `claude`. #6288: there is no HTTP fallback any more; an absent
+/// socket drops the event, as any other hook failure is dropped.
+/// What: [`post_best_effort`], whose transport is the socket.
 /// Test: `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`,
-/// `tm_hook_session_start_8531::a_session_start_with_no_socket_falls_back_to_http`,
+/// `tm_hook_session_start_8531::a_session_start_with_no_socket_never_falls_back_to_http`,
 /// `tm_hook_session_end_8980::the_owners_session_end_over_the_socket_stales_its_records`.
 pub(crate) async fn post_lifecycle_via_socket(client: &reqwest::Client, url: &str, body: &Value) {
-    let socket = super::managed_merged_prs::is_loopback_url(url)
-        .then(trusty_mpm::client::http_client::resolve_daemon_socket)
-        .and_then(Result::ok);
-    post_session_start_via(socket.as_deref(), client, url, body).await;
-}
-
-/// [`post_lifecycle_via_socket`] over an explicit socket path.
-///
-/// What: one 2 s socket attempt. Only an unreachable socket — nothing
-/// listening — falls back to HTTP; a delivered, refused or timed-out attempt
-/// ends here, so the daemon never ingests the event twice.
-/// Test: the two `tm_hook_session_start_8531` cases (#8531), through the
-/// built `tm`.
-pub(crate) async fn post_session_start_via(
-    socket: Option<&Path>,
-    client: &reqwest::Client,
-    url: &str,
-    body: &Value,
-) {
-    use trusty_mpm::client::{DaemonCallError, DaemonClient};
-    if let Some(socket) = socket {
-        let sent = DaemonClient::over_socket(socket)
-            .post("/hooks")
-            .json(body)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await;
-        if !matches!(sent, Err(DaemonCallError::Unreachable { .. })) {
-            return;
-        }
-    }
     post_best_effort(client, url, body).await;
 }
 

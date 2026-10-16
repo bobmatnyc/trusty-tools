@@ -3,82 +3,37 @@
 //! Why: the daemon can only correlate a `SubagentStop` back to the dispatch that
 //! started it if the hook shim actually forwards the keys Claude Code provides.
 //! The pure builder is unit-tested in `commands::hook_payload`, but nothing
-//! proved those fields survive the real path — stdin JSON → `tm hook` → HTTP
-//! POST body. A regression there would be invisible to the unit tests and would
+//! proved those fields survive the real path — stdin JSON → `tm hook` → the
+//! posted body. A regression there would be invisible to the unit tests and would
 //! silently disable delegation tracking in production, so it is asserted here
 //! against the actual built binary.
-//! What: stands up a one-shot loopback HTTP server, runs the built `tm` binary
-//! as `tm --url <server> hook` with a real captured hook payload on stdin, and
-//! asserts on the JSON body the daemon would have received. The payloads mirror
+//! What: stands up a capturing daemon socket (#6288), runs the built `tm`
+//! binary as `tm hook` aimed at it with a real captured hook payload on stdin,
+//! and asserts on the JSON body the daemon would have received. The payloads mirror
 //! live Claude Code 2.1.220 captures (the #2864 Step-0 probe).
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_delegation_payload::`.
 
 use crate::common;
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
 use std::process::Stdio;
 
-/// Read one HTTP request off `stream` and return its body.
+/// Run `tm hook` with `stdin_json` against a capturing daemon socket and return
+/// the posted `/hooks` body, the process's success flag, and its stdout.
 ///
-/// Why: the hook POSTs a single small JSON body; a full HTTP stack would be
-/// overkill. Reading headers to find `Content-Length` and then exactly that many
-/// bytes is deterministic and avoids relying on the peer closing the socket.
-fn read_http_body(stream: &mut TcpStream) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 1024];
-
-    // Read until the end of the header block.
-    let header_end = loop {
-        match stream.read(&mut chunk) {
-            Ok(0) => break buf.windows(4).position(|w| w == b"\r\n\r\n"),
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break Some(p);
-                }
-            }
-            Err(e) => panic!("read failed: {e}"),
-        }
-    }
-    .expect("request must contain a header terminator");
-
-    let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
-    let len: usize = headers
-        .lines()
-        .find_map(|l| l.strip_prefix("content-length:"))
-        .and_then(|v| v.trim().parse().ok())
-        .expect("hook POST must carry a content-length");
-
-    let body_start = header_end + 4;
-    while buf.len() < body_start + len {
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) => panic!("read failed: {e}"),
-        }
-    }
-    String::from_utf8_lossy(&buf[body_start..body_start + len]).into_owned()
-}
-
-/// Run `tm hook` with `stdin_json` against a one-shot capture server and return
-/// the POSTed body, the process's success flag, and its stdout.
+/// #6288: the hook posts over the daemon socket as `mpm.hooks.ingest`, whose
+/// params ARE the body the HTTP route took.
 fn capture_hook_post(stdin_json: &str) -> (serde_json::Value, bool, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let port = listener.local_addr().expect("addr").port();
-
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let body = read_http_body(&mut stream);
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
-        let _ = stream.flush();
-        body
+    let (url, frames) = common::socket::spawn_mock(|_| {
+        common::socket::Reply::Frame(common::socket::result_frame("{}"))
     });
 
     // #7568: the child gets a scratch `$HOME`, so the hook's own state writes
     // land there rather than in the operator's `~/.trusty-mpm`.
-    let mut child = common::tm_command()
-        .args(["--url", &format!("http://127.0.0.1:{port}"), "hook"])
+    let mut cmd = common::tm_command();
+    common::socket::aim(&mut cmd, &url);
+    let mut child = cmd
+        .args(["hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .stdin(Stdio::piped())
@@ -94,11 +49,12 @@ fn capture_hook_post(stdin_json: &str) -> (serde_json::Value, bool, String) {
         .expect("write stdin");
     let output = child.wait_with_output().expect("wait for tm hook");
 
-    let body = server.join().expect("capture server panicked");
-    let json: serde_json::Value =
-        serde_json::from_str(&body).unwrap_or_else(|e| panic!("body was not JSON ({e}): {body}"));
+    let frame = frames
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the hook must post to the daemon socket");
+    assert_eq!(frame["method"], "mpm.hooks.ingest", "{frame}");
     (
-        json,
+        frame["params"].clone(),
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     )

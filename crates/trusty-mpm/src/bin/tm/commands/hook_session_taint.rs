@@ -9,8 +9,8 @@
 //! same `<session_id>.json` through `channels_taint::write_taint`, so S4's
 //! reader needs no second marker.
 //! What: [`post_lifecycle`] routes `SessionEnd` to the unchanged best-effort
-//! socket post, and `SessionStart` to [`deliver_session_start`] (socket, then
-//! HTTP, reporting the outcome) and [`settle_session_start`]. A daemon that
+//! socket post, and `SessionStart` to [`deliver_session_start`] (the socket
+//! only, #6288, reporting the outcome) and [`settle_session_start`]. A daemon that
 //! answers 2xx settles nothing. Otherwise, when no managed session's taint
 //! covers the payload's cwd, there is nothing to re-apply and the hook
 //! succeeds as before; when one does, or the marks cannot be listed, the hook
@@ -55,9 +55,8 @@ pub(crate) async fn post_lifecycle(
         super::hook_notify::post_lifecycle_via_socket(client, url, body).await;
         return Ok(());
     }
-    let socket = super::managed_merged_prs::is_loopback_url(url)
-        .then(trusty_mpm::client::http_client::resolve_daemon_socket)
-        .and_then(Result::ok);
+    // #6288: `url` is the socket locator `main` resolved, or a refusal.
+    let socket = trusty_mpm::core::socket_from_locator(url);
     let delivery = deliver_session_start(socket.as_deref(), url, body).await;
     let home = dirs::home_dir().filter(|home| home.is_absolute());
     let cwd = body["payload"]["cwd"]
@@ -67,49 +66,36 @@ pub(crate) async fn post_lifecycle(
     settle_session_start(home.as_deref(), session_id, cwd, &delivery).map_err(anyhow::Error::msg)
 }
 
-/// Deliver a `SessionStart` over the socket, else HTTP, and report the answer.
+/// Deliver a `SessionStart` over the socket and report the answer.
 ///
-/// What: one 2 s socket attempt; only an unreachable socket falls back to
-/// HTTP (500 ms connect, 2 s total), so the daemon never ingests the event
-/// twice (#8531).
+/// What: one 2 s socket attempt. #6288: no socket, or an unreachable one, is
+/// [`Delivery::NoAnswer`] naming the socket — never an HTTP retry, so the
+/// unconfirmed delivery is settled by [`settle_session_start`] rather than
+/// sent to whatever answers on TCP.
 /// Test: `tests/tm_hook_session_start_8531.rs`,
 /// `tests/tm_hook_session_start_taint_8433.rs`,
-/// `socket_exchange_failure_is_no_answer_without_http_fallback`.
+/// `socket_exchange_failure_is_no_answer_without_http_fallback`,
+/// `an_unreachable_socket_is_no_answer_without_http_fallback`.
 pub(crate) async fn deliver_session_start(
     socket: Option<&Path>,
     url: &str,
     body: &Value,
 ) -> Delivery {
-    use trusty_mpm::client::{DaemonCallError, DaemonClient};
-    if let Some(socket) = socket {
-        let sent = DaemonClient::over_socket(socket)
-            .post("/hooks")
-            .json(body)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await;
-        match sent {
-            Ok(response) => {
-                return match response.error_for_status() {
-                    Ok(_) => Delivery::Accepted,
-                    Err(e) => Delivery::Refused(e.to_string()),
-                };
-            }
-            Err(DaemonCallError::Unreachable { .. }) => {}
-            Err(e) => return Delivery::NoAnswer(e.to_string()),
-        }
-    }
-    let client = match reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(500))
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => return Delivery::NoAnswer(e.to_string()),
+    use trusty_mpm::client::DaemonClient;
+    let Some(socket) = socket else {
+        return Delivery::NoAnswer(format!("no daemon socket ({url}); #6288 sends no TCP"));
     };
-    match client.post(format!("{url}/hooks")).json(body).send().await {
-        Ok(response) if response.status().is_success() => Delivery::Accepted,
-        Ok(response) => Delivery::Refused(response.status().to_string()),
+    let sent = DaemonClient::over_socket(socket)
+        .post("/hooks")
+        .json(body)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await;
+    match sent {
+        Ok(response) => match response.error_for_status() {
+            Ok(_) => Delivery::Accepted,
+            Err(e) => Delivery::Refused(e.to_string()),
+        },
         Err(e) => Delivery::NoAnswer(e.to_string()),
     }
 }

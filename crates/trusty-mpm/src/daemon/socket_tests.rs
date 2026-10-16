@@ -336,7 +336,10 @@ fn every_route_names_a_served_method() {
             "`{verb} {path}` maps to `{method}`, which the daemon socket does not serve"
         );
     }
-    for method in crate::daemon::rpc::cli_socket::METHODS {
+    for method in crate::daemon::rpc::cli_socket::METHODS
+        .iter()
+        .chain(crate::daemon::rpc::client_cutover::METHODS)
+    {
         assert!(served.contains(method), "{method} is not registered");
     }
 }

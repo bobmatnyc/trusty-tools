@@ -101,8 +101,8 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
     struct Body {
         events: Vec<EventRow>,
     }
-    let body: Body = client
-        .get(format!("{url}/events/poll"))
+    let body: Body = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .get("/events/poll")
         .send()
         .await?
         .error_for_status()?
@@ -685,13 +685,14 @@ pub(crate) async fn overseer(
 ) -> anyhow::Result<()> {
     match action {
         OverseerAction::Status => {
-            let body: serde_json::Value = client
-                .get(format!("{url}/overseer"))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let body: serde_json::Value =
+                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                    .get("/overseer")
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
             let overseer = &body["overseer"];
             let enabled = overseer
                 .get("enabled")
@@ -727,12 +728,13 @@ pub(crate) async fn optimizer(
 ) -> anyhow::Result<()> {
     match action {
         OptimizerAction::Status => {
-            let body: serde_json::Value = client
-                .get(format!("{url}/optimizer"))
-                .send()
-                .await?
-                .json()
-                .await?;
+            let body: serde_json::Value =
+                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                    .get("/optimizer")
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
             println!("{}", serde_json::to_string_pretty(&body["optimizer"])?);
             // Print the scope note so operators are not misled into thinking a
             // non-Off level compresses their live native session (issue #1944).
@@ -780,17 +782,17 @@ pub(crate) async fn attach_cmd(
     target: &str,
     json: bool,
     single_pane: bool,
-    explicit: Option<&str>,
 ) -> anyhow::Result<()> {
     use trusty_mpm::core::{ResolveResult, SessionSummary, resolve_target};
 
     // The daemon wraps the session array in a `{ "sessions": [...] }` envelope.
-    let resp: serde_json::Value = client
-        .get(format!("{url}/sessions"))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let resp: serde_json::Value =
+        trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+            .get("/sessions")
+            .send()
+            .await?
+            .json()
+            .await?;
     let empty = vec![];
     let raw = resp
         .get("sessions")
@@ -822,10 +824,9 @@ pub(crate) async fn attach_cmd(
             }
             // Launch the TUI focused on this session. #6483: the multipane
             // dashboard is the default; the single-pane chat is opt-in.
-            let resolved_url = trusty_mpm::core::resolve_daemon_url(Some(url));
-            // #9556: an explicit `--url` / `TRUSTY_MPM_URL` survives a failed poll.
-            let daemon = trusty_mpm::client::DaemonClient::new(resolved_url)
-                .with_pinned_base_url(explicit.is_some_and(|u| !u.is_empty()));
+            // #6288: `url` is the socket locator `main` resolved; re-discovery
+            // resolves the same socket, so nothing needs pinning.
+            let daemon = trusty_mpm::client::DaemonClient::new(url);
             trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane).await
         }
         ResolveResult::Ambiguous(ids) => {

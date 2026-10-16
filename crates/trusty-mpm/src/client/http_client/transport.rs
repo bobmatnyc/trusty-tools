@@ -88,6 +88,48 @@ impl DaemonCallError {
             .find(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
     }
 
+    /// True only when the dial found nothing listening: the socket file is
+    /// absent or refuses (`ECONNREFUSED`, a stale file) — positive evidence
+    /// the daemon is not running (#6288, #9034).
+    ///
+    /// Why: a dial can also fail on permission or on a socket whose owner or
+    /// mode is wrong; none of those says the daemon is down, and starting a
+    /// second one over them is the #9034 hazard. An absent socket counts even
+    /// when the hardened pre-connect check refused its directory first (a data
+    /// dir no daemon has bound yet is not `0700`): with no socket file, no
+    /// daemon is serving it.
+    /// What: an `Unreachable` whose chain holds `ENOENT`/`ECONNREFUSED`, or
+    /// whose socket path (`target`) has no file — one `lstat`.
+    /// Test: `nothing_listening_is_only_an_absent_or_stale_socket`.
+    pub fn nothing_listening(&self) -> bool {
+        let Self::Unreachable { source, target } = self else {
+            return false;
+        };
+        let refused = source
+            .chain()
+            .filter_map(|e| e.downcast_ref::<std::io::Error>())
+            .any(|io| {
+                matches!(
+                    io.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                )
+            });
+        refused
+            || std::fs::symlink_metadata(target)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// True when the daemon answered that it does not serve the method — it
+    /// predates this `tm` (#6288): the socket form of an HTTP 404 route.
+    ///
+    /// Test: `a_method_the_daemon_lacks_is_reported_as_missing`.
+    pub fn is_method_missing(&self) -> bool {
+        let Self::Failed { source, .. } = self else {
+            return false;
+        };
+        source.downcast_ref::<MethodMissing>().is_some()
+    }
+
     /// True when the exchange outlived its timeout, on either transport.
     pub fn is_timeout(&self) -> bool {
         let Self::Failed { source, .. } = self else {
@@ -101,6 +143,19 @@ impl DaemonCallError {
                 Some(trusty_common::uds::UdsRpcError::Timeout { .. })
             )
     }
+}
+
+/// The daemon answered "method not found": it predates this `tm` (#6288).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the daemon does not serve `{method}` — it predates this tm; restart it (`tm restart`) \
+     ({message})"
+)]
+pub struct MethodMissing {
+    /// The JSON-RPC method that was asked for.
+    pub method: String,
+    /// The daemon's own message.
+    pub message: String,
 }
 
 /// A daemon request under construction, for either transport.
@@ -298,11 +353,10 @@ impl SocketCall {
                 resume_reason: None,
             }),
             (None, Some(e)) if e.code == socket_routes::CODE_METHOD_NOT_FOUND => {
-                Err(failed(anyhow::anyhow!(
-                    "the daemon does not serve `{rpc_method}` — it predates this tm; \
-                     restart it (`tm restart`) ({})",
-                    e.message
-                )))
+                Err(failed(anyhow::Error::new(MethodMissing {
+                    method: rpc_method.to_string(),
+                    message: e.message,
+                })))
             }
             (None, Some(e)) => Ok(DaemonResponse {
                 status: socket_routes::status_for_code(e.code),

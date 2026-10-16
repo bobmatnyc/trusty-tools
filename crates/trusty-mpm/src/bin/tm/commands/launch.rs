@@ -8,6 +8,7 @@
 //! `cli_parses_connect_with_dir` in `tests.rs`.
 
 use serde::Deserialize;
+use trusty_mpm::client::DaemonClient;
 
 use crate::commands::{launch_handoff::Handoff, launch_home::launch_files, project::resolve_dir};
 use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
@@ -345,8 +346,8 @@ pub(crate) async fn launch(
         id: Option<trusty_mpm::core::session::SessionId>,
     }
     let folder_name = fallback_session_name(&live_path);
-    let (tmux_name, session_id) = match client
-        .post(format!("{url}/sessions"))
+    let (tmux_name, session_id) = match DaemonClient::with_client(client.clone(), url)
+        .post("/sessions")
         .json(&serde_json::json!({
             "project": managed_workdir,
             "project_path": managed_workdir,
@@ -463,8 +464,8 @@ pub(crate) async fn launch(
     }
     if let Some(session_id) = session_id {
         if let Some(pid) = claude_pid {
-            let _ = client
-                .patch(format!("{url}/sessions/{}/pid", session_id.0))
+            let _ = DaemonClient::with_client(client.clone(), url)
+                .patch(format!("/sessions/{}/pid", session_id.0))
                 .json(&serde_json::json!({ "pid": pid }))
                 .send()
                 .await;
@@ -605,8 +606,8 @@ pub(crate) async fn connect(
         name: String,
     }
     let folder_name = fallback_session_name(&path);
-    let tmux_name = match client
-        .post(format!("{url}/api/v1/sessions/connect"))
+    let tmux_name = match DaemonClient::with_client(client.clone(), url)
+        .post("/api/v1/sessions/connect")
         .json(&serde_json::json!({
             "project": path,
             "project_path": path,
@@ -886,9 +887,10 @@ async fn find_existing_session(
     workdir: &str,
     project_dir: Option<&str>,
 ) -> Option<String> {
-    let resp = client.get(format!("{url}/sessions")).send().await.ok()?;
-    let body = resp.error_for_status().ok()?.bytes().await.ok()?;
-    first_live_session(&body, workdir, project_dir, tmux_has_session)
+    let daemon = DaemonClient::with_client(client.clone(), url);
+    let resp = daemon.get("/sessions").send().await.ok()?;
+    let body = resp.error_for_status().ok()?.text().await.ok()?;
+    first_live_session(body.as_bytes(), workdir, project_dir, tmux_has_session)
 }
 
 /// The tmux name of the first session in a `GET /sessions` body that matches

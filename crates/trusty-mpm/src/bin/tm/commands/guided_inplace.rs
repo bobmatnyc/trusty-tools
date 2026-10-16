@@ -351,8 +351,8 @@ async fn fetch_managed_session(
     url: &str,
     id: &str,
 ) -> Option<trusty_mpm::client::ManagedSessionSummary> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+    let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .get(format!("/api/v1/sessions/managed/{id}"))
         .timeout(PROBE_TIMEOUT)
         .send()
         .await
@@ -446,14 +446,15 @@ async fn reactivate_managed_session(
     caller_pane_id: Option<&str>,
     pane_confirmed_dead: bool,
 ) -> bool {
-    let mut req = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/reactivate"))
+    let mut req = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .post(format!("/api/v1/sessions/managed/{id}/reactivate"))
         .timeout(PROBE_TIMEOUT);
     if let Some(pane_id) = caller_pane_id.filter(|s| !s.is_empty()) {
         req = req.query(&[("caller_pane_id", pane_id)]);
     }
     if pane_confirmed_dead {
-        req = req.query(&[("pane_confirmed_dead", "true")]);
+        // #6288: typed, so the socket's params struct decodes it.
+        req = req.query(&[("pane_confirmed_dead", true)]);
     }
     let result = req.send().await;
     match result {

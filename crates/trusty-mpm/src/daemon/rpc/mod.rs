@@ -47,5 +47,8 @@ pub mod cli_socket;
 /// #6288 step 2a: MCP dispatch, the socket form of `POST /rpc`.
 pub mod mcp;
 
+/// #6288 client cutover: the egress verdict and the managed file view.
+pub mod client_cutover;
+
 /// #6288 step 2a: the coordinator's context snapshot and chat turn.
 pub mod coordinator;

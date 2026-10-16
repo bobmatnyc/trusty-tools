@@ -89,19 +89,12 @@ pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
     infer_subcommands = true
 )]
 pub(crate) struct Cli {
-    /// Base URL of the trusty-mpm daemon (used by the thin CLI subcommands).
+    /// Retired daemon URL: tm reaches the daemon over its unix socket (#6288).
+    /// A loopback URL is ignored with a notice; a remote URL is refused.
     ///
-    /// Why (#2487): deliberately `Option<String>` with NO `default_value`.
-    /// `None` means "the operator did not pass `--url` and `TRUSTY_MPM_URL`
-    /// is unset" — every downstream resolver (`core::discovery::
-    /// resolve_daemon_url*`) treats that, and only that, as license to fall
-    /// through to the lock file / gateway probe / compiled-in default. A
-    /// `String` with `default_value = DEFAULT_URL` made "unset" and "operator
-    /// explicitly set TRUSTY_MPM_URL to the literal default value" the exact
-    /// same string, which is what let `TRUSTY_MPM_URL=http://127.0.0.1:7880`
-    /// get silently rerouted through the trusty-console gateway proxy instead
-    /// of honoured directly (issue #2487). Matches the pattern already used
-    /// by `SessionAction::Tui::url`.
+    /// Why (#2487): deliberately `Option<String>` with NO `default_value`, so
+    /// "supplied" is told apart from "unset". #6288: the value no longer picks
+    /// a daemon; `core::discovery::explicit_url_notice` judges it.
     /// What: `Some(v)` exactly when `--url` or `TRUSTY_MPM_URL` was supplied.
     /// Test: `cli_url_flag_overrides_default`, `cli_url_flag_equal_to_default_is_still_some`.
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]

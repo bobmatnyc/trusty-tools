@@ -35,7 +35,10 @@ pub(crate) mod daemon_sandbox;
 // #9695: an address whose connect fails in the kernel, on every host.
 #[cfg(test)]
 pub(crate) mod dead_addr;
+// #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
+#[cfg(test)]
+pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;
 pub(crate) mod divert_check;

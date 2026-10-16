@@ -418,54 +418,18 @@ async fn main() -> anyhow::Result<()> {
         return commands::socket_dispatch::run(cli).await;
     }
 
-    // #2517: the top-level CLI client must carry the same bounded
-    // connect/request timeouts `DaemonClient` uses (issue #2471/#2512) — a
-    // bare `reqwest::Client::new()` here has NO timeout, so `tm status`
-    // against a daemon that accepts the TCP connection but never answers
-    // hung for the OS-level socket timeout (observed 55.63s live-verify)
-    // instead of the intended ~10s bound. `daemon_healthy` (used by `tm
-    // status`/`tm start`) and the gateway probe below both send through
-    // this SAME client, so both are now bounded too.
+    // #6288 (Architect ruling df-D46): every command reaches the daemon over
+    // its unix socket. `url` is the `unix:<path>` locator `core::discovery`
+    // resolves, which `DaemonClient::with_client` turns into a socket-only
+    // client; nothing here builds a TCP address or probes the console gateway.
+    // A loopback --url/TRUSTY_MPM_URL is ignored with a notice. A remote one is
+    // refused before dispatch, except for `tm hook`, which must never fail the
+    // user's turn (`tests/tm_hook_idle_parking.rs`) and runs with no daemon. A
+    // sandbox with no socket of its own gets the #9556 sentinel, as before.
+    // `client` stays only for the HTTP-shaped signatures; it is never sent to.
     let client = trusty_mpm::client::http_client::default_client();
-    // Resolve the daemon URL once with gateway-first probing:
-    //   1. Explicit --url/TRUSTY_MPM_URL, whenever it was actually supplied
-    //      (`cli.url` is `Option<String>` — see its doc, #2487) → use it
-    //      directly, bypassing the gateway entirely. There is no comparison
-    //      against DEFAULT_DAEMON_URL: `Some` here always means the operator
-    //      made a real choice, even one that happens to equal the default URL
-    //      verbatim. Before #2487 `cli.url` was a plain `String` with
-    //      `default_value = DEFAULT_URL`, so an explicit
-    //      `TRUSTY_MPM_URL=http://127.0.0.1:7880` was indistinguishable from
-    //      "nothing was set" and fell through to the gateway probe below —
-    //      silently rerouting every `tm` subcommand (including `tm projects
-    //      config … set`) through the trusty-console proxy on port 7788
-    //      instead of the daemon on 7880.
-    //   2. trusty-console gateway (`http://{console}/api/mpm`) if the console is
-    //      running and the daemon is reachable through it (#1849 Phase 2).
-    //   3. Lock file (daemon may bind to an ephemeral port) → default.
-    // The gateway path routes all `tm` traffic through the unified web UI while
-    // preserving full direct-fallback behaviour when the console is absent.
-    // Stale TRUSTY_MPM_URL values (#1731) are still probed before falling back.
-    //
-    // #1737 note: this top-level resolution is deliberately NOT gated on
-    // explicit-URL reachability, even though an explicit override never falls
-    // back here (step (a) of the gateway resolver returns it verbatim — see
-    // that function's doc). `tm hook` has an intentional FAIL-OPEN contract
-    // that must survive an unreachable `--url`/`TRUSTY_MPM_URL` — a Claude
-    // Code hook must never fail the user's turn because the best-effort
-    // daemon POST could not connect (see `tests/tm_hook_idle_parking.rs`,
-    // which asserts exit 0 even for `--url http://127.0.0.1:1`); a blanket
-    // probe-and-abort here would regress it. A command that instead wants
-    // "explicit URL must be reachable, error otherwise" semantics calls
-    // [`trusty_mpm::core::resolve_daemon_url_for_cli`] itself, on top of this
-    // shared resolution, before running any of its own fallback-prone logic —
-    // `commands::guided::run_guided_default` (the bare `tm` dispatch target
-    // below) does exactly that: it was the one LIVE instance of the #1737
-    // silent-fallback bug (its daemon-autostart step ignores whichever URL it
-    // is handed and always re-resolves implicitly), so it now probes
-    // `explicit` up front and errors — translated to exit 75 below — instead
-    // of silently auto-starting/reconnecting to a different daemon.
-    let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, cli.url.as_deref()).await;
+    let fail_open = matches!(cli.command, Some(Command::Hook { .. }));
+    let url = trusty_mpm::core::resolve_daemon_url_for_dispatch(cli.url.as_deref(), fail_open)?;
     // #7166: captured before `cli.command` is moved into the match below —
     // `--account` is a `global = true` flag (see `cli::Cli::account`'s doc),
     // so it binds regardless of where in the invocation it appeared.
@@ -484,9 +448,8 @@ async fn main() -> anyhow::Result<()> {
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
     // here — rather than inside the async `prune_idle` — guarantees no live async
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
-    let explicit_url = cli.url.as_deref();
     let result = match cli.command {
-        None => commands::guided::run_guided_default(&client, &url, explicit_url).await,
+        None => commands::guided::run_guided_default(&client, &url).await,
         // #6288 step 1: dispatched over the socket before URL resolution.
         Some(
             Command::Status
@@ -544,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
             single_pane,
         }) => {
             // #9556: an explicit `--url` is pinned; #6483: multipane by default.
-            let client = trusty_mpm::tui::client_for(tui_url.as_deref());
+            let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
             trusty_mpm::tui::run_initial_view_with(client, interval_ms, None, single_pane).await
         }
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
@@ -630,7 +593,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             json,
             single_pane,
-        }) => attach_cmd(&client, &url, &target, json, single_pane, explicit_url).await,
+        }) => attach_cmd(&client, &url, &target, json, single_pane).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.

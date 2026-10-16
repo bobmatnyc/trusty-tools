@@ -5,47 +5,37 @@
 //! none of them proves that the BINARY keeps `--json` a byte-for-byte echo of
 //! the daemon's body, or that a piped table — the shape every script reads —
 //! carries no escape, `NO_COLOR` or not.
-//! What: serves a fixed `GET /api/v1/sessions/managed` body holding one
-//! session per colored state, points the binary at it with `TRUSTY_MPM_URL`,
-//! and asserts on stdout. `--no-prune` keeps each listing a pure read.
+//! What: serves a fixed `mpm.managed.list` result holding one session per
+//! colored state on a mock daemon socket (#6288), points the binary at it with
+//! `TRUSTY_MPM_SOCKET`, and asserts on stdout. `--no-prune` keeps each listing
+//! a pure read.
 //! Test: this file; run with `cargo test -p trusty-mpm --test integration tm_ls_state_colors::`.
 
 use crate::common;
 
-use std::future::IntoFuture;
+/// The exact daemon body that `--json` must echo unchanged. #6288: over the
+/// socket the body is the JSON-RPC result as the transport writes it —
+/// compact, keys in order — so the fixture is written in that form.
+const BODY: &str = concat!(
+    r#"{"sessions":["#,
+    r#"{"id":"00000000-0000-0000-0000-000000000001","name":"tm-active-01","state":"active"},"#,
+    r#"{"id":"00000000-0000-0000-0000-000000000002","name":"tm-stopped-02","state":"stopped"},"#,
+    r#"{"id":"00000000-0000-0000-0000-000000000003","name":"tm-errored-03","state":"errored"}"#,
+    "]}"
+);
 
-use axum::Router;
-use axum::http::header;
-use axum::routing::get;
-
-/// The exact daemon body — spacing and key order included — that `--json`
-/// must echo unchanged.
-const BODY: &str = r#"{"sessions": [
-  {"id": "00000000-0000-0000-0000-000000000001", "name": "tm-active-01", "state": "active"},
-  {"id": "00000000-0000-0000-0000-000000000002", "name": "tm-stopped-02", "state": "stopped"},
-  {"id": "00000000-0000-0000-0000-000000000003", "name": "tm-errored-03", "state": "errored"}
-]}"#;
-
-/// Serve [`BODY`] on the managed-session list route of an ephemeral port.
+/// Serve [`BODY`] as the managed-session list on a mock daemon socket.
 async fn serve_stub() -> String {
-    let router = Router::new().route(
-        "/api/v1/sessions/managed",
-        get(|| async { ([(header::CONTENT_TYPE, "application/json")], BODY) }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind an ephemeral loopback port");
-    let addr = listener.local_addr().expect("read the bound address");
-    tokio::spawn(axum::serve(listener, router).into_future());
-    format!("http://{addr}")
+    common::socket::spawn_mock(|_| common::socket::Reply::Frame(common::socket::result_frame(BODY)))
+        .0
 }
 
 /// Run `tm ls <args>` against `url` with a piped stdout, `NO_COLOR` as given.
 fn run_ls(url: &str, args: &[&str], no_color: Option<&str>) -> std::process::Output {
     let cwd = tempfile::tempdir().expect("temp cwd");
     let mut cmd = common::tm_command();
-    cmd.env("TRUSTY_MPM_URL", url)
-        .env_remove("NO_COLOR")
+    common::socket::aim(&mut cmd, url);
+    cmd.env_remove("NO_COLOR")
         .arg("ls")
         .args(args)
         .current_dir(cwd.path())
