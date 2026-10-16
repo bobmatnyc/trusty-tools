@@ -110,19 +110,22 @@ fn a_merged_pr_is_linked_once_and_lists_the_tree_as_a_candidate() {
     assert!(tree.is_dir(), "a candidate is listed, never removed");
 }
 
+/// Branch name, the two answers, the expected candidacy and PR.
+type Case = (
+    &'static str,
+    PrAnswer,
+    BranchAnswer,
+    Option<StaleReason>,
+    Option<u64>,
+);
+
 /// #8994 S2c criterion 5: only an answered fact makes a candidate. A gone
 /// branch with nothing unpushed is one; a present branch, a branch with no
 /// upstream, unpushed commits, an open PR, and any unresolvable answer are not.
 #[test]
 fn only_an_answered_fact_makes_a_stale_candidate() {
     let fx = Fixture::new();
-    let cases: Vec<(
-        &str,
-        PrAnswer,
-        BranchAnswer,
-        Option<StaleReason>,
-        Option<u64>,
-    )> = vec![
+    let cases: Vec<Case> = vec![
         (
             "gone",
             PrAnswer::NoPr,
