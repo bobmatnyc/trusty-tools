@@ -7,9 +7,10 @@
 //! `seed_shared_embedder_with_mock()` test helper.
 //! Test: `shared_embedder_is_singleton` in retrieval::tests.
 
+use crate::engine::EngineError;
 use crate::engine::embed::{Embedder, FastEmbedder};
 use crate::engine::timeouts;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -59,30 +60,58 @@ pub(super) static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> =
 /// bounded by `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s). In test
 /// builds, callers should first call `seed_shared_embedder_with_mock()` so
 /// the cell is pre-populated with `MockEmbedder` and no model download is
-/// attempted.
-/// Test: `shared_embedder_is_singleton`; timeout path covered by
-///       `timeout_wrapper_fires_on_embedder_init` in retrieval::tests; the
+/// attempted. A failed or timed-out init is `EngineError::Embed` (#9278).
+/// Test: `shared_embedder_is_singleton`; the `Embed` mapping by
+///       `an_embedder_init_failure_is_engine_error_embed` (via `init_in`); the
 ///       CoreML hang auto-recovery decision logic is covered by the
 ///       `decide_fallback` unit tests in `embedder::fast_embedder`.
-pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
-    let timeout = timeouts::embedder_init_timeout();
-    SHARED_EMBEDDER
-        .get_or_try_init(|| async {
-            let e = tokio::time::timeout(timeout, FastEmbedder::new())
+pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>, EngineError> {
+    init_in(
+        &SHARED_EMBEDDER,
+        timeouts::embedder_init_timeout(),
+        || async {
+            let e = FastEmbedder::new()
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "FastEmbedder cold init timed out after {:?} (issue #906); \
-                         increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if the model \
-                         needs more time on this host",
-                        timeout
-                    )
-                })?
                 .context("init shared FastEmbedder")?;
             Ok::<Arc<dyn Embedder + Send + Sync>, anyhow::Error>(Arc::new(e))
-        })
-        .await
-        .cloned()
+        },
+    )
+    .await
+}
+
+/// Resolve `cell`, running `init` under `timeout` when it is still empty.
+///
+/// Why (#9278 T3c-2): `SHARED_EMBEDDER` is process-wide and tests seed it, so
+/// no test could reach the init-failure arm of [`shared_embedder`]. Taking the
+/// cell and the init as arguments lets a test drive that arm with a local cell
+/// and a failing init, offline, and pin the mapping to `EngineError::Embed`.
+/// What: `get_or_try_init` with `init` bounded by `timeout`; a failed or
+/// timed-out init is `EngineError::Embed` with the whole chain's text.
+/// Test: `an_embedder_init_failure_is_engine_error_embed`,
+/// `an_embedder_init_timeout_is_engine_error_embed`.
+pub(super) async fn init_in<F, Fut>(
+    cell: &OnceCell<Arc<dyn Embedder + Send + Sync>>,
+    timeout: std::time::Duration,
+    init: F,
+) -> Result<Arc<dyn Embedder + Send + Sync>, EngineError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Arc<dyn Embedder + Send + Sync>>>,
+{
+    cell.get_or_try_init(|| async {
+        tokio::time::timeout(timeout, init()).await.map_err(|_| {
+            anyhow::anyhow!(
+                "FastEmbedder cold init timed out after {:?} (issue #906); \
+                     increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if the model \
+                     needs more time on this host",
+                timeout
+            )
+        })?
+    })
+    .await
+    .cloned()
+    // #9278 T3c-2: typed for callers outside the crate.
+    .map_err(EngineError::embed)
 }
 
 /// Whether the process-wide shared embedder has been initialised.

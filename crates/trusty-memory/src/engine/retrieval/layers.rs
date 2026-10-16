@@ -46,10 +46,11 @@ use super::handle::PalaceHandle;
 use super::id_tokens::query_id_tokens;
 use super::scope::{RecallScope, scope_admits};
 use super::types::{CrossPalaceRecall, CrossPalaceResult, RecallResult};
+use crate::engine::EngineError;
 use crate::engine::dream::extract_keywords;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, DrawerType, RoomType};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -749,29 +750,35 @@ pub(crate) async fn recall_deep_scoped(
 /// Why: CLI/MCP often want a one-shot "recall" without managing an embedder
 /// handle; this convenience binds the embedder lifecycle to the call.
 /// What: Initializes a `FastEmbedder` (which warms on first run), then
-/// delegates to `recall`.
-/// Test: `cli_remember_and_recall` integration test.
+/// delegates to `recall`. An embedder that cannot be built is
+/// `EngineError::Embed`; a recall fault maps through
+/// `EngineError::from_internal` (#9278).
+/// Test: `cli_remember_and_recall` integration test,
+/// `the_embedder_and_read_paths_return_engine_error`.
 pub async fn recall_with_default_embedder(
     handle: &PalaceHandle,
     query: &str,
     top_k: usize,
-) -> Result<Vec<RecallResult>> {
-    let embedder = shared_embedder()
+) -> std::result::Result<Vec<RecallResult>, EngineError> {
+    // #9278 T3c-2: `Embed` as-is; Q7 would drop a context prefix on it.
+    let embedder = shared_embedder().await?;
+    recall(handle, embedder.as_ref(), query, top_k)
         .await
-        .context("acquire shared embedder for recall")?;
-    recall(handle, embedder.as_ref(), query, top_k).await
+        .map_err(EngineError::from_internal)
 }
 
-/// Deep recall with the shared `FastEmbedder` (issue #57).
+/// Deep recall with the shared `FastEmbedder` (issue #57); errors as
+/// [`recall_with_default_embedder`].
 pub async fn recall_deep_with_default_embedder(
     handle: &PalaceHandle,
     query: &str,
     top_k: usize,
-) -> Result<Vec<RecallResult>> {
-    let embedder = shared_embedder()
+) -> std::result::Result<Vec<RecallResult>, EngineError> {
+    // #9278 T3c-2: as `recall_with_default_embedder`.
+    let embedder = shared_embedder().await?;
+    recall_deep(handle, embedder.as_ref(), query, top_k)
         .await
-        .context("acquire shared embedder for recall_deep")?;
-    recall_deep(handle, embedder.as_ref(), query, top_k).await
+        .map_err(EngineError::from_internal)
 }
 
 /// Fan out a recall across every palace handle and merge the results.
@@ -913,6 +920,8 @@ pub(crate) async fn recall_across_palaces_with_default_embedder(
     top_k: usize,
     deep: bool,
 ) -> Result<Vec<CrossPalaceResult>> {
+    // #9278 T3c-2: the only `Context` user left here is test-only.
+    use anyhow::Context as _;
     let embedder = shared_embedder()
         .await
         .context("acquire shared embedder for recall_across_palaces")?;

@@ -276,7 +276,7 @@ impl SmMemory {
             .await
             .map_err(|source| SmMemoryError::Operation {
                 op: "recall",
-                source,
+                source: source.into(),
             })
     }
 
@@ -294,7 +294,7 @@ impl SmMemory {
             .await
             .map_err(|source| SmMemoryError::Operation {
                 op: "recall_deep",
-                source,
+                source: source.into(),
             })
     }
 

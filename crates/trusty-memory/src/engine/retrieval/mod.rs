@@ -71,6 +71,8 @@ mod chunk_split_tests;
 #[cfg(test)]
 mod embed_store_tests;
 #[cfg(test)]
+mod embedder_tests;
+#[cfg(test)]
 mod l1_live_tests;
 #[cfg(test)]
 mod op_budget_remember_tests;

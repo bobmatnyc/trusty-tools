@@ -19,6 +19,7 @@ use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
 use super::semantic::{SemanticPassOutcome, semantic_consolidation_pass};
 use super::settled;
+use crate::engine::EngineError;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::PalaceId;
 use crate::engine::registry::PalaceRegistry;
@@ -273,8 +274,17 @@ impl Dreamer {
     /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`,
     /// `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`,
     /// `settled_corpus_tests::a_failed_merge_persist_does_not_settle_the_palace`,
-    /// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`.
-    pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
+    /// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`,
+    /// `the_embedder_and_read_paths_return_engine_error`.
+    ///
+    /// #9278: a failed pass maps through `EngineError::from_internal`. Only an
+    /// embedder that could not be built or initialised, or an input over the
+    /// chunk limit, is `EngineError::Embed`; an inference failure or a timed-out
+    /// embed during dedup is `EngineError::Other`.
+    pub async fn dream_cycle(
+        &self,
+        handle: &Arc<PalaceHandle>,
+    ) -> std::result::Result<DreamStats, EngineError> {
         // #7106: wait for a slot in the process-wide bound before doing any
         // work. The daemon runs one loop per resident palace and they all woke
         // together, so the peak footprint was one cycle's working set times
@@ -295,7 +305,11 @@ impl Dreamer {
         };
         // Counted independently of the permit on purpose — see `DreamCycleGauge`.
         let _in_flight = DreamCycleGauge::enter();
-        let outcome = self.run_claimed_cycle(handle).await;
+        // #9278 T3c-2: typed for callers outside the crate.
+        let outcome = self
+            .run_claimed_cycle(handle)
+            .await
+            .map_err(EngineError::from_internal);
         // #8246: report failed cycles too — dedup persists each merge before a
         // later pass can fail, so an `Err` cycle may still have changed text.
         if let Some(hook) = &self.after_cycle {
@@ -508,7 +522,7 @@ fn changed_nothing(stats: &DreamStats) -> bool {
 /// logs a `warn` naming the palace. Pure logging — no return value.
 /// Test: exercised by every dream-loop test that spawns `start_with_shutdown`.
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
-fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
+fn log_cycle_outcome(palace_id: &PalaceId, outcome: std::result::Result<DreamStats, EngineError>) {
     match outcome {
         Ok(stats) => tracing::info!(
             palace = %palace_id,

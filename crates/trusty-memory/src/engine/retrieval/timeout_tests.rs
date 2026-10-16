@@ -64,6 +64,10 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("shared_embedder() must return Err when init times out, got Ok"),
         };
+        assert!(
+            matches!(err, crate::engine::EngineError::Embed(_)),
+            "{err:?}"
+        );
         let msg = format!("{err:#}");
         assert!(
             msg.contains("timed out") || msg.contains("FastEmbedder"),

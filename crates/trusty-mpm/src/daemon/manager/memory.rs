@@ -520,7 +520,7 @@ mod live {
                 .await
                 .map_err(|source| PortfolioMemoryError::Operation {
                     op: "recall",
-                    source,
+                    source: source.into(),
                 })
         }
 
