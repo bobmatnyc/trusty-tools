@@ -312,6 +312,9 @@ pub async fn serve_with_shutdown(
     // #8451: evict idle builder-slot dirs once their volume passes its budget.
     services::slot_pool_evict::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
     project_adoption::spawn_startup_marker_migration(&state); // #8511
+    // #9923: the Socket Mode inbound source; it holds no socket until ready.
+    #[cfg(feature = "channels")]
+    managed_routes::socket_mode::spawn(Arc::clone(&state), cancel.child_token());
 
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
     // default host spawns nothing. A malformed section is reported here and

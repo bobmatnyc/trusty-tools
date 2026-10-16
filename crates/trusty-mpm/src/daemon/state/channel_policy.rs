@@ -5,12 +5,14 @@
 //! What: [`DaemonState::channel_policy`] builds the snapshot on first use
 //! over `config.yaml` under [`DaemonState::user_home`]. [`ChannelHold`] groups
 //! the daemon's channel state (this snapshot, the #8433 P2 question table,
-//! the #9873 inbound rate windows) behind one `DaemonState` field.
+//! the #9873 inbound rate windows, the #9923 event claim log) behind one
+//! `DaemonState` field.
 //! Test: `daemon_state_holds_snapshot_under_its_user_home`.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::channels::inbound::InboundLimiter;
+use crate::channels::question_table::claims::{ClaimError, ClaimHold, ClaimStore, claims_path};
 use crate::channels::snapshot::DaemonPolicySnapshot;
 
 use super::DaemonState;
@@ -27,6 +29,8 @@ pub(crate) struct ChannelHold {
     pub(super) questions: super::question_table::QuestionTableHold,
     // #9873 Q7: the inbound rate windows, process-local.
     inbound_limiter: InboundLimiter,
+    // #9923 Q3: the Socket Mode event claim log, opened on first use.
+    inbound_claims: ClaimHold,
 }
 
 impl DaemonState {
@@ -47,5 +51,15 @@ impl DaemonState {
     /// by a restart.
     pub fn inbound_limiter(&self) -> &InboundLimiter {
         &self.channels.inbound_limiter
+    }
+
+    /// The daemon's inbound event claim log (#9923 Q3), opened on first
+    /// use and reopened when poisoned; the open prunes claims past
+    /// retention (Q5). Blocking: async callers use `spawn_blocking`.
+    ///
+    /// Test: `daemon_claim_store_opens_under_its_user_home`.
+    pub fn inbound_claims(&self) -> Result<Arc<ClaimStore>, ClaimError> {
+        let home = self.user_home().ok_or(ClaimError::NoHome)?;
+        self.channels.inbound_claims.get(&claims_path(&home))
     }
 }

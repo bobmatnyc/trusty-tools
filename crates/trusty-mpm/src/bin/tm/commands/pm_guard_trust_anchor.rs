@@ -621,7 +621,8 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session. \
      `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), \
-     as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815).";
+     as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815), and \
+     `channels/inbound_claims.jsonl` and its `.lock`, `.torn` and `.prune` files (#9923).";
 
 /// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {

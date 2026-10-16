@@ -184,7 +184,10 @@ cli = ["daemon", "tui", "telegram", "slack", "channels"]
 
 # `channels` gates the trusty-channels route policy: the `tm doctor` channel
 # rows (#8454 S2c) and the daemon's policy snapshot (#8433 P1). No sending.
-channels = ["dep:trusty-channels"]
+# #9923: the Socket Mode inbound source needs the WebSocket client and a
+# cancellation token.
+channels = ["dep:trusty-channels", "dep:tokio-tungstenite", "dep:futures-util",
+            "dep:tokio-util"]
 
 # `daemon` gates the daemon library module and the `daemon` subcommand.
 # Activating `daemon` also pulls in `mcp` (the daemon implements OrchestratorBackend).

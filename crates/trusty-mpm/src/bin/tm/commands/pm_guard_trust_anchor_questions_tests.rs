@@ -98,6 +98,33 @@ fn anchor_denies_a_link_planted_at_the_torn_file() {
     }
 }
 
+/// 🔴 #9923 Q3: the inbound event claim log, its lock, torn and prune
+/// files are sealed like the question table: no session may write, move,
+/// delete or plant a link at them, the Architect included.
+#[test]
+fn anchor_denies_writes_to_the_inbound_claim_log() {
+    let fx = with_table();
+    let claims = "~/.trusty-tools/trusty-mpm/channels/inbound_claims.jsonl";
+    let log = fx
+        .home
+        .join(".trusty-tools/trusty-mpm/channels/inbound_claims.jsonl");
+    std::fs::write(&log, "").expect("log");
+    std::fs::write(log.with_extension("jsonl.lock"), "").expect("lock");
+    for env in [pm_env(&fx), architect_env(&fx)] {
+        for suffix in ["", ".lock", ".torn", ".prune"] {
+            let path = format!("{claims}{suffix}");
+            for command in [
+                format!("echo x >> {path}"),
+                format!("rm -f {path}"),
+                format!("mv /tmp/forged {path}"),
+                format!("ln -sf /tmp/forged {path}"),
+            ] {
+                denied(&fx, &env, &command);
+            }
+        }
+    }
+}
+
 /// 🔴 #9815 (r-078): with no taint live, a write the guard cannot place
 /// (`xargs cp`) is denied to the Architect, because it could land on the
 /// table.

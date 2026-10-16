@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use trusty_channels::policy::{Channel, parse_host};
+use trusty_channels::policy::{Channel, HostChannel, parse_host};
 use trusty_common::credential_registry::env_var_for;
 use trusty_common::credentials::Secret;
 
@@ -188,19 +188,30 @@ fn code_of(raw: &str) -> String {
 /// is set. Blocking.
 /// Test: `bot_ref_is_read_from_the_host_ceiling`.
 pub fn bot_ref(home: Option<&Path>) -> Result<String, String> {
+    host_slack(home)?
+        .bot_ref()
+        .map(str::to_owned)
+        .ok_or_else(|| "the slack connection names no bot_ref".to_owned())
+}
+
+/// The host ceiling's enabled Slack channel under `home`.
+///
+/// What: reads and parses the host file; `Err` naming the fault when the
+/// file is missing or refused, or Slack is absent or disabled. Blocking.
+/// #9923: shared by [`bot_ref`] and the Socket Mode `app_ref` read.
+/// Test: `bot_ref_is_read_from_the_host_ceiling`,
+/// `daemon_holds_app_token_via_app_ref_only`.
+pub fn host_slack(home: Option<&Path>) -> Result<HostChannel, String> {
     let home = home.ok_or("no home directory, so no host ceiling")?;
     let path = trusty_common::crate_config::crate_config_path_at(home, "trusty-mpm");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("host ceiling {} unreadable: {}", path.display(), e.kind()))?;
     let ceiling = parse_host(&text, Some(home)).map_err(|e| e.to_string())?;
-    let slack = ceiling
+    ceiling
         .channel(Channel::Slack)
         .filter(|c| c.enabled())
-        .ok_or("slack is not enabled in the host ceiling")?;
-    slack
-        .bot_ref()
-        .map(str::to_owned)
-        .ok_or_else(|| "the slack connection names no bot_ref".to_owned())
+        .cloned()
+        .ok_or_else(|| "slack is not enabled in the host ceiling".to_owned())
 }
 
 /// Resolve `bot_ref`'s token through the credential registry.

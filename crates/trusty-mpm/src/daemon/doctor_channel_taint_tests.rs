@@ -415,3 +415,48 @@ fn doctor_row_is_unknown_when_taint_cannot_be_listed() {
         );
     }
 }
+
+/// 🔴 #9923 Q4: a Slack event claimed and never settled is a `Fail` naming
+/// the event; once settled, the row is `Ok`.
+#[test]
+fn claimed_never_settled_event_is_a_doctor_fail() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = channels_taint::taint_dir(home.path());
+    std::fs::create_dir_all(&dir).expect("taint dir");
+    let log = dir.with_file_name("inbound_claims.jsonl");
+    let at = (chrono::Utc::now() - chrono::TimeDelta::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let claimed =
+        format!("{{\"v\":1,\"kind\":\"claimed\",\"event_id\":\"EvLost1\",\"at\":\"{at}\"}}\n");
+    std::fs::write(&log, &claimed).expect("claim log");
+    let live = HashSet::new();
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("EvLost1"), "{}", row.message);
+    let done = format!(
+        "{{\"v\":1,\"kind\":\"done\",\"event_id\":\"EvLost1\",\"at\":\"{at}\",\"outcome\":\"delivered\"}}\n"
+    );
+    std::fs::write(&log, format!("{claimed}{done}")).expect("claim log");
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// 🔴 #9923: a claim settled as `act_timed_out` is a `Fail` naming the
+/// event: its effect did not finish, so the answer may be lost.
+#[test]
+fn timed_out_event_is_a_doctor_fail() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = channels_taint::taint_dir(home.path());
+    std::fs::create_dir_all(&dir).expect("taint dir");
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let lines = format!(
+        "{{\"v\":1,\"kind\":\"claimed\",\"event_id\":\"EvSlow1\",\"at\":\"{at}\"}}\n\
+         {{\"v\":1,\"kind\":\"done\",\"event_id\":\"EvSlow1\",\"at\":\"{at}\",\
+         \"outcome\":\"act_timed_out\"}}\n"
+    );
+    std::fs::write(dir.with_file_name("inbound_claims.jsonl"), lines).expect("claim log");
+    let row = channel_taint_row(&dir, &HashSet::new());
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("EvSlow1"), "{}", row.message);
+    assert!(row.message.contains("did not finish"), "{}", row.message);
+}
