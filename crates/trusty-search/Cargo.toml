@@ -270,7 +270,6 @@ tokio-stream = { version = "0.1", features = ["sync", "time"] }
 tokio-util = { workspace = true }
 async-trait = "0.1"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 eventsource-stream = "0.2"
 futures = "0.3"

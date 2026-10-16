@@ -154,7 +154,8 @@ fn the_ratchet_detects_a_writer_outside_the_unnamed_group() {
 /// Why: the reindex finish (`persist_indexed_head_sha`), the reconcile stamp,
 /// the first-query stamp (`update_last_queried_unix`), the registration and
 /// delete handlers and the boot restore paths all patch `indexes.toml` through
-/// `data_dir()`. The router entry points reach every handler.
+/// `data_dir()`. The socket's `build_router` (the `RpcRouter`) reaches every
+/// method.
 /// What: matched as whole identifiers in test code, so a call, a `use` and a
 /// path all count; `upsert_index_registry_entry_at` does not count as
 /// `upsert_index_registry_entry`, because an explicit path never reads env.
@@ -186,7 +187,6 @@ const REGISTRY_REACHING: &[&str] = &[
     "unregister_with_map",
     "relocate_index_handler",
     "relocate_index_report",
-    "add_index_roots_handler",
     "add_index_roots_report",
     "patch_index_config_handler",
     "patch_index_config_report",
@@ -204,7 +204,6 @@ const REGISTRY_REACHING: &[&str] = &[
     "remove_index_registry_entry",
     "remove_index_registry_entries",
     "build_router",
-    "build_router_on",
 ];
 
 /// Attributes that put a test in the unnamed `serial_test` group.

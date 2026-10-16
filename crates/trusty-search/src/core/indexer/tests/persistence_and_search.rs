@@ -995,7 +995,7 @@ async fn test_get_embedding_returns_some_after_indexing() {
 }
 
 /// Issue #484 — `chunk_content_by_id` is the escape hatch used by
-/// `search_similar_handler` when the embedding LRU cache misses.
+/// `search_similar_report` when the embedding LRU cache misses.
 ///
 /// Why: the handler falls back from `get_embedding` (LRU cache) to
 /// `chunk_content_by_id` + `embed_text` so it can produce results for

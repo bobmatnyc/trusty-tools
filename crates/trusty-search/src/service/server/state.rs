@@ -115,12 +115,10 @@ pub struct SearchAppState {
     /// The ONE admission limiter gating the interactive query surface
     /// (#6285 slice 3).
     ///
-    /// Why here rather than a local in `build_router_on`: the socket serves the
-    /// same six query methods the axum `interactive_limited` group serves, and
-    /// a limiter built per router would give each door its own N permits — the
-    /// daemon would admit 2N concurrent searches while both doors reported
-    /// obeying `TRUSTY_MAX_CONCURRENT_REQUESTS=N`. That is the #2845 storm the
-    /// limiter exists to stop, reopened by the second transport.
+    /// Why here rather than a local in a router: a limiter built per router
+    /// would give each router its own N permits — the daemon would admit 2N
+    /// concurrent searches while reporting `TRUSTY_MAX_CONCURRENT_REQUESTS=N`.
+    /// That is the #2845 storm the limiter exists to stop.
     /// What: `ConcurrencyLimiter::from_env`, resolved once per state. Both
     /// routers clone this `Arc`; neither builds its own.
     /// Test: `queries_are_refused_when_the_shared_limiter_is_saturated`.
@@ -287,7 +285,7 @@ pub struct SearchAppState {
     /// would make a 2 s health poll do unbounded I/O; instead a background
     /// task recomputes it every 10 s and stores the result here so the
     /// handler reads it lock-free.
-    /// What: an `AtomicU64` updated by the task spawned in `build_router`.
+    /// What: an `AtomicU64` updated by the task `spawn_daemon_tickers` starts.
     /// `0` until the first walk completes (typically within 10 s of startup).
     /// Test: `health_includes_resource_fields` asserts the field is present.
     pub disk_bytes: Arc<std::sync::atomic::AtomicU64>,

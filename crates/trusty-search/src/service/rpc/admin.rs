@@ -26,9 +26,8 @@
 //! | `search.registry.orphans` | `GET /registry/orphans` | free |
 //! | `search.admin.stop` | `POST /admin/stop` | free |
 //!
-//! All five HTTP routes sit in `service::server::build_router_on`'s `free`
-//! group — no admission limiter, no query deadline — and all five methods copy
-//! that. The two config writes are `free` on HTTP for the same reason
+//! All five HTTP routes sat in the retired axum router's `free` group — no
+//! admission limiter, no query deadline — and all five methods copy that. The two config writes are `free` on HTTP for the same reason
 //! `DELETE /indexes/{id}` is (slice 4's lane table): they are registry-level,
 //! and putting them behind the limiter here would make a config edit queue
 //! behind a running reindex that the HTTP route sails past. `search.admin.stop`
@@ -175,12 +174,12 @@ impl LogsTail {
 /// kept beside `reads`, `queries`, `writes` and `streams` so each slice adds one
 /// file rather than editing one.
 /// What: one `typed` registration per method, each cloning the `Arc` handle to
-/// the shared [`SearchAppState`] and running the SAME `*_report` core its axum
-/// handler wraps. [`METHOD_REGISTRY_ORPHANS`] takes no state at all — it reads
-/// the registry file, which is the entire reason #6371 added the route.
+/// the shared [`SearchAppState`] and running its `*_report` core.
+/// [`METHOD_REGISTRY_ORPHANS`] takes no state at all — it reads the registry
+/// file, which is the entire reason #6371 added the route.
 /// Test: `rpc_router_registers_every_documented_method` in `socket_tests.rs`;
 /// the `*_over_the_socket_matches_the_http_body` cases and their failure-arm
-/// siblings drive each registration against its HTTP twin.
+/// siblings drive each registration against its `*_report` core.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     use crate::service::orphan_report::registry_orphans_report;
     use crate::service::server::{

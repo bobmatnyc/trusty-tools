@@ -45,7 +45,7 @@
 //! them in the first place.
 //!
 //! Test: `reads_tests.rs` — one `*_over_the_socket_matches_the_http_body` per
-//! family, driving the real axum router and the real socket router against one
+//! family, driving the `*_report` core and the real socket router against one
 //! shared state.
 //!
 //! [`register`]: crate::service::rpc::reads::register
@@ -137,14 +137,12 @@ pub struct IndexScoped<P> {
 /// the JSON-RPC envelope and the accept loop are all
 /// [`trusty_common::uds::server`]'s.
 /// What: one `typed` registration per method, each cloning the `Arc` handle to
-/// the shared [`SearchAppState`] — the daemon's ONE state, the same value the
-/// axum router was built on, so the two transports read one registry rather
-/// than two copies of it. Every fallible body returns the `(status, body)` pair
-/// its axum handler returns, and [`rpc_error_from_http`] turns that into the
-/// error frame, so a refusal cannot be one thing over HTTP and another here.
+/// the shared [`SearchAppState`] — the daemon's ONE state, the one the tickers
+/// mutate. Every fallible body returns the `(status, body)` pair its `*_report`
+/// core returns, and [`rpc_error_from_http`] turns that into the error frame.
 /// Test: `rpc_router_registers_every_documented_method` in `socket_tests.rs`;
 /// the `*_over_the_socket_matches_the_http_body` cases drive each registration
-/// against its HTTP twin.
+/// against its `*_report` core.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     /// One method whose body cannot fail.
     macro_rules! ok {
