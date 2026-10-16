@@ -6,7 +6,8 @@
 //! This file is that record: `~/.trusty-mpm/worktrees.jsonl`, one JSON event
 //! per line, written by every tm provisioning route and by the backfill.
 //!
-//! What: [`LedgerEvent`] (`created` / `observed` / `measured` / `removed`),
+//! What: [`LedgerEvent`] (`created` / `observed` / `measured` / `pr_linked` /
+//! `removed`),
 //! [`WorktreeLedger`] (append and read), and the submodules that build on it —
 //! [`fold`] (current state as a PURE fold over the events), [`record`] (the
 //! provisioning hook and the size measurement) and [`backfill`] (registering
@@ -25,7 +26,12 @@
 //! write) is counted in [`LedgerRead::malformed`], never silently dropped: the
 //! next appender starts its first line with `\n` so nothing is concatenated
 //! onto the fragment, and the read parses each line's bytes on its own.
-//! Test: `worktree_ledger::tests`.
+//!
+//! Format compatibility (#8994 S2c): `pr_linked` is the one event kind added
+//! after slice 1. A binary built before it fails to parse that line, counts it
+//! in [`LedgerRead::malformed`] and folds every other line unchanged; a ledger
+//! without it folds exactly as before.
+//! Test: `worktree_ledger::tests`, `fold::format_tests`.
 
 pub mod backfill;
 pub mod bash_worktree;
@@ -34,6 +40,11 @@ pub mod fold;
 pub mod hook_ingest;
 pub mod reconcile;
 pub mod record;
+// #8994 S2c: `removed` from a removal route, on evidence only.
+pub mod removal_evidence;
+// #8994 S2c: PR numbers and stale candidates for `tm worktrees`.
+pub mod stale;
+pub mod stale_probe;
 
 #[cfg(test)]
 mod tests;
@@ -100,8 +111,15 @@ pub enum EventKind {
         /// Bytes allocated on disk, as `du` counts them.
         bytes: u64,
     },
+    /// The pull request for the tree's branch became known (#8994 S2c).
+    ///
+    /// A binary older than S2c reads this line as malformed and skips it.
+    PrLinked {
+        /// The pull request number.
+        pr: u64,
+    },
     /// The tree is gone from disk and from `git worktree list`
-    /// ([`reconcile`] writes it).
+    /// ([`reconcile`] and [`removal_evidence`] write it).
     Removed,
 }
 

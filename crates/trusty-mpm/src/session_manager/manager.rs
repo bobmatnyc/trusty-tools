@@ -361,6 +361,10 @@ pub struct SessionManager {
     /// #8433: the channel taint directory a session end retires from.
     /// Installed by the daemon only; see `channel_taint.rs`.
     pub(crate) taint_dir: std::sync::OnceLock<PathBuf>,
+    /// #8994 S2c: where a decommission's worktree removal is recorded.
+    /// Installed by the daemon only; see `decommission_ledger.rs`.
+    pub(crate) removal_recorder:
+        std::sync::OnceLock<crate::core::worktree_ledger::removal_evidence::RemovalRecorder>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -408,6 +412,7 @@ impl SessionManager {
             resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             claude_registry: std::sync::OnceLock::new(),
             taint_dir: std::sync::OnceLock::new(),
+            removal_recorder: std::sync::OnceLock::new(),
         })
     }
 

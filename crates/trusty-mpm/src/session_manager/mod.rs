@@ -18,6 +18,8 @@ pub mod decommission;
 pub mod decommission_force;
 // #8663: the content gates on decommission's two `remove_dir_all` routes.
 mod decommission_owned;
+// #8994 S2c: a decommission's worktree removal, recorded in the ledger.
+mod decommission_ledger;
 // #9841: answer idempotency — decision ids and the claim.
 pub mod decision;
 pub mod dedup;

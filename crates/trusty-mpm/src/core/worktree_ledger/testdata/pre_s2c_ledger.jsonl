@@ -1,0 +1,17 @@
+{"ts":"2026-10-01T00:00:01Z","path":"/r/alpha/.worktrees/a","event":"created","repo":"/r/alpha","branch":"session/a","origin":"tm_daemon","session":"s-1"}
+{"ts":"2026-10-01T00:00:02Z","path":"/r/alpha/.worktrees/b","event":"created","repo":"/r/alpha","origin":"backfill"}
+{"ts":"2026-10-01T00:00:03Z","path":"/r/alpha/.claude/worktrees/agent-c","event":"observed","repo":"/r/alpha","branch":"worktree-agent-c","origin":"agent_isolation","session":"sess-2"}
+{"ts":"2026-10-01T00:00:04Z","path":"/r/beta/.claude/worktrees/agent-d","event":"observed","repo":"/r/beta","origin":"agent_isolation"}
+{"ts":"2026-10-01T00:00:05Z","path":"/r/beta/.worktrees/e","event":"observed","repo":"/r/beta","branch":"fix/e","origin":"git_command","session":"sess-3"}
+{"ts":"2026-10-01T00:00:06Z","path":"/r/alpha/.worktrees/a","event":"measured","bytes":100}
+{"ts":"2026-10-01T00:00:07Z","path":"/r/alpha/.worktrees/a","event":"measured","bytes":250}
+{"ts":"2026-10-01T00:00:08Z","path":"/r/alpha/.worktrees/z","event":"measured","bytes":999}
+{"ts":"2026-10-01T00:00:09Z","path":"/r/alpha/.worktrees/a","event":"created","repo":"/r/other","origin":"tm_cli"}
+{"ts":"2026-10-01T00:00:10Z","path":"/r/alpha/.worktrees/b","event":"removed"}
+{"ts":"2026-10-01T00:00:11Z","path":"/r/alpha/.worktrees/b","event":"measured","bytes":5}
+{"ts":"2026-10-01T00:00:12Z","path":"/r/alpha/.worktrees/b","event":"created","repo":"/r/alpha","branch":"main2","origin":"backfill"}
+{"ts":"2026-10-01T00:00:13Z","path":"/r/beta/.claude/worktrees/agent-d","event":"removed"}
+
+{"ts":"2026-10-01T00:00:14Z","path":"/r/beta/.worktrees/f","event":"crea
+{"ts":"2026-10-01T00:00:15Z","path":"/r/beta/.worktrees/g","event":"some_future_kind"}
+{"ts":"2026-10-01T00:00:17Z","path":"/r/alpha/.claude/worktrees/agent-c","event":"measured","bytes":4096}

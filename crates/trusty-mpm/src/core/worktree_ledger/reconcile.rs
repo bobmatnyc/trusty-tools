@@ -115,7 +115,9 @@ fn directory_gone(path: &Path) -> bool {
 }
 
 /// Every path `repo`'s `git worktree list` names, or why it cannot be trusted.
-fn listed_keys(repo: &Path) -> Result<BTreeSet<PathBuf>, String> {
+///
+/// #8994 S2c: shared with `removal_evidence`, so both apply one listing rule.
+pub(crate) fn listed_keys(repo: &Path) -> Result<BTreeSet<PathBuf>, String> {
     if directory_gone(repo) {
         return Err("repository directory is gone".to_string());
     }

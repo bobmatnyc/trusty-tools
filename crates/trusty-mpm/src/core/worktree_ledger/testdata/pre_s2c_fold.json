@@ -1,0 +1,46 @@
+[
+  {
+    "path": "/r/alpha/.claude/worktrees/agent-c",
+    "repo": "/r/alpha",
+    "branch": "worktree-agent-c",
+    "origin": "agent_isolation",
+    "observed_only": true,
+    "session": "sess-2",
+    "first_seen": "2026-10-01T00:00:03Z",
+    "bytes": 4096,
+    "measured_at": "2026-10-01T00:00:17Z"
+  },
+  {
+    "path": "/r/alpha/.worktrees/a",
+    "repo": "/r/alpha",
+    "branch": "session/a",
+    "origin": "tm_daemon",
+    "observed_only": false,
+    "session": "s-1",
+    "first_seen": "2026-10-01T00:00:01Z",
+    "bytes": 250,
+    "measured_at": "2026-10-01T00:00:07Z"
+  },
+  {
+    "path": "/r/alpha/.worktrees/b",
+    "repo": "/r/alpha",
+    "branch": "main2",
+    "origin": "backfill",
+    "observed_only": false,
+    "session": null,
+    "first_seen": "2026-10-01T00:00:12Z",
+    "bytes": null,
+    "measured_at": null
+  },
+  {
+    "path": "/r/beta/.worktrees/e",
+    "repo": "/r/beta",
+    "branch": "fix/e",
+    "origin": "git_command",
+    "observed_only": true,
+    "session": "sess-3",
+    "first_seen": "2026-10-01T00:00:05Z",
+    "bytes": null,
+    "measured_at": null
+  }
+]

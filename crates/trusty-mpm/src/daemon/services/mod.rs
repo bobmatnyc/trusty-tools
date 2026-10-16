@@ -44,6 +44,8 @@ pub mod tmux_service;
 pub mod worktree_command_ingest;
 // #8994 S2a: records agent-isolation trees in the worktree ledger from hooks.
 pub mod worktree_ledger_ingest;
+// #8994 S2c: `removed` from the three removal routes, on evidence only.
+pub(crate) mod worktree_removal_ledger;
 
 // #7965: the cross-sweep latency contract — a running sweep never pushes a
 // request past the client's discovery budget. It spans both sweeps, so it lives

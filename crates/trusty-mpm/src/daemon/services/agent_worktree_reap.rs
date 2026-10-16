@@ -507,6 +507,10 @@ async fn reap_and_record(
         tokio::task::spawn_blocking(move || reap_worktree(&removal_path, &reap_agent_id, &in_use))
             .await
             .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
+    if outcome == ReapOutcome::Removed {
+        // #8994 S2c: only a removal this reap made; the ledger re-checks it.
+        super::worktree_removal_ledger::record_reaped(state, &path).await;
+    }
     match &outcome {
         ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
             state.mutate_delegation(id, |d| d.worktree_path = None);

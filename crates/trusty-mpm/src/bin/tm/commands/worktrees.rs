@@ -6,11 +6,14 @@
 //! backfill of pre-existing trees and the size measurement.
 //! What: [`collect`] backfills from every registered project's
 //! `git worktree list`, records `removed` for a live tree gone from disk and
-//! from git, measures each live tree unless `--no-size`, folds the ledger and
+//! from git, measures each live tree unless `--no-size`, links each tree's
+//! pull request and lists stale candidates (#8994 S2c), folds the ledger and
 //! returns a [`WorktreesReport`]; [`run`] prints it as text or JSON.
-//! Daemon-less: it touches only `~/.trusty-mpm/` and git, and deletes nothing.
+//! Daemon-less: it touches only `~/.trusty-mpm/`, git and `gh`, and deletes
+//! nothing.
 //! Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
-//! `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`
+//! `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`,
+//! `tm_worktrees_shows_the_pr_and_lists_stale_candidates`
 //! (`tests/tm_worktrees_cli.rs`).
 
 use std::path::{Path, PathBuf};
@@ -25,6 +28,8 @@ use trusty_mpm::core::worktree_ledger::fold::{ProjectSummary, fold, gib};
 use trusty_mpm::core::worktree_ledger::hook_ingest::clear_sticky_ingest_failure;
 use trusty_mpm::core::worktree_ledger::reconcile::{ReconcileReport, reconcile_removed};
 use trusty_mpm::core::worktree_ledger::record::measure_live;
+use trusty_mpm::core::worktree_ledger::stale::{StaleReason, TreeView, link_prs_and_find_stale};
+use trusty_mpm::core::worktree_ledger::stale_probe::GitGhStaleProbe;
 
 /// Flags for `tm worktrees`.
 #[derive(Debug, Clone, clap::Args)]
@@ -83,6 +88,12 @@ pub(crate) struct WorktreesReport {
     pub missing: usize,
     /// Ledger lines that did not parse.
     pub malformed: usize,
+    /// Every live tree with its PR (#8994 S2c).
+    pub trees: Vec<TreeView>,
+    /// The trees that are stale candidates — listed, never removed.
+    pub stale_candidates: Vec<TreeView>,
+    /// `pr_linked` events appended this run.
+    pub pr_linked: usize,
 }
 
 /// Backfill, reconcile, optionally measure, then fold the ledger under `home`.
@@ -91,13 +102,15 @@ pub(crate) struct WorktreesReport {
 /// through the real binary and nothing here reads the process environment.
 /// What: registry → [`backfill_checkouts`] (then, when every checkout
 /// answered, the sticky hook-ingest failure record is cleared) → [`reconcile_removed`] →
-/// [`measure_live`] (when `measure`) → fold. The reconcile runs under
+/// [`measure_live`] (when `measure`) → [`link_prs_and_find_stale`] → fold.
+/// The reconcile runs under
 /// `--no-size` too: it lists git, it never measures. A ledger error
 /// propagates; an unreadable registry is reported in
 /// [`BackfillSummary::registry_error`] and the rest still runs.
 /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
 /// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`,
-/// `tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill`.
+/// `tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill`,
+/// `tm_worktrees_shows_the_pr_and_lists_stale_candidates`.
 pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<WorktreesReport> {
     let ledger = WorktreeLedger::under_home(home);
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
@@ -126,6 +139,12 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
         let outcome = measure_live(&ledger, &fold(&ledger.read()?.events))?;
         measured = Some(outcome.measured);
     }
+    // #8994 S2c: PR numbers and stale candidates; nothing is removed.
+    let stale = link_prs_and_find_stale(
+        &ledger,
+        &fold(&ledger.read()?.events),
+        &GitGhStaleProbe::default(),
+    )?;
     let read = ledger.read()?;
     let projects = fold(&read.events).by_project();
     let bytes = projects.iter().map(|p| p.bytes).sum();
@@ -148,6 +167,9 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
         missing: reconcile.missing(),
         reconcile,
         malformed: read.malformed,
+        stale_candidates: stale.candidates().cloned().collect(),
+        pr_linked: stale.pr_linked,
+        trees: stale.trees,
     })
 }
 
@@ -163,6 +185,37 @@ pub(crate) async fn run(args: WorktreesArgs) -> anyhow::Result<()> {
     }
     print_text(&report);
     Ok(())
+}
+
+/// The per-tree lines and the stale candidates (#8994 S2c).
+fn print_trees(report: &WorktreesReport) {
+    for t in &report.trees {
+        let pr = t.pr.map_or_else(|| "-".to_string(), |n| format!("PR #{n}"));
+        let branch = t.branch.as_deref().unwrap_or("-");
+        println!("       {pr:>9}  {branch}  {}", t.path.display());
+    }
+    if !report.stale_candidates.is_empty() {
+        println!("stale candidates (listed only; nothing is removed):");
+    }
+    for t in &report.stale_candidates {
+        let why = match &t.stale {
+            Some(StaleReason::MergedPr { pr }) => format!("PR #{pr} merged"),
+            Some(StaleReason::BranchGone) => "branch gone from origin, nothing unpushed".into(),
+            None => continue,
+        };
+        println!("  stale candidate: {}  ({why})", t.path.display());
+    }
+    let unresolved = report
+        .trees
+        .iter()
+        .filter(|t| !t.unresolved.is_empty())
+        .count();
+    if unresolved > 0 {
+        eprintln!(
+            "tm worktrees: {unresolved} tree(s) whose PR or branch lookup could not be answered \
+             are not stale candidates (see --json)"
+        );
+    }
 }
 
 fn print_text(report: &WorktreesReport) {
@@ -185,6 +238,7 @@ fn print_text(report: &WorktreesReport) {
         report.total.gib,
         report.projects.len()
     );
+    print_trees(report);
     let b = &report.backfill;
     if b.created + b.observed > 0 {
         println!(

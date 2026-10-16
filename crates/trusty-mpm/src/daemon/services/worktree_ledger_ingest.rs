@@ -69,7 +69,9 @@ pub(crate) struct IngestTracker {
     seen: Mutex<HashSet<PathBuf>>,
     pending: Mutex<HashSet<PathBuf>>,
     reconcile_queued: AtomicBool,
-    write: Mutex<()>,
+    // #8994 S2c: shared with the removal recorder, so its read-fold-append
+    // never interleaves with this module's.
+    write: Arc<Mutex<()>>,
 }
 
 impl IngestTracker {
@@ -115,6 +117,11 @@ impl IngestTracker {
     /// Hold the ledger write lock (S2b serializes with S2a through it).
     pub(super) fn lock_write(&self) -> std::sync::MutexGuard<'_, ()> {
         self.write.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The ledger write lock itself, for the removal recorder (#8994 S2c).
+    pub(super) fn write_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.write)
     }
 }
 
