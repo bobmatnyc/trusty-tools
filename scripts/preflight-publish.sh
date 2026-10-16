@@ -143,10 +143,10 @@
 #     against the tree rather than assumed.
 #
 #     WHY THIS IS NOT ALREADY COVERED: nothing anywhere compares the two.
-#     `cargo publish` ships whatever is committed under `ui-dist/` (listed in
-#     trusty-search's `include`), `SKIP_UI_BUILD=1` short-circuits build.rs on
-#     every release path, and the mirror step that refreshes the bundle
-#     (`make -C crates/trusty-search sync-ui`) is human-remembered. Forget it
+#     `cargo publish` ships whatever bundle is committed (until #9535,
+#     trusty-search's `include` listed `ui-dist/`), `SKIP_UI_BUILD=1`
+#     short-circuits build.rs on every release path, and the step that
+#     refreshes the bundle is human-remembered. Forget it
 #     and every gate above still passes: the tree is clean, the tag is right,
 #     the version is free, the public API is unchanged. trusty-search shipped
 #     that exact state three times — v0.12.1, v0.13.1, and 0.37.0, which
@@ -318,9 +318,6 @@
 #         MANIFEST-STALE, MANIFEST-GAP, NO-SOURCES, STAMP-MISSING,
 #         NO-ASSET-REFS, NO-INDEX). Case 19 is the laundering regression; case 20
 #         proves the byte-identical-rebuild remedy leaves something to commit.
-#         Case 18 runs against the real fc7f396f — the commit trusty-search
-#         0.37.0 was published from — and names #3509's commit 972171e8 as the
-#         source change the bundle never picked up.
 #     (h) BOTH modes for check 9 (#6406), via
 #         scripts/check-changelog-assembled-selftest.sh: synthetic fixtures for
 #         a stranded fragment with no section (the #5919 shape), a section

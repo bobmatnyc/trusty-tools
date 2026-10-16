@@ -447,14 +447,14 @@ an inline status tag. Source paths are cited where known.
   BM25 + symbol graph stay hot.
 - *Gap:* None material.
 
-### 4.12 UI (`src/service/ui.rs`, `ui/`, `ui-dist/`)
+### 4.12 UI (`src/service/ui.rs`)
 
 **FR-UI-1 — Embedded Svelte admin UI** ✅
 - *Vision:* Search, index management, and chat from a browser, served by the
   daemon itself.
-- *Current:* Svelte 5 UI compiled into the binary via `include_dir!`; Collections,
-  Search, Chat, Admin panels; opened with `trusty-search ui`; built by `build.rs`
-  (`SKIP_UI_BUILD=1` to skip) (`src/service/ui.rs`).
+- *Current:* Collections, Search, Chat and Admin panels, built and served by
+  trusty-console at `/tools/search/`. #9535 deleted this crate's UI bundle and
+  `build.rs`; the binary serves no UI.
 - *Gap:* None material.
 
 **FR-UI-2 — OpenRouter chat with auto-injected search context** ✅

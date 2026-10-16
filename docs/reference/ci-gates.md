@@ -232,8 +232,8 @@ above.
   `ci-crate-relevance.sh` marks relevant (the wrapper then drops those). Any
   other such path selects the crates whose `*.rs` source names it literally
   on a non-comment line, found by `git grep` at plan time — for example
-  `scripts/check-ui-bundle-freshness.sh` selects `trusty-search` and
-  `trusty-console` through their `build.rs`. A literal counts only when the
+  `scripts/check-ui-bundle-freshness.sh` selects `trusty-console` through its
+  `build.rs`. A literal counts only when the
   file exists, or existed at the diff's base (a deleted or renamed script),
   so a test fixture string such as `"scripts/go.sh"` selects nothing. A
   `./`, `../`, `{root}/` or absolute prefix still names the path. Most

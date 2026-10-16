@@ -126,11 +126,9 @@ because a favicon is shipped as a file rather than imported as a component;
 
 Five committed bundles carry a fifth kind of copy, which nobody edits by hand:
 `crates/trusty-console/ui/dist/`, `ui-search-dist/`, `ui-memory-dist/`,
-`ui-analyze-dist/` and `crates/trusty-search/ui-dist/` are bundler output that a
-Rust binary embeds, so each one holds a mirror of its package's `favicon.svg`
-emitted by `pnpm build` (the trusty-search one mirrored by
-`make -C crates/trusty-search release-prep`). Refresh them with that build rather
-than by copying, and `scripts/check-ui-bundle-freshness.sh` proves each mirror
+`ui-analyze-dist/` and `ui-secrets-dist/` are bundler output that a Rust binary embeds, so each one
+holds a mirror of its package's `favicon.svg` emitted by `pnpm build`. Refresh
+them with that build rather than by copying, and `scripts/check-ui-bundle-freshness.sh` proves each mirror
 still matches the source it was built from.
 
 The Tauri shells' `icons/` directories (`crates/trusty-code-gui/icons/`) are **not** on that list. Those are app/dock

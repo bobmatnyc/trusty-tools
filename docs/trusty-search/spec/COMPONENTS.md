@@ -337,23 +337,20 @@ on first embed request, supervised with backoff/restart limits, idle-shutdownabl
 
 ---
 
-## 11. Embedded UI — `src/service/ui.rs`, `ui/`, `ui-dist/`
+## 11. Chat core — `src/service/ui.rs`
 
-**Responsibility.** Browser-based search, index management, and chat served by the
-daemon itself, with no separate frontend deploy.
+**Responsibility.** Answer one question grounded in an index for the socket
+method `search.chat`.
 
 **Key types/modules.**
-- `src/service/ui.rs` — serves the bundle at `GET /ui`, `/ui/`, `/ui/{*path}`.
-- `ui/` (Svelte 5 sources) → `ui-dist/` (compiled bundle embedded via
-  `include_dir!`); built by `build.rs` (`SKIP_UI_BUILD=1` skips).
-- `POST /chat` + `GET /api/chat/providers` — OpenRouter chat with search-context
-  injection (503 without `OPENROUTER_API_KEY`).
+- `src/service/ui.rs` — request types and `chat_report`, which resolves the
+  provider, gathers search context and collects the streamed reply.
 
-**Current state.** ✅ Collections, Search, Chat, Admin panels compiled into the
-binary; opened with `trusty-search ui`. CI fails if `ui-dist/` is stale
-(`ui-dist-check`); `make release-prep` rebuilds + mirrors before publish.
+**Current state.** ✅ #9214 removed the TCP listener and #9535 deleted the
+embedded UI, its bundle and its build script. The search dashboard is built and
+served by trusty-console at `/tools/search/`.
 
-**Known gaps.** None material; the UI is not part of the integration contract.
+**Known gaps.** None material; the dashboard is not part of the integration contract.
 
 ---
 

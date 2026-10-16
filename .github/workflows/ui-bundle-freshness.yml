@@ -1,9 +1,9 @@
 # Committed UI bundle freshness gate (#3606).
 #
-# Four crates commit a pre-built Svelte/Vite bundle that cargo packages
-# verbatim: trusty-search (ui-dist/) plus trusty-memory, trusty-analyze and
-# trusty-console (ui/dist/). SKIP_UI_BUILD=1 is set globally in ci.yml, so
-# build.rs never regenerates any of them here — CI ships whatever is committed.
+# trusty-console commits pre-built Svelte/Vite bundles that cargo packages
+# verbatim (scripts/ui-bundle-manifest.tsv lists them). SKIP_UI_BUILD=1 is set
+# globally in ci.yml, so build.rs never regenerates any of them here — CI ships
+# whatever is committed.
 # Three trusty-search releases went out carrying a bundle built from source that
 # had already changed, the last of them 0.37.0, whose admin dashboard had no
 # dark mode.
@@ -68,11 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # fetch-depth: 0 for two reasons: the gate resolves last-touch commits
-      # across full history, and the self-test's case 18 runs against the real
-      # fc7f396f (trusty-search 0.37.0's publish commit). Case 18 self-skips
-      # when that commit is absent, so a shallow clone degrades it to a skip
-      # rather than a false failure.
+      # fetch-depth: 0 because the gate resolves last-touch commits across
+      # full history.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0

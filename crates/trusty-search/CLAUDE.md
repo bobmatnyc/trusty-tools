@@ -1560,9 +1560,8 @@ The daemon serves every method on its Unix socket and binds no TCP port
 #9536 removed `--port` and `--no-http` from `start`: clap rejects either as
 an unknown argument (exit 2), and `TRUSTY_SEARCH_NO_HTTP` is not read. A unit
 that still passes a flag fails to start; `service install` regenerates it
-without them. #9535 deleted the test-only axum router (ruling D1), so `/ui`,
-`/upgrade`, `/metrics` and `/api/chat/providers` are unavailable; the search
-dashboard is served by trusty-console.
+without them. #9535 deleted the test-only axum router (ruling D1) and every
+HTTP route it served; the search dashboard is served by trusty-console.
 
 Every CLI path uses the socket. `port` exits 1 with `no HTTP listener
 (socket-only daemon at <socket>)`; `dashboard` and `monitor web` exit
@@ -1583,9 +1582,6 @@ integration tests and downstream consumers can reach the internal APIs.
 ```
 trusty-search/
 ├── Cargo.toml                       single-crate manifest (lib + bin)
-├── build.rs                         Svelte UI build wrapper (inert since #6155)
-├── ui-dist/                         UI bundle mirror (no longer embedded, #9535),
-│                                    mirrored from crates/trusty-console/ui-search-dist
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
 ├── README.md
@@ -1638,58 +1634,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ### Release Process
 
-Before publishing to crates.io, the Svelte admin UI must be built and synced
-into the crate-root `ui-dist/`. #9535 removed the `include_dir!` embed, so the
-binary no longer serves it; `build.rs` and this step remain until the
-Architect rules on them.
-`cargo publish` cannot reach files outside the crate tarball, so the sync
-step is mandatory.
-
-🔴 **#6155 moved the dashboard's Svelte source out of this crate** into
-`crates/trusty-console/ui-search/`, where trusty-console builds it and serves it
-at `/tools/search/`. This crate no longer has a `ui/` tree, and `build.rs` no
-longer builds anything: `ui-dist/` is a mirror of the console's bundle, and both
-carry the same source digest. #9214 removed the HTTP listener and #9535 the
-`/ui/` handlers, so nothing serves `ui-dist/` from this binary.
-
 ```bash
-make release-prep                              # rebuild via trusty-console, then mirror → ui-dist/
 cargo publish                                  # single crate (lib + bin)
 ```
 
-`make release-prep` runs `make -C crates/trusty-console search-ui` (which does
-the `pnpm install --frozen-lockfile && pnpm build`) and then mirrors
-`crates/trusty-console/ui-search-dist/` into the crate-root `ui-dist/`.
-
-🔴 **The `ui-dist-check` job this section used to cite was real, and it never
-ran once.** It lived in this crate's own `<crate>/.github/workflows/ci.yml` — a
-pre-monorepo leftover carried in by the initial import (`13f9fa2c0`,
-2026-05-19) — and did exactly the rebuild-then-diff the old text described.
-GitHub Actions only discovers workflows in the REPO-ROOT
-`.github/workflows/`, so a nested copy is inert no matter what it contains.
-Believing in it is part of why 0.37.0 shipped without dark mode (#3606); that
-directory was deleted in the same change rather than hoisted, because hoisting
-it would reintroduce the byte-diff `ci.yml`'s `ui-checks` job had already
-rejected on Vite hash instability, and would duplicate the gate below.
-
-What guards it now is `scripts/preflight-publish.sh` CHECK 7 at the publish
-boundary, plus `.github/workflows/ui-bundle-freshness.yml` at merge time. Both
-run `scripts/check-ui-bundle-freshness.sh`, which compares the digest recorded
-in `ui-dist/ui-source-hash.txt` against the current source — since #6155 that
-source is `crates/trusty-console/ui-search/`, named by this crate's row in
-`scripts/ui-bundle-manifest.tsv`. `make release-prep` writes that stamp; run the
-gate yourself any time:
-
-```bash
-bash scripts/check-ui-bundle-freshness.sh trusty-search
-```
-
-When the Rust build runs after the JS step is already done (CI publish flow),
-set `SKIP_UI_BUILD=1` to skip `build.rs`'s embedded UI build:
-
-```bash
-SKIP_UI_BUILD=1 cargo publish
-```
+The crate ships no UI and has no build script (#9535). The search dashboard's
+Svelte source is `crates/trusty-console/ui-search/`; trusty-console builds it,
+serves it at `/tools/search/`, and publishes the bundle in its own tarball.
+`scripts/preflight-publish.sh` CHECK 7 still runs for this crate and reports
+that it tracks no committed UI bundle.
 
 ### GPU-accelerated embedding (CUDA, optional)
 
