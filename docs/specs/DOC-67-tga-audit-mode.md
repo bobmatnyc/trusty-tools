@@ -439,7 +439,8 @@ trusty-analyze, and #5670 reaches each link differently:
   that indexes into it are the same install. The ADDRESS is not a tga setting:
   trusty-search binds an OS-assigned port and records it, so the guard reads
   `trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH`, the resolver
-  promoted into `trusty-common` for this caller. Both failure arms refuse the run,
+  promoted into `trusty-common` for this caller. #9957 removed that resolver
+  after trusty-search stopped binding TCP (#9214). Both failure arms refuse the run,
   as link 3's do. `trusty-audit` pins `trusty-search` as a fourth
   `RequiredTool` and exports `TRUSTY_SEARCH_BIN` onto every `tga audit` child, so
   an isolated run reaches the engagement's copy rather than a PATH lookup.
