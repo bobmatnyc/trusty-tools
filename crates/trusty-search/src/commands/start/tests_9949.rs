@@ -4,7 +4,8 @@
 //! attempts allowed pinned the daemon to ort for its whole uptime. Three
 //! defects combined: the scaled attempt budget never reached the supervisor,
 //! giving up was permanent, and every attempt repeated the full-import venv
-//! recheck.
+//! recheck. #9468 adds the launcher-before-venv order and the permanent vs
+//! transient split.
 //! What: deterministic fakes for `PythonBootstrap`, driven under paused tokio
 //! time so the multi-minute background backoff resolves instantly.
 //! Test: the tests below.
@@ -18,6 +19,7 @@ use super::graceful_bootstrap::{
     PythonBootstrap, VenvCheck,
 };
 use crate::core::Embedder;
+use crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth;
 use crate::service::embedder_supervisor::{
     ActiveBackend, BackendKind, BootstrapState, SupervisorConfig, SwitchableEmbedder,
 };
@@ -297,32 +299,114 @@ async fn attempt_two_adapter_gets_twice_the_base_budget() {
     );
 }
 
-/// A missing launcher is a decided failure: terminal `Failed`, the reason in
-/// the report, and no background retry scheduled.
+/// #9468: a permanent failure at startup ends the bootstrap on its first
+/// attempt, even with startup attempts to spare: one venv build, no retry.
 #[tokio::test(start_paused = true)]
-async fn graceful_bootstrap_missing_launcher_is_terminal_with_no_retry() {
+async fn graceful_bootstrap_permanent_failure_ends_the_retry_loop() {
+    let switchable = ort_switchable();
+    let fake = ContendedBootstrap::failing_probes(0);
+    fake.venv_fails_from.store(0, Ordering::SeqCst);
+
+    let promoted = drive(&switchable, &fake, 3).await;
+
+    assert!(promoted.is_none());
+    assert_eq!(switchable.active().kind, BackendKind::Ort);
+    assert_eq!(switchable.active().bootstrap, BootstrapState::Failed);
+    assert_eq!(
+        *fake.venv_checks.lock().expect("venv_checks lock"),
+        vec![VenvCheck::FullImport],
+        "the failed venv build must not be repeated"
+    );
+    assert_eq!(fake.launcher_lookups.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.built(), 0);
+    let report = switchable.bootstrap_control().report();
+    assert_eq!(report.attempts, 1);
+    assert_eq!(report.next_retry_at, None);
+    assert!(
+        report
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("fake venv rebuild failure")),
+        "the report must say why: {report:?}"
+    );
+}
+
+/// #9468: a transient failure keeps the #9949 behaviour — every startup
+/// attempt runs, then background rounds keep attempting while ort serves.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_transient_failure_keeps_retrying() {
+    let switchable = ort_switchable();
+    let fake = ContendedBootstrap::failing_probes(usize::MAX);
+    spawn_drive(&switchable, &fake, 2);
+    wait_until("a scheduled retry", || {
+        switchable.active().bootstrap == BootstrapState::Retrying
+    })
+    .await;
+    assert_eq!(fake.built(), 2, "both startup attempts ran");
+
+    tokio::time::sleep(background_retry_delay(0)).await;
+    wait_until("the first background attempt", || fake.built() == 3).await;
+    wait_until("the next scheduled retry", || {
+        switchable
+            .bootstrap_control()
+            .report()
+            .next_retry_at
+            .is_some()
+    })
+    .await;
+
+    assert_eq!(switchable.active().kind, BackendKind::Ort);
+    assert_eq!(switchable.active().bootstrap, BootstrapState::Retrying);
+    assert_eq!(fake.launcher_lookups.load(Ordering::SeqCst), 3);
+    assert_eq!(switchable.bootstrap_control().report().attempts, 3);
+    assert!(
+        switchable
+            .bootstrap_control()
+            .shutdown(Duration::from_secs(5))
+            .await
+    );
+}
+
+/// #9468 regression: a missing launcher ends the bootstrap before any venv
+/// work. Before the fix every attempt built the venv first (with `uv` present,
+/// a ~3 GB torch download) and only then failed the launcher lookup.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_missing_launcher_builds_no_venv() {
     let switchable = ort_switchable();
     let fake = ContendedBootstrap::with(0, false, true);
 
     let promoted = drive(&switchable, &fake, 2).await;
 
     assert!(promoted.is_none());
-    assert_eq!(switchable.active().kind, BackendKind::Ort);
+    assert_eq!(
+        *fake.venv_checks.lock().expect("venv_checks lock"),
+        Vec::<VenvCheck>::new(),
+        "no venv step may run while the launcher is missing"
+    );
+    assert_eq!(
+        fake.launcher_lookups.load(Ordering::SeqCst),
+        1,
+        "a permanent failure is not retried"
+    );
+    assert_eq!(fake.built(), 0, "no adapter, so no sidecar, was ever built");
+    assert_eq!(
+        switchable.active().kind,
+        BackendKind::Ort,
+        "ort keeps serving"
+    );
     assert_eq!(switchable.active().bootstrap, BootstrapState::Failed);
     let report = switchable.bootstrap_control().report();
     assert_eq!(
         report.next_retry_at, None,
-        "a terminal failure schedules nothing"
+        "a permanent failure schedules nothing"
     );
+    let health = PythonBootstrapHealth::new("failed", &report);
     assert!(
-        report
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("launcher not found")),
-        "the report must say why: {report:?}"
+        health.last_error.as_deref().is_some_and(|e| {
+            e.contains("launcher not found") && e.contains("trusty-embedderd-py")
+        }),
+        "/health must name the missing launcher: {health:?}"
     );
-    assert_eq!(fake.launcher_lookups.load(Ordering::SeqCst), 2);
-    assert_eq!(fake.built(), 0, "no adapter, so no sidecar, was ever built");
 }
 
 /// #9949: a decided error in a background round (the probe failed at startup,

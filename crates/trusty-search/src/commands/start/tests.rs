@@ -1406,6 +1406,8 @@ struct FakeBootstrap {
     venv_failures_remaining: AtomicUsize,
     /// When true, the built adapter's readiness probe always fails.
     fail_probe: bool,
+    /// Number of leading adapters whose readiness probe fails (#9468).
+    probe_failures_remaining: AtomicUsize,
     /// When true, the built adapter's readiness probe hangs forever (the
     /// probe timeout fires instead of an `Err`).
     hang_probe: bool,
@@ -1422,6 +1424,7 @@ impl FakeBootstrap {
         Self {
             venv_failures_remaining: AtomicUsize::new(0),
             fail_probe: false,
+            probe_failures_remaining: AtomicUsize::new(0),
             hang_probe: false,
             venv_attempts: AtomicUsize::new(0),
             teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
@@ -1430,41 +1433,29 @@ impl FakeBootstrap {
 
     fn probe_always_fails() -> Self {
         Self {
-            venv_failures_remaining: AtomicUsize::new(0),
             fail_probe: true,
-            hang_probe: false,
-            venv_attempts: AtomicUsize::new(0),
-            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+            ..Self::always_succeeds()
         }
     }
 
     fn probe_always_hangs() -> Self {
         Self {
-            venv_failures_remaining: AtomicUsize::new(0),
-            fail_probe: false,
             hang_probe: true,
-            venv_attempts: AtomicUsize::new(0),
-            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+            ..Self::always_succeeds()
         }
     }
 
     fn venv_always_fails() -> Self {
         Self {
             venv_failures_remaining: AtomicUsize::new(u32::MAX as usize),
-            fail_probe: false,
-            hang_probe: false,
-            venv_attempts: AtomicUsize::new(0),
-            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+            ..Self::always_succeeds()
         }
     }
 
-    fn venv_fails_once_then_succeeds() -> Self {
+    fn probe_fails_once_then_succeeds() -> Self {
         Self {
-            venv_failures_remaining: AtomicUsize::new(1),
-            fail_probe: false,
-            hang_probe: false,
-            venv_attempts: AtomicUsize::new(0),
-            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+            probe_failures_remaining: AtomicUsize::new(1),
+            ..Self::always_succeeds()
         }
     }
 
@@ -1502,7 +1493,12 @@ impl PythonBootstrap for FakeBootstrap {
         Option<OrchestratorArc<OrchestratorAtomicU32>>,
         OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown>,
     ) {
-        let adapter: OrchestratorArc<dyn crate::core::Embedder> = if self.fail_probe {
+        let remaining = &self.probe_failures_remaining;
+        let fail_once = remaining.load(std::sync::atomic::Ordering::Relaxed) > 0;
+        if fail_once {
+            remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let adapter: OrchestratorArc<dyn crate::core::Embedder> = if self.fail_probe || fail_once {
             OrchestratorArc::new(FakePythonEmbedderErr)
         } else if self.hang_probe {
             OrchestratorArc::new(FakePythonEmbedderHangs)
@@ -1755,7 +1751,8 @@ async fn graceful_bootstrap_probe_timeout_tears_down_the_handle() {
 /// A transient failure on the first attempt must be retried, succeeding on
 /// the second — proving the retry loop actually re-invokes every bootstrap
 /// step rather than giving up after one failure. Uses paused virtual time so
-/// the linear backoff between attempts resolves instantly.
+/// the linear backoff between attempts resolves instantly. #9468: the failure
+/// is a probe failure; a venv error is permanent and is not retried.
 #[tokio::test(start_paused = true)]
 async fn graceful_bootstrap_retries_before_giving_up() {
     let ort: OrchestratorArc<dyn crate::core::Embedder> =
@@ -1765,7 +1762,7 @@ async fn graceful_bootstrap_retries_before_giving_up() {
         test_ort_bootstrapping_active(),
     ));
     let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
-    let fake = OrchestratorArc::new(FakeBootstrap::venv_fails_once_then_succeeds());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_fails_once_then_succeeds());
     let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
     drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
@@ -1786,8 +1783,9 @@ async fn graceful_bootstrap_retries_before_giving_up() {
 }
 
 /// #9949 rewrite: exhausting the startup attempts gives up only on a decided
-/// failure. A venv build that keeps failing ends `Failed` after exactly
-/// `retries` attempts with no retry scheduled; a probe that keeps failing
+/// failure. A venv build that fails ends `Failed` after its first attempt
+/// (#9468: a permanent failure is not retried) with no retry scheduled; a
+/// probe that keeps failing
 /// does NOT give up — it ends the startup window `Retrying`, with the error
 /// and the next retry time recorded. Before #9949 both arms ended `Failed`.
 /// Test: this test.
@@ -1818,11 +1816,11 @@ async fn graceful_bootstrap_gives_up_after_exhausting_retries() {
     assert_eq!(
         fake.venv_attempts
             .load(std::sync::atomic::Ordering::Relaxed),
-        3,
-        "must attempt exactly `retries` times, no more, no less"
+        1,
+        "#9468: a permanent failure must not spend the other startup attempts"
     );
     let report = switchable.bootstrap_control().report();
-    assert_eq!(report.attempts, 3);
+    assert_eq!(report.attempts, 1);
     assert_eq!(
         report.next_retry_at, None,
         "a terminal failure schedules nothing"
