@@ -28,6 +28,11 @@
 //! #9856: the daemon proves an `ask_owner` asker from the kernel's peer pid,
 //! which only the socket carries — since #6288 every call travels that way.
 //!
+//! #9979: a `sessions_chat` call is forwarded under a longer bound than every
+//! other request — see [`forwarding_timeout`]. The tool is served only by a
+//! bridge started with `--allow-chat`; every other bridge hides it and refuses
+//! the call locally — see [`chat_gate_refusal`].
+//!
 //! Test: `is_notification_*`, `value_to_mcp_response_*`,
 //! `forward_errors_on_an_absent_socket_naming_it`, and `stamp_*` unit tests
 //! below; end to end in
@@ -46,6 +51,42 @@ use trusty_mcp::{DaemonBridgeConfig, Request, Response};
 /// call from being cut off while still capping a truly hung request.
 /// Test: `the_forwarding_timeout_leaves_headroom_over_the_disk_survey_budget_clamp`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Forwarding timeout for one `sessions_chat` turn (#9979).
+///
+/// Why: an action-capable turn runs up to nine model calls, each bounded at
+/// 120 s by the provider client, plus the session verbs it invokes, so 60 s
+/// cuts a valid turn short. This applies to `sessions_chat` alone.
+///
+/// A turn occupies this bridge until it ends or this cap fires:
+/// `run_stdio_loop` dispatches one request at a time, so the bridge answers
+/// nothing else meanwhile. A shorter timeout on the caller's side does NOT
+/// cancel the turn on the bridge or the daemon. The S2 chat client therefore
+/// needs a dedicated MCP handle for chat, a caller bound >= this cap, and no
+/// automatic retry (#9979).
+///
+/// #9979: that dedicated handle is the only caller. The tool is served only by
+/// a bridge started with `--allow-chat`, which S2's chat handle passes; the
+/// shared bridges (`.mcp.json`, the console's shared handle) omit the flag and
+/// never expose it.
+/// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
+const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// The forwarding timeout for `req`: [`CHAT_REQUEST_TIMEOUT`] for a
+/// `sessions_chat` tool call, [`REQUEST_TIMEOUT`] for everything else.
+///
+/// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
+fn forwarding_timeout(req: &serde_json::Value) -> Duration {
+    let method = req.get("method").and_then(serde_json::Value::as_str);
+    let tool = req
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str);
+    if method == Some("tools/call") && tool == Some("sessions_chat") {
+        CHAT_REQUEST_TIMEOUT
+    } else {
+        REQUEST_TIMEOUT
+    }
+}
 
 /// Build the `DaemonBridgeConfig` for the trusty-mpm stdio bridge.
 ///
@@ -224,19 +265,130 @@ fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
 /// Send one MCP request as `mpm.mcp.dispatch` over the daemon socket.
 ///
 /// What: the socket client's `POST /rpc` mapping to the socket `url` locates;
-/// never a TCP fallback. A refusal sentinel `url` fails before any I/O.
+/// never a TCP fallback. A refusal sentinel `url` fails before any I/O. The
+/// bound is [`forwarding_timeout`] (#9979).
 /// Test: `forward_errors_on_an_absent_socket_naming_it`.
 async fn forward_over_socket(url: &str, req: serde_json::Value) -> Result<serde_json::Value> {
     let daemon = trusty_mpm::client::DaemonClient::new(url);
+    let bound = forwarding_timeout(&req);
     daemon
         .post("/rpc")
         .json(&req)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(bound)
         .send()
         .await?
         .error_for_status()?
         .json::<serde_json::Value>()
         .await
+}
+
+/// The caller-facing text for a failed forward (#9979).
+///
+/// Why: a forward that outlived its bound reached the daemon, which may still
+/// be running the call; "daemon unreachable" would invite a retry of a call
+/// with side effects.
+/// What: a timeout names the wait and the possibly-running call; any other
+/// failure keeps the "daemon unreachable" text.
+/// Test: `a_forward_timeout_is_not_reported_as_an_unreachable_daemon`.
+fn forward_failure_message(e: &anyhow::Error) -> String {
+    let timed_out = e
+        .downcast_ref::<trusty_mpm::client::DaemonCallError>()
+        .is_some_and(trusty_mpm::client::DaemonCallError::is_timeout);
+    if timed_out {
+        format!(
+            "trusty-mpm bridge timed out waiting for the daemon; the daemon may \
+             still be running the call, so do not retry a call with side effects: {e:#}"
+        )
+    } else {
+        format!("trusty-mpm daemon unreachable: {e:#}")
+    }
+}
+
+/// The one tool name the `--allow-chat` gate governs (#9979).
+const CHAT_TOOL: &str = "sessions_chat";
+
+/// The local refusal for a `sessions_chat` call on a bridge without `--allow-chat`.
+///
+/// Why (#9979): a chat turn holds this serial bridge for up to
+/// [`CHAT_REQUEST_TIMEOUT`], and every PM session loads the shared bridge, so
+/// the tool is opt-in per bridge.
+/// What: `Some(MCP tool-error result)` (isError true, naming `--allow-chat`)
+/// when `allow_chat` is false and `req` is a `tools/call` for `sessions_chat`;
+/// `None` otherwise. The caller answers it without a socket call.
+/// Test: `a_chat_call_without_allow_chat_is_refused_locally`,
+/// `a_chat_call_with_allow_chat_reaches_the_daemon`.
+fn chat_gate_refusal(req: &serde_json::Value, allow_chat: bool) -> Option<serde_json::Value> {
+    let method = req.get("method").and_then(serde_json::Value::as_str);
+    let tool = req
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str);
+    if allow_chat || method != Some("tools/call") || tool != Some(CHAT_TOOL) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": "sessions_chat is not enabled on this bridge: chat is served only by a \
+                     `tm serve --stdio --allow-chat` bridge (a dedicated chat handle), not \
+                     the shared one."
+        }],
+        "isError": true,
+    }))
+}
+
+/// Remove `sessions_chat` from a `tools/list` response value when chat is off.
+///
+/// Why (#9979): the daemon catalog keeps the tool; only this bridge hides it.
+/// What: drops the `sessions_chat` entry from `result.tools`; any other
+/// response, and every response with `allow_chat`, is left untouched.
+/// Test: `tools_list_without_allow_chat_omits_sessions_chat`,
+/// `tools_list_with_allow_chat_keeps_sessions_chat`.
+fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_chat: bool) {
+    if allow_chat || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list") {
+        return;
+    }
+    if let Some(tools) = resp
+        .pointer_mut("/result/tools")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        tools.retain(|t| t.get("name").and_then(serde_json::Value::as_str) != Some(CHAT_TOOL));
+    }
+}
+
+/// Answer one non-notification request: gate, stamp, forward, filter.
+///
+/// Why: one function carries the whole per-request path so the `--allow-chat`
+/// gate is testable against a fake socket (#9979).
+/// What: a gated `sessions_chat` call is answered locally with no socket
+/// call; otherwise the request is stamped (#6888), forwarded to `url`, and the
+/// reply has `sessions_chat` hidden from a `tools/list`.
+/// Test: the `tools_list_*` and `a_chat_call_*` tests below.
+async fn handle_request(
+    req: Request,
+    url: &str,
+    managed: Option<&str>,
+    allow_chat: bool,
+) -> Response {
+    let mut req_value = req_to_value(&req);
+    if let Some(result) = chat_gate_refusal(&req_value, allow_chat) {
+        return Response::ok(req.id.clone(), result);
+    }
+    stamp_caller_session_id(&mut req_value, managed);
+    let list_req = req_value.clone();
+    match forward_over_socket(url, req_value).await {
+        Ok(mut resp_value) => {
+            hide_chat_tool(&list_req, &mut resp_value, allow_chat);
+            value_to_mcp_response(resp_value)
+        }
+        Err(e) => {
+            tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
+            Response::err(
+                req.id.clone(),
+                mcp::error_codes::INTERNAL_ERROR,
+                forward_failure_message(&e),
+            )
+        }
+    }
 }
 
 /// Convert the daemon's JSON-RPC response value into an `mcp::Response`.
@@ -331,9 +483,12 @@ async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<()> {
 /// other request as `mpm.mcp.dispatch` over the socket, re-resolved per request.
 /// A transport error returns a JSON-RPC internal error rather than crashing the
 /// loop — the next request reconnects.
+///
+/// #9979: `allow_chat` (`--allow-chat`) is off by default; off, the bridge
+/// hides `sessions_chat` from `tools/list` and refuses the call locally.
 /// Test: the helpers are unit-tested below; the end-to-end forward path is
 /// covered by the daemon's `rpc_*` integration tests.
-pub(crate) async fn run_stdio_bridge() -> Result<()> {
+pub(crate) async fn run_stdio_bridge(allow_chat: bool) -> Result<()> {
     // Step 1: ensure the daemon is reachable (auto-start if needed). Hard error
     // on failure — no silent fallback. All output goes to stderr.
     let config = build_bridge_config();
@@ -353,19 +508,7 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
                 return Response::suppressed();
             }
             let url = trusty_mpm::core::resolve_daemon_url(None);
-            let mut req_value = req_to_value(&req);
-            stamp_caller_session_id(&mut req_value, managed_session_id.as_deref());
-            match forward_over_socket(&url, req_value).await {
-                Ok(resp_value) => value_to_mcp_response(resp_value),
-                Err(e) => {
-                    tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
-                    Response::err(
-                        req.id.clone(),
-                        mcp::error_codes::INTERNAL_ERROR,
-                        format!("trusty-mpm daemon unreachable: {e:#}"),
-                    )
-                }
-            }
+            handle_request(req, &url, managed_session_id.as_deref(), allow_chat).await
         }
     })
     .await
@@ -511,6 +654,215 @@ mod tests {
         let v = req_to_value(&req);
         assert_eq!(v["method"], "session_list");
         assert_eq!(v["id"], 5);
+    }
+
+    /// #9979: only a `sessions_chat` call gets the chat bound; every other
+    /// call, including another tool and a non-call method, keeps 60 s.
+    #[test]
+    fn forwarding_timeout_widens_only_for_a_chat_turn() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert!(CHAT_REQUEST_TIMEOUT > REQUEST_TIMEOUT);
+        assert_eq!(
+            forwarding_timeout(&call("sessions_chat", json!({"message": "hi"}))),
+            CHAT_REQUEST_TIMEOUT
+        );
+        for req in [
+            call("session_list", json!({})),
+            call("disk_survey", json!({})),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "sessions_chat"}),
+        ] {
+            assert_eq!(forwarding_timeout(&req), REQUEST_TIMEOUT, "{req}");
+        }
+    }
+
+    /// A daemon socket (0600 in a 0700 directory, as the client dial requires)
+    /// that reads one request frame, then answers once the returned sender
+    /// fires. It arms no timer of its own, so the paused clock only ever
+    /// advances to the client's bound or to the test's own sleep.
+    fn slow_socket() -> (String, tempfile::TempDir, tokio::sync::oneshot::Sender<()>) {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_dir = dir.path().join("s");
+        std::fs::create_dir(&sock_dir).expect("socket dir");
+        std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let path = sock_dir.join("mpm.sock");
+        let std_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let listener = tokio::net::UnixListener::from_std(std_listener).expect("tokio listener");
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line).await;
+            if released.await.is_err() {
+                return;
+            }
+            let frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
+            let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+        });
+        (trusty_mpm::core::socket_locator(&path), dir, release)
+    }
+
+    /// #9979: `forward_over_socket` applies `forwarding_timeout`, not a fixed
+    /// bound. A daemon that answers after 90 s of paused tokio time is
+    /// outlived by the 60 s default but not by the chat bound.
+    /// Red if `.timeout(bound)` reverts to `.timeout(REQUEST_TIMEOUT)`.
+    #[tokio::test(start_paused = true)]
+    async fn forward_over_socket_applies_the_per_request_bound() {
+        let (url, _dir, release) = slow_socket();
+        let chat = tokio::spawn(async move {
+            forward_over_socket(&url, call("sessions_chat", json!({"message": "hi"}))).await
+        });
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        release.send(()).expect("server still waiting");
+        let reply = chat
+            .await
+            .expect("join")
+            .expect("a chat turn outlasts 60 s inside the chat bound");
+        assert_eq!(reply["ok"], true);
+
+        let (url, _dir, _release) = slow_socket();
+        let err = forward_over_socket(&url, call("session_list", json!({})))
+            .await
+            .expect_err("any other call is cut at 60 s");
+        assert!(format!("{err:#}").contains("within 60s"), "{err:#}");
+    }
+
+    /// #9979: a forward that times out is reported as a wait that may have
+    /// left the call running, not as an unreachable daemon.
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_timeout_is_not_reported_as_an_unreachable_daemon() {
+        let (url, _dir, _release) = slow_socket();
+        let err = forward_over_socket(&url, call("session_list", json!({})))
+            .await
+            .expect_err("times out at 60 s");
+        let msg = forward_failure_message(&err);
+        assert!(msg.contains("timed out waiting for the daemon"), "{msg}");
+        assert!(msg.contains("may still be running"), "{msg}");
+        assert!(!msg.contains("unreachable"), "{msg}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let absent = trusty_mpm::core::socket_locator(&dir.path().join("absent.sock"));
+        let err = forward_over_socket(&absent, json!({"method": "ping"}))
+            .await
+            .expect_err("nothing listens");
+        assert!(forward_failure_message(&err).starts_with("trusty-mpm daemon unreachable"));
+    }
+
+    /// A counting fake daemon socket (0600 in a 0700 dir). Every connection is
+    /// one request frame answered with `reply` (the JSON-RPC response the
+    /// daemon returns, wrapped as the frame's `result`); the counter is the number of
+    /// socket calls the bridge made.
+    fn counting_socket(
+        reply: serde_json::Value,
+    ) -> (
+        String,
+        tempfile::TempDir,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_dir = dir.path().join("s");
+        std::fs::create_dir(&sock_dir).expect("socket dir");
+        std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let path = sock_dir.join("mpm.sock");
+        let std_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let listener = tokio::net::UnixListener::from_std(std_listener).expect("tokio listener");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line).await;
+                seen.fetch_add(1, Ordering::SeqCst);
+                // The socket frame wraps the daemon's JSON-RPC reply as `result`.
+                let frame = format!("{}\n", json!({"jsonrpc": "2.0", "id": 1, "result": reply}));
+                let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+            }
+        });
+        (trusty_mpm::core::socket_locator(&path), dir, calls)
+    }
+
+    fn list_request() -> Request {
+        serde_json::from_value(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}))
+            .expect("request")
+    }
+
+    fn chat_request() -> Request {
+        serde_json::from_value(call("sessions_chat", json!({"message": "hi"}))).expect("request")
+    }
+
+    fn catalog_reply() -> serde_json::Value {
+        json!({"jsonrpc": "2.0", "id": 7, "result": {"tools": [
+            {"name": "session_list"}, {"name": "sessions_chat"}, {"name": "disk_survey"}
+        ]}})
+    }
+
+    fn tool_names(resp: &Response) -> Vec<String> {
+        resp.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    /// #9979: without `--allow-chat`, `tools/list` omits `sessions_chat` and
+    /// keeps the other tools.
+    #[tokio::test]
+    async fn tools_list_without_allow_chat_omits_sessions_chat() {
+        let (url, _dir, _calls) = counting_socket(catalog_reply());
+        let resp = handle_request(list_request(), &url, None, false).await;
+        assert_eq!(tool_names(&resp), ["session_list", "disk_survey"]);
+    }
+
+    /// #9979: with `--allow-chat`, `tools/list` passes through unchanged.
+    #[tokio::test]
+    async fn tools_list_with_allow_chat_keeps_sessions_chat() {
+        let (url, _dir, _calls) = counting_socket(catalog_reply());
+        let resp = handle_request(list_request(), &url, None, true).await;
+        assert_eq!(
+            tool_names(&resp),
+            ["session_list", "sessions_chat", "disk_survey"]
+        );
+    }
+
+    /// #9979: without `--allow-chat`, a `sessions_chat` call is answered
+    /// locally with an MCP tool error naming the flag; the daemon is never dialled.
+    #[tokio::test]
+    async fn a_chat_call_without_allow_chat_is_refused_locally() {
+        let (url, _dir, calls) = counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
+        let resp = handle_request(chat_request(), &url, None, false).await;
+        let result = resp.result.expect("a tool error is a JSON-RPC result");
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("--allow-chat") && text.contains("not enabled"),
+            "{text}"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// #9979: with `--allow-chat`, the call reaches the daemon and its reply
+    /// comes back verbatim.
+    #[tokio::test]
+    async fn a_chat_call_with_allow_chat_reaches_the_daemon() {
+        let (url, _dir, calls) =
+            counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {"reply": "hello"}}));
+        let resp = handle_request(chat_request(), &url, None, true).await;
+        assert_eq!(resp.result.expect("result")["reply"], "hello");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// #6288: with no daemon socket the forward fails naming the socket, and

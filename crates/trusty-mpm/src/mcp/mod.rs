@@ -7,7 +7,7 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-seven
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-eight
 //! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
@@ -17,7 +17,7 @@
 //! lifecycle, kept in the same tool group for file-count reasons only), five
 //! console-facing tools, four project-registry tools, four session-manager
 //! proxy tools, the Disk-dashboard survey (#6927), `secrets_get_ref`
-//! (#7522) and `ask_owner` (#9856) — the [`OrchestratorBackend`] trait the daemon implements to
+//! (#7522), `ask_owner` (#9856) and `sessions_chat` (#9979) — the [`OrchestratorBackend`] trait the daemon implements to
 //! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
 //! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
 //! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
@@ -178,6 +178,22 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Test: `dispatch_ask_owner_tool` (mock); the decision in
     /// `channels/ask_owner_tests.rs`.
     async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String>;
+
+    // ── #9979: the coordinator chat turn ─────────────────────────────────────
+
+    /// Back `sessions_chat`: one coordinator chat turn, as `mpm.sessions.chat`.
+    ///
+    /// Why: D96 moves the chat page to the console, which reaches the daemon
+    /// over MCP only; the chat turn had a socket method and no tool.
+    /// What: `turn` is the tool's `arguments` object — the `mpm.sessions.chat`
+    /// request, `message` already checked present. Returns that method's
+    /// response unchanged, or an error text carrying its HTTP status (`503`
+    /// when no model is configured).
+    /// Test: `dispatch_sessions_chat_tool` (mock);
+    /// `mcp_dispatch_sessions_chat_matches_mpm_sessions_chat` and
+    /// `mcp_dispatch_sessions_chat_without_a_model_is_a_503_tool_error`
+    /// (daemon).
+    async fn sessions_chat(&self, turn: Value) -> Result<Value, String>;
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
 
@@ -744,6 +760,11 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
         ) {
             (Ok(recipient), Ok(question)) => backend.ask_owner(&recipient, &question).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
+        },
+        // #9979: the `mpm.sessions.chat` request, passed through whole.
+        "sessions_chat" => match required_str(&args, "message") {
+            Ok(_) => backend.sessions_chat(args).await,
+            Err(e) => Err(e),
         },
         // ── #1222: console-facing tools ──────────────────────────────────────
         "console_metrics" => backend.console_metrics().await,

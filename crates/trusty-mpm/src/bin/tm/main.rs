@@ -466,12 +466,13 @@ async fn main() -> anyhow::Result<()> {
             | Command::Pr { .. },
         ) => unreachable!("socket commands are dispatched before daemon-URL resolution"),
         Some(Command::Start) => start(&client, &url).await,
-        Some(Command::Serve { stdio }) => {
+        Some(Command::Serve { stdio, allow_chat }) => {
             if stdio {
                 // #1221: MCP stdio bridge — forward JSON-RPC to the daemon's
                 // loopback POST /rpc, auto-starting the daemon and reconnecting
                 // with backoff. This is the `.mcp.json` entry point.
-                commands::serve_stdio::run_stdio_bridge().await
+                // #9979: `sessions_chat` is served only with `--allow-chat`.
+                commands::serve_stdio::run_stdio_bridge(allow_chat).await
             } else {
                 start(&client, &url).await
             }

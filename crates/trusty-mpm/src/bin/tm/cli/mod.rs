@@ -207,6 +207,15 @@ pub(crate) enum Command {
         /// the daemon if needed and reconnecting with backoff if it restarts.
         #[arg(long)]
         stdio: bool,
+        /// Serve the `sessions_chat` tool on this bridge (default: hidden).
+        ///
+        /// Why (#9979): a chat turn holds the serial bridge for up to 20
+        /// minutes, so the shared bridge every PM session loads must not
+        /// expose it. Only a dedicated chat handle passes this flag.
+        /// What: without it, `tools/list` omits `sessions_chat` and a call is
+        /// refused locally. Meaningful only with `--stdio`.
+        #[arg(long, requires = "stdio")]
+        allow_chat: bool,
     },
     /// Stop every running trusty-mpm daemon process.
     ///

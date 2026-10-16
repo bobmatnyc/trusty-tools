@@ -239,6 +239,11 @@ impl OrchestratorBackend for MockBackend {
         Ok(json!({ "recipient": recipient, "question": question }))
     }
 
+    // #9979: echoes the turn it received so the pass-through is observable.
+    async fn sessions_chat(&self, turn: Value) -> Result<Value, String> {
+        Ok(json!({ "reply": "ok", "turn": turn }))
+    }
+
     // ── #6927: the Disk dashboard's survey ───────────────────────────────────
     async fn disk_survey(
         &self,
@@ -444,7 +449,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
     // two PM pause/resume context tools `session_context_catchup` /
     // `session_context_pause` + the #6927 Disk survey `disk_survey` + the
-    // #7522 `secrets_get_ref` + the #9856 `ask_owner`).
+    // #7522 `secrets_get_ref` + the #9856 `ask_owner` + the #9979 `sessions_chat`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -453,7 +458,15 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 37);
+    assert_eq!(tools.as_array().unwrap().len(), 38);
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "sessions_chat"),
+        "#9979: tools/list must list sessions_chat"
+    );
 }
 
 /// Why: #6431's bulk delete must route through dispatch and report per-session
@@ -1748,6 +1761,31 @@ async fn dispatch_ask_owner_tool() {
         json!({ "question": "q" }),
     ] {
         let resp = dispatch(&MockBackend, call("ask_owner", args.clone())).await;
+        let result = resp.result.expect("a result");
+        assert_eq!(result["isError"], true, "{args}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("missing required string argument"), "{text}");
+    }
+}
+
+/// Why (#9979): `sessions_chat` hands the whole `mpm.sessions.chat` request to
+/// the backend, and a turn with no `message` fails before the daemon is asked.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_sessions_chat_tool() {
+    let args = json!({ "message": "status?", "conv_id": "c1", "actions": true });
+    let resp = dispatch(&MockBackend, call("sessions_chat", args.clone())).await;
+    let result = resp.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    let echoed: Value = serde_json::from_str(text).expect("JSON text");
+    assert_eq!(
+        echoed["turn"], args,
+        "the turn must reach the backend whole"
+    );
+
+    for args in [json!({}), json!({ "message": 5 })] {
+        let resp = dispatch(&MockBackend, call("sessions_chat", args.clone())).await;
         let result = resp.result.expect("a result");
         assert_eq!(result["isError"], true, "{args}");
         let text = result["content"][0]["text"].as_str().expect("text");

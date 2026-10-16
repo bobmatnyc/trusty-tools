@@ -20,6 +20,7 @@ use trusty_common::uds::server::{CODE_INVALID_PARAMS, RpcResponse, RpcRouter};
 
 use super::{METHOD, register};
 use crate::core::paths::FrameworkPaths;
+use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
 use crate::daemon::api;
 use crate::daemon::state::DaemonState;
 
@@ -145,4 +146,78 @@ async fn http_rpc_still_refuses_a_non_loopback_peer() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Call `sessions_chat` with `arguments` through [`METHOD`]; the tool result.
+async fn sessions_chat_result(router: &RpcRouter, arguments: Value) -> Value {
+    let envelope = json!({"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                          "params": {"name": "sessions_chat", "arguments": arguments}});
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        rpc_frame(router, envelope),
+    )
+    .await
+    .expect("#9979: a chat turn must answer, never hang");
+    assert!(frame.get("error").is_none(), "{frame}");
+    frame["result"]["result"].clone()
+}
+
+/// Why (#9979): the tool is listed, and a turn through `mpm.mcp.dispatch`
+/// returns the `mpm.sessions.chat` response unchanged. A `@prefix:` turn needs
+/// no model, so it runs hermetically; the unique tmux name reaches no pane.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn mcp_dispatch_sessions_chat_matches_mpm_sessions_chat() {
+    let (state, _dir) = hermetic();
+    let router = register(RpcRouter::new(), &state);
+    let listing = rpc_frame(
+        &router,
+        json!({"jsonrpc": "2.0", "id": 20, "method": "tools/list"}),
+    )
+    .await;
+    let tools = listing["result"]["result"]["tools"]
+        .as_array()
+        .expect("a tool list");
+    assert!(
+        tools.iter().any(|t| t["name"] == "sessions_chat"),
+        "{listing}"
+    );
+
+    let name = format!("tm-mcpchat-{}", uuid::Uuid::new_v4().simple());
+    let mut session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    session.tmux_name = name.clone();
+    state.register_session(session);
+    let turn = json!({ "message": format!("@{}: echo hi", name.trim_start_matches("tm-")) });
+
+    let result = sessions_chat_result(&router, turn.clone()).await;
+    assert_eq!(result["isError"], false, "{result}");
+    let text = result["content"][0]["text"].as_str().expect("text");
+    let reply: Value = serde_json::from_str(text).expect("the tool text is JSON");
+    assert_eq!(reply["routed_to_session"], json!(name), "{reply}");
+
+    let chat = super::super::coordinator::register(RpcRouter::new(), &state);
+    let frame = json!({ "jsonrpc": "2.0", "id": 1, "method": "mpm.sessions.chat", "params": turn });
+    let response: RpcResponse = chat
+        .dispatch(&serde_json::to_vec(&frame).expect("encode"))
+        .await;
+    let direct = serde_json::to_value(response).expect("serialise the frame");
+    assert_eq!(
+        reply, direct["result"],
+        "the tool must not reshape the reply"
+    );
+}
+
+/// Why (#9979, the Fail-Open Check): with no model configured the turn is a
+/// tool error carrying the `503` status text, answered at once.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn mcp_dispatch_sessions_chat_without_a_model_is_a_503_tool_error() {
+    let (state, _dir) = hermetic();
+    let router = register(RpcRouter::new(), &state);
+    let result = sessions_chat_result(&router, json!({ "message": "what is running?" })).await;
+    assert_eq!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(text.starts_with("sessions_chat failed (503): "), "{text}");
+    assert!(text.contains("not configured"), "{text}");
 }
