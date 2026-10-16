@@ -22,6 +22,7 @@ use trusty_mpm::core::worktree_ledger::backfill::{
     BackfillReport, backfill_checkouts, registered_checkouts,
 };
 use trusty_mpm::core::worktree_ledger::fold::{ProjectSummary, fold, gib};
+use trusty_mpm::core::worktree_ledger::hook_ingest::clear_sticky_ingest_failure;
 use trusty_mpm::core::worktree_ledger::reconcile::{ReconcileReport, reconcile_removed};
 use trusty_mpm::core::worktree_ledger::record::measure_live;
 
@@ -88,20 +89,34 @@ pub(crate) struct WorktreesReport {
 ///
 /// Why: `home` is an argument so the integration test drives a scratch home
 /// through the real binary and nothing here reads the process environment.
-/// What: registry → [`backfill_checkouts`] → [`reconcile_removed`] →
+/// What: registry → [`backfill_checkouts`] (then, when every checkout
+/// answered, the sticky hook-ingest failure record is cleared) → [`reconcile_removed`] →
 /// [`measure_live`] (when `measure`) → fold. The reconcile runs under
 /// `--no-size` too: it lists git, it never measures. A ledger error
 /// propagates; an unreadable registry is reported in
 /// [`BackfillSummary::registry_error`] and the rest still runs.
 /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
-/// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`.
+/// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`,
+/// `tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill`.
 pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<WorktreesReport> {
     let ledger = WorktreeLedger::under_home(home);
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
         &home.join(FRAMEWORK_DIR_NAME),
     );
     let (report, registry_error) = match registered_checkouts(&registry_dir).await {
-        Ok(checkouts) => (backfill_checkouts(&ledger, &checkouts)?, None),
+        Ok(checkouts) => {
+            let report = backfill_checkouts(&ledger, &checkouts)?;
+            // #8994 S2b: a clean backfill records the tree a Bash call made
+            // and the daemon missed, so it alone clears the sticky record.
+            if report.unanswered.is_empty() {
+                match clear_sticky_ingest_failure(&ledger) {
+                    Ok(true) => eprintln!("tm worktrees: cleared the hook-ingest failure record"),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("tm worktrees: could not clear the failure record: {e}"),
+                }
+            }
+            (report, None)
+        }
         Err(e) => (BackfillReport::default(), Some(e.to_string())),
     };
     // #8994: without this pass a reaped or removed tree stays live forever.

@@ -16,15 +16,16 @@
 //! that gives no answer, a ledger read or write error — is (1) logged at
 //! `warn` with its cause, (2) recorded in S2a's `worktrees.ingest-failure.json`
 //! sidecar, which the `worktree_registry` doctor row reports as `Warn`, and
-//! (3) returned in [`CommandReport::errors`]. It also marks the shared
-//! [`super::worktree_ledger_ingest::IngestTracker`], so no later success, S2a's
-//! included, clears the sidecar while this daemon runs: there is no retry
-//! here, and `tm worktrees`' backfill is what records a missed tree.
+//! (3) returned in [`CommandReport::errors`]. The sidecar record is `sticky`
+//! (persisted in the record, so it survives a daemon restart): no later
+//! success, S2a's included, clears it. There is no retry here; `tm worktrees`'
+//! backfill records a missed tree and, once it ran cleanly, clears the record.
 //! Nothing here deletes, moves, locks or unlocks a worktree.
 //! Test: `daemon::services::worktree_command_ingest::tests`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use serde_json::Value;
 
@@ -35,8 +36,10 @@ use crate::core::worktree_ledger::backfill::registered_checkouts;
 use crate::core::worktree_ledger::bash_worktree::{
     ParsedCommand, WorktreeOp, parse_worktree_command,
 };
-use crate::core::worktree_ledger::command_ingest::{observe_added_tree, reconcile_command_removal};
-use crate::core::worktree_ledger::hook_ingest::{ObserveOutcome, record_ingest_failure};
+use crate::core::worktree_ledger::command_ingest::{
+    NEW_TREE_WINDOW, observe_added_tree, reconcile_command_removal,
+};
+use crate::core::worktree_ledger::hook_ingest::{ObserveOutcome, record_sticky_ingest_failure};
 use crate::core::worktree_ledger::reconcile::ReconcileReport;
 use crate::core::worktree_ledger::{LEDGER_FILE, WorktreeLedger};
 use crate::daemon::state::DaemonState;
@@ -59,7 +62,8 @@ pub struct CommandReport {
 /// command without the word `worktree`, or one that runs no `git worktree`
 /// call. Otherwise spawns the work and returns its handle; nothing on the hook
 /// path awaits it. With no tokio runtime or a relative framework root the
-/// work cannot run: that is logged at `warn` and marks the tracker.
+/// work cannot run: that is logged at `warn` and, given an absolute root,
+/// recorded in the sidecar.
 /// Test: `each_worktree_add_form_records_one_entry`,
 /// `commands_that_only_mention_the_words_record_nothing`,
 /// `a_failed_record_is_never_silent_and_never_blocks`.
@@ -80,6 +84,7 @@ pub fn spawn_for_bash(
         .and_then(Value::as_str)
         .filter(|c| c.contains("worktree"))?;
     let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
+    let received = SystemTime::now();
     let parsed = parse_worktree_command(command, cwd);
     if parsed.ops.is_empty() && parsed.errors.is_empty() {
         return None;
@@ -87,12 +92,15 @@ pub fn spawn_for_bash(
     let tracker = state.worktree_ingest();
     let root = state.framework_root();
     let (Ok(runtime), true) = (tokio::runtime::Handle::try_current(), root.is_absolute()) else {
-        tracker.mark_command_failed();
         tracing::warn!(
             root = %root.display(),
             "worktree ledger: a Bash `git worktree` call was not recorded — no async \
              runtime or no absolute framework root (#8994)"
         );
+        if root.is_absolute() {
+            let ledger = WorktreeLedger::at(root.join(LEDGER_FILE));
+            fail(&ledger, "a Bash `git worktree` call (no async runtime)");
+        }
         return None;
     };
     let ledger = WorktreeLedger::at(root.join(LEDGER_FILE));
@@ -102,7 +110,14 @@ pub fn spawn_for_bash(
         let checkouts = registered_checkouts(&registry_dir)
             .await
             .map_err(|e| format!("project registry unreadable: {e}"));
-        let work = move || ingest(&tracker, &ledger, parsed, &checkouts, &session);
+        let work = move || ingest(
+            &tracker,
+            &ledger,
+            parsed,
+            &checkouts,
+            &session,
+            received.checked_sub(NEW_TREE_WINDOW),
+        );
         tokio::task::spawn_blocking(work)
             .await
             .unwrap_or_else(|e| CommandReport {
@@ -119,12 +134,13 @@ fn ingest(
     parsed: ParsedCommand,
     checkouts: &Result<Vec<PathBuf>, String>,
     session: &str,
+    not_before: Option<SystemTime>,
 ) -> CommandReport {
     let _write = tracker.lock_write();
     let mut report = CommandReport::default();
     for error in &parsed.errors {
         let what = format!("a Bash `git worktree` call: {error}");
-        report.errors.push(fail(tracker, ledger, &what));
+        report.errors.push(fail(ledger, &what));
     }
     for op in &parsed.ops {
         let (what, result) = match op {
@@ -132,7 +148,13 @@ fn ingest(
                 let what = format!("`git worktree add` of {}", show(candidates));
                 let result = match checkouts {
                     Ok(checkouts) => {
-                        observe_added_tree(ledger, candidates, checkouts, Some(session))
+                        observe_added_tree(
+                            ledger,
+                            candidates,
+                            checkouts,
+                            Some(session),
+                            not_before.unwrap_or(SystemTime::UNIX_EPOCH),
+                        )
                             .map(|outcome| report.added.push(outcome))
                             .map_err(|e| e.to_string())
                     }
@@ -157,23 +179,22 @@ fn ingest(
             Ok(()) => tracing::info!("worktree ledger: read {what} (#8994)"),
             Err(e) => report
                 .errors
-                .push(fail(tracker, ledger, &format!("{what}: {e}"))),
+                .push(fail(ledger, &format!("{what}: {e}"))),
         }
     }
     report
 }
 
-/// Log one failure at `warn`, record it in the sidecar, mark the tracker.
-fn fail(tracker: &IngestTracker, ledger: &WorktreeLedger, what: &str) -> String {
+/// Log one failure at `warn` and record it, sticky, in the sidecar.
+fn fail(ledger: &WorktreeLedger, what: &str) -> String {
     let message = format!("hook ingest could not record {what}");
     tracing::warn!(
         "worktree ledger: {message} — the hook verdict is unaffected; `tm worktrees` \
          backfills what was missed (#8994)"
     );
-    if let Err(e) = record_ingest_failure(ledger, &message) {
+    if let Err(e) = record_sticky_ingest_failure(ledger, &message) {
         tracing::warn!("worktree ledger: could not record the ingest failure either: {e} (#8994)");
     }
-    tracker.mark_command_failed();
     message
 }
 

@@ -396,6 +396,7 @@ async fn a_failed_record_is_never_silent_and_never_blocks() {
         "an unrelated success must not clear the S2b alarm"
     );
     assert_ne!(row().status, CheckStatus::Ok);
+    assert!(read_ingest_failure(&h.ledger()).unwrap().unwrap().sticky);
     // A command that cannot be parsed is reported the same way.
     let report = h
         .bash(
@@ -452,11 +453,58 @@ async fn an_add_refused_for_an_existing_worktree_records_nothing() {
         .bash(HookEvent::PostToolUse, command, &fixture.repo)
         .await
         .expect("work");
-    assert!(
-        !matches!(report.added.as_slice(), [ObserveOutcome::Recorded { .. }]),
-        "{report:?}"
-    );
+    assert_eq!(report.added, vec![ObserveOutcome::NotNew]);
     assert_eq!(observed_git_command(&h, &tree), 0, "no owner is claimed");
     assert_eq!(h.count(|_| true), 0, "nothing appended");
     assert_eq!(report.errors, Vec::<String>::new());
+}
+
+/// A failure record with the sticky marker, as the warn path leaves it.
+fn assert_sticky_failure(h: &Harness, report: &CommandReport, cause: &str) {
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(report.errors[0].contains("git worktree add"), "{report:?}");
+    let failure = read_ingest_failure(&h.ledger())
+        .unwrap()
+        .expect("the warn path records the failure");
+    assert!(failure.error.contains(cause), "{failure:?}");
+    assert!(failure.sticky, "{failure:?}");
+    assert_eq!(h.count(|_| true), 0, "nothing appended");
+    let row =
+        crate::daemon::doctor::doctor_worktree_registry::check_worktree_registry(h.home.path());
+    assert_ne!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// Fail-open, error arm `Git`: a git that gives no answer (here, a deadline
+/// already past, so none is spawned and the call reads as a timeout) is
+/// recorded sticky, never silently dropped as "not recorded".
+#[tokio::test]
+async fn a_git_that_gives_no_answer_is_recorded_sticky() {
+    let fixture = GitWorktreeFixture::new();
+    let h = Harness::new(&fixture.repo).await;
+    let command = "git worktree add -b s2b/slow ../wt-slow";
+    assert!(sh(command, &fixture.repo));
+    let parsed = parse_worktree_command(command, Some(&fixture.repo));
+    let checkouts = Ok(vec![fixture.repo.clone()]);
+    let tracker = IngestTracker::default();
+    let report = crate::core::bounded_proc::with_deadline(std::time::Instant::now(), || {
+        ingest(&tracker, &h.ledger(), parsed, &checkouts, "s", None)
+    });
+    assert_sticky_failure(&h, &report, "gave no answer");
+}
+
+/// Fail-open, error arm "registry unreadable": the add cannot be judged, so it
+/// is recorded sticky.
+#[tokio::test]
+async fn an_unreadable_project_registry_is_recorded_sticky() {
+    let fixture = GitWorktreeFixture::new();
+    let h = Harness::new(&fixture.repo).await;
+    let registry = crate::project::registry_data_dir_under(h.state.framework_root());
+    std::fs::write(registry.join("projects.json"), b"{torn").unwrap();
+    let command = "git worktree add -b s2b/reg ../wt-reg";
+    assert!(sh(command, &fixture.repo));
+    let report = h
+        .bash(HookEvent::PostToolUse, command, &fixture.repo)
+        .await
+        .expect("work");
+    assert_sticky_failure(&h, &report, "project registry unreadable");
 }
