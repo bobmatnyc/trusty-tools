@@ -103,7 +103,10 @@ fn poisoned_claim_store_is_reopened_by_its_hold() {
     let hold = ClaimHold::default();
     let store = hold.get(&fx.path).expect("open");
     assert_eq!(store.claim("Ev1").expect("claim"), Claim::Fresh);
-    store.state.lock().expect("state").poisoned = true;
+    // A real append failure poisons it and frees its flock.
+    store.state.lock().expect("state").fault = Some(ClaimFault::Append);
+    assert!(store.claim("Ev2").is_err(), "the append failed");
+    assert!(store.is_poisoned());
     let again = hold.get(&fx.path).expect("reopened");
     assert!(!std::sync::Arc::ptr_eq(&store, &again), "a new store");
     assert_eq!(again.claim("Ev1").expect("claim"), Claim::Duplicate);
