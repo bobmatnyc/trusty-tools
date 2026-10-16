@@ -24,6 +24,9 @@ pub mod dream;
 // #9278 (A5, Q3): `Embedder` is trusty-common's; callers outside the crate
 // name `trusty_common::embedder`.
 pub(crate) mod embed;
+mod error;
+#[cfg(test)]
+mod error_tests;
 pub mod filter;
 // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
 #[cfg(test)]
@@ -64,6 +67,7 @@ pub use community::{KnowledgeGap, find_communities};
 pub use content_hash::{
     CONTENT_HASH_VERSION, ContentHash, memory_content_hash, normalize_for_hash,
 };
+pub use error::EngineError;
 #[cfg(feature = "server")]
 pub(crate) use maintenance_lease::{LeaseStatus, MaintenanceLease};
 // #9278 (ruling 2026-10-14): no root re-export of the palace types or the
