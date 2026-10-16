@@ -505,6 +505,12 @@ mod tests {
     #[serial]
     async fn python_embedder_check_enabled_aggregates_all_four_checks_in_order() {
         let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
+        // #9966: keep the uv/venv lookups off the real data dir, and keep any
+        // uv lookup offline even if it regressed into fetching.
+        let data = tempfile::tempdir().expect("tempdir");
+        let data_path = data.path().to_str().expect("utf-8 tempdir");
+        let _d = EnvVarGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data_path);
+        let _f = EnvVarGuard::set("TRUSTY_UV_FETCH", "0");
 
         let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
         let results = PythonEmbedderCheck.run(&state).await;
