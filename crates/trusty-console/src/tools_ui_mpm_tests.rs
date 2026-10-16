@@ -10,12 +10,20 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use super::*;
-use crate::routes::chat::MPM_CHAT_API_PATH;
+use crate::mcp_handle::McpServiceHandle;
+use crate::routes::chat::{CHAT_CALL_TIMEOUT, MPM_CHAT_API_PATH, MpmChat};
 use crate::server::{AppState, build_router};
 
 /// Send `req` through the real router; status, headers and body text.
+///
+/// #9979: the chat handle points at an absent binary, so a guard regression
+/// fails inside a test (a 503, not the expected 403) and spawns no process:
+/// `AppState::new` would otherwise spawn the real `tm serve --stdio --allow-chat`.
 async fn send(req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, String) {
-    let router = build_router(AppState::new(vec![]));
+    let mut state = AppState::new(vec![]);
+    let absent = McpServiceHandle::new("trusty-console-no-such-tm-9979", vec![]);
+    state.mpm_chat = MpmChat::with_timeout(std::sync::Arc::new(absent), CHAT_CALL_TIMEOUT);
+    let router = build_router(state);
     let resp = router.oneshot(req).await.expect("response");
     let status = resp.status();
     let headers = resp.headers().clone();
