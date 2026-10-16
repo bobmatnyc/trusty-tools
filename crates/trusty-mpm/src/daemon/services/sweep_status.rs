@@ -167,7 +167,8 @@ pub(crate) static HYGIENE: SweepStatus = SweepStatus::new(HYGIENE_NAME);
 /// What: a `Semaphore` with a single permit, acquired for a whole pass. A sweep
 /// that finds it taken WAITS rather than skipping, because both sweeps are
 /// idempotent and a skipped hygiene pass would leave a base clone stale for the
-/// life of the daemon (hygiene runs once per boot).
+/// life of the daemon (hygiene runs once per boot). The manual `--merged-prs`
+/// prune takes the same permit but never waits: it answers busy (#8994).
 /// Test: `the_lane_serialises_two_sweeps`.
 pub(crate) fn lane() -> &'static Semaphore {
     static LANE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));

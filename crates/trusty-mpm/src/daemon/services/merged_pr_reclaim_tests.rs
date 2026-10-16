@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    DEFAULT_INTERVAL_SECS, SweepReport, parse_enabled, parse_interval_secs, reclaim, reclaim_loop,
+    DEFAULT_INTERVAL_SECS, ManualPermitRefusal, SweepReport, parse_enabled, parse_interval_secs,
+    reclaim, reclaim_loop, try_manual_permit,
 };
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_reclaim::{ReclaimMode, ReclaimOutcome, ReclaimSurvey};
@@ -199,4 +200,50 @@ async fn reclaim_on_an_empty_root_reclaims_nothing() {
         "a workspace root with no registered worktree has nothing to reclaim: {out:?}"
     );
     assert_eq!(out.survey.candidates.len(), 0, "outcome: {out:?}");
+}
+
+/// 🔴 #8994: manual and timer reclaim can never hold the permit at once.
+///
+/// What: a LOCAL lane, so no other test's use of the process-global one can
+/// interfere. The timer side takes it exactly as [`super::run_one_tick`] does
+/// (`acquire().await`); the manual side through [`try_manual_permit`]. Each
+/// direction is checked: timer holds → manual is `Busy`; manual holds → the
+/// timer waits; the manual permit, once dropped, lets the timer in.
+#[tokio::test]
+async fn manual_permit_refuses_while_the_timer_holds_the_lane() {
+    let lane = tokio::sync::Semaphore::new(1);
+
+    let timer = lane.acquire().await.expect("a fresh lane is open");
+    assert_eq!(
+        try_manual_permit(&lane).err(),
+        Some(ManualPermitRefusal::Busy),
+        "a manual pass must not start while the timer sweep holds the lane"
+    );
+    drop(timer);
+
+    let manual = try_manual_permit(&lane).expect("a free lane grants the manual permit");
+    let timer_wait = tokio::time::timeout(Duration::from_millis(200), lane.acquire()).await;
+    assert!(
+        timer_wait.is_err(),
+        "the timer sweep must wait while a manual pass holds the lane"
+    );
+    drop(manual);
+    let _timer = tokio::time::timeout(Duration::from_secs(5), lane.acquire())
+        .await
+        .expect("the timer gets the lane once the manual pass ends")
+        .expect("lane is open");
+}
+
+/// 🔴 #8994 FAIL-CLOSED: a lane that cannot grant a permit for any reason
+/// other than "held" refuses the manual pass. `Closed` is not `Busy`, and it
+/// is never a permit.
+#[test]
+fn manual_permit_fails_closed_on_a_closed_lane() {
+    let lane = tokio::sync::Semaphore::new(1);
+    lane.close();
+    assert_eq!(
+        try_manual_permit(&lane).err(),
+        Some(ManualPermitRefusal::Closed),
+        "a closed lane must refuse the manual pass, not grant or misreport it"
+    );
 }
