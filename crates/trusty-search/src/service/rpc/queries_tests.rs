@@ -3,10 +3,10 @@
 //! Why: the failure this rules out is the two transports answering a QUESTION
 //! differently — a consumer migrated onto the socket by the retire slice
 //! getting different hits, a different fusion order, a different drop tally, or
-//! a different refusal than the HTTP route it replaced. Every test here drives
-//! the REAL axum router and the REAL RPC router against ONE shared
-//! `SearchAppState`, so a `*_report` function that stopped being the body both
-//! transports serve fails these rather than surfacing in a consumer.
+//! a different refusal than the HTTP route it replaced. #9535: the router is
+//! gone, so the HTTP body is the `*_report` core each handler wrapped, behind
+//! the same decode and guards, called on the SAME `SearchAppState` the REAL RPC
+//! router reads.
 //!
 //! **The index holds a real corpus and the queries are real.** Slice 2's read
 //! parity could be proved over shapes; a search cannot. The fixture wires a
@@ -25,22 +25,22 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use tower::ServiceExt;
+use axum::http::StatusCode;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::embed::{Embedder, MockEmbedder};
-use crate::core::indexer::CodeIndexer;
+use crate::core::indexer::{CodeIndexer, SearchQuery};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
 use crate::service::concurrency::ConcurrencyLimiter;
 use crate::service::query_timeout::QueryTimeoutConfig;
 use crate::service::rpc::error::{CODE_DEADLINE_EXCEEDED, CODE_NOT_FOUND, CODE_UNAVAILABLE};
 use crate::service::rpc::queries;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::{
+    global_grep_report, global_search_report, grep_report, search_report, search_similar_report,
+    typeahead_report, SearchAppState,
+};
 
 /// The index every parity case queries.
 const INDEX: &str = "parity-6285-queries";
@@ -80,20 +80,15 @@ fn raw(id: &str, file: &str, function_name: Option<&str>, content: &str) -> RawC
     }
 }
 
-/// One state, both routers, over an index with a live corpus and vector lane.
+/// One state, read by the RPC router and the cores, over a live corpus.
 ///
-/// Why both routers are built from the SAME `Arc`: that is the property under
-/// test at one level down — `build_router_on` and `queries::register` must read
-/// one registry, one limiter and one deadline. Two `Arc::new` calls here would
-/// make every assertion below pass against two independent daemons.
-async fn fixture_with(state: SearchAppState) -> (Arc<SearchAppState>, Router, RpcRouter) {
+/// Why the SAME `Arc`: the cores and `queries::register` must read one
+/// registry, one limiter and one deadline; two `Arc::new` calls would make every
+/// assertion below pass against two independent daemons.
+async fn fixture_with(state: SearchAppState) -> (Arc<SearchAppState>, RpcRouter) {
     let state = Arc::new(state);
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc = queries::register(RpcRouter::new(), &state);
-    (state, http, rpc)
+    (state, rpc)
 }
 
 /// The four chunks every fixture plants: `(chunk id, file, function, content)`.
@@ -158,24 +153,24 @@ async fn planted_registry(root: &std::path::Path) -> (IndexRegistry, Arc<dyn Emb
 const ABSENT_ROOT: &str = "/nonexistent/parity-6285-queries";
 
 /// The default fixture: production guards, one planted index, no files on disk.
-async fn fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
+async fn fixture() -> (Arc<SearchAppState>, RpcRouter) {
     let (registry, embedder) = planted_registry(std::path::Path::new(ABSENT_ROOT)).await;
-    let (state, http, rpc) = fixture_with(SearchAppState::new(registry)).await;
+    let (state, rpc) = fixture_with(SearchAppState::new(registry)).await;
     state.install_embedder(embedder).await;
-    (state, http, rpc)
+    (state, rpc)
 }
 
 /// The same fixture with the two guards shrunk to something a test can trip:
 /// one admission slot with no queue, and a 50 ms query deadline.
-async fn guarded_fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
+async fn guarded_fixture() -> (Arc<SearchAppState>, RpcRouter) {
     let (registry, embedder) = planted_registry(std::path::Path::new(ABSENT_ROOT)).await;
     let state = SearchAppState::new(registry).with_query_guards(
         ConcurrencyLimiter::with_limits(1, 0),
         QueryTimeoutConfig::from_duration(std::time::Duration::from_millis(50)),
     );
-    let (state, http, rpc) = fixture_with(state).await;
+    let (state, rpc) = fixture_with(state).await;
     state.install_embedder(embedder).await;
-    (state, http, rpc)
+    (state, rpc)
 }
 
 /// The grep fixture: the same corpus, over a root whose files really exist.
@@ -187,7 +182,7 @@ async fn guarded_fixture() -> (Arc<SearchAppState>, Router, RpcRouter) {
 ///
 /// The `TempDir` is returned because dropping it deletes the tree the assertions
 /// depend on.
-async fn grep_fixture() -> (tempfile::TempDir, Router, RpcRouter) {
+async fn grep_fixture() -> (tempfile::TempDir, Arc<SearchAppState>, RpcRouter) {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join("src")).expect("create src/");
     for (_, file, _, content) in CORPUS {
@@ -195,52 +190,22 @@ async fn grep_fixture() -> (tempfile::TempDir, Router, RpcRouter) {
     }
 
     let (registry, embedder) = planted_registry(tmp.path()).await;
-    let (state, http, rpc) = fixture_with(SearchAppState::new(registry)).await;
+    let (state, rpc) = fixture_with(SearchAppState::new(registry)).await;
     state.install_embedder(embedder).await;
-    (tmp, http, rpc)
+    (tmp, state, rpc)
 }
 
-/// One request against the real router, as `(status, body-text)`.
-async fn http_raw(router: &Router, request: Request<Body>) -> (StatusCode, String) {
-    let response = router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("the router must answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the body");
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
+fn http_body<T: serde::Serialize>(
+    answer: Result<T, (StatusCode, serde_json::Value)>,
+) -> serde_json::Value {
+    let bytes = serde_json::to_vec(&answer.expect("the core must answer 200")).expect("encode");
+    serde_json::from_slice(&bytes).expect("decode the body")
 }
 
-/// `POST uri` with a JSON body, as parsed JSON, asserting a 200.
-async fn http_post(router: &Router, uri: &str, body: serde_json::Value) -> serde_json::Value {
-    let request = Request::post(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).expect("encode")))
-        .expect("build the request");
-    let (status, text) = http_raw(router, request).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "POST {uri} answered {status}: {text}"
-    );
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("POST {uri} body is not JSON: {e}"))
-}
-
-/// `GET uri`, as parsed JSON, asserting a 200.
-async fn http_get(router: &Router, uri: &str) -> serde_json::Value {
-    let request = Request::get(uri)
-        .body(Body::empty())
-        .expect("build the request");
-    let (status, text) = http_raw(router, request).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "GET {uri} answered {status}: {text}"
-    );
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("GET {uri} body is not JSON: {e}"))
+/// A JSON request decoded as the core's request type, as the HTTP extractor did.
+fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
+    serde_json::from_value(json).expect("decode the request")
 }
 
 async fn dispatch(
@@ -302,7 +267,7 @@ fn assert_non_trivial(body: &serde_json::Value, field: &str, what: &str) {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn search_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
     let query = serde_json::json!({ "text": TERM, "top_k": 5, "expand_graph": false });
 
     let over_socket = rpc_ok(
@@ -318,7 +283,7 @@ async fn search_over_the_socket_matches_the_http_body() {
         "no row should be dropped for this query: {over_socket}"
     );
 
-    let over_http = http_post(&http, &format!("/indexes/{INDEX}/search"), query).await;
+    let over_http = http_body(search_report(&state, INDEX, params(query)).await);
     assert_eq!(without_latency(over_socket), without_latency(over_http));
 }
 
@@ -329,7 +294,7 @@ async fn search_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn global_search_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
     let req = serde_json::json!({ "query": TERM, "top_k": 5 });
 
     let over_socket = rpc_ok(&rpc, queries::METHOD_QUERY_ALL, req.clone()).await;
@@ -340,7 +305,7 @@ async fn global_search_over_the_socket_matches_the_http_body() {
         "the one planted index must contribute a lane: {over_socket}"
     );
 
-    let over_http = http_post(&http, "/search", req).await;
+    let over_http = http_body(global_search_report(&state, params(req)).await);
     assert_eq!(without_latency(over_socket), without_latency(over_http));
 }
 
@@ -352,7 +317,7 @@ async fn global_search_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn grep_over_the_socket_matches_the_http_body() {
-    let (_tmp, http, rpc) = grep_fixture().await;
+    let (_tmp, state, rpc) = grep_fixture().await;
     let req = serde_json::json!({
         "pattern": "AUTHENTICATE", "case_insensitive": true, "glob": "src/*.rs", "max_results": 10,
     });
@@ -365,7 +330,7 @@ async fn grep_over_the_socket_matches_the_http_body() {
     .await;
     assert_non_trivial(&over_socket, "matches", "grep");
 
-    let over_http = http_post(&http, &format!("/indexes/{INDEX}/grep"), req).await;
+    let over_http = http_body(grep_report(&state, INDEX, params(req)).await);
     // `GrepResponse` carries no host-sampled field, so this is a whole-body
     // comparison with nothing excluded.
     assert_eq!(over_socket, over_http);
@@ -379,12 +344,15 @@ async fn grep_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn global_grep_over_the_socket_matches_the_http_body() {
-    let (_tmp, http, rpc) = grep_fixture().await;
+    let (_tmp, state, rpc) = grep_fixture().await;
 
     let req = serde_json::json!({ "pattern": TERM, "max_results": 10 });
     let over_socket = rpc_ok(&rpc, queries::METHOD_GREP_ALL, req.clone()).await;
     assert_non_trivial(&over_socket, "matches", "global grep");
-    assert_eq!(over_socket, http_post(&http, "/grep", req).await);
+    assert_eq!(
+        over_socket,
+        http_body(global_grep_report(&state, params(req)).await)
+    );
 
     // An id no store holds narrows to an empty sweep on both transports.
     let req = serde_json::json!({ "pattern": TERM, "index_id": MISSING, "max_results": 10 });
@@ -394,7 +362,10 @@ async fn global_grep_over_the_socket_matches_the_http_body() {
         serde_json::json!(0),
         "an unknown index_id narrows the fan-out rather than refusing it"
     );
-    assert_eq!(over_socket, http_post(&http, "/grep", req).await);
+    assert_eq!(
+        over_socket,
+        http_body(global_grep_report(&state, params(req)).await)
+    );
 }
 
 /// Why: `search_similar` resolves a seed chunk, then re-embeds it when the LRU
@@ -404,7 +375,7 @@ async fn global_grep_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn search_similar_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
     let req = serde_json::json!({ "file": "src/auth.rs", "function": TERM, "top_k": 3 });
 
     let over_socket = rpc_ok(
@@ -420,7 +391,7 @@ async fn search_similar_over_the_socket_matches_the_http_body() {
         "the seed must resolve to the planted chunk: {over_socket}"
     );
 
-    let over_http = http_post(&http, &format!("/indexes/{INDEX}/search_similar"), req).await;
+    let over_http = http_body(search_similar_report(&state, INDEX, params(req)).await);
     assert_eq!(without_latency(over_socket), without_latency(over_http));
 }
 
@@ -432,38 +403,27 @@ async fn search_similar_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn typeahead_over_the_socket_matches_the_http_body() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let over_socket = rpc_ok(
-        &rpc,
-        queries::METHOD_TYPEAHEAD,
-        serde_json::json!({ "index_id": INDEX, "q": "auth", "limit": 5, "mode": "lexical" }),
-    )
-    .await;
-    assert_non_trivial(&over_socket, "hits", "typeahead");
-    assert_eq!(over_socket["mode"], serde_json::json!("lexical"));
-
-    let over_http = http_get(
-        &http,
-        &format!("/indexes/{INDEX}/typeahead?q=auth&limit=5&mode=lexical"),
-    )
-    .await;
-    assert_eq!(without_latency(over_socket), without_latency(over_http));
-
-    // The clamp: `limit` above `MAX_TYPEAHEAD_LIMIT` is capped identically, and
-    // a query string delivers it as text where the socket delivers a number.
-    let over_socket = rpc_ok(
-        &rpc,
-        queries::METHOD_TYPEAHEAD,
-        serde_json::json!({ "index_id": INDEX, "q": "auth", "limit": 999 }),
-    )
-    .await;
-    let over_http = http_get(
-        &http,
-        &format!("/indexes/{INDEX}/typeahead?q=auth&limit=999"),
-    )
-    .await;
-    assert_eq!(without_latency(over_socket), without_latency(over_http));
+    // The second arm is the clamp: a `limit` above `MAX_TYPEAHEAD_LIMIT` is
+    // capped identically.
+    for (args, check) in [
+        (
+            serde_json::json!({ "q": "auth", "limit": 5, "mode": "lexical" }),
+            true,
+        ),
+        (serde_json::json!({ "q": "auth", "limit": 999 }), false),
+    ] {
+        let mut socket_args = args.clone();
+        socket_args["index_id"] = serde_json::json!(INDEX);
+        let over_socket = rpc_ok(&rpc, queries::METHOD_TYPEAHEAD, socket_args).await;
+        if check {
+            assert_non_trivial(&over_socket, "hits", "typeahead");
+            assert_eq!(over_socket["mode"], serde_json::json!("lexical"));
+        }
+        let over_http = http_body(typeahead_report(&state, INDEX, params(args)).await);
+        assert_eq!(without_latency(over_socket), without_latency(over_http));
+    }
 }
 
 /// Why: an id no store holds is the most-hit refusal on this surface, and the
@@ -475,7 +435,7 @@ async fn typeahead_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_unknown_index_reports_not_found_on_every_query_method() {
-    let (_state, _http, rpc) = fixture().await;
+    let (_state, rpc) = fixture().await;
 
     for (method, params) in [
         (
@@ -516,13 +476,12 @@ async fn an_unknown_index_reports_not_found_on_every_query_method() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_empty_query_reports_invalid_params_on_both_transports() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let request = Request::post(format!("/indexes/{INDEX}/search"))
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"text":"   "}"#))
-        .expect("build the request");
-    let (status, _body) = http_raw(&http, request).await;
+    let (status, _body) =
+        search_report(&state, INDEX, params(serde_json::json!({ "text": "   " })))
+            .await
+            .expect_err("an empty query is refused");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let err = rpc_err(
@@ -542,13 +501,15 @@ async fn an_empty_query_reports_invalid_params_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_bad_regex_reports_invalid_params_on_both_transports() {
-    let (_state, http, rpc) = fixture().await;
+    let (state, rpc) = fixture().await;
 
-    let request = Request::post(format!("/indexes/{INDEX}/grep"))
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pattern":"fn ("}"#))
-        .expect("build the request");
-    let (status, _body) = http_raw(&http, request).await;
+    let (status, _body) = grep_report(
+        &state,
+        INDEX,
+        params(serde_json::json!({ "pattern": "fn (" })),
+    )
+    .await
+    .expect_err("a bad regex is refused");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let err = rpc_err(
@@ -570,16 +531,15 @@ async fn a_bad_regex_reports_invalid_params_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn an_unknown_search_field_reports_invalid_params_on_both_transports() {
-    let (_state, http, rpc) = fixture().await;
+    let (_state, rpc) = fixture().await;
 
-    let request = Request::post(format!("/indexes/{INDEX}/search"))
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"text":"authenticate","path_prefx":"src/"}"#))
-        .expect("build the request");
-    let (status, _body) = http_raw(&http, request).await;
+    // The HTTP route's `Json<SearchQuery>` extractor ran this decode.
+    let decoded = serde_json::from_value::<SearchQuery>(
+        serde_json::json!({ "text": TERM, "path_prefx": "src/" }),
+    );
     assert!(
-        status.is_client_error(),
-        "a misspelled filter must not be silently ignored, got {status}"
+        decoded.is_err(),
+        "a misspelled filter must not be silently ignored"
     );
 
     let err = rpc_err(
@@ -603,20 +563,19 @@ async fn an_unknown_search_field_reports_invalid_params_on_both_transports() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn queries_are_refused_when_the_shared_limiter_is_saturated() {
-    let (state, http, rpc) = guarded_fixture().await;
+    let (state, rpc) = guarded_fixture().await;
 
     // Hold the only slot for the duration of both requests.
     let held = crate::service::concurrency::admit(&state.query_limiter)
         .await
         .expect("the first caller is admitted");
 
-    let request = Request::post(format!("/indexes/{INDEX}/search"))
-        .header("content-type", "application/json")
-        .body(Body::from(format!(r#"{{"text":"{TERM}"}}"#)))
-        .expect("build the request");
-    let (status, body) = http_raw(&http, request).await;
+    // The admission core the HTTP limiter middleware ran.
+    let (status, body) = crate::service::concurrency::admit(&state.query_limiter)
+        .await
+        .expect_err("the HTTP door refuses a second caller");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.contains("server_busy"), "{body}");
+    assert_eq!(body["error"], "server_busy", "{body}");
 
     let err = rpc_err(
         &rpc,
@@ -642,20 +601,21 @@ async fn queries_are_refused_when_the_shared_limiter_is_saturated() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports() {
-    let (state, http, rpc) = guarded_fixture().await;
+    let (state, rpc) = guarded_fixture().await;
     let handle = state
         .registry
         .get(&IndexId::new(INDEX))
         .expect("the planted index");
     let blocked = handle.indexer.write().await;
 
-    let request = Request::post(format!("/indexes/{INDEX}/search"))
-        .header("content-type", "application/json")
-        .body(Body::from(format!(r#"{{"text":"{TERM}"}}"#)))
-        .expect("build the request");
-    let (status, body) = http_raw(&http, request).await;
+    // The deadline core the HTTP timeout middleware ran, around the search core.
+    let search = search_report(&state, INDEX, params(serde_json::json!({ "text": TERM })));
+    let (status, body) =
+        crate::service::query_timeout::with_query_deadline(&state.query_timeout, search)
+            .await
+            .expect_err("the HTTP door answers 408");
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
-    assert!(body.contains("query_timeout"), "{body}");
+    assert_eq!(body["error"], "query_timeout", "{body}");
 
     let err = rpc_err(
         &rpc,

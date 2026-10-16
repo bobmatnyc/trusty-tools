@@ -9,9 +9,9 @@
 //! would be discovered in a consumer, after the retire slice deleted the route
 //! it could have been compared against.
 //!
-//! Every case drives the REAL axum router and the REAL RPC router over ONE
-//! shared state, so a `*_report` core that stopped being the body both
-//! transports serve fails here.
+//! Every case drives the REAL RPC router and, for the HTTP side, the
+//! `*_report` core each route wrapped (#9535: the router is gone), over ONE
+//! shared state, so a socket that stopped running that core fails here.
 //!
 //! **The two config writes touch process-global state, so every case is
 //! `#[serial]` and runs under an isolated `TRUSTY_DATA_DIR`.** The memory limits
@@ -23,10 +23,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use tower::ServiceExt as _;
+use axum::http::StatusCode;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::indexer::CodeIndexer;
@@ -34,21 +31,24 @@ use crate::core::memguard::{
     index_memory_limit_mb, memory_limit_mb, set_index_memory_limit_mb, set_memory_limit_mb,
 };
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+use crate::service::orphan_report::registry_orphans_report;
 use crate::service::persistence::{self, PersistedIndex};
 use crate::service::rpc::admin;
 use crate::service::rpc::error::CODE_NOT_FOUND;
 use crate::service::rpc::RestoreLimits;
 use crate::service::server::tests_components::IsolatedDataDir;
-use crate::service::server::{build_router_on, SearchAppState};
+use crate::service::server::{
+    admin_stop_report, logs_tail_report, patch_config_report, patch_index_config_report,
+    LogsTailParams, PatchConfigRequest, SearchAppState,
+};
 
 // ---------------------------------------------------------------- fixtures ---
 
-/// One state carrying `ids` as registered indexes, plus both routers on it.
+/// One state carrying `ids` as registered indexes, plus the RPC router on it.
 ///
-/// Why both from the SAME `Arc`: the property under test one level down is that
-/// `build_router_on` and `admin::register` read ONE registry. Two `Arc::new`
-/// calls would make every comparison below a comparison of two daemons.
-fn routers(ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter) {
+/// Why the SAME `Arc`: two `Arc::new` calls would make every comparison below a
+/// comparison of two daemons.
+fn routers(ids: &[&str]) -> (Arc<SearchAppState>, RpcRouter) {
     let registry = IndexRegistry::new();
     for id in ids {
         let root = format!("/nonexistent/admin-{id}");
@@ -59,12 +59,8 @@ fn routers(ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter) {
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
     let rpc = admin::register(RpcRouter::new(), &state);
-    (state, http, rpc)
+    (state, rpc)
 }
 
 // #7665: the guard this file used to define privately now lives beside the two
@@ -72,72 +68,22 @@ fn routers(ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter) {
 
 // ------------------------------------------------------------- transports ---
 
-async fn http_raw(router: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
-    let response = router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("the router must answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the body");
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-    (status, body)
-}
-
-fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).expect("encode")))
-        .expect("build the request")
-}
-
-async fn http_ok(
-    router: &Router,
-    method: &str,
-    uri: &str,
-    body: serde_json::Value,
+/// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
+fn http_body<T: serde::Serialize>(
+    answer: Result<T, (StatusCode, serde_json::Value)>,
 ) -> serde_json::Value {
-    let (status, body) = http_raw(router, json_request(method, uri, body)).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{method} {uri} answered {status}: {body}"
-    );
-    body
+    let bytes = serde_json::to_vec(&answer.expect("the core must answer 200")).expect("encode");
+    serde_json::from_slice(&bytes).expect("decode the body")
 }
 
-async fn http_get(router: &Router, uri: &str) -> serde_json::Value {
-    let request = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .body(Body::empty())
-        .expect("build the request");
-    let (status, body) = http_raw(router, request).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "GET {uri} answered {status}: {body}"
-    );
-    body
+/// A JSON request decoded as the core's request type, as the HTTP extractor did.
+fn params<T: serde::de::DeserializeOwned>(json: serde_json::Value) -> T {
+    serde_json::from_value(json).expect("decode the request")
 }
 
-async fn http_err(
-    router: &Router,
-    method: &str,
-    uri: &str,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
-    let (status, body) = http_raw(router, json_request(method, uri, body)).await;
-    assert!(
-        status.is_client_error() || status.is_server_error(),
-        "{method} {uri} must be refused, got {status}: {body}"
-    );
-    (status, body)
+/// The `GET /logs/tail` page for `query`, decoded as its `Query` extractor did.
+fn logs_tail(state: &Arc<SearchAppState>, query: serde_json::Value) -> serde_json::Value {
+    http_body(Ok(logs_tail_report(state, &params(query))))
 }
 
 async fn dispatch(
@@ -240,10 +186,11 @@ fn live_config(state: &Arc<SearchAppState>, id: &str) -> serde_json::Value {
 #[serial_test::serial]
 async fn index_config_set_over_the_socket_matches_the_http_body() {
     let _isolated = IsolatedDataDir::new();
-    let (state, http, rpc) = routers(&["cfg-http", "cfg-socket"]);
+    let (state, rpc) = routers(&["cfg-http", "cfg-socket"]);
 
     let patch = serde_json::json!({ "include_docs": false, "extra_skip_dirs": ["vendor"] });
-    let over_http = http_ok(&http, "PATCH", "/indexes/cfg-http/config", patch.clone()).await;
+    let over_http =
+        http_body(patch_index_config_report(&state, "cfg-http", params(patch.clone())).await);
     let over_socket = rpc_ok(
         &rpc,
         admin::METHOD_INDEX_CONFIG_SET,
@@ -284,11 +231,13 @@ async fn index_config_set_over_the_socket_matches_the_http_body() {
 #[serial_test::serial]
 async fn a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport() {
     let _isolated = IsolatedDataDir::new();
-    let (state, http, rpc) = routers(&["cfg-zero"]);
+    let (state, rpc) = routers(&["cfg-zero"]);
     let before = live_config(&state, "cfg-zero");
 
     let patch = serde_json::json!({ "data_file_max_bytes": 0 });
-    let over_http = http_err(&http, "PATCH", "/indexes/cfg-zero/config", patch.clone()).await;
+    let over_http = patch_index_config_report(&state, "cfg-zero", params(patch.clone()))
+        .await
+        .expect_err("a zero cap is refused");
     let over_socket = rpc_err(
         &rpc,
         admin::METHOD_INDEX_CONFIG_SET,
@@ -319,10 +268,12 @@ async fn a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport() 
 #[serial_test::serial]
 async fn a_config_set_against_an_unknown_index_is_refused_and_registers_nothing() {
     let _isolated = IsolatedDataDir::new();
-    let (_state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
 
     let patch = serde_json::json!({ "include_docs": false });
-    let over_http = http_err(&http, "PATCH", "/indexes/cfg-ghost/config", patch.clone()).await;
+    let over_http = patch_index_config_report(&state, "cfg-ghost", params(patch.clone()))
+        .await
+        .expect_err("an unknown index is refused");
     let over_socket = rpc_err(
         &rpc,
         admin::METHOD_INDEX_CONFIG_SET,
@@ -351,17 +302,12 @@ async fn a_config_set_against_an_unknown_index_is_refused_and_registers_nothing(
 #[serial_test::serial]
 async fn config_set_over_the_socket_matches_the_http_body() {
     let _restore = RestoreLimits::capture();
-    let (_state, http, rpc) = routers(&[]);
+    let (_state, rpc) = routers(&[]);
+    let patch_config = |json| http_body(Ok(patch_config_report(params(json))));
 
     set_memory_limit_mb(Some(4096));
     set_index_memory_limit_mb(Some(512));
-    let over_http = http_ok(
-        &http,
-        "PATCH",
-        "/config",
-        serde_json::json!({ "memory_limit_mb": 2048 }),
-    )
-    .await;
+    let over_http = patch_config(serde_json::json!({ "memory_limit_mb": 2048 }));
     assert_eq!(over_http["memory_limit_mb"], serde_json::json!(2048));
     assert_eq!(
         over_http["index_memory_limit_mb"],
@@ -390,13 +336,7 @@ async fn config_set_over_the_socket_matches_the_http_body() {
     // the route about the same request.
     set_memory_limit_mb(Some(4096));
     set_index_memory_limit_mb(Some(512));
-    let disabled_over_http = http_ok(
-        &http,
-        "PATCH",
-        "/config",
-        serde_json::json!({ "index_memory_limit_mb": null }),
-    )
-    .await;
+    let disabled_over_http = patch_config(serde_json::json!({ "index_memory_limit_mb": null }));
 
     set_memory_limit_mb(Some(4096));
     set_index_memory_limit_mb(Some(512));
@@ -427,17 +367,19 @@ async fn config_set_over_the_socket_matches_the_http_body() {
 #[serial_test::serial]
 async fn a_malformed_config_set_applies_neither_field_on_either_transport() {
     let _restore = RestoreLimits::capture();
-    let (_state, http, rpc) = routers(&[]);
+    let (_state, rpc) = routers(&[]);
 
     set_memory_limit_mb(Some(4096));
     set_index_memory_limit_mb(Some(512));
     let malformed = serde_json::json!({ "memory_limit_mb": 1024, "index_memory_limit_mb": "lots" });
 
-    let (status, body) = http_err(&http, "PATCH", "/config", malformed.clone()).await;
+    // The HTTP route's `Json<PatchConfigRequest>` extractor ran this decode.
+    let refused = serde_json::from_value::<PatchConfigRequest>(malformed.clone());
+    assert!(refused.is_err(), "HTTP must refuse the malformed body");
     assert_eq!(
         (memory_limit_mb(), index_memory_limit_mb()),
         (Some(4096), Some(512)),
-        "HTTP refused with {status} ({body}) but a limit moved anyway"
+        "HTTP refused but a limit moved anyway"
     );
 
     let over_socket = rpc_err(&rpc, admin::METHOD_CONFIG_SET, malformed).await;
@@ -461,12 +403,12 @@ async fn a_malformed_config_set_applies_neither_field_on_either_transport() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn logs_tail_over_the_socket_matches_the_http_body() {
-    let (state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
     for i in 0..5 {
         state.log_buffer.push(format!("line {i}"));
     }
 
-    let over_http = http_get(&http, "/logs/tail?n=3").await;
+    let over_http = logs_tail(&state, serde_json::json!({ "n": 3 }));
     let over_socket = rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await;
 
     assert_eq!(
@@ -485,7 +427,7 @@ async fn logs_tail_over_the_socket_matches_the_http_body() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn logs_tail_clamps_n_on_the_socket_too() {
-    let (state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
     for i in 0..3 {
         state.log_buffer.push(format!("line {i}"));
     }
@@ -493,14 +435,14 @@ async fn logs_tail_clamps_n_on_the_socket_too() {
     // Over the ceiling: both transports answer the whole buffer, not an error.
     let huge = serde_json::json!({ "n": 10_000_000 });
     assert_eq!(
-        rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, huge).await,
-        http_get(&http, "/logs/tail?n=10000000").await,
+        rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, huge.clone()).await,
+        logs_tail(&state, huge),
     );
 
     // Absent: the socket must reach the route's own default, not `usize`'s zero.
     assert_eq!(
         rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::Value::Null).await,
-        http_get(&http, "/logs/tail").await,
+        logs_tail(&state, serde_json::json!({})),
     );
 }
 
@@ -515,7 +457,7 @@ async fn logs_tail_clamps_n_on_the_socket_too() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
-    let (state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
     for i in 0..3 {
         state.log_buffer.push(format!("line {i}"));
     }
@@ -524,18 +466,9 @@ async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
     // side, the router's decoder on the other. The two STATUSES are deliberately
     // not compared: each is its own transport's layer answering, not a decision
     // either core made. Same reasoning as the config.set sibling.
-    let (status, body) = http_raw(
-        &http,
-        Request::builder()
-            .method("GET")
-            .uri("/logs/tail?n=lots")
-            .body(Body::empty())
-            .expect("build the request"),
-    )
-    .await;
     assert!(
-        status.is_client_error(),
-        "HTTP must refuse a non-numeric n, got {status}: {body}"
+        serde_json::from_value::<LogsTailParams>(serde_json::json!({ "n": "lots" })).is_err(),
+        "HTTP must refuse a non-numeric n"
     );
 
     for malformed in [
@@ -554,7 +487,7 @@ async fn a_malformed_n_is_refused_before_the_log_ring_is_read() {
     // same page the HTTP route serves for the same request.
     assert_eq!(
         rpc_ok(&rpc, admin::METHOD_LOGS_TAIL, serde_json::json!({ "n": 3 })).await,
-        http_get(&http, "/logs/tail?n=3").await,
+        logs_tail(&state, serde_json::json!({ "n": 3 })),
     );
 }
 
@@ -595,8 +528,8 @@ async fn registry_orphans_over_the_socket_matches_the_http_body() {
     plant_row("orphans-wiped", live.path().join("wiped-root"));
     plant_row("orphans-unplugged", Path::new("/Volumes/Kemono/project"));
 
-    let (_state, http, rpc) = routers(&[]);
-    let over_http = http_get(&http, "/registry/orphans").await;
+    let (_state, rpc) = routers(&[]);
+    let over_http = http_body(registry_orphans_report().await);
     let over_socket = rpc_ok(
         &rpc,
         admin::METHOD_REGISTRY_ORPHANS,
@@ -665,13 +598,10 @@ async fn an_unreadable_registry_is_refused_on_either_transport() {
     let _ = std::fs::remove_file(&path);
     std::fs::create_dir_all(&path).expect("make indexes.toml unreadable as a file");
 
-    let (_state, http, rpc) = routers(&[]);
-    let request = Request::builder()
-        .method("GET")
-        .uri("/registry/orphans")
-        .body(Body::empty())
-        .expect("build the request");
-    let over_http = http_raw(&http, request).await;
+    let (_state, rpc) = routers(&[]);
+    let over_http = registry_orphans_report()
+        .await
+        .expect_err("an unreadable registry is refused");
     assert_eq!(
         over_http.0,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -707,12 +637,12 @@ async fn an_unreadable_registry_is_refused_on_either_transport() {
 #[serial_test::serial]
 async fn admin_stop_over_the_socket_matches_the_http_body() {
     let _isolated = IsolatedDataDir::new();
-    let (state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
 
     // Subscribe BEFORE either call: `run_daemon` holds a receiver for the
     // daemon's life, and without one the send fails and the route refuses.
     let mut over_http_rx = state.shutdown_tx.subscribe();
-    let over_http = http_ok(&http, "POST", "/admin/stop", serde_json::json!({})).await;
+    let over_http = http_body(admin_stop_report(&state));
     assert!(
         *over_http_rx.borrow_and_update(),
         "the HTTP route must signal the shutdown channel"
@@ -747,7 +677,7 @@ async fn admin_stop_over_the_socket_matches_the_http_body() {
 #[serial_test::serial]
 async fn admin_stop_is_refused_on_both_transports_when_nothing_drives_shutdown() {
     let _isolated = IsolatedDataDir::new();
-    let (state, http, rpc) = routers(&[]);
+    let (state, rpc) = routers(&[]);
     // `SearchAppState::new` drops the receiver it creates, so this state carries
     // no shutdown driver — exactly the condition the arm reports.
     assert_eq!(
@@ -756,7 +686,7 @@ async fn admin_stop_is_refused_on_both_transports_when_nothing_drives_shutdown()
         "the fixture must carry no shutdown driver"
     );
 
-    let over_http = http_err(&http, "POST", "/admin/stop", serde_json::json!({})).await;
+    let over_http = admin_stop_report(&state).expect_err("nothing drives shutdown");
     let over_socket = rpc_err(&rpc, admin::METHOD_ADMIN_STOP, serde_json::Value::Null).await;
 
     assert_eq!(over_http.0, StatusCode::SERVICE_UNAVAILABLE);
