@@ -11436,11 +11436,14 @@ name = "trusty-embedderd-py"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "flate2",
  "fs4 0.8.4",
  "hex",
  "include_dir",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
