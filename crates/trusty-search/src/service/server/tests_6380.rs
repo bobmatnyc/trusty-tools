@@ -11,30 +11,27 @@
 //! while the delete waits to quiesce must refuse it, because the pre-lock
 //! comparison and the teardown it authorises are not one step.
 //!
-//! What: most tests drive the real router with `oneshot`, so the
-//! `?expected_root_path=` extractor and the status code are exercised alongside
-//! the guard. The interleaving test calls `delete_index_report` directly instead,
-//! because it needs one `SearchAppState` shared between the delete and the
-//! relocate. Every test points `TRUSTY_DATA_DIR` at a `TempDir` and is
-//! `#[serial_test::serial]`, because that env var is process-wide.
+//! What: every test calls the `delete_index_report` core (#9535) and asserts
+//! the status it returns alongside the guard's effects. The interleaving test
+//! shares one `SearchAppState` between the delete and the relocate. Every test
+//! points `TRUSTY_DATA_DIR` at a `TempDir` and is `#[serial_test::serial]`,
+//! because that env var is process-wide.
 //!
 //! Test: this module. Run with `cargo test -p trusty-search tests_6380`.
 
-use super::build_router;
 use super::search::{delete_index_report, DeleteIndexParams};
+use super::test_support::delete_answer;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::persistence;
 use crate::service::reindex::{index_cancel_flag, index_teardown_lock};
 use crate::service::server::SearchAppState;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tower::ServiceExt;
 
 /// Id used throughout. `[a-z0-9-]` only, so `persistence::sanitize_id` is the
 /// identity function and the data-dir name is predictable.
@@ -60,40 +57,20 @@ fn row_exists(id: &str) -> bool {
         .any(|e| e.id == id)
 }
 
-/// Issue the DELETE and return `(status, body)`.
-async fn send_delete(uri: &str) -> (StatusCode, serde_json::Value) {
-    let router = build_router(SearchAppState::new(IndexRegistry::new()));
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    (status, serde_json::from_slice(&bytes).expect("json body"))
+/// Delete `id` over empty in-memory stores and return `(status, body)`.
+async fn send_delete(id: &str, params: DeleteIndexParams) -> (StatusCode, serde_json::Value) {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    delete_answer(&state, id, params).await
 }
 
-/// The delete URI carrying an expectation, percent-encoded.
-fn delete_uri(id: &str, expected_root: &Path, delete_data: bool) -> String {
-    let encoded: String = expected_root
-        .display()
-        .to_string()
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect();
-    format!("/indexes/{id}?delete_data={delete_data}&expected_root_path={encoded}")
+/// Delete params carrying an expectation. The old route percent-encoded the
+/// root's `display()` string and the query extractor decoded it back to the
+/// same UTF-8 string, so passing that string directly is the same request.
+fn expecting(expected_root: &Path, delete_data: bool) -> DeleteIndexParams {
+    DeleteIndexParams {
+        delete_data,
+        expected_root_path: Some(expected_root.display().to_string()),
+    }
 }
 
 /// #6380: the reported hazard. A registration whose root moved between the
@@ -115,7 +92,7 @@ async fn a_delete_whose_expected_root_moved_is_refused() {
     let gone = isolated.path().join("gone");
     let data_dir = register(INDEX_ID, &live, isolated.path());
 
-    let (status, body) = send_delete(&delete_uri(INDEX_ID, &gone, true)).await;
+    let (status, body) = send_delete(INDEX_ID, expecting(&gone, true)).await;
 
     assert_eq!(
         status,
@@ -158,7 +135,7 @@ async fn a_delete_whose_expected_root_matches_proceeds() {
     let root = isolated.path().join("still-here");
     let data_dir = register(INDEX_ID, &root, isolated.path());
 
-    let (status, body) = send_delete(&delete_uri(INDEX_ID, &root, true)).await;
+    let (status, body) = send_delete(INDEX_ID, expecting(&root, true)).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["removed"], true, "body: {body}");
@@ -182,7 +159,7 @@ async fn a_delete_expectation_against_an_absent_registration_is_refused() {
     let isolated = super::tests_components::IsolatedDataDir::new();
     let root = isolated.path().join("never-registered");
 
-    let (status, body) = send_delete(&delete_uri("never-existed-6380", &root, false)).await;
+    let (status, body) = send_delete("never-existed-6380", expecting(&root, false)).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
     assert!(
@@ -234,7 +211,7 @@ async fn an_unreadable_registry_refuses_an_expected_root_delete() {
     std::fs::set_permissions(&registry_dir, std::fs::Permissions::from_mode(0o000))
         .expect("make the registry directory unreadable");
 
-    let (status, body) = send_delete(&delete_uri(INDEX_ID, &root, true)).await;
+    let (status, body) = send_delete(INDEX_ID, expecting(&root, true)).await;
 
     assert_eq!(
         status,
@@ -406,7 +383,7 @@ async fn a_delete_without_an_expectation_is_unguarded() {
     let root = isolated.path().join("whatever");
     register(INDEX_ID, &root, isolated.path());
 
-    let (status, body) = send_delete(&format!("/indexes/{INDEX_ID}")).await;
+    let (status, body) = send_delete(INDEX_ID, DeleteIndexParams::default()).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["removed"], true, "body: {body}");

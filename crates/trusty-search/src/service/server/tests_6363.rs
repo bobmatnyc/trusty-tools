@@ -11,21 +11,20 @@
 //! true on every boot, clearable only by stopping the daemon and hand-editing
 //! the file. The console delete (#6360 / PR #6362) reads `removed: false` as a
 //! failure and calls this same handler, so it could not clear them either.
-//! What: drives the real router with `oneshot` so the route wiring, the
-//! `?delete_data=` extractor and the status code are all exercised — the status
-//! code is half of what #6363 changes. Every test points `TRUSTY_DATA_DIR` at a
-//! `TempDir` (`IsolatedDataDir`) and is `#[serial_test::serial]`, because that
-//! env var is process-wide.
+//! What: calls the `delete_index_report` core (#9535) and asserts the status it
+//! returns — the status code is half of what #6363 changes. Every test points
+//! `TRUSTY_DATA_DIR` at a `TempDir` (`IsolatedDataDir`) and is
+//! `#[serial_test::serial]`, because that env var is process-wide.
 //! Test: this module. Run with `cargo test -p trusty-search tests_6363`.
 
-use super::build_router;
+use super::test_support::delete_answer;
+use super::DeleteIndexParams;
 use crate::core::registry::IndexRegistry;
 use crate::service::persistence;
 use crate::service::server::SearchAppState;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use std::path::{Path, PathBuf};
-use tower::ServiceExt;
+use std::sync::Arc;
 
 /// Id used throughout. `[a-z0-9-]` only, so `persistence::sanitize_id` is the
 /// identity function and the data-dir name is predictable.
@@ -99,29 +98,15 @@ fn row_exists(id: &str) -> bool {
         .any(|e| e.id == id)
 }
 
-/// A router over EMPTY stores — exactly what warm boot leaves behind once
-/// `retain_approved_entries` has dropped the entry.
-fn router_over_empty_stores() -> axum::Router {
-    build_router(SearchAppState::new(IndexRegistry::new()))
-}
-
-/// Issue the DELETE and return `(status, body)`.
-async fn send_delete(router: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    (status, serde_json::from_slice(&bytes).expect("json body"))
+/// Delete `id` over EMPTY stores — exactly what warm boot leaves behind once
+/// `retain_approved_entries` has dropped the entry — and return `(status, body)`.
+async fn delete_over_empty_stores(id: &str, delete_data: bool) -> (StatusCode, serde_json::Value) {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let params = DeleteIndexParams {
+        delete_data,
+        ..Default::default()
+    };
+    delete_answer(&state, id, params).await
 }
 
 /// #6363: an id the allowlist excluded at warm boot must be deletable — row
@@ -132,7 +117,7 @@ async fn send_delete(router: axum::Router, uri: &str) -> (StatusCode, serde_json
 /// `200 {"removed": false}` — so `body["removed"]` is `false`, the row is still
 /// in the file and the marker file is still on disk. All three assertions fail.
 /// What: seeds one registration whose root the allowlist rejects, drives
-/// `DELETE /indexes/{id}?delete_data=true` over the real router, then re-reads
+/// `DELETE /indexes/{id}?delete_data=true` through the delete core, then re-reads
 /// the persisted registry and the data dir.
 /// Test: this test.
 #[tokio::test]
@@ -144,11 +129,7 @@ async fn delete_of_an_allowlist_excluded_registration_removes_the_row() {
     let index_data_dir = register_only_in_toml(INDEX_ID, root.path(), isolated.path());
     assert!(row_exists(INDEX_ID), "fixture must seed the registry row");
 
-    let (status, body) = send_delete(
-        router_over_empty_stores(),
-        &format!("/indexes/{INDEX_ID}?delete_data=true"),
-    )
-    .await;
+    let (status, body) = delete_over_empty_stores(INDEX_ID, true).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
@@ -189,8 +170,7 @@ async fn delete_of_an_allowlist_excluded_registration_removes_the_row() {
 async fn delete_of_an_id_in_no_store_and_no_registry_is_404() {
     let _isolated = super::tests_components::IsolatedDataDir::new();
 
-    let (status, body) =
-        send_delete(router_over_empty_stores(), "/indexes/never-existed-6363").await;
+    let (status, body) = delete_over_empty_stores("never-existed-6363", false).await;
 
     assert_eq!(
         status,
@@ -243,8 +223,7 @@ async fn a_failed_indexes_toml_rewrite_is_reported_not_swallowed() {
     std::fs::set_permissions(isolated.path(), std::fs::Permissions::from_mode(0o555))
         .expect("make data dir read-only");
 
-    let (status, body) =
-        send_delete(router_over_empty_stores(), &format!("/indexes/{INDEX_ID}")).await;
+    let (status, body) = delete_over_empty_stores(INDEX_ID, false).await;
 
     assert_eq!(
         status,
