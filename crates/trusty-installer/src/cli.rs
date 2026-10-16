@@ -129,7 +129,8 @@ pub enum AnalyzeCoreArg {
 /// so a set added to `SIGNABLE_BINARIES` without a variant here is
 /// unreachable from the CLI.
 ///
-/// What: `Search` → the `trusty-search` + `trusty-embedderd` set; `Mpm` → the
+/// What: `Search` → the `trusty-search` + `trusty-embedderd` +
+/// `trusty-embedderd-py` set (#9973); `Mpm` → the
 /// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
 /// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
 /// #4277); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
@@ -139,7 +140,7 @@ pub enum AnalyzeCoreArg {
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SignTargetArg {
-    /// `trusty-search` + its bundled `trusty-embedderd`.
+    /// `trusty-search` + its bundled `trusty-embedderd` and `trusty-embedderd-py`.
     #[value(name = "trusty-search")]
     Search,
     /// `trusty-mpm`.

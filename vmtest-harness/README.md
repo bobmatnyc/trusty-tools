@@ -395,7 +395,7 @@ The six steps:
 ## What a green run proves — and what it does not
 
 A `vmtest run <pattern>` exiting 0 proves: the stack **built from that source**,
-**all twelve in-scope binaries landed**, no multi-binary package installed a
+**all thirteen in-scope binaries landed**, no multi-binary package installed a
 partial set, the installed tool versions are internally consistent, and the six
 in-scope daemons **answered `/health`**. On a machine with none of your state on it.
 

@@ -72,7 +72,7 @@ scenario_install_branch() {
     # 2. Install each in-scope CRATE from the cloned tree — "each in-scope
     #    crate", not each row and not each binary (§12.5's own loop comment).
     #    `tsv_scope_crate_dirs` emits UNIQUE crate directories in
-    #    first-appearance order: twelve in-scope rows, eight directories
+    #    first-appearance order: thirteen in-scope rows (#9973), eight directories
     #    (§F-3). Install order is TSV row order (§F-10(b)) — performance-neutral
     #    under a shared CARGO_TARGET_DIR, and `trusty-installer` precedes N2 in
     #    row order already, which is what N2 needs.
@@ -131,7 +131,7 @@ scenario_install_branch() {
     #    call; single-binary packages do not need one, because for them
     #    `verify_binaries` already is the whole claim." The set is DERIVED rather
     #    than listed, so a crate that gains a second binary is gated the moment
-    #    `--check-table` adds its row — four packages today: trusty-search (2),
+    #    `--check-table` adds its row — four packages today: trusty-search (3, #9973),
     #    trusty-memory (3 — §9.3's corrected sidecar count), trusty-installer (2)
     #    and trusty-mpm (2).
     for _pkg in $(tsv_scope_multibin_packages); do

@@ -290,7 +290,7 @@ _tsv_rows() {
 # invalidate DOC-1 §7.4's Single-Install gate — it would not; repeated
 # `cargo install --path` reinstalls the package's full binary set and the end
 # state is identical — but because P5's checkpoint COUNTS installs (one per
-# value) and twelve installs of eight crates is waste and noise.
+# value) and thirteen installs of eight crates (#9973) is waste and noise.
 #
 # The genuine hazard §F-3 does point at is a PER-BINARY install: `cargo install
 # --path <dir> --bin <binary>` defeats the gate silently and with a green

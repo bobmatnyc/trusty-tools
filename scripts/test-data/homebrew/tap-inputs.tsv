@@ -9,11 +9,17 @@
 # a test of the extracted script against itself. Do not "fix" a row to make a
 # failing render pass — a mismatch means the renderer drifted.
 #
-# ONE golden has since moved ahead of the tap on purpose: #7311 added
-# `depends_on "rtk"` to the trusty-mpm formula, so expected/trusty-mpm.rb
-# carries that line and the next trusty-mpm release publishes it. Every other
-# golden still reproduces the tap byte-for-byte, and a `depends_on` appearing in
-# any of them is renderer drift. rtk is a BINARY dependency: `rtk init` /
+# TWO goldens have since moved ahead of the tap on purpose:
+#   - #7311 added `depends_on "rtk"` to the trusty-mpm formula, so
+#     expected/trusty-mpm.rb carries that line and the next trusty-mpm release
+#     publishes it.
+#   - #9973 added `trusty-embedderd-py` to trusty-search's BINARIES in
+#     release.yml (the launcher moved into trusty-search in #9468), so the
+#     trusty-search row's binaries column and expected/trusty-search.rb carry a
+#     third `bin.install`. Version and digests are still the 0.45.1 observation;
+#     the next trusty-search release publishes the third line.
+# Every other golden still reproduces the tap byte-for-byte, and a `depends_on`
+# appearing in any of them is renderer drift. rtk is a BINARY dependency: `rtk init` /
 # `rtk init -g` must never run, since they install a competing PreToolUse hook.
 #
 # trusty-controller is deliberately ABSENT. Its formula is a stale artifact of
@@ -26,7 +32,7 @@
 #
 # `binaries` is CRATE_CONFIG's BINARIES for that crate in release.yml, in order.
 # The first entry is the formula's `test do` smoke-test target.
-trusty-search	0.45.1	trusty-search-v0.45.1	trusty-search trusty-embedderd	3c4849aa35d2fe687899dc5a61248a52e79329f2556e49d362a8e91aae211bc3	04fad934635be49142d0cded60a87dd6e4fcf322442298361d27511a719cb7d1
+trusty-search	0.45.1	trusty-search-v0.45.1	trusty-search trusty-embedderd trusty-embedderd-py	3c4849aa35d2fe687899dc5a61248a52e79329f2556e49d362a8e91aae211bc3	04fad934635be49142d0cded60a87dd6e4fcf322442298361d27511a719cb7d1
 trusty-memory	0.18.0	trusty-memory-v0.18.0	trusty-memory trusty-bm25-daemon	f886a3404f36891dfd608f48aabbe0a0802c3bebec26a394e19e59e5f4e246a0	7a7eae7b1a0dd3e9e4bceb9a880771c4ecfe6d381796903950042aa42a006ff5
 trusty-analyze	0.9.0	trusty-analyze-v0.9.0	trusty-analyze	ce0b33799e3c3b6013f97286227939592c698b450d3c5d8e788e52c5f89cc2a4	75bb4fa9dc3f0d1a7c46c34b13ee65f4e31290ec21f42c37c1736f53ff363cd3
 trusty-review	0.16.0	trusty-review-v0.16.0	trusty-review	0f4bdddcf160688f5df2e5ec5c0893aedd3305e4d715ca4f9a8b4279fa42fc2e	1c706161ff914f38df694c781af7872f8161903059193458016cf64378bf4ff3

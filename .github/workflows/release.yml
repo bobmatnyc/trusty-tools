@@ -327,8 +327,11 @@ jobs:
           CRATE="${{ steps.parse.outputs.crate }}"
 
           if [[ "$CRATE" == "trusty-search" ]]; then
-            # Binaries: trusty-search + trusty-embedderd
-            # Both [[bin]] targets are declared in trusty-search/Cargo.toml.
+            # Binaries: trusty-search + trusty-embedderd + trusty-embedderd-py
+            # All three [[bin]] targets are declared in trusty-search/Cargo.toml.
+            # #9973: trusty-embedderd-py is the Python/MPS launcher, owned by
+            # trusty-search since #9468; it must ship in every archive and the
+            # formula, or the installed set differs from `cargo install`.
             # trusty-console was REMOVED from the install surface in #1318
             # (single-owner-per-binary); it now ships as its own release job.
             # UI-embedding crate: SKIP_UI_BUILD=1 required for cargo publish / build.
@@ -337,7 +340,7 @@ jobs:
             #   (trusty-search has a bare `load-dynamic` feature; there is NO
             #    `http-server` feature in this crate — confirmed from Cargo.toml).
             CARGO_PKG="trusty-search"
-            BINARIES="trusty-search trusty-embedderd"
+            BINARIES="trusty-search trusty-embedderd trusty-embedderd-py"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
