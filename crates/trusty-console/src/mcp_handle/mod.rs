@@ -485,7 +485,8 @@ impl McpServiceHandle {
     /// re-probe populates the updated tool set, and the call becomes allowed again.
     /// What: Calls `ensure_connected` to obtain the cached tool set; if `tool` is
     /// not in the set, returns `McpHandleError::ToolUnavailable` immediately
-    /// without making a JSON-RPC round-trip. Otherwise delegates to `call_tool_raw`.
+    /// without making a JSON-RPC round-trip. Otherwise makes the call (via
+    /// [`Self::call_tool_enveloped`], default bound) and unwraps the envelope.
     /// Test: `call_tool_checked_returns_tool_unavailable_when_tool_absent` in `tests.rs`.
     pub async fn call_tool_checked(
         &self,

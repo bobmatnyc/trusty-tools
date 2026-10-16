@@ -94,7 +94,7 @@ impl MpmChat {
     /// never retried, because an action-capable turn is not idempotent and a
     /// timed-out call is not cancelled on the daemon.
     /// What: one capability-gated `sessions_chat` call under `call_timeout`;
-    /// the envelope goes through [`interpret_envelope`].
+    /// the envelope goes through `interpret_envelope`.
     /// Test: `a_timed_out_turn_is_a_503_naming_the_timeout`,
     /// `chat_without_mpm_is_a_503_with_a_text_body`.
     pub async fn turn(&self, body: Value) -> Result<Value, ChatTurnError> {
