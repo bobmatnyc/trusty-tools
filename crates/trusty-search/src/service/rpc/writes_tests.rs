@@ -28,10 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use tower::ServiceExt;
+use axum::http::StatusCode;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INTERNAL_ERROR};
 
 use crate::allowlist::{AllowlistConfig, AllowlistEntry, AllowlistPaths};
@@ -48,9 +45,9 @@ use crate::service::rpc::error::{
 };
 use crate::service::rpc::writes;
 use crate::service::server::{
-    build_router_on, create_index_report, delete_index_report, graph_neighbors_report,
-    index_file_report, ingest_graph_report, patch_index_config_report, reindex_report,
-    relocate_index_report, remove_file_report, SearchAppState,
+    create_index_report, delete_index_report, graph_neighbors_report, index_file_report,
+    ingest_graph_report, patch_index_config_report, reindex_report, relocate_index_report,
+    remove_file_report, SearchAppState,
 };
 
 /// The vector dimensionality the mock embedder is built at.
@@ -111,35 +108,12 @@ async fn served(state: SearchAppState) -> (Arc<SearchAppState>, RpcRouter) {
     (state, rpc)
 }
 
-/// [`served`] plus the axum router, for the child modules that still drive it.
-// #9535: S1c retires this with `build_router_on`.
-async fn routers(state: SearchAppState) -> (Arc<SearchAppState>, Router, RpcRouter) {
-    let (state, rpc) = served(state).await;
-    let http = build_router_on(
-        Arc::clone(&state),
-        trusty_common::server::SelfOrigins::default(),
-    );
-    (state, http, rpc)
-}
-
 /// An empty-registry state whose allowlist approves `approved`.
 async fn empty_served(
     allowlist_dir: &Path,
     approved: &[&Path],
 ) -> (Arc<SearchAppState>, RpcRouter) {
     served(
-        SearchAppState::new(IndexRegistry::new())
-            .with_allowlist_paths(allowlist(allowlist_dir, approved)),
-    )
-    .await
-}
-
-/// [`empty_served`] plus the axum router, for the child modules (#9535 S1c).
-async fn empty_state(
-    allowlist_dir: &Path,
-    approved: &[&Path],
-) -> (Arc<SearchAppState>, Router, RpcRouter) {
-    routers(
         SearchAppState::new(IndexRegistry::new())
             .with_allowlist_paths(allowlist(allowlist_dir, approved)),
     )
@@ -165,78 +139,6 @@ fn index_with_corpus(
 }
 
 // ------------------------------------------------------------- transports ---
-
-// #9535: the `http_*` router helpers serve the child modules only; S1c retires
-// them with `build_router_on`. Cases in this file call the cores below them.
-async fn http_raw(router: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
-    let response = router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("the router must answer");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read the body");
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let body = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("body is not JSON ({e}): {status} {text}"));
-    (status, body)
-}
-
-fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).expect("encode")))
-        .expect("build the request")
-}
-
-/// A JSON request that must answer `200`, as its parsed body.
-async fn http_ok(
-    router: &Router,
-    method: &str,
-    uri: &str,
-    body: serde_json::Value,
-) -> serde_json::Value {
-    let (status, body) = http_raw(router, json_request(method, uri, body)).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{method} {uri} answered {status}: {body}"
-    );
-    body
-}
-
-/// A JSON request that must be refused, as `(status, body)`.
-async fn http_err(
-    router: &Router,
-    method: &str,
-    uri: &str,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
-    let (status, body) = http_raw(router, json_request(method, uri, body)).await;
-    assert!(
-        status.is_client_error() || status.is_server_error(),
-        "{method} {uri} must be refused, got {status}: {body}"
-    );
-    (status, body)
-}
-
-/// A bodyless request (`DELETE`), as `(status, body)`.
-async fn http_bodyless(
-    router: &Router,
-    method: &str,
-    uri: &str,
-) -> (StatusCode, serde_json::Value) {
-    let request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .body(Body::empty())
-        .expect("build the request");
-    http_raw(router, request).await
-}
 
 /// A core's 200 body, encoded the way axum's `Json` writes it (#9535).
 fn http_body<T: serde::Serialize>(
