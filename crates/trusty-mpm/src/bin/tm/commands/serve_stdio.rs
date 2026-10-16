@@ -54,9 +54,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// Why: an action-capable turn runs up to nine model calls, each bounded at
 /// 120 s by the provider client, plus the session verbs it invokes, so 60 s
-/// cuts a valid turn short. The caller's own per-call bound (the console's
-/// `call_tool_with_timeout`) is the operative limit; this only ends a hung
-/// turn, and it applies to `sessions_chat` alone.
+/// cuts a valid turn short. This applies to `sessions_chat` alone.
+///
+/// A turn occupies this bridge until it ends or this cap fires:
+/// `run_stdio_loop` dispatches one request at a time, so the bridge answers
+/// nothing else meanwhile. A shorter timeout on the caller's side does NOT
+/// cancel the turn on the bridge or the daemon. The S2 chat client therefore
+/// needs a dedicated MCP handle for chat, a caller bound >= this cap, and no
+/// automatic retry (#9979).
 /// Test: `forwarding_timeout_widens_only_for_a_chat_turn`.
 const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
@@ -270,6 +275,28 @@ async fn forward_over_socket(url: &str, req: serde_json::Value) -> Result<serde_
         .await
 }
 
+/// The caller-facing text for a failed forward (#9979).
+///
+/// Why: a forward that outlived its bound reached the daemon, which may still
+/// be running the call; "daemon unreachable" would invite a retry of a call
+/// with side effects.
+/// What: a timeout names the wait and the possibly-running call; any other
+/// failure keeps the "daemon unreachable" text.
+/// Test: `a_forward_timeout_is_not_reported_as_an_unreachable_daemon`.
+fn forward_failure_message(e: &anyhow::Error) -> String {
+    let timed_out = e
+        .downcast_ref::<trusty_mpm::client::DaemonCallError>()
+        .is_some_and(trusty_mpm::client::DaemonCallError::is_timeout);
+    if timed_out {
+        format!(
+            "trusty-mpm bridge timed out waiting for the daemon; the daemon may \
+             still be running the call, so do not retry a call with side effects: {e:#}"
+        )
+    } else {
+        format!("trusty-mpm daemon unreachable: {e:#}")
+    }
+}
+
 /// Convert the daemon's JSON-RPC response value into an `mcp::Response`.
 ///
 /// Why: `run_stdio_loop` expects `mcp::Response`; the daemon returns a raw value
@@ -393,7 +420,7 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
                     Response::err(
                         req.id.clone(),
                         mcp::error_codes::INTERNAL_ERROR,
-                        format!("trusty-mpm daemon unreachable: {e:#}"),
+                        forward_failure_message(&e),
                     )
                 }
             }
@@ -562,6 +589,74 @@ mod tests {
         ] {
             assert_eq!(forwarding_timeout(&req), REQUEST_TIMEOUT, "{req}");
         }
+    }
+
+    /// A daemon socket (0600 in a 0700 directory, as the client dial requires)
+    /// that reads one request frame, waits `delay` of tokio time, then answers.
+    fn slow_socket(delay: Duration) -> (String, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_dir = dir.path().join("s");
+        std::fs::create_dir(&sock_dir).expect("socket dir");
+        std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700)).expect("0700");
+        let path = sock_dir.join("mpm.sock");
+        let std_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let listener = tokio::net::UnixListener::from_std(std_listener).expect("tokio listener");
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line).await;
+            tokio::time::sleep(delay).await;
+            let frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
+            let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+        });
+        (trusty_mpm::core::socket_locator(&path), dir)
+    }
+
+    /// #9979: `forward_over_socket` applies `forwarding_timeout`, not a fixed
+    /// bound. A daemon that answers after 90 s of (paused) tokio time is
+    /// outlived by the 60 s default but not by the chat bound.
+    /// Red if `.timeout(bound)` reverts to `.timeout(REQUEST_TIMEOUT)`.
+    #[tokio::test(start_paused = true)]
+    async fn forward_over_socket_applies_the_per_request_bound() {
+        let (url, _dir) = slow_socket(Duration::from_secs(90));
+        let reply = forward_over_socket(&url, call("sessions_chat", json!({"message": "hi"})))
+            .await
+            .expect("a chat turn outlasts 60 s inside the chat bound");
+        assert_eq!(reply["result"]["ok"], true);
+
+        let (url, _dir) = slow_socket(Duration::from_secs(90));
+        let err = forward_over_socket(&url, call("session_list", json!({})))
+            .await
+            .expect_err("any other call is cut at 60 s");
+        assert!(format!("{err:#}").contains("within 60s"), "{err:#}");
+    }
+
+    /// #9979: a forward that times out is reported as a wait that may have
+    /// left the call running, not as an unreachable daemon.
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_timeout_is_not_reported_as_an_unreachable_daemon() {
+        let (url, _dir) = slow_socket(Duration::from_secs(90));
+        let err = forward_over_socket(&url, call("session_list", json!({})))
+            .await
+            .expect_err("times out at 60 s");
+        let msg = forward_failure_message(&err);
+        assert!(msg.contains("timed out waiting for the daemon"), "{msg}");
+        assert!(msg.contains("may still be running"), "{msg}");
+        assert!(!msg.contains("unreachable"), "{msg}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let absent = trusty_mpm::core::socket_locator(&dir.path().join("absent.sock"));
+        let err = forward_over_socket(&absent, json!({"method": "ping"}))
+            .await
+            .expect_err("nothing listens");
+        assert!(forward_failure_message(&err).starts_with("trusty-mpm daemon unreachable"));
     }
 
     /// #6288: with no daemon socket the forward fails naming the socket, and

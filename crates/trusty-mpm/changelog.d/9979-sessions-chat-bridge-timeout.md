@@ -1,2 +1,2 @@
 Changed
-- `tm serve --stdio` waits up to 20 minutes for a `sessions_chat` call instead of 60 s, so a long action-capable chat turn is not cut off. Every other request keeps the 60 s bound (#9979).
+- `tm serve --stdio` waits up to 20 minutes for a `sessions_chat` call instead of 60 s, so a long action-capable chat turn is not cut off. Every other request keeps the 60 s bound. A turn holds the bridge until it ends, and a forward that times out is reported as a timeout (the daemon may still be running the call) rather than "daemon unreachable" (#9979).

@@ -28,9 +28,12 @@ pub(super) fn chat_tools() -> Vec<Value> {
          (plus `routed_to_session` and `command_output` for a routed command); \
          absent fields are omitted. Pass the returned `conv_id` to continue \
          the same conversation. `actions: true` lets the Session Manager run \
-         session verbs inside the turn, which can take minutes: call this tool \
-         with a per-call timeout longer than your client's default. With no \
-         model configured the call fails with a `503` error text.",
+         session verbs inside the turn, which can take minutes, up to a 20-minute \
+         ceiling at the `tm serve --stdio` bridge. A turn holds that bridge \
+         until it ends, and a shorter caller timeout does not cancel it: use a \
+         dedicated MCP handle, a call timeout of at least 20 minutes, and do \
+         not retry. With no model configured the call fails with a `503` error \
+         text.",
         json!({
             "type": "object",
             "properties": {

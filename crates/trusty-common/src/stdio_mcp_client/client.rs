@@ -307,7 +307,8 @@ impl StdioMcpClient {
     /// default.
     /// What: the same request as `call_tool`; the round-trip errors with
     /// "timed out after `call_timeout`" when no matching response arrives in
-    /// time.
+    /// time. A fired timeout does not cancel the server-side call (the request
+    /// is already written): do not retry a tool with side effects on timeout.
     /// Test: `call_tool_with_timeout_applies_the_callers_bound`,
     /// `call_tool_with_timeout_returns_a_reply_inside_a_longer_bound`.
     pub async fn call_tool_with_timeout(
