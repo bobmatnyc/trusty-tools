@@ -148,6 +148,10 @@ use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
 use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 
+// #9146: which directories a command may stand in across `cd`s.
+mod cd_tracking;
+use cd_tracking::CwdTracker;
+
 /// Deny a whole-tree-destructive git command aimed at a main checkout.
 ///
 /// Why: the one entry point `pm_guard` calls. It is kept to the wrapper shape
@@ -980,7 +984,10 @@ fn unresolved_directory_deny_reason(
 /// directory across `cd` segments and a leading `git -C` — restoring it when a
 /// subshell, a coproc or a child-process wrapper's string ends, but not after
 /// an `eval`, which runs in the current shell — and returns the first segment
-/// whose `(verb, argv-tail)` satisfies `matches`.
+/// whose `(verb, argv-tail)` satisfies `matches`. A `cd` that may be skipped,
+/// fail or run in a subshell leaves several candidate directories
+/// ([`CwdTracker`], #9146); this returns the first, which is the `cd`'s
+/// destination, and [`git_verb_targets_with_tail`] returns all of them.
 /// `None` when no segment qualifies — including a segment `shlex` cannot split,
 /// which yields no argv to classify.
 /// Test: `destructive_target_dir_*`, `commit_target_dir_*`.
@@ -1017,11 +1024,13 @@ pub(super) fn git_verb_target_dir_with_tail(
         .next()
 }
 
-/// Every segment's match, in order — one per segment (#8572).
+/// Every segment's match, in order — one per segment (#8572), and one per
+/// candidate directory of that segment (#9146).
 ///
 /// Why: the HEAD-switch rule must judge `git -C <wt> checkout a && git
 /// checkout b` on its SECOND segment too; the first match alone misses it.
-/// Test: `head_switch_judges_every_segment`.
+/// Test: `head_switch_judges_every_segment`,
+/// `a_cd_that_may_not_run_or_fail_keeps_the_old_directory_9146`.
 pub(super) fn git_verb_targets_with_tail(
     command: &str,
     cwd: &Path,
@@ -1029,33 +1038,15 @@ pub(super) fn git_verb_targets_with_tail(
     matches: impl Fn(&str, &[String]) -> bool,
 ) -> Vec<(String, PathBuf, Vec<String>)> {
     let mut found = Vec::new();
-    let mut effective_cwd = cwd.to_path_buf();
     // #9127: grouping peeled off, and a subshell's `cd` scoped to it.
-    let mut outer_cwds = Vec::new();
+    // #9146: a `cd` that may be skipped, fail or run in a subshell keeps the
+    // directory it left as a candidate too.
+    let mut tracker = CwdTracker::new(cwd, env);
     for step in shell_groups::grouped_steps(command).steps {
-        let segment = match step {
-            Step::Enter => {
-                outer_cwds.push(effective_cwd.clone());
-                continue;
-            }
-            Step::Leave => {
-                effective_cwd = outer_cwds.pop().unwrap_or(effective_cwd);
-                continue;
-            }
-            Step::Command(segment) => segment,
+        let Some(segment) = tracker.step(step) else {
+            continue;
         };
         let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Some(argv) = shlex::split(trimmed)
-                && let Some(dest) = argv.get(1)
-            {
-                effective_cwd = resolve_target_path(dest, &effective_cwd, env);
-            }
-            continue;
-        }
         // #8439: every token that could be the subcommand. One when the global
         // options resolve; every non-option token after an unknown one, so
         // `git --shallow-file status checkout -- f` is judged as `checkout`.
@@ -1078,12 +1069,23 @@ pub(super) fn git_verb_targets_with_tail(
             if !matches(subcommand, tail) {
                 continue;
             }
-            let base = match (split, git_dash_c_override(&argv, idx)) {
-                (Some(at), _) => resolve_target_path(&argv[at], &effective_cwd, env),
-                (None, Some(dash_c)) => resolve_target_path(dash_c, &effective_cwd, env),
-                (None, None) => effective_cwd.clone(),
-            };
-            found.push((subcommand.clone(), base, tail.to_vec()));
+            // #9146: one entry per directory the segment may run in.
+            let mut bases: Vec<PathBuf> = Vec::new();
+            for effective_cwd in tracker.cwds() {
+                let base = match (split, git_dash_c_override(&argv, idx)) {
+                    (Some(at), _) => resolve_target_path(&argv[at], effective_cwd, env),
+                    (None, Some(dash_c)) => resolve_target_path(dash_c, effective_cwd, env),
+                    (None, None) => effective_cwd.clone(),
+                };
+                if !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+            found.extend(
+                bases
+                    .into_iter()
+                    .map(|base| (subcommand.clone(), base, tail.to_vec())),
+            );
             break;
         }
     }
@@ -2839,5 +2841,140 @@ mod tests {
         assert!(reason.contains("/repo/main"), "{reason}");
         assert!(reason.contains(".claude/worktrees"), "{reason}");
         assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+    }
+
+    /// 🔴 REGRESSION (#9146 item 2): a `cd` the shell may skip, that may fail,
+    /// or that runs in a subshell was read as if it always moved the
+    /// directory, so from a main checkout each of these was judged against the
+    /// worktree and allowed, while the shell committed or reset the main
+    /// checkout. All were allowed on origin/main at dcd33f9591.
+    #[test]
+    fn a_cd_that_may_not_run_or_fail_keeps_the_old_directory_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path()).display().to_string();
+        let gone = main.path().join(".claude/worktrees/agent-gone");
+        let gone = gone.display();
+        let shapes = [
+            format!("cd {wt} | true; git VERB"),
+            format!("cd {wt} & git VERB"),
+            format!("false && cd {wt}; git VERB"),
+            format!("false || cd {wt}; git VERB"),
+            format!("cd {gone}; git VERB"),
+            format!("cd {gone} || true; git VERB"),
+            format!("cd {gone} && true; git VERB"),
+            format!("cd {gone}\ngit VERB"),
+        ];
+        let commits: Vec<String> = shapes
+            .iter()
+            .map(|s| s.replace("VERB", "commit -a -m x"))
+            .collect();
+        let missed = commits_not_denied(&commits, main.path());
+        assert!(
+            missed.is_empty(),
+            "commit not denied:\n{}",
+            missed.join("\n")
+        );
+        for shape in &shapes {
+            let command = shape.replace("VERB", "reset --hard");
+            assert!(
+                evaluate_main_checkout_destructive_command(&command, main.path()).is_some(),
+                "reset not denied: {command}"
+            );
+        }
+        // Error arm: a `cd` whose destination the guard cannot read — an
+        // unexpanded variable or a substitution — never clears the verb after
+        // it, from either directory. (An operand `shlex` cannot split is an
+        // unbalanced quote, which the shell refuses before anything runs.)
+        let unread = [
+            "cd \"$UNSET_9146\"; git VERB",
+            "cd \"$UNSET_9146\" && git VERB",
+            "cd \"$(cat /tmp/dir-9146)\"; git VERB",
+        ];
+        let commits: Vec<String> = unread
+            .iter()
+            .map(|s| s.replace("VERB", "commit -a -m x"))
+            .collect();
+        let missed = commits_not_denied(&commits, main.path());
+        assert!(
+            missed.is_empty(),
+            "commit not denied:\n{}",
+            missed.join("\n")
+        );
+        for cwd in [main.path(), Path::new(&wt)] {
+            for shape in &unread {
+                let command = shape.replace("VERB", "reset --hard");
+                assert!(
+                    evaluate_main_checkout_destructive_command(&command, cwd).is_some(),
+                    "reset not denied from {}: {command}",
+                    cwd.display()
+                );
+            }
+        }
+    }
+
+    /// The other half of #9146: a `cd` sure to have run still moves the
+    /// directory — every `&&` between it and the git verb, or an
+    /// unconditional `cd` into a directory that exists — and a commit whose
+    /// quoted message carries parentheses or braces still allows.
+    #[test]
+    fn a_cd_that_surely_ran_still_moves_the_directory_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let w = wt.display();
+        let gone = main.path().join(".claude/worktrees/agent-gone");
+        let gone = gone.display();
+        for command in [
+            format!("cd {w} && git reset --hard"),
+            format!("cd {w}; git reset --hard"),
+            format!("cd -- {w}; git reset --hard"),
+            format!("cd {gone} && git reset --hard"),
+            format!("[ -d {w} ] && cd {w} && git reset --hard"),
+            format!("cd {w} || exit 1; git reset --hard"),
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(&command, main.path()).is_none(),
+                "must stay allowed: {command}"
+            );
+        }
+        for command in [
+            "git commit -m 'fix (a) {b}'",
+            "git commit -m \"fix(x): {y} (z)\"",
+        ] {
+            assert!(
+                evaluate_main_checkout_commit_command(command, &wt).is_none(),
+                "must stay allowed: {command}"
+            );
+        }
+        // Fail-open check: a bare `cd` names no directory the guard can see,
+        // so the verb is still judged where the command stands.
+        assert!(
+            evaluate_main_checkout_destructive_command("cd; git reset --hard", main.path())
+                .is_some()
+        );
+    }
+
+    /// 🔴 REGRESSION (#9146 item 2): a here-document body handed to a shell
+    /// runs in a child shell, so its `cd` does not reach the commands after
+    /// the terminator. A `cd` inside the body still places the body's own
+    /// commands.
+    #[test]
+    fn a_cd_in_a_shell_heredoc_body_does_not_leak_9146() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let (m, w) = (main.path().display(), wt.display());
+        let missed = commits_not_denied(
+            &[
+                format!("bash <<'EOF'\ncd {w}\nEOF\ngit commit -a -m x"),
+                format!("sh <<EOF\ncd {w}\nEOF\ngit commit -a -m x"),
+            ],
+            main.path(),
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        let reset = format!("bash <<'EOF'\ncd {w}\nEOF\ngit reset --hard");
+        assert!(evaluate_main_checkout_destructive_command(&reset, main.path()).is_some());
+        let inner = format!("bash <<'EOF'\ncd {m}\ngit reset --hard\nEOF");
+        assert!(evaluate_main_checkout_destructive_command(&inner, &wt).is_some());
+        let body_only = format!("bash <<'EOF'\ncd {w}\ngit reset --hard\nEOF");
+        assert!(evaluate_main_checkout_destructive_command(&body_only, main.path()).is_none());
     }
 }
