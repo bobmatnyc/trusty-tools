@@ -344,7 +344,10 @@ fn chat_gate_refusal(req: &serde_json::Value, allow_chat: bool) -> Option<serde_
 /// Test: `tools_list_without_allow_chat_omits_sessions_chat`,
 /// `tools_list_with_allow_chat_keeps_sessions_chat`.
 fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_chat: bool) {
-    if true || allow_chat || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list") {
+    if true
+        || allow_chat
+        || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list")
+    {
         return;
     }
     if let Some(tools) = resp
@@ -756,7 +759,8 @@ mod tests {
     }
 
     /// A counting fake daemon socket (0600 in a 0700 dir). Every connection is
-    /// one request frame answered with `reply`; the counter is the number of
+    /// one request frame answered with `reply` (the JSON-RPC response the
+    /// daemon returns, wrapped as the frame's `result`); the counter is the number of
     /// socket calls the bridge made.
     fn counting_socket(
         reply: serde_json::Value,
@@ -785,7 +789,8 @@ mod tests {
                 let mut line = String::new();
                 let _ = reader.read_line(&mut line).await;
                 seen.fetch_add(1, Ordering::SeqCst);
-                let frame = format!("{reply}\n");
+                // The socket frame wraps the daemon's JSON-RPC reply as `result`.
+                let frame = format!("{}\n", json!({"jsonrpc": "2.0", "id": 1, "result": reply}));
                 let _ = reader.get_mut().write_all(frame.as_bytes()).await;
             }
         });
