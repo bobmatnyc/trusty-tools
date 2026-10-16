@@ -63,8 +63,7 @@ impl SearchAppState {
             // #6821: one RAM read per state, not one per `/health` poll.
             machine_tier: trusty_common::machine_tier::MachineBudget::detect().tier,
             // #6285 slice 3: one limiter and one deadline per DAEMON, not per
-            // router — the socket and the axum router both gate the query
-            // surface on these.
+            // router — the socket gates the query surface on these.
             query_limiter: crate::service::concurrency::ConcurrencyLimiter::from_env(),
             query_timeout: crate::service::query_timeout::QueryTimeoutConfig::from_env(),
             file_get_limiter: Arc::new(tokio::sync::Semaphore::new(
@@ -88,9 +87,9 @@ impl SearchAppState {
             lexical_defaults: Default::default(),
             chat_provider: Arc::new(OnceCell::new()),
             events: Arc::new(events_tx),
-            // Default to an empty buffer — `build_router` callers that have
-            // installed the `LogBufferLayer` override this via
-            // `with_log_buffer`. Test states keep the empty default.
+            // Default to an empty buffer — a daemon that has installed the
+            // `LogBufferLayer` overrides this via `with_log_buffer`. Test
+            // states keep the empty default.
             log_buffer: trusty_common::log_buffer::LogBuffer::new(
                 trusty_common::log_buffer::DEFAULT_LOG_CAPACITY,
             ),
@@ -146,8 +145,8 @@ impl SearchAppState {
     ///
     /// Why: both are resolved from the environment in [`Self::new`], so the
     /// only way to prove a saturated limiter or an expired deadline is to
-    /// inject a tiny one — and injecting on the STATE is what makes the proof a
-    /// parity test, since the axum router reads these same two values.
+    /// inject a tiny one — and injecting on the STATE is what makes the proof
+    /// reach the socket, which reads these same two values.
     /// Following `ConcurrencyLimiter::with_limits` and
     /// `QueryTimeoutConfig::from_duration`, which are `cfg(test)` for the same
     /// reason.
@@ -212,7 +211,7 @@ impl SearchAppState {
     }
 
     /// Builder-style: attach the Prometheus recorder handle (issue #41
-    /// Phase 1). Calling this enables the `/metrics` route in `build_router`.
+    /// Phase 1).
     #[must_use]
     pub fn with_metrics(mut self, metrics: crate::service::metrics::MetricsState) -> Self {
         self.metrics = Some(metrics);

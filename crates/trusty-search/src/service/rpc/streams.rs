@@ -2,9 +2,8 @@
 //!
 //! Why: slices 2–4 moved every route that answers in ONE body. These two answer
 //! in many, over a connection that stays open — `GET /status/stream` and
-//! `GET /indexes/{id}/reindex/stream`. HTTP is untouched and still serves both;
-//! the socket is an ADDITIONAL way to reach the same event sequence until the
-//! retire slice.
+//! `GET /indexes/{id}/reindex/stream`. #9214 retired the HTTP listener and
+//! #9535 deleted the routes, so the socket is the only way to reach them.
 //!
 //! What: the method-to-route table below, the two producers, and [`register`].
 //!
@@ -15,9 +14,8 @@
 //! | `search.status.stream` | `GET /status/stream` | free |
 //! | `search.index.reindex.stream` | `GET /indexes/{id}/reindex/stream` | free |
 //!
-//! Both HTTP routes sit in `service::server::build_router_on`'s `free` group —
-//! no admission limiter, no query deadline — and both methods copy that. It is
-//! not only parity: a stream runs for as long as its reindex does, so holding an
+//! Both HTTP routes sat in the retired axum router's `free` group — no
+//! admission limiter, no query deadline — and both methods keep that. A stream runs for as long as its reindex does, so holding an
 //! admission permit for its lifetime would let two dashboards exhaust the
 //! semaphore that `/health` and every query share (#41).
 //!
@@ -37,14 +35,13 @@
 //! One item is the JSON value one SSE `data:` line carries — the same document,
 //! parsed rather than prefixed. `{"type":"connected"}`, a `DaemonEvent`, a
 //! reindex progress event, and the `{"type":"lag","skipped":N}` frame a lagged
-//! broadcast subscriber gets are all identical on both transports.
+//! broadcast subscriber gets are the documents the retired SSE routes sent.
 //!
-//! Two SSE-only frames have no socket counterpart, both because the reason for
-//! them is HTTP's:
+//! The SSE routes' two transport-only frames are not ported:
 //!
-//! - the `: heartbeat\n\n` comment frame `reindex_stream_handler` emits every
-//!   20 s. It exists so an idle TCP body is not torn down by the OS or an
-//!   intermediate proxy while the embedder sidecar stalls between batches. A
+//! - the `: heartbeat\n\n` comment frame the reindex SSE route sent every
+//!   20 s. It kept an idle TCP body from being torn down by the OS or an
+//!   intermediate proxy while the embedder sidecar stalled between batches. A
 //!   Unix socket has neither, and `trusty_common::uds`'s stream client applies
 //!   NO read budget between frames, so an idle stream here is not a stream at
 //!   risk. A heartbeat would be an item a consumer has to learn to discard.
@@ -147,20 +144,18 @@ const STREAM_BUFFER: usize = 64;
 
 /// One SSE `data:` payload, as the JSON value it is.
 ///
-/// Why not the raw string: the HTTP handlers write these lines verbatim after a
-/// `data: ` prefix, and every producer in this crate writes JSON there. Parsing
-/// makes an item on this transport the SAME document a `data:` line carries,
-/// which is what the parity tests compare.
+/// Why not the raw string: every producer in this crate writes JSON lines, and
+/// parsing makes an item the SAME document the retired SSE `data:` line
+/// carried, which is what the replay tests compare.
 /// What: a line that does not parse is emitted as a JSON string rather than
 /// dropped or turned into a terminal error. That is a producer bug, and the
-/// stream HTTP would have delivered must not die of it — the bytes stay
-/// recoverable by the consumer.
+/// stream must not die of it — the bytes stay recoverable by the consumer.
 /// Test: `reindex_progress_events_replay_the_planted_sequence_frame_for_frame`.
 fn item(line: String) -> serde_json::Value {
     serde_json::from_str(&line).unwrap_or(serde_json::Value::String(line))
 }
 
-/// The `{"type":"lag","skipped":N}` frame both transports send a lagged reader.
+/// The `{"type":"lag","skipped":N}` frame a lagged reader gets.
 fn lag(skipped: u64) -> serde_json::Value {
     serde_json::json!({ "type": "lag", "skipped": skipped })
 }
@@ -222,9 +217,8 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 /// #6386: that ONE call is what makes the open exactly-once. It used to be three
 /// statements here — snapshot, read status, subscribe — copied by hand from the
 /// SSE handler, and an event whose buffer write and broadcast straddled them
-/// could arrive twice or not at all. The SSE route now opens through the same
-/// method, so parity holds by construction rather than by two hand-kept copies;
-/// the argument for why nothing can straddle it is on that method.
+/// could arrive twice or not at all. The argument for why nothing can straddle
+/// it is on that method.
 ///
 /// A progress record whose status is no longer `Running` yields its replay and
 /// ends. Without that arm the stream would deliver the buffered `complete` event
@@ -233,8 +227,8 @@ fn status_stream(state: &Arc<SearchAppState>) -> RpcStreamItems {
 /// # Errors
 ///
 /// [`CODE_NOT_FOUND`] when no reindex has been recorded for the index, which is
-/// the `404` the HTTP route answers. HTTP sends that status with an empty body,
-/// so the message here is this transport's own rather than a copied one.
+/// the `404` the retired HTTP route answered with an empty body, so the message
+/// here is this transport's own.
 ///
 /// [`CODE_NOT_FOUND`]: super::error::CODE_NOT_FOUND
 ///
@@ -371,8 +365,8 @@ async fn file_events_stream(
 
 /// Map this slice's methods onto their producers.
 ///
-/// Neither is wrapped in an admission or deadline guard, because neither HTTP
-/// route is — see the lane table in this module's header, and
+/// Neither is wrapped in an admission or deadline guard, because neither
+/// retired HTTP route was — see the lane table in this module's header, and
 /// `every_socket_method_takes_the_admission_lane_its_http_route_takes` in
 /// `lanes_tests.rs`, which asserts that for all of them at once.
 ///

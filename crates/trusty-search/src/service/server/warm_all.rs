@@ -17,9 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{http::StatusCode, Json};
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -347,23 +344,6 @@ fn warm_targets(state: &SearchAppState) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
-}
-
-/// `POST /warm` — start warming every registered index, or join the running warm.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn warm_start_handler(
-    State(state): State<Arc<SearchAppState>>,
-    body: Option<Json<WarmStartRequest>>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    warm_start_report(&state, body.map(|Json(b)| b))
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
-/// `GET /warm/status` — per-index warm state and totals.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn warm_status_handler(State(state): State<Arc<SearchAppState>>) -> Json<Value> {
-    Json(warm_status_report(&state))
 }
 
 /// The body `POST /warm` and `search.warm.start` serve.

@@ -27,10 +27,10 @@
 //! The reindex TRIGGER is here; `GET /indexes/{id}/reindex/stream` and the other
 //! SSE routes are slice 5's.
 //!
-//! ## Two lanes, because the axum router puts these routes in two groups
+//! ## Two lanes, because the retired axum router put these routes in two groups
 //!
-//! `service::server::build_router_on` splits its routes three ways, and these
-//! seven land in two of them. The four per-index writes are `bulk_limited`:
+//! The retired axum router split its routes three ways, and these seven landed
+//! in two of them. The four per-index writes are `bulk_limited`:
 //! admission-limited on the SAME `SearchAppState` semaphore the query surface
 //! uses, and deliberately NOT deadline-bounded, because a reindex or an ingest
 //! can legitimately run for minutes (`bulk_guarded`). The three registry-level

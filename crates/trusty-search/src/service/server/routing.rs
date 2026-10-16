@@ -4,15 +4,9 @@
 //! receive a `POST /search` fan-out; separating it from the handler body
 //! keeps `search.rs` focused on per-request dispatch.
 //! What: `RoutingMode` enum + `compute_context_weights` helper +
-//! `SearchSimilarRequest` + `search_similar_handler`.
+//! `SearchSimilarRequest` + `search_similar_report`.
 //! Test: `routing_mode_all_preserves_every_index_with_weights` and siblings.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    Json,
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -168,47 +162,16 @@ fn default_similar_top_k() -> usize {
     10
 }
 
-/// Handle `POST /indexes/:id/search_similar`.
-///
-/// Why (issue #484): the original implementation returned 404 whenever the
-/// embedding-LRU cache missed, which always happens for `skip_kg=true` indexes
-/// (the cache is populated only at commit time; entries age out and are never
-/// restored). Re-embedding the seed chunk's text via `embed_text` when the
-/// cache misses lets `search_similar` work on any index regardless of KG mode.
-/// What: looks up the seed chunk's embedding from the LRU cache; on miss,
-/// fetches the chunk's raw content and re-embeds it; falls through to 404 only
-/// when neither path can produce an embedding (BM25-only index or unknown
-/// chunk).
-/// Test: `search_similar_fallback_reembeds_when_cache_misses` in the server
-/// integration tests.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn search_similar_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<SearchSimilarRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // #6285 slice 3: HTTP still answers a BARE status with an empty body, which
-    // is what this route has always sent. The body the core carries beside that
-    // status exists for the socket, where `RpcError` requires a message and an
-    // empty one would tell a caller nothing. The retire slice, which deletes
-    // this wrapper, is where HTTP gains the body too.
-    search_similar_report(&state, &id, req)
-        .await
-        .map(Json)
-        .map_err(|(status, _body)| status)
-}
-
 /// The body `POST /indexes/{id}/search_similar` serves, without the transport
 /// (#6285 slice 3).
 ///
 /// Why: `search.similar` answers the same question over the socket. One body is
 /// what stops the two transports resolving a different seed chunk, or one
 /// re-embedding on a cache miss while the other 404s.
-/// What: [`search_similar_handler`]'s whole former body, with each bare
+/// What: the retired HTTP handler's whole former body, with each bare
 /// `StatusCode` refusal given the wording that says WHICH of the four misses it
 /// was — an unknown index, an unknown seed, an index with no embedder, or a
-/// failed embed. HTTP discards that wording today (see the wrapper); the socket
-/// carries it.
+/// failed embed. The socket carries that wording.
 /// Test: `search_similar_over_the_socket_matches_the_http_body`,
 /// `an_unknown_index_reports_not_found_on_every_query_method`.
 pub(crate) async fn search_similar_report(

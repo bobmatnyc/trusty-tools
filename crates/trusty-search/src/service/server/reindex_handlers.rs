@@ -3,7 +3,7 @@
 //! Why: The `POST /indexes/:id/reindex` trigger and
 //! `GET /indexes/:id/reindex/stream` SSE endpoint share reindex-progress
 //! types and cooldown logic; grouping them here keeps reindex concerns isolated.
-//! What: `ReindexRequest`, `reindex_handler`, `reindex_stream_handler`.
+//! What: `ReindexRequest`, `reindex_report`, and the test-only `reindex_handler`.
 //! Test: `reindex_handler_rejects_within_cooldown` and
 //! `reindex_status_aborted_memory_serializes_lowercase`.
 use axum::http::StatusCode;
@@ -12,21 +12,11 @@ use std::sync::Arc;
 // #9214 (D1): imports only the test-only HTTP handlers use.
 #[cfg(test)]
 use axum::{
-    body::Body,
     extract::{Path, State},
-    response::Response,
     Json,
 };
-#[cfg(test)]
-use futures::stream::{self, StreamExt};
-#[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
-use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
-#[cfg(test)]
-use crate::service::reindex::ReindexStatus;
 use crate::service::reindex::{
     root_gate, spawn_claimed_reindex, ReindexClaimError, ReindexProgress,
 };
@@ -569,118 +559,4 @@ pub(super) fn claim_refusal(
             (status, body)
         }
     }
-}
-
-/// Heartbeat interval for the reindex SSE stream.
-///
-/// Why: under memory pressure the embedderd sidecar can stall between batches,
-/// leaving the SSE body idle for minutes. Without any bytes flowing, the OS
-/// (or any intermediate proxy/reverse-proxy) tears down the idle TCP connection
-/// before the terminal event is ever written — the client sees a decode error
-/// or "stream ended without completion event". Emitting a comment-only SSE
-/// frame (`: heartbeat\n\n`) every `SSE_HEARTBEAT_INTERVAL` keeps the body
-/// transport alive so the connection survives long stalls.
-/// What: used by `reindex_stream_handler` to pace the `IntervalStream`.
-/// Test: covered indirectly by the full reindex path; the interval fires even
-/// when no real events are produced.
-#[cfg(test)] // #9214 (D1): only the SSE route uses it.
-const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
-
-/// SSE keep-alive heartbeat frame (SSE comment — ignored by all spec-compliant
-/// clients including `eventsource-stream`).
-#[cfg(test)] // #9214 (D1): only the SSE route sends it.
-const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
-
-/// SSE stream of reindex progress events.
-///
-/// Why: Mirrors the `/status/stream` SSE pattern (manual `Response::builder()`
-/// with `text/event-stream` + `no-cache` + `X-Accel-Buffering: no`).
-/// Replays any events already buffered (so a late subscriber still sees the
-/// `start` event) and then streams live events from the broadcast channel
-/// until the reindex completes. Lagged subscribers receive a
-/// `{"type":"lag","skipped":N}` frame. A 20 s keep-alive heartbeat (SSE
-/// comment frame, ignored by clients) prevents the OS from tearing down the
-/// idle TCP connection when the sidecar stalls between batches.
-///
-/// What: builds a merged stream of (a) broadcast events and (b) 20 s interval
-/// heartbeats. The broadcast path produces `data:` frames; the heartbeat path
-/// produces ``: heartbeat\n\n`` comment frames. The merged stream is wrapped
-/// in `Body::from_stream` and returned as `text/event-stream`.
-///
-/// Test: `reindex_stream_handler` is exercised by the full-reindex integration
-/// path; #9535 removed its frame-for-frame comparison with the socket stream,
-/// which `service::rpc::streams_tests` now covers alone. The heartbeat interval fires
-/// independently of real events so it cannot be blocked by a stalled sidecar.
-/// `service::reindex::progress_race_tests` covers the #6386 exactly-once open
-/// both surfaces now share.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn reindex_stream_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Result<Response, StatusCode> {
-    let index_id = IndexId::new(id);
-    let progress = state
-        .reindex_progress
-        .get(&index_id)
-        .map(|r| Arc::clone(r.value()))
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // #6386: take the replay buffer, the status, and the live subscription as ONE
-    // atomic step, so no event can be buffered after the snapshot and broadcast
-    // before the subscribe (which lost it) or land in both (which repeated it).
-    // `service::rpc::streams::reindex_stream` opens through the same method, so
-    // the two transports cannot drift.
-    let (replay, initial_status, rx) = progress.subscribe_with_replay().await;
-
-    fn frame(line: String) -> Result<axum::body::Bytes, std::io::Error> {
-        Ok(axum::body::Bytes::from(format!("data: {line}\n\n")))
-    }
-
-    let replay_stream = stream::iter(replay).map(frame);
-
-    // If the reindex already finished before the subscriber connected, the
-    // replay buffer contains the terminal `complete` event and the live
-    // stream would idle forever. Return the replay only in that case.
-    let body = if initial_status != ReindexStatus::Running {
-        Body::from_stream(replay_stream)
-    } else {
-        // Live event stream from the broadcast channel.
-        let live = BroadcastStream::new(rx).map(|res| match res {
-            Ok(line) => frame(line),
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Ok(
-                axum::body::Bytes::from(format!("data: {{\"type\":\"lag\",\"skipped\":{n}}}\n\n")),
-            ),
-        });
-
-        // Keep-alive heartbeat: emit `: heartbeat\n\n` every 20 s so the
-        // HTTP body never goes fully idle between events. SSE comment frames
-        // (lines starting with ':') are mandated by the spec to be ignored
-        // by all compliant clients including `eventsource-stream`.
-        //
-        // Why merge rather than chain: we need interleaving, not sequencing
-        // — the heartbeat must fire even while the live stream is idle, and
-        // the live stream must continue after a heartbeat tick.
-        let heartbeat = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
-            SSE_HEARTBEAT_INTERVAL,
-        ))
-        .map(|_| -> Result<axum::body::Bytes, std::io::Error> {
-            Ok(axum::body::Bytes::from_static(
-                SSE_HEARTBEAT_FRAME.as_bytes(),
-            ))
-        });
-
-        // `stream::select` from `futures` interleaves two streams; the
-        // merged stream ends when BOTH inputs end. The broadcast stream ends
-        // when the sender (reindex task) drops; the interval stream runs
-        // forever. Relying on the broadcast-stream termination is therefore
-        // sufficient — the interval side is just a no-cost keep-alive.
-        Body::from_stream(replay_stream.chain(stream::select(live, heartbeat)))
-    };
-
-    Ok(Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("X-Accel-Buffering", "no")
-        .body(body)
-        .expect("valid SSE response"))
 }
