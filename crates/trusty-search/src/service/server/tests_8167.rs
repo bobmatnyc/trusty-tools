@@ -8,7 +8,8 @@
 //! across the delete, the way `service::reindex::defer_embed_queue` does.
 //! What: a real colocated index — redb corpus plus a saved HNSW snapshot,
 //! reloaded so the snapshot is served from its mmap view — deleted through the
-//! real router with `TRUSTY_DATA_DIR` redirected at a temp dir.
+//! `delete_index_report` core (#9535) with `TRUSTY_DATA_DIR` redirected at a
+//! temp dir.
 //! Test: this module; the SIGBUS reproduction is
 //! `tests/delete_releases_mmap_8232.rs`.
 
@@ -16,15 +17,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use tokio::sync::RwLock;
-use tower::ServiceExt;
 use trusty_common::embedder::MockEmbedder;
 
-use super::build_router;
 use super::delete_close::{close_index_files, CLOSE_BUDGET};
+use super::test_support::delete_answer;
 use super::tests_components::IsolatedDataDir;
+use super::DeleteIndexParams;
 use crate::core::indexer::TEST_REHYDRATE_DELAY_MS;
 use crate::core::indexer::{CodeIndexer, IndexDeleted, SearchQuery};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -40,7 +40,7 @@ const INDEX_ID: &str = "delete-close-8167";
 
 /// A registered, mmap-served colocated index plus the paths of its files.
 struct Fixture {
-    router: axum::Router,
+    state: Arc<SearchAppState>,
     registry: IndexRegistry,
     handle: Arc<IndexHandle>,
     redb: std::path::PathBuf,
@@ -74,7 +74,7 @@ async fn fixture() -> Fixture {
         entry.root_path.clone(),
     ));
     Fixture {
-        router: build_router(SearchAppState::new(registry.clone())),
+        state: Arc::new(SearchAppState::new(registry.clone())),
         registry,
         handle,
         redb: corpus_redb_path_for_entry(&entry).expect("redb path"),
@@ -82,29 +82,9 @@ async fn fixture() -> Fixture {
     }
 }
 
-/// Send `DELETE /indexes/{INDEX_ID}` and return status plus decoded body.
-async fn send_delete(router: &axum::Router) -> (StatusCode, serde_json::Value) {
-    send_delete_query(router, "").await
-}
-
-/// [`send_delete`] with a query string, e.g. `?delete_data=true`.
-async fn send_delete_query(router: &axum::Router, query: &str) -> (StatusCode, serde_json::Value) {
-    let resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/indexes/{INDEX_ID}{query}"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    (status, serde_json::from_slice(&bytes).expect("json body"))
+/// Delete `INDEX_ID` with default params and return status plus body.
+async fn send_delete(state: &Arc<SearchAppState>) -> (StatusCode, serde_json::Value) {
+    delete_answer(state, INDEX_ID, DeleteIndexParams::default()).await
 }
 
 fn query() -> SearchQuery {
@@ -127,7 +107,7 @@ async fn delete_releases_the_corpus_and_vector_files_while_a_clone_survives() {
         "precondition: the live index holds its redb file exclusively"
     );
 
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
 
     let reopened = redb::Database::open(&fx.redb);
@@ -154,7 +134,7 @@ async fn a_surviving_clone_gets_an_error_not_an_empty_result() {
     let _isolated = IsolatedDataDir::new();
     let fx = fixture().await;
     let surviving = Arc::clone(&fx.handle);
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
 
     let indexer = surviving.indexer.read().await;
@@ -181,7 +161,7 @@ async fn a_corpus_still_referenced_elsewhere_abandons_the_delete() {
         .corpus_store()
         .expect("colocated corpus");
 
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["removed"], false, "{body}");
     assert!(
@@ -201,7 +181,7 @@ async fn a_corpus_still_referenced_elsewhere_abandons_the_delete() {
     );
 
     drop(pinned);
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::OK, "the retry must succeed: {body}");
     assert!(redb::Database::open(&fx.redb).is_ok());
 }
@@ -230,7 +210,7 @@ async fn a_writer_outliving_the_quiesce_wait_closes_the_files_when_it_finishes()
         .read_owned()
         .await;
 
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         body["quiesced"], false,
@@ -301,8 +281,9 @@ async fn a_delete_during_a_slow_rehydrate_waits_without_the_write_lock() {
     let fx = fixture().await;
     let _delay = start_slow_rehydrate(&fx.handle).await;
 
-    let router = fx.router.clone();
-    let delete = tokio::spawn(async move { send_delete(&router).await });
+    // A spawned task, so the delete is in flight while this task probes the lock.
+    let state = Arc::clone(&fx.state);
+    let delete = tokio::spawn(async move { send_delete(&state).await });
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         fx.handle.indexer.try_read().is_ok(),
@@ -360,7 +341,7 @@ async fn a_deleted_index_skips_snapshot_writes_without_the_swap_error() {
     let isolated = IsolatedDataDir::new();
     let fx = fixture().await;
     let surviving = Arc::clone(&fx.handle);
-    let (status, body) = send_delete(&fx.router).await;
+    let (status, body) = send_delete(&fx.state).await;
     assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
 
     let store = ErrorStore::with_path(Some(isolated.path().join("errors.jsonl")), 64);
@@ -416,7 +397,11 @@ async fn a_persist_after_delete_data_does_not_recreate_the_colocated_dir() {
     let data_dir = fx.root.path().join(".trusty-search");
     assert!(data_dir.exists(), "precondition: the colocated dir exists");
 
-    let (status, body) = send_delete_query(&fx.router, "?delete_data=true").await;
+    let params = DeleteIndexParams {
+        delete_data: true,
+        ..Default::default()
+    };
+    let (status, body) = delete_answer(&fx.state, INDEX_ID, params).await;
     assert_eq!(status, StatusCode::OK, "delete must succeed: {body}");
     assert!(
         !data_dir.exists(),

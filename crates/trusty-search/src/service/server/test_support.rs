@@ -35,8 +35,14 @@
 //! keeps using raw `tempfile::tempdir()` for its two "still rejects" /
 //! "opts in" tests — those exist to prove the denylist itself works, so
 //! they must not use an allowlisted root.
+//!
+//! [`delete_answer`] is the second helper: the delete-route tests' one call
+//! into `delete_index_report` (#9535).
 
+use super::{delete_index_report, DeleteIndexParams, SearchAppState};
+use axum::http::StatusCode;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
@@ -96,4 +102,21 @@ pub(super) fn allowlisted_index_root(prefix: &str) -> (TempDir, PathBuf) {
     // obtained any other way is refused, exactly as in production.
     crate::allowlist::test_fixtures::approve(&canonical);
     (dir, canonical)
+}
+
+/// `DELETE /indexes/{id}`'s answer as `(status, body)`, from its transport-free
+/// core (#9535).
+///
+/// `Ok` maps to `200`, as `delete_index_handler`'s `Json` wrapper does, so a
+/// `200` assertion on the result means "the core answered `Ok`". A refusal keeps
+/// the status and body the core returned.
+pub(super) async fn delete_answer(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: DeleteIndexParams,
+) -> (StatusCode, serde_json::Value) {
+    match delete_index_report(state, id, params).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(refusal) => refusal,
+    }
 }
