@@ -289,6 +289,16 @@ impl HookService {
                 &payload,
             ),
         );
+        // 1f (See #8994 S2b): a Bash `git worktree add|remove|prune` that ran;
+        // detached like 1e, read before step 2 rewrites the payload.
+        drop(
+            crate::daemon::services::worktree_command_ingest::spawn_for_bash(
+                &self.state,
+                session,
+                event,
+                &payload,
+            ),
+        );
 
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {

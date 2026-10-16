@@ -136,7 +136,7 @@ fn listed_keys(repo: &Path) -> Result<BTreeSet<PathBuf>, String> {
 ///
 /// Why: a gone tree cannot be canonicalized, but git and the ledger may spell
 /// its parent differently (macOS `/var` → `/private/var`).
-fn lenient_key(path: &Path) -> PathBuf {
+pub(crate) fn lenient_key(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut cur = path;
     loop {

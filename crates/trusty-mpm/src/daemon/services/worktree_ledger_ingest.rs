@@ -20,7 +20,11 @@
 //! one retry per stop event, never per tool call — observes every pending tree
 //! again. The sidecar is cleared only by an ingest that appends successfully
 //! while `pending` is empty: an unrelated success never hides a tree that is
-//! still missing. Every task reads the project registry, so a tree drained
+//! still missing; a Bash-command record failure (#8994 S2b,
+//! [`super::worktree_command_ingest`]) is stored `sticky` in the record
+//! itself, so it also outlives a daemon restart and only `tm worktrees`'
+//! clean backfill clears it.
+//! Every task reads the project registry, so a tree drained
 //! from `pending` is judged only against a real read, never an empty list; a
 //! drained tree leaves `pending` only with an `observed` record or a verdict
 //! from that read. A registry-read failure skips only the observe step (the
@@ -42,7 +46,7 @@ use crate::core::session::SessionId;
 use crate::core::worktree_ledger::backfill::registered_checkouts;
 use crate::core::worktree_ledger::hook_ingest::{
     ObserveOutcome, agent_tree_of, clear_ingest_failure, observe_agent_tree, reconcile_agent_trees,
-    record_ingest_failure,
+    record_ingest_failure, sticky_failure_recorded,
 };
 use crate::core::worktree_ledger::reconcile::ReconcileReport;
 use crate::core::worktree_ledger::{LEDGER_FILE, WorktreeLedger};
@@ -99,12 +103,18 @@ impl IngestTracker {
             .collect()
     }
 
+    /// `true` while a failed record awaits a retry.
     fn has_pending(&self) -> bool {
         !self
             .pending
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// Hold the ledger write lock (S2b serializes with S2a through it).
+    pub(super) fn lock_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -278,8 +288,8 @@ impl Pass<'_> {
 /// What: drains `pending` first (so this event's own failure waits for the
 /// next stop), observes the event's tree, retries the drained trees, reconciles
 /// (resetting `reconcile_queued` before the ledger read), and clears the
-/// sidecar only when something was appended, nothing failed and nothing is
-/// still pending.
+/// sidecar only when something was appended, nothing failed, nothing is
+/// still pending and the record is not sticky.
 /// Test: `a_failed_tree_is_retried_and_the_alarm_outlives_an_unrelated_success`,
 /// `a_failed_registry_read_does_not_absorb_later_stops`,
 /// `a_tree_pending_after_a_stop_is_spawned_is_never_dropped`.
@@ -327,6 +337,8 @@ fn ingest(
     if pass.appended
         && pass.report.error.is_none()
         && !tracker.has_pending()
+        // #8994 S2b: a Bash-recorder miss is repaired by the backfill, not by this.
+        && !sticky_failure_recorded(ledger)
         && let Err(e) = clear_ingest_failure(ledger)
     {
         tracing::warn!("worktree ledger: could not clear the ingest-failure sidecar: {e} (#8994)");

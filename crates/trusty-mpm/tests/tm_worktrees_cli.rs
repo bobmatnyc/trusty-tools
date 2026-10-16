@@ -216,3 +216,46 @@ fn tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git() {
         .count();
     assert_eq!(removed_again, 1, "a second run appends no second removed");
 }
+
+/// Seed the ingest-failure sidecar under `home` and return its path.
+fn seed_failure(home: &Path, sticky: bool) -> PathBuf {
+    let ledger = WorktreeLedger::under_home(home);
+    let path = trusty_mpm::core::worktree_ledger::hook_ingest::ingest_failure_path(&ledger);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let body = serde_json::json!({
+        "ts": "2026-10-16T00:00:00Z",
+        "error": "hook ingest could not record `git worktree add` of /x",
+        "failures": 1,
+        "sticky": sticky,
+    });
+    std::fs::write(&path, body.to_string()).unwrap();
+    path
+}
+
+/// #8994 S2b criterion 6: a Bash-recorder failure stays until `tm worktrees`
+/// backfills cleanly; a plain S2a record, and a backfill that could not read
+/// the registry, leave it alone.
+#[test]
+fn tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill() {
+    let home = tempfile::tempdir().unwrap();
+    let plain = seed_failure(home.path(), false);
+    worktrees_json(home.path(), &["--no-size"]);
+    assert!(plain.exists(), "a non-sticky record is not this command's");
+
+    let sticky = seed_failure(home.path(), true);
+    let registry = home
+        .path()
+        .join(".trusty-mpm/project-registry/projects.json");
+    std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    std::fs::write(&registry, b"{torn").unwrap();
+    let report = worktrees_json(home.path(), &["--no-size"]);
+    assert!(
+        report["backfill"]["registry_error"].is_string(),
+        "{report:#}"
+    );
+    assert!(sticky.exists(), "an unread registry repaired nothing");
+
+    std::fs::remove_file(&registry).unwrap();
+    worktrees_json(home.path(), &["--no-size"]);
+    assert!(!sticky.exists(), "a clean backfill repairs the missed tree");
+}
