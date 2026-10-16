@@ -23,6 +23,8 @@ pub mod delegation_repair_caller;
 pub(crate) mod delegation_repair_probe;
 pub mod delegation_tracker;
 pub mod hook_service;
+// #8994 S3a: the ledger reclaim pass, run inside the merged-PR reclaim tick.
+pub(crate) mod ledger_reclaim;
 // #7504: the ONE place the merged-PR reclaim's production probes are assembled,
 // plus the daemon loop that runs it automatically after a merge.
 pub mod merged_pr_reclaim;

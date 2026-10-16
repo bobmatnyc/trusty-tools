@@ -346,3 +346,98 @@ fn tm_worktrees_shows_the_pr_and_lists_stale_candidates() {
     assert!(stdout.contains("PR #31"), "{stdout}");
     assert!(stdout.contains("stale candidate"), "{stdout}");
 }
+
+/// A repository with a bare `origin` and one ledger-recorded tree per name on
+/// `wt/<name>`, each pushed and then deleted on the remote (branch gone).
+fn gone_branch_trees(root: &Path, home: &Path, names: &[&str]) -> Vec<PathBuf> {
+    let remote = root.join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "--bare", "--initial-branch=main"]);
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--initial-branch=main"]);
+    git_id(&repo, &["commit", "--allow-empty", "-m", "init"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "main"]);
+    let ledger = WorktreeLedger::under_home(home);
+    let mut trees = Vec::new();
+    for name in names {
+        let wt = repo.join(".worktrees").join(name);
+        let branch = format!("wt/{name}");
+        git(
+            &repo,
+            &["worktree", "add", "-b", &branch, wt.to_str().unwrap()],
+        );
+        git(&wt, &["push", "-q", "-u", "origin", &branch]);
+        git(&wt, &["push", "-q", "origin", "--delete", &branch]);
+        let mut e = created(&wt, repo.to_str().unwrap());
+        if let EventKind::Created { branch: b, .. } = &mut e.kind {
+            *b = Some(branch);
+        }
+        ledger.append(&e).unwrap();
+        trees.push(wt);
+    }
+    trees
+}
+
+/// 🔴 #8994 S3a criterion 3 (gate F1): a branch-gone candidate whose tree is
+/// detached, or checked out on another branch, is kept by the reclaim plan;
+/// one still on its recorded branch is eligible. Nothing is deleted. Fails on
+/// 2bcb496dbe, whose report has no `reclaim_plan`.
+#[test]
+fn tm_worktrees_keeps_a_stale_candidate_whose_head_left_its_branch() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let trees = gone_branch_trees(&root, home.path(), &["kept-on", "detached", "switched"]);
+    git(&trees[1], &["checkout", "-q", "--detach"]);
+    git(&trees[2], &["checkout", "-q", "-b", "other-work"]);
+
+    let report = worktrees_json(home.path(), &["--no-size"]);
+
+    let plan = report["reclaim_plan"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no reclaim_plan in the report: {report:#}"));
+    let entry = |p: &Path| {
+        plan.iter()
+            .find(|r| r["path"] == p.to_str().unwrap())
+            .unwrap_or_else(|| panic!("{} planned: {report:#}", p.display()))
+    };
+    assert_eq!(entry(&trees[0])["action"], "eligible", "{report:#}");
+    assert_eq!(entry(&trees[1])["action"], "keep", "{report:#}");
+    let detached = entry(&trees[1])["reason"].as_str().unwrap_or_default();
+    assert!(detached.contains("detached"), "{report:#}");
+    assert_eq!(entry(&trees[2])["action"], "keep", "{report:#}");
+    let switched = entry(&trees[2])["reason"].as_str().unwrap_or_default();
+    assert!(switched.contains("refs/heads/other-work"), "{report:#}");
+    assert!(trees.iter().all(|t| t.is_dir()), "nothing is deleted");
+}
+
+/// #8994 S3a criterion 5: `--no-fetch` asks neither the remote nor GitHub, so
+/// a branch deleted on the remote is unresolved — not a stale candidate, kept
+/// by the plan — and never reported gone.
+#[test]
+fn tm_worktrees_no_fetch_reports_a_gone_branch_unresolved() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let trees = gone_branch_trees(&root, home.path(), &["offline"]);
+
+    let report = worktrees_json(home.path(), &["--no-size", "--no-fetch"]);
+
+    let rows = report["trees"].as_array().expect("trees");
+    assert_eq!(rows.len(), 1, "{report:#}");
+    assert!(rows[0]["stale"].is_null(), "{report:#}");
+    let unresolved = rows[0]["unresolved"].to_string();
+    assert!(unresolved.contains("--no-fetch"), "{report:#}");
+    assert_eq!(
+        report["stale_candidates"].as_array().map(Vec::len),
+        Some(0),
+        "{report:#}"
+    );
+    let plan = report["reclaim_plan"].as_array().expect("reclaim_plan");
+    assert_eq!(plan.len(), 1, "{report:#}");
+    assert_eq!(plan[0]["action"], "keep", "{report:#}");
+    assert!(trees[0].is_dir());
+}

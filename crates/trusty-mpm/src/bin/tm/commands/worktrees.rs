@@ -7,10 +7,12 @@
 //! What: [`collect`] backfills from every registered project's
 //! `git worktree list`, records `removed` for a live tree gone from disk and
 //! from git, measures each live tree unless `--no-size`, links each tree's
-//! pull request and lists stale candidates (#8994 S2c), folds the ledger and
+//! pull request and lists stale candidates (#8994 S2c), plans what the ledger
+//! reclaim sweep may do with each (#8994 S3a), folds the ledger and
 //! returns a [`WorktreesReport`]; [`run`] prints it as text or JSON.
 //! Daemon-less: it touches only `~/.trusty-mpm/`, git and `gh`, and deletes
-//! nothing.
+//! nothing. It runs one bounded `git fetch --prune origin` per repository it
+//! asks about a branch; `--no-fetch` skips that and every `gh` call.
 //! Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
 //! `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`,
 //! `tm_worktrees_shows_the_pr_and_lists_stale_candidates`
@@ -26,6 +28,8 @@ use trusty_mpm::core::worktree_ledger::backfill::{
 };
 use trusty_mpm::core::worktree_ledger::fold::{ProjectSummary, fold, gib};
 use trusty_mpm::core::worktree_ledger::hook_ingest::clear_sticky_ingest_failure;
+use trusty_mpm::core::worktree_ledger::reclaim_plan::{PlanAction, PlannedTree, plan_reclaim};
+use trusty_mpm::core::worktree_ledger::reclaim_probe::GitReclaimProbe;
 use trusty_mpm::core::worktree_ledger::reconcile::{ReconcileReport, reconcile_removed};
 use trusty_mpm::core::worktree_ledger::record::measure_live;
 use trusty_mpm::core::worktree_ledger::stale::{StaleReason, TreeView, link_prs_and_find_stale};
@@ -40,6 +44,10 @@ pub(crate) struct WorktreesArgs {
     /// Skip measuring; report the sizes the ledger last recorded.
     #[arg(long)]
     pub no_size: bool,
+    /// Skip `git fetch --prune` and every `gh` call; lookups that need them
+    /// are reported unresolved, never as gone or merged (#8994 S3a).
+    #[arg(long)]
+    pub no_fetch: bool,
 }
 
 /// The backfill half of the report.
@@ -94,6 +102,9 @@ pub(crate) struct WorktreesReport {
     pub stale_candidates: Vec<TreeView>,
     /// `pr_linked` events appended this run.
     pub pr_linked: usize,
+    /// What the ledger reclaim sweep may do with each candidate or unresolved
+    /// tree, before its removal gates (#8994 S3a).
+    pub reclaim_plan: Vec<PlannedTree>,
 }
 
 /// Backfill, reconcile, optionally measure, then fold the ledger under `home`.
@@ -102,16 +113,24 @@ pub(crate) struct WorktreesReport {
 /// through the real binary and nothing here reads the process environment.
 /// What: registry → [`backfill_checkouts`] (then, when every checkout
 /// answered, the sticky hook-ingest failure record is cleared) → [`reconcile_removed`] →
-/// [`measure_live`] (when `measure`) → [`link_prs_and_find_stale`] → fold.
-/// The reconcile runs under
-/// `--no-size` too: it lists git, it never measures. A ledger error
+/// [`measure_live`] (when `measure`) → [`link_prs_and_find_stale`] →
+/// [`plan_reclaim`] → fold. The reconcile runs under
+/// `--no-size` too: it lists git, it never measures. Without `fetch`
+/// (`--no-fetch`) the stale and plan probes run no `git fetch` and no `gh`.
+/// A ledger error
 /// propagates; an unreadable registry is reported in
 /// [`BackfillSummary::registry_error`] and the rest still runs.
 /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
 /// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`,
 /// `tm_worktrees_clears_only_a_sticky_failure_and_only_after_a_clean_backfill`,
-/// `tm_worktrees_shows_the_pr_and_lists_stale_candidates`.
-pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<WorktreesReport> {
+/// `tm_worktrees_shows_the_pr_and_lists_stale_candidates`,
+/// `tm_worktrees_keeps_a_stale_candidate_whose_head_left_its_branch`,
+/// `tm_worktrees_no_fetch_reports_a_gone_branch_unresolved`.
+pub(crate) async fn collect(
+    home: &Path,
+    measure: bool,
+    fetch: bool,
+) -> anyhow::Result<WorktreesReport> {
     let ledger = WorktreeLedger::under_home(home);
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
         &home.join(FRAMEWORK_DIR_NAME),
@@ -140,11 +159,14 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
         measured = Some(outcome.measured);
     }
     // #8994 S2c: PR numbers and stale candidates; nothing is removed.
-    let stale = link_prs_and_find_stale(
-        &ledger,
-        &fold(&ledger.read()?.events),
-        &GitGhStaleProbe::default(),
-    )?;
+    // #8994 S3a: `--no-fetch` asks neither the remote nor GitHub.
+    let (stale_probe, plan_probe) = if fetch {
+        (GitGhStaleProbe::default(), GitReclaimProbe::default())
+    } else {
+        (GitGhStaleProbe::offline(), GitReclaimProbe::offline())
+    };
+    let stale = link_prs_and_find_stale(&ledger, &fold(&ledger.read()?.events), &stale_probe)?;
+    let reclaim_plan = plan_reclaim(&stale, &plan_probe);
     let read = ledger.read()?;
     let projects = fold(&read.events).by_project();
     let bytes = projects.iter().map(|p| p.bytes).sum();
@@ -170,6 +192,7 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
         stale_candidates: stale.candidates().cloned().collect(),
         pr_linked: stale.pr_linked,
         trees: stale.trees,
+        reclaim_plan,
     })
 }
 
@@ -178,7 +201,7 @@ pub(crate) async fn run(args: WorktreesArgs) -> anyhow::Result<()> {
     let home = dirs::home_dir()
         .filter(|h| h.is_absolute())
         .ok_or_else(|| anyhow::anyhow!("tm worktrees: no absolute home directory"))?;
-    let report = collect(&home, !args.no_size).await?;
+    let report = collect(&home, !args.no_size, !args.no_fetch).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -204,6 +227,17 @@ fn print_trees(report: &WorktreesReport) {
             None => continue,
         };
         println!("  stale candidate: {}  ({why})", t.path.display());
+    }
+    // #8994 S3a: what the ledger reclaim sweep may do, before its removal gates.
+    for p in &report.reclaim_plan {
+        match &p.action {
+            PlanAction::Eligible { .. } => {
+                println!("  reclaim sweep: eligible  {}", p.path.display());
+            }
+            PlanAction::Keep { reason } => {
+                println!("  reclaim sweep: keep  {}  ({reason})", p.path.display());
+            }
+        }
     }
     let unresolved = report
         .trees

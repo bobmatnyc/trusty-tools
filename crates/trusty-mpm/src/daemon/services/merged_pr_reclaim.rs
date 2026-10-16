@@ -357,7 +357,8 @@ pub(crate) async fn reclaim_loop(
 /// One sweep, gated on host state and logged (#7504).
 ///
 /// Split from [`reclaim_loop`] so a test can drive exactly one pass without
-/// racing a timer.
+/// racing a timer. The ledger reclaim pass (#8994 S3a) runs after the
+/// merged-PR pass, under the same permit.
 /// Test: `reclaim_loop_reclaims_nothing_on_a_scratch_framework_root`.
 pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
     // #6348: the same refusal `reap_loop` and the orphan-GC loop apply. A daemon
@@ -408,9 +409,7 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
                         .collect::<Vec<_>>()
                         .join("; ")
                 );
-                return;
-            }
-            if report.reclaimed > 0 {
+            } else if report.reclaimed > 0 {
                 info!(
                     reclaimed = report.reclaimed,
                     bytes_freed = report.bytes,
@@ -421,6 +420,9 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         }
         Err(e) => warn!("worktree-reclaim sweep: the pass did not complete: {e}"),
     }
+    // #8994 S3a: the ledger-driven pass, under the same permit; report-only
+    // unless `disk.ledger_reclaim_remove` is set.
+    super::ledger_reclaim::run_and_log(state).await;
 }
 
 /// Why a manual reclaim pass did not get the maintenance permit (#8994).
