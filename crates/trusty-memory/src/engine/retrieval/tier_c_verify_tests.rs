@@ -27,7 +27,7 @@ async fn write(
     content: &str,
     fact_key: Option<&str>,
     verify: &str,
-) -> anyhow::Result<Uuid> {
+) -> Result<Uuid, crate::engine::EngineError> {
     handle
         .remember_with_options(
             content.to_string(),
@@ -157,4 +157,41 @@ async fn slot_retirement_closes_the_retirees_verify_command() {
         .await
         .unwrap();
     assert!(held.is_empty(), "{held:?}");
+}
+
+/// #9278 T3c-1: `remember`, `remember_with_options`, `forget` and `flush`
+/// return `EngineError`, and a slot whose verify record failed after its
+/// drawer committed is `EngineError::VerifyNotStored`, naming that drawer.
+#[tokio::test]
+async fn the_write_paths_return_engine_error_with_a_typed_verify_miss() {
+    use crate::engine::EngineError;
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    handle.fail_next_verify_record_for_test();
+    let err = write(&handle, "PR 9390 head is 5a6a8e3613", Some(SLOT), CMD)
+        .await
+        .expect_err("a missed verify record is reported");
+    let EngineError::VerifyNotStored(missed) = err else {
+        panic!("expected VerifyNotStored, got {err:?}");
+    };
+    assert!(
+        handle
+            .kg
+            .load_drawer_ids()
+            .unwrap()
+            .contains(&missed.drawer)
+    );
+
+    let id: Result<Uuid, EngineError> = handle
+        .remember(
+            "the typed remember path stores a plain drawer".to_string(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await;
+    let gone: Result<ForgetOutcome, EngineError> = handle.forget(id.unwrap()).await;
+    assert_eq!(gone.unwrap(), ForgetOutcome::Deleted);
+    let flushed: Result<(), EngineError> = handle.flush();
+    flushed.unwrap();
 }

@@ -18,6 +18,8 @@ mod chunk_health;
 mod chunk_progress;
 // #9735: `pub(crate)` so the dream merge can refuse a split part.
 pub(crate) mod chunk_split;
+// #9278 T3c-1: split out of `handle` (500-SLOC cap).
+mod closets;
 mod deferred_embed;
 // #9278 A2b: split out of `embed_repair` (500-SLOC cap).
 mod alias_repair;

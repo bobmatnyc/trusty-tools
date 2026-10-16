@@ -502,7 +502,7 @@ mod live {
                 .map(|id| id.to_string())
                 .map_err(|source| PortfolioMemoryError::Operation {
                     op: "remember",
-                    source,
+                    source: source.into(),
                 })
         }
 

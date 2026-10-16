@@ -910,6 +910,33 @@ async fn supersede_leaves_the_original_intact_when_the_replacement_cannot_be_wri
     assert!(edges.is_empty(), "{edges:?}");
 }
 
+/// #9278 T3c-1 (Q4): a vector fault while the replacement is written is still
+/// `ShareError::Hnsw`; the typed `remember_with_options` would hide it in
+/// `ShareError::Other`. The fault is an op-budget overrun on a parked insert.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // the parked insert gate is the fault
+async fn supersede_keeps_a_vector_fault_as_share_error_hnsw() {
+    use crate::engine::store::hnsw_store::HnswStoreError;
+    let tmp = tempdir().unwrap();
+    let h = open_palace(tmp.path(), "sup-hnsw");
+    let original = write(&h, "a fact whose correction cannot be indexed", &[]).await;
+    let store = h.vector_store.clone();
+    store
+        .op_breaker()
+        .set_budget_for_test(std::time::Duration::from_millis(300));
+    let err = {
+        let _parked = store.hnsw_for_test().park_insert_gate_for_test();
+        let fix = "the corrected fact that the parked index cannot take";
+        supersede_drawer(&h, original, fix, RoomType::General, vec![], 0.5).await
+    }
+    .expect_err("a vector fault fails the supersession");
+    assert!(
+        matches!(err, ShareError::Hnsw(HnswStoreError::OpBudget(_))),
+        "{err:?}"
+    );
+}
+
 // ── Fail-closed: the embed runs before the durable write ────────────────────
 
 /// Why: `insert_new` embeds BEFORE it writes, so an embedder failure must leave

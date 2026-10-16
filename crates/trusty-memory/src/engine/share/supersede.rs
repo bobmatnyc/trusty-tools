@@ -107,7 +107,8 @@ pub struct Supersession {
 /// palace is refused with [`ShareError::ReadOnly`] before anything is written.
 /// Test: `supersede_mints_a_new_hash_and_links_the_original`,
 /// `assert_superseded_by_fails_loud_on_an_unwritable_kg`,
-/// `share_writes_refuse_a_read_only_palace_with_share_error`.
+/// `share_writes_refuse_a_read_only_palace_with_share_error`,
+/// `supersede_keeps_a_vector_fault_as_share_error_hnsw`.
 pub async fn supersede_drawer(
     handle: &PalaceHandle,
     original: Uuid,
@@ -120,13 +121,15 @@ pub async fn supersede_drawer(
     if handle.is_read_only() {
         return Err(ShareError::ReadOnly);
     }
+    // #9278 T3c-1 (Q4): the anyhow path, so a vector fault stays `ShareError::Hnsw`.
     let replacement = handle
-        .remember_with_options(
+        .remember_with_options_within(
             new_content.into(),
             room,
             tags,
             importance,
             RememberOptions::forced(),
+            crate::engine::timeouts::write_pipeline_timeout(),
         )
         .await
         .context("write the superseding drawer")

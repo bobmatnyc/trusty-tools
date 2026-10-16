@@ -87,13 +87,19 @@ pub enum OpBudgetError {
 /// What: walks `err` and its sources, and returns the first `OpBudget`
 /// payload of a [`HnswStoreError`] or a bare [`OpBudgetError`]. #9278 T2:
 /// the API no longer names `anyhow`; pass an `anyhow::Error` as `&*err`.
+/// #9278 T3c-1: also inside an `EngineError::Hnsw`.
 /// Test: `a_remember_whose_vector_step_exceeds_its_budget_commits_nothing`,
 /// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
 pub fn op_budget_error<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a OpBudgetError> {
+    use crate::engine::EngineError;
     std::iter::successors(Some(err), |e| e.source()).find_map(|e| {
-        match e.downcast_ref::<HnswStoreError>() {
+        let hnsw = match e.downcast_ref::<EngineError>() {
+            Some(EngineError::Hnsw(h)) => Some(h),
+            _ => e.downcast_ref::<HnswStoreError>(),
+        };
+        match hnsw {
             Some(HnswStoreError::OpBudget(b)) => Some(b),
             Some(_) => None,
             None => e.downcast_ref::<OpBudgetError>(),
