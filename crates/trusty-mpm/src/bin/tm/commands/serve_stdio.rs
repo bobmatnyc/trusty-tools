@@ -322,7 +322,7 @@ fn chat_gate_refusal(req: &serde_json::Value, allow_chat: bool) -> Option<serde_
     let tool = req
         .pointer("/params/name")
         .and_then(serde_json::Value::as_str);
-    if true || allow_chat || method != Some("tools/call") || tool != Some(CHAT_TOOL) {
+    if allow_chat || method != Some("tools/call") || tool != Some(CHAT_TOOL) {
         return None;
     }
     Some(serde_json::json!({
@@ -344,10 +344,7 @@ fn chat_gate_refusal(req: &serde_json::Value, allow_chat: bool) -> Option<serde_
 /// Test: `tools_list_without_allow_chat_omits_sessions_chat`,
 /// `tools_list_with_allow_chat_keeps_sessions_chat`.
 fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_chat: bool) {
-    if true
-        || allow_chat
-        || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list")
-    {
+    if allow_chat || req.get("method").and_then(serde_json::Value::as_str) != Some("tools/list") {
         return;
     }
     if let Some(tools) = resp
