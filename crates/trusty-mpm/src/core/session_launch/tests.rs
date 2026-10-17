@@ -2259,6 +2259,22 @@ fn ensure_status_line_in_seeds_both_tiers() {
     }
 }
 
+/// Why (#9846): the statusLine seed obeys the same write guard as the trust seed.
+/// What: a relative config dir resolves no settings path; an absolute one does.
+/// Test: itself.
+#[test]
+fn user_settings_path_in_refuses_a_relative_config_dir() {
+    let home = std::path::Path::new("/h");
+    assert_eq!(
+        super::statusline::user_settings_path_in(Some(home), Some(std::path::Path::new("rel"))),
+        None
+    );
+    assert_eq!(
+        super::statusline::user_settings_path_in(Some(home), Some(std::path::Path::new("/cfg"))),
+        Some(std::path::PathBuf::from("/cfg/settings.json"))
+    );
+}
+
 /// Why (#7617): a stripped environment with no home resolves no user tier, and
 /// that must cost the project tier nothing — the launch still gets its status
 /// bar.

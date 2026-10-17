@@ -91,5 +91,20 @@ fn user_settings_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     // #9846: the same relocation the repair path and `tm doctor` apply.
     let config_dir = crate::core::session_record::claude_config_dir_override();
-    super::user_tier::resolve(home.as_deref(), config_dir.as_deref()).map(|t| t.settings_json())
+    user_settings_path_in(home.as_deref(), config_dir.as_deref())
+}
+
+/// The user-tier `settings.json` for an explicit home and config dir.
+///
+/// Why (#9846): the statusLine seed must obey the same write guard as the trust
+/// seed — a relative `CLAUDE_CONFIG_DIR` would write `rel/settings.json` beside
+/// tm's cwd.
+/// What: [`super::user_tier::resolve_for_write`], reduced to the settings file;
+/// `None` when the location is unusable.
+/// Test: `user_settings_path_in_refuses_a_relative_config_dir`.
+pub(super) fn user_settings_path_in(
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    super::user_tier::resolve_for_write(home, config_dir).map(|t| t.settings_json())
 }

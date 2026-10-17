@@ -1000,7 +1000,8 @@ pub(super) fn prepare_session_inner(
     // so the `💸` segment is core setup rather than a project's to arrange.
     // #8545: the injected home, not the ambient `$HOME` `ensure_status_line` reads.
     // #9846: under `CLAUDE_CONFIG_DIR` when the caller named one.
-    let user_settings = user_tier::resolve(home, host.claude_config_dir).map(|t| t.settings_json());
+    // #9846: declines a relative config dir, as the trust seed does.
+    let user_settings = statusline::user_settings_path_in(home, host.claude_config_dir);
     if let Err(err) = ensure_status_line_in(project_dir, user_settings.as_deref()) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
