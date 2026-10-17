@@ -185,8 +185,10 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
 /// name-only check; no stronger signal exists for it. Pane probes only run
 /// for records whose name IS in `live` (short-circuited by `&&`), so a
 /// fleet where most sessions are genuinely stopped pays no extra tmux
-/// round-trips.
+/// round-trips. A `Stopped` record whose live pane holds only an idle shell
+/// stays `"stopped"` and not attached (#8241, [`pane_holds_idle_shell`]).
 /// Test: `reconcile_live_state_flips_stopped_to_active_when_alive`,
+/// `reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241`,
 /// `reconcile_live_state_leaves_terminal_states`,
 /// `reconcile_live_state_leaves_persisted_state_untouched`,
 /// `reconcile_live_state_prefers_pane_scoped_liveness_over_name_membership`,
@@ -215,6 +217,13 @@ pub(super) fn reconcile_live_state(
             },
             _ => name_live,
         };
+        // #8241: a live pane is not a running runtime. The runtime reaper
+        // marks a record Stopped and leaves its pane alive on an idle shell,
+        // so a Stopped record reads active only when its pane runs something
+        // the reaper would not have called exited.
+        let is_live = is_live
+            && !(record.state == ManagedSessionState::Stopped
+                && pane_holds_idle_shell(tmux, record));
         summary.attached = is_live && attached.contains(name);
         if matches!(
             record.state,
@@ -223,6 +232,27 @@ pub(super) fn reconcile_live_state(
             summary.state = if is_live { "active" } else { "stopped" }.to_string();
         }
     }
+}
+
+/// True when `record`'s pane is confirmed to hold only an idle shell (#8241).
+///
+/// Why: [`crate::daemon::runtime_reap`] stops a record whose runtime exited
+/// and leaves the pane alive, so pane liveness alone made `tm ls` read such a
+/// record `active` while `persisted_state` and MCP `session_list` read
+/// `stopped`. This applies the reaper's own idle test to the same pane.
+/// What: resolves the pane (the record's `pane_id`, else the session's pane
+/// by name), reads its foreground command, and answers
+/// [`crate::daemon::orphan_gc::is_idle_shell`]. An unresolvable pane or an
+/// unreadable command answers `false`, keeping the pane-liveness answer.
+/// Test: `reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241`
+/// in `super::tests`.
+fn pane_holds_idle_shell(tmux: &dyn ManagedTmuxDriver, record: &SessionRecord) -> bool {
+    let pane = record
+        .pane_id
+        .clone()
+        .or_else(|| tmux.get_pane_id(&record.tmux_name));
+    pane.and_then(|p| tmux.pane_foreground_command(&p).ok())
+        .is_some_and(|cmd| crate::daemon::orphan_gc::is_idle_shell(&cmd))
 }
 
 /// Probe live tmux ONCE and reconcile every summary's displayed state in place.

@@ -380,6 +380,75 @@ fn reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped() 
     );
 }
 
+/// A live pane whose foreground command is `foreground` (#8241).
+struct ForegroundTmux {
+    foreground: &'static str,
+}
+impl ManagedTmuxDriver for ForegroundTmux {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(Vec::new())
+    }
+    fn pane_foreground_command(&self, _pane_id: &str) -> Result<String, ManagedError> {
+        Ok(self.foreground.to_string())
+    }
+}
+
+/// #8241: the runtime reaper stops a record and leaves its pane alive on an
+/// idle shell. That record must read `stopped` (and not `attached`) on the
+/// reconciled surface too, agreeing with `persisted_state`; a pane that runs
+/// a runtime still reads `active`, and an `Active` record is left to the
+/// reaper.
+#[test]
+fn reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241() {
+    use std::collections::HashSet;
+    let live: HashSet<String> = ["tm-apex".to_string()].into_iter().collect();
+    let attached = live.clone();
+    let reconcile = |state: ManagedSessionState, foreground: &'static str| {
+        let mut rec = make_record(None);
+        rec.state = state;
+        rec.tmux_name = "tm-apex".into();
+        rec.pane_id = Some("%5".to_string());
+        let records = vec![rec];
+        let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+        let tmux = ForegroundTmux { foreground };
+        reconcile_live_state(&tmux, &mut summaries, &records, &live, &attached);
+        summaries.remove(0)
+    };
+
+    let parked = reconcile(ManagedSessionState::Stopped, "zsh");
+    assert_eq!(
+        (parked.state.as_str(), parked.persisted_state.as_str()),
+        ("stopped", "stopped"),
+        "an idle-shell pane must not make a Stopped record read active"
+    );
+    assert!(
+        !parked.attached,
+        "an idle-shell pane must not read attached"
+    );
+
+    let relaunched = reconcile(ManagedSessionState::Stopped, "claude");
+    assert_eq!(relaunched.state, "active", "a running runtime reads active");
+    assert!(relaunched.attached);
+
+    let active = reconcile(ManagedSessionState::Active, "zsh");
+    assert_eq!(
+        active.state, "active",
+        "an Active record is the reaper's to stop"
+    );
+}
+
 /// Why: both the MCP path (`record_to_json`) and the HTTP path
 /// (`record_to_summary`) must expose `source_id` so callers on either
 /// transport can filter or reconnect by project identity (#1733).
