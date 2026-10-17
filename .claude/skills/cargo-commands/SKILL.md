@@ -97,9 +97,11 @@ cargo run -p trusty-search -- start
 cargo run -p trusty-mpm -- --help
 
 # trusty-search performance regression suite
-# requires an ISOLATED daemon (not your dev daemon) with trusty-tools indexed,
-# and TRUSTY_SEARCH_TEST_URL pointed at it — see #7675
-TRUSTY_SEARCH_TEST_URL=http://127.0.0.1:<isolated-port> \
+# requires a sandbox daemon (scripts/sandbox_search_daemon.sh) with a marked
+# corpus copy indexed; talks over its socket (#9993), no default socket
+TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search.sock \
+TRUSTY_SEARCH_BENCH_INDEX=<index id> \
+TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
   cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture
 ```
 
