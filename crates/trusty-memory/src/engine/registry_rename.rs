@@ -240,7 +240,9 @@ impl PalaceRegistry {
     /// `rename_palace_refuses_a_newer_format_source_and_changes_nothing`,
     /// `rename_palace_allows_the_reverse_rename`,
     /// `rename_palace_refuses_a_target_with_chat_sessions`,
-    /// `rename_palace_waits_for_a_dropped_handle_to_close_its_files`.
+    /// `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
+    /// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
+    /// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
     pub(crate) fn rename_palace(
         &self,
         data_root: &Path,
@@ -380,6 +382,11 @@ impl PalaceRegistry {
             .map_err(|e| PalaceRenameError::io(format!("rename palace {old:?}"), e))?;
         let replace = if present(&new_dir)? {
             self.check_target(&new_dir, new, opts)?;
+            // #9945: the check opened and dropped the target; its KG writer
+            // keeps `kg.redb` cached until polled. Moving the source onto the
+            // same path first would serve the trashed target's store as `new`.
+            // Still before the alias write, so a timeout changes nothing.
+            await_files_closed(data_root, &[new.to_string()], opts.busy_wait)?;
             true
         } else {
             match strict_alias(data_root, new)? {
@@ -476,10 +483,14 @@ fn invalid(new: &str, reason: &str) -> PalaceRenameError {
 /// when a runtime worker next polls the task. Moving the directory before then
 /// leaves the file open under its old path, and the next open of the new id
 /// gets `DatabaseAlreadyOpen` and falls back to a read-only snapshot.
-/// What: polls the KG and vector caches for `<root>/<key>/kg.redb` and
-/// `<root>/<key>/index.usearch.redb`; a file still open after `wait` is `Busy`,
-/// with nothing changed.
-/// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`.
+/// What: polls the KG cache for `<root>/<key>/kg.redb` and the live vector
+/// `Database` of `<root>/<key>/index.usearch.redb` (alive while any clone of
+/// its store is, even in a detached blocking job); a file still open after
+/// `wait` is `Busy`, with nothing changed. Also run on the `replace_empty`
+/// target after `check_target` opened it.
+/// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
+/// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
+/// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
 fn await_files_closed(data_root: &Path, keys: &[String], wait: Duration) -> RenameResult<()> {
     let deadline = Instant::now() + wait;
     for key in keys {
