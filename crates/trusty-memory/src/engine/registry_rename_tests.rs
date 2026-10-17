@@ -415,3 +415,44 @@ fn rename_palace_allows_the_reverse_rename() {
     assert_eq!(map.get("b-p").map(String::as_str), Some("a-p"));
     assert_eq!(map.get("a-p"), None, "no alias is keyed by the live id");
 }
+
+/// Why (#9945): a dropped handle's KG writer task keeps `kg.redb` open until
+/// a runtime worker polls its abort. A rename that moved the directory first
+/// left the next open of the new id on a read-only snapshot — the CI failure
+/// of `rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated`.
+/// What: holds the runtime's only worker across the rename, so the aborted
+/// task cannot drop its store, then requires a writable reopen of the new id.
+/// Test: itself.
+#[test]
+fn rename_palace_waits_for_a_dropped_handle_to_close_its_files() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _entered = rt.enter();
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let reg = PalaceRegistry::new();
+    drop(create(&reg, root, "busy-src"));
+    let (started, worker_held) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        started.send(()).expect("signal");
+        std::thread::sleep(Duration::from_millis(800));
+    });
+    worker_held.recv().expect("the worker is held");
+
+    let opts = RenameOptions {
+        busy_wait: Duration::from_secs(5),
+        ..RenameOptions::default()
+    };
+    reg.rename_palace(root, "busy-src", "busy-dst", &opts)
+        .expect("rename");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("busy-dst"))
+        .expect("open the renamed palace");
+    assert!(
+        !reopened.is_read_only(),
+        "the renamed palace reopened on a read-only snapshot"
+    );
+}

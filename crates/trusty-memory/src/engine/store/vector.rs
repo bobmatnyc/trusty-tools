@@ -298,6 +298,20 @@ fn redb_path_for(usearch_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Whether a live store in this process still holds the vector redb file of
+/// `usearch_path`.
+///
+/// Why (#9945): a dropped handle is not a closed file while a spawned task
+/// still owns a clone of the store; a palace rename must not move the file
+/// until it is closed.
+/// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`.
+pub(crate) fn vector_db_is_open(usearch_path: &Path) -> bool {
+    let cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
+    cache
+        .get(&canonical_key(&redb_path_for(usearch_path)))
+        .is_some_and(|weak| weak.strong_count() > 0)
+}
+
 /// HNSW-backed vector store with the `UsearchStore` public API.
 ///
 /// Why: `PalaceHandle` and several test helpers reference `UsearchStore`
