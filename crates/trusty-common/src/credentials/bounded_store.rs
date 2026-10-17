@@ -521,9 +521,7 @@ pub fn resolve_provider_bounded_with(
     store: Arc<dyn KeyStore>,
     timeout: Duration,
 ) -> Result<String, SecretResolveError> {
-    let var = env_var_for(provider)
-        .map(str::to_string)
-        .unwrap_or_else(|| provider.to_string());
+    let var = canonical_var(provider);
     if let Ok(value) = std::env::var(&var)
         && !value.is_empty()
     {
@@ -532,17 +530,99 @@ pub fn resolve_provider_bounded_with(
     match store_get_bounded(store, provider, timeout) {
         Ok(Some(value)) if !value.is_empty() => Ok(value),
         Ok(_) => Err(SecretResolveError::Absent { var }),
+        Err(failure) => Err(store_failure_error(var, failure, timeout)),
+    }
+}
+
+/// Resolve `var`'s credential STORE FIRST: the bounded store, then the process
+/// env, which already reflects `.env.local`.
+///
+/// Why (#9936): a daemon autostarted from a session inherits that session's
+/// env and cwd, so with the env tier first a session chose which Slack app the
+/// daemon connects as. A credential whose source must be the host owner's
+/// store, not the caller's environment, resolves through this instead of
+/// [`resolve_env_var_bounded`]. Every other credential keeps env first.
+/// What: [`resolve_env_var_bounded`]'s registry mapping and `.env.local` load,
+/// then [`resolve_provider_bounded_store_first_with`] over
+/// [`super::default_store`], [`STORE_READ_TIMEOUT`] and `std::env::var`.
+///
+/// # Errors
+///
+/// As [`resolve_provider_bounded_store_first_with`], plus
+/// [`SecretResolveError::Unregistered`].
+///
+/// Test: `store_first_prefers_the_store_over_the_environment`.
+pub fn resolve_env_var_bounded_store_first(var: &str) -> Result<String, SecretResolveError> {
+    let Some(provider) = provider_for_env_var(var) else {
+        return Err(SecretResolveError::Unregistered {
+            var: var.to_string(),
+        });
+    };
+    super::dotenv::load_env_local_once();
+    resolve_provider_bounded_store_first_with(
+        provider,
+        Arc::from(super::default_store()),
+        STORE_READ_TIMEOUT,
+        |name| std::env::var(name).ok(),
+    )
+}
+
+/// Hermetic core of [`resolve_env_var_bounded_store_first`]: `store`, then `env`.
+///
+/// Why: the store and the env tier are both parameters, so a test proves the
+/// order without an OS keychain and without mutating the process environment.
+/// What: [`store_get_bounded`] first. A non-empty stored value wins. Only a
+/// store that ANSWERED with nothing falls through to `env(<canonical var>)`.
+///
+/// # Errors
+///
+/// `Absent` when neither tier holds a non-empty value. `Timeout` or `Store`
+/// when the store read failed: that is terminal, and `env` is never called.
+///
+/// Test: `store_first_prefers_the_store_over_the_environment`,
+/// `store_first_falls_back_to_the_environment_only_when_the_store_is_empty`,
+/// `store_first_surfaces_a_store_failure_instead_of_the_environment`.
+pub fn resolve_provider_bounded_store_first_with(
+    provider: &str,
+    store: Arc<dyn KeyStore>,
+    timeout: Duration,
+    env: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, SecretResolveError> {
+    let var = canonical_var(provider);
+    match store_get_bounded(store, provider, timeout) {
+        Ok(Some(value)) if !value.is_empty() => Ok(value),
+        Ok(_) => match env(&var) {
+            Some(value) if !value.is_empty() => Ok(value),
+            _ => Err(SecretResolveError::Absent { var }),
+        },
+        // #9936: a store that failed is not a store that holds nothing — no
+        // quiet fall-through to the environment.
+        Err(failure) => Err(store_failure_error(var, failure, timeout)),
+    }
+}
+
+/// `provider`'s canonical environment variable, or the key itself when the
+/// registry has none.
+fn canonical_var(provider: &str) -> String {
+    env_var_for(provider)
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.to_string())
+}
+
+/// The caller-facing error for a failed bounded store read of `var`.
+fn store_failure_error(var: String, failure: StoreFailure, timeout: Duration) -> SecretResolveError {
+    match failure {
         // #8236: `cached` comes from the read, never from a constant — an
         // operator's next step differs by whether the store was just asked.
-        Err(StoreFailure {
+        StoreFailure {
             kind: StoreErrorKind::Timeout,
             cached,
-        }) => Err(SecretResolveError::Timeout {
+        } => SecretResolveError::Timeout {
             var,
             waited_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             cached,
-        }),
-        Err(StoreFailure { kind, cached }) => Err(SecretResolveError::Store { var, kind, cached }),
+        },
+        StoreFailure { kind, cached } => SecretResolveError::Store { var, kind, cached },
     }
 }
 
