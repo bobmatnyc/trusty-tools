@@ -424,22 +424,77 @@ pub fn check_log_rotation() -> CheckResult {
 
 // ── Python/MPS sidecar checks (epic #3524 slice 5) ──────────────────────────
 
-/// Is the opt-in Python/MPS sidecar selected for this environment?
+/// How the Python/MPS sidecar is selected on this host, if at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonEmbedderSelection {
+    /// Not selected (Linux default, `stdio`, `in-process`, ...).
+    NotSelected,
+    /// `TRUSTY_EMBEDDER=python`, the explicit opt-in.
+    Explicit,
+    /// Apple Silicon with `TRUSTY_EMBEDDER` unset or `auto`: the daemon serves
+    /// on ort and bootstraps the sidecar in the background (#9968).
+    GracefulDefault,
+}
+
+/// Whether this build targets Apple Silicon — the platform flag
+/// `resolve_default_embedder_mode` reads in `start/embedder.rs`.
+pub fn is_apple_silicon() -> bool {
+    cfg!(all(target_arch = "aarch64", target_os = "macos"))
+}
+
+/// Decide which Python/MPS path doctor diagnoses.
 ///
-/// Why: the detailed checks below (`uv`, venv, launcher, device) are only
-/// meaningful when `TRUSTY_EMBEDDER=python` is set — otherwise they'd report
-/// spurious warnings about an embedder backend the operator never opted into.
-/// What: `TRUSTY_EMBEDDER == "python"`.
-/// Test: `python_embedder_enabled_*` in `tests.rs`.
-pub fn python_embedder_enabled() -> bool {
-    std::env::var("TRUSTY_EMBEDDER")
-        .map(|v| v == "python")
-        .unwrap_or(false)
+/// Why: the detailed checks (`uv`, venv, launcher, device) only make sense
+/// where the daemon tries to run the sidecar. #9968: that includes the Apple
+/// Silicon default, where doctor used to report "not enabled" while the
+/// daemon bootstrapped the sidecar and fell back to ort in silence.
+/// What: `python` → `Explicit` on any platform; unset/empty/`auto` →
+/// `GracefulDefault` when `is_apple_silicon`, the same precedence as
+/// `resolve_default_embedder_mode_for`; everything else → `NotSelected`.
+/// The platform is a parameter so both branches are testable on any host.
+/// Test: `python_embedder_selection_for_each_platform_and_value`.
+pub fn python_embedder_selection_for(
+    trusty_embedder: Option<&str>,
+    is_apple_silicon: bool,
+) -> PythonEmbedderSelection {
+    match trusty_embedder.unwrap_or("") {
+        "python" => PythonEmbedderSelection::Explicit,
+        // #9968: the graceful default runs the sidecar without any opt-in.
+        "" | "auto" if is_apple_silicon => PythonEmbedderSelection::GracefulDefault,
+        _ => PythonEmbedderSelection::NotSelected,
+    }
 }
 
 /// Check `uv` presence + version (required to bootstrap the Python/MPS venv).
-pub fn check_python_uv() -> CheckResult {
-    match trusty_embedderd_py::bootstrap::locate_uv() {
+/// `locate_uv` never fetches (#9966), so this stays read-only.
+pub fn check_python_uv(selection: PythonEmbedderSelection) -> CheckResult {
+    uv_check_result(trusty_embedderd_py::bootstrap::locate_uv(), selection)
+}
+
+/// Map a `locate_uv` outcome to a doctor row.
+///
+/// Why (#9966): with no uv installed the bootstrap fetches the pinned uv, so
+/// "not installed" is not fatal unless `TRUSTY_UV_FETCH=0`.
+/// What: `Ok` with the version; `Warn` for `UvError::NotInstalled`; for
+/// everything else (fetch off, bad `TRUSTY_UV_BIN`, refused cache) the same
+/// downgrade as [`launcher_check_result`]: `Warn` under `GracefulDefault`
+/// (#9970 — the daemon stays on ort and says so), `Error` otherwise.
+/// Test: `uv_check_result_warns_when_the_bootstrap_would_fetch`,
+/// `uv_rows_warn_under_the_graceful_default_and_error_for_explicit_python`.
+pub(crate) fn uv_check_result(
+    found: anyhow::Result<std::path::PathBuf>,
+    selection: PythonEmbedderSelection,
+) -> CheckResult {
+    use trusty_embedderd_py::uv_fetch::UvError;
+    match found {
+        Err(e)
+            if matches!(
+                e.downcast_ref::<UvError>(),
+                Some(UvError::NotInstalled { .. })
+            ) =>
+        {
+            CheckResult::Warn(format!("uv: {e}"))
+        }
         Ok(path) => {
             let version = std::process::Command::new(&path)
                 .arg("--version")
@@ -450,9 +505,34 @@ pub fn check_python_uv() -> CheckResult {
                 .unwrap_or_else(|| "version unknown".to_string());
             CheckResult::Ok(format!("uv: {} ({})", version, path.display()))
         }
+        // #9970: degraded, not broken — the graceful default serves on ort.
+        Err(e) if selection == PythonEmbedderSelection::GracefulDefault => {
+            CheckResult::Warn(format!(
+                "uv unavailable: {e:#} — the Apple Silicon default stays on ort until \
+                 uv is usable; install uv or set TRUSTY_UV_BIN"
+            ))
+        }
         Err(e) => CheckResult::Error(format!(
             "uv not found: {e:#} — required to bootstrap the Python/MPS embedder \
              (TRUSTY_EMBEDDER=python); install uv or set TRUSTY_UV_BIN"
+        )),
+    }
+}
+
+/// Map a venv-layout lookup to a doctor row: the venv check on `Ok`, and on
+/// an error the [`uv_check_result`] downgrade (#9970).
+/// Test: `layout_check_result_warns_under_the_graceful_default`.
+pub(crate) fn layout_check_result(
+    found: anyhow::Result<trusty_embedderd_py::VenvLayout>,
+    selection: PythonEmbedderSelection,
+) -> CheckResult {
+    match found {
+        Ok(layout) => check_python_venv(&layout),
+        Err(e) if selection == PythonEmbedderSelection::GracefulDefault => CheckResult::Warn(
+            format!("Python/MPS embedder: could not resolve venv layout: {e:#} — staying on ort"),
+        ),
+        Err(e) => CheckResult::Error(format!(
+            "Python/MPS embedder: could not resolve venv layout: {e:#}"
         )),
     }
 }
@@ -482,10 +562,12 @@ pub fn check_python_venv(layout: &trusty_embedderd_py::VenvLayout) -> CheckResul
             want_hash
         ))
     } else if !ready_path.exists() && !venv_present {
+        // #9968: no "with TRUSTY_EMBEDDER=python" — the Apple Silicon default
+        // builds it too.
         CheckResult::Warn(format!(
             "Python/MPS venv: not yet bootstrapped ({}) — will build on the next \
-             `trusty-search start` with TRUSTY_EMBEDDER=python (one-time ~2-3 GB \
-             download); run `trusty-search doctor --fix` to bootstrap it now",
+             `trusty-search start` (one-time ~2-3 GB download); run \
+             `trusty-search doctor --fix` to bootstrap it now",
             layout.venv_dir.display()
         ))
     } else {
@@ -498,11 +580,49 @@ pub fn check_python_venv(layout: &trusty_embedderd_py::VenvLayout) -> CheckResul
     }
 }
 
+/// The remedy a missing launcher row names (#9968).
+///
+/// trusty-search ships the launcher beside its own binary (#9977). `tctl
+/// install` re-places every binary of the release archive on each run, so it
+/// restores a deleted launcher. `--force` makes `cargo install` rebuild even
+/// when the installed trusty-search version is already current.
+pub const LAUNCHER_FIX: &str = "reinstall trusty-search, which ships the launcher \
+     beside its binary: `tctl install trusty-search` or `cargo install trusty-search \
+     --locked --force`; or set TRUSTY_EMBEDDERD_PY_BIN to the launcher's path";
+
 /// Check that the `trusty-embedderd-py` launcher binary is discoverable.
-pub fn check_python_launcher() -> CheckResult {
-    match trusty_embedderd_py::locate_launcher_binary() {
+/// Read-only: a lookup of `TRUSTY_EMBEDDERD_PY_BIN`, the sibling path and PATH.
+pub fn check_python_launcher(selection: PythonEmbedderSelection) -> CheckResult {
+    launcher_check_result(trusty_embedderd_py::locate_launcher_binary(), selection)
+}
+
+/// Map a launcher lookup to a doctor row.
+///
+/// Why: #9968 — under the graceful default the daemon falls back to ort
+/// when the launcher is missing, so that is a degraded install (Warn), not a
+/// broken one; the row must still say where it looked and how to fix it.
+/// What: `Ok` with the path; on error the lookup's own message (it names the
+/// path searched) plus [`LAUNCHER_FIX`] — a `Warn` under `GracefulDefault`,
+/// an `Error` otherwise (the explicit `python` opt-in, as before).
+/// Test: `launcher_check_result_warns_under_the_graceful_default`,
+/// `python_checks_run_under_graceful_default`.
+pub(crate) fn launcher_check_result(
+    found: anyhow::Result<std::path::PathBuf>,
+    selection: PythonEmbedderSelection,
+) -> CheckResult {
+    match found {
         Ok(p) => CheckResult::Ok(format!("trusty-embedderd-py launcher: {}", p.display())),
-        Err(e) => CheckResult::Error(format!("trusty-embedderd-py launcher not found: {e:#}")),
+        // #9968: the wording avoids "not found", which `doctor --fix` reads
+        // as a missing model cache.
+        Err(e) if selection == PythonEmbedderSelection::GracefulDefault => {
+            CheckResult::Warn(format!(
+                "trusty-embedderd-py launcher missing: {e:#} — the Apple Silicon default \
+                 stays on ort until it is back; fix: {LAUNCHER_FIX}"
+            ))
+        }
+        Err(e) => CheckResult::Error(format!(
+            "trusty-embedderd-py launcher not found: {e:#}; fix: {LAUNCHER_FIX}"
+        )),
     }
 }
 

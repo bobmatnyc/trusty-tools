@@ -32,7 +32,8 @@
 //! #9949: a probe that fails every startup attempt no longer pins the daemon
 //! to ort. [`drive_bootstrap`] keeps retrying in the background with capped
 //! backoff ([`background_retry_delay`]) until one attempt succeeds; only a
-//! permanent failure (missing launcher, venv build error) is terminal.
+//! permanent failure (missing launcher, a venv build error other than a
+//! network failure or timeout — #9971) is terminal.
 //! #9468: each attempt locates the launcher before any venv work, and a
 //! permanent failure ends the bootstrap on its first occurrence.
 //!
@@ -54,7 +55,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::Embedder;
-use crate::service::embedder_supervisor::bootstrap_control::BootstrapReport;
+use crate::service::embedder_supervisor::bootstrap_control::{BootstrapPhase, BootstrapReport};
 use crate::service::embedder_supervisor::{
     ActiveBackend, BackendKind, BootstrapState, SupervisorConfig, SwitchableEmbedder,
 };
@@ -145,14 +146,24 @@ impl AttemptError {
     ///
     /// Why: a missing launcher was retried, and each retry rebuilt the venv
     /// (a ~3 GB torch download) before failing the same lookup again.
-    /// What: `Launcher` and `Venv` are permanent: another attempt repeats the
-    /// same missing binary or the same failed build. `Probe` is transient: a
-    /// contended host can answer minutes later (#9949).
+    /// What: `Launcher` is permanent: another attempt repeats the same
+    /// missing binary. `Venv` follows `trusty_embedderd_py::failure_kind`
+    /// (#9971): a network failure or timeout is transient, low disk, a
+    /// missing uv or a failed local step is permanent. `Probe` is transient:
+    /// a contended host can answer minutes later (#9949).
     /// Test: `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
-    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`.
+    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`;
+    /// `venv_network_failure_retries_then_swaps_to_python`,
+    /// `venv_disk_full_failure_is_not_retried` in `start/venv_retry_9971_tests.rs`.
     fn at(step: FailedStep, e: anyhow::Error) -> Self {
+        use trusty_embedderd_py::FailureKind;
         match step {
-            FailedStep::Launcher | FailedStep::Venv => Self::Permanent(e),
+            FailedStep::Launcher => Self::Permanent(e),
+            // #9971: typed classification; a dropped torch download retries.
+            FailedStep::Venv => match trusty_embedderd_py::failure_kind(&e) {
+                FailureKind::Transient => Self::Transient(e),
+                FailureKind::Permanent => Self::Permanent(e),
+            },
             FailedStep::Probe => Self::Transient(e),
         }
     }
@@ -406,7 +417,8 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// What: makes up to `retries` startup attempts (linear backoff, `2 *
 /// attempt` seconds). The first permanent error ([`AttemptError::at`]) marks
 /// the bootstrap `Failed` and returns, in a startup or a background attempt
-/// (#9468). If every startup attempt failed on the probe, marks it `Retrying`
+/// (#9468). If every startup attempt failed transiently (the probe, or a venv
+/// network failure — #9971), marks it `Retrying`
 /// and keeps attempting in the background, waiting [`background_retry_delay`]
 /// between rounds, until an attempt succeeds, a permanent error ends it, or
 /// the switchable's `BootstrapControl` is shut down. Every failed attempt records its error in
@@ -430,7 +442,9 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
 /// `graceful_bootstrap_transient_failure_keeps_retrying`,
 /// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
-/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`.
+/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`;
+/// `venv_network_failure_retries_then_swaps_to_python` in
+/// `start/venv_retry_9971_tests.rs`.
 pub(super) async fn drive_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
@@ -468,7 +482,8 @@ pub(super) async fn drive_bootstrap(
         }
     }
 
-    // #9949: the probe failed, not the setup — keep retrying while ort serves.
+    // #9949: every startup attempt failed transiently (the probe, or #9971 a
+    // venv-build network failure) — keep retrying while ort serves.
     let mut round = 0usize;
     loop {
         let delay = background_retry_delay(round);
@@ -522,6 +537,13 @@ async fn sleep_unless_cancelled(delay: Duration, cancel: &CancellationToken) -> 
     }
 }
 
+/// Record the step the running attempt is on (#9970).
+fn set_phase(switchable: &SwitchableEmbedder, phase: BootstrapPhase) {
+    switchable
+        .bootstrap_control()
+        .update_report(|r| BootstrapReport { phase, ..r.clone() });
+}
+
 /// Mark the bootstrap terminally `Failed` on a permanent error (#9949).
 fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
     switchable
@@ -543,6 +565,8 @@ fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
 ///
 /// Fail-open check: a failed attempt writes its error into the report BEFORE
 /// the caller logs it, so `/health` always says why, never only a WARN line.
+/// Test: `retry_wait_after_a_failed_probe_reads_retrying_with_the_error` in
+/// `start/tests_9949.rs` (#9970: the failed attempt resets the step to `Idle`).
 async fn run_attempt(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
@@ -563,8 +587,10 @@ async fn run_attempt(
     };
     let outcome = try_bootstrap_once(switchable, state, ops, attempt, check, cancel).await;
     match &outcome {
+        // #9970: the attempt is over, so no step is running.
         Ok(_) => control.update_report(|r| BootstrapReport {
             last_error: None,
+            phase: BootstrapPhase::Idle,
             ..r.clone()
         }),
         Err(AttemptError::Cancelled) => {}
@@ -572,6 +598,7 @@ async fn run_attempt(
             let text = attempt_error_text(e);
             control.update_report(|r| BootstrapReport {
                 last_error: Some(text.clone()),
+                phase: BootstrapPhase::Idle,
                 ..r.clone()
             });
         }
@@ -620,7 +647,8 @@ async fn try_bootstrap_once(
 
     // Step b: blocking venv bootstrap off the async runtime. A shutdown does
     // not wait for it: the blocking thread finishes on its own and spawns no
-    // sidecar.
+    // sidecar. #9970: the agent note says the venv is installing.
+    set_phase(switchable, BootstrapPhase::InstallingVenv);
     let venv_ops = Arc::clone(ops);
     let venv = tokio::task::spawn_blocking(move || venv_ops.ensure_venv(check));
     let venv = tokio::select! {
@@ -651,6 +679,7 @@ async fn try_bootstrap_once(
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
     // load + one real embed THROUGH the supervisor, bounded by the budget.
+    set_phase(switchable, BootstrapPhase::Probing);
     let probe = tokio::select! {
         biased;
         () = cancel.cancelled() => None,

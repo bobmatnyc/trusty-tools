@@ -724,6 +724,8 @@ fn locate_uv_refuses_a_tampered_cached_uv() {
     // Empty PATH and HOME: only a system-dir uv can still be found, and it wins.
     unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
     unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    // #9966: locate_uv never fetches; the opt-out keeps a regression offline too.
+    unsafe { std::env::set_var("TRUSTY_UV_FETCH", "0") };
     let host = trusty_common::bin_resolve::resolve_binary("uv");
     match (with_data_override(tmp.path(), locate_uv), host) {
         (found, Some(host)) => assert_eq!(found.unwrap(), host, "installed uv wins"),
@@ -733,4 +735,275 @@ fn locate_uv_refuses_a_tampered_cached_uv() {
             "the error must name the refused cached uv, got: {e:#}"
         ),
     }
+}
+
+/// Why (#9966): `build_venv` must reach the fetch-aware uv lookup, and the
+/// one opt-out must fail loudly. On the B1 base the build's error said the
+/// fetch was "not yet available" and never named `TRUSTY_UV_FETCH`.
+/// What: no uv anywhere, `TRUSTY_UV_FETCH=0`, and a `.ready` venv whose
+/// recheck fails; the rebuild must fail naming both variables, with no uv
+/// cache dir created. A host uv in a system dir wins and is reported instead.
+/// Test: this test.
+#[test]
+fn a_build_with_no_uv_and_the_fetch_off_names_both_variables() {
+    // #9966: mutates PATH, HOME, TRUSTY_UV_FETCH, TRUSTY_DATA_DIR_OVERRIDE.
+    if !isolate_in_child_process(
+        "bootstrap::tests::a_build_with_no_uv_and_the_fetch_off_names_both_variables",
+    ) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
+    unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+    unsafe { std::env::set_var("TRUSTY_UV_FETCH", "0") };
+    if let Some(host) = trusty_common::bin_resolve::resolve_binary("uv") {
+        eprintln!(
+            "SKIP: a system-dir uv at {} wins; nothing to prove",
+            host.display()
+        );
+        return;
+    }
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+        fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
+        let err = format!("{:#}", ensure_venv().expect_err("no uv and no fetch"));
+        assert!(err.contains("TRUSTY_UV_FETCH=0"), "{err}");
+        assert!(err.contains("TRUSTY_UV_BIN"), "{err}");
+        let uv_dir = layout.base.parent().unwrap().join("uv");
+        assert!(!uv_dir.exists(), "the opt-out must not touch the uv cache");
+    });
+}
+
+/// Why (#9966): `locate_uv` backs the read-only `trusty-search doctor`, which
+/// must never download, write the uv cache, or block on the network. B2 had
+/// routed it through the fetch.
+/// What: no uv anywhere, `TRUSTY_UV_FETCH` unset (fetch on), and every proxy
+/// variable aimed at a closed local port so a regressed fetch fails fast
+/// instead of downloading. `locate_uv` must fail without creating the uv
+/// cache dir, and its error must say the bootstrap would fetch, not that a
+/// fetch failed. A host uv in a system dir wins and the test skips.
+/// Test: this test.
+#[test]
+fn locate_uv_with_no_uv_and_the_fetch_on_never_fetches() {
+    // #9966: mutates PATH, HOME, proxy vars, TRUSTY_UV_*, TRUSTY_DATA_DIR_OVERRIDE.
+    if !isolate_in_child_process(
+        "bootstrap::tests::locate_uv_with_no_uv_and_the_fetch_on_never_fetches",
+    ) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("PATH", tmp.path().join("empty-path")) };
+    unsafe { std::env::set_var("HOME", tmp.path().join("home")) };
+    unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+    unsafe { std::env::remove_var("TRUSTY_UV_FETCH") };
+    for var in ["NO_PROXY", "no_proxy"] {
+        unsafe { std::env::remove_var(var) };
+    }
+    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        unsafe { std::env::set_var(var, "http://127.0.0.1:9") };
+    }
+    if let Some(host) = trusty_common::bin_resolve::resolve_binary("uv") {
+        eprintln!(
+            "SKIP: a system-dir uv at {} wins; nothing to prove",
+            host.display()
+        );
+        return;
+    }
+    let err = format!(
+        "{:#}",
+        with_data_override(tmp.path(), locate_uv).expect_err("no uv is installed or cached")
+    );
+    let uv_dir = tmp.path().join("trusty-search/py-embedder/uv");
+    assert!(
+        !uv_dir.exists(),
+        "locate_uv must not fetch or touch the uv cache; {} exists ({err})",
+        uv_dir.display()
+    );
+    assert!(err.contains("not installed"), "{err}");
+    assert!(
+        err.contains("0.12.23") && err.contains("TRUSTY_UV_FETCH=0"),
+        "{err}"
+    );
+    assert!(!err.contains("failed"), "no fetch was tried: {err}");
+}
+
+/// #9971: a uv step's process failure reaches the caller as a typed error.
+/// `/bin/sh` stands in for uv, so no freshly written file is exec'd: a stalled
+/// step is a transient `Timeout`, a failed local step a permanent
+/// `StepFailed`, and a failed `pip sync` (sh runs `./pip`) a download failure
+/// whose kind follows the free space.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn uv_step_failures_are_typed_for_the_retry_decision() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = Path::new("/bin/sh");
+    let run = |args: &[&str], timeout| {
+        super::run_with_timeout(sh, args, tmp.path(), tmp.path(), timeout).unwrap_err()
+    };
+    let generous = Duration::from_secs(30);
+
+    let stalled = run(&["-c", "sleep 30"], Duration::from_millis(300));
+    assert!(
+        matches!(
+            stalled.downcast_ref::<VenvBuildError>(),
+            Some(VenvBuildError::Timeout { .. })
+        ),
+        "{stalled:#}"
+    );
+    assert_eq!(failure_kind(&stalled), FailureKind::Transient);
+
+    let local = run(&["-c", "exit 3"], generous);
+    assert!(
+        matches!(
+            local.downcast_ref::<VenvBuildError>(),
+            Some(VenvBuildError::StepFailed { .. })
+        ),
+        "{local:#}"
+    );
+    assert_eq!(failure_kind(&local), FailureKind::Permanent);
+
+    fs::write(tmp.path().join("pip"), "exit 4\n").unwrap();
+    let download = run(&["pip", "sync"], generous);
+    let free = fs4::available_space(tmp.path()).unwrap();
+    let want = if free < REQUIRED_FREE_BYTES {
+        FailureKind::Permanent
+    } else {
+        FailureKind::Transient
+    };
+    assert_eq!(failure_kind(&download), want, "{download:#}");
+}
+
+/// Write `script` at `path` and mark it executable from a `/bin/sh` child, so
+/// this process never holds a write fd on a file a later spawn execs (a
+/// concurrent fork would inherit it and the exec would fail with ETXTBSY).
+#[cfg(unix)]
+fn write_exec_script_via_child(path: &Path, script: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+            "sh",
+        ])
+        .args([script, path.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
+}
+
+/// #9971 regression: a build that follows a failed, not-ready build runs over
+/// the venv dir that attempt left. `/bin/sh` stands in for uv and runs the
+/// fake step scripts in the project dir. The fake `uv venv` exits 2 when the
+/// dir exists, as real uv does; `uv pip sync` fails while `net-down` exists.
+/// Attempt 1 fails at the sync after creating the venv, attempt 2 must
+/// finish and write `.ready`.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_build_after_a_failed_sync_starts_over_the_partial_venv() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    let net_down = tmp.path().join("net-down");
+    fs::write(&net_down, "").unwrap();
+    let steps = [
+        ("python", "exit 0\n".to_owned()),
+        (
+            "venv",
+            r#"if [ -e "$1" ]; then echo "error: A virtual environment already exists at $1" >&2; exit 2; fi
+mkdir -p "$1/bin" && printf '#!/bin/sh\nexit 0\n' > "$1/bin/python" && chmod 755 "$1/bin/python"
+"#
+            .to_owned(),
+        ),
+        ("export", "exit 0\n".to_owned()),
+        (
+            "pip",
+            format!("if [ -e '{}' ]; then exit 1; fi\n", net_down.display()),
+        ),
+    ];
+    fs::create_dir_all(&layout.project_dir).unwrap();
+    for (name, body) in &steps {
+        fs::write(layout.project_dir.join(name), body).unwrap();
+    }
+    let sh = Path::new("/bin/sh");
+
+    let first = super::build_venv_with(&layout, sh).expect_err("the sync is down");
+    assert!(
+        format!("{first:#}").contains("uv pip sync"),
+        "attempt 1 fails at the sync: {first:#}"
+    );
+    let free = fs4::available_space(tmp.path()).unwrap();
+    if free >= REQUIRED_FREE_BYTES {
+        assert_eq!(failure_kind(&first), FailureKind::Transient, "{first:#}");
+    }
+    assert!(layout.venv_python.is_file(), "attempt 1 left its venv");
+    assert!(!layout.ready_sentinel().exists());
+
+    fs::remove_file(&net_down).unwrap();
+    super::build_venv_with(&layout, sh).expect("attempt 2 starts over the partial venv");
+    assert!(is_ready(&layout), "attempt 2 wrote .ready");
+}
+
+/// #9971: the pre-`uv venv` clear never touches a venv marked `.ready`, and
+/// on a not-ready venv removes only the venv dir.
+/// Test: this test.
+#[test]
+fn clear_unready_venv_spares_a_ready_venv_and_its_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    fs::create_dir_all(layout.venv_dir.join("bin")).unwrap();
+    fs::write(&layout.venv_python, "").unwrap();
+    fs::create_dir_all(&layout.project_dir).unwrap();
+    fs::write(layout.project_dir.join("keep"), "").unwrap();
+    fs::write(layout.ready_sentinel(), lockfile_hash()).unwrap();
+
+    super::clear_unready_venv(&layout).unwrap();
+    assert!(
+        layout.venv_python.is_file(),
+        "a ready venv is never cleared"
+    );
+
+    fs::remove_file(layout.ready_sentinel()).unwrap();
+    super::clear_unready_venv(&layout).unwrap();
+    assert!(!layout.venv_dir.exists(), "the unfinished venv is removed");
+    assert!(layout.project_dir.join("keep").is_file());
+    assert!(layout.base.is_dir());
+    super::clear_unready_venv(&layout).expect("no venv dir is a no-op");
+}
+
+/// #9971 regression: the smoke test's network exit (the model download
+/// failed on the network) is transient while disk space remains; any other
+/// failing exit stays permanent.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_smoke_test_network_exit_is_transient_and_other_exits_permanent() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    fs::create_dir_all(&layout.project_dir).unwrap();
+
+    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit \"$3\"\n");
+    let net = super::smoke_test(&layout).expect_err("network exit");
+    let free = fs4::available_space(&layout.project_dir).unwrap();
+    let want = if free < REQUIRED_FREE_BYTES {
+        FailureKind::Permanent
+    } else {
+        FailureKind::Transient
+    };
+    assert_eq!(failure_kind(&net), want, "{net:#}");
+    assert!(net.downcast_ref::<VenvBuildError>().is_some(), "{net:#}");
+
+    fs::remove_file(&layout.venv_python).unwrap();
+    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+    let other = super::smoke_test(&layout).expect_err("import error");
+    assert_eq!(failure_kind(&other), FailureKind::Permanent, "{other:#}");
+    assert!(
+        other.to_string().contains("py-embedder smoke test failed"),
+        "{other:#}"
+    );
 }

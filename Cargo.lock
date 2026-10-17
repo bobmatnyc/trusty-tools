@@ -11440,6 +11440,7 @@ dependencies = [
  "fs4 0.8.4",
  "hex",
  "include_dir",
+ "reqwest 0.12.28",
  "sha2 0.10.9",
  "tar",
  "tempfile",
