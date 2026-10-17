@@ -574,21 +574,25 @@ pub fn validate_and_repair(
     validate_and_repair_with_exe(fw, workspace, repo_url, None)
 }
 
-/// [`validate_and_repair`] with the user home named (#8545).
+/// [`validate_and_repair`] with the user home and config dir named (#8545).
 ///
 /// Why: the repair's session preparation writes the user-tier statusLine and
 /// trust seed under a home; a daemon pinned to a test home must not reach `$HOME`.
-/// What: the same repair, with `home` handed to
-/// [`crate::core::session_launch::prepare_session_for_repair_under`].
+/// #9999: the daemon's `RepairHost` also names the config dir, so the tier
+/// follows `CLAUDE_CONFIG_DIR` as `tm validate --repair` does (#9846).
+/// What: the same repair, with `home` and `claude_config_dir` handed to
+/// [`crate::core::session_launch::prepare_session_for_repair_in`].
 /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`,
-/// `repair_writes_auto_memory_off`.
+/// `repair_writes_auto_memory_off`,
+/// `the_daemon_repair_writes_the_user_tier_under_the_config_dir_9999`.
 pub fn validate_and_repair_under(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
     home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> RepairOutcome {
-    repair_with(fw, workspace, repo_url, None, home, None)
+    repair_with(fw, workspace, repo_url, None, home, claude_config_dir)
 }
 
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
