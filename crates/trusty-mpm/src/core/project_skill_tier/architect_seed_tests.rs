@@ -12,8 +12,7 @@ use super::*;
 use crate::core::content_source::test_support::{rc, repo_content};
 use crate::core::framework_content::tests::{fake_checkout_with_package, legacy_content};
 use crate::core::project_skill_tier::architect_skills::{
-    self, CONTEXT_REFRESH, FLEET_CHECK, SHIPPED, ShippedSkill, deploy_resolved,
-    deploy_skills_into,
+    self, CONTEXT_REFRESH, FLEET_CHECK, SHIPPED, ShippedSkill, deploy_resolved, deploy_skills_into,
 };
 
 /// sha256 of each skill as `include_str!` compiled it in at eada92a230, before
@@ -28,7 +27,6 @@ const COMPILED_IN: [(&str, &str); 2] = [
         "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
     ),
 ];
-
 
 /// A content source with the repository's required instructions plus
 /// `extra` (`(path relative to instructions/, body)`).
@@ -58,7 +56,11 @@ fn shipped(rel: &str) -> String {
 #[test]
 fn the_repository_content_seeds_the_architect() {
     let seed = ArchitectSeed::load(rc()).expect("the checkout carries the seed");
-    assert!(seed.claude_md.contains("`local/state.md`"), "{}", seed.claude_md);
+    assert!(
+        seed.claude_md.contains("`local/state.md`"),
+        "{}",
+        seed.claude_md
+    );
     assert!(!seed.claude_md.contains("records/"), "{}", seed.claude_md);
     let stems: Vec<&str> = seed.skills.iter().map(|s| s.stem).collect();
     let shipped_stems: Vec<&str> = SHIPPED.iter().map(|s| s.stem).collect();
@@ -186,10 +188,7 @@ fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
     let stems: Vec<&str> = seed.skills.iter().map(|s| s.stem).collect();
     let want: Vec<&str> = table.iter().map(|s| s.stem).collect();
     assert_eq!(stems, want);
-    assert_eq!(
-        seed.skills.last().map(|s| s.contents.as_str()),
-        Some(body)
-    );
+    assert_eq!(seed.skills.last().map(|s| s.contents.as_str()), Some(body));
 
     let tier = tempfile::tempdir().expect("tier");
     let report = deploy_skills_into(tier.path(), &seed.skills);

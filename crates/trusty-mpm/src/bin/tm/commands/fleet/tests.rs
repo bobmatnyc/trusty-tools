@@ -1247,7 +1247,11 @@ fn every_template_asset_is_seeded() {
             if path.file_name().is_some_and(|n| n == ".DS_Store") {
                 continue;
             }
-            let rel = path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             let dest = if rel == "gitignore" {
                 ".gitignore".to_owned()
             } else {
@@ -1265,7 +1269,11 @@ fn every_template_asset_is_seeded() {
             checked += 1;
         }
     }
-    assert_eq!(checked, LOCAL_TEMPLATES.len() + 1, "templates found: {checked}");
+    assert_eq!(
+        checked,
+        LOCAL_TEMPLATES.len() + 1,
+        "templates found: {checked}"
+    );
 }
 
 /// #9997 AC5: a seed carrying one more skill writes it with no change to
