@@ -33,6 +33,8 @@ mod corpus_open_quarantine_4122;
 mod daemon_env_precedence;
 mod daemon_no_tcp_9214;
 mod data_dir_forward;
+// #9993 G7: sandbox freshness probe (one ignored test + helper tests).
+mod freshness_probe;
 // #9450: compaction cost at 150K (ignored measurement).
 mod hnsw_compact_9450;
 mod hnsw_recall_9414;
