@@ -152,11 +152,19 @@ pub(crate) const DIRS: &[&str] = &["local/projects"];
 /// `an_edited_seed_or_script_is_never_overwritten`.
 pub(crate) fn deploy(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Vec<Step>> {
     let files = files(seed);
-    let mut steps = Vec::with_capacity(files.len() + DIRS.len());
+    let mut steps = Vec::with_capacity(files.len() + DIRS.len() + 2);
+    // #9997: an Architect that still keeps `records/` gets no `local/` rows.
+    let records_era = dir.join(super::status::STALE_RECORDS_DIR).is_dir();
     for file in &files {
+        if records_era && file.dest.starts_with("local/") {
+            continue;
+        }
         steps.push(deploy_file(dir, file)?);
     }
     for rel in DIRS {
+        if records_era {
+            continue;
+        }
         let path = dir.join(rel);
         steps.push(if path.is_dir() {
             Step::Unchanged(format!("{rel}/"))
@@ -166,7 +174,32 @@ pub(crate) fn deploy(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Vec<Ste
             Step::Changed(format!("created {rel}/"))
         });
     }
+    if records_era {
+        steps.extend(records_era_steps(dir));
+    }
     Ok(steps)
+}
+
+/// The report lines for a project that still keeps `records/`.
+///
+/// Why: #9997. A re-init must not seed `local/` beside `records/`; a `local/`
+/// left from an earlier run is the owner's to merge, so it is named, not removed.
+/// What: one `Skipped` line saying the `local/` templates were not seeded, plus
+/// a warning line naming `local/` when it exists. Reads only.
+/// Test: `a_reinit_beside_records_writes_no_local_templates`,
+/// `a_reinit_warns_about_a_stale_local_beside_records`.
+fn records_era_steps(dir: &Path) -> Vec<Step> {
+    let mut steps = vec![Step::Skipped(
+        "local/ templates: not seeded, because records/ exists".to_owned(),
+    )];
+    let local = dir.join("local");
+    if local.exists() {
+        steps.push(Step::Skipped(format!(
+            "WARNING stale `local/` directory at {} beside `records/`: move what you keep              into one of them and delete the other yourself (tm deletes nothing)",
+            local.display()
+        )));
+    }
+    steps
 }
 
 /// Write one file when absent; never replace bytes that differ.
