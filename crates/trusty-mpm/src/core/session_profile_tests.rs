@@ -233,7 +233,8 @@ fn every_kept_item_reaches_the_architect_prompt() {
     for (item, marker) in [
         ("identity", "You are a direct-action supervisor"),
         ("hard limits", "### Hard Limits"),
-        ("relay marker", "`[<Name> supervisor HH:MMZ]`"),
+        // #9997: the marker relay.sh accepts names the Architect.
+        ("relay marker", "`[<Name> Architect HH:MMZ]`"),
         ("two-step send", "Send with the two-step pattern"),
         ("exact tmux targets", "`-t '=<session>:'`"),
         ("evidence labels", "**reported**"),

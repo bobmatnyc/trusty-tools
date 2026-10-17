@@ -184,7 +184,12 @@ fn a_blocked_skill_dir_is_an_error_line() {
         "{:?}",
         report.errors
     );
-    assert_eq!(report.written, vec!["tm-context-refresh"]);
+    // #9997: every other shipped skill is still written.
+    let others: Vec<&str> = shipped_stems()
+        .into_iter()
+        .filter(|stem| *stem != FLEET_CHECK.stem)
+        .collect();
+    assert_eq!(report.written, others);
     let (ok, detail) = health(project.path());
     assert!(!ok, "a failed deploy reported healthy: {detail}");
     assert!(detail.contains("tm-fleet-check: unreadable"), "{detail}");

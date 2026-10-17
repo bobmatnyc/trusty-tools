@@ -205,7 +205,7 @@ The owner wrote the text below in this project's `AGENTS.md`. It is later and mo
 
 # Owner overrides
 
-Owner: Bob. Report in UTC.
+Owner: Ada. Report in UTC.
 
 ## Architect Core
 
