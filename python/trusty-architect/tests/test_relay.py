@@ -15,6 +15,9 @@ POSTED = os.path.join(SCRIPTS, "posted.sh")
 
 STUB = """#!/bin/sh
 echo "$*" >> "{dir}/tmux.log"
+if [ -f "{dir}/fail_literal" ]; then
+  case "$*" in *" -l "*) exit 1 ;; esac
+fi
 case "$1" in
   capture-pane)
     n=$(cat "{dir}/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{dir}/n"
@@ -24,6 +27,14 @@ case "$1" in
     cat "$f" ;;
 esac
 exit 0
+"""
+
+# A python3 that fails from its Nth call on (N in "{dir}/py_fail_from"); earlier
+# calls run the real interpreter. Tests the box_state error arms of relay.sh.
+FAKE_PY = """#!/bin/sh
+n=$(cat "{dir}/py_n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{dir}/py_n"
+if [ "$n" -ge "$(cat "{dir}/py_fail_from")" ]; then exit 1; fi
+exec "{real}" "$@"
 """
 
 RULE = "─" * 40
@@ -48,6 +59,16 @@ class Stub:
             (self.dir / f"capture.{i}").write_text(text)
         self.cwd = tmp_path / "elsewhere"  # never the project root
         self.cwd.mkdir()
+
+    def fail_literal_send(self):
+        (self.dir / "fail_literal").write_text("")
+
+    def fail_python_from(self, n):
+        import shutil
+        py = self.dir / "bin" / "python3"
+        py.write_text(FAKE_PY.format(dir=self.dir, real=shutil.which("python3")))
+        py.chmod(0o755)
+        (self.dir / "py_fail_from").write_text(str(n))
 
     def run(self, script, *args):
         env = {k: v for k, v in os.environ.items()
@@ -105,6 +126,50 @@ def test_relay_sends_enter_only_after_both_checks(tmp_path, before):
     assert sends == [f"send-keys -t =tm-api: -l {TEXT}", "send-keys -t =tm-api: Enter"]
     captures = [c for c in stub.calls() if c.startswith("capture-pane")]
     assert len(captures) == 2 and all("-t =tm-api:" in c for c in captures)
+
+
+@pytest.mark.parametrize("fail_from,expect", [(1, "SKIP input=error"), (2, "NOT-OURS input=error")])
+def test_relay_fails_closed_when_the_classifier_exits_nonzero(tmp_path, fail_from, expect):
+    stub = Stub(tmp_path, [box(), box(TEXT)])
+    stub.fail_python_from(fail_from)
+    out = stub.run(RELAY, "tm-api", TEXT)
+    assert out.returncode == 1, out
+    assert expect in out.stdout, out
+    assert not any(s.endswith(" Enter") for s in stub.sends())
+
+
+def test_relay_reports_not_ours_when_the_second_capture_is_empty(tmp_path):
+    stub = Stub(tmp_path, [box(), ""])
+    out = stub.run(RELAY, "tm-api", TEXT)
+    assert out.returncode == 1 and "NOT-OURS" in out.stdout, out
+    assert not any(s.endswith(" Enter") for s in stub.sends())
+
+
+def test_relay_sends_no_enter_when_typing_the_text_fails(tmp_path):
+    stub = Stub(tmp_path, [box(), box(TEXT)])
+    stub.fail_literal_send()
+    out = stub.run(RELAY, "tm-api", TEXT)
+    assert out.returncode == 1 and "FAILED send-keys" in out.stdout, out
+    assert not any(s.endswith(" Enter") for s in stub.sends())
+
+
+@pytest.mark.parametrize("ctrl", ["\r", "\x1b", "\x07", "\x1f"])
+def test_relay_refuses_control_characters_before_typing(tmp_path, ctrl):
+    stub = Stub(tmp_path, [box(), box(TEXT)])
+    text = f"{TEXT} tail{ctrl}more"
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 1, out
+    assert "CONTROL-CHAR" in out.stdout and "tail" not in out.stdout, out
+    assert stub.calls() == []
+
+
+def test_relay_still_accepts_lf_and_tab(tmp_path):
+    text = f"{TEXT}\n\tsecond line"
+    stub = Stub(tmp_path, [box(), box(TEXT)])
+    out = stub.run(RELAY, "tm-api", text)
+    assert out.returncode == 0, out
+    assert "\tsecond line" in stub.calls(), stub.calls()  # the stub logs one argv line per LF
+    assert stub.sends()[-1] == "send-keys -t =tm-api: Enter"
 
 
 @pytest.mark.parametrize("text", [
