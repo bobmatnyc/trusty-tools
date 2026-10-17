@@ -14,7 +14,8 @@
 //!
 //! [`fixture`] fails closed: an unset variable, or no daemon answering
 //! `search.health` at the named socket, panics with a message naming it. Every
-//! index call goes through [`Fixture::index_call`], which first reads the
+//! index call goes through [`Fixture::index_call`] or
+//! [`Fixture::index_call_after`], each of which first reads the
 //! index's `root_path` and refuses unless it equals the canonical corpus path.
 //! Test: `a_missing_daemon_fails_closed_naming_the_socket`,
 //! `socket_env_is_required_absolute_and_not_the_live_default`,
@@ -207,23 +208,47 @@ impl Fixture {
     /// Guard, then call an index-scoped `method`, timing only the call.
     ///
     /// What: params are `{"index_id", "body"}` when `body` is `Some`, else
-    /// `{"index_id"}`. Returns `(latency_ms, result)`; the guard runs before
+    /// `{"index_id"}`. Returns `(latency, result)`; the guard runs before
     /// the clock starts.
     pub async fn index_call(
         &self,
         method: &str,
         body: Option<Value>,
-    ) -> Result<(u128, Value), String> {
+    ) -> Result<(Duration, Value), String> {
         self.guard().await?;
+        self.timed(method, body).await
+    }
+
+    /// Guard, wait on `start`, then call `method`, timing only the call.
+    ///
+    /// Why: a concurrent batch's wall-clock window must not contain the
+    /// guards (#9993 G1 review). Every task still guards its own call.
+    /// What: the guard runs first; the call starts once every party has
+    /// reached `start`, so the caller can open its window at the same point.
+    pub async fn index_call_after(
+        &self,
+        method: &str,
+        body: Option<Value>,
+        start: &tokio::sync::Barrier,
+    ) -> Result<(Duration, Value), String> {
+        let guarded = self.guard().await;
+        // Wait even on a refusal, or the other parties would wait forever.
+        start.wait().await;
+        guarded?;
+        self.timed(method, body).await
+    }
+
+    /// The call itself; callers have already run [`Self::guard`].
+    async fn timed(&self, method: &str, body: Option<Value>) -> Result<(Duration, Value), String> {
         let params = match body {
             Some(body) => json!({ "index_id": self.index, "body": body }),
             None => json!({ "index_id": self.index }),
         };
         let started = Instant::now();
         let result = self.client.call(method, params).await;
-        let ms = started.elapsed().as_millis();
+        let elapsed = started.elapsed();
         result
-            .map(|value| (ms, value))
+            .map(|value| (elapsed, value))
             .map_err(|e: DaemonCallError| format!("{method} on index {}: {e}", self.index))
     }
 

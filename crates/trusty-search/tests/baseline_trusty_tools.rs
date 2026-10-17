@@ -33,6 +33,16 @@
 //! A missing daemon, variable, index or root mismatch fails the test, naming
 //! what is missing; nothing is skipped.
 //!
+//! # Results envelope (#9993 G2)
+//! Each latency test reports n, nearest-rank p50/p95/p99, max and qps per
+//! operation (`support/latency_stats.rs`). With
+//! `TRUSTY_SEARCH_BENCH_ENVELOPE=<absolute path>` set, the rows are written
+//! there as the schema-1 envelope shared with trusty-memory
+//! (`support/perf_envelope.rs`); unset, nothing is written. Optional:
+//! `TRUSTY_SEARCH_BENCH_COMMIT`, `TRUSTY_SEARCH_BENCH_LABEL` (`mac`/`evo`).
+//! Run with `--test-threads=1` for a measurement, so tests do not share the
+//! daemon while timed.
+//!
 //! # Regression thresholds
 //! - Query latency p50: <= 500 ms
 //! - Query latency p99: <= 2000 ms
@@ -44,10 +54,17 @@ mod isolated_benchmark;
 #[path = "support/socket_benchmark.rs"]
 mod socket_benchmark;
 use socket_benchmark::{fixture, Fixture};
+// #9993 G2: nearest-rank percentiles + qps, written as the schema-1 envelope.
+#[path = "support/latency_stats.rs"]
+mod latency_stats;
+#[path = "support/perf_envelope.rs"]
+mod perf_envelope;
+use latency_stats::{latency_stats, LatencyStats};
+use perf_envelope::{latency_rows, load_now, RunContext};
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -124,7 +141,7 @@ fn query_body(query: &str) -> Value {
     })
 }
 
-/// Issue `search.query` over the socket and return `(latency_ms, body)`.
+/// Issue `search.query` over the socket and return `(latency, body)`.
 ///
 /// Why: Factoring out the search call keeps the latency-measurement tests
 /// DRY and ensures every call uses the same `top_k` and `expand_graph`
@@ -132,24 +149,51 @@ fn query_body(query: &str) -> Value {
 /// What: Guards the index root, then sends `{text, top_k: 10, expand_graph:
 /// true, compact: true}` and times only the call. Any refusal panics.
 /// Test: called by `test_query_latency_p50_under_threshold` and friends.
-async fn search(fx: &Fixture, query: &str) -> (u128, Value) {
+async fn search(fx: &Fixture, query: &str) -> (Duration, Value) {
     fx.index_call("search.query", Some(query_body(query)))
         .await
         .unwrap_or_else(|e| panic!("query '{query}': {e}"))
 }
 
-/// Compute the p-percentile of a sorted (ascending) slice.
-///
-/// Why: p50/p99 are the agreed regression thresholds; computing them from raw
-/// samples avoids an external statistics dependency.
-/// What: Returns `values[floor(len * p / 100)]`, clamped to the last index.
-/// Test: Verified informally — for `[1,2,3,4,5]` p50 → 3, p99 → 5.
-fn percentile(sorted: &[u128], p: usize) -> u128 {
-    if sorted.is_empty() {
-        return 0;
+/// The envelope header this test knows: daemon version, index, load before.
+async fn run_context(fx: &Fixture, load_before: Option<f64>) -> RunContext {
+    RunContext {
+        version: fx.health().await["version"].as_str().map(str::to_string),
+        corpus: Some(fx.index.clone()),
+        load_before,
     }
-    let idx = ((sorted.len() * p) / 100).min(sorted.len() - 1);
-    sorted[idx]
+}
+
+/// Summarize serial `samples`, print them, and record them in the envelope.
+///
+/// What: a serial loop's window is the sum of its samples, because the gaps
+/// between calls are untimed guard work. A summary or write failure panics.
+fn summarize_serial(
+    ctx: &RunContext,
+    op: &str,
+    samples: &[Duration],
+    p99_threshold_ms: Option<f64>,
+) -> LatencyStats {
+    let window = samples.iter().sum();
+    summarize(ctx, op, samples, window, p99_threshold_ms)
+}
+
+/// Summarize `samples` over `window`, print, and record the envelope rows.
+fn summarize(
+    ctx: &RunContext,
+    op: &str,
+    samples: &[Duration],
+    window: Duration,
+    p99_threshold_ms: Option<f64>,
+) -> LatencyStats {
+    let stats = latency_stats(samples, window).unwrap_or_else(|e| panic!("{op}: {e}"));
+    println!(
+        "{op}: n={} p50={:.2} ms p95={:.2} ms p99={:.2} ms max={:.2} ms qps={:.2}",
+        stats.n, stats.p50_ms, stats.p95_ms, stats.p99_ms, stats.max_ms, stats.qps
+    );
+    perf_envelope::record(ctx, latency_rows(op, &stats, p99_threshold_ms))
+        .unwrap_or_else(|e| panic!("{op}: {e}"));
+    stats
 }
 
 /// Whether `search.indexes.list` names `index`, as a bare id or an `{id}` row.
@@ -231,33 +275,32 @@ async fn test_index_exists_and_has_content() {
 #[tokio::test]
 #[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_query_latency_p50_under_threshold() {
+    let load_before = load_now();
     let fx = fixture().await;
     fx.assert_ready().await;
-    let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len());
+    let mut latencies: Vec<Duration> = Vec::with_capacity(REGRESSION_QUERIES.len());
 
     println!("\n{:<50} {:>12}  top_file", "query", "latency_ms");
     println!("{}", "-".repeat(90));
 
     for (query, _expected_file, _intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&fx, query).await;
+        let (elapsed, body) = search(&fx, query).await;
         let top_file = body["results"][0]["file"]
             .as_str()
             .unwrap_or("<no results>");
-        println!("{:<50} {:>12}  {top_file}", query, ms);
-        latencies.push(ms);
+        println!("{:<50} {:>12}  {top_file}", query, elapsed.as_millis());
+        latencies.push(elapsed);
     }
 
     assert_eq!(latencies.len(), REGRESSION_QUERIES.len(), "missing samples");
-    latencies.sort_unstable();
-    let p50 = percentile(&latencies, 50);
-    println!(
-        "\n{} samples: p50 latency: {p50} ms  (threshold: {LATENCY_P50_THRESHOLD_MS} ms)",
-        latencies.len()
-    );
+    let ctx = run_context(&fx, load_before).await;
+    let stats = summarize_serial(&ctx, "search.query single pass", &latencies, None);
+    println!("p50 threshold: {LATENCY_P50_THRESHOLD_MS} ms");
 
     assert!(
-        p50 <= LATENCY_P50_THRESHOLD_MS,
-        "p50 query latency {p50} ms exceeds threshold {LATENCY_P50_THRESHOLD_MS} ms"
+        stats.p50_ms <= LATENCY_P50_THRESHOLD_MS as f64,
+        "p50 query latency {:.2} ms exceeds threshold {LATENCY_P50_THRESHOLD_MS} ms",
+        stats.p50_ms
     );
 }
 
@@ -272,14 +315,15 @@ async fn test_query_latency_p50_under_threshold() {
 #[tokio::test]
 #[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_query_latency_p99_under_threshold() {
+    let load_before = load_now();
     let fx = fixture().await;
     fx.assert_ready().await;
-    let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
+    let mut latencies: Vec<Duration> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
 
     for _ in 0..3 {
         for (query, _, _) in REGRESSION_QUERIES {
-            let (ms, _) = search(&fx, query).await;
-            latencies.push(ms);
+            let (elapsed, _) = search(&fx, query).await;
+            latencies.push(elapsed);
         }
     }
 
@@ -288,17 +332,15 @@ async fn test_query_latency_p99_under_threshold() {
         REGRESSION_QUERIES.len() * 3,
         "missing samples"
     );
-    latencies.sort_unstable();
-    let p99 = percentile(&latencies, 99);
-    let p50 = percentile(&latencies, 50);
-    println!(
-        "\n{} samples: p50={p50} ms, p99={p99} ms  (p99 threshold: {LATENCY_P99_THRESHOLD_MS} ms)",
-        latencies.len()
-    );
+    let ctx = run_context(&fx, load_before).await;
+    let threshold = LATENCY_P99_THRESHOLD_MS as f64;
+    let stats = summarize_serial(&ctx, "search.query serial", &latencies, Some(threshold));
+    println!("p99 threshold: {LATENCY_P99_THRESHOLD_MS} ms");
 
     assert!(
-        p99 <= LATENCY_P99_THRESHOLD_MS,
-        "p99 query latency {p99} ms exceeds threshold {LATENCY_P99_THRESHOLD_MS} ms"
+        stats.p99_ms <= threshold,
+        "p99 query latency {:.2} ms exceeds threshold {LATENCY_P99_THRESHOLD_MS} ms",
+        stats.p99_ms
     );
 }
 
@@ -325,7 +367,8 @@ async fn test_result_relevance() {
     println!("{}", "-".repeat(100));
 
     for (query, expected_frag, intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&fx, query).await;
+        let (elapsed, body) = search(&fx, query).await;
+        let ms = elapsed.as_millis();
 
         let results = body["results"].as_array().cloned().unwrap_or_default();
         // Accept a match anywhere in the top-3 to allow minor reranking variance.
@@ -372,13 +415,18 @@ async fn test_result_relevance() {
 /// or the embedder pool would surface here as refusals or timeouts.
 /// What: Issues 8 queries via `tokio::task::JoinSet`, each on its own socket
 /// connection, asserts all succeed and the wall-clock total stays under 5 s.
-/// Each task runs the root guard before its timed call.
+/// Each task runs the root guard, then waits on a barrier; the window opens
+/// when the barrier releases, so no guard is inside it (#9993 G2).
 /// Test: this IS the test.
 #[tokio::test]
 #[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_concurrent_queries_no_errors() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
     use tokio::task::JoinSet;
 
+    const TASKS: usize = 8;
+    let load_before = load_now();
     let fx = fixture().await;
     fx.assert_ready().await;
 
@@ -387,28 +435,33 @@ async fn test_concurrent_queries_no_errors() {
         .iter()
         .map(|(q, _, _)| *q)
         .cycle()
-        .take(8)
+        .take(TASKS)
         .collect();
 
-    let t0 = Instant::now();
-    let mut join_set: JoinSet<Result<u128, String>> = JoinSet::new();
+    // Every task plus this one; the window opens when all have arrived.
+    let start = Arc::new(Barrier::new(TASKS + 1));
+    let mut join_set: JoinSet<Result<Duration, String>> = JoinSet::new();
 
     for query in queries {
         let body = query_body(query);
         let fx = fx.clone();
+        let start = Arc::clone(&start);
         join_set.spawn(async move {
-            fx.index_call("search.query", Some(body))
+            fx.index_call_after("search.query", Some(body), &start)
                 .await
-                .map(|(ms, _)| ms)
+                .map(|(elapsed, _)| elapsed)
         });
     }
 
-    let mut outcomes: Vec<Result<u128, String>> = Vec::new();
+    start.wait().await;
+    let t0 = Instant::now();
+    let mut outcomes: Vec<Result<Duration, String>> = Vec::new();
     while let Some(result) = join_set.join_next().await {
         outcomes.push(result.expect("task should not panic"));
     }
 
-    let total_ms = t0.elapsed().as_millis();
+    let window = t0.elapsed();
+    let total_ms = window.as_millis();
     println!(
         "\n{} concurrent queries completed in {total_ms} ms",
         outcomes.len()
@@ -417,13 +470,16 @@ async fn test_concurrent_queries_no_errors() {
         println!("  query {i}: {outcome:?}");
     }
 
-    assert_eq!(outcomes.len(), 8, "missing concurrent samples");
+    assert_eq!(outcomes.len(), TASKS, "missing concurrent samples");
     let errors: Vec<_> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
     assert!(
         errors.is_empty(),
         "{} concurrent queries were refused: {errors:?}",
         errors.len()
     );
+    let samples: Vec<Duration> = outcomes.iter().filter_map(|o| o.clone().ok()).collect();
+    let ctx = run_context(&fx, load_before).await;
+    summarize(&ctx, "search.query concurrent x8", &samples, window, None);
 
     assert!(
         total_ms < 5_000,
@@ -444,7 +500,7 @@ const GREP_LATENCY_PATTERNS: &[&str] = &[
 ];
 
 /// Shell out to `rg` (preferred) or `grep` against `root` for `pattern`,
-/// returning `(hit_count, latency_ms)`.
+/// returning `(hit_count, latency)`.
 ///
 /// Why: a fair comparison scans the same eligible source tree. Mirror the
 /// indexer's default directory exclusions so intentionally unindexed build,
@@ -453,7 +509,7 @@ const GREP_LATENCY_PATTERNS: &[&str] = &[
 /// matching line. Scan errors fail the benchmark instead of becoming zero
 /// reference hits.
 /// Test: used by `test_grep_endpoint_latency_vs_ripgrep`.
-fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
+fn ripgrep_count(root: &Path, pattern: &str) -> (usize, Duration) {
     let started = Instant::now();
     let mut command = if Command::new("rg").arg("--version").output().is_ok() {
         let mut command = Command::new("rg");
@@ -475,7 +531,7 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
         .arg(".")
         .output()
         .expect("reference grep must launch");
-    let elapsed_ms = started.elapsed().as_millis();
+    let elapsed = started.elapsed();
     assert!(
         matches!(out.status.code(), Some(0 | 1)),
         "reference grep failed: {}",
@@ -492,7 +548,7 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
             .parse::<usize>()
             .expect("grep count must be numeric");
     }
-    (hits, elapsed_ms)
+    (hits, elapsed)
 }
 
 /// Compare `search.grep` latency and hit count against system ripgrep for
@@ -511,6 +567,7 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
 #[tokio::test]
 #[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_grep_endpoint_latency_vs_ripgrep() {
+    let load_before = load_now();
     let fx = fixture().await;
     fx.assert_ready().await;
     let root = fx.corpus.clone();
@@ -532,12 +589,12 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
     );
 
     let mut shortfalls: Vec<String> = Vec::new();
-    let mut ep_latencies: Vec<u128> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
-    let mut rg_latencies: Vec<u128> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
+    let mut ep_latencies: Vec<Duration> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
+    let mut rg_latencies: Vec<Duration> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
 
     for pattern in GREP_LATENCY_PATTERNS {
         let req_body = json!({ "pattern": pattern, "max_results": 10_000 });
-        let (ep_ms, ep_body) = fx
+        let (ep_elapsed, ep_body) = fx
             .index_call("search.grep", Some(req_body))
             .await
             .unwrap_or_else(|e| panic!("grep {pattern}: {e}"));
@@ -551,20 +608,21 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
             .unwrap_or_default();
 
         // System ripgrep against the same root.
-        let (rg_hits, rg_ms) = ripgrep_count(&root, pattern);
+        let (rg_hits, rg_elapsed) = ripgrep_count(&root, pattern);
+        let (ep_ms, rg_ms) = (ep_elapsed.as_millis(), rg_elapsed.as_millis());
 
-        let ratio = if rg_ms == 0 {
+        let ratio = if rg_elapsed.is_zero() {
             f64::INFINITY
         } else {
-            ep_ms as f64 / rg_ms as f64
+            ep_elapsed.as_secs_f64() / rg_elapsed.as_secs_f64()
         };
         println!(
             "| {:<28} | {:>9} | {:>9} | {:>9} | {:>9} | {:>6.2} |",
             pattern, ep_hits, rg_hits, ep_ms, rg_ms, ratio
         );
 
-        ep_latencies.push(ep_ms);
-        rg_latencies.push(rg_ms);
+        ep_latencies.push(ep_elapsed);
+        rg_latencies.push(rg_elapsed);
 
         // Correctness: the daemon walks the indexed file set and may legitimately
         // see *more* matches than rg when the index covers files rg's type filter
@@ -577,18 +635,9 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
         }
     }
 
-    ep_latencies.sort_unstable();
-    rg_latencies.sort_unstable();
-    println!(
-        "search.grep P50={} ms  P95={} ms",
-        percentile(&ep_latencies, 50),
-        percentile(&ep_latencies, 95)
-    );
-    println!(
-        "ripgrep     P50={} ms  P95={} ms",
-        percentile(&rg_latencies, 50),
-        percentile(&rg_latencies, 95)
-    );
+    let ctx = run_context(&fx, load_before).await;
+    summarize_serial(&ctx, "search.grep", &ep_latencies, None);
+    summarize_serial(&ctx, "ripgrep reference", &rg_latencies, None);
 
     assert!(
         shortfalls.is_empty(),
