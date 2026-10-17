@@ -7,7 +7,9 @@
 //! never from the error text.
 //! What: [`VenvBuildError`] for the build's own failures, and
 //! [`failure_kind`], which reads the first typed cause in an `anyhow` chain:
-//! a [`VenvBuildError`], a [`UvError`] or an [`io::Error`].
+//! a [`VenvBuildError`], a [`UvError`] or an [`io::Error`]. The smoke test
+//! reports a network failure during its model download with
+//! [`SMOKE_NETWORK_EXIT`].
 //! Test: `venv_error_tests.rs`.
 
 use std::io;
@@ -17,6 +19,10 @@ use crate::uv_fetch::UvError;
 
 /// Approximate free space a venv build needs (torch is ~2-3 GB).
 pub(crate) const REQUIRED_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+/// The smoke test's exit code for a network failure while it downloads the
+/// model (`EX_TEMPFAIL`, #9971).
+pub(crate) const SMOKE_NETWORK_EXIT: i32 = 75;
 
 /// Whether a later attempt can succeed where this one failed (#9971).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,15 +118,48 @@ pub(crate) fn step_exit_with(
     free: Option<u64>,
 ) -> VenvBuildError {
     let step = format!("uv {}", args.join(" "));
-    let downloads = matches!(args, ["python", "install", ..] | ["pip", "sync", ..]);
+    if matches!(args, ["python", "install", ..] | ["pip", "sync", ..]) {
+        download_exit_with(step, status, dir, free)
+    } else {
+        VenvBuildError::StepFailed { step, status }
+    }
+}
+
+/// A failed download: `InsufficientDisk` below [`REQUIRED_FREE_BYTES`] free
+/// at `dir`, else the transient `DownloadFailed`.
+fn download_exit_with(
+    step: String,
+    status: String,
+    dir: &Path,
+    free: Option<u64>,
+) -> VenvBuildError {
     match free {
-        _ if !downloads => VenvBuildError::StepFailed { step, status },
         Some(free_bytes) if free_bytes < REQUIRED_FREE_BYTES => VenvBuildError::InsufficientDisk {
             path: dir.to_path_buf(),
             free_bytes,
         },
         _ => VenvBuildError::DownloadFailed { step, status },
     }
+}
+
+/// The error for a smoke test that exited non-zero (#9971).
+///
+/// What: [`SMOKE_NETWORK_EXIT`] means the model download failed on the
+/// network, classified like a failed uv download step (free space at `dir`
+/// decides). Any other exit, or a signal (`code` is `None`), stays the
+/// untyped, permanent smoke-test failure.
+/// Test: `a_smoke_test_network_exit_is_classified_by_free_space`.
+pub(crate) fn smoke_exit_with(
+    code: Option<i32>,
+    status: String,
+    dir: &Path,
+    free: Option<u64>,
+) -> anyhow::Error {
+    if code == Some(SMOKE_NETWORK_EXIT) {
+        let step = "py-embedder smoke test (model download)".to_owned();
+        return download_exit_with(step, status, dir, free).into();
+    }
+    anyhow::anyhow!("py-embedder smoke test failed: {status}")
 }
 
 pub(crate) fn human_bytes(n: u64) -> String {
