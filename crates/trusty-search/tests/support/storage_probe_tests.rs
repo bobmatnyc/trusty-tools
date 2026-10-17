@@ -1,6 +1,7 @@
 //! Unit tests for the read-only storage probe (#9993 G6).
 
 use super::*;
+use std::process::Stdio;
 
 fn write(path: &Path, bytes: usize) {
     if let Some(parent) = path.parent() {
@@ -186,11 +187,16 @@ fn sandbox_pid_requires_the_pidfile_and_a_matching_argv() {
     let error = sandbox_pid(&socket).expect_err("a process of another data dir");
     assert!(error.contains("does not run with --data-dir"), "{error}");
 
-    // A process whose argv names the data dir is accepted. `; :` keeps the
-    // shell from exec-ing `sleep`, so its own argv stays the one checked.
+    // A process whose argv names the data dir is accepted. `read _` is a shell
+    // builtin, so the stand-in forks no child that `kill` could orphan; the
+    // piped stdin keeps the builtin blocking, and null stdout/stderr leave no
+    // inherited descriptor open past the test.
     let mut child = Command::new("/bin/sh")
-        .args(["-c", "sleep 30; :", "sandbox-probe", "--data-dir"])
+        .args(["-c", "read _", "sandbox-probe", "--data-dir"])
         .arg(&data_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn a stand-in daemon");
     std::fs::write(&pidfile, format!("{}\n", child.id())).expect("child pid");
