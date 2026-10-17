@@ -77,3 +77,29 @@ Each report names its threshold in `threshold`.
 A crossing goes to the Architect. The analysis files no issues and posts no comments.
 
 EVO p95 is noisy under fleet load, so the 10% latency threshold can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
+
+## Live collector (read-only)
+
+`scripts/memory_perf_collect.sh` takes the storage, indexing and dream-score rows from a running or stopped trusty-memory data root and prints one envelope (schema 1) on stdout. It adds two fields to the envelope: `idle_gate` (`passed`, `failed` or `skipped`) and `sampled_palaces`. Palace rows carry `palace` (a size-rank label `p01`, `p02`, ...) and, for file rows, `file` (a basename).
+
+Read-only guarantee. The script reads file sizes (`stat`, `du -sk`), runs `trusty-memory palace stats <name> --json` serially, calls `memory.status` once over the socket, and reads each sampled palace's `dream_stats.json`. It never calls `memory_recall`, `memory_recall_all`, `palace_embed_sweep` or any write, compact, dream or reembed verb, and never starts or stops a daemon.
+
+Public output. The JSON holds no palace name, project name, host path, user name or host name. The host is `label`, OS name and version, CPU model and RAM GB.
+
+Idle gate. A 1-minute load of 2 or more before the run is a refusal (exit 3). A load of 2 or more after the run marks `idle_gate: "failed"`; discard that run. `--skip-idle-gate` marks `"skipped"` and is for sandbox checks only.
+
+| Flag | Meaning |
+|---|---|
+| `--label mac\|evo` | host label (default by OS) |
+| `--top N` | palaces sampled, largest by disk bytes (default 10) |
+| `--data-root DIR` | data root, last component `trusty-memory` (env `MEMORY_PERF_DATA_ROOT`) |
+| `--socket PATH` | daemon socket (env `MEMORY_PERF_SOCKET`; default `<data-root>/trusty-memory.sock`) |
+| `--bin PATH` | `trusty-memory` binary (env `MEMORY_PERF_BIN`) |
+| `--out FILE` | also write the JSON to FILE |
+| `--commit SHA`, `--tool-version V`, `--corpus NAME` | envelope fields; defaults are the script checkout's HEAD, the daemon's version, `live` |
+
+Needs `jq`, `nc`, `du`, `stat`, `awk` and `trusty-memory`. With no daemon on the socket, `residency` is null and the file and `palace stats` rows still run.
+
+Sandbox check: start a daemon with `scripts/sandbox_memory_daemon.sh`, then pass its `data/trusty-memory` dir as `--data-root`.
+
+Metric notes. `dream_recall_score_before` and `_after` are the mean top-3 cosine of 8 fixed queries, not a correctness measure. `dream_duration_ms` is bimodal because the embed passes are skipped when the drawer set is unchanged. `commit` is the script checkout's HEAD, not the daemon build.
