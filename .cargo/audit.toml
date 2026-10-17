@@ -18,4 +18,17 @@
 # severity. Only h2 0.3.27 remains affected (the 0.4 line is on the patched
 # 0.4.16); 0.3.27 has no patched version. Renewed to 2026-11-13 by owner ruling
 # Dd5 (2026-10-14, #6067); the hf-hub 0.5 bump removes it.
-ignore = ["RUSTSEC-2026-0258"]
+#
+# RUSTSEC-2026-0367 / -0368 / -0369 — zip extract-to-disk bugs, patched only in
+# zip >= 9.0.0. Pinned upstream with no zip-9 release: calamine 0.36 (zip
+# 8.6.0), candle-core 0.10.2 via fastembed (7.2.0), candle-core 0.8.4 optional
+# candle (1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (3.0.0). No
+# extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see
+# #10019. Review by 2026-11-20 (Architect ruling df-D59); the date also sits in
+# each id's `deny.toml` reason.
+ignore = [
+  "RUSTSEC-2026-0258",
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]
