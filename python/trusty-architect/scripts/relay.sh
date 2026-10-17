@@ -5,7 +5,8 @@
 # relay typed over a draft or submitted into someone else's text cannot be
 # taken back. This script refuses whenever it is in doubt.
 # What: refuses (exit 1, NO-MARKER) unless <text> starts with an Architect
-# relay marker `[<Name> Architect HH:MMZ]`; classifies the box with
+# relay marker `[<Name> Architect HH:MMZ]`; refuses (exit 1,
+# CONTROL-CHAR) any C0 control byte except LF and TAB; classifies the box with
 # scripts/input-state.py and refuses (exit 1, SKIP) unless it is `empty` or
 # `suggestion`; types the text literally with no Enter; classifies again and
 # refuses (exit 1, NOT-OURS, no Enter) unless the box is `typed` and starts
@@ -23,6 +24,12 @@ text="${2:-}"
 if [ -z "$s" ] || [ -z "$text" ]; then
   echo "usage: relay.sh <session> <text>" >&2
   exit 2
+fi
+# #9997: refuse CR, ESC and every other C0 control byte except LF and TAB
+# before typing; the message names the rule, never the text.
+if [ -n "$(printf '%s' "$text" | LC_ALL=C tr -d '\011\012\040-\377')" ]; then
+  echo "$s CONTROL-CHAR: the text may hold no C0 control character except LF and TAB"
+  exit 1
 fi
 t="=$s:"
 T=(tmux ${TMUX_SOCKET:+-S "$TMUX_SOCKET"})
