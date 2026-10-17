@@ -42,6 +42,35 @@ impl TmuxDriver {
         Ok(command.to_owned())
     }
 
+    /// Every pane of session `name`, as the runtime reaper reads panes (#8241).
+    ///
+    /// What: `list-panes -s -t =name: -F '#{pane_id} #{pane_pid}
+    /// #{pane_current_command}'`, parsed by [`parse_session_panes`]. `Err` on a
+    /// spawn failure, a non-zero exit, or a listing that does not parse whole.
+    /// Test: `parse_session_panes_accepts_only_a_whole_listing`.
+    pub fn session_panes(&self, name: &str) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>> {
+        let argv = [
+            "list-panes".to_owned(),
+            "-s".to_owned(),
+            "-t".to_owned(),
+            crate::core::tmux::exact_window_target(name),
+            "-F".to_owned(),
+            SESSION_PANES_FORMAT.to_owned(),
+        ];
+        let output = crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?;
+        if !output.status.success() {
+            return Err(Error::Protocol(format!(
+                "tmux list-panes for session '{name}' failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        parse_session_panes(name, &String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+            Error::Protocol(format!(
+                "tmux list-panes for session '{name}' returned an unparsable listing"
+            ))
+        })
+    }
+
     /// `display-message -t %N -p <format>` for a `%N` `pane_id`, raw.
     fn pane_display_line(&self, pane_id: &str, format: &str) -> Result<String> {
         if !(pane_id.starts_with('%') && trusty_common::tmux::is_immutable_id(pane_id)) {
@@ -88,4 +117,44 @@ impl TmuxDriver {
         })?;
         Ok(())
     }
+}
+
+/// The `list-panes` format [`TmuxDriver::session_panes`] asks for (#8241).
+///
+/// Space-separated, command last: tmux rewrites a TAB to `_` for a client
+/// without a UTF-8 locale (#6529), and a command name may hold spaces.
+const SESSION_PANES_FORMAT: &str = "#{pane_id} #{pane_pid} #{pane_current_command}";
+
+/// Parse a [`SESSION_PANES_FORMAT`] listing of session `name` (#8241).
+///
+/// Why: the listing decides whether a stopped record may read idle, and an
+/// idle answer lets a resume start a runtime in that pane. A row this parser
+/// skipped could be the one pane that still runs a runtime.
+/// What: one [`PaneInfo`](crate::daemon::orphan_gc::PaneInfo) per row, with
+/// `session_name` set to `name` (the exact `=name:` target proves membership).
+/// `None` for an empty listing or any row without a `%N` id, a numeric pid and
+/// a non-empty command. Blank lines are skipped.
+/// Test: `parse_session_panes_accepts_only_a_whole_listing`.
+pub(crate) fn parse_session_panes(
+    name: &str,
+    stdout: &str,
+) -> Option<Vec<crate::daemon::orphan_gc::PaneInfo>> {
+    let mut panes = Vec::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let mut fields = line.trim().splitn(3, ' ');
+        let pane_id = fields.next()?;
+        let pane_pid = fields.next()?.parse::<u32>().ok()?;
+        let command = fields.next()?.trim();
+        if !pane_id.starts_with('%') || command.is_empty() {
+            return None;
+        }
+        panes.push(crate::daemon::orphan_gc::PaneInfo {
+            session_name: name.to_owned(),
+            pane_current_command: command.to_owned(),
+            pane_pid: Some(pane_pid),
+            pane_id: Some(pane_id.to_owned()),
+            pane_current_path: None,
+        });
+    }
+    (!panes.is_empty()).then_some(panes)
 }

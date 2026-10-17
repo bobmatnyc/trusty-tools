@@ -314,6 +314,16 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// #8241: one `list-panes -s -t =name:`, parsed whole or `Err`.
+    fn session_panes(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>, ManagedError> {
+        self.driver
+            .session_panes(name)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// #9004: `kill-session -t $N`, after the floor answers for `name`.
     fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
         let floor = self.driver.architect_floor();

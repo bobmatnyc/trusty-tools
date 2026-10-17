@@ -383,6 +383,32 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     );
 }
 
+/// Why: #9747 — gh 2.98 rejects `gh repo view --json autoMergeAllowed`, and
+/// the shipped instruction to run it failed 61 times in 72 h.
+/// What: the two files carrying the #8640 auto-merge read name the REST field
+/// `allow_auto_merge`, and no deployed skill or the version-control agent
+/// names the rejected field.
+#[test]
+fn auto_merge_read_uses_a_field_gh_accepts_9747() {
+    const READ: &str = "--jq .allow_auto_merge";
+    for (file, body) in [
+        ("version-control.md", agent("version-control.md")),
+        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
+    ] {
+        assert!(
+            body.contains(READ),
+            "`{file}` must read auto-merge via `{READ}`"
+        );
+    }
+    let named: Vec<&str> = rc()
+        .skills()
+        .chain([("agents/version-control.md", agent("version-control.md"))])
+        .filter(|(_, body)| body.contains("autoMergeAllowed"))
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(named.is_empty(), "gh rejects `autoMergeAllowed`: {named:?}");
+}
+
 #[test]
 fn tm_skills_have_frontmatter() {
     // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`

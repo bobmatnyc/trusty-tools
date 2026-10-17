@@ -245,6 +245,31 @@ fn parses_managed_pane_row() {
     assert!(TmuxDriver::parse_managed_pane_row("tmpm-q\t\t1\t%1\t/w").is_none());
 }
 
+/// #8241: a skipped row could be the one pane that still runs a runtime, so a
+/// session listing parses whole or not at all.
+#[test]
+fn parse_session_panes_accepts_only_a_whole_listing() {
+    use super::pane_identity::parse_session_panes;
+    let panes = parse_session_panes("tm-apex", "%1 100 zsh\n\n%2 200 Google Chrome\n")
+        .expect("a well-formed listing parses");
+    assert_eq!(panes.len(), 2);
+    assert_eq!(panes[0].session_name, "tm-apex");
+    assert_eq!(panes[0].pane_id.as_deref(), Some("%1"));
+    assert_eq!(panes[0].pane_pid, Some(100));
+    assert_eq!(panes[1].pane_current_command, "Google Chrome");
+
+    for bad in [
+        "",
+        "%1 100 zsh\n%2 claude",
+        "%1 x zsh",
+        "1 100 zsh",
+        "%1 100",
+        "%1_100_zsh",
+    ] {
+        assert!(parse_session_panes("tm-apex", bad).is_none(), "{bad:?}");
+    }
+}
+
 /// #6118: the fifth column is the only OPTIONAL one — an empty value is "tmux
 /// told us nothing about this pane's cwd", which the orphan-GC can never reap
 /// on. It must parse to `None`, not to an empty path that would resolve to the

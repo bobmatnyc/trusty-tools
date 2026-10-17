@@ -505,6 +505,25 @@ pub trait ManagedTmuxDriver: Send + Sync {
         )))
     }
 
+    /// Every pane of session `name`, with its foreground command and shell
+    /// pid (#8241).
+    ///
+    /// Why: the runtime reaper judges a session by ALL its panes (#2463);
+    /// `tm ls` must apply that same test before it calls a record idle.
+    /// What: the default is `Err`, so a driver that cannot list panes never
+    /// lets a record read idle. [`super::real_tmux::RealTmuxDriver`] runs one
+    /// `list-panes -s -t =name:`.
+    /// Test: `reconcile_live_state_pane_list_error_keeps_a_stopped_record_active_8241`.
+    #[cfg(feature = "daemon")] // #9776: PaneInfo lives in the daemon module.
+    fn session_panes(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot list the panes of session '{name}' with their commands"
+        )))
+    }
+
     /// Kill the session whose `$N` id is `session_id`, which carries `name`,
     /// unless the [`Self::architect_floor`] refuses `name` (#9004).
     ///
