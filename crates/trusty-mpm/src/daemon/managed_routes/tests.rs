@@ -14,7 +14,7 @@ use chrono::Utc;
 // `_under` form, so no test here writes the process-global `$HOME`.
 use super::summary::{
     checked_summaries_with_under, reconcile_against_tmux, reconcile_live_state,
-    record_to_summary_checked_under, stale_assets_for_many_under,
+    reconcile_live_state_with_probe, record_to_summary_checked_under, stale_assets_for_many_under,
 };
 use super::{record_to_json, record_to_summary};
 use crate::session_manager::{
@@ -380,11 +380,25 @@ fn reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped() 
     );
 }
 
-/// A live pane whose foreground command is `foreground` (#8241).
-struct ForegroundTmux {
-    foreground: &'static str,
+/// A live session `tm-apex` whose panes run `commands`; the first is the
+/// recorded pane `%5` (#8241).
+struct PaneListTmux {
+    commands: Vec<&'static str>,
+    /// `session_panes` answers `Err`, as a failed `list-panes` would.
+    list_fails: bool,
+    /// The shell pid every listed pane carries.
+    pid: Option<u32>,
 }
-impl ManagedTmuxDriver for ForegroundTmux {
+impl PaneListTmux {
+    fn new(commands: Vec<&'static str>) -> Self {
+        Self {
+            commands,
+            list_fails: false,
+            pid: Some(4242),
+        }
+    }
+}
+impl ManagedTmuxDriver for PaneListTmux {
     fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
         Ok(())
     }
@@ -400,9 +414,63 @@ impl ManagedTmuxDriver for ForegroundTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
     }
-    fn pane_foreground_command(&self, _pane_id: &str) -> Result<String, ManagedError> {
-        Ok(self.foreground.to_string())
+    fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
+        pane_id
+            .strip_prefix('%')
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(5))
+            .and_then(|i| self.commands.get(i))
+            .map(|c| (*c).to_string())
+            .ok_or_else(|| ManagedError::TmuxUnavailable(format!("no pane {pane_id}")))
     }
+    fn session_panes(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>, ManagedError> {
+        if self.list_fails {
+            return Err(ManagedError::TmuxUnavailable("list-panes failed".into()));
+        }
+        Ok(self
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::daemon::orphan_gc::PaneInfo {
+                session_name: name.to_string(),
+                pane_current_command: (*c).to_string(),
+                pane_pid: self.pid,
+                pane_id: Some(format!("%{}", i + 5)),
+                pane_current_path: None,
+            })
+            .collect())
+    }
+}
+
+/// A probe that finds a live child under every shell: a runtime suspended
+/// with Ctrl-Z leaves its shell in front and the runtime behind it.
+struct AlwaysLiveChildProbe;
+impl crate::daemon::orphan_gc::ChildLivenessProbe for AlwaysLiveChildProbe {
+    fn has_live_child(&self, _pane_pid: Option<u32>) -> bool {
+        true
+    }
+}
+
+/// Reconcile one `state` record bound to `tm-apex`'s pane `%5`, which is
+/// alive and attached, against `tmux` (#8241).
+fn reconcile_8241(
+    state: ManagedSessionState,
+    tmux: &PaneListTmux,
+    probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
+) -> super::SessionSummary {
+    use std::collections::HashSet;
+    let live: HashSet<String> = ["tm-apex".to_string()].into_iter().collect();
+    let mut rec = make_record(None);
+    rec.state = state;
+    rec.tmux_name = "tm-apex".into();
+    rec.pane_id = Some("%5".to_string());
+    let records = vec![rec];
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    reconcile_live_state_with_probe(tmux, &mut summaries, &records, &live, &live, probe);
+    summaries.remove(0)
 }
 
 /// #8241: the runtime reaper stops a record and leaves its pane alive on an
@@ -412,19 +480,13 @@ impl ManagedTmuxDriver for ForegroundTmux {
 /// reaper.
 #[test]
 fn reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241() {
-    use std::collections::HashSet;
-    let live: HashSet<String> = ["tm-apex".to_string()].into_iter().collect();
-    let attached = live.clone();
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
     let reconcile = |state: ManagedSessionState, foreground: &'static str| {
-        let mut rec = make_record(None);
-        rec.state = state;
-        rec.tmux_name = "tm-apex".into();
-        rec.pane_id = Some("%5".to_string());
-        let records = vec![rec];
-        let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
-        let tmux = ForegroundTmux { foreground };
-        reconcile_live_state(&tmux, &mut summaries, &records, &live, &attached);
-        summaries.remove(0)
+        reconcile_8241(
+            state,
+            &PaneListTmux::new(vec![foreground]),
+            &AlwaysIdleProbe,
+        )
     };
 
     let parked = reconcile(ManagedSessionState::Stopped, "zsh");
@@ -447,6 +509,57 @@ fn reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241() {
         active.state, "active",
         "an Active record is the reaper's to stop"
     );
+}
+
+/// #8241: a runtime suspended with Ctrl-Z leaves its shell in the foreground
+/// and a live child behind it. The reaper calls that pane live, so the record
+/// must not read `stopped` — a `Restart` would start a second runtime.
+#[test]
+fn reconcile_live_state_suspended_runtime_keeps_a_stopped_record_active_8241() {
+    let summary = reconcile_8241(
+        ManagedSessionState::Stopped,
+        &PaneListTmux::new(vec!["zsh"]),
+        &AlwaysLiveChildProbe,
+    );
+    assert_eq!(
+        summary.state, "active",
+        "an idle shell with a live child is a suspended runtime, not a stopped one"
+    );
+    assert!(summary.attached);
+}
+
+/// #8241, #2463: the recorded pane is an idle shell but a split pane in the
+/// same session runs `claude`. The reaper judges the session by every pane,
+/// so the record must not read `stopped`.
+#[test]
+fn reconcile_live_state_split_pane_runtime_keeps_a_stopped_record_active_8241() {
+    let summary = reconcile_8241(
+        ManagedSessionState::Stopped,
+        &PaneListTmux::new(vec!["zsh", "claude"]),
+        &crate::daemon::orphan_gc::AlwaysIdleProbe,
+    );
+    assert_eq!(
+        summary.state, "active",
+        "a split pane running claude keeps the session live"
+    );
+}
+
+/// #8241: when the session's panes cannot be listed, or a pane carries no
+/// shell pid to probe for a child, nothing proves the runtime gone — the
+/// record keeps its pre-#8241 `active` answer even though the recorded pane
+/// reads `zsh`.
+#[test]
+fn reconcile_live_state_pane_list_error_keeps_a_stopped_record_active_8241() {
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let mut unlistable = PaneListTmux::new(vec!["zsh"]);
+    unlistable.list_fails = true;
+    let summary = reconcile_8241(ManagedSessionState::Stopped, &unlistable, &AlwaysIdleProbe);
+    assert_eq!(summary.state, "active", "a pane-list error is not idle");
+
+    let mut pidless = PaneListTmux::new(vec!["zsh"]);
+    pidless.pid = None;
+    let summary = reconcile_8241(ManagedSessionState::Stopped, &pidless, &AlwaysIdleProbe);
+    assert_eq!(summary.state, "active", "a pane with no pid is not idle");
 }
 
 /// Why: both the MCP path (`record_to_json`) and the HTTP path
