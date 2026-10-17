@@ -2,7 +2,7 @@
 
 ## Bundled agents
 
-trusty-agents ships with these agents in `.trusty-agents/agents/`:
+trusty-agents ships these agents as instructional content in the repository's `content/agents/trusty-agents/agents/` (#9014), deployed to `~/.trusty-agents/agents/` on each run:
 
 | Agent | Role | Purpose |
 |---|---|---|

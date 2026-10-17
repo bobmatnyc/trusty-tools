@@ -500,9 +500,9 @@ search_indexes = ["real-index", "store-label"]
     /// Test: itself.
     #[test]
     fn agent_name_allowlist_accepts_every_bundled_agent() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".trusty-agents")
-            .join("agents");
+        let dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+            crate::agents::bundled::BundledTreeKind::Agents,
+        );
         let mut checked = 0usize;
         for entry in std::fs::read_dir(&dir).expect("bundled agents dir") {
             let entry = entry.expect("dir entry");

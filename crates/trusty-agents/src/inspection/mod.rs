@@ -312,15 +312,23 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Path to the repo-bundled `.trusty-agents` directory (agents + skills).
+    /// Path to the crate's `.trusty-agents` directory (skills; the agents
+    /// moved to `content/` in #9014).
     fn bundled_config_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents")
     }
 
     fn load_bundled_registries() -> (AgentRegistry, SkillRegistry) {
         let dir = bundled_config_dir();
+        // #9014: the bundled roster is content now, not `<dir>/agents`.
+        let mut agent_paths = agent_search_paths(&dir);
+        agent_paths.push(
+            crate::agents::bundled::content::test_support::repo_tree_dir(
+                crate::agents::bundled::BundledTreeKind::Agents,
+            ),
+        );
         (
-            AgentRegistry::load(&agent_search_paths(&dir)),
+            AgentRegistry::load(&agent_paths),
             SkillRegistry::load(&skill_search_paths(&dir)),
         )
     }

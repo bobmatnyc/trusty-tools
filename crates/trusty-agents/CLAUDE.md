@@ -230,9 +230,7 @@ trusty-agents/
 ├── Cargo.toml
 ├── .env.local              # API keys (not committed)
 ├── .trusty-agents/              # Bundled config (committed) + runtime state
-│   ├── agents/             # Agent TOML configs (pm.toml, python-engineer.toml, …)
 │   ├── skills/             # Skill markdown files
-│   ├── workflows/          # Workflow JSON definitions
 │   ├── tasks/              # Bake-off task files (level-1.txt … level-5.txt)
 │   ├── agent-templates/    # Starter templates for user-authored agents
 │   └── state/              # Runtime state (gitignored): build.json, history/,
@@ -244,6 +242,12 @@ trusty-agents/
     ├── ipc/                # NDJSON IPC protocol
     └── tools/              # Tool definitions + dispatch
 ```
+
+Note: The bundled agent configs (`pm.toml`, `python-engineer.toml`, the
+assistant packages, …) and workflow JSON definitions are instructional
+content under the repo-root `content/agents/trusty-agents/{agents,workflows}/`
+(ADR-0064, #9014). `src/agents/bundled/` reads them at runtime and deploys
+them to `~/.trusty-agents/`; nothing is compiled into the binary.
 
 Note: The project previously used a separate `config/` directory for bundled
 config; it has been folded into `.trusty-agents/` (v0.1.25) so the harness's own

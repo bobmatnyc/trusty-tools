@@ -5,7 +5,7 @@
 //! revisited, so a binary upgrade that changed a bundled template (e.g. a
 //! new tool grant on the base `assistant` agent) never reached a machine
 //! that already had the old file deployed. A stable, deterministic hash of
-//! the embedded bundle's actual bytes — persisted alongside the deployed
+//! the bundled tree's actual bytes — persisted alongside the deployed
 //! files — lets `ensure_bundled_agents_deployed` detect "the binary's
 //! template set changed since we last deployed" automatically, with no
 //! manually-bumped version constant to forget.

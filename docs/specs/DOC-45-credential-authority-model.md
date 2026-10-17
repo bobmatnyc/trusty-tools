@@ -343,7 +343,7 @@ a write-capable credential.
 
 This clause exists because the false version of it has already been shipped and
 caught. The base persona's own comment
-(`crates/trusty-agents/.trusty-agents/agents/assistant/agent.toml:105-113`)
+(`content/agents/trusty-agents/agents/assistant/agent.toml:105-113`)
 records that today's Google-backed ingest tools reuse **write-capable** OAuth
 grants and return `None` from `ToolExecutor::scope()` — so they are **not
 scope-gated at all** — after a read-only claim had previously been made and been

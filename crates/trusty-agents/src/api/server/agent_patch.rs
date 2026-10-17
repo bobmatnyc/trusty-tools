@@ -778,9 +778,14 @@ pub(super) async fn persona_at(dirs: &[PathBuf], name: &str) -> Response {
     };
     let persona_path = package_dir.join("persona.md");
     match tokio::fs::read_to_string(&persona_path).await {
+        // #9014: the editor shows the persona body, not the bundled file's
+        // `metadata: {version}` frontmatter.
         Ok(content) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "content": content, "editable": true })),
+            Json(serde_json::json!({
+                "content": crate::skills::strip_frontmatter(&content),
+                "editable": true
+            })),
         )
             .into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (

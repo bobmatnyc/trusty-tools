@@ -1,28 +1,22 @@
-//! Compile-time embedded bundled agent set + version-stamped deploy/refresh.
+//! The bundled agent set, read from instructional content, plus its
+//! version-stamped deploy/refresh into `~/.trusty-agents/` (#9014).
 //!
 //! Why (#3405/#3406 follow-up): `tagent` launched from OUTSIDE this repo
 //! checkout (e.g. `cd ~ && tagent --plain`, the owner's reported clean-shell
 //! failure) has no project-tier `.trusty-agents/agents/` at all, and — until
 //! this module — nothing ever populated the resolver's `$HOME` fallback tier
 //! ([`super::loader`]'s `agents_dir_candidates`, and
-//! [`super::registry::agent_search_paths`]) either. The bundled roster
-//! (`assistant`, `ctrl`, `pm`, the specialist set, …) only ever existed as
-//! plain files under THIS crate's own `.trusty-agents/agents/` — reachable
-//! only when the process happens to run inside (or was built to auto-detect)
-//! this checkout. A `cargo install`ed binary run from any other directory had
-//! no bundled roster to fall back to, so `/switch assistant` (and the plain
-//! CLI's default-persona switch) failed with a bare "file not found" and
-//! silently degraded to `ctrl` (local Ollama) with no explanation.
+//! [`super::registry::agent_search_paths`]) either. A `cargo install`ed binary
+//! run from any other directory had no bundled roster to fall back to, so
+//! `/switch assistant` (and the plain CLI's default-persona switch) failed with
+//! a bare "file not found" and silently degraded to `ctrl` (local Ollama) with
+//! no explanation.
 //!
 //! Why v2 (#3556): the original fix deployed the bundled roster exactly
 //! ONCE per machine — [`deploy_bundled_agents`]'s `if dest.exists() {
-//! continue; }` never revisits a file that is already there. A binary
-//! upgrade that changes a bundled template (e.g. PR-A's `delegate_to_agent`
-//! grant added to the base `assistant` agent) never reaches a machine that
-//! already deployed the OLD copy — the compiled/source template is correct,
-//! only the on-disk deployed copy goes stale, and the user silently loses a
-//! capability until a human manually deletes the stale file. This module now
-//! stamps every deploy with a content hash of the embedded bundle
+//! continue; }` never revisits a file that is already there. A template
+//! change never reached a machine that already deployed the OLD copy. This
+//! module stamps every deploy with a content hash of the bundled tree
 //! ([`stamp`]) and, on a hash mismatch, refreshes exactly the bundled files
 //! whose content actually changed — never a user's own non-bundled agent,
 //! and never silently: a bundled file whose ON-DISK content differs from
@@ -31,115 +25,67 @@
 //! file can recover it — see [`stale_backup_path`] for why the name carries
 //! the content digest and what bounds the resulting set (#4461).
 //!
-//! trusty-mpm solves the identical problem for ITS bundled agents/skills via
-//! `include_str!` + an explicit `install` deploy step
-//! (`crates/trusty-mpm/src/core/bundle.rs`); this module is the same pattern
-//! adapted to trusty-agents' directory-package + flat-`.toml` agent formats
-//! (too varied in shape for one `include_str!` constant per file, so this
-//! uses `rust-embed` — already a dependency for the web UI bundle, see
-//! `api/server/ui.rs` — to embed the whole `.trusty-agents/agents/` tree at
-//! once).
+//! Why v3 (#9014, ADR-0064): the two trees are no longer compiled in. They
+//! live under `content/agents/trusty-agents/{agents,workflows}/` and
+//! [`content::BundledTree`] reads them at runtime through the shared content
+//! resolver. With no content the production entry points fail with the
+//! resolver's typed error naming the remedy; nothing deploys an empty set.
 //!
 //! What: [`deploy_bundled_agents`] is the hermetic, "write missing files
-//! only" core — writes every embedded file under `target_dir`, but ONLY when
-//! that path doesn't already exist there, so a fresh deploy never clobbers a
-//! prior one. [`ensure_bundled_agents_deployed`] is the production entry
-//! point: resolves `target_dir` to `$HOME/.trusty-agents/agents` and, when
-//! the on-disk `.bundled-stamp` file is missing or stale relative to the
-//! CURRENT binary's embedded content hash, refreshes every bundled file
-//! whose bytes changed (backing up any that differ from what's on disk)
-//! before rewriting the stamp; otherwise it's the same fast no-op as before.
+//! only" core — writes every file of a [`content::BundledTree`] under
+//! `target_dir`, but ONLY when that path doesn't already exist there.
+//! [`ensure_bundled_agents_deployed`] is the production entry point: reads the
+//! agent tree, resolves `target_dir` to `$HOME/.trusty-agents/agents` and,
+//! when the on-disk `.bundled-stamp` file is missing or stale relative to the
+//! tree's content hash, refreshes every bundled file whose bytes changed
+//! (backing up any that differ from what's on disk) before rewriting the
+//! stamp; otherwise it's the same fast no-op as before.
 //! [`repair_bundled_agents`] is the explicit manual escape hatch (`tagent
 //! agents repair`) — force-refreshes regardless of the stamp.
 //!
 //! Concurrency (#3556 code-critic follow-up, HIGH + MEDIUM): `delegate_to_agent`
 //! routinely spawns a fresh `tagent` subprocess per delegation, so multiple
-//! processes can enter the stale-stamp refresh path concurrently right after
-//! a binary upgrade. Every write in this module now goes through
-//! `crate::state_writer::atomic_write` (tmp-file + rename — never a
-//! truncate-in-place, so a crash mid-write can't leave a torn file on disk).
-//! The ENTIRE read-decide-write sequence for a stamp-aware pass —
-//! `stamp::read`, the is-stale decision, the refresh loop, and the
-//! subsequent `stamp::write` — is one critical section under a SINGLE
-//! pass-level advisory lock ([`lock`]), acquired ONCE by the caller
+//! processes can enter the stale-stamp refresh path concurrently. Every write
+//! in this module goes through `crate::state_writer::atomic_write` (tmp-file +
+//! rename). The ENTIRE read-decide-write sequence for a stamp-aware pass —
+//! `stamp::read`, the is-stale decision, the refresh loop, and the subsequent
+//! `stamp::write` — is one critical section under a SINGLE pass-level
+//! advisory lock ([`lock`]), acquired ONCE by the caller
 //! ([`ensure_bundled_agents_deployed_in`], [`force_reprovision_bundled_agents`])
-//! and threaded down into [`reprovision_embedded_locked`] (the MEDIUM
-//! follow-up: an earlier version acquired the lock only INSIDE the refresh
-//! loop, leaving the stamp read/decide/write outside it — two concurrent
-//! passes could both observe the same stale stamp, both refresh, then race
-//! writing the stamp). Two concurrent passes over the same `target_dir` are
-//! now fully serialized end to end, not just per-file. A backup path is
-//! derived from the bytes it holds, so a later pass — even one recovering
-//! from a prior crash — writes torn or already-refreshed content to its own
-//! path and can never clobber a genuine backup (#4461).
+//! and threaded down into [`reprovision_tree_locked`]. A backup path is
+//! derived from the bytes it holds, so a later pass can never clobber a
+//! genuine backup (#4461).
 //!
-//! Test: see `tests.rs` in this module, plus `stamp`'s and `lock`'s own
-//! tests.
+//! Test: see `tests.rs` and `content_tests.rs` in this module, plus `stamp`'s
+//! and `lock`'s own tests.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
+pub mod content;
 mod lock;
 mod provenance;
 mod stamp;
 
-/// Embeds this crate's own `.trusty-agents/agents/` tree — the shared
-/// persona set (`assistant`, `ctrl`, `pm`, `cto-assistant`, `izzie`) and the
-/// specialist roster (`python-engineer`, `qa-agent`, …) — into the compiled
-/// binary at build time.
-/// #5226: an allowlist, so a stray local file cannot ship inside the binary.
-/// See [`is_bundled_asset`] for why the filter is an allowlist and not a
-/// denylist, and for the second layer that repeats it at deploy time.
-#[derive(rust_embed::RustEmbed)]
-#[folder = ".trusty-agents/agents/"]
-#[include = "*.toml"]
-#[include = "*.md"]
-#[include = "*.json"]
-struct BundledAgents;
-
-/// Embeds this crate's own `.trusty-agents/workflows/` tree — the prescriptive
-/// pipeline definitions `--workflow <name>` loads — into the compiled binary
-/// at build time (#5227).
-///
-/// Why: agents were the only config kind ever deployed to the `$HOME` tier, so
-/// `tagent --workflow prescriptive` launched from a directory with no
-/// `.trusty-agents/` (the macOS `.app` sidecar runs with `cwd = /`) resolved
-/// every agent hierarchically and then had no workflow definition to read.
-/// What: same `rust-embed` mechanism as [`BundledAgents`], deployed by
-/// [`ensure_bundled_workflows_deployed`] through the SAME stamp/lock/refresh
-/// path — see [`reprovision_embedded_locked`].
-/// #5226: same allowlist as [`BundledAgents`] — see [`is_bundled_asset`].
-#[derive(rust_embed::RustEmbed)]
-#[folder = ".trusty-agents/workflows/"]
-#[include = "*.toml"]
-#[include = "*.md"]
-#[include = "*.json"]
-struct BundledWorkflows;
+pub use content::{BundledTree, BundledTreeKind};
 
 /// Is `rel` a file the bundle is allowed to ship and deploy? (#5226)
 ///
-/// Why: `rust-embed` embeds whatever physically sits in the folder at build
-/// time and ignores `.gitignore`, so a stray local file left in
-/// `.trusty-agents/agents/` before a release build ships inside the
-/// distributed `tagent` binary and — because that tree is deployed to
-/// `~/.trusty-agents/agents/` — gets written into every user's home. A `.env`
-/// is the worst case; `state_writer::atomic_write` leaves a `<file>.lock`
-/// sidecar beside every file it writes, so a `.lock` reaching a source asset
-/// directory is realistic rather than hypothetical. This is an ALLOWLIST, not
-/// a denylist, so a stray file of a kind nobody anticipated is excluded by
-/// default: a bundled file that fails to ship is loud (the agent does not
-/// resolve), a secret that ships is silent.
+/// Why: a stray local file left in the bundled source tree (a `.env`, the
+/// `<file>.lock` sidecar `state_writer::atomic_write` leaves) would otherwise
+/// be written into every user's home. This is an ALLOWLIST, not a denylist,
+/// so a stray file of a kind nobody anticipated is excluded by default: a
+/// bundled file that fails to ship is loud (the agent does not resolve), a
+/// secret that ships is silent.
 /// What: accepts a path whose extension is one of the three the bundle
 /// actually uses — `toml`, `md`, `json` — and whose every path component is
-/// dotless. It repeats, at deploy time, what the `#[include]` globs on
-/// [`BundledAgents`] and [`BundledWorkflows`] already do at build time; a
-/// binary built before that filter existed still cannot write a stray file
-/// into a user's home.
+/// dotless. [`content::BundledTree::from_content`] applies it when reading the
+/// tree, and [`bundled_files`] repeats it at deploy time.
 /// Test: `bundled_asset_predicate_fails_closed`,
 /// `stray_files_in_the_asset_tree_are_never_deployed`,
-/// `embedded_trees_carry_only_bundled_assets` (tests.rs).
+/// `every_source_file_is_a_bundled_asset_or_known_junk` (tests.rs).
 fn is_bundled_asset(rel: &str) -> bool {
     let mut components = rel.split('/').peekable();
     let mut last = "";
@@ -155,31 +101,31 @@ fn is_bundled_asset(rel: &str) -> bool {
     )
 }
 
-/// Every `(path, bytes)` pair the bundle `E` actually contributes (#5226).
+/// Every `(path, bytes)` pair `tree` actually deploys (#5226).
 ///
 /// Why: the stamp and the write loop both have to agree on what "the bundle"
 /// is — a stray file that changed the stamp but was never written would make
-/// every startup see a stale stamp and refresh forever. One filtered read
+/// every startup see a stale stamp and refresh forever. One filtered view
 /// keeps them from drifting.
-/// What: walks `E::iter()`, drops anything [`is_bundled_asset`] rejects with a
-/// `warn` naming it, and returns the rest.
+/// What: drops anything [`is_bundled_asset`] rejects with a `warn` naming it,
+/// and returns the rest.
 /// Test: `stray_files_in_the_asset_tree_are_never_deployed`,
 /// `stray_files_do_not_move_the_bundle_stamp` (tests.rs).
-fn bundled_assets<E: rust_embed::RustEmbed>() -> Result<Vec<(String, Vec<u8>)>> {
-    let mut out = Vec::new();
-    for rel in E::iter() {
-        if !is_bundled_asset(rel.as_ref()) {
-            tracing::warn!(
-                asset = %rel,
-                "ignoring a file in the embedded asset tree that is not a bundled asset"
-            );
-            continue;
-        }
-        let file =
-            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
-        out.push((rel.to_string(), file.data.into_owned()));
-    }
-    Ok(out)
+fn bundled_files(tree: &BundledTree) -> Vec<(String, Vec<u8>)> {
+    tree.files()
+        .iter()
+        .filter(|(rel, _)| {
+            let keep = is_bundled_asset(rel);
+            if !keep {
+                tracing::warn!(
+                    asset = %rel,
+                    "ignoring a file in the bundled tree that is not a bundled asset"
+                );
+            }
+            keep
+        })
+        .cloned()
+        .collect()
 }
 
 /// Outcome of one (re)provision pass over the bundled agent set (#3556).
@@ -190,7 +136,7 @@ fn bundled_assets<E: rust_embed::RustEmbed>() -> Result<Vec<(String, Vec<u8>)>> 
 /// user copy that got archived before being overwritten — three independent
 /// counters make that distinction possible without re-walking the file set.
 /// What: `written` counts brand-new files, `refreshed` counts existing
-/// bundled files whose content was updated to match the current embedded
+/// bundled files whose content was updated to match the current bundled
 /// template, `backed_up` counts how many of those refreshes archived a
 /// differing prior copy to `<file>.stale.<digest>.bak` first, and `preserved`
 /// counts files the automatic path declined to overwrite because they no longer
@@ -221,24 +167,26 @@ impl ReprovisionReport {
     }
 }
 
-/// Idempotently materialise every embedded bundled-agent file under
-/// `target_dir`, without ever overwriting a file that is already there.
+/// Idempotently materialise every file of `tree` under `target_dir`, without
+/// ever overwriting a file that is already there.
 ///
-/// Why: the hermetic core — takes `target_dir` as a parameter (rather than
-/// resolving `$HOME` itself) so tests can point it at a tempdir instead of
-/// touching the real filesystem outside the sandbox. Preserved as its own
-/// entry point (rather than folded into the stamp-aware path) because it is
-/// the exact "never touch an existing file" contract a few callers still
-/// want explicitly (and every existing test pins this behavior).
-/// What: for each path `rust-embed` walked out of `.trusty-agents/agents/`,
-/// skips it when `target_dir.join(path)` already exists, otherwise creates
-/// parent directories and writes the embedded bytes verbatim. Returns the
-/// count of newly-written files.
+/// Why: the hermetic core — takes the tree and `target_dir` as parameters
+/// (rather than resolving content and `$HOME` itself) so tests can point it at
+/// a tempdir instead of touching the real filesystem outside the sandbox.
+/// Preserved as its own entry point (rather than folded into the stamp-aware
+/// path) because it is the exact "never touch an existing file" contract a
+/// few callers still want explicitly (and every existing test pins this
+/// behavior).
+/// What: for each bundled path, skips it when `target_dir.join(path)` already
+/// exists, otherwise creates parent directories and writes the bytes
+/// verbatim. Returns the count of newly-written files.
 /// Test: `deploy_writes_missing_files_only`, `deploy_is_idempotent_on_rerun`,
 /// `deploy_never_overwrites_existing_file`,
 /// `deploy_writes_directory_package_agents` (tests.rs).
-pub fn deploy_bundled_agents(target_dir: &Path) -> Result<usize> {
-    Ok(reprovision_bundled_agents(target_dir, RefreshPolicy::WriteMissingOnly)?.written)
+// #9014: takes the tree read from content; nothing is compiled in.
+pub fn deploy_bundled_agents(tree: &BundledTree, target_dir: &Path) -> Result<usize> {
+    let guard = lock::acquire(target_dir)?;
+    Ok(reprovision_tree_locked(&guard, tree, target_dir, RefreshPolicy::WriteMissingOnly)?.written)
 }
 
 /// What a reprovision pass may do to a bundled file that is already on disk
@@ -268,30 +216,7 @@ enum RefreshPolicy {
     Overwrite,
 }
 
-/// Shared core of every deploy/refresh entry point in this module (#3556),
-/// acquiring its OWN pass-level lock — for callers with no additional
-/// state (the stamp) to guard alongside the loop.
-///
-/// Why: `deploy_bundled_agents` has no stamp read/decide/write step around
-/// it, so acquiring and immediately delegating is the simplest correct form.
-/// Callers that DO have a stamp step to keep in the same critical section
-/// (`ensure_bundled_agents_deployed_in`, `force_reprovision_bundled_agents`)
-/// acquire the lock themselves and call
-/// [`reprovision_embedded_locked`] directly instead of this wrapper —
-/// see that function's docs for why (#3556 code-critic follow-up, MEDIUM).
-/// What: acquires the pass-level lock, then delegates to
-/// [`reprovision_embedded_locked`].
-/// Test: `deploy_writes_missing_files_only`, `deploy_never_overwrites_existing_file`,
-/// `deploy_is_idempotent_on_rerun`, `deploy_writes_directory_package_agents` (tests.rs).
-fn reprovision_bundled_agents(
-    target_dir: &Path,
-    policy: RefreshPolicy,
-) -> Result<ReprovisionReport> {
-    let guard = lock::acquire(target_dir)?;
-    reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, policy)
-}
-
-/// The actual write-side loop over `BundledAgents::iter()`, REQUIRING an
+/// The actual write-side loop over one [`BundledTree`], REQUIRING an
 /// already-held pass-level lock (#3556 code-critic follow-up, MEDIUM).
 ///
 /// Why: takes `_guard: &lock::ProvisionLock` as a parameter — not because the
@@ -309,16 +234,16 @@ fn reprovision_bundled_agents(
 /// binary versions racing — e.g. a `cargo install` finishing in one
 /// terminal while an older `tagent` is mid-startup in another — could leave
 /// a stamp that doesn't match the content actually on disk).
-/// What: for each embedded file, writes it when missing (`written`); when
+/// What: for each bundled file, writes it when missing (`written`); when
 /// present, acts on `policy`. [`RefreshPolicy::WriteMissingOnly`] skips it
-/// untouched. The other two compare on-disk bytes to the embedded bytes —
+/// untouched. The other two compare on-disk bytes to the bundled bytes —
 /// identical content is skipped, and differing content is archived to the
 /// content-addressed [`stale_backup_path`] (`backed_up`) and then overwritten
 /// (`refreshed`) via `crate::state_writer::atomic_write` (tmp-file + rename, so
 /// a crash mid-write leaves the original file/backup intact rather than torn).
 /// The backup write is skipped only when that exact path already exists, which —
 /// because the path is derived from the bytes — means those bytes are already
-/// archived. Only ever touches paths that are part of the embedded bundle — a
+/// archived. Only ever touches paths that are part of the bundled tree — a
 /// user's own non-bundled file at `target_dir` is never read, backed up, or
 /// written.
 ///
@@ -344,8 +269,9 @@ fn reprovision_bundled_agents(
 /// `repair_still_overwrites_a_hand_edit_the_automatic_pass_kept` (tests.rs);
 /// `pass_lock_serializes_concurrent_reprovision_calls` (`lock`'s own tests)
 /// pins the underlying mutual-exclusion primitive.
-fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
+fn reprovision_tree_locked(
     _guard: &lock::ProvisionLock,
+    tree: &BundledTree,
     target_dir: &Path,
     policy: RefreshPolicy,
 ) -> Result<ReprovisionReport> {
@@ -354,7 +280,7 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
     let known = provenance::read(target_dir);
     let mut recorded = known.clone();
     // #5226: a path the bundle does not own is never materialised here.
-    for (rel, bytes) in bundled_assets::<E>()? {
+    for (rel, bytes) in bundled_files(tree) {
         let dest = target_dir.join(&rel);
 
         if dest.exists() {
@@ -464,73 +390,57 @@ fn stale_backup_path(dest: &Path, content: &[u8]) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Compute the current binary's content stamp over its embedded bundle.
+/// The content stamp of `tree`.
 ///
-/// Why: pulled out of the two call sites (`ensure_bundled_agents_deployed_in`,
-/// `force_reprovision_bundled_agents`) that both need "what does THIS
-/// binary's bundle hash to right now" so they can never compute it
-/// differently.
-/// What: reads every embedded `(path, bytes)` pair and delegates to
-/// [`stamp::compute`] for the order-independent hash.
+/// Why: pulled out of the two call sites (`ensure_tree_deployed_in`,
+/// `force_reprovision_bundled_agents`) that both need "what does this tree
+/// hash to right now" so they can never compute it differently.
+/// What: hashes the [`bundled_files`] view with [`stamp::compute`].
 /// Test: `stamp_changes_when_content_changes`,
 /// `stamp_stable_regardless_of_input_order` (`stamp`'s own tests).
-fn current_bundle_stamp<E: rust_embed::RustEmbed>() -> Result<String> {
+fn current_bundle_stamp(tree: &BundledTree) -> String {
     // #5226: the same filtered view the write loop uses, so a stray file can
     // never make the stamp disagree with what actually gets deployed.
-    Ok(stamp::compute(bundled_assets::<E>()?))
+    stamp::compute(bundled_files(tree))
 }
 
-/// Hermetic core of [`ensure_bundled_agents_deployed`] — takes `target_dir`
-/// explicitly so tests can point it at a tempdir (#3556).
+/// Hermetic core of [`ensure_bundled_agents_deployed`] — takes the tree and
+/// `target_dir` explicitly so tests can point it at a tempdir (#3556).
 ///
-/// Why: the production entry point resolves `$HOME` itself, which routine
-/// `cargo test` runs must never touch; this is the same
-/// hermetic-core-plus-thin-wrapper split every other function in this module
-/// already uses. Acquires the pass-level lock ONCE, before `stamp::read`
-/// (#3556 code-critic follow-up, MEDIUM), and holds it across the ENTIRE
-/// read-decide-refresh-write sequence so two concurrent callers over the
-/// same `target_dir` can never both observe the same stale stamp and race
-/// writing it back — see [`reprovision_embedded_locked`]'s docs for
-/// the full rationale.
-/// What: computes the current binary's bundle stamp, compares it to the
-/// stamp on disk (`target_dir/.bundled-stamp`, via [`stamp::read`]) — a
-/// missing or differing stamp means "stale", triggering
-/// `reprovision_embedded_locked(&guard, target_dir, RefreshPolicy::KeepHandEdits)`
-/// (refresh path) followed by writing the new stamp; a matching stamp takes the
-/// fast `RefreshPolicy::WriteMissingOnly` path and leaves the stamp file
-/// untouched. A lock-acquire failure propagates as `Err` (unchanged
-/// contract: the caller, `ensure_bundled_agents_deployed`, is the one that
-/// fails soft on `$HOME` resolution — this function itself is not best
-/// effort).
+/// Why: the production entry point resolves content and `$HOME` itself, which
+/// routine `cargo test` runs must never touch.
+/// What: [`ensure_tree_deployed_in`] over `tree`.
 /// Test: `stale_stamp_triggers_refresh`, `matching_stamp_is_a_fast_noop`,
 /// `missing_stamp_establishes_baseline_without_rewriting_matching_content`,
 /// `concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh`,
 /// `ensure_deployed_blocks_on_externally_held_pass_lock` (tests.rs).
-pub fn ensure_bundled_agents_deployed_in(target_dir: &Path) -> Result<ReprovisionReport> {
-    ensure_embedded_deployed_in::<BundledAgents>(target_dir)
+// #9014: takes the tree read from content; nothing is compiled in.
+pub fn ensure_bundled_agents_deployed_in(
+    tree: &BundledTree,
+    target_dir: &Path,
+) -> Result<ReprovisionReport> {
+    ensure_tree_deployed_in(tree, target_dir)
 }
 
-/// Stamp-aware deploy/refresh of one embedded config tree into `target_dir`
-/// (#5227 generalisation of `ensure_bundled_agents_deployed_in`).
+/// Stamp-aware deploy/refresh of one bundled tree into `target_dir` (#5227).
 ///
 /// Why: agents and workflows need byte-identical deploy semantics — the
 /// pass-level lock, the content-hash staleness check, the
-/// `.stale.<digest>.bak` archive of a differing on-disk copy. Duplicating
-/// that for a second config kind
-/// would guarantee the two drift; parameterising over the embed keeps one
-/// implementation. `stamp` and `lock` are already per-`target_dir`, so the two
-/// trees never share a stamp file.
-/// What: identical to what `ensure_bundled_agents_deployed_in` did before,
-/// with `BundledAgents` lifted to a type parameter.
-/// Test: the whole existing bundled-agent suite exercises this through
-/// `ensure_bundled_agents_deployed_in`; `bundled_workflows_deploy_to_target`
-/// pins the workflows instantiation.
-fn ensure_embedded_deployed_in<E: rust_embed::RustEmbed>(
-    target_dir: &Path,
-) -> Result<ReprovisionReport> {
+/// `.stale.<digest>.bak` archive of a differing on-disk copy. One
+/// implementation keeps the two from drifting. `stamp` and `lock` are
+/// per-`target_dir`, so the two trees never share a stamp file. Acquires the
+/// pass-level lock ONCE, before `stamp::read` (#3556), and holds it across the
+/// whole read-decide-refresh-write sequence — see [`reprovision_tree_locked`].
+/// What: compares the tree's stamp to `target_dir/.bundled-stamp`; a missing
+/// or differing stamp refreshes under [`RefreshPolicy::KeepHandEdits`] and
+/// rewrites the stamp, a matching one takes the
+/// [`RefreshPolicy::WriteMissingOnly`] fast path and leaves it untouched.
+/// Test: the bundled-agent suite through `ensure_bundled_agents_deployed_in`;
+/// `bundled_workflows_deploy_to_target` pins the workflows tree.
+fn ensure_tree_deployed_in(tree: &BundledTree, target_dir: &Path) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
 
-    let current_stamp = current_bundle_stamp::<E>()?;
+    let current_stamp = current_bundle_stamp(tree);
     let on_disk_stamp = stamp::read(target_dir);
     let is_stale = on_disk_stamp.as_deref() != Some(current_stamp.as_str());
 
@@ -541,113 +451,163 @@ fn ensure_embedded_deployed_in<E: rust_embed::RustEmbed>(
     } else {
         RefreshPolicy::WriteMissingOnly
     };
-    let report = reprovision_embedded_locked::<E>(&guard, target_dir, policy)?;
+    let report = reprovision_tree_locked(&guard, tree, target_dir, policy)?;
     if is_stale {
         stamp::write(target_dir, &current_stamp)?;
     }
     Ok(report)
 }
 
+/// `~/.trusty-agents/<kind dir>`, or `None` when `$HOME` is unknown.
+fn home_target(kind: BundledTreeKind) -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".trusty-agents").join(kind.dir_name()))
+}
+
+/// Reads the `kind` tree for this process (#9014).
+///
+/// What: [`BundledTree::load`], its typed error kept as the source so a
+/// caller can still downcast it (see [`log_deploy_failure`]).
+fn load_tree(kind: BundledTreeKind) -> Result<BundledTree> {
+    BundledTree::load(kind).with_context(|| {
+        format!(
+            "cannot read the bundled {} from instructional content",
+            kind.dir_name()
+        )
+    })
+}
+
 /// Production entry point: deploy/refresh the bundled workflow definitions at
 /// `$HOME/.trusty-agents/workflows/` (#5227).
 ///
-/// Why: `--workflow prescriptive` reads `<workflows-dir>/prescriptive.json`,
-/// and until this the only copy on any machine lived inside a checkout of this
-/// repo. A `cargo install`ed `tagent` — or the GUI's `.app` sidecar, whose CWD
-/// is `/` — had no workflow definition anywhere on its search hierarchy, so
-/// making the pre-flight hierarchical alone would only have moved the failure
-/// from the pre-flight to `WorkflowNotFound`.
-/// What: mirrors [`ensure_bundled_agents_deployed`] exactly — no-op when
-/// `$HOME` is unresolvable, otherwise stamp-aware deploy into
+/// Why: `--workflow prescriptive` reads `<workflows-dir>/prescriptive.json`.
+/// A `cargo install`ed `tagent` — or the GUI's `.app` sidecar, whose CWD is
+/// `/` — has no workflow definition anywhere on its search hierarchy until
+/// this deploys one.
+/// What: mirrors [`ensure_bundled_agents_deployed`] — no-op when `$HOME` is
+/// unresolvable, otherwise reads the workflow tree from content (an `Err`
+/// naming the remedy when there is none) and deploys it stamp-aware into
 /// `$HOME/.trusty-agents/workflows`. Best-effort at the call site.
 /// Test: `bundled_workflows_deploy_to_target` covers the hermetic core.
 pub fn ensure_bundled_workflows_deployed() -> Result<ReprovisionReport> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(target) = home_target(BundledTreeKind::Workflows) else {
         return Ok(ReprovisionReport::default());
     };
-    let target = home.join(".trusty-agents").join("workflows");
-    ensure_embedded_deployed_in::<BundledWorkflows>(&target)
+    ensure_tree_deployed_in(&load_tree(BundledTreeKind::Workflows)?, &target)
 }
 
 /// Production entry point: deploy/refresh the bundled agent set at
 /// `$HOME/.trusty-agents/agents/` — the resolver's `$HOME` fallback tier —
 /// so `tagent` launched from ANY directory resolves `assistant` (and the
-/// rest of the bundled roster) with the CURRENT binary's template content,
-/// not whatever was deployed there by a previous version (#3556).
+/// rest of the bundled roster) with the current content, not whatever was
+/// deployed there before (#3556).
 ///
-/// Why: called once per process from `runtime::startup::run_startup_init`,
-/// mirroring where the credential-onboarding banner already runs — this is
+/// Why: called once per process from `runtime::startup::run_startup_init` —
 /// the single choke point every interactive/one-shot invocation passes
 /// through, but NOT `TrustyAgentsRepl::new` (many unit tests construct a REPL
-/// directly without sandboxing `$HOME`; hooking there would make routine
-/// `cargo test` runs write into a developer's real home directory).
-/// What: no-op (`Ok(default)`) when `$HOME` cannot be resolved at all —
-/// matches every other best-effort `dirs::home_dir()` operation in this
-/// crate (the REPL log dir, the user-profile save). Never fatal: a deploy
-/// failure (e.g. a read-only `$HOME`) is reported to the caller as an `Err`
-/// so it can log a `warn` and continue — a stale or missing bundled roster
-/// degrades to the pre-fix behavior, it does not crash the harness.
+/// directly without sandboxing `$HOME`).
+/// What: no-op (`Ok(default)`) when `$HOME` cannot be resolved. Otherwise
+/// reads the agent tree from content and deploys it. With no content
+/// installed, or a release missing a required file, it returns that typed
+/// error (#9014) and deploys nothing; a write failure (a read-only `$HOME`)
+/// is an `Err` too. The caller logs it and continues — it never crashes the
+/// harness.
 /// Test: `ensure_bundled_agents_deployed_in` (this function's hermetic
-/// core) carries the unit coverage; this thin `$HOME`-resolving wrapper is
-/// exercised end-to-end by real `tagent` invocations (mirrors every other
-/// best-effort `dirs::home_dir()` operation in this crate).
+/// core) carries the unit coverage; `an_absent_tree_fails_closed_naming_its_first_required_file`
+/// (content_tests.rs) pins the no-content arm.
 pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(target) = home_target(BundledTreeKind::Agents) else {
         return Ok(ReprovisionReport::default());
     };
-    let target = home.join(".trusty-agents").join("agents");
-    ensure_bundled_agents_deployed_in(&target)
+    ensure_tree_deployed_in(&load_tree(BundledTreeKind::Agents)?, &target)
 }
 
-/// Force-refresh every bundled agent file under `target_dir` regardless of
-/// the stamp (#3556) — the hermetic core of [`repair_bundled_agents`].
+/// The remedy text when `err` is a not-installed content error (#9014).
 ///
-/// Why: an explicit manual escape hatch is needed for the cases the
-/// automatic stamp check can't cover — e.g. a user suspects a deploy was
-/// interrupted, or wants to confirm the roster matches the installed binary
-/// without waiting for (or trusting) the stamp comparison. Acquires the
-/// pass-level lock ONCE, before the refresh loop, and holds it through the
-/// trailing `stamp::write` (#3556 code-critic follow-up, MEDIUM) — the same
-/// one-critical-section shape as `ensure_bundled_agents_deployed_in`, so a
-/// concurrent `ensure_*`/`repair` pair over the same `target_dir` can never
-/// interleave.
-/// What: unconditionally runs the refresh path
-/// (`reprovision_embedded_locked(&guard, target_dir, RefreshPolicy::Overwrite)`),
-/// then
-/// writes the current bundle stamp so a subsequent automatic startup check
-/// treats the roster as up to date. Errors (including a lock-acquire
-/// failure) propagate loudly to the caller — this function has no fail-soft
-/// path (unchanged contract: `repair_bundled_agents` is an explicit,
-/// user-invoked command, not a best-effort background step).
+/// Why: `run_startup_init` deploys before tracing exists and the REPL sends
+/// tracing to a file, so it prints this one line itself.
+/// What: `Some(<error text>)` for a not-installed
+/// [`trusty_agents_common::agent_content::AgentContentError`], else `None`.
+/// Test: `no_content_startup_names_tm_content_update` (tests/no_content_e2e.rs).
+pub fn not_installed_message(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<trusty_agents_common::agent_content::AgentContentError>()
+        .filter(|e| e.is_not_installed())
+        .map(ToString::to_string)
+}
+
+/// The stderr text for a content error from a deploy (#9014).
+///
+/// Why: old or unusable content (`Missing`, `Invalid`, `EmptyRoster`) fails
+/// the load as surely as none does, and its remedy is the same `tm content
+/// update`; the REPL's tracing goes to a file, so startup prints it.
+/// What: `Some(<error text>)`, which carries the remedy and the path or origin,
+/// for every [`trusty_agents_common::agent_content::AgentContentError`] except
+/// `Write` (a plain I/O failure, not a content problem); else `None`.
+/// Test: `stale_content_startup_names_tm_content_update_and_the_missing_file`
+/// (tests/stale_content_e2e.rs).
+pub fn deploy_failure_message(err: &anyhow::Error) -> Option<String> {
+    use trusty_agents_common::agent_content::AgentContentError;
+    err.downcast_ref::<AgentContentError>()
+        .filter(|e| !matches!(e, AgentContentError::Write { .. }))
+        .map(ToString::to_string)
+}
+
+/// Logs a failed best-effort deploy of `what` (#9014).
+///
+/// Why: with no content installed, the agent and workflow deploys fail for
+/// the same reason; one ERROR line naming `tm content update` tells the
+/// operator what to do, two warnings bury it.
+/// What: a not-installed [`trusty_agents_common::agent_content::AgentContentError`]
+/// goes through `report_not_installed` (one ERROR line per process); any other
+/// error is a `warn`.
+/// Test: `no_content_startup_names_tm_content_update` (tests/no_content_e2e.rs);
+/// the one-line rule is pinned in trusty-agents-common's `agent_content` tests.
+pub fn log_deploy_failure(what: &str, err: &anyhow::Error) {
+    use trusty_agents_common::agent_content::{AgentContentError, report_not_installed};
+    let claimed = err
+        .downcast_ref::<AgentContentError>()
+        .is_some_and(|e| report_not_installed(e, what));
+    if !claimed {
+        tracing::warn!(error = %format!("{err:#}"), "{what}");
+    }
+}
+
+/// Force-refresh every file of `tree` under `target_dir` regardless of the
+/// stamp (#3556) — the hermetic core of [`repair_bundled_agents`].
+///
+/// Why: an explicit manual escape hatch for the cases the automatic stamp
+/// check can't cover — e.g. a user suspects a deploy was interrupted. Acquires
+/// the pass-level lock ONCE and holds it through the trailing `stamp::write`
+/// (#3556), so a concurrent `ensure_*`/`repair` pair can never interleave.
+/// What: runs the refresh loop under [`RefreshPolicy::Overwrite`], then writes
+/// the tree's stamp so a later automatic startup check treats the roster as
+/// up to date. Errors propagate loudly — no fail-soft path.
 /// Test: `force_reprovision_overwrites_even_when_stamp_matches`,
 /// `existing_stale_backup_is_never_clobbered` (tests.rs).
-pub fn force_reprovision_bundled_agents(target_dir: &Path) -> Result<ReprovisionReport> {
+// #9014: takes the tree read from content; nothing is compiled in.
+pub fn force_reprovision_bundled_agents(
+    tree: &BundledTree,
+    target_dir: &Path,
+) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
-    let report =
-        reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, RefreshPolicy::Overwrite)?;
-    let current_stamp = current_bundle_stamp::<BundledAgents>()?;
-    stamp::write(target_dir, &current_stamp)?;
+    let report = reprovision_tree_locked(&guard, tree, target_dir, RefreshPolicy::Overwrite)?;
+    stamp::write(target_dir, &current_bundle_stamp(tree))?;
     Ok(report)
 }
 
 /// Production entry point for the explicit manual escape hatch — `tagent
 /// agents repair` (#3556).
 ///
-/// Why: unlike [`ensure_bundled_agents_deployed`] (a best-effort background
-/// startup step that must never be fatal), this is a command the user
-/// explicitly invoked to fix a problem — an unresolvable `$HOME` here is a
-/// real failure the user needs to see, not something to silently no-op.
-/// What: resolves `$HOME/.trusty-agents/agents` and delegates to
-/// [`force_reprovision_bundled_agents`]; errors loudly (rather than
-/// returning `Ok(default)`) when `$HOME` cannot be resolved.
-/// Test: covered via `force_reprovision_bundled_agents`'s tempdir-based
-/// tests; the `$HOME` resolution itself mirrors
-/// `ensure_bundled_agents_deployed`'s (already-established) pattern.
+/// Why: unlike [`ensure_bundled_agents_deployed`], this is a command the user
+/// explicitly invoked to fix a problem — an unresolvable `$HOME` or absent
+/// content is a real failure the user needs to see.
+/// What: resolves `$HOME/.trusty-agents/agents`, reads the agent tree from
+/// content and delegates to [`force_reprovision_bundled_agents`]; errors
+/// loudly on either failure.
+/// Test: covered via `force_reprovision_bundled_agents`'s tempdir-based tests.
 pub fn repair_bundled_agents() -> Result<ReprovisionReport> {
-    let home = dirs::home_dir()
+    let target = home_target(BundledTreeKind::Agents)
         .context("cannot resolve $HOME to repair bundled agents in ~/.trusty-agents/agents")?;
-    let target = home.join(".trusty-agents").join("agents");
-    force_reprovision_bundled_agents(&target)
+    force_reprovision_bundled_agents(&load_tree(BundledTreeKind::Agents)?, &target)
 }
 
 #[cfg(test)]

@@ -1249,7 +1249,7 @@ being able to do things.
 ### 9.6 Conformance
 
 - **C-08.1** A corpus test loads every checked-in `agent.toml` under
-  `crates/trusty-agents/.trusty-agents/agents/` and asserts the resolved
+  `content/agents/trusty-agents/agents/` and asserts the resolved
   effective tool set, store bindings, listener bindings and scope set are
   unchanged against a golden snapshot taken at `385aeff7` (CC-1, CC-2, CC-3).
 - **C-08.2** A config carrying `[skills]` and `[permissions]` parses without

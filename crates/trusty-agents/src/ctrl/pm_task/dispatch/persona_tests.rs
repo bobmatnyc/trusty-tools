@@ -513,9 +513,9 @@ fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
         "complete_task",
     ];
 
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let cfg = AgentConfig::by_name_in(&[agents_dir], "cto-assistant")
         .expect("bundled cto-assistant directory package resolves");
 
@@ -593,9 +593,9 @@ fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
 fn base_assistant_declares_no_dead_scope_patterns() {
     use crate::tools::registry::dead_scope;
 
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
         .expect("bundled assistant template resolves");
     let scopes = cfg
@@ -648,9 +648,9 @@ fn base_assistant_declares_no_dead_scope_patterns() {
 /// (#3985).
 #[test]
 fn base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool() {
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
         .expect("bundled assistant template resolves");
 
@@ -752,9 +752,9 @@ fn base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool() {
 /// Test: this test IS the coverage.
 #[test]
 fn base_assistant_scope_grants_cover_every_declared_memory_scope() {
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
         .expect("bundled assistant template resolves");
     let allow = cfg
@@ -822,9 +822,9 @@ fn shadowed_flat_persona_scope_grants_cover_every_declared_memory_scope() {
     // test above for why the vocabulary is `bind`'s and not a guess.
     const BOUND_MEMORY_TOOLS: [&str; 3] = ["memory_recall", "memory_remember", "memory_write"];
 
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     for name in ["izzie", "cto-assistant"] {
         let path = agents_dir.join(format!("{name}.toml"));
         let cfg = AgentConfig::load(&path)
@@ -867,9 +867,9 @@ fn shadowed_flat_persona_scope_grants_cover_every_declared_memory_scope() {
 fn shipped_agents_with_live_google_patterns_are_not_flagged() {
     use crate::tools::registry::dead_scope;
 
-    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
     for name in ["izzie", "cto-assistant"] {
         let cfg = AgentConfig::by_name_in(std::slice::from_ref(&agents_dir), name)

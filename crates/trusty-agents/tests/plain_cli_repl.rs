@@ -23,6 +23,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+// #9014: stage instructional content into the scratch `$HOME`.
+#[path = "support/content.rs"]
+mod content_support;
+
 /// Absolute path to the freshly built `tagent` binary (Cargo sets this for
 /// integration tests that share a package with a `[[bin]]` target).
 const BIN: &str = env!("CARGO_BIN_EXE_tagent");
@@ -452,6 +456,9 @@ fn profile_resolves_from_env_without_interactive_prompt() {
 #[test]
 fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
     let isolated_home = tempfile::tempdir().expect("isolated HOME for bundled-deploy test");
+    // #9014: the roster is deployed from instructional content, so the scratch
+    // `$HOME` carries the installed bundle a real machine would.
+    content_support::stage_repo_content(isolated_home.path());
     let home_str = isolated_home
         .path()
         .to_str()

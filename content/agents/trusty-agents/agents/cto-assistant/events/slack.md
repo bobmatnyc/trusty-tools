@@ -1,3 +1,7 @@
+---
+metadata:
+  version: "0.1.0"
+---
 <!--
 Per-connector event instructions for the CTO Assistant's Slack listener
 (#3852, DOC-54 SPEC-AGENTS-05/06). Loaded into context IN ADDITION TO

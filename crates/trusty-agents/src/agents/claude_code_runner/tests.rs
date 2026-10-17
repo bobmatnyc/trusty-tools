@@ -446,6 +446,15 @@ async fn dispatcher_errors_when_claude_code_requested_but_unwired() {
     }
     // We need an agent TOML with runner="claude-code". The test for
     // claude-code-engineer.toml (added in this change) serves as that.
+    let _env = crate::agents::tests::loading::ENV_LOCK.lock().await;
+    // #9014: the bundled roster lives under content/, not the cwd.
+    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        bundled_dir.to_str().expect("utf-8 path"),
+    );
     let dispatcher = DispatchingAgentRunner::new(Arc::new(FakeFallback), None);
     let err = dispatcher
         .run("claude-code-engineer", "x")

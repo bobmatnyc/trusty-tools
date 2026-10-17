@@ -167,6 +167,38 @@ path = "agents/ticketing.md"
 version = "0.1.0"
 
 [[member]]
+path = "agents/trusty-agents/agents/assistant/persona.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/cto-assistant/events/slack.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/cto-assistant/persona.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/ctrl/persona.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/izzie/events/gmail.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/izzie/persona.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/agents/writing-assistant/persona.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/trusty-agents/workflows/VERSIONING.md"
+version = "0.1.0"
+
+[[member]]
 path = "agents/trusty-code/code-analyzer.md"
 version = "0.1.0"
 

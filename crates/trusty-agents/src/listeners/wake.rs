@@ -394,7 +394,8 @@ pub(crate) async fn load_connector_instructions(
             .join("events")
             .join(format!("{connector}.md"));
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            return Some(content);
+            // #9014: drop the bundled file's `metadata: {version}` frontmatter.
+            return Some(crate::skills::strip_frontmatter(&content).to_owned());
         }
     }
     None

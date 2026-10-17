@@ -1040,7 +1040,13 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
     // `assistant/agent.toml` — e.g. deployed before the `delegate_to_agent`
     // grant existed on the bundled template — the exact scenario #3556
     // fixes.
-    let written = crate::agents::bundled::deploy_bundled_agents(tmp.path()).unwrap();
+    let written = crate::agents::bundled::deploy_bundled_agents(
+        crate::agents::bundled::content::test_support::repo_tree(
+            crate::agents::bundled::BundledTreeKind::Agents,
+        ),
+        tmp.path(),
+    )
+    .unwrap();
     assert!(
         written > 0,
         "sanity: bundled deploy wrote at least one file"
@@ -1059,7 +1065,13 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
     // above is indistinguishable from an operator's hand edit. What this test is
     // about is the refreshed file's journey through the resolver and the scoping
     // chain, not which entry point performed the refresh.
-    let report = crate::agents::bundled::force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let report = crate::agents::bundled::force_reprovision_bundled_agents(
+        crate::agents::bundled::content::test_support::repo_tree(
+            crate::agents::bundled::BundledTreeKind::Agents,
+        ),
+        tmp.path(),
+    )
+    .unwrap();
     assert!(
         report.refreshed > 0,
         "seeded stale assistant/agent.toml must trigger a refresh, got: {report:?}"

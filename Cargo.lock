@@ -11007,6 +11007,7 @@ dependencies = [
  "stop-words",
  "strip-ansi-escapes",
  "subtle",
+ "tar",
  "teloxide",
  "tempfile",
  "thiserror 1.0.69",

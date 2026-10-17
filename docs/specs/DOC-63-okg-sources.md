@@ -722,7 +722,7 @@ This is not a hypothetical imported from general LLM-security literature. It is
 this repository's own, recorded, enforced position:
 
 - **The base assistant persona carries no git tools because of ingestion.**
-  `crates/trusty-agents/.trusty-agents/agents/assistant/agent.toml:84-87`,
+  `content/agents/trusty-agents/agents/assistant/agent.toml:84-87`,
   verbatim: *"`izzie` ingests UNTRUSTED content (Gmail/Drive/Calendar), so that
   put untrusted input one hop from a cross-project read primitive: a
   prompt-injection exfiltration shape."* PR #4420 stripped `git_log`/`git_status`
@@ -1691,7 +1691,7 @@ Phase B's runner ticket.
 - `crates/trusty-agents/src/stores/` — `binding.rs` (`okg_tree_path`),
   `config.rs` (`AgentStoreBinding`, one store per agent), `index_feed.rs` (the
   push contract, `covers()` at `:113-118`)
-- `crates/trusty-agents/.trusty-agents/agents/assistant/agent.toml:79-113` — the
+- `content/agents/trusty-agents/agents/assistant/agent.toml:79-113` — the
   untrusted-content threat model and the two OKG boundaries
 - `crates/trusty-agents/src/agents/tests/loading.rs:2200` —
   `bundled_personas_pin_git_reach`

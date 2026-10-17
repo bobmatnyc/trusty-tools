@@ -1,3 +1,7 @@
+---
+metadata:
+  version: "0.1.0"
+---
 <!--
 Persona DELTAS for the `writing-assistant` overlay (#8186, epic #8183). The
 base `assistant` persona (../assistant/persona.md) is prepended at load time by

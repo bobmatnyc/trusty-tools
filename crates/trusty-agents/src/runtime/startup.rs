@@ -179,7 +179,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // directory — not just inside this repo checkout — resolves `assistant`
     // instead of failing with "agent not found" and silently degrading to
     // `ctrl`. #3556: this is now version-stamped — when the binary's
-    // embedded bundle content changes since the last deploy, the stale
+    // bundled content changes since the last deploy, the stale
     // on-disk bundled files are refreshed automatically (backing up any
     // that differ from the current template first), not left permanently
     // frozen at whatever a previous binary wrote. Best-effort: a failure
@@ -188,9 +188,14 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // (even in quiet modes) since it has no stdout/stderr output of its own
     // beyond an optional one-time note gated the same way the credentials
     // banner is.
-    let bundled_agents_report = agents::bundled::ensure_bundled_agents_deployed()
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
-        .unwrap_or_default();
+    // #9014: the roster is read from instructional content. The deploy runs
+    // here, before the tracing subscriber exists, so its error is held and
+    // reported once logging is up (`report_deploy_failures` below).
+    let (bundled_agents_report, agents_deploy_err) =
+        match agents::bundled::ensure_bundled_agents_deployed() {
+            Ok(report) => (report, None),
+            Err(e) => (Default::default(), Some(e)),
+        };
 
     // #5227: same treatment for the bundled WORKFLOW definitions. Agents were
     // the only config kind that ever reached the `$HOME` tier, so
@@ -199,9 +204,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // definition to read anywhere on its search hierarchy. Same best-effort
     // posture as the roster deploy above: a read-only `$HOME` degrades to the
     // pre-fix "workflow not found", it does not crash the harness.
-    let _bundled_workflows_report = agents::bundled::ensure_bundled_workflows_deployed()
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled workflows to $HOME"))
-        .unwrap_or_default();
+    let workflows_deploy_err = agents::bundled::ensure_bundled_workflows_deployed().err();
 
     // #4325: create each Assistant INSTANCE's home directory
     // (`~/trusty-agents/<instance>/`) so the layout exists before anything
@@ -230,11 +233,12 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // merged in. Suppress in quiet/non-interactive modes (sub-agent IPC,
     // workflow runners, HTTP servers) where stderr output would corrupt
     // protocol streams or just be noise.
+    let quiet_mode = std::env::args()
+        .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
+    // #9014: a deploy error printed below is not logged a second time.
+    let printed_on_stderr =
+        |e: &anyhow::Error| !quiet_mode && agents::bundled::deploy_failure_message(e).is_some();
     {
-        let raw_args: Vec<String> = std::env::args().collect();
-        let quiet_mode = raw_args
-            .iter()
-            .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
         if !quiet_mode {
             // #3844: a bundled file the refresh KEPT because it carries a local
             // edit is the one thing here the operator has to know about — the
@@ -264,6 +268,22 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                     bundled_agents_report.total_touched(),
                     bundled_agents_report.written
                 );
+            }
+            // #9014: tracing goes to repl.log in the REPL, so the remedy for
+            // missing, old or unusable content is printed here, the way
+            // #3844's note is. One line per distinct error.
+            let mut printed: Vec<String> = Vec::new();
+            for e in agents_deploy_err.iter().chain(workflows_deploy_err.iter()) {
+                let Some(msg) = agents::bundled::deploy_failure_message(e) else {
+                    continue;
+                };
+                if agents::bundled::not_installed_message(e).is_some() {
+                    trusty_agents_common::agent_content::mark_not_installed_reported();
+                }
+                if !printed.contains(&msg) {
+                    eprintln!("[trusty-agents] ERROR {msg}");
+                    printed.push(msg);
+                }
             }
             check_credentials_and_warn();
         }
@@ -322,6 +342,19 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .with_env_filter(env_filter)
             .with_writer(std::io::stderr) // keep stdout clean for NDJSON
             .init();
+    }
+
+    // #9014: the deploy errors held above. Non-quiet modes printed every
+    // content error already, so only a write failure is logged there; a quiet
+    // mode (`--api`, `--serve`, ...) reaches stderr only through this line.
+    if let Some(e) = agents_deploy_err.as_ref().filter(|e| !printed_on_stderr(e)) {
+        agents::bundled::log_deploy_failure("failed to deploy bundled agents to $HOME", e);
+    }
+    if let Some(e) = workflows_deploy_err
+        .as_ref()
+        .filter(|e| !printed_on_stderr(e))
+    {
+        agents::bundled::log_deploy_failure("failed to deploy bundled workflows to $HOME", e);
     }
 
     // #api-early-dispatch: Short-circuit `--api` / `--serve` BEFORE any

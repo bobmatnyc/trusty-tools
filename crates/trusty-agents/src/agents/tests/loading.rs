@@ -133,11 +133,14 @@ async fn by_name_async_loads_plan_agent() {
     // redirect the lookup out from under this test.
     let _guard = ENV_LOCK.lock().await;
     clear_model_env("plan-agent");
-    // SAFETY: guarded by ENV_LOCK for the duration of this guard's scope,
-    // which spans the `by_name_async` call below.
-    unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-    }
+    // #9014: the bundled roster lives under content/, not the cwd.
+    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        bundled_dir.to_str().expect("utf-8 path"),
+    );
     let cfg = AgentConfig::by_name_async("plan-agent")
         .await
         .expect("plan-agent loads async");
@@ -285,6 +288,14 @@ fn agent_config_load_populates_adapter() {
     // `plan-agent` is configured with an Anthropic model.
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("plan-agent");
+    // #9014: the bundled roster lives under content/, not the cwd.
+    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        bundled_dir.to_str().expect("utf-8 path"),
+    );
     let cfg = AgentConfig::by_name("plan-agent").expect("plan-agent loads");
     use crate::llm::adapter::Provider;
     assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
@@ -464,9 +475,9 @@ content = "test"
 
 /// Path to the bundled `.trusty-agents/agents` directory shipped with the crate.
 fn bundled_agents_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents")
+    crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    )
 }
 
 /// #3738 (MEDIUM): `cto-assistant` ships as TWO hand-maintained files — the
