@@ -1,0 +1,2 @@
+Fixed
+- The Slack `bot_ref` and `app_ref` tokens now resolve from the credential store first, and from the process environment or `.env.local` only when the store holds no value. A daemon autostarted from a session can no longer pick which Slack app it connects as through that session's environment or working directory. A store read error now disables the Slack channel with the error kind instead of falling back to the environment. Every other credential keeps its environment-first order (#9936).
