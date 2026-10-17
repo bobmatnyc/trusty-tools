@@ -34,7 +34,8 @@ use super::ExtractError;
 /// uncompressed size is rejected up front, AND the reader is wrapped in
 /// `Read::take` so a lying size field cannot bypass the bound.
 /// Test: `test_oversized_document_xml_rejected_by_declared_size`,
-/// `test_bounded_read_rejects_underdeclared_entry`.
+/// `test_bounded_read_rejects_underdeclared_entry`,
+/// `test_forged_declared_size_rejected_through_real_zip`.
 pub(super) const MAX_PART_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Read a zip entry to a `String`, refusing to decompress past `cap` bytes.
@@ -74,6 +75,48 @@ pub(super) fn read_entry_bounded<R: Read>(
         )));
     }
     String::from_utf8(bytes).map_err(|e| wrap(e.to_string()))
+}
+
+/// Patch every central-directory and local-header uncompressed-size field
+/// belonging to `target_name` in a zip so it reads `to`, and report how many
+/// fields were rewritten.
+///
+/// Why: the zip-bomb guards must be tested against a real archive whose size
+/// fields lie, not only against a `Cursor`. Both header copies are patched:
+/// rewriting only the central directory would leave the local header as a
+/// second honest source, and the guards must hold when neither is trusted.
+/// Shared by the docx and xlsx guard tests (#10019).
+#[cfg(test)]
+pub(super) fn forge_uncompressed_size(bytes: &mut [u8], target_name: &str, to: u32) -> usize {
+    const CD_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+    const LOCAL_SIG: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
+    let mut patched = 0;
+    let mut i = 0;
+    while i + 46 <= bytes.len() {
+        if bytes[i..i + 4] == CD_SIG {
+            // Central directory header: name length at +28, uncompressed
+            // size at +24, name itself at +46.
+            let name_len = u16::from_le_bytes([bytes[i + 28], bytes[i + 29]]) as usize;
+            if i + 46 + name_len <= bytes.len()
+                && &bytes[i + 46..i + 46 + name_len] == target_name.as_bytes()
+            {
+                bytes[i + 24..i + 28].copy_from_slice(&to.to_le_bytes());
+                patched += 1;
+            }
+        } else if bytes[i..i + 4] == LOCAL_SIG {
+            // Local file header: name length at +26, uncompressed size at
+            // +22, name itself at +30.
+            let name_len = u16::from_le_bytes([bytes[i + 26], bytes[i + 27]]) as usize;
+            if i + 30 + name_len <= bytes.len()
+                && &bytes[i + 30..i + 30 + name_len] == target_name.as_bytes()
+            {
+                bytes[i + 22..i + 26].copy_from_slice(&to.to_le_bytes());
+                patched += 1;
+            }
+        }
+        i += 1;
+    }
+    patched
 }
 
 /// Append one run-text event's content to `buf`.

@@ -300,7 +300,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
             let one = slide(&format!("{}{}", para("Title one"), para("Bullet A")));
             zip.write_all(one.as_bytes()).unwrap();
@@ -354,7 +354,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zip.start_file("word/document.xml", opts).unwrap();
             zip.write_all(document_xml.as_bytes()).unwrap();
             zip.finish().unwrap();

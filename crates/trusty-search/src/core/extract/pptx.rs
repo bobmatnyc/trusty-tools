@@ -91,11 +91,14 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
 /// numeric and the notes part for a slide is named by the same number.
 /// What: parses `<N>` out of `ppt/slides/slide<N>.xml`, ignoring any other
 /// entry (including `ppt/slides/_rels/…`, whose name carries a suffix past
-/// `.xml` and so never parses).
+/// `.xml` and so never parses). An entry whose name zip cannot decode is
+/// skipped the same way: it cannot spell `ppt/slides/slide<N>.xml`.
 /// Test: `test_extracts_slides_in_numeric_order`.
 fn slide_numbers(archive: &zip::ZipArchive<std::fs::File>) -> Vec<u32> {
     archive
         .file_names()
+        // #10019: zip 9 yields `ZipResult<Cow<str>>` per name, not `&str`.
+        .filter_map(Result::ok)
         .filter_map(|name| {
             name.strip_prefix(SLIDE_PREFIX)
                 .and_then(|rest| rest.strip_suffix(PART_SUFFIX))
@@ -201,7 +204,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             for (name, body) in entries {
                 zip.start_file(name.as_str(), opts).unwrap();
                 zip.write_all(body.as_bytes()).unwrap();
