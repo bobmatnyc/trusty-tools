@@ -474,14 +474,27 @@ fn rename_palace_replace_empty_waits_for_the_targets_dropped_writer() {
     let _entered = rt.enter();
     let tmp = tempdir().unwrap();
     let root = tmp.path();
+    // Built through a scratch registry that is dropped and awaited, so the
+    // registry under test caches no handle: the rename's first wait finds
+    // nothing and cannot absorb the held worker below.
+    let drawer = Drawer::new(uuid::Uuid::new_v4(), "from the source");
+    let kept = drawer.id;
+    {
+        let scratch = PalaceRegistry::new();
+        let src = create(&scratch, root, "rep-src");
+        src.kg.upsert_drawer_sync(&drawer).unwrap();
+        drop(src);
+        drop(create(&scratch, root, "rep-dst"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ["rep-src", "rep-dst"]
+        .iter()
+        .any(|id| KgStoreRedb::is_cached(&root.join(id).join("kg.redb")))
+    {
+        assert!(Instant::now() < deadline, "the scratch stores never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let reg = PalaceRegistry::new();
-    let src = create(&reg, root, "rep-src");
-    let kept = uuid::Uuid::new_v4();
-    src.kg
-        .upsert_drawer_sync(&Drawer::new(kept, "from the source"))
-        .unwrap();
-    drop(src);
-    drop(create(&reg, root, "rep-dst"));
     let (started, worker_held) = std::sync::mpsc::channel();
     rt.spawn(async move {
         started.send(()).expect("signal");
