@@ -30,6 +30,8 @@ mod graceful_bootstrap;
 // inline branches no test could reach — which data dir every per-instance path
 // derives from, and whether an explicit one may auto-discover.
 mod isolation;
+// #9970: the python intent behind the installed embedder, for the agent note.
+mod python_intent;
 // #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
 // starts, which used to match by process name alone.
 // #8686: `service restart` scopes its kill set with the same plan.

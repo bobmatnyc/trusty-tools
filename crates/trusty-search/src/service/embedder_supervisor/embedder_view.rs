@@ -63,9 +63,10 @@ fn bootstrap_step(state: BootstrapState, phase: BootstrapPhase) -> &'static str 
 ///
 /// Why: see the module docs.
 /// What: `intended` is `python` whenever a python bootstrap applies (any
-/// state but `NotApplicable`, which only the graceful default and the
-/// swap-back watchdog leave), else the active backend. `note` is `Some`
-/// exactly when `active != intended`.
+/// state but `NotApplicable`), else the active backend: `NotApplicable`
+/// means the backend serving is the one the host asked for, including the
+/// eager python path while python serves. `note` is `Some` exactly when
+/// `active != intended`.
 /// Test: `note_names_each_degraded_step`, `no_note_once_python_serves`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EmbedderView {
@@ -135,10 +136,18 @@ fn note(active: &str, bootstrap: &str, report: &BootstrapReport) -> String {
              ({reason}). Fix the cause and restart the daemon, or set \
              TRUSTY_EMBEDDER=stdio to choose ort."
         ),
-        "fell_back_to_ort" => format!(
-            "{head}: the python embedder stopped and could not be restarted. Restart \
-             the daemon to try python again."
-        ),
+        // #9970: name the cause when one was recorded (the eager path's
+        // fallback latch records it; the swap-back watchdog does not).
+        "fell_back_to_ort" => {
+            let cause = report
+                .last_error
+                .as_deref()
+                .map_or_else(String::new, |e| format!(" ({e})"));
+            format!(
+                "{head}: the python embedder stopped and could not be restarted{cause}. \
+                 Restart the daemon to try python again."
+            )
+        }
         _ => format!("{head} while the python embedder bootstrap starts."),
     }
 }
