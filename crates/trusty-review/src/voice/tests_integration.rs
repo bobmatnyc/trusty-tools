@@ -2,7 +2,7 @@
 //!
 //! Why: extracted from tests.rs to keep that file under the 500-line cap (#610).
 //! These tests exercise the end-to-end duetto path and drift detection between
-//! the bundled fixture and the external ~/.config copy.
+//! the shipped content voice and the external ~/.config copy.
 //! What: full stock→principles→voice pipeline test and the bundled vs. external
 //! drift-check test (skipped gracefully when the external file is absent).
 //! Test: included via `#[path = "tests_integration.rs"]` from mod.rs.
@@ -15,9 +15,9 @@ use super::{VoiceConfig, loader::VoiceLoader, principles::principles_addendum, t
 ///
 /// Why: end-to-end test that confirms the duetto voice integrates cleanly
 /// into VoiceConfig's combined_addendum without truncation or escaping issues.
-/// What: loads duetto from bundled fixture, builds a full VoiceConfig,
+/// What: loads duetto from shipped content voice, builds a full VoiceConfig,
 /// asserts the combined addendum contains both layers in order.
-/// Test: uses bundled fixture; no network.
+/// Test: uses shipped content voice; no network.
 #[test]
 fn full_pipeline_with_duetto_voice() {
     let loader = VoiceLoader::new();
@@ -59,15 +59,15 @@ fn full_pipeline_with_duetto_voice() {
     );
 }
 
-/// The bundled duetto voice fixture matches the external ~/.config version when present.
+/// The shipped duetto voice matches the external ~/.config version when present.
 ///
-/// Why: the fixture in the crate must stay in sync with the authoritative file
+/// Why: the content's voice (#9015) must stay in sync with the authoritative file
 /// at ~/.config/trusty-review/voices/duetto/voice.toml.  If they diverge, users
 /// with the external file get a different voice than those without.  This test
 /// guards against accidental drift.
 /// What: if the external file is absent (CI), skips gracefully.  When present,
 /// reads the external file directly (bypassing the loader search path) and compares
-/// it against the bundled fixture loaded with `VoiceLoader::bundled_only()`, which
+/// it against the shipped content voice loaded with `VoiceLoader::bundled_only()`, which
 /// skips the XDG path so the assertion truly compares bundled vs. external.
 /// Test: conditional on external file presence; no network.
 #[test]
@@ -87,7 +87,7 @@ fn bundled_duetto_matches_external_when_present() {
     }
 
     // bundled_only() skips the XDG config dir, so `load("duetto")` can only
-    // return the compile-time `include_str!` fixture — never the external file.
+    // return the instructional content's voice — never the external file.
     let loader_bundled = VoiceLoader::bundled_only();
     let bundled = loader_bundled
         .load("duetto")

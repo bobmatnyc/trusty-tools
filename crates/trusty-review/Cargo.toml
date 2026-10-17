@@ -142,7 +142,7 @@ name        = "trusty-review"
 # 0.38.2 carries fixes only, with no public item added or changed.
 # 0.38.2 -> 0.38.3 (#9214): PATCH. 0.38.2 is live on crates.io; 0.38.3 carries
 # the search-socket fail-closed change, with no public item added or changed.
-version     = "0.38.5"
+version     = "0.39.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -242,7 +242,9 @@ clap         = { workspace = true }
 # which owns AWS region resolution and Converse-client construction for this
 # crate's `llm::bedrock` provider — the one implementation of both, per
 # CLAUDE.md's common-entry-point rule.
-trusty-common = { workspace = true, features = ["intent-source", "bedrock-client", "config-cli", "webhook-relay", "gh-cli", "uds", "uds-supervisor", "redb-open"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
+# `content-resolver` (#9015): the reviewer prompts are runtime content
+# (ADR-0064), read through the shared resolver; see `pipeline::prompt_templates`.
+trusty-common = { workspace = true, features = ["intent-source", "bedrock-client", "config-cli", "webhook-relay", "gh-cli", "uds", "uds-supervisor", "redb-open", "content-resolver"] }  # `redb-open` (#5063): the workspace's single redb corruption classifier, which `store::redb_error_is_incompatible_format` delegates to
 # JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
 # compiles `src/mcp/`.
 trusty-mcp = { workspace = true, optional = true }
@@ -334,3 +336,8 @@ tempfile     = { workspace = true }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads (used by selector resolve_db_path tests).
 serial_test  = { workspace = true }
+# #9015: `tests/support/content.rs` packs the checkout's prompts into the
+# verified bundle a spawned `trusty-review` reads. Both are already in the graph
+# through trusty-common's `content-resolver`, so no new crate compiles.
+tar          = { workspace = true }
+flate2       = { workspace = true }

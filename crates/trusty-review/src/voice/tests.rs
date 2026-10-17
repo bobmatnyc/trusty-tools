@@ -229,20 +229,19 @@ fn principles_contains_do_not_flag_guardrails() {
     );
 }
 
-// ── VoiceLoader — bundled fixtures ────────────────────────────────────────────
+// ── VoiceLoader — shipped voice (instructional content, #9015) ───────────────
 
-/// The bundled duetto voice loads correctly and has expected content.
+/// The shipped duetto voice loads correctly and has expected content.
 ///
-/// Why: the embedded `include_str!` fixture must parse cleanly at runtime; if
-/// the TOML is malformed the crate would panic on any review that selects the
-/// voice.
+/// Why: the content's `voices/duetto/voice.toml` must parse cleanly at
+/// runtime; a malformed one refuses every review that selects the voice.
 /// What: loads `duetto` via `VoiceLoader::new()` and asserts key fields.
-/// Test: uses compile-time embedded fixture; no filesystem I/O to external paths.
+/// Test: reads the staged checkout content; no external paths.
 #[test]
 fn load_bundled_duetto_voice() {
     let loader = VoiceLoader::new();
-    // This call hits the bundled fixture (no ~/.config/trusty-review/voices/duetto
-    // required for the test to pass).
+    // Under `cfg(test)` the content is the staged checkout copy (no
+    // ~/.config/trusty-review/voices/duetto required for the test to pass).
     let pkg = loader.load("duetto").expect("bundled duetto must load");
     assert_eq!(pkg.meta.name, "duetto", "meta.name must be duetto");
     assert!(
@@ -258,6 +257,41 @@ fn load_bundled_duetto_voice() {
         pkg.meta.provenance.reviewers_count >= 5,
         "duetto must have >= 5 source reviewers"
     );
+}
+
+/// Content older than #9015 lacks the shipped voice, or carries one that does
+/// not parse: the loader refuses naming the file and the remedy.
+///
+/// Why (#9015): a review that selects `duetto` must refuse rather than run
+/// with no voice or a compiled-in copy.
+/// What: content without `voice.toml`, then with it unparseable; both are
+/// `VoiceLoaderError::Content` naming the path and `tm content update`.
+/// Test: this test itself.
+#[test]
+fn a_stale_release_without_the_shipped_voice_refuses() {
+    use crate::runtime_content::{
+        content_path,
+        test_support::{OverrideGuard, installed_with, installed_without},
+    };
+    let path = content_path("voices/duetto/voice.toml");
+    for (case, content) in [
+        ("absent", installed_without(&path)),
+        ("unparseable", installed_with(&path, b"[meta\n")),
+    ] {
+        let _guard = OverrideGuard::content(content);
+        let err = VoiceLoader::bundled_only()
+            .load("duetto")
+            .expect_err("a shipped voice the content lacks must refuse");
+        assert!(
+            matches!(err, super::loader::VoiceLoaderError::Content(_)),
+            "{case}: {err:?}"
+        );
+        assert!(err.to_string().contains(&path), "{case}: {err}");
+        assert!(
+            err.to_string().contains("tm content update"),
+            "{case}: {err}"
+        );
+    }
 }
 
 /// Loading a non-existent voice returns NotFound.
@@ -388,7 +422,7 @@ fn load_valid_bare_name_still_resolves() {
     assert!(loader.load("duetto").is_ok());
 }
 
-/// Custom dir takes priority over the bundled fixture for the same name.
+/// Custom dir takes priority over the shipped content voice for the same name.
 ///
 /// Why: operators must be able to override bundled packages without changing
 /// the binary.

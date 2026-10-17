@@ -23,6 +23,10 @@
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
+// #9015: the report templates are runtime content; this stages the checkout's.
+#[path = "support/content.rs"]
+mod content;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -223,6 +227,7 @@ async fn analyze_populates_complexity_and_findings() {
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template loads");
     let mut model =
@@ -343,6 +348,7 @@ async fn green_diagnostic_stays_dropped_under_a_path_that_spells_its_code() {
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template loads");
     let mut model =
@@ -442,6 +448,7 @@ async fn analyze_fetch_failure_falls_through_to_scan() {
     let manifest_path = write_fixture(tmp.path());
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template loads");
     let mut model =

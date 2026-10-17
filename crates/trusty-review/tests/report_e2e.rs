@@ -10,6 +10,10 @@
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
+// #9015: the report templates are runtime content; this stages the checkout's.
+#[path = "support/content.rs"]
+mod content;
+
 use trusty_review::report::{
     CorpusSnapshot, Reporter, TemplateLoader, benchmark, load_manifest, model::ReportModel,
 };
@@ -63,6 +67,7 @@ fn end_to_end_two_repo_report() {
     assert_eq!(manifest.repositories.len(), 2);
 
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template loads");
     let mut model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
@@ -187,6 +192,7 @@ fn end_to_end_corpus_benchmark() {
 
     let manifest = load_manifest(&manifest_path).expect("manifest");
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template");
     let mut model =
@@ -283,6 +289,7 @@ fn end_to_end_bare_scan_emits_mermaid_chart() {
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::new()
+        .with_content(content::staged_content())
         .load("report-technical-dd")
         .expect("template loads");
     let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)

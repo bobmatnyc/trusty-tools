@@ -103,8 +103,8 @@ pub mod runner_coverage;
 // Why: helper functions (apply_grade_and_floor, fetch_github_pr_meta, abort_dry,
 // finalize_run) extracted from runner.rs to keep it under the 500-line cap (#610).
 pub mod runner_helpers;
-// Why: system-prompt string constants extracted from prompt.rs to keep it under
-// the 500-line cap (#610) after the two coverage-gating variants were added (#1014).
+// Why: the reviewer system prompts, read at runtime from instructional content
+// (ADR-0064, #9015); split from prompt.rs for the 500-line cap (#610).
 pub mod prompt_templates;
 // Why: user-message builder extracted from prompt.rs to keep it under the
 // 500-line cap (#610) — the function is 145 lines on its own.
@@ -129,6 +129,7 @@ pub use prompt::{
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,
     reviewer_system_prompt_with_coverage,
 };
+pub use prompt_templates::{PromptContentError, ReviewerPrompts};
 pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review, run_review_with};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};

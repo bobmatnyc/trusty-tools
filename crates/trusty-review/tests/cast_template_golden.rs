@@ -14,6 +14,10 @@
 //! Test: this file.
 #![cfg(feature = "report")]
 
+// #9015: the report templates are runtime content; this stages the checkout's.
+#[path = "support/content.rs"]
+mod content;
+
 use std::path::Path;
 
 use trusty_review::report::{
@@ -135,6 +139,7 @@ fn render(code_only_mode: bool) -> String {
 
     let manifest = load_manifest(&manifest_path).expect("manifest loads");
     let template = TemplateLoader::bundled_only()
+        .with_content(content::staged_content())
         .load(CAST)
         .expect("bundled CAST template loads");
     let mut model =

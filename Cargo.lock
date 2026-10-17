@@ -11685,7 +11685,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.38.5"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11698,6 +11698,7 @@ dependencies = [
  "clap",
  "dashmap 6.2.1",
  "dirs 5.0.1",
+ "flate2",
  "futures-util",
  "jsonwebtoken",
  "redb 4.3.0",
@@ -11707,6 +11708,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

@@ -7,6 +7,7 @@
 //! LlmRequest system field.
 //! Test: included as `#[cfg(test)] mod voice_tests` from `prompt.rs`.
 
+use crate::pipeline::prompt_templates::test_support::prompts; // #9015
 use crate::{
     pipeline::prompt::{
         ReviewContext, ReviewPrMeta, build_review_prompt, build_system_prompt,
@@ -39,11 +40,11 @@ fn sample_meta() -> ReviewPrMeta {
 #[test]
 fn build_system_prompt_stock_only() {
     let vc = VoiceConfig::stock_only();
-    let layered = build_system_prompt(&vc);
-    let stock = reviewer_system_prompt();
+    let layered = build_system_prompt(prompts(), &vc);
+    let stock = reviewer_system_prompt(prompts());
     assert_eq!(
         layered, stock,
-        "stock_only VoiceConfig must produce identical output to reviewer_system_prompt()"
+        "stock_only VoiceConfig must produce identical output to reviewer_system_prompt(prompts())"
     );
 }
 
@@ -62,7 +63,7 @@ fn build_system_prompt_with_principles_only() {
         voice_name: None,
         ..Default::default()
     };
-    let result = build_system_prompt(&vc);
+    let result = build_system_prompt(prompts(), &vc);
     // Must start with stock base.
     assert!(
         result.starts_with("You are a senior software engineer"),
@@ -75,7 +76,7 @@ fn build_system_prompt_with_principles_only() {
     );
     // Stock base is a substring.
     assert!(
-        result.contains(reviewer_system_prompt()),
+        result.contains(reviewer_system_prompt(prompts())),
         "result must contain the full stock base"
     );
 }
@@ -94,7 +95,7 @@ fn build_system_prompt_full_pipeline_ordering() {
         voice_name: Some("test".to_string()),
         ..Default::default()
     };
-    let result = build_system_prompt(&vc);
+    let result = build_system_prompt(prompts(), &vc);
     let stock_pos = result.find("senior software engineer").unwrap();
     let principles_pos = result.find("PRINCIPLES_MARKER").unwrap();
     let voice_pos = result.find("VOICE_MARKER").unwrap();
@@ -126,7 +127,7 @@ fn build_system_prompt_full_pipeline_with_review_template_ordering() {
         review_template: Some("## TEMPLATE_MARKER".to_string()),
         review_template_name: Some("strict-security".to_string()),
     };
-    let result = build_system_prompt(&vc);
+    let result = build_system_prompt(prompts(), &vc);
     let stock_pos = result.find("senior software engineer").unwrap();
     let principles_pos = result.find("PRINCIPLES_MARKER").unwrap();
     let voice_pos = result.find("VOICE_MARKER").unwrap();
@@ -145,7 +146,7 @@ fn build_system_prompt_full_pipeline_with_review_template_ordering() {
     );
     // The stock rubric is never replaced — it remains a full substring.
     assert!(
-        result.contains(reviewer_system_prompt()),
+        result.contains(reviewer_system_prompt(prompts())),
         "the stock base prompt must remain intact (wholesale replacement is out of scope)"
     );
 }
@@ -166,6 +167,7 @@ fn build_review_prompt_with_voice_config_principles() {
         ..Default::default()
     };
     let req = build_review_prompt(
+        prompts(),
         "o",
         "r",
         &sample_meta(),
@@ -201,6 +203,7 @@ fn build_review_prompt_with_voice_config_full() {
         ..Default::default()
     };
     let req = build_review_prompt(
+        prompts(),
         "o",
         "r",
         &sample_meta(),
@@ -241,14 +244,14 @@ fn build_review_prompt_with_voice_config_full() {
 #[test]
 fn build_system_prompt_no_trailing_separator_when_no_addendum() {
     let vc = VoiceConfig::stock_only();
-    let result = build_system_prompt(&vc);
+    let result = build_system_prompt(prompts(), &vc);
     assert!(
         !result.ends_with("\n\n"),
         "stock_only must not gain a trailing double-newline"
     );
     assert_eq!(
         result.len(),
-        reviewer_system_prompt().len(),
+        reviewer_system_prompt(prompts()).len(),
         "stock_only result length must match stock base length"
     );
 }

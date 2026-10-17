@@ -2858,3 +2858,7 @@ mod linked_issues;
 // #9197 B2b: its failure branches, asserted on the finished ledger.
 #[path = "runner_linked_issues_failure_tests.rs"]
 mod linked_issues_failure;
+
+// #9015: the reviewer prompts come from content, or the review never starts.
+#[path = "runner_prompts_tests.rs"]
+mod prompts_from_content;

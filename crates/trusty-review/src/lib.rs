@@ -49,6 +49,9 @@ pub mod voice;
 // composes with (never replaces) the voice/principles layers above. Always
 // compiled — no feature gate — for the same reason as `voice`.
 pub mod review_template;
+// #9015: the prompts, templates and voice are runtime content (ADR-0064); one
+// resolver and one error type for every reader. Always compiled.
+pub mod runtime_content;
 // Why: Phase 1 (#582) adds live posting, which needs a durable cross-process
 // dedup claim store (redb) and an in-process in-flight guard.  These storage
 // and concurrency concerns live in their own module, separate from the

@@ -1,35 +1,38 @@
-//! Report template loader — XDG override + bundled fallback (M1, #2313).
+//! Report template loader — XDG override, else instructional content (M1,
+//! #2313; content since #9015).
 //!
 //! Why: report templates should be customisable per operator (drop a file at
-//! `~/.config/trusty-review/templates/<name>.md`) but must also work out of the
-//! box after `cargo install` with zero setup.  This mirrors the `VoiceLoader`
-//! pattern: user-config directory wins, else a compile-time `include_str!`
-//! bundled default.
+//! `~/.config/trusty-review/templates/<name>.md`), and the shipped ones are
+//! product content (ADR-0064): they live in
+//! `content/instructions/trusty-review/templates/` and are read at runtime, so
+//! a template fix needs no crate release. This mirrors the `VoiceLoader`
+//! pattern: user-config directory wins, else the installed content.
 //! What: [`TemplateLoader`] resolves a template name to its markdown source,
-//! trying extra dirs → XDG config dir → bundled defaults.  Two templates ship
-//! bundled: `report-technical-dd` and `report-technical-dd-cast`.
+//! trying extra dirs → XDG config dir → content. Two templates ship in
+//! content: `report-technical-dd` and `report-technical-dd-cast`; either one
+//! absent or empty there is a [`ReportError::Content`] naming the remedy,
+//! never a fallback.
 //! [`parse_section_instructions`] (#2357 layered instructions) reads a
 //! template's `<!-- instruct:<section_id> ... -->` blocks into an override map
 //! consumed by the synthesis prompt builder — the template-override tier of the
 //! generic → template → analyst instruction layering (see
 //! `section_instructions.rs`).
-//! Test: `template.rs` tests cover bundled fallback for both templates, an XDG
+//! Test: `template.rs` tests cover the content-served templates, a stale
+//! release that lacks one (`a_stale_release_without_a_shipped_template_refuses`), an XDG
 //! override via an injected extra dir, the not-found error, and instruct-block
 //! parsing (single-line, multi-line, unknown-id, and non-instruct comments).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracing::warn;
+use trusty_common::content::ResolvedContent;
 
 use super::error::ReportError;
 use super::polish::balanced_comment_len;
 use super::section_instructions::is_valid_section_id;
-
-/// The generic vendor-neutral technical-DD template, bundled at compile time.
-const BUNDLED_TECHNICAL_DD: &str = include_str!("../../templates/report-technical-dd.md");
-/// The CAST-specific technical-DD template, bundled at compile time.
-const BUNDLED_TECHNICAL_DD_CAST: &str = include_str!("../../templates/report-technical-dd-cast.md");
+use crate::runtime_content::{content_path, optional_text, resolve_for_process};
 
 /// The default template name used when none is specified.
 pub const DEFAULT_TEMPLATE: &str = "report-technical-dd";
@@ -71,19 +74,21 @@ pub fn resolve_template_alias(name: &str) -> &str {
 /// Why: a single entry point for template loading so the reporter and CLI need
 /// not reason about search-directory precedence.
 /// What: `load(name)` tries `extra_dirs` (test/local overrides), then the XDG
-/// user-config dir, then bundled defaults; returns the first hit.  `skip_xdg`
-/// suppresses the user-config lookup so tests can assert on the bundled default
-/// exclusively.
+/// user-config dir, then the instructional content; returns the first hit.
+/// `skip_xdg` suppresses the user-config lookup so tests can assert on the
+/// shipped template exclusively. `content` is the source [`Self::with_content`]
+/// supplied; `None` resolves this process's content on first need.
 /// Test: `template.rs::{load_bundled_default, load_from_extra_dir,
 /// load_missing_errors, bundled_only_ignores_xdg}`.
 #[derive(Debug, Default)]
 pub struct TemplateLoader {
     extra_dirs: Vec<PathBuf>,
     skip_xdg: bool,
+    content: Option<Arc<ResolvedContent>>,
 }
 
 impl TemplateLoader {
-    /// Construct a loader searching the XDG config dir and bundled defaults.
+    /// Construct a loader searching the XDG config dir, then the content.
     ///
     /// Why: the production call site needs no custom directories.
     /// What: empty `extra_dirs`, XDG search enabled.
@@ -101,33 +106,47 @@ impl TemplateLoader {
     pub fn with_extra_dirs(dirs: Vec<PathBuf>) -> Self {
         Self {
             extra_dirs: dirs,
-            skip_xdg: false,
+            ..Self::default()
         }
     }
 
     /// Construct a loader that skips the XDG user-config path entirely.
     ///
-    /// Why: tests asserting on the BUNDLED default must not accidentally load a
-    /// developer's `~/.config/trusty-review/templates/<name>.md`.
-    /// What: empty extra dirs, XDG search suppressed.
+    /// Why: tests asserting on the SHIPPED template must not accidentally load
+    /// a developer's `~/.config/trusty-review/templates/<name>.md`.
+    /// What: empty extra dirs, XDG search suppressed; templates come from the
+    /// instructional content only.
     /// Test: `template.rs::bundled_only_ignores_xdg`.
     pub fn bundled_only() -> Self {
         Self {
-            extra_dirs: vec![],
             skip_xdg: true,
+            ..Self::default()
         }
+    }
+
+    /// Reads shipped templates from `content` instead of this process's
+    /// resolved content (#9015).
+    ///
+    /// Why: a caller that already resolved content, or a test with no
+    /// installed bundle, names the source itself.
+    /// Test: `a_stale_release_without_a_shipped_template_refuses`.
+    #[must_use]
+    pub fn with_content(mut self, content: Arc<ResolvedContent>) -> Self {
+        self.content = Some(content);
+        self
     }
 
     /// Load a template's markdown source by name.
     ///
     /// Why: the reporter resolves the chosen template name to its source before
-    /// filling; graceful fallback to bundled defaults keeps zero-setup installs
-    /// working.
-    /// What: tries each extra dir, then the XDG dir, for `<name>.md`; then the
-    /// bundled defaults.  Returns [`ReportError::TemplateNotFound`] when nothing
-    /// matches.
+    /// filling, and before any repository is walked.
+    /// What: tries each extra dir, then the XDG dir, for `<name>.md`; then
+    /// `instructions/trusty-review/templates/<name>.md` in the content.
+    /// Returns [`ReportError::TemplateNotFound`] when no source has a template
+    /// of that name, and [`ReportError::Content`] when the content cannot be
+    /// resolved, or lacks or empties a shipped template (#9015).
     /// Test: `template.rs::{load_bundled_default, load_from_extra_dir,
-    /// load_missing_errors}`.
+    /// load_missing_errors, a_stale_release_without_a_shipped_template_refuses}`.
     pub fn load(&self, name: &str) -> std::result::Result<String, ReportError> {
         // 1. Extra dirs (highest priority — test injection + local overrides).
         for base in &self.extra_dirs {
@@ -156,14 +175,16 @@ impl TemplateLoader {
             }
         }
 
-        // 3. Bundled fallback.
-        match name {
-            "report-technical-dd" => Ok(BUNDLED_TECHNICAL_DD.to_string()),
-            "report-technical-dd-cast" => Ok(BUNDLED_TECHNICAL_DD_CAST.to_string()),
-            _ => Err(ReportError::TemplateNotFound {
-                name: name.to_string(),
-            }),
-        }
+        // 3. #9015: the instructional content, never a compiled-in default.
+        let content = match &self.content {
+            Some(content) => Arc::clone(content),
+            None => resolve_for_process()?,
+        };
+        let shipped = name == DEFAULT_TEMPLATE || name == CAST_TEMPLATE;
+        let path = content_path(&format!("templates/{name}.md"));
+        optional_text(&content, &path, shipped)?.ok_or_else(|| ReportError::TemplateNotFound {
+            name: name.to_string(),
+        })
     }
 }
 
@@ -288,6 +309,31 @@ mod tests {
         let loader = TemplateLoader::bundled_only();
         let err = loader.load("does-not-exist").expect_err("must error");
         assert!(matches!(err, ReportError::TemplateNotFound { .. }));
+    }
+
+    /// Why (#9015): a content release older than this binary lacks a shipped
+    /// template; the report must refuse naming the file and the remedy, never
+    /// render from a compiled-in copy or an empty skeleton.
+    /// What: content without `report-technical-dd.md`, then with it emptied;
+    /// both are `ReportError::Content` naming the path and `tm content update`.
+    /// Test: this test itself.
+    #[test]
+    fn a_stale_release_without_a_shipped_template_refuses() {
+        use crate::runtime_content::test_support::{installed_with, installed_without};
+        let path = content_path("templates/report-technical-dd.md");
+        for (case, content) in [
+            ("absent", installed_without(&path)),
+            ("empty", installed_with(&path, b"\n")),
+        ] {
+            let err = TemplateLoader::bundled_only()
+                .with_content(content)
+                .load(DEFAULT_TEMPLATE)
+                .expect_err("a shipped template the content lacks must refuse");
+            assert!(matches!(err, ReportError::Content(_)), "{case}: {err:?}");
+            let text = err.to_string();
+            assert!(text.contains(&path), "{case}: {text}");
+            assert!(text.contains("tm content update"), "{case}: {text}");
+        }
     }
 
     /// Why: bundled-only mode must ignore any external XDG template.

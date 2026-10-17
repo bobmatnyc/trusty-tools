@@ -7,6 +7,7 @@
 //! Test: included as `#[cfg(test)] mod tests` from `prompt.rs`.
 
 use super::*;
+use crate::pipeline::prompt_templates::test_support::prompts; // #9015
 
 // Shared fixture helpers (sample_meta, empty_context, stock_voice).
 // Extracted to avoid duplication across prompt_tests.rs /
@@ -17,7 +18,7 @@ use helpers::{empty_context, sample_meta, stock_voice};
 
 #[test]
 fn system_prompt_contains_policy() {
-    let prompt = reviewer_system_prompt();
+    let prompt = reviewer_system_prompt(prompts());
     assert!(
         prompt.contains("default verdict is APPROVE"),
         "system prompt must state APPROVE-default policy"
@@ -47,7 +48,7 @@ fn system_prompt_contains_policy() {
 /// Test: no network.
 #[test]
 fn system_prompt_contains_severity_anchors() {
-    let prompt = reviewer_system_prompt();
+    let prompt = reviewer_system_prompt(prompts());
     assert!(
         prompt.contains("critical"),
         "system prompt must define the 'critical' severity anchor"
@@ -74,7 +75,7 @@ fn system_prompt_contains_severity_anchors() {
 /// Test: no network.
 #[test]
 fn system_prompt_contains_compile_break_rule() {
-    let prompt = reviewer_system_prompt();
+    let prompt = reviewer_system_prompt(prompts());
     assert!(
         prompt.contains("REMOVES a symbol"),
         "system prompt must describe the removed-symbol compile-break pattern"
@@ -96,6 +97,7 @@ fn system_prompt_contains_compile_break_rule() {
 #[test]
 fn build_review_prompt_strips_bedrock_prefix() {
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -119,6 +121,7 @@ fn build_review_prompt_strips_bedrock_prefix() {
 #[test]
 fn build_review_prompt_strips_openrouter_prefix() {
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -138,6 +141,7 @@ fn build_review_prompt_strips_openrouter_prefix() {
 fn build_review_prompt_includes_diff() {
     let diff = "+fn hello() { println!(\"hi\"); }\n";
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -184,6 +188,7 @@ fn prompt_includes_caller_context() {
         ..Default::default()
     };
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -233,6 +238,7 @@ fn prompt_omits_absent_caller_context() {
     // A whitespace-only field must be treated as absent (no empty heading).
     context.pr_discussion = Some("   \n  ".to_string());
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -286,6 +292,7 @@ fn prompt_includes_context_blocks() {
     };
 
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "repo",
         &sample_meta(),
@@ -327,6 +334,7 @@ fn prompt_includes_context_blocks() {
 fn prompt_includes_external_context() {
     let external = "## Related JIRA tickets\n\n- **PROJ-1 — Add auth** — In Progress\n";
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -364,6 +372,7 @@ fn prompt_includes_external_context() {
 #[test]
 fn prompt_empty_external_context_adds_nothing() {
     let req = build_review_prompt(
+        prompts(),
         "o",
         "r",
         &sample_meta(),
@@ -382,6 +391,7 @@ fn prompt_empty_external_context_adds_nothing() {
 #[test]
 fn prompt_empty_context_omits_sections() {
     let req = build_review_prompt(
+        prompts(),
         "o",
         "r",
         &sample_meta(),
@@ -412,6 +422,7 @@ fn prompt_empty_context_omits_sections() {
 #[test]
 fn build_review_prompt_includes_response_schema() {
     let req = build_review_prompt(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -450,7 +461,7 @@ fn build_review_prompt_includes_response_schema() {
 /// Test: no network.
 #[test]
 fn system_prompt_uses_structured_output_language() {
-    let prompt = reviewer_system_prompt();
+    let prompt = reviewer_system_prompt(prompts());
     assert!(
         !prompt.contains("```json"),
         "system prompt must not contain the old fenced JSON block instruction"
@@ -466,6 +477,7 @@ fn prompt_local_diff_mode_no_pr_metadata() {
     // In --local-diff mode, pr_meta has empty fields.
     let meta = ReviewPrMeta::default();
     let req = build_review_prompt(
+        prompts(),
         "local",
         "local",
         &meta,
@@ -628,7 +640,7 @@ fn review_schema_offers_style_category() {
 /// Test: no network.
 #[test]
 fn system_prompt_describes_unknown_grade() {
-    let prompt = reviewer_system_prompt();
+    let prompt = reviewer_system_prompt(prompts());
     assert!(
         prompt.contains("UNKNOWN"),
         "system prompt must describe the UNKNOWN grade"
@@ -683,10 +695,13 @@ fn max_tokens_default_for_non_gemini() {
 #[test]
 fn system_prompt_contains_source_citation_instruction() {
     for (label, prompt) in [
-        ("stock", reviewer_system_prompt_with_coverage(false)),
+        (
+            "stock",
+            reviewer_system_prompt_with_coverage(prompts(), false),
+        ),
         (
             "coverage-gating",
-            reviewer_system_prompt_with_coverage(true),
+            reviewer_system_prompt_with_coverage(prompts(), true),
         ),
     ] {
         assert!(
@@ -707,16 +722,14 @@ fn system_prompt_contains_source_citation_instruction() {
 /// Why: the guardrail section was added to reduce known false positives on Rust
 /// `move` closures and `tokio::select!` branches (#1422).  Asserting its presence
 /// ensures prompt changes don't accidentally drop it.
-/// What: checks both SYSTEM_PROMPT_STOCK and SYSTEM_PROMPT_COVERAGE_GATING for
-/// the key guardrail phrases.
-/// Test: no network; operates on the constant strings directly.
+/// What: checks both reviewer prompts (#9015: read from content) for the key
+/// guardrail phrases.
+/// Test: no network; operates on the checkout's prompt text.
 #[test]
 fn both_system_prompts_contain_rust_fp_guardrail() {
-    use crate::pipeline::prompt_templates::{SYSTEM_PROMPT_COVERAGE_GATING, SYSTEM_PROMPT_STOCK};
-
     for (label, prompt) in [
-        ("stock", SYSTEM_PROMPT_STOCK),
-        ("coverage-gating", SYSTEM_PROMPT_COVERAGE_GATING),
+        ("stock", prompts().stock()),
+        ("coverage-gating", prompts().coverage_gating()),
     ] {
         assert!(
             prompt.contains("Known false-positive patterns"),

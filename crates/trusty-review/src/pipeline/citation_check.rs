@@ -81,8 +81,9 @@ pub const CITATION_REASON: &str = "#4042 citation";
 /// finding (#9188 D). `code:` citations are extracted and verified
 /// SEPARATELY, before this strip runs (see [`CODE_CITATION_RE`]).
 /// This list and the prompt's grammar section
-/// (`assets/prompts/system_prompt_stock.md`) must stay in step — a form the
-/// prompt permits but this regex omits is scanned as an ungrounded quote.
+/// (`content/instructions/trusty-review/prompts/system_prompt_stock.md`, #9015)
+/// must stay in step — a form the prompt permits but this regex omits is
+/// scanned as an ungrounded quote.
 /// #4999: the `apex:` form was dropped when APEX retrieval was removed.
 /// #9193: `[doc: path@sha — "excerpt"]`, taught only in the opt-in docs
 /// section note; the line gate resolves it in the doc corpus or withholds.

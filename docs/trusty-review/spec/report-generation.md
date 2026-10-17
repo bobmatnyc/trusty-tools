@@ -91,7 +91,7 @@
 
 ## Template Structure
 
-Two templates will ship in `crates/trusty-review/templates/`:
+Two templates will ship in `crates/trusty-review/templates/` (since #9015, `content/instructions/trusty-review/templates/`):
 
 1. **`report-technical-dd.md`** (generic, vendor-neutral): Structure shared by all CAST/BlackDuck/homegrown reports. Sections: metadata, exec summary + top risks, scoring model, per-app scorecard, findings by severity, risk registers, graph datasets, gaps/caveats.
 2. **`report-technical-dd-cast.md`** (CAST-specific): Native 1.00–4.00 health-factor scales (Robustness/Efficiency/Security/Changeability/Transferability + TQI), ISO-5055 domains, Highlight-style scans (OSS/CVE, license, cloud maturity boosters/blockers, green impact), Appmarq peer benchmarks (quartiles/ranks), age-adjusted acceptability thresholds, remediation horizon tiers (fix-before-close/near/mid/long) with cost/effort.
@@ -958,7 +958,7 @@ pins the opacity defensively.
 
 ## References & Related Docs
 
-- **[crates/trusty-review/templates/](../../../crates/trusty-review/templates/)** — Template instances (generic + CAST-specific)
+- **[content/instructions/trusty-review/templates/](../../../content/instructions/trusty-review/templates/)** — Template instances (generic + CAST-specific)
 - **[docs/trusty-review/reports/](../reports/)** — Generated report examples
 - **[crates/trusty-analyze/CLAUDE.md](../../../crates/trusty-analyze/CLAUDE.md)** — trusty-analyze architecture and metrics schema (will be updated per task D)
 - **[trusty-review README](../../../crates/trusty-review/README.md)** — Usage and quick-start

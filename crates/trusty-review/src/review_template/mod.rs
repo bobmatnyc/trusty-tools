@@ -10,8 +10,10 @@
 //! names in the shared XDG config tree.
 //!
 //! What: [`ReviewTemplateLoader`] resolves a template name to its markdown
-//! source, trying extra dirs (tests) → the XDG user-config dir → bundled
-//! defaults. One template ships bundled: `strict-security`. A review template
+//! source, trying extra dirs (tests) → the XDG user-config dir → the
+//! instructional content (`instructions/trusty-review/templates/review/`,
+//! #9015). One template ships there: `strict-security`; content that lacks or
+//! empties it is [`ReviewTemplateError::Content`], never a default. A review template
 //! is APPENDED as a structured addendum section to the layered system prompt
 //! (after voice/principles) — see
 //! `pipeline::voice_config::build_voice_config` for the full layering order.
@@ -37,9 +39,12 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::identifier::is_valid_identifier;
+use crate::runtime_content::{
+    PromptContentError, content_path, optional_text, resolve_for_process,
+};
 
-/// The bundled `strict-security` review template, embedded at compile time.
-const BUNDLED_STRICT_SECURITY: &str = include_str!("../../templates/review/strict-security.md");
+/// The review templates that ship in the instructional content (#9015).
+const SHIPPED: &[&str] = &["strict-security"];
 
 /// Errors produced by the review-template loader.
 ///
@@ -52,8 +57,10 @@ const BUNDLED_STRICT_SECURITY: &str = include_str!("../../templates/review/stric
 /// What: `NotFound` for an unknown (but syntactically valid) template name;
 /// `InvalidName` for a name that fails `is_valid_identifier` — returned
 /// BEFORE any path join or filesystem access; `Io` for a filesystem failure
-/// while reading a discovered override file.
-/// Test: `load_missing_errors`, `load_rejects_absolute_path_before_any_io`.
+/// while reading a discovered override file; `Content` (#9015) when the
+/// instructional content cannot supply the template — the review must refuse.
+/// Test: `load_missing_errors`, `load_rejects_absolute_path_before_any_io`,
+/// `a_stale_release_without_the_shipped_template_refuses`.
 #[derive(Debug, Error)]
 pub enum ReviewTemplateError {
     /// No review template with the given name exists in any search directory.
@@ -75,6 +82,10 @@ pub enum ReviewTemplateError {
         #[source]
         source: std::io::Error,
     },
+    /// The instructional content could not supply the template (#9015); the
+    /// text names the remedy.
+    #[error(transparent)]
+    Content(#[from] PromptContentError),
 }
 
 /// Resolves review-template names to markdown addendum source.
@@ -84,8 +95,8 @@ pub enum ReviewTemplateError {
 /// search-directory precedence.
 /// What: `load(name)` tries `extra_dirs` (test/local overrides), then the XDG
 /// user-config dir (`~/.config/trusty-review/templates/review/<name>.md` on
-/// Linux; the platform-equivalent `dirs::config_dir()` elsewhere), then
-/// bundled defaults; returns the first hit. `skip_xdg` suppresses the
+/// Linux; the platform-equivalent `dirs::config_dir()` elsewhere), then the
+/// instructional content; returns the first hit. `skip_xdg` suppresses the
 /// user-config lookup so tests can assert on the bundled default exclusively.
 /// Test: `load_bundled_default`, `load_from_extra_dir`, `load_missing_errors`,
 /// `bundled_only_ignores_xdg`.
@@ -121,7 +132,7 @@ impl ReviewTemplateLoader {
 
     /// Construct a loader that skips the XDG user-config path entirely.
     ///
-    /// Why: tests asserting on the BUNDLED default must not accidentally load
+    /// Why: tests asserting on the SHIPPED template must not accidentally load
     /// a developer's `~/.config/trusty-review/templates/review/<name>.md`.
     /// What: empty extra dirs, XDG search suppressed.
     /// Test: `bundled_only_ignores_xdg`.
@@ -141,8 +152,11 @@ impl ReviewTemplateLoader {
     /// What: validates `name` via `is_valid_identifier` FIRST, returning
     /// [`ReviewTemplateError::InvalidName`] before any path join or
     /// filesystem access. Only then tries each extra dir, then the XDG dir,
-    /// for `templates/review/<name>.md`; then the bundled defaults. Returns
-    /// [`ReviewTemplateError::NotFound`] when nothing matches.
+    /// for `templates/review/<name>.md`; then the content's
+    /// `instructions/trusty-review/templates/review/<name>.md`. Returns
+    /// [`ReviewTemplateError::NotFound`] when nothing has that name, and
+    /// [`ReviewTemplateError::Content`] when the content cannot be resolved or
+    /// lacks or empties a shipped template (#9015).
     /// Test: `load_bundled_default`, `load_from_extra_dir`,
     /// `load_missing_errors`, `load_rejects_absolute_path_before_any_io`,
     /// `load_rejects_parent_traversal_before_any_io`.
@@ -185,13 +199,14 @@ impl ReviewTemplateLoader {
             }
         }
 
-        // 3. Bundled fallback.
-        match name {
-            "strict-security" => Ok(BUNDLED_STRICT_SECURITY.to_string()),
-            _ => Err(ReviewTemplateError::NotFound {
+        // 3. #9015: the instructional content, never a compiled-in default.
+        let content = resolve_for_process()?;
+        let path = content_path(&format!("templates/review/{name}.md"));
+        optional_text(&content, &path, SHIPPED.contains(&name))?.ok_or_else(|| {
+            ReviewTemplateError::NotFound {
                 name: name.to_string(),
-            }),
-        }
+            }
+        })
     }
 }
 
@@ -201,7 +216,7 @@ impl ReviewTemplateLoader {
 mod tests {
     use super::*;
 
-    /// Why: the bundled default must load with zero external setup.
+    /// Why: the shipped template must load from the content with no override.
     /// What: loads `strict-security` and asserts a known heading is present.
     /// Test: this test itself.
     #[test]
@@ -234,6 +249,28 @@ mod tests {
         let loader = ReviewTemplateLoader::bundled_only();
         let err = loader.load("does-not-exist").expect_err("must error");
         assert!(matches!(err, ReviewTemplateError::NotFound { .. }));
+    }
+
+    /// Why (#9015): content older than this binary lacks the shipped template;
+    /// the loader must refuse naming the file, so the review refuses too.
+    /// What: content without `strict-security.md` is `Content`, naming the
+    /// path and `tm content update`; an unshipped name stays `NotFound`.
+    /// Test: this test itself.
+    #[test]
+    fn a_stale_release_without_the_shipped_template_refuses() {
+        use crate::runtime_content::test_support::{OverrideGuard, installed_without};
+        let path = content_path("templates/review/strict-security.md");
+        let _guard = OverrideGuard::content(installed_without(&path));
+        let loader = ReviewTemplateLoader::bundled_only();
+        let err = loader.load("strict-security").expect_err("must refuse");
+        assert!(matches!(err, ReviewTemplateError::Content(_)), "{err:?}");
+        assert!(err.to_string().contains(&path), "{err}");
+        assert!(err.to_string().contains("tm content update"), "{err}");
+        let unknown = loader.load("my-own").expect_err("absent");
+        assert!(
+            matches!(unknown, ReviewTemplateError::NotFound { .. }),
+            "{unknown:?}"
+        );
     }
 
     /// Why: bundled-only mode must ignore any external XDG template.
