@@ -152,10 +152,9 @@ async fn detached_rehydrate_survives_caller_cancellation() {
 /// Issue #3683 slice 1: concurrent callers must dedupe onto ONE detached
 /// scan rather than each independently re-triggering their own rehydrate.
 ///
-/// Why deterministic via timing (not a scan counter): `Bm25Index`/
-/// `CorpusStore` don't expose a scan-count hook, so this pins the
-/// OBSERVABLE contract instead — 5 concurrent callers racing a slow rehydrate
-/// all complete close to the duration of ONE scan, not N serialized scans.
+/// Why a counter: the `cfg(test)` per-indexer scan count in `idle_evict`
+/// records every scan the blocking task starts, so 5 callers racing a slow
+/// rehydrate must leave it at exactly 1. No wall-clock bound decides the result.
 #[tokio::test]
 #[serial_test::serial]
 async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
@@ -181,7 +180,12 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
         compact: false,
         ..Default::default()
     };
-    let start = std::time::Instant::now();
+    let scans = super::idle_evict::RehydrateScanCounter::arm(&idx);
+    assert_eq!(
+        scans.count(),
+        0,
+        "no rehydrate scan may have run before the concurrent callers start"
+    );
     let mut tasks = Vec::new();
     for _ in 0..5 {
         let idx_bg = Arc::clone(&idx);
@@ -194,14 +198,11 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
     }
     super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
 
-    // One ~200ms scan shared by all 5 callers finishes well under 700ms even
-    // with scheduling overhead; 5 INDEPENDENT (non-deduped) scans serialized
-    // behind the same locks would take roughly 5x that.
-    assert!(
-        start.elapsed() < Duration::from_millis(700),
-        "5 concurrent callers must dedupe onto one scan, not each re-trigger their own; \
-         took {:?}",
-        start.elapsed()
+    // #10015: count the scans instead of timing them; elapsed time flaked on a loaded runner.
+    assert_eq!(
+        scans.count(),
+        1,
+        "5 concurrent callers must dedupe onto exactly one scan, not each re-trigger their own"
     );
 }
 
