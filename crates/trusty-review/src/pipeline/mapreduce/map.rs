@@ -30,6 +30,7 @@ use crate::{
         letter_grade::grade_floor,  // #9310 ruling 50: a chunk's grade floor
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_sections},
+        prompt_templates::ReviewerPrompts,
         reply_shape::describe_reply,
         verdict_status::judged_verdict, // #9310: a chunk's grade floors its verdict
     },
@@ -49,6 +50,8 @@ use super::unit::{MapUnit, MapUnitKind};
 /// `Copy`-cheap to clone for each task because it holds references.
 /// Test: constructed in `map_tests.rs`.
 pub struct MapContext<'a> {
+    /// The reviewer system prompts (#9015: read from content, not compiled in).
+    pub prompts: &'a ReviewerPrompts,
     /// GitHub org (passed through to the prompt builder).
     pub owner: &'a str,
     /// GitHub repo.
@@ -225,6 +228,7 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>, extra_sections: &str) -> MapT
                 });
             }
             let req = build_review_prompt_with_sections(
+                ctx.prompts,
                 ctx.owner,
                 ctx.repo,
                 ctx.pr_meta,

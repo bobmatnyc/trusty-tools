@@ -32,6 +32,7 @@ use crate::{
         optional_context::assemble::{AppliedContext, refs_for_review}, // #9192, #9197
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
+        prompt_templates::ReviewerPrompts,
         runner::{CallerContext, ReviewDeps, ReviewInput},
         runner_helpers::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
@@ -69,6 +70,8 @@ pub(super) struct MapReduceRun {
     pub degraded_reason: Option<String>,
     /// #9192 corpus switch and #9197 issue section from `apply_caller_context`.
     pub(crate) applied: AppliedContext,
+    /// #9015: the reviewer prompts the unified path would have used.
+    pub(crate) prompts: std::sync::Arc<ReviewerPrompts>,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -106,6 +109,7 @@ pub(super) async fn run_mapreduce_branch(
 
     let voice_config = build_voice_config(config);
     let ctx = MapContext {
+        prompts: &run.prompts, // #9015
         owner: &result.owner,
         repo: &result.repo,
         pr_meta: &run.pr_meta,

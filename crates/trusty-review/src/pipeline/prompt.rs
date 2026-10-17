@@ -33,9 +33,8 @@ use crate::{
     voice::VoiceConfig,
 };
 
-// System prompt templates are in a separate file to keep this module under the
-// 500-line cap (#610) — the two large prompt constants are ~160 lines combined.
-use super::prompt_templates::{SYSTEM_PROMPT_COVERAGE_GATING, SYSTEM_PROMPT_STOCK};
+// #9015: the system prompts are runtime content, read by `prompt_templates`.
+use super::prompt_templates::ReviewerPrompts;
 // User-message builder extracted to keep this module under the 500-line cap (#610).
 use super::prompt_user_msg::build_user_message;
 
@@ -241,17 +240,15 @@ pub struct ReviewContext {
 /// REV-130's fail-open APPROVE), the output format contract, and the quality bar
 /// for REQUEST_CHANGES/BLOCK.  Kept as a function for backward compatibility and
 /// for tests that need only the stock text.  For the full 3-layer prompt
-/// (stock → principles → voice) use `build_system_prompt(voice_config)`.
-/// The `coverage_gating_enabled` parameter controls whether the prompt tells
-/// the model that coverage can gate the verdict (#1014).  When `false`, the
-/// stock advisory text ("do not block on coverage") is preserved unchanged.
-/// What: returns a static string; the output-format section uses structured
-/// output language — the provider forces JSON via `response_schema` so the
-/// model need not emit a fenced block.
+/// (stock → principles → voice) use `build_system_prompt`.
+/// What: the stock text of `prompts` (#9015: read from content, not compiled
+/// in); the output-format section uses structured output language — the
+/// provider forces JSON via `response_schema` so the model need not emit a
+/// fenced block.
 /// Test: `system_prompt_contains_policy`, `system_prompt_coverage_gating_on`,
 /// `system_prompt_coverage_gating_off`.
-pub fn reviewer_system_prompt() -> &'static str {
-    reviewer_system_prompt_with_coverage(false)
+pub fn reviewer_system_prompt(prompts: &ReviewerPrompts) -> &str {
+    reviewer_system_prompt_with_coverage(prompts, false)
 }
 
 /// Build the base system prompt with optional coverage-gating language.
@@ -264,12 +261,11 @@ pub fn reviewer_system_prompt() -> &'static str {
 /// pre-#1014 stock text.  When true, the "Note but do not block on" coverage line
 /// is replaced with an informational note about the coverage context block.
 /// Test: `system_prompt_coverage_gating_on`, `system_prompt_coverage_gating_off`.
-pub fn reviewer_system_prompt_with_coverage(coverage_gating_enabled: bool) -> &'static str {
-    if coverage_gating_enabled {
-        SYSTEM_PROMPT_COVERAGE_GATING
-    } else {
-        SYSTEM_PROMPT_STOCK
-    }
+pub fn reviewer_system_prompt_with_coverage(
+    prompts: &ReviewerPrompts,
+    coverage_gating_enabled: bool,
+) -> &str {
+    prompts.for_coverage(coverage_gating_enabled)
 }
 
 // ─── Layered system prompt ────────────────────────────────────────────────────
@@ -286,8 +282,8 @@ pub fn reviewer_system_prompt_with_coverage(coverage_gating_enabled: bool) -> &'
 /// "do not block on coverage" advisory is replaced with an informational note.
 /// Test: `build_system_prompt_stock_only`, `build_system_prompt_with_principles`,
 /// `build_system_prompt_full_pipeline` in `prompt_tests.rs`.
-pub fn build_system_prompt(voice_config: &VoiceConfig) -> String {
-    build_system_prompt_with_coverage(voice_config, false)
+pub fn build_system_prompt(prompts: &ReviewerPrompts, voice_config: &VoiceConfig) -> String {
+    build_system_prompt_with_coverage(prompts, voice_config, false)
 }
 
 /// Build the layered system prompt with an explicit coverage-gating flag.
@@ -298,10 +294,11 @@ pub fn build_system_prompt(voice_config: &VoiceConfig) -> String {
 /// appends the principles and voice addenda exactly as `build_system_prompt` does.
 /// Test: `build_system_prompt_coverage_gating_on`.
 pub fn build_system_prompt_with_coverage(
+    prompts: &ReviewerPrompts,
     voice_config: &VoiceConfig,
     coverage_gating_enabled: bool,
 ) -> String {
-    let stock = reviewer_system_prompt_with_coverage(coverage_gating_enabled);
+    let stock = reviewer_system_prompt_with_coverage(prompts, coverage_gating_enabled);
     let addendum = voice_config.combined_addendum();
     if addendum.is_empty() {
         return stock.to_string();
@@ -335,6 +332,7 @@ pub fn build_system_prompt_with_coverage(
 // splitting would make the API less ergonomic without improving cohesion.
 #[allow(clippy::too_many_arguments)]
 pub fn build_review_prompt(
+    prompts: &ReviewerPrompts,
     owner: &str,
     repo: &str,
     pr_meta: &ReviewPrMeta,
@@ -345,6 +343,7 @@ pub fn build_review_prompt(
     voice_config: &VoiceConfig,
 ) -> LlmRequest {
     build_review_prompt_inner(
+        prompts,
         owner,
         repo,
         pr_meta,
@@ -367,6 +366,7 @@ pub fn build_review_prompt(
 /// Test: `build_review_prompt_coverage_gating_injects_block`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_review_prompt_with_coverage(
+    prompts: &ReviewerPrompts,
     owner: &str,
     repo: &str,
     pr_meta: &ReviewPrMeta,
@@ -378,6 +378,7 @@ pub fn build_review_prompt_with_coverage(
     coverage_gating_enabled: bool,
 ) -> LlmRequest {
     build_review_prompt_inner(
+        prompts,
         owner,
         repo,
         pr_meta,
@@ -403,6 +404,7 @@ pub fn build_review_prompt_with_coverage(
 /// `supplied_issue_doc_reaches_the_reviewer_prompt`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_review_prompt_with_sections(
+    prompts: &ReviewerPrompts,
     owner: &str,
     repo: &str,
     pr_meta: &ReviewPrMeta,
@@ -415,6 +417,7 @@ pub(crate) fn build_review_prompt_with_sections(
     extra_sections: &str,
 ) -> LlmRequest {
     build_review_prompt_inner(
+        prompts,
         owner,
         repo,
         pr_meta,
@@ -436,6 +439,7 @@ pub(crate) fn build_review_prompt_with_sections(
 /// Test: covered transitively by all `build_review_prompt_*` tests.
 #[allow(clippy::too_many_arguments)]
 fn build_review_prompt_inner(
+    prompts: &ReviewerPrompts,
     owner: &str,
     repo: &str,
     pr_meta: &ReviewPrMeta,
@@ -458,7 +462,7 @@ fn build_review_prompt_inner(
     );
     LlmRequest {
         model: strip_provider_prefix(reviewer_model).to_string(),
-        system: build_system_prompt_with_coverage(voice_config, coverage_gating_enabled),
+        system: build_system_prompt_with_coverage(prompts, voice_config, coverage_gating_enabled),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: user_message,

@@ -22,8 +22,8 @@ mod truncation;
 use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC headroom
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, resolve_diff_token,
-    subject_of,
+    claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, prompts_or_abort,
+    resolve_diff_token, subject_of,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
@@ -249,6 +249,13 @@ async fn run_pipeline(
         format!("https://github.com/{owner}/{repo}/pull/{pr_number}")
     } else {
         String::new()
+    };
+    // #9015: no reviewer prompts, no review — before any claim, fetch or model call.
+    let subject = (owner.as_str(), repo.as_str(), pr_number, pr_url.as_str());
+    let supplied = options.prompts.as_ref();
+    let prompts = match prompts_or_abort(supplied, subject, config, &input, &deps).await {
+        std::ops::ControlFlow::Continue(prompts) => prompts,
+        std::ops::ControlFlow::Break(aborted) => return aborted,
     };
 
     // ── Step 1b: posting requires the claim gate (#5113) ──────────────────
@@ -576,6 +583,7 @@ async fn run_pipeline(
             coverage_contrib,
             degraded_reason,
             applied,
+            prompts, // #9015
         };
         return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
     }
@@ -584,6 +592,7 @@ async fn run_pipeline(
     // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
     let voice_config = build_voice_config(config);
     let llm_req = build_review_prompt_with_sections(
+        &prompts, // #9015
         &owner,
         &repo,
         &pr_meta,

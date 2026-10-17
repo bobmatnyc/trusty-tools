@@ -22,7 +22,8 @@ use trusty_review::models::ReviewResult;
 use trusty_review::pipeline::verify_posted::UNJUDGED_REASON;
 use trusty_review::pipeline::withheld_contract::reason_class;
 use trusty_review::pipeline::{
-    CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
+    CallerContext, DiffSource, ReviewDeps, ReviewInput, ReviewOptions, TriggerDecision,
+    run_review_with,
 };
 
 use crate::fakes::{FakeSearch, ReadyAnalyze};
@@ -388,7 +389,10 @@ pub async fn review_diff(
         dedup: None,
     };
     let started = Instant::now();
-    let result = run_review(config, input, deps).await;
+    // #9015: the checkout's prompts, supplied, so no `.git` or bundle is needed.
+    let options =
+        ReviewOptions::default().with_prompts(Arc::new(crate::prompts::checkout_prompts()));
+    let result = run_review_with(config, input, deps, options).await.result;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let replies = reviewer.replies();
     let (reviewer, verifier) = (reviewer.usage(), checker.usage());

@@ -27,6 +27,7 @@ use crate::{
         output::{print_review_result, write_review_log},
         post::{FinalizeAction, PostContext, decide_action, finalize_review},
         prompt::ReviewPrMeta,
+        prompt_templates::ReviewerPrompts,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
 };
@@ -60,6 +61,41 @@ pub(super) fn subject_of(source: &DiffSource) -> (String, String, u64, bool) {
         }
         DiffSource::Stdin => (LOCAL_OWNER.to_string(), "stdin".to_string(), 0_u64, true),
     }
+}
+
+/// The reviewer prompts this review builds from (`Continue`), or the finished
+/// abort (`Break`) (#9015).
+///
+/// Why: the prompts are runtime content (ADR-0064). Without them no review can
+/// run, and the run must stop before it claims a dedup slot, fetches the PR or
+/// calls a model, so a retry once content is installed starts clean.
+/// What: the prompts the caller supplied, else [`ReviewerPrompts::load`]. On a
+/// load error: one ERROR line, then [`ReviewResult::mark_infra_skip`] with
+/// `"not reviewed: <error>"` (the error text names its remedy; the MCP
+/// envelope turns `isError` on), finished by [`abort_dry`] with
+/// [`DedupClaim::NotHeld`]. Never a default or empty prompt.
+/// Test: `run_review_without_prompts_fails_closed_before_any_fetch_or_model_call`,
+/// `run_review_uses_supplied_prompts_without_loading`.
+pub(super) async fn prompts_or_abort(
+    supplied: Option<&Arc<ReviewerPrompts>>,
+    subject: (&str, &str, u64, &str),
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    deps: &ReviewDeps,
+) -> ControlFlow<ReviewResult, Arc<ReviewerPrompts>> {
+    if let Some(prompts) = supplied {
+        return ControlFlow::Continue(Arc::clone(prompts));
+    }
+    let err = match ReviewerPrompts::load() {
+        Ok(prompts) => return ControlFlow::Continue(Arc::new(prompts)),
+        Err(err) => err,
+    };
+    let (owner, repo, pr, pr_url) = subject;
+    error!(error = %err, "reviewer prompts unavailable — not reviewed (#9015)");
+    let mut result = ReviewResult::new(owner, repo, pr, format!("PR #{pr}"), pr_url);
+    result.mark_infra_skip(format!("not reviewed: {err}"));
+    // #9015: NotHeld — the load runs before any claim is attempted.
+    ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
 }
 
 /// Combine caller-supplied PR description + discussion into a single author-

@@ -8,6 +8,7 @@
 //! LLM that asserts the per-unit diff text reached the prompt.
 //! Test: this is the test module.
 
+use crate::pipeline::prompt_templates::test_support::prompts; // #9015
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -161,6 +162,7 @@ fn ctx<'a>(
     voice: &'a VoiceConfig,
 ) -> MapContext<'a> {
     MapContext {
+        prompts: prompts(),
         owner: "acme",
         repo: "widgets",
         pr_meta,

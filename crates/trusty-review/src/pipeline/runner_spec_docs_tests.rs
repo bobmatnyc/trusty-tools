@@ -371,9 +371,9 @@ async fn claude_md_off_makes_no_fetch_and_no_section() {
 #[serial_test::serial]
 #[tokio::test]
 async fn default_prompts_never_mention_doc_citations() {
-    use crate::pipeline::prompt_templates::{SYSTEM_PROMPT_COVERAGE_GATING, SYSTEM_PROMPT_STOCK};
-    assert!(!SYSTEM_PROMPT_STOCK.contains("[doc:"));
-    assert!(!SYSTEM_PROMPT_COVERAGE_GATING.contains("[doc:"));
+    let p = crate::pipeline::prompt_templates::test_support::prompts(); // #9015
+    assert!(!p.stock().contains("[doc:"));
+    assert!(!p.coverage_gating().contains("[doc:"));
     let seen = run(Setup::new(
         OptionalContextRequest::default(),
         FakeFetcher::adr(),
