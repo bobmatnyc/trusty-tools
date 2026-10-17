@@ -25,7 +25,7 @@ mod entry;
 pub use entry::{
     prepare_isolated_session, prepare_isolated_session_under, prepare_session,
     prepare_session_for_managed, prepare_session_for_repair_in, prepare_session_for_repair_under,
-    prepare_session_with_home, prepare_session_with_repo_url,
+    prepare_session_with_home, prepare_session_with_home_in, prepare_session_with_repo_url,
     prepare_session_with_repo_url_and_exe, prepare_session_with_style,
     prepare_session_with_style_and_native,
 };
@@ -69,10 +69,11 @@ mod settings;
 mod skills;
 // #7617: the launch-time `statusLine` guarantee, both tiers.
 mod statusline;
-pub use statusline::{ensure_status_line, ensure_status_line_in};
+pub use statusline::{ensure_status_line, ensure_status_line_in, user_settings_path_in};
 mod sync_assets;
 // #9846: the user-tier paths, relocated by `CLAUDE_CONFIG_DIR`.
 mod user_tier;
+pub use user_tier::user_tier_config_dir;
 // #7688: the four `--append-system-prompt` composers, split out of this module
 // when the addendum pushed it over the 500-SLOC production cap. Re-exported so
 // every existing `session_launch::build_system_prompt_for*` call site is

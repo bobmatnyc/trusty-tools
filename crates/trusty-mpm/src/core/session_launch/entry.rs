@@ -377,6 +377,33 @@ pub fn prepare_session_with_home(
     native_supported: bool,
     home: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
+    prepare_session_with_home_in(
+        fw,
+        project_dir,
+        explicit_style,
+        native_supported,
+        home,
+        None,
+    )
+}
+
+/// [`prepare_session_with_home`] with the user tier's config dir named (#9999).
+///
+/// Why: `tm session start` and `session_connect` named only a home, so with
+/// `CLAUDE_CONFIG_DIR` set elsewhere their statusLine seed, trust seed and
+/// legacy-hook strip still landed under `<home>/.claude` (#9846's follow-up).
+/// What: the same preparation, with `claude_config_dir` relocating the user
+/// tier off `home`; `None` keeps `<home>/.claude` and `<home>/.claude.json`.
+/// Test: `session_start_in_place_writes_the_user_tier_under_the_config_dir_9999`,
+/// `launch_session_writes_the_user_tier_under_the_config_dir_9999`.
+pub fn prepare_session_with_home_in(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+    home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
     prepare_session_inner(
         fw,
         project_dir,
@@ -384,6 +411,9 @@ pub fn prepare_session_with_home(
         native_supported,
         None,
         None,
-        HostInputs::with_home(home),
+        HostInputs {
+            claude_config_dir,
+            ..HostInputs::with_home(home)
+        },
     )
 }

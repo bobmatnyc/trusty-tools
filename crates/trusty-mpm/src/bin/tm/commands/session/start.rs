@@ -91,7 +91,16 @@ pub(crate) async fn start_session(
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    start_session_in_place(daemon, &path, &fw, dirs::home_dir().as_deref()).await
+    // #9999: the user tier `CLAUDE_CONFIG_DIR` names, as `tm validate --repair` uses.
+    let config_dir = trusty_mpm::core::session_record::claude_config_dir_override();
+    start_session_in_place(
+        daemon,
+        &path,
+        &fw,
+        dirs::home_dir().as_deref(),
+        config_dir.as_deref(),
+    )
+    .await
 }
 
 /// The launch spec `tm session start` starts its in-place pane with (#8405,
@@ -189,7 +198,8 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// registers via `POST /sessions`, then creates a detached tmux session rooted
 /// at `path` and starts `claude` in it from [`inplace_session_spec`], which
 /// carries that file as `--append-system-prompt-file`.
-/// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
+/// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`,
+/// `session_start_in_place_writes_the_user_tier_under_the_config_dir_9999`
 /// in `start_tests.rs` covers the routing decision hermetically; the tmux/daemon
 /// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
 /// this function inherited unchanged.
@@ -202,6 +212,8 @@ async fn start_session_in_place(
     // test passes a tempdir, which is what lets it stop repointing the process's
     // `$HOME` — a write every sibling test in this binary would observe.
     home: Option<&std::path::Path>,
+    // #9999: relocates the user tier off `home`, as `CLAUDE_CONFIG_DIR` does.
+    claude_config_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
@@ -210,8 +222,14 @@ async fn start_session_in_place(
     // Same real version probe `prepare_session` performs; only the home is
     // supplied explicitly (#5544).
     let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
-    match trusty_mpm::core::session_launch::prepare_session_with_home(fw, path, None, native, home)
-    {
+    match trusty_mpm::core::session_launch::prepare_session_with_home_in(
+        fw,
+        path,
+        None,
+        native,
+        home,
+        claude_config_dir,
+    ) {
         Ok(report) => {
             println!(
                 "{}",

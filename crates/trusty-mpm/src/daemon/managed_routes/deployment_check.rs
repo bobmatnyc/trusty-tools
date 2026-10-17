@@ -28,16 +28,23 @@ use crate::session_manager::ManagedSessionId;
 /// user-tier statusLine and trust seed under a home. An isolated test daemon
 /// pins its own home; production passes `DaemonState::user_home`. #8436: it no
 /// longer carries a trusty-memory verdict — no launch asks for one.
-/// What: `home` (`None` skips the user-global writes).
+/// What: `home` (`None` skips the user-global writes) and (#9999) the config
+/// dir that relocates the user tier off it, as `CLAUDE_CONFIG_DIR` does.
 #[derive(Default)]
 pub(super) struct RepairHost {
     pub(super) home: Option<std::path::PathBuf>,
+    pub(super) claude_config_dir: Option<std::path::PathBuf>,
 }
 
 impl RepairHost {
-    /// A host with the user home.
-    pub(super) fn new(home: Option<std::path::PathBuf>) -> Self {
-        Self { home }
+    /// The host `state` resolves: its user home and user-tier config dir.
+    /// Test: `the_daemon_repair_writes_the_user_tier_under_the_config_dir_9999`.
+    pub(super) fn for_state(state: &crate::daemon::state::DaemonState) -> Self {
+        Self {
+            home: state.user_home(),
+            // #9999: the tier `CLAUDE_CONFIG_DIR` names, never only `<home>/.claude`.
+            claude_config_dir: state.user_claude_config_dir(),
+        }
     }
 }
 
@@ -100,6 +107,7 @@ pub(super) fn ensure_deployment_complete(
         workspace,
         repo_url,
         host.home.as_deref(),
+        host.claude_config_dir.as_deref(),
     );
     // Warn-only carrier-reachability self-check (issue #2231) — see its own
     // doc comment. Runs regardless of the completeness verdict below and can

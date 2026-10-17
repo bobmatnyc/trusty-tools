@@ -52,6 +52,26 @@ pub(super) fn resolve(home: Option<&Path>, config_dir: Option<&Path>) -> Option<
     }
 }
 
+/// The user tier's config dir for a caller whose home a test may pin (#9999).
+///
+/// Why: the daemon and the connect client take their home from a test pin
+/// when one is set (#8545). `CLAUDE_CONFIG_DIR` is set inside every managed
+/// session, so reading it under a pinned home would send a test's user-tier
+/// writes into the operator's real config dir.
+/// What: `pinned_config_dir` when `pinned_home` is `Some`; otherwise
+/// [`crate::core::session_record::claude_config_dir_override`], the dir #9846
+/// resolves for `tm validate --repair`. Feed the answer to [`resolve_for_write`].
+/// Test: `a_pinned_home_never_reads_the_ambient_config_dir`.
+pub fn user_tier_config_dir(
+    pinned_home: Option<&Path>,
+    pinned_config_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    match pinned_home {
+        Some(_) => pinned_config_dir.map(Path::to_path_buf),
+        None => crate::core::session_record::claude_config_dir_override(),
+    }
+}
+
 /// [`resolve`], declined unless the location is absolute.
 ///
 /// Why (#5544): a relative or absent base would send a user-global write beside
@@ -102,5 +122,22 @@ mod tests {
         assert_eq!(unset.claude_json, Path::new("/h/.claude.json"));
         assert_eq!(resolve(None, None), None);
         assert_eq!(resolve_for_write(Some(home), Some(Path::new("rel"))), None);
+    }
+
+    /// #9999: a pinned home takes only the pinned config dir, never the
+    /// ambient `CLAUDE_CONFIG_DIR` this test process may carry.
+    #[test]
+    fn a_pinned_home_never_reads_the_ambient_config_dir() {
+        let home = Path::new("/h");
+        let cfg = Path::new("/cfg");
+        assert_eq!(user_tier_config_dir(Some(home), None), None);
+        assert_eq!(
+            user_tier_config_dir(Some(home), Some(cfg)),
+            Some(PathBuf::from("/cfg"))
+        );
+        assert_eq!(
+            user_tier_config_dir(None, Some(cfg)),
+            crate::core::session_record::claude_config_dir_override()
+        );
     }
 }

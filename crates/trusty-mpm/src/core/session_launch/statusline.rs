@@ -102,9 +102,6 @@ fn user_settings_path() -> Option<PathBuf> {
 /// What: [`super::user_tier::resolve_for_write`], reduced to the settings file;
 /// `None` when the location is unusable.
 /// Test: `user_settings_path_in_refuses_a_relative_config_dir`.
-pub(super) fn user_settings_path_in(
-    home: Option<&Path>,
-    config_dir: Option<&Path>,
-) -> Option<PathBuf> {
+pub fn user_settings_path_in(home: Option<&Path>, config_dir: Option<&Path>) -> Option<PathBuf> {
     super::user_tier::resolve_for_write(home, config_dir).map(|t| t.settings_json())
 }

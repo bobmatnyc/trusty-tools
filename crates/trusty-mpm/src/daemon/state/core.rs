@@ -173,6 +173,8 @@ pub struct DaemonState {
     /// The user home for user-global writes; `None` resolves the process home.
     /// #8545: the isolated test constructors pin it under their temp root.
     pub(super) user_home: Option<PathBuf>,
+    /// #9999: a test's user-tier config dir; read only while `user_home` is pinned.
+    pub(super) user_claude_config_dir: Option<PathBuf>,
     /// The base the captured-error stores are read from, when this daemon must
     /// not resolve them from process-global state (#6505).
     ///
@@ -540,6 +542,7 @@ impl DaemonState {
             pair_code: Mutex::new(None),
             framework_root: root,
             user_home: None,
+            user_claude_config_dir: None,
             // Production keeps the OS data-directory resolution; see the field doc.
             error_store_base: None,
             event_tx,
@@ -628,6 +631,7 @@ impl DaemonState {
             error_store_base: Some(framework_root.clone()),
             framework_root,
             user_home: None,
+            user_claude_config_dir: None,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
@@ -680,22 +684,6 @@ impl DaemonState {
     /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
     pub fn user_home(&self) -> Option<PathBuf> {
         self.user_home.clone().or_else(dirs::home_dir)
-    }
-
-    /// Self-heal `workspace`'s statusLine, the user tier under [`Self::user_home`].
-    ///
-    /// Why (#8545): the resume route used the ambient `$HOME`, so an isolated
-    /// daemon test wrote the operator's `~/.claude/settings.json`.
-    /// What: `session_launch::ensure_status_line_in` with `<home>/.claude/settings.json`.
-    /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
-    pub fn ensure_status_line(
-        &self,
-        workspace: &std::path::Path,
-    ) -> Result<(), crate::core::session_launch::PrepError> {
-        let user = self
-            .user_home()
-            .map(|h| h.join(".claude").join("settings.json"));
-        crate::core::session_launch::ensure_status_line_in(workspace, user.as_deref())
     }
 
     /// The base this daemon reads captured-error stores from, when one is
