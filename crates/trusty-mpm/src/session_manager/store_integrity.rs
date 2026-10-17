@@ -197,6 +197,8 @@ pub fn valid_prefix_bytes(raw: &str) -> Option<usize> {
 
 /// Why a repair could not be performed.
 #[derive(Debug, Error)]
+// #9080: a new repair refusal must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum RepairError {
     /// The file parses fine — there is nothing to repair.
     #[error("session store {0} parses cleanly; nothing to repair")]

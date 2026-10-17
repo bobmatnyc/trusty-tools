@@ -83,6 +83,8 @@ const CLAUDE_JSON: &str = ".claude.json";
 /// composed map that will not serialise.
 /// Test: `provision_errors_when_the_state_dir_is_unwritable`.
 #[derive(Debug, thiserror::Error)]
+// #9080: a new provisioning failure must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum ScopeError {
     /// The composed file could not be written.
     #[error(

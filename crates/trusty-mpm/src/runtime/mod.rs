@@ -75,6 +75,8 @@ use crate::session_manager::ManagedTmuxDriver;
 /// or required binary not found on PATH.
 /// Test: exercised by `ClaudeCodeAdapter` unit tests.
 #[derive(Debug, Error)]
+// #9080: a new adapter failure class must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum RuntimeError {
     /// The spawn command could not be executed in the target pane.
     #[error("spawn failed: {0}")]

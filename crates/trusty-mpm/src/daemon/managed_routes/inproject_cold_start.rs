@@ -86,6 +86,8 @@ const DIRTY_ENTRY_PREVIEW: usize = 10;
 /// Test: `existing_checkout_on_a_different_remote_fails_loud`,
 /// `existing_checkout_without_an_origin_fails_loud`.
 #[derive(Debug, thiserror::Error)]
+// #9080: a new cold-start failure must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum ColdStartError {
     /// The existing managed checkout belongs to a different repository.
     #[error(

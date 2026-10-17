@@ -28,6 +28,8 @@ use super::store_integrity::{StoreIntegrity, validate};
 /// What: one variant per failure mode with human-readable context strings.
 /// Test: exercised indirectly through `SessionStore` method tests.
 #[derive(Debug, Error)]
+// #9080: a new store failure mode must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum StoreError {
     /// An I/O operation on the backing file failed.
     #[error("session store I/O error: {0}")]

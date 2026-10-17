@@ -67,6 +67,8 @@ impl Keyed for Milestone {
 /// What: one variant per failure mode: I/O, serialization, or not-found.
 /// Test: `store_other_io_error_propagates`, `store_get_missing_is_not_found`.
 #[derive(Debug, Error)]
+// #9080: a new store failure mode must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum StoreError {
     /// An I/O operation on the backing file failed.
     #[error("store I/O error: {0}")]
