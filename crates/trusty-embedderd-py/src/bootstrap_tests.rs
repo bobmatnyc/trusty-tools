@@ -828,3 +828,51 @@ fn locate_uv_with_no_uv_and_the_fetch_on_never_fetches() {
     );
     assert!(!err.contains("failed"), "no fetch was tried: {err}");
 }
+
+/// #9971: a uv step's process failure reaches the caller as a typed error.
+/// `/bin/sh` stands in for uv, so no freshly written file is exec'd: a stalled
+/// step is a transient `Timeout`, a failed local step a permanent
+/// `StepFailed`, and a failed `pip sync` (sh runs `./pip`) a download failure
+/// whose kind follows the free space.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn uv_step_failures_are_typed_for_the_retry_decision() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = Path::new("/bin/sh");
+    let run = |args: &[&str], timeout| {
+        super::run_with_timeout(sh, args, tmp.path(), tmp.path(), timeout).unwrap_err()
+    };
+    let generous = Duration::from_secs(30);
+
+    let stalled = run(&["-c", "sleep 30"], Duration::from_millis(300));
+    assert!(
+        matches!(
+            stalled.downcast_ref::<VenvBuildError>(),
+            Some(VenvBuildError::Timeout { .. })
+        ),
+        "{stalled:#}"
+    );
+    assert_eq!(failure_kind(&stalled), FailureKind::Transient);
+
+    let local = run(&["-c", "exit 3"], generous);
+    assert!(
+        matches!(
+            local.downcast_ref::<VenvBuildError>(),
+            Some(VenvBuildError::StepFailed { .. })
+        ),
+        "{local:#}"
+    );
+    assert_eq!(failure_kind(&local), FailureKind::Permanent);
+
+    fs::write(tmp.path().join("pip"), "exit 4\n").unwrap();
+    let download = run(&["pip", "sync"], generous);
+    let free = fs4::available_space(tmp.path()).unwrap();
+    let want = if free < REQUIRED_FREE_BYTES {
+        FailureKind::Permanent
+    } else {
+        FailureKind::Transient
+    };
+    assert_eq!(failure_kind(&download), want, "{download:#}");
+}

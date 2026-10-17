@@ -1,0 +1,2 @@
+Added
+- Venv-build failures are typed: `VenvBuildError` (`InsufficientDisk`, `Timeout`, `DownloadFailed`, `StepFailed`) and `failure_kind`, which reads an error's first typed cause and answers `Transient` or `Permanent`. A network failure or timeout (a stalled or failed `uv python install` / `uv pip sync`, a failed uv download, a stalled first smoke test) is transient; low disk, `ENOSPC`, `TRUSTY_UV_FETCH=0` with no uv, a failed local uv step and untyped errors are permanent. A download step that fails with less than ~3 GB free reports `InsufficientDisk` (#9971).

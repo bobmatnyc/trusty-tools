@@ -51,6 +51,8 @@ use include_dir::{include_dir, Dir};
 use sha2::{Digest, Sha256};
 
 use crate::spawn_retry::run_bounded_python_check;
+// #9971: typed build failures, so the caller retries a network failure only.
+use crate::venv_error::{human_bytes, step_exit, VenvBuildError, REQUIRED_FREE_BYTES};
 
 /// The Python project (pyproject + hashed uv.lock + `trusty_embed_sidecar`
 /// package + tests) embedded into the binary and materialized at bootstrap.
@@ -58,9 +60,6 @@ static PY_PROJECT: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/python");
 
 /// Pinned CPython version `uv python install` provisions for the venv.
 const PINNED_PYTHON: &str = "3.11";
-
-/// Approximate free space required to build the venv (torch is ~2-3 GB).
-const REQUIRED_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Default bootstrap timeout (each uv step); override via
 /// `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS`.
@@ -603,13 +602,11 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
 fn precheck_disk_space(base: &Path) -> Result<()> {
     // fs4::available_space needs an existing path; base is created by caller.
     match fs4::available_space(base) {
-        Ok(free) if free < REQUIRED_FREE_BYTES => bail!(
-            "insufficient disk space for the Python/MPS sidecar venv: {} free at {}, \
-             need ~{} GB (torch + sentence-transformers)",
-            human_bytes(free),
-            base.display(),
-            REQUIRED_FREE_BYTES / (1024 * 1024 * 1024)
-        ),
+        Ok(free) if free < REQUIRED_FREE_BYTES => Err(VenvBuildError::InsufficientDisk {
+            path: base.to_path_buf(),
+            free_bytes: free,
+        }
+        .into()),
         Ok(free) => {
             tracing::debug!(free = %human_bytes(free), "py-embedder: disk-space precheck ok");
             Ok(())
@@ -623,10 +620,6 @@ fn precheck_disk_space(base: &Path) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn human_bytes(n: u64) -> String {
-    format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 /// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs
@@ -747,17 +740,19 @@ fn run_with_timeout(
                 if status.success() {
                     return Ok(());
                 }
-                bail!("uv {} exited with {status}", args.join(" "));
+                // #9971: a failed download step is retried unless disk is low.
+                return Err(step_exit(args, status.to_string(), cwd).into());
             }
             None => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!(
-                        "uv {} timed out after {}s (TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS)",
-                        args.join(" "),
-                        timeout.as_secs()
-                    );
+                    // #9971: a stalled step (the torch download) is transient.
+                    return Err(VenvBuildError::Timeout {
+                        step: format!("uv {}", args.join(" ")),
+                        secs: timeout.as_secs(),
+                    }
+                    .into());
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -791,10 +786,12 @@ fn smoke_test(layout: &VenvLayout) -> Result<()> {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!(
-                        "py-embedder smoke test timed out after {}s",
-                        timeout.as_secs()
-                    );
+                    // #9971: the first smoke test downloads the model; a stall is transient.
+                    return Err(VenvBuildError::Timeout {
+                        step: "py-embedder smoke test".to_string(),
+                        secs: timeout.as_secs(),
+                    }
+                    .into());
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
