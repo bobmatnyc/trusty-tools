@@ -713,7 +713,10 @@ fn store_first_prefers_the_store_over_the_environment() {
         counted_env("fake-env-b", &env_calls),
     );
 
-    assert!(got.as_deref() == Ok("fake-store-a"), "the store did not win");
+    assert!(
+        got.as_deref() == Ok("fake-store-a"),
+        "the store did not win"
+    );
     assert_eq!(env_calls.load(Ordering::SeqCst), 0, "env was read");
 }
 
@@ -739,7 +742,10 @@ fn store_first_falls_back_to_the_environment_only_when_the_store_is_empty() {
         |_| Some(String::new()),
     )
     .expect_err("an empty env value is not a value");
-    assert!(matches!(none, SecretResolveError::Absent { .. }), "{none:?}");
+    assert!(
+        matches!(none, SecretResolveError::Absent { .. }),
+        "{none:?}"
+    );
 }
 
 /// Why (#9936, fail-open check): a store that FAILED is not a store that holds

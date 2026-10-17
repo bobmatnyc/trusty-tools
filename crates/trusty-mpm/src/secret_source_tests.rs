@@ -456,9 +456,14 @@ fn slack_refs_resolve_the_store_before_the_environment_9936() {
         if !got.as_ref().is_ok_and(|s| s.expose() == "fake-env-b-9936") {
             wrong.push(format!("{key}: an empty store did not fall back to env"));
         }
-        store.set(key, "fake-store-a-9936").expect("sandbox store set");
+        store
+            .set(key, "fake-store-a-9936")
+            .expect("sandbox store set");
         let got = resolve(key);
-        if !got.as_ref().is_ok_and(|s| s.expose() == "fake-store-a-9936") {
+        if !got
+            .as_ref()
+            .is_ok_and(|s| s.expose() == "fake-store-a-9936")
+        {
             wrong.push(format!("{key}: the store value did not win over env"));
         }
     }
