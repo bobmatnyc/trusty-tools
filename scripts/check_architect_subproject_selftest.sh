@@ -110,6 +110,8 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     shipped-missing) rm "$t/$SKILL_DST" ;;
     # #9132: scripts/ still holds shipped copies, so the directory exists.
     unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/scripts/extra.py" ;;
+    # #9997: a content skill with no sub-project source is unguarded too.
+    unpaired-skill) printf 'no source\n' >"$t/content/instructions/architect/skills/extra.md" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
     # #9822: the Rust crate crates/trusty-architect is not the sub-project.
     crate-dependency)
@@ -134,6 +136,7 @@ secret${TAB}SECRET
 drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
 unpaired${TAB}UNPAIRED
+unpaired-skill${TAB}UNPAIRED
 empty${TAB}EMPTY"
 # #9996: every new class in the content tree and in the Python tree; the
 # assets copy gets a representative pair.
@@ -210,7 +213,7 @@ done
 for tree in content python; do
   name="near-miss-$tree"
   cp -R "$clean" "$WORK/$name"
-  if [ "$tree" = content ]; then f="$WORK/$name/content/instructions/architect/skills/near.md"
+  if [ "$tree" = content ]; then f="$WORK/$name/content/instructions/architect/near.md"
   else f="$WORK/$name/python/trusty-architect/near.md"; fi
   printf '%s\n' 'a bobcat and masala, Bobbin, robertson' \
     'mail user@example.com or ops@docs.example.org' \

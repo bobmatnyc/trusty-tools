@@ -184,7 +184,12 @@ fn a_blocked_skill_dir_is_an_error_line() {
         "{:?}",
         report.errors
     );
-    assert_eq!(report.written, vec!["tm-context-refresh"]);
+    // #9997: every other shipped skill is still written.
+    let others: Vec<&str> = shipped_stems()
+        .into_iter()
+        .filter(|stem| *stem != FLEET_CHECK.stem)
+        .collect();
+    assert_eq!(report.written, others);
     let (ok, detail) = health(project.path());
     assert!(!ok, "a failed deploy reported healthy: {detail}");
     assert!(detail.contains("tm-fleet-check: unreadable"), "{detail}");
@@ -252,15 +257,59 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 2] = [
+    const PINNED: [(&str, &str); 10] = [
         (
             "tm-fleet-check",
-            "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
+            "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
         ),
         (
             "tm-context-refresh",
-            "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
+            "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
         ),
+        (
+            "architect-tmux-ops",
+            "e38c80da0581139ce727e1650cf6404594b2172de0e32077a7cea17956b02382",
+        ),
+        (
+            "architect-operating-rules",
+            "fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3",
+        ),
+        (
+            "architect-workflow",
+            "bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755",
+        ),
+        (
+            "architect-search-memory",
+            "dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303",
+        ),
+        (
+            "architect-github",
+            "0a839e6671261dd4999cc65c4f90ab2e782db7f44aecdeab18174ac913c68b3d",
+        ),
+        (
+            "architect-strategy",
+            "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
+        ),
+        (
+            "architect-completion-standard",
+            "5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374",
+        ),
+        (
+            "architect-owner-model",
+            "f9d9b4afd2f28fd93d45947bc0b13376a7d99f44befd73e08132136fb70f4bf1",
+        ),
+    ];
+    // #9997: a skill on its first release has no earlier text; its first
+    // edit moves it off this list and its old hash into `previous`.
+    const FIRST_RELEASE: [&str; 8] = [
+        "architect-tmux-ops",
+        "architect-operating-rules",
+        "architect-workflow",
+        "architect-search-memory",
+        "architect-github",
+        "architect-strategy",
+        "architect-completion-standard",
+        "architect-owner-model",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {
@@ -271,7 +320,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "{stem} changed: add the OLD hash (the PINNED value) to its `previous` \
              list, then update PINNED"
         );
-        assert!(!skill.previous.is_empty(), "{stem} has no shipped history");
+        assert_eq!(
+            skill.previous.is_empty(),
+            FIRST_RELEASE.contains(&stem),
+            "{stem}: only a first-release skill has no shipped history"
+        );
         assert!(
             !skill.previous.contains(&pinned),
             "{stem}: the current hash is listed as previous"
@@ -297,7 +350,14 @@ const RECORDS_ERA: [(&str, &str); 2] = [
 /// with one hand-added line stays project-custom.
 #[test]
 fn a_records_era_seed_is_refreshed_and_an_edited_one_stays_custom() {
-    let skills = shipped();
+    // #9997 U1b: only the two skills that shipped in the records era have a
+    // records-era text; the later skills are not part of this upgrade path.
+    let skills: Vec<_> = shipped()
+        .into_iter()
+        .filter(|s| RECORDS_ERA.iter().any(|(stem, _)| *stem == s.stem))
+        .collect();
+    let era_stems: Vec<&str> = RECORDS_ERA.iter().map(|(stem, _)| *stem).collect();
+    assert_eq!(skills.iter().map(|s| s.stem).collect::<Vec<_>>(), era_stems);
     let untouched = tempdir().unwrap();
     for (stem, text) in RECORDS_ERA {
         let path = skill_path(untouched.path(), stem);
@@ -305,7 +365,7 @@ fn a_records_era_seed_is_refreshed_and_an_edited_one_stays_custom() {
         std::fs::write(&path, text).unwrap();
     }
     let report = deploy_skills_into(untouched.path(), &skills);
-    assert_eq!(report.written, shipped_stems(), "{report:?}");
+    assert_eq!(report.written, era_stems, "{report:?}");
     assert!(report.kept_custom.is_empty(), "{report:?}");
     for skill in &skills {
         let live = std::fs::read_to_string(skill_path(untouched.path(), skill.stem)).unwrap();
@@ -320,7 +380,7 @@ fn a_records_era_seed_is_refreshed_and_an_edited_one_stays_custom() {
         std::fs::write(&path, format!("{text}\nA project line.\n")).unwrap();
     }
     let report = deploy_skills_into(edited.path(), &skills);
-    assert_eq!(report.kept_custom, shipped_stems(), "{report:?}");
+    assert_eq!(report.kept_custom, era_stems, "{report:?}");
     assert!(report.written.is_empty(), "{report:?}");
     for (stem, text) in RECORDS_ERA {
         assert_eq!(

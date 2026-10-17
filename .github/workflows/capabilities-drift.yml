@@ -198,6 +198,7 @@ jobs:
           # to it must run that step too.
           if grep -qxF "scripts/check_capabilities.sh" "$changed_nl" ||
              grep -qxF "scripts/check_test_count.sh" "$changed_nl" ||
+             grep -qE '^scripts/(check_architect_paths(_selftest)?\.sh|lib/architect_paths\.py)$' "$changed_nl" ||
              grep -qxF ".github/workflows/capabilities-drift.yml" "$changed_nl"; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             echo "capabilities-drift: running — a check script or this workflow changed"
@@ -290,6 +291,18 @@ jobs:
       - name: Check tm-capabilities generated skill for drift
         if: steps.relevance.outputs.relevant != 'false'
         run: bash scripts/check_capabilities.sh
+
+      # #9997 AC1: every path and skill the shipped Architect manual and skills
+      # name exists after `tm fleet init`, run with the `tm` this job built
+      # (on PATH since the build step). Selftest first: a checker only seen
+      # passing cannot be told apart from one that reads nothing.
+      - name: Architect path check after tm fleet init (#9997)
+        if: >-
+          !cancelled() && steps.relevance.outputs.relevant != 'false'
+          && steps.build.outcome == 'success'
+        run: |
+          ./scripts/check_architect_paths_selftest.sh
+          ./scripts/check_architect_paths.sh
 
       # #8700: the agent resident-budget tests (bundle_tests.rs) ran only in
       # the non-required pre-publish shards, so PR #8695 grew BASE-AGENT.md

@@ -116,7 +116,19 @@ const PENDING_OWNER_RULING: &[&str] = &[
 /// its context refresh, so they stay off the floor; they are neither coding
 /// skills nor an open question, so they get their own list.
 /// Test: `architect_only_skills_are_off_the_floor`.
-const ARCHITECT_ONLY_SKILLS: &[&str] = &["tm-context-refresh", "tm-fleet-check"];
+const ARCHITECT_ONLY_SKILLS: &[&str] = &[
+    // #9997: the skills the Architect's operating manual indexes.
+    "architect-completion-standard",
+    "architect-github",
+    "architect-operating-rules",
+    "architect-owner-model",
+    "architect-search-memory",
+    "architect-strategy",
+    "architect-tmux-ops",
+    "architect-workflow",
+    "tm-context-refresh",
+    "tm-fleet-check",
+];
 
 /// Skill names on the floor that belong to NEITHER bundled catalog.
 ///

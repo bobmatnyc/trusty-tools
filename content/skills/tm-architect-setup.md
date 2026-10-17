@@ -39,8 +39,10 @@ alias `opus` as its model.
    user, the watch set, the cadence, the records layout), seeds `local/` with
    the record templates (state, actions, goals, user, instance facts, a
    per-project template, the owner model and the mandates schema), writes
-   the poller to `scripts/`, and writes the Architect-only skills
-   `tm-fleet-check` and `tm-context-refresh` to `.claude/skills/`. It writes
+   the poller and the relay scripts (`relay.sh`, `posted.sh`) to `scripts/`,
+   the voice guide to `docs/architect/`, and the Architect-only skills
+   (`tm-fleet-check`, `tm-context-refresh` and the `architect-*` skills the
+   operating manual indexes) to `.claude/skills/`. It writes
    each file only when it is absent and reports an edited one as skipped, so
    your edits survive every later run. The seeded `CLAUDE.md` declares no
    IDENTITY, ENFORCEMENT or WORKFLOW override blocks, and the project's

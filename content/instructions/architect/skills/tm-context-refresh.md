@@ -1,6 +1,6 @@
 ---
 name: tm-context-refresh
-description: The Architect's context refresh for a watched trusty-mpm session or its own. Checkpoint with /tm-session-pause, verify the snapshot, /clear, then /tm-session-resume, each step verified before the next. Default threshold 50% context. Architect only.
+description: The Architect's context refresh for a watched trusty-mpm session or its own. Checkpoint with /tm-session-pause, verify the snapshot, /clear, then /tm-session-resume, each step verified before the next, when a session reaches the context bar (250k tokens by default). Architect only.
 user-invocable: true
 metadata:
   version: "0.1.0"
@@ -11,11 +11,14 @@ effort: high
 
 # tm-context-refresh — Refresh a Watched Session's Context
 
-**Threshold: 50% context by default**, with 45 to 49% counted as approaching.
-This project's `CLAUDE.md` may set another value. The threshold applies to the
-supervised sessions and replaces the stock 70% caution default. This skill is
-the step-by-step procedure; every step is verified before the next. A routine
-refresh that passes every check needs no extra confirmation from the user.
+**Run it at the bar (250k tokens by default; set in `CLAUDE.md`).** The
+poller raises a `ctx` alert marked `approaching` at 90% of the bar and `bar`
+at the bar, and a `self_ctx` alert when your own session reaches it. The bar
+applies to the supervised sessions and to you, and replaces the stock 70%
+caution default. At the bar the poller only alerts; you run this procedure,
+and nothing is cleared for you. This skill is the step-by-step procedure;
+every step is verified before the next. A routine refresh that passes every
+check needs no extra confirmation from the user.
 
 Paths starting with `scripts/` or `local/` are relative to this project's
 root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
@@ -85,9 +88,9 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
 
 ## The Architect's own session
 
-- Your own pane shows no `ctx` field. The poller measures your context from
-  this project's newest interactive transcript with `scripts/self-ctx.py` and
-  raises a `self_ctx` alert at the threshold this project's `CLAUDE.md` sets.
+- Your own pane shows no `ctx` field. The poller measures your context in
+  tokens from this project's newest interactive transcript with
+  `scripts/self-ctx.py` and raises a `self_ctx` alert at the same bar.
 - Refresh yourself with the same steps at the next safe boundary: no dialog
   open for the user and no relay half sent. Verify the snapshot first.
 - Before the pause, record your crons and Monitors with their ids in
@@ -107,3 +110,4 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
 ## Related skills
 
 - `tm-fleet-check`: the supervision pass that starts this procedure (step 9).
+- `architect-tmux-ops`: the two-step send each step uses.

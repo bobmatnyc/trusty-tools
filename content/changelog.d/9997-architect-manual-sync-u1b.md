@@ -1,0 +1,4 @@
+Changed
+- The Architect manual `instructions/architect/architect.md` names `tm-fleet-check` and `tm-context-refresh` instead of the retired `trusty-*` names, and drops the skill-index rows, `(details: …)` pointers and doc pointers for skills and files that do not ship. Its relay marker is `[<Name> Architect HH:MMZ]`, with `Architect answer:` and `Architect question:` (#9997).
+- One context bar, 250k tokens by default and set in the Architect `CLAUDE.md`, replaces the 50% and 40% thresholds in the manual, `tm-context-refresh`, `tm-fleet-check` and the `CLAUDE.md` template. It applies to the watched sessions and to the Architect's own session (#9997).
+- `tm-fleet-check` sends relays through `scripts/relay.sh` and checks a shared pane with `scripts/posted.sh`. `skills/tm-architect-setup.md` lists the relay scripts, the voice guide and the `architect-*` skills that `tm fleet init` writes (#9997).

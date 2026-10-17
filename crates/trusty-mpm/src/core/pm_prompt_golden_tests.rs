@@ -267,7 +267,8 @@ fn golden_architect_prompt() {
 #[test]
 fn golden_architect_prompt_with_agents_md() {
     // #8436 (Q2a): the owner's AGENTS.md sits between architect.md and the core.
-    let agents_md = "# Owner overrides\n\nOwner: Bob. Report in UTC.\n";
+    // #9997: an example owner name, never a real person's.
+    let agents_md = "# Owner overrides\n\nOwner: Ada. Report in UTC.\n";
     assert_golden(
         "architect-prompt-agents-md.md",
         &architect_golden_prompt(rc(), Some(agents_md)),

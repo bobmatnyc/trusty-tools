@@ -1,7 +1,8 @@
 //! The Architect's shipped skills, deployed into its project tier at launch (#9540).
 //!
-//! Why: `tm fleet init` seeds `tm-fleet-check` and `tm-context-refresh` into
-//! the Architect project once. Nothing wrote them again, so a deleted copy
+//! Why: `tm fleet init` seeds the Architect skills ([`SHIPPED`]: the two
+//! `tm-*` skills and, since #9997, the `architect-*` skills) into the
+//! Architect project once. Nothing wrote them again, so a deleted copy
 //! stayed gone and a framework update never reached an untouched copy. They
 //! must reach the Architect only (rulings df-D21, df-D22): the managed skill
 //! tier is shared by every PM and outranks the project tier, so the one valid
@@ -77,6 +78,8 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
         // #9997: the `records/` text, before the `local/` layout.
         "7535d8bc496f17cd1a9d80e461073aa9539fd070329231cb2508a6e65981287a",
+        // #9997 U1b: the `local/` text, before the 250k bar and relay.sh.
+        "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
     ],
 };
 
@@ -90,12 +93,34 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
         // #9997: the `records/` text, before the `local/` layout.
         "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
+        // #9997 U1b: the 50% text, before the 250k-token bar.
+        "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
     ],
 };
 
+/// A skill on its first release: no earlier shipped text to recognise.
+const fn first_release(stem: &'static str) -> ShippedSkill {
+    ShippedSkill {
+        stem,
+        previous: &[],
+    }
+}
+
 /// Every skill the Architect receives, in deploy order. A new skill is one
 /// entry here plus `content/instructions/<SKILLS_DIR>/<stem>.md` (#9997).
-pub const SHIPPED: &[ShippedSkill] = &[FLEET_CHECK, CONTEXT_REFRESH];
+pub const SHIPPED: &[ShippedSkill] = &[
+    FLEET_CHECK,
+    CONTEXT_REFRESH,
+    // #9997 U1b: the skills the operating manual indexes, first shipped here.
+    first_release("architect-tmux-ops"),
+    first_release("architect-operating-rules"),
+    first_release("architect-workflow"),
+    first_release("architect-search-memory"),
+    first_release("architect-github"),
+    first_release("architect-strategy"),
+    first_release("architect-completion-standard"),
+    first_release("architect-owner-model"),
+];
 
 /// The deploy record, beside the skills in the project tier.
 ///

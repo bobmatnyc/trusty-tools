@@ -729,42 +729,84 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     assert!(!again.changed(), "{}", again.render());
 }
 
-/// Acceptance 2: every Architect-relative path and script a ported skill
-/// names exists in a freshly initialised project. `inbox/` is excluded: it is
-/// the poller's runtime directory, and `events.jsonl` is absent until #8392.
+/// Acceptance 2, and #9997 AC1: every Architect-relative path and script the
+/// shipped manual and each seeded skill name exists in a freshly initialised
+/// project. `inbox/` is excluded: it is the poller's runtime directory, and
+/// `events.jsonl` is absent until #8392. `scripts/check_architect_paths.sh`
+/// is the CI form of this check, with fenced blocks and command forms too.
 #[test]
 fn every_path_a_ported_skill_names_exists_after_init() {
     let fx = Fixture::new();
     fx.init().unwrap();
     let dir = fx.dir();
-    for skill in ported_skills() {
+    let manual = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("content/instructions/architect/architect.md");
+    let mut texts: Vec<(String, String)> = ported_skills()
+        .into_iter()
+        .map(|s| (s.dest, s.contents.to_owned()))
+        .collect();
+    texts.push((
+        "architect.md".to_owned(),
+        std::fs::read_to_string(&manual).expect("the shipped manual"),
+    ));
+    let mut total = 0;
+    for (name, contents) in &texts {
         let mut checked = 0;
-        for raw in skill
-            .contents
-            .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
-        {
+        for raw in contents.split(|c: char| c.is_whitespace() || "`'\"(),".contains(c)) {
             let word = raw.trim_end_matches(['.', ':', ';']);
-            // #9997: the Architect's records live in `local/`.
-            let architect_path = ["scripts/", "local/", ".claude/"]
+            // #9997: the Architect's records live in `local/`; its docs in `docs/`.
+            let architect_path = ["scripts/", "local/", ".claude/", "docs/", "templates/"]
                 .iter()
                 .any(|p| word.starts_with(p))
                 || word == "CLAUDE.md";
             if !architect_path {
                 continue;
             }
-            // `local/projects/<project>.md` names a directory of per-project files.
-            let path = match word.find('<') {
+            // `local/projects/<project>.md` and `local/projects/*.md` name a
+            // directory of files; the directory must exist.
+            let path = match word.find(['<', '*']) {
                 Some(i) => dir.join(&word[..i]),
                 None => dir.join(word),
             };
-            assert!(
-                path.exists(),
-                "{}: `{word}` is missing after init",
-                skill.dest
-            );
+            assert!(path.exists(), "{name}: `{word}` is missing after init");
             checked += 1;
         }
-        assert!(checked >= 3, "{}: only {checked} paths found", skill.dest);
+        let floor = if name.contains("/tm-") || name == "architect.md" {
+            3
+        } else {
+            0
+        };
+        assert!(checked >= floor, "{name}: only {checked} paths found");
+        total += checked;
+    }
+    assert!(
+        total >= 40,
+        "only {total} paths found across {} texts",
+        texts.len()
+    );
+}
+
+/// #9997 AC3: the relay scripts and the voice guide the manual points at are
+/// seeded, the two shell scripts executable, and the directories the skills
+/// write into exist.
+#[test]
+fn the_relay_scripts_and_the_voice_guide_are_seeded() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for (rel, executable) in [
+        ("scripts/relay.sh", true),
+        ("scripts/posted.sh", true),
+        ("scripts/relay-marker.py", false),
+        ("docs/architect/voice.md", false),
+    ] {
+        let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert_eq!(meta.permissions().mode() & 0o111 != 0, executable, "{rel}");
+    }
+    for rel in ["local/users", "local/briefs"] {
+        assert!(dir.join(rel).is_dir(), "{rel} is not created");
     }
 }
 
@@ -790,7 +832,10 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
     ] {
         assert!(check.contains(needle), "missing: {needle}");
     }
-    assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
+    // #9997: one context bar, in tokens, set in `CLAUDE.md`.
+    assert!(
+        text("tm-context-refresh").contains("the bar (250k tokens by default; set in `CLAUDE.md`)")
+    );
 }
 
 /// #8878 R1 critic MEDIUM: the seeded instructions derive the poller's

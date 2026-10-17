@@ -5,12 +5,15 @@ splits off cleanly: nothing here calls tmux, reads a file, or sends keys.
 What: parse_pane() turns one pane capture into a dict of facts (input box via
 scripts/input-state.py `classify`, dialog, question, ctx, plan, limit,
 errors). evaluate() and fleet_plan_alerts() turn those facts into alert
-dicts; dedup() splits alerts into new and suppressed. fleet-poll.py loads this
+dicts; dedup() splits alerts into new and suppressed. context_bar() reads the
+one context bar (#9997): CONTEXT_BAR_TOKENS, default 250000, against
+CONTEXT_WINDOW_TOKENS, default 1000000, for panes that show only a percent. fleet-poll.py loads this
 file by path and re-exports these names, so its callers see no change.
 Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports)
 """
 import hashlib
 import importlib.util
+import math
 import os
 import re
 import time
@@ -21,7 +24,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
 REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
           "self_ctx": 1800}
-CTX_WARN, CTX_HIGH = 45, 50
+# #9997: one context bar in tokens; a pane's `ctx N%` is converted against the
+# window. "approaching" fires at 90% of the bar, "bar" at the bar.
+CONTEXT_BAR_DEFAULT = 250_000
+CONTEXT_WINDOW_DEFAULT = 1_000_000
+APPROACH = 0.9
 PLAN_HIGH = 90
 DETAIL_MAX = 200
 
@@ -149,6 +156,69 @@ def _pct(pattern, text):
     return int(m.group(1)) if m else None
 
 
+def _footer_tokens(text):
+    """Tokens a footer states outright, or None. tm's status line prints
+    `ctx>200k` when Claude Code sends no window payload: a lower bound."""
+    m = re.search(r"\bctx>(\d+)k\b", text)
+    return int(m.group(1)) * 1000 if m else None
+
+
+def _positive_int(env, name, default, warnings):
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+    if value <= 0:
+        warnings.append(f"{name}={raw!r} is not a positive integer; using {default}")
+        return default
+    return value
+
+
+def context_bar(env=None):
+    """(bar_tokens, window_tokens, warnings) from the environment (#9997).
+
+    An unset name takes its default. A value that is not a positive integer
+    takes the default and adds a warning: the alert is never switched off.
+    A bar at or above the window adds a warning too; ctx_lines() then stops
+    the percent line at the window and token counts still compare in tokens.
+    """
+    env = os.environ if env is None else env
+    warnings = []
+    bar = _positive_int(env, "CONTEXT_BAR_TOKENS", CONTEXT_BAR_DEFAULT, warnings)
+    window = _positive_int(env, "CONTEXT_WINDOW_TOKENS", CONTEXT_WINDOW_DEFAULT, warnings)
+    if bar >= window:
+        warnings.append(
+            f"CONTEXT_BAR_TOKENS={bar} is not below CONTEXT_WINDOW_TOKENS={window}: "
+            "a pane's ctx % alerts at 90% and 100% of its window; a token count "
+            "in the footer alerts at the bar")
+    return bar, window, warnings
+
+
+def ctx_lines(bar, window):
+    """(approaching_pct, bar_pct) for a pane's integer `ctx N%`."""
+    bar_pct = min(bar, window) * 100 / window
+    return math.floor(bar_pct * APPROACH), bar_pct
+
+
+def ctx_level(info, bar, window):
+    """"bar", "approaching" or None for one parsed pane."""
+    tokens = info.get("ctx_tokens")
+    if tokens is not None:
+        if tokens >= bar:
+            return "bar"
+        return "approaching" if tokens >= bar * APPROACH else None
+    ctx = info.get("ctx")
+    if ctx is None:
+        return None
+    approaching, at_bar = ctx_lines(bar, window)
+    if ctx >= at_bar:
+        return "bar"
+    return "approaching" if ctx >= approaching else None
+
+
 def _screen_lines(capture):
     """Escape-stripped, right-trimmed screen rows with trailing blanks dropped.
     Shared by parse_pane and wake()'s own post-send confirmation."""
@@ -182,6 +252,7 @@ def parse_pane(capture):
         "agents": agents,
         "busy": busy,
         "ctx": _pct(r"\bctx (\d+)%", ftext),
+        "ctx_tokens": _footer_tokens(ftext),
         "plan5h": _pct(r"⏳\s*(\d+)%", ftext),
         "planwk": _pct(r"📅\s*(\d+)%", ftext),
         "question": None if (busy or dialog or not box) else last_question(lines, top),
@@ -206,9 +277,11 @@ def alert(kind, fingerprint, detail, session="", pane="", now=None):
     }
 
 
-def evaluate(info, ps, now, session, pane):
-    """Alerts for one parsed pane. `ps` is this pane's mutable state (idle, errors)."""
+def evaluate(info, ps, now, session, pane, bar=None):
+    """Alerts for one parsed pane. `ps` is this pane's mutable state (idle, errors).
+    `bar` is (bar_tokens, window_tokens); None reads context_bar()."""
     out = []
+    bar_tokens, window = context_bar()[:2] if bar is None else bar
 
     def add(kind, f, detail):
         out.append(alert(kind, f, detail, session, pane, now))
@@ -228,9 +301,11 @@ def evaluate(info, ps, now, session, pane):
             add("idle", f"since-{int(since)}", f"idle {int((now - since) // 60)} min, no agents running")
     else:
         ps["idle_since"] = None
-    ctx = info["ctx"]
-    if ctx is not None and ctx >= CTX_WARN:
-        add("ctx", str(CTX_HIGH if ctx >= CTX_HIGH else CTX_WARN), f"ctx {ctx}%")
+    level = ctx_level(info, bar_tokens, window)
+    if level:
+        seen = (f"ctx {info['ctx']}%" if info.get("ctx_tokens") is None
+                else f"ctx>{info['ctx_tokens'] // 1000}k")
+        add("ctx", level, f"{seen} ({level}; bar {bar_tokens} tokens)")
     if info["limit"]:
         add("plan-limit", fp(info["limit"]), info["limit"])
     prev = ps.get("errors")
