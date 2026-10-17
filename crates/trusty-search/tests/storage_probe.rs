@@ -27,13 +27,13 @@ mod isolated_benchmark;
 mod latency_stats;
 #[path = "support/perf_envelope.rs"]
 mod perf_envelope;
+#[path = "support/storage_probe.rs"]
+mod probe;
 #[path = "support/socket_benchmark.rs"]
 mod socket_benchmark;
-#[path = "support/storage_probe.rs"]
-mod storage_probe;
 
 use perf_envelope::{load_now, RunContext};
-use storage_probe::{rss_bytes, sandbox_pid, snapshots, storage_dirs, storage_rows, unchanged};
+use probe::{rss_bytes, sandbox_pid, snapshots, storage_dirs, storage_rows, unchanged};
 
 #[tokio::test]
 #[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]

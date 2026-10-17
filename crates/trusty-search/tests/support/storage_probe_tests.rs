@@ -143,7 +143,7 @@ fn storage_dirs_reads_both_layouts_and_refuses_neither() {
 #[test]
 fn rss_reads_a_live_pid_and_refuses_unsupported_or_missing_pids() {
     let own = rss_bytes(std::process::id()).expect("this process has an RSS");
-    assert!(own.bytes > 0 && own.bytes % 1024 == 0, "{own:?}");
+    assert!(own.bytes > 0 && own.bytes.is_multiple_of(1024), "{own:?}");
 
     let error = rss_bytes_on("windows", std::process::id()).expect_err("unsupported OS");
     assert!(error.contains("unsupported on windows"), "{error}");
