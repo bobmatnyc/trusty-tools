@@ -521,6 +521,19 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
     ensure_tree_deployed_in(&load_tree(BundledTreeKind::Agents)?, &target)
 }
 
+/// The remedy text when `err` is a not-installed content error (#9014).
+///
+/// Why: `run_startup_init` deploys before tracing exists and the REPL sends
+/// tracing to a file, so it prints this one line itself.
+/// What: `Some(<error text>)` for a not-installed
+/// [`trusty_agents_common::agent_content::AgentContentError`], else `None`.
+/// Test: `no_content_startup_names_tm_content_update` (tests/no_content_e2e.rs).
+pub fn not_installed_message(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<trusty_agents_common::agent_content::AgentContentError>()
+        .filter(|e| e.is_not_installed())
+        .map(ToString::to_string)
+}
+
 /// Logs a failed best-effort deploy of `what` (#9014).
 ///
 /// Why: with no content installed, the agent and workflow deploys fail for
@@ -529,8 +542,8 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
 /// What: a not-installed [`trusty_agents_common::agent_content::AgentContentError`]
 /// goes through `report_not_installed` (one ERROR line per process); any other
 /// error is a `warn`.
-/// Test: none here; the one-line rule this delegates to is pinned in
-/// trusty-agents-common's `agent_content` tests.
+/// Test: `no_content_startup_names_tm_content_update` (tests/no_content_e2e.rs);
+/// the one-line rule is pinned in trusty-agents-common's `agent_content` tests.
 pub fn log_deploy_failure(what: &str, err: &anyhow::Error) {
     use trusty_agents_common::agent_content::{AgentContentError, report_not_installed};
     let claimed = err
