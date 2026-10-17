@@ -51,6 +51,7 @@ fn snapshot(pid: Option<u32>, version: &str) -> HealthSnapshot {
         unsupervised_forced: false,
         launchd_supervision: String::new(),
         degraded: Vec::new(),
+        unbound_delegations: None,
     }
 }
 

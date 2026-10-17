@@ -171,6 +171,20 @@ pub struct HealthResponse {
     /// Test: `health_publishes_no_degraded_subsystem_when_idle`.
     #[serde(default)]
     pub degraded: Vec<String>,
+    /// Live delegation records of unbound sessions still waiting for the 6 h
+    /// stale (#9007).
+    ///
+    /// Why: #8980 made SessionEnd staling fail closed, so an unbound session's
+    /// records wait for the age-based sweep; the owner accepted that on
+    /// condition `tm doctor` shows it. The records live only in this daemon's
+    /// memory, so `/health` is the one place a daemonless `tm doctor` can read
+    /// them.
+    /// What: `Ok(count)`, or `Err(why)` when the count cannot be taken (a
+    /// sealed registry). `None` for a daemon predating the field; the row
+    /// reports that as unknown, never as zero.
+    /// Test: `health_reports_the_unbound_delegation_count_9007`.
+    #[serde(default)]
+    pub unbound_delegations: Option<Result<usize, String>>,
 }
 
 /// Default for [`HealthResponse::supervised`] on deserialize — matches the

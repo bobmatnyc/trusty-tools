@@ -1104,4 +1104,14 @@ pub struct HealthSnapshot {
     /// `health_snapshot_launchd_supervision_defaults_to_empty`.
     #[serde(default)]
     pub launchd_supervision: String,
+    /// Live delegation records of unbound sessions waiting for the 6 h stale
+    /// (#9007).
+    ///
+    /// Why: the `tm doctor` row for #9007; the records live in the daemon's
+    /// memory only.
+    /// What: mirrors `daemon::api::types::HealthResponse::unbound_delegations`;
+    /// `None` when the responding daemon predates the field.
+    /// Test: `health_snapshot_unbound_delegations_is_none_when_absent`.
+    #[serde(default)]
+    pub unbound_delegations: Option<Result<usize, String>>,
 }

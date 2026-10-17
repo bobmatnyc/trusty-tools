@@ -79,6 +79,13 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
             .degraded_reason()
             .into_iter()
             .collect(),
+        // #9007: the records live in this process's memory only.
+        unbound_delegations: Some(
+            crate::daemon::services::delegation_unbound::count_unbound_waiting(
+                state,
+                chrono::Utc::now(),
+            ),
+        ),
     }
 }
 

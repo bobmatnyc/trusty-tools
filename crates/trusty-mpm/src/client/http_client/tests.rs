@@ -1163,6 +1163,25 @@ fn health_snapshot_degraded_defaults_to_empty() {
     assert!(suspended.degraded[0].contains("gh auth login"));
 }
 
+/// #9007: the count is `None` for a daemon predating it, so a client cannot
+/// read an absent count as zero; both wire arms parse.
+#[test]
+fn health_snapshot_unbound_delegations_is_none_when_absent() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal parses");
+    assert_eq!(minimal.unbound_delegations, None);
+    let ok: HealthSnapshot = serde_json::from_value(
+        serde_json::json!({ "status": "ok", "unbound_delegations": { "Ok": 2 } }),
+    )
+    .expect("Ok arm parses");
+    assert_eq!(ok.unbound_delegations, Some(Ok(2)));
+    let err: HealthSnapshot = serde_json::from_value(
+        serde_json::json!({ "status": "ok", "unbound_delegations": { "Err": "sealed" } }),
+    )
+    .expect("Err arm parses");
+    assert_eq!(err.unbound_delegations, Some(Err("sealed".to_string())));
+}
+
 /// #4469: an older daemon that does not publish `launchd_supervision` must
 /// parse, yielding the empty string rather than a hard error.
 ///
