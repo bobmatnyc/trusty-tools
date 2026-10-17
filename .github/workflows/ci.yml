@@ -617,6 +617,14 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-channels --all-targets --features unrouted-slack-mcp -- -D warnings
 
+      # #10013: trusty-agents builds trusty-memory with only `mcp-schema`, but
+      # feature unification turns `server` back on in the `--workspace` run
+      # above, so dead code under `mcp-schema` alone reached main unseen. This
+      # step lints trusty-memory's library exactly as trusty-agents builds it.
+      - name: cargo clippy -p trusty-memory --no-default-features --features mcp-schema -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-memory --lib --no-default-features --features mcp-schema -- -D warnings
+
   # --------------------------------------------------------------------------
   # rustdoc-links: broken intra-doc links, on the PR that writes them (#5973).
   #

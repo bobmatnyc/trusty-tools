@@ -306,7 +306,11 @@ async fn tier_c_write_without_expiry_gets_the_default_ttl() {
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
 
-    let before = Utc::now();
+    // #5077: the store keeps epoch millis, so a write in the same millisecond
+    // as an unrounded `before` reads back below `before + 24h`.
+    let before = Utc::now()
+        .duration_trunc(Duration::milliseconds(1))
+        .unwrap();
     let id = write(&handle, "current state of the PR", Some(SLOT), None)
         .await
         .unwrap();

@@ -47,6 +47,8 @@ pub(crate) struct AccessLog {
     drawers: Arc<RwLock<Vec<Drawer>>>,
     pending: Mutex<HashSet<Uuid>>,
     scheduled: AtomicBool,
+    // #10013: read only by `mark_dirty`, whose caller chain needs `server`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     debounce_ms: AtomicU64,
     /// Test seam: the next write fails as a failed redb commit would.
     #[cfg(test)]
@@ -82,6 +84,8 @@ impl AccessLog {
     ///
     /// Why: one write per debounce window, however many recalls land in it.
     /// What: with no tokio runtime the ids wait for the next flush or the drop.
+    // #10013: only `record_accesses` calls it, and its caller chain needs `server`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     fn mark_dirty(self: &Arc<Self>, ids: impl IntoIterator<Item = Uuid>) {
         self.pending.lock().extend(ids);
         if self.scheduled.swap(true, Ordering::AcqRel) {
@@ -205,6 +209,8 @@ impl PalaceHandle {
     /// Test: `record_accesses_bumps_in_memory_and_persists_on_flush`,
     /// `a_read_only_handle_records_nothing`,
     /// `a_served_lane_hit_persists_its_access_count_across_reopen`.
+    // #10013: the only caller, `tools::recall_access`, compiles under `server`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn record_accesses(&self, ids: &[Uuid]) {
         if ids.is_empty() || self.is_read_only() {
             return;
