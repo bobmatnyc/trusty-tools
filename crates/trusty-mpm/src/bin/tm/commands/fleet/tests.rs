@@ -610,7 +610,7 @@ fn a_first_run_seeds_the_architect_project() {
             skill.stem
         );
     }
-    // #9997: the `local/` layout, every template non-empty, and no `records/`.
+    // #9997: the `local/` layout, every template non-empty, none of the old one.
     for rel in LOCAL_TEMPLATES {
         let body = std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(!body.trim().is_empty(), "{rel} was seeded empty");
@@ -1208,4 +1208,82 @@ fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
     );
     assert!(stale.join("projects").is_dir());
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept\n");
+}
+
+/// #9997 Fail-Open check: a records path that cannot be checked is a warning,
+/// never a silent pass; an absent one or a plain file is no warning.
+#[test]
+fn an_uncheckable_stale_dir_is_a_warning() {
+    use super::status::stale_records_warning;
+    let scratch = tempfile::tempdir().unwrap();
+    assert_eq!(stale_records_warning(scratch.path()), None);
+    std::fs::write(scratch.path().join(STALE_DIR), "a file\n").unwrap();
+    assert_eq!(stale_records_warning(scratch.path()), None);
+    // A file where the Architect directory should be: the lookup errors.
+    let not_a_dir = scratch.path().join("plain-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let warning = stale_records_warning(&not_a_dir).expect("an error is a warning");
+    assert!(warning.starts_with("cannot check"), "{warning}");
+}
+
+/// #9997: every template asset is seeded byte-equal, so a template added
+/// under `src/assets/architect/templates/` without a `template!` row fails.
+#[test]
+fn every_template_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/templates");
+    let files = seeded_files();
+    let mut stack = vec![root.clone()];
+    let mut checked = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            // Finder metadata, skipped like the drift gate skips it.
+            if path.file_name().is_some_and(|n| n == ".DS_Store") {
+                continue;
+            }
+            let rel = path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+            let dest = if rel == "gitignore" {
+                ".gitignore".to_owned()
+            } else {
+                rel
+            };
+            let seeded = files
+                .iter()
+                .find(|f| f.dest == dest)
+                .unwrap_or_else(|| panic!("{dest}: a template asset tm fleet init does not seed"));
+            assert_eq!(
+                seeded.contents,
+                std::fs::read_to_string(&path).unwrap(),
+                "{dest}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, LOCAL_TEMPLATES.len() + 1, "templates found: {checked}");
+}
+
+/// #9997 AC5: a seed carrying one more skill writes it with no change to
+/// `seed.rs`; the table is built from the seed's skills.
+#[test]
+fn a_seed_with_one_more_skill_seeds_it() {
+    use trusty_mpm::core::project_skill_tier::architect_skills::ArchitectSkill;
+    let mut seed = seed().clone();
+    seed.skills.push(ArchitectSkill {
+        stem: "tm-probe-extra",
+        contents: "---\nname: tm-probe-extra\n---\n".to_owned(),
+        previous: &[],
+    });
+    let files = super::seed::files(&seed);
+    let row = files
+        .iter()
+        .find(|f| f.dest == ".claude/skills/tm-probe-extra/SKILL.md")
+        .expect("the extra skill is seeded");
+    assert_eq!(row.contents, "---\nname: tm-probe-extra\n---\n");
+    assert!(!row.executable);
 }

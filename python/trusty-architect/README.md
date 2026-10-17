@@ -16,7 +16,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `records/`. |
+| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`). |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
 | `scripts/fleet-classify.py` | The poller's pure half: pane parsing and alert evaluation, with no tmux call or file I/O. `fleet-poll.py` loads it by path, so it ships beside it. |
 | `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
@@ -57,7 +57,7 @@ selftest, only when this directory or the check changes.
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,
 `skills/` and `templates/`, and the drift check fails when one differs.
 `tm fleet init` writes them into the Architect project: `scripts/`,
-`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore` and `records/`.
+`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore` and `local/`.
 It writes a file only when it is absent and reports an edited one as skipped.
 With a launch it starts the poller through `scripts/start-fleet-poll.sh`, and
 a start that fails fails the command.
@@ -81,7 +81,7 @@ Rules:
   succeeds, an Architect exists. Stop.
 - Never add a git remote to the Architect's repo.
 - Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The `supervisor` profile replaces it.
-- Never copy another installation's `CLAUDE.md`, `records/` or `inbox/`. Write
+- Never copy another installation's `CLAUDE.md`, `local/` or `inbox/`. Write
   them for this user.
 - Launch the session only when the owner says so.
 
@@ -111,11 +111,11 @@ Copy each file only if the target is absent. Never overwrite an edited one.
 
 ```sh
 src=<src>
-mkdir -p "$dir/scripts" "$dir/records/projects" \
+mkdir -p "$dir/scripts" "$dir/local" \
   "$dir/.claude/skills/tm-fleet-check" "$dir/.claude/skills/tm-context-refresh"
 cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
-cp -n "$src/templates/records/state.md" "$src/templates/records/actions.md" "$dir/records/"
+cp -Rn "$src/templates/local/."         "$dir/local/"
 cp -n "$src"/scripts/*.py "$src"/scripts/*.sh "$dir/scripts/"
 cp -n "$src/skills/tm-fleet-check.md"     "$dir/.claude/skills/tm-fleet-check/SKILL.md"
 cp -n "$src/skills/tm-context-refresh.md" "$dir/.claude/skills/tm-context-refresh/SKILL.md"
@@ -136,11 +136,11 @@ Edit `$dir/CLAUDE.md` for this user. Do not copy it from elsewhere.
   project path and goal.
 - Set the cadence only if the owner wants a value other than the default.
 
-`records/state.md` and `records/actions.md` stay as seeded. The Architect
-fills them. Commit the project:
+The files under `local/` stay as seeded. The Architect fills them. Commit
+the project:
 
 ```sh
-git -C "$dir" add -- CLAUDE.md .gitignore .trusty-mpm.toml records scripts .claude
+git -C "$dir" add -- CLAUDE.md .gitignore .trusty-mpm.toml local scripts .claude
 git -C "$dir" commit -m "chore: seed the Architect project"
 ```
 
@@ -225,6 +225,6 @@ The script is idempotent. Pass `--interval N` to change the cycle length.
   before that.
 - `tm fleet status --dir "$dir"` exits 0 and prints `complete`.
 - The Architect's first supervision pass appends an entry to
-  `records/actions.md`.
+  `local/actions.md`.
 
 When a step fails, report it to the owner. Do not start a second Architect.

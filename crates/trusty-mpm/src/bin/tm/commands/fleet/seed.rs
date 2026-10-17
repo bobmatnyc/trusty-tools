@@ -1,14 +1,16 @@
 //! The files `tm fleet init` writes into the Architect project (#8436, P4).
 //!
 //! Why: the Architect profile reads its fleet specifics from "this project's
-//! `CLAUDE.md`", runs the deterministic poller from `scripts/`, keeps its pass
-//! records in `records/` (ruling C), and runs the Architect-only skills
-//! `tm-fleet-check` and `tm-context-refresh` (rulings D, E). Without them a
-//! fresh Architect has instructions that point at files that do not exist.
+//! `CLAUDE.md`", runs the deterministic poller from `scripts/`, keeps its
+//! records in `local/` (#9997, superseding ruling C), and runs
+//! the Architect-only skills `tm-fleet-check` and `tm-context-refresh`
+//! (rulings D, E). Without them a fresh Architect has instructions that point
+//! at files that do not exist.
 //! What: [`files`] lists each file in write order. The `CLAUDE.md` template
 //! and the two skills come from an [`ArchitectSeed`] read from content at
 //! runtime (#9132, ADR-0064); the scripts and the other templates are still
-//! embedded. The canonical copies live in `python/trusty-architect/` and
+//! embedded; every file under `src/assets/architect/templates/` is a
+//! `template!` row. The canonical copies live in `python/trusty-architect/` and
 //! `scripts/check_architect_subproject.sh` fails when a shipped copy drifts.
 //! The two skills are not in the framework bundle (`core::bundle::ALL`): that
 //! bundle deploys to every session's user tier, and these must reach the
@@ -17,6 +19,7 @@
 //! overwritten. The two skills' bytes are the ones every Architect launch
 //! also deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
+//! `every_template_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `every_script_a_seeded_script_loads_by_path_is_seeded`,
@@ -53,11 +56,34 @@ macro_rules! embedded {
     };
 }
 
+/// Build one [`EMBEDDED`] row for a template seeded at the same relative path
+/// under the Architect directory as under `src/assets/architect/templates/`.
+macro_rules! template {
+    ($rel:literal) => {
+        embedded!($rel, concat!("templates/", $rel), false)
+    };
+}
+
 /// The files still compiled in, in write order, after `CLAUDE.md`.
 const EMBEDDED: &[Embedded] = &[
     embedded!(".gitignore", "templates/gitignore", false),
-    embedded!("records/state.md", "templates/records/state.md", false),
-    embedded!("records/actions.md", "templates/records/actions.md", false),
+    // #9997: the records layout is `local/`, never the old directory.
+    template!("local/state.md"),
+    template!("local/actions.md"),
+    template!("local/goals.md"),
+    template!("local/user.md"),
+    template!("local/instance.md"),
+    template!("local/projects/_template.md"),
+    template!("local/owner/README.md"),
+    template!("local/owner/business.md"),
+    template!("local/owner/process.md"),
+    template!("local/owner/decision-making.md"),
+    template!("local/owner/risk-tolerance.md"),
+    template!("local/owner/detail-and-communication.md"),
+    template!("local/owner/contradictions.md"),
+    template!("local/owner/dream-log.md"),
+    template!("local/mandates/README.md"),
+    template!("local/mandates/example.toml"),
     embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
     // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
     embedded!(
@@ -109,8 +135,9 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
         .collect()
 }
 
-/// Directories `tm fleet init` creates that start with no file in them.
-pub(crate) const DIRS: &[&str] = &["records/projects"];
+/// Directories `tm fleet init` guarantees, created when absent.
+// #9997: per-project records live in `local/projects/`.
+pub(crate) const DIRS: &[&str] = &["local/projects"];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
 ///
