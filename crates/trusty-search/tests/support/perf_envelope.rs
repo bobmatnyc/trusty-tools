@@ -273,6 +273,17 @@ mod tests {
             corpus: Some("perf-abc".into()),
             load_before: Some(0.5),
         });
+        // Fixed host, clock and env fields: a live reading (ram_gb) may not
+        // round-trip through serde_json bit-exactly, which flaked on CI.
+        envelope.commit = Some("abc1234".into());
+        envelope.label = Some("test".into());
+        envelope.host = Host {
+            id: Some("test-host".into()),
+            os: "TestOS 1".into(),
+            cpu: Some("Test CPU".into()),
+            ram_gb: Some(16.0),
+        };
+        envelope.date = "2026-01-01T00:00:00Z".into();
         envelope.load.after = Some(0.75);
         envelope.results = latency_rows("search.query serial", &stats(), Some(2000.0));
         let text = serde_json::to_string(&envelope).expect("serialize");
