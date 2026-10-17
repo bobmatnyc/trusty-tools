@@ -1,3 +1,7 @@
+---
+metadata:
+  version: "0.1.0"
+---
 # Versioning Policy
 
 trusty-agents follows semantic versioning with a **patch-per-feature** discipline.

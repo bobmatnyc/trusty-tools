@@ -362,7 +362,7 @@ fn handle_agent_command_resolves_when_standalone_cwd_lacks_agents_dir() {
 
 /// Why (#3303): the concrete regression from the issue — `/agent assistant`
 /// against the REAL bundled `assistant` directory package (shipped at
-/// `crates/trusty-agents/.trusty-agents/agents/assistant/`, no flat
+/// `content/agents/trusty-agents/agents/assistant/`, no flat
 /// `assistant.toml` sibling) must activate the persona. `cargo test`'s
 /// working directory is the crate root, so `TrustyAgentsRepl::new`'s own
 /// project-dir detection resolves `agents_dir` to the bundled dir with no

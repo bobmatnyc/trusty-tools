@@ -1,3 +1,7 @@
+---
+metadata:
+  version: "0.1.0"
+---
 <!--
 Per-connector event instructions for Izzie's Gmail listener (#3817, DOC-54
 SPEC-AGENTS-05 §6). Loaded into context IN ADDITION TO persona.md whenever a

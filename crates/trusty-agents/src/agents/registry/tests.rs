@@ -496,9 +496,9 @@ fn bundled_agents_are_not_shadowed_by_a_claude_agents_copy() {
 // Test: Run `cargo test --lib agent_registry_discovers_bundled_agents`.
 
 fn bundled_agents_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents")
+    crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    )
 }
 
 #[test]

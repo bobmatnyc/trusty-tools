@@ -179,7 +179,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // directory — not just inside this repo checkout — resolves `assistant`
     // instead of failing with "agent not found" and silently degrading to
     // `ctrl`. #3556: this is now version-stamped — when the binary's
-    // embedded bundle content changes since the last deploy, the stale
+    // bundled content changes since the last deploy, the stale
     // on-disk bundled files are refreshed automatically (backing up any
     // that differ from the current template first), not left permanently
     // frozen at whatever a previous binary wrote. Best-effort: a failure
@@ -188,8 +188,12 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // (even in quiet modes) since it has no stdout/stderr output of its own
     // beyond an optional one-time note gated the same way the credentials
     // banner is.
+    // #9014: the roster is read from instructional content; with none
+    // installed the failure is one ERROR line naming the remedy.
     let bundled_agents_report = agents::bundled::ensure_bundled_agents_deployed()
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
+        .inspect_err(|e| {
+            agents::bundled::log_deploy_failure("failed to deploy bundled agents to $HOME", e)
+        })
         .unwrap_or_default();
 
     // #5227: same treatment for the bundled WORKFLOW definitions. Agents were
@@ -200,7 +204,9 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // posture as the roster deploy above: a read-only `$HOME` degrades to the
     // pre-fix "workflow not found", it does not crash the harness.
     let _bundled_workflows_report = agents::bundled::ensure_bundled_workflows_deployed()
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled workflows to $HOME"))
+        .inspect_err(|e| {
+            agents::bundled::log_deploy_failure("failed to deploy bundled workflows to $HOME", e)
+        })
         .unwrap_or_default();
 
     // #4325: create each Assistant INSTANCE's home directory

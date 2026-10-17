@@ -72,9 +72,14 @@ chmod +x "$TEST_DIR/tagent"
 # We copy only the committed-config subdirectories, NOT .trusty-agents/state/
 # (which is runtime state and was just created empty above).
 echo "→ Copying bundled harness .trusty-agents/…"
+# #9014: agents and workflows are instructional content, under the repo's
+# content/agents/trusty-agents/; the rest stays in the crate.
+CONTENT_TREE="$PROJECT_ROOT/../../content/agents/trusty-agents"
 for sub in agents skills workflows tasks agent-templates; do
-  if [[ -d "$PROJECT_ROOT/.trusty-agents/$sub" ]]; then
-    cp -R "$PROJECT_ROOT/.trusty-agents/$sub" "$TEST_DIR/.trusty-agents/$sub"
+  src="$PROJECT_ROOT/.trusty-agents/$sub"
+  [[ -d "$CONTENT_TREE/$sub" ]] && src="$CONTENT_TREE/$sub"
+  if [[ -d "$src" ]]; then
+    cp -R "$src" "$TEST_DIR/.trusty-agents/$sub"
   fi
 done
 

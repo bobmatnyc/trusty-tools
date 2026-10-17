@@ -11,8 +11,8 @@
 //! that shows `None` behaving differently from `Some(provider)` is
 //! demonstrating the defect and the fix in one run.
 //! What: drives `AgentConfig::apply_provider_pin_with_policy` over the real
-//! bundled templates read from this crate's `.trusty-agents/agents/` tree —
-//! the same bytes `agents::bundled` embeds — rather than over fixtures, so a
+//! bundled templates read from `content/agents/trusty-agents/agents/` —
+//! the same bytes `agents::bundled` deploys — rather than over fixtures, so a
 //! template added later is covered automatically.
 //! Test: this module IS the test surface.
 
@@ -47,9 +47,9 @@ const CITED_UNPINNED_TEMPLATES: [&str; 6] = [
 
 /// This crate's bundled agent-template directory.
 fn templates_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents")
+    crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    )
 }
 
 /// Every bundled template as `(path relative to the agents dir, TOML body)`.
@@ -260,7 +260,7 @@ fn a_configured_policy_survives_differing_ambient_credentials() {
 /// policy-resolved provider.
 ///
 /// Why: `agents::bundled` rewrites a deployed template whenever its bytes
-/// differ from the embedded bundle, and it never re-applies a live edit. Had
+/// differ from the bundled tree, and it never re-applies a live edit. Had
 /// #3766 been implemented by writing a provider into the template files, every
 /// reprovision would have silently reverted it. Keeping the policy in the
 /// operator config and applying it at LOAD is what makes this test pass, so
@@ -278,7 +278,13 @@ fn a_configured_policy_survives_differing_ambient_credentials() {
 fn a_reprovision_cannot_regress_the_policy_resolved_provider() {
     let target = tempfile::tempdir().expect("tempdir");
     let target = target.path();
-    crate::agents::bundled::ensure_bundled_agents_deployed_in(target).expect("initial deploy");
+    crate::agents::bundled::ensure_bundled_agents_deployed_in(
+        crate::agents::bundled::content::test_support::repo_tree(
+            crate::agents::bundled::BundledTreeKind::Agents,
+        ),
+        target,
+    )
+    .expect("initial deploy");
 
     let deployed = target.join("ctrl.toml");
     let resolve = || {
@@ -299,8 +305,13 @@ fn a_reprovision_cannot_regress_the_policy_resolved_provider() {
     );
     std::fs::write(&deployed, edited).expect("write the edited template");
 
-    let report =
-        crate::agents::bundled::force_reprovision_bundled_agents(target).expect("refresh pass");
+    let report = crate::agents::bundled::force_reprovision_bundled_agents(
+        crate::agents::bundled::content::test_support::repo_tree(
+            crate::agents::bundled::BundledTreeKind::Agents,
+        ),
+        target,
+    )
+    .expect("refresh pass");
     assert!(
         report.refreshed >= 1,
         "the force path must have driven a real refresh: {report:?}"

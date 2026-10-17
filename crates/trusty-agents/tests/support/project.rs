@@ -60,9 +60,10 @@ impl Project {
     /// the process cwd; copying the bundled tree into the tempdir makes the
     /// binary self-contained for the test run.
     /// What: Locates the manifest dir via `CARGO_MANIFEST_DIR`, copies
-    /// `<manifest>/.trusty-agents` recursively into `<tempdir>/.trusty-agents`, and
-    /// reads the binary path from `CARGO_BIN_EXE_tagent` (set by Cargo
-    /// for integration tests).
+    /// `<manifest>/.trusty-agents` recursively into `<tempdir>/.trusty-agents`
+    /// together with the `agents/` and `workflows/` trees from the checkout's
+    /// `content/agents/trusty-agents/` (#9014), and reads the binary path from
+    /// `CARGO_BIN_EXE_tagent` (set by Cargo for integration tests).
     /// Test: Implicit via the integration tests in `cli_project.rs`.
     pub fn new() -> Self {
         let root = tempfile::tempdir().expect("create tempdir");
@@ -70,6 +71,14 @@ impl Project {
         let src_cfg = manifest.join(".trusty-agents");
         let dst_cfg = root.path().join(".trusty-agents");
         copy_dir_recursive(&src_cfg, &dst_cfg).expect("copy .trusty-agents");
+        // #9014: the bundled agents and workflows are instructional content.
+        let content = trusty_common::test_harness::test_repo_root()
+            .expect("resolve the checkout")
+            .join("content/agents/trusty-agents");
+        for tree in ["agents", "workflows"] {
+            copy_dir_recursive(&content.join(tree), &dst_cfg.join(tree))
+                .expect("copy the bundled content tree");
+        }
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_tagent"));
         let home = tempfile::tempdir().expect("create isolated HOME tempdir");
         Self { root, binary, home }

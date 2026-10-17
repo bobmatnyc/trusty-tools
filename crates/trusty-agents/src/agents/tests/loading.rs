@@ -464,9 +464,9 @@ content = "test"
 
 /// Path to the bundled `.trusty-agents/agents` directory shipped with the crate.
 fn bundled_agents_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents")
+    crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    )
 }
 
 /// #3738 (MEDIUM): `cto-assistant` ships as TWO hand-maintained files — the

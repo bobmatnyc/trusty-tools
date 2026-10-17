@@ -515,9 +515,9 @@ fn empty_write_is_accepted() {
 /// fail) reintroduced for skills.
 #[test]
 fn bundled_assistant_personas_declare_only_reachable_skills() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(".trusty-agents")
-        .join("agents");
+    let root = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let mut checked = 0usize;
     for entry in std::fs::read_dir(&root)
         .expect("bundled agents dir")

@@ -20,7 +20,17 @@
 #   features  optional: `--features` the target's build needs (empty default set).
 # A module row covers every test in it, including ones added later; a test
 # row covers only that test. Prefer a test row in a large, slow module.
+trusty-agents	lib	agents::bundled	reads repo_tree / repo_tree_files (content/agents/trusty-agents) through fake checkouts (#9014)
+trusty-agents	lib	agents::registry::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal 'content/instructions/architect/skills' (#8436, #9132)
+trusty-agents	lib	agents::tests::loading	runtime: resolves bundled agents and persona.md from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-agents	lib	agents::tests::provider_policy	reads repo_tree and the bundled templates under content/agents/trusty-agents/agents (#9014)
+trusty-agents	lib	api::server::agent_stores::unit_tests::agent_name_allowlist_accepts_every_bundled_agent	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-agents	lib	ctrl::pm_task::dispatch::persona::tests	runtime: resolves the bundled assistant packages from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-agents	lib	inspection::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-agents	lib	runtime::tool_registry::registry_tests::deployed_assistant_config_survives_scoping_with_delegate_to_agent	reads repo_tree (content/agents/trusty-agents/agents) (#9014)
+trusty-agents	test:cli_project	*	runtime: the spawned tagent reads the bundled agents and workflows copied from content/agents/trusty-agents (#9014)
+trusty-agents	test:plain_cli_repl	plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier	runtime: the spawned tagent deploys the roster from content staged into its HOME (#9014)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)

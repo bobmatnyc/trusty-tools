@@ -91,10 +91,14 @@ pub async fn run_mcp_serve() -> anyhow::Result<()> {
     // this (startup.rs), populating `$HOME/.trusty-agents/agents/`. Bypassing
     // it means `list_agents` returns `{"agents":[]}` on a fresh `$HOME`; run
     // the same best-effort deploy here. Emits nothing on stdout per its own doc.
+    // #9014: one ERROR line when no instructional content is installed.
     let _ = crate::agents::bundled::ensure_bundled_agents_deployed()
-        .inspect_err(
-            |e| tracing::warn!(error = %e, "mcp-serve: failed to deploy bundled agents to $HOME"),
-        )
+        .inspect_err(|e| {
+            crate::agents::bundled::log_deploy_failure(
+                "mcp-serve: failed to deploy bundled agents to $HOME",
+                e,
+            )
+        })
         .unwrap_or_default();
 
     run_stdio_loop(dispatch).await
