@@ -171,7 +171,9 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.log_dir = dir.path().to_path_buf();
-    let outcome = run_review_with(&config, input, deps, ReviewOptions::new(request)).await;
+    // #9015: the prompts come from the checkout's content, not the cwd.
+    let options = ReviewOptions::new(request).with_prompts(super::pr_tests::checkout_prompts());
+    let outcome = run_review_with(&config, input, deps, options).await;
 
     let prompts = llm.0.lock().map(|p| p.clone()).unwrap_or_default();
     let reviewer = prompts.first().expect("the reviewer must be called");

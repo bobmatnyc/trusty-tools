@@ -1,2 +1,3 @@
 Added
 - `instructions/trusty-review/prompts/` (`system_prompt_stock.md`, `system_prompt_coverage_gating.md`): trusty-review's reviewer system prompts, moved out of the `trusty-review` binary byte for byte. They carry no frontmatter, because the files are sent to the model verbatim; under `instructions/` a version is optional, so they are not manifest members (#9015).
+- `instructions/trusty-review/templates/` (`report-technical-dd.md`, `report-technical-dd-cast.md`), `instructions/trusty-review/templates/review/strict-security.md` and `instructions/trusty-review/voices/duetto/voice.toml`: trusty-review's report templates, review template and voice package, moved out of the binary byte for byte. They declare no version and are not manifest members (#9015).

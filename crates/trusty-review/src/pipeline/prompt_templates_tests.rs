@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use trusty_common::content::{ContentLock, DevOverride, LOCK_FILE_NAME, ResolveOptions, resolve};
+use trusty_common::content::{
+    ContentError, ContentLock, DevOverride, LOCK_FILE_NAME, ResolveOptions, resolve,
+};
 use trusty_common::integrity::Sha256Digest;
 
 use super::test_support::{fake_checkout, prompts, repo_prompt_files};
@@ -145,6 +147,10 @@ fn every_prompt_content_error_names_its_remedy() {
             origin: installed,
             path,
             reason: "the file is empty".to_owned(),
+        },
+        PromptContentError::CheckoutOverride {
+            value: "relative".into(),
+            reason: "it is not an absolute path".to_owned(),
         },
     ];
     for err in cases {

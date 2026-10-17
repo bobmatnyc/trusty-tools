@@ -89,14 +89,20 @@ pub enum ReportError {
     Manifest(#[from] ManifestError),
 
     /// The requested template name resolved to neither an XDG override nor a
-    /// bundled default.
+    /// template in the installed content.
     #[error(
-        "template '{name}' not found (no XDG override at ~/.config/trusty-review/templates/{name}.md and no bundled default)"
+        "template '{name}' not found (no XDG override at ~/.config/trusty-review/templates/{name}.md and no instructions/trusty-review/templates/{name}.md in the instructional content)"
     )]
     TemplateNotFound {
         /// The template name that could not be resolved.
         name: String,
     },
+
+    /// The instructional content that serves the templates could not supply
+    /// one (#9015): not installed, stale, empty or unverifiable. The text
+    /// names the remedy; no report is rendered from a default.
+    #[error(transparent)]
+    Content(#[from] crate::runtime_content::PromptContentError),
 
     /// The analyst instructions file (`--instructions` / `[report].instructions`)
     /// could not be read — almost always a mistyped path, which must fail loudly

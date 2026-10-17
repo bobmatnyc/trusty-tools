@@ -324,6 +324,16 @@ pub(super) struct Observed {
 pub(super) async fn observe(
     source: FakePrSource,
     caller: CallerContext,
+    options: ReviewOptions,
+) -> Observed {
+    observe_with(&hermetic_config(), source, caller, options).await
+}
+
+/// [`observe`] under `config` instead of [`hermetic_config`] (#9015).
+pub(super) async fn observe_with(
+    config: &ReviewConfig,
+    source: FakePrSource,
+    caller: CallerContext,
     mut options: ReviewOptions,
 ) -> Observed {
     let source = Arc::new(source);
@@ -337,7 +347,7 @@ pub(super) async fn observe(
         ..ready_deps(reviewer.clone(), Some(verifier.clone()))
     };
     options.pr_source = Some(source.clone());
-    let outcome = run_review_with(&hermetic_config(), github_input(caller), deps, options).await;
+    let outcome = run_review_with(config, github_input(caller), deps, options).await;
     Observed {
         outcome,
         reviewer,

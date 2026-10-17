@@ -40,9 +40,9 @@ use crate::{
         },
         verdict_status::{Judged, judged_verdict}, // #9310
         verify_posted::{GateInputs, gate_then_verify},
-        voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors,
     },
+    voice::VoiceConfig,
 };
 
 /// Owned inputs the map-reduce branch needs beyond the borrowed config/deps.
@@ -72,6 +72,8 @@ pub(super) struct MapReduceRun {
     pub(crate) applied: AppliedContext,
     /// #9015: the reviewer prompts the unified path would have used.
     pub(crate) prompts: std::sync::Arc<ReviewerPrompts>,
+    /// #9015: the voice layers, built with the prompts before any fetch.
+    pub(crate) voice_config: VoiceConfig,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -107,7 +109,6 @@ pub(super) async fn run_mapreduce_branch(
         );
     }
 
-    let voice_config = build_voice_config(config);
     let ctx = MapContext {
         prompts: &run.prompts, // #9015
         owner: &result.owner,
@@ -116,7 +117,7 @@ pub(super) async fn run_mapreduce_branch(
         context: &run.context,
         external_context: &run.external_context,
         reviewer_model: &input.reviewer_model,
-        voice_config: &voice_config,
+        voice_config: &run.voice_config,
         coverage_enabled: config.coverage.enabled,
     };
 

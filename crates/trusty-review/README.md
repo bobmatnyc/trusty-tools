@@ -592,6 +592,7 @@ required (`true`) everywhere unless explicitly opted out via
 | `TRUSTY_REVIEW_VOICE_PACKAGE` | — | Voice package name; see [Per-project config & review templates](#per-project-config--review-templates) |
 | `TRUSTY_REVIEW_PRINCIPLES` | `true` | Disable the universal principles layer (`false`) |
 | `TRUSTY_REVIEW_TEMPLATE` | — | Named review-template addendum (issue #2995); see [Per-project config & review templates](#per-project-config--review-templates) |
+| `TRUSTY_REVIEW_CONTENT_CHECKOUT` | — | Absolute root of a trusty-tools checkout whose `content/` serves the prompts, templates and voice instead of the installed bundle (#9015); the cwd is never used |
 | `RUST_LOG` | `warn` | Tracing filter (logs to stderr) |
 
 AWS credentials can also be supplied via `~/.aws/credentials`, IAM roles, or SSO.
@@ -727,10 +728,11 @@ override for the template name specifically.
 
 `--review-template <name>` (or `[review] template = "<name>"`) selects a
 named markdown addendum appended to the layered PR-review system prompt.
-Resolution mirrors the `report` subcommand's template UX: bundled defaults →
-`<config_dir>/trusty-review/templates/review/<name>.md` user override
-(checked before the bundled `include_str!()` default — same pattern as
-`VoiceLoader` and the report `TemplateLoader`), where `<config_dir>` is
+Resolution mirrors the `report` subcommand's template UX: the
+`<config_dir>/trusty-review/templates/review/<name>.md` user override wins,
+else `instructions/trusty-review/templates/review/<name>.md` in the installed
+content bundle (`tm content update`) — same pattern as `VoiceLoader` and the
+report `TemplateLoader` — where `<config_dir>` is
 [`dirs::config_dir()`](https://docs.rs/dirs/latest/dirs/fn.config_dir.html) —
 concretely:
 
@@ -738,7 +740,7 @@ concretely:
   `$XDG_CONFIG_HOME` if set)
 - macOS: `~/Library/Application Support/trusty-review/templates/review/<name>.md`
 
-One template ships bundled: `strict-security` (extra scrutiny on injection,
+One template ships in the content: `strict-security` (extra scrutiny on injection,
 authn/authz, secrets, crypto, input validation, and supply-chain risk).
 
 `name` (from any source — CLI, repo file, env var, or config file) must be a
@@ -925,13 +927,15 @@ byte-identical to the pre-Mermaid output.
 
 ### Templates
 
-Two vendor-neutral, placeholder-only templates ship in
-`crates/trusty-review/templates/`: `report-technical-dd` (generic) and
+Two vendor-neutral, placeholder-only templates ship in the instructional
+content (`content/instructions/trusty-review/templates/`, installed by `tm
+content update`): `report-technical-dd` (generic) and
 `report-technical-dd-cast` (CAST-specific health factors, ISO-5055 domains,
 Appmarq-style benchmarks). Override either by dropping a same-named file in
-the XDG template override directory (`~/.trusty-review/templates/`, checked
-before the bundled `include_str!()` default — same pattern as the reviewer's
-`VoiceLoader`).
+the XDG template override directory (`~/.config/trusty-review/templates/`,
+checked before the content — same pattern as the reviewer's `VoiceLoader`).
+Content that lacks or empties the chosen template stops `report` before any
+repository is walked, naming the file and the remedy.
 
 `--template` also accepts the short aliases `cast` (→ `report-technical-dd-cast`)
 and `default` / `generic` (→ `report-technical-dd`), resolved before the
