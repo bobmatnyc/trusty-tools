@@ -1059,7 +1059,10 @@ fn the_summary_scores_a_hand_built_rank_list() {
         ],
     );
     let s = small.summarize("mechanisms on");
-    assert_eq!((s.n, s.k, s.hit_at_1, s.hit_at_3, s.hit_at_5), (6, 5, 1, 3, 4));
+    assert_eq!(
+        (s.n, s.k, s.hit_at_1, s.hit_at_3, s.hit_at_5),
+        (6, 5, 1, 3, 4)
+    );
     // (1 + 1/3 + 1/3 + 1/5 + 1/6 + 0) / 6 = 0.33889; the miss adds 0.
     assert_eq!(s.mrr, 0.3389);
     assert_eq!(s.recall_at_k, 0.6667);
