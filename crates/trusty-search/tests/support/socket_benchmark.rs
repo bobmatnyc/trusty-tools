@@ -18,6 +18,7 @@
 //! index's `root_path` and refuses unless it equals the canonical corpus path.
 //! Test: `a_missing_daemon_fails_closed_naming_the_socket`,
 //! `socket_env_is_required_absolute_and_not_the_live_default`,
+//! `an_unresolvable_live_socket_refuses_instead_of_skipping_the_check`,
 //! `index_id_is_required`.
 
 #![allow(dead_code)] // Each test binary uses a different subset.
@@ -54,9 +55,10 @@ pub struct Fixture {
 ///
 /// Why: the suite must never reach the installed daemon by default (#9993).
 /// What: refuses an unset or empty value, a relative path, and a path equal
-/// to `live` (compared after canonicalizing each parent directory).
+/// to `live` (compared after canonicalizing each parent directory). `live` is
+/// a resolved path, never an `Option`, so the comparison cannot be skipped.
 /// Test: `socket_env_is_required_absolute_and_not_the_live_default`.
-pub fn validate_socket(raw: Option<&OsStr>, live: Option<&Path>) -> Result<PathBuf, String> {
+pub fn validate_socket(raw: Option<&OsStr>, live: &Path) -> Result<PathBuf, String> {
     let raw = raw
         .map(|v| v.to_string_lossy().trim().to_string())
         .filter(|v| !v.is_empty())
@@ -74,13 +76,37 @@ pub fn validate_socket(raw: Option<&OsStr>, live: Option<&Path>) -> Result<PathB
             socket.display()
         ));
     }
-    if live.is_some_and(|live| same_socket(&socket, live)) {
+    if same_socket(&socket, live) {
         return Err(format!(
             "{SOCKET_ENV}={} is the live install's socket; use a sandbox daemon",
             socket.display()
         ));
     }
     Ok(socket)
+}
+
+/// Resolve the live install's default socket, or refuse naming the cause.
+///
+/// Why: a failure to resolve the live socket must never turn the live-default
+/// refusal into a silent skip (#9993). `data_dir_override` is the argument of
+/// `resolve_socket_path`; production passes `None`.
+/// What: `Err("cannot resolve the live socket to refuse it: ...")` on failure.
+/// Test: `an_unresolvable_live_socket_refuses_instead_of_skipping_the_check`.
+pub fn resolve_live_socket(data_dir_override: Option<&OsStr>) -> Result<PathBuf, String> {
+    trusty_search::service::socket::resolve_socket_path(data_dir_override)
+        .map_err(|e| format!("cannot resolve the live socket to refuse it: {e:#}"))
+}
+
+/// The socket the suite may dial: `raw`, validated against the live default.
+///
+/// What: resolves the live socket first, so a resolution failure is an `Err`.
+/// Test: `an_unresolvable_live_socket_refuses_instead_of_skipping_the_check`.
+pub fn resolve_suite_socket(
+    raw: Option<&OsStr>,
+    live_override: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let live = resolve_live_socket(live_override)?;
+    validate_socket(raw, &live)
 }
 
 /// Equal file names under the same canonical parent directory.
@@ -121,8 +147,7 @@ pub async fn connect(socket: &Path) -> Result<DaemonClient, String> {
 
 /// Resolve and connect the fixture, panicking on any refusal.
 pub async fn fixture() -> Fixture {
-    let live = trusty_search::service::socket::resolve_socket_path(None).ok();
-    let socket = validate_socket(std::env::var_os(SOCKET_ENV).as_deref(), live.as_deref())
+    let socket = resolve_suite_socket(std::env::var_os(SOCKET_ENV).as_deref(), None)
         .unwrap_or_else(|e| panic!("{e}"));
     let index =
         validate_index_id(std::env::var_os(INDEX_ENV).as_deref()).unwrap_or_else(|e| panic!("{e}"));
@@ -232,14 +257,28 @@ mod tests {
     fn socket_env_is_required_absolute_and_not_the_live_default() {
         let dir = tempfile::tempdir().expect("scratch dir");
         let live = dir.path().join("trusty-search.sock");
-        assert!(validate_socket(None, Some(&live)).is_err());
-        assert!(validate_socket(Some(OsStr::new("  ")), Some(&live)).is_err());
-        assert!(validate_socket(Some(OsStr::new("data/ts.sock")), Some(&live)).is_err());
-        assert!(validate_socket(Some(live.as_os_str()), Some(&live)).is_err());
+        assert!(validate_socket(None, &live).is_err());
+        assert!(validate_socket(Some(OsStr::new("  ")), &live).is_err());
+        assert!(validate_socket(Some(OsStr::new("data/ts.sock")), &live).is_err());
+        assert!(validate_socket(Some(live.as_os_str()), &live).is_err());
         let sandbox = dir.path().join("sandbox").join("trusty-search.sock");
         assert_eq!(
-            validate_socket(Some(sandbox.as_os_str()), Some(&live)),
+            validate_socket(Some(sandbox.as_os_str()), &live),
             Ok(sandbox)
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_live_socket_refuses_instead_of_skipping_the_check() {
+        // A relative data-dir override makes `resolve_socket_path` fail without
+        // touching process-global env. A valid sandbox socket must still be refused.
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let sandbox = dir.path().join("sandbox").join("trusty-search.sock");
+        let error = resolve_suite_socket(Some(sandbox.as_os_str()), Some(OsStr::new("relative")))
+            .expect_err("an unresolvable live socket must refuse, not skip the check");
+        assert!(
+            error.contains("cannot resolve the live socket to refuse it"),
+            "the refusal must name the cause: {error}"
         );
     }
 
