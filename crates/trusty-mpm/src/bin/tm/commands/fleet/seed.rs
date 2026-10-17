@@ -60,7 +60,11 @@ macro_rules! embedded {
 /// under the Architect directory as under `src/assets/architect/templates/`.
 macro_rules! template {
     ($rel:literal) => {
-        embedded!($rel, concat!("templates/", $rel), false)
+        (
+            $rel,
+            include_str!(concat!("../../../../assets/architect/templates/", $rel)),
+            false,
+        )
     };
 }
 
