@@ -1244,7 +1244,10 @@ fn a_reinit_warns_about_a_stale_local_beside_records() {
     let rendered = fx.init().unwrap().render();
 
     let needle = format!("stale `local/` directory at {}", local.display());
-    assert!(rendered.contains(&needle), "missing `{needle}`:\n{rendered}");
+    assert!(
+        rendered.contains(&needle),
+        "missing `{needle}`:\n{rendered}"
+    );
     assert!(local.join("state.md").is_file(), "local/ was touched");
 
     std::fs::remove_dir_all(&local).unwrap();
