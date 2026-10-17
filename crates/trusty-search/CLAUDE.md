@@ -776,6 +776,17 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lane matched the literal against every chunk's content instead. A filename
     query compares path basenames and never scans content, so it reports
     `false`.
+  - `meta.embedder` (#9970): `{active, intended, bootstrap, note}`. `active`
+    is the backend that embedded this query (`ort`, `python`, ...);
+    `intended` is the one the host is configured or defaulted to (`python`
+    whenever a python bootstrap applies). `bootstrap` is `/health`'s
+    `embedder_bootstrap` refined to `installing_venv` or `probing` while an
+    attempt runs. `note` is a plain-language sentence for the agent whenever
+    `active != intended` — installing, retrying at a time, failed with the
+    cause, or fell back — and `null` otherwise. Omitted before the daemon
+    installs its embedder. The `search.query.all` fan-out carries the same
+    object as a top-level `embedder`. Whether the index's own vectors are
+    built is a separate signal: `vector_unavailable` and `search_capabilities`.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:
@@ -1333,7 +1344,8 @@ retrying in the background (#9949) after 2, 5 and 10 minutes, then every 30
 minutes, and hot-swaps on the first success; ort serves throughout.
 `/health`'s `embedder_bootstrap` reports `"retrying"` (and `status:
 "degraded"`), and its `python_bootstrap` object carries `state`, `attempts`,
-`last_error` and `next_retry_at` (RFC 3339 UTC). Only a permanent failure — the
+`last_error` and `next_retry_at` (RFC 3339 UTC), plus `phase` and `note`
+(#9970, below). Only a permanent failure — the
 launcher is missing, or the venv build returns an error — is terminal: the
 first one ends the bootstrap, the daemon stays on ort for its lifetime and
 `embedder_bootstrap` reports `"failed"`, with `last_error` naming the cause.

@@ -54,7 +54,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::Embedder;
-use crate::service::embedder_supervisor::bootstrap_control::BootstrapReport;
+use crate::service::embedder_supervisor::bootstrap_control::{BootstrapPhase, BootstrapReport};
 use crate::service::embedder_supervisor::{
     ActiveBackend, BackendKind, BootstrapState, SupervisorConfig, SwitchableEmbedder,
 };
@@ -522,6 +522,13 @@ async fn sleep_unless_cancelled(delay: Duration, cancel: &CancellationToken) -> 
     }
 }
 
+/// Record the step the running attempt is on (#9970).
+fn set_phase(switchable: &SwitchableEmbedder, phase: BootstrapPhase) {
+    switchable
+        .bootstrap_control()
+        .update_report(|r| BootstrapReport { phase, ..r.clone() });
+}
+
 /// Mark the bootstrap terminally `Failed` on a permanent error (#9949).
 fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
     switchable
@@ -563,8 +570,10 @@ async fn run_attempt(
     };
     let outcome = try_bootstrap_once(switchable, state, ops, attempt, check, cancel).await;
     match &outcome {
+        // #9970: the attempt is over, so no step is running.
         Ok(_) => control.update_report(|r| BootstrapReport {
             last_error: None,
+            phase: BootstrapPhase::Idle,
             ..r.clone()
         }),
         Err(AttemptError::Cancelled) => {}
@@ -572,6 +581,7 @@ async fn run_attempt(
             let text = attempt_error_text(e);
             control.update_report(|r| BootstrapReport {
                 last_error: Some(text.clone()),
+                phase: BootstrapPhase::Idle,
                 ..r.clone()
             });
         }
@@ -620,7 +630,8 @@ async fn try_bootstrap_once(
 
     // Step b: blocking venv bootstrap off the async runtime. A shutdown does
     // not wait for it: the blocking thread finishes on its own and spawns no
-    // sidecar.
+    // sidecar. #9970: the agent note says the venv is installing.
+    set_phase(switchable, BootstrapPhase::InstallingVenv);
     let venv_ops = Arc::clone(ops);
     let venv = tokio::task::spawn_blocking(move || venv_ops.ensure_venv(check));
     let venv = tokio::select! {
@@ -651,6 +662,7 @@ async fn try_bootstrap_once(
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
     // load + one real embed THROUGH the supervisor, bounded by the budget.
+    set_phase(switchable, BootstrapPhase::Probing);
     let probe = tokio::select! {
         biased;
         () = cancel.cancelled() => None,

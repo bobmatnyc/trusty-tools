@@ -1,0 +1,3 @@
+Added
+- Search responses name the embedder that served them. `meta.embedder` on `search.query` (the MCP `search`, `search_lexical`, `search_semantic` and `search_kg` tools) and a top-level `embedder` on the `search.query.all` fan-out carry `active`, `intended`, `bootstrap` (`n/a`, `bootstrapping`, `installing_venv`, `probing`, `retrying`, `failed`, `ready` or `fell_back_to_ort`) and `note`. While the python embedder installs, waits for a retry or has failed, `note` says the results come from the ort fallback and why; once python serves it is `null` (#9970).
+- `/health`'s `python_bootstrap` gains `phase` and `note`, the same step and note search responses carry (#9970).

@@ -64,6 +64,10 @@ mod tests_9949;
 #[cfg(test)]
 mod tests_9968;
 
+// #9970: the agent note on search while the python venv installs.
+#[cfg(test)]
+mod tests_9970;
+
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
 // sibling of `tests` rather than folded into it because `tests.rs` is

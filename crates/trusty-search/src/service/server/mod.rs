@@ -68,6 +68,8 @@ mod router;
 mod routing;
 mod search;
 mod search_global;
+// #9970: the per-index search `meta` block, `embedder` included.
+mod search_meta;
 mod state;
 mod state_impl;
 mod status;
@@ -226,6 +228,9 @@ mod stage_failed_5927_tests;
 mod resident_index_cap_6821_tests;
 #[cfg(test)]
 mod tests_health_switchable;
+// #9970: the embedder note on the fan-out body and `/health`.
+#[cfg(test)]
+mod tests_9970_embedder_note;
 #[cfg(test)]
 mod tests_index;
 #[cfg(test)]

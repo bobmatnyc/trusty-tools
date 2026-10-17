@@ -423,10 +423,13 @@ fn launcher_check_result_warns_under_the_graceful_default() {
 fn uv_check_result_warns_when_the_bootstrap_would_fetch() {
     use trusty_embedderd_py::uv_fetch::UvError;
     let cache = std::path::PathBuf::from("/data/py-embedder/uv/0.12.23/uv");
-    let warn = uv_check_result(Err(UvError::NotInstalled {
-        cache: cache.clone(),
-    }
-    .into()));
+    let warn = uv_check_result(
+        Err(UvError::NotInstalled {
+            cache: cache.clone(),
+        }
+        .into()),
+        PythonEmbedderSelection::Explicit,
+    );
     match &warn {
         CheckResult::Warn(msg) => assert!(
             msg.contains("not installed")
@@ -437,7 +440,10 @@ fn uv_check_result_warns_when_the_bootstrap_would_fetch() {
         ),
         other => panic!("expected Warn, got {other:?}"),
     }
-    let off = uv_check_result(Err(UvError::Disabled { cache }.into()));
+    let off = uv_check_result(
+        Err(UvError::Disabled { cache }.into()),
+        PythonEmbedderSelection::Explicit,
+    );
     assert!(
         matches!(&off, CheckResult::Error(msg) if msg.contains("uv not found")),
         "the fetch off is fatal: {off:?}"
@@ -519,4 +525,18 @@ fn check_python_venv_ready_file_without_venv_binary_reports_warn() {
 
     let r = check_python_venv(&layout);
     assert!(r.is_warn(), "expected Warn, got {r:?}");
+}
+
+/// #9970: a venv-layout lookup error follows the uv row's downgrade — Warn
+/// under the graceful default, Error under explicit python.
+#[test]
+fn layout_check_result_warns_under_the_graceful_default() {
+    let failed = || Err(anyhow::anyhow!("no data dir"));
+    let warn = layout_check_result(failed(), PythonEmbedderSelection::GracefulDefault);
+    assert!(
+        matches!(&warn, CheckResult::Warn(m) if m.contains("no data dir")),
+        "{warn:?}"
+    );
+    let error = layout_check_result(failed(), PythonEmbedderSelection::Explicit);
+    assert!(matches!(&error, CheckResult::Error(_)), "{error:?}");
 }
