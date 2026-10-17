@@ -514,6 +514,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// lets a record read idle. [`super::real_tmux::RealTmuxDriver`] runs one
     /// `list-panes -s -t =name:`.
     /// Test: `reconcile_live_state_pane_list_error_keeps_a_stopped_record_active_8241`.
+    #[cfg(feature = "daemon")] // #9776: PaneInfo lives in the daemon module.
     fn session_panes(
         &self,
         name: &str,
