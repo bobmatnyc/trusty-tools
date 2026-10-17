@@ -27,10 +27,20 @@ RULE = "─" * 80
 DIM, RESET = "\x1b[2m", "\x1b[0m"
 
 
-def screen(body, box="", dim=False, agents=(), ctx=30, plan=(30, 40), status=None):
-    """A pane capture: transcript, optional status line, input box, footer."""
+@pytest.fixture(autouse=True)
+def _no_context_bar_env(monkeypatch):
+    """#9997: every test starts at the shipped bar, whatever the shell exports."""
+    for key in ("CONTEXT_BAR_TOKENS", "CONTEXT_WINDOW_TOKENS"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def screen(body, box="", dim=False, agents=(), ctx=10, plan=(30, 40), status=None,
+           ctx_field=None):
+    """A pane capture: transcript, optional status line, input box, footer.
+    `ctx_field` replaces the whole `ctx N%` segment (e.g. `ctx>200k`)."""
     box_line = "❯\xa0" + (f"{DIM}{box}{RESET}" if dim else box)
-    footer = [f"  TM 1.7.4 ● | org/proj ⎇ tm-x | @me | Opus 5.5 | ctx {ctx}% | $1.00 | "
+    ctx_field = f"ctx {ctx}%" if ctx_field is None else ctx_field
+    footer = [f"  TM 1.7.4 ● | org/proj ⎇ tm-x | @me | Opus 5.5 | {ctx_field} | $1.00 | "
               f"⏳{plan[0]}% 📅{plan[1]}% | 💸1%/1%",
               "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 9 agents",
               " " * 70 + "/rc", "", "  ⏺ main"]
@@ -193,13 +203,86 @@ def test_question_is_last_pm_line_ending_in_question_mark():
 
 # --- ctx / plan-limit / error ------------------------------------------------
 
-def test_ctx_47_alerts_and_crossing_50_changes_fingerprint():
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=47))
-    assert kinds(alerts) == ["ctx"] and alerts[0]["fingerprint"] == "45"
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=52))
-    assert alerts[0]["fingerprint"] == "50"
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=44))
-    assert alerts == []
+def ctx_fingerprints(ctx=None, ctx_field=None):
+    """The fingerprint of each `ctx` alert one busy pane raises."""
+    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=ctx, ctx_field=ctx_field))
+    return [a["fingerprint"] for a in alerts if a["kind"] == "ctx"]
+
+
+# #9997: one bar, 250k tokens by default, over a 1M window: a pane's ctx 25%.
+@pytest.mark.parametrize("ctx,expected", [
+    (25, ["bar"]), (47, ["bar"]), (24, ["approaching"]), (22, ["approaching"]), (21, []),
+])
+def test_ctx_alerts_follow_the_250k_bar_by_default(ctx, expected):
+    assert ctx_fingerprints(ctx) == expected
+
+
+def test_ctx_alert_detail_names_the_pane_value_and_the_bar():
+    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=25))
+    assert "ctx 25%" in alerts[0]["detail"] and "250000" in alerts[0]["detail"]
+
+
+def test_context_bar_tokens_moves_the_ctx_line(monkeypatch):
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", "500000")
+    assert ctx_fingerprints(50) == ["bar"]
+    assert ctx_fingerprints(45) == ["approaching"]
+    assert ctx_fingerprints(44) == []
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "2.5"])
+def test_an_invalid_bar_falls_back_to_the_default_and_warns(monkeypatch, raw):
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", raw)
+    bar, window, warnings = fp.fleet_classify.context_bar()
+    assert (bar, window) == (250_000, 1_000_000)
+    assert any("CONTEXT_BAR_TOKENS" in w for w in warnings), warnings
+    assert ctx_fingerprints(25) == ["bar"]  # the alert stays on, at the default
+    assert ctx_fingerprints(21) == []
+
+
+def test_an_invalid_window_falls_back_to_the_default_and_warns(monkeypatch):
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "lots")
+    bar, window, warnings = fp.fleet_classify.context_bar()
+    assert (bar, window) == (250_000, 1_000_000)
+    assert any("CONTEXT_WINDOW_TOKENS" in w for w in warnings), warnings
+
+
+def test_the_shipped_defaults_warn_about_nothing():
+    assert fp.fleet_classify.context_bar() == (250_000, 1_000_000, [])
+
+
+@pytest.mark.parametrize("window,bar", [("200000", "250000"), ("250000", "250000")])
+def test_a_bar_at_or_over_the_window_warns_and_never_disables_the_alert(monkeypatch, window, bar):
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", window)
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", bar)
+    _, _, warnings = fp.fleet_classify.context_bar()
+    assert any("CONTEXT_WINDOW_TOKENS" in w and "CONTEXT_BAR_TOKENS" in w for w in warnings), \
+        warnings
+    # The percent line stops at the window: 90% approaching, 100% at the bar.
+    assert ctx_fingerprints(100) == ["bar"]
+    assert ctx_fingerprints(90) == ["approaching"]
+    assert ctx_fingerprints(80) == []
+
+
+@pytest.mark.parametrize("bar,expected", [
+    ("150000", ["bar"]),            # more than 200k tokens is past a 150k bar
+    ("210000", ["approaching"]),    # 200k is past 90% of 210k
+    ("250000", []),                 # 200k is below 90% of 250k
+])
+def test_a_footer_token_count_alerts_against_the_bar_in_tokens(monkeypatch, bar, expected):
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "200000")
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", bar)
+    assert ctx_fingerprints(ctx_field="ctx>200k") == expected
+
+
+def test_resolve_context_bar_logs_each_warning_once(monkeypatch, tmp_path):
+    log = tmp_path / "poll.log"
+    monkeypatch.setattr(fp, "LOG", str(log))
+    monkeypatch.setattr(fp, "_LOGGED_BAR_WARNINGS", set())
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", "abc")
+    assert fp.resolve_context_bar() == (250_000, 1_000_000)
+    assert fp.resolve_context_bar() == (250_000, 1_000_000)
+    lines = log.read_text().splitlines()
+    assert len(lines) == 1 and "CONTEXT_BAR_TOKENS" in lines[0] and "WARNING" in lines[0]
 
 
 def test_plan_limit_text_and_status_line():
@@ -282,21 +365,19 @@ def _usage_line(usage, msg_type="assistant", entrypoint="cli"):
                        "entrypoint": entrypoint}) + "\n"
 
 
-def test_self_ctx_alerts_only_when_over_threshold(tmp_path, monkeypatch):
+def test_self_ctx_alerts_only_when_over_the_bar(tmp_path, monkeypatch):
     monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
-    monkeypatch.delenv("SELF_CTX_WINDOW", raising=False)
-    monkeypatch.delenv("SELF_CTX_THRESHOLD", raising=False)
 
     over = tmp_path / "over.jsonl"
     over.write_text(
         _usage_line({"input_tokens": 1}, "user")  # non-assistant line: ignored
         + _usage_line({"input_tokens": 100_000, "cache_read_input_tokens": 300_000,
-                       "cache_creation_input_tokens": 5_000})  # 405,000 / 1,000,000 = 40.5%
+                       "cache_creation_input_tokens": 5_000})  # 405,000 tokens > 250,000
     )
     os.utime(over, (1000, 1000))
     alerts = fp.self_ctx_alerts(0.0)
     assert kinds(alerts) == ["self_ctx"]
-    assert "self ctx 41%" in alerts[0]["detail"] or "self ctx 40%" in alerts[0]["detail"]
+    assert "405000 tokens" in alerts[0]["detail"] and "250000" in alerts[0]["detail"]
     assert alerts[0]["session"] == fp.ARCHITECT
 
     # A newer transcript (higher mtime) under the threshold: no alert, and the
@@ -312,8 +393,6 @@ def test_self_ctx_alerts_ignores_a_newer_sdk_cli_transcript(tmp_path, monkeypatc
     write to the same directory every few minutes and can out-mtime the
     Architect's own session; they must never be the one measured."""
     monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
-    monkeypatch.delenv("SELF_CTX_WINDOW", raising=False)
-    monkeypatch.delenv("SELF_CTX_THRESHOLD", raising=False)
     architect = tmp_path / "architect.jsonl"
     architect.write_text(_usage_line({"input_tokens": 900_000}, entrypoint="cli"))
     os.utime(architect, (1000, 1000))
@@ -331,15 +410,23 @@ def test_self_ctx_missing_or_empty_dir_never_crashes(tmp_path, monkeypatch):
     assert fp.self_ctx_alerts(0.0) == []
 
 
-def test_self_ctx_window_and_threshold_are_env_overridable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tokens,alerts", [(260_000, 1), (250_000, 1), (240_000, 0)])
+def test_self_ctx_compares_tokens_with_the_bar_and_no_window(tmp_path, monkeypatch, tokens, alerts):
+    """#9997: the own-context bar is the same 250k tokens; a window plays no part."""
     monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
-    f = tmp_path / "t.jsonl"
-    f.write_text(_usage_line({"input_tokens": 50, "cache_read_input_tokens": 50}))  # 100 tokens
-    monkeypatch.setenv("SELF_CTX_WINDOW", "1000")
-    monkeypatch.setenv("SELF_CTX_THRESHOLD", "5")  # 100/1000 = 10% >= 5%
-    alerts = fp.self_ctx_alerts(0.0)
-    assert kinds(alerts) == ["self_ctx"]
-    monkeypatch.setenv("SELF_CTX_THRESHOLD", "50")  # 10% < 50%: no alert
+    (tmp_path / "t.jsonl").write_text(_usage_line({"input_tokens": tokens}))
+    assert len(fp.self_ctx_alerts(0.0)) == alerts
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "100000")  # far below the tokens
+    assert len(fp.self_ctx_alerts(0.0)) == alerts
+
+
+def test_self_ctx_bar_follows_context_bar_tokens(tmp_path, monkeypatch):
+    monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
+    (tmp_path / "t.jsonl").write_text(
+        _usage_line({"input_tokens": 50, "cache_read_input_tokens": 50}))  # 100 tokens
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", "50")
+    assert kinds(fp.self_ctx_alerts(0.0)) == ["self_ctx"]
+    monkeypatch.setenv("CONTEXT_BAR_TOKENS", "500")
     assert fp.self_ctx_alerts(0.0) == []
 
 
@@ -537,7 +624,7 @@ def _written_kinds(alerts_path, session):
 
 def test_quiet_session_suppresses_idle_but_not_ctx(tmp_path, monkeypatch):
     parked, active = _pane("tm-parked", "%10"), _pane("tm-active", "%11")
-    cap = screen(PM_TURN, ctx=50)  # empty box, no agents: idle-eligible; ctx>=45 too
+    cap = screen(PM_TURN, ctx=50)  # empty box, no agents: idle-eligible; past the bar too
     alerts_path = _cycle_env(monkeypatch, tmp_path, [(parked, cap), (active, cap)],
                              quiet_lines="tm-parked\n")
     state = {"panes": {"tm-parked|%10": {"idle_since": 0.0},
