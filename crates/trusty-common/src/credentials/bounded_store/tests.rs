@@ -735,13 +735,15 @@ fn store_first_falls_back_to_the_environment_only_when_the_store_is_empty() {
     assert!(got.as_deref() == Ok("fake-env-b"), "env did not answer");
     assert_eq!(env_calls.load(Ordering::SeqCst), 1);
 
-    let none = resolve_provider_bounded_store_first_with(
+    // A failed assert names the outcome, never the resolved value.
+    let Err(none) = resolve_provider_bounded_store_first_with(
         "test-store-first-b2",
         Arc::new(crate::credentials::MemoryKeyStore::new()),
         Duration::from_secs(1),
         |_| Some(String::new()),
-    )
-    .expect_err("an empty env value is not a value");
+    ) else {
+        panic!("an empty env value is not a value, but one resolved");
+    };
     assert!(
         matches!(none, SecretResolveError::Absent { .. }),
         "{none:?}"
@@ -755,13 +757,15 @@ fn store_first_falls_back_to_the_environment_only_when_the_store_is_empty() {
 #[test]
 fn store_first_surfaces_a_store_failure_instead_of_the_environment() {
     let env_calls = Arc::new(AtomicUsize::new(0));
-    let err = resolve_provider_bounded_store_first_with(
+    // A failed assert names the outcome, never the resolved value.
+    let Err(err) = resolve_provider_bounded_store_first_with(
         "test-store-first-c",
         Arc::new(AlwaysFails),
         Duration::from_secs(1),
         counted_env("fake-env-b", &env_calls),
-    )
-    .expect_err("a store failure is terminal");
+    ) else {
+        panic!("a store failure is terminal, but a value resolved");
+    };
 
     assert!(
         matches!(
