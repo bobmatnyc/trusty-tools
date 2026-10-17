@@ -180,8 +180,9 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
         compact: false,
         ..Default::default()
     };
+    let scans = super::idle_evict::RehydrateScanCounter::arm(&idx);
     assert_eq!(
-        super::idle_evict::rehydrate_scan_count(&idx),
+        scans.count(),
         0,
         "no rehydrate scan may have run before the concurrent callers start"
     );
@@ -199,7 +200,7 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
 
     // #10015: count the scans instead of timing them; elapsed time flaked on a loaded runner.
     assert_eq!(
-        super::idle_evict::rehydrate_scan_count(&idx),
+        scans.count(),
         1,
         "5 concurrent callers must dedupe onto exactly one scan, not each re-trigger their own"
     );

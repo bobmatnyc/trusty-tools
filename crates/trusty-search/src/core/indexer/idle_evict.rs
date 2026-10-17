@@ -374,34 +374,59 @@ pub(crate) static TEST_REHYDRATE_DELAY_MS: std::sync::atomic::AtomicU64 =
 /// many scans ran, not how long they took. Keyed by the indexer's
 /// `rehydrate_inflight` address (as the #9513 panic hook is) so a concurrent
 /// test's scan never reaches another test's count.
-/// What: `(gate address, scans started)` pairs; bumped by the blocking scan.
-/// Compiled out of non-test builds.
+/// What: `(gate address, scans started)` pairs. A key exists only while a
+/// [`RehydrateScanCounter`] guard for it is alive; the blocking scan bumps an
+/// armed key and ignores any other. Compiled out of non-test builds.
 /// Test: `rehydrate_dedupes_concurrent_callers_onto_one_scan`.
-// #10015: scan counter replaces the wall-clock dedupe assertion.
+// #10015: scan counter replaces the wall-clock dedupe assertion. Arm/Drop (not a
+// never-cleared map) so a later indexer reusing a freed address sees no stale count.
 #[cfg(test)]
 static TEST_REHYDRATE_SCAN_COUNTS: StdMutex<Vec<(usize, u64)>> = StdMutex::new(Vec::new());
 
 #[cfg(test)]
-fn record_rehydrate_scan(key: usize) {
-    let mut counts = TEST_REHYDRATE_SCAN_COUNTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    match counts.iter_mut().find(|(k, _)| *k == key) {
-        Some((_, n)) => *n += 1,
-        None => counts.push((key, 1)),
-    }
-}
-
-/// Test-only: how many rehydrate scans `indexer` has started.
-#[cfg(test)]
-pub(crate) fn rehydrate_scan_count(indexer: &CodeIndexer) -> u64 {
-    let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
+fn rehydrate_scan_counts() -> std::sync::MutexGuard<'static, Vec<(usize, u64)>> {
     TEST_REHYDRATE_SCAN_COUNTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map_or(0, |(_, n)| *n)
+}
+
+#[cfg(test)]
+fn record_rehydrate_scan(key: usize) {
+    if let Some((_, n)) = rehydrate_scan_counts().iter_mut().find(|(k, _)| *k == key) {
+        *n += 1;
+    }
+}
+
+/// Test-only: counts rehydrate scans of ONE indexer from `arm` until dropped.
+/// Test: `rehydrate_dedupes_concurrent_callers_onto_one_scan`.
+#[cfg(test)]
+pub(crate) struct RehydrateScanCounter(usize);
+
+#[cfg(test)]
+impl RehydrateScanCounter {
+    /// Start counting scans of `indexer` from zero.
+    pub(crate) fn arm(indexer: &CodeIndexer) -> Self {
+        let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
+        let mut counts = rehydrate_scan_counts();
+        counts.retain(|(k, _)| *k != key);
+        counts.push((key, 0));
+        Self(key)
+    }
+
+    /// Scans of the armed indexer started since `arm`.
+    pub(crate) fn count(&self) -> u64 {
+        rehydrate_scan_counts()
+            .iter()
+            .find(|(k, _)| *k == self.0)
+            .map_or(0, |(_, n)| *n)
+    }
+}
+
+#[cfg(test)]
+impl Drop for RehydrateScanCounter {
+    fn drop(&mut self) {
+        rehydrate_scan_counts().retain(|(k, _)| *k != self.0);
+    }
 }
 
 /// Read `TRUSTY_REHYDRATE_WAIT_MS`, falling back to
@@ -651,7 +676,7 @@ impl CodeIndexer {
     /// occasionally waiting the full budget instead of returning early.
     /// Test: `detached_rehydrate_survives_caller_cancellation`,
     /// `rehydrate_dedupes_concurrent_callers_onto_one_scan` in
-    /// `indexer::cost_scaled_threshold_tests`.
+    /// `indexer::rehydrate_tests`.
     pub(super) async fn ensure_corpus_rehydrated(&self) {
         let Some(notify) = self.begin_corpus_rehydrate() else {
             return;
