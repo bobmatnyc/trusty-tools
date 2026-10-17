@@ -74,7 +74,8 @@ DENY_FILE="${ARCHITECT_LEAK_DENY_FILE:-}"
 TAB="$(printf '\t')"
 
 # Shipped copies: "<path under the sub-project>|<path under the repo root>",
-# one per line. P4 added what `tm fleet init` writes into the Architect.
+# one per line. P4 added what `tm fleet init` writes into the Architect;
+# #9997 moved the records templates to local/ and added the rest of local/.
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -87,8 +88,22 @@ scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 templates/CLAUDE.md|content/instructions/architect/templates/CLAUDE.md
 templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
-templates/records/state.md|crates/trusty-mpm/src/assets/architect/templates/records/state.md
-templates/records/actions.md|crates/trusty-mpm/src/assets/architect/templates/records/actions.md
+templates/local/state.md|crates/trusty-mpm/src/assets/architect/templates/local/state.md
+templates/local/actions.md|crates/trusty-mpm/src/assets/architect/templates/local/actions.md
+templates/local/goals.md|crates/trusty-mpm/src/assets/architect/templates/local/goals.md
+templates/local/user.md|crates/trusty-mpm/src/assets/architect/templates/local/user.md
+templates/local/instance.md|crates/trusty-mpm/src/assets/architect/templates/local/instance.md
+templates/local/projects/_template.md|crates/trusty-mpm/src/assets/architect/templates/local/projects/_template.md
+templates/local/owner/README.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/README.md
+templates/local/owner/business.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/business.md
+templates/local/owner/process.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/process.md
+templates/local/owner/decision-making.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/decision-making.md
+templates/local/owner/risk-tolerance.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/risk-tolerance.md
+templates/local/owner/detail-and-communication.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/detail-and-communication.md
+templates/local/owner/contradictions.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/contradictions.md
+templates/local/owner/dream-log.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/dream-log.md
+templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templates/local/mandates/README.md
+templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
 "
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done
