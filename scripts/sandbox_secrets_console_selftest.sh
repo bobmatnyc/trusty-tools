@@ -32,6 +32,11 @@
 #     rel-bin     a relative --secrets-bin or --console-bin refuses
 #     bad-path    a --dir whose path holds a quote refuses (it is written to JSON)
 #     bad-arg     an unknown argument is a usage error (exit 2)
+#     tm-bin      --tm-bin <dir> and --tm-bin <dir>/tm give the console stub
+#                 PATH=<dir>:/usr/bin:/bin and the secrets stub the default;
+#                 without it both keep /usr/bin:/bin (#9979)
+#     tm-bin-bad  a missing path, a dir or file with no executable tm, and a
+#                 relative path refuse (exit 1)
 #
 # Usage: ./scripts/sandbox_secrets_console_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -76,6 +81,7 @@ for role in secrets console; do
 #!/bin/sh
 role="${0##*/}"
 env | cut -d= -f1 | sort > "$HOME/$role.names"
+printf '%s\n' "$PATH" > "$HOME/$role.path"
 # #9793: the four pinned variables with their values; none is a secret.
 env | grep -E '^(TRUSTY_SANDBOX|TRUSTY_DATA_DIR_OVERRIDE|TRUSTY_MPM_ROOT|TRUSTY_SECRETS_EXTERNAL)=' \
   | LC_ALL=C sort > "$HOME/$role.values"
@@ -296,6 +302,39 @@ expect_refusal bad-path 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$TMP_RO
 [ -z "$(ls -A "$TMP_ROOT/quo\"te")" ] || fail bad-path-created "the refusal created files"
 expect_refusal bad-arg 2 --secrets-bin "$SB" --console-bin "$CB" --nope
 [ -z "$(ls -A "$DIR4")" ] || fail refusals-created "a refused run created files in --dir"
+
+# #9979: --tm-bin prepends one directory to the console's PATH, nothing else.
+mkdir -p "$TMP_ROOT/tmbin" "$TMP_ROOT/tmbin-empty"
+printf '#!/bin/sh\nexit 0\n' > "$TMP_ROOT/tmbin/tm"
+chmod +x "$TMP_ROOT/tmbin/tm"
+TMB="$(cd "$TMP_ROOT/tmbin" && pwd -P)"
+run_tm_bin_case() {
+  local name="$1" arg="$2" d="$TMP_ROOT/case-$1"
+  mkdir -p "$d"
+  spawn_launcher --secrets-bin "$SB" --console-bin "$CB" --dir "$d" --bind "127.0.0.1:$PORT" --projects 1 \
+    ${arg:+--tm-bin "$arg"} > "$TMP_ROOT/out-$name" 2>&1
+  if wait_for "$d/home/stub-console.path" && wait_for "$d/home/stub-secrets.path"; then
+    expect_eq "$name console PATH" "$(cat "$d/home/stub-console.path")" "${arg:+$TMB:}/usr/bin:/bin"
+    expect_eq "$name secrets PATH" "$(cat "$d/home/stub-secrets.path")" "/usr/bin:/bin"
+  else
+    fail "$name" "the stubs never ran"
+    sed 's/^/    /' "$TMP_ROOT/out-$name"
+  fi
+  kill -TERM "$LAUNCHER_PID" 2>/dev/null || true
+  wait "$LAUNCHER_PID" 2>/dev/null || true
+  LAUNCHER_PID=""
+  bash "$LAUNCHER" --stop "$d" > /dev/null 2>&1 || true
+}
+run_tm_bin_case tm-bin-dir "$TMB"
+run_tm_bin_case tm-bin-file "$TMB/tm"
+run_tm_bin_case tm-bin-none ""
+DIR5="$TMP_ROOT/case5"
+mkdir -p "$DIR5"
+: > "$TMP_ROOT/tmbin-empty/notexec"
+for bad in "$TMP_ROOT/no-such-dir" "$TMP_ROOT/tmbin-empty" "$TMP_ROOT/tmbin-empty/notexec" "tmbin"; do
+  expect_refusal "tm-bin-bad-${bad##*/}" 1 --secrets-bin "$SB" --console-bin "$CB" --dir "$DIR5" --tm-bin "$bad"
+done
+[ -z "$(ls -A "$DIR5")" ] || fail tm-bin-bad-created "a refused run created files in --dir"
 
 echo "sandbox_secrets_console_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

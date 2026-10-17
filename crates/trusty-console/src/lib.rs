@@ -84,6 +84,8 @@ pub(crate) mod tailnet_peer;
 // #6155: the trusty-search, trusty-memory and trusty-analyze SPAs, mounted
 // under /tools/<tool>/.
 pub mod tools_ui;
+// #9979: the mpm chat page, moved from the daemon's `/web` (D96).
+pub mod tools_ui_mpm;
 pub mod webhook;
 
 /// How often the background sweep re-attempts pending webhook deliveries.

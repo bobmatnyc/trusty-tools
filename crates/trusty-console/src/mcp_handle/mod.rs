@@ -300,6 +300,12 @@ impl McpServiceHandle {
         }
     }
 
+    /// The binary and args this handle spawns — test helper (#9979).
+    #[cfg(test)]
+    pub(crate) fn command_for_test(&self) -> (&str, &[String]) {
+        (&self.binary, &self.args)
+    }
+
     /// Prime this handle to the `Degraded` state — test helper only.
     ///
     /// Why: Integration tests in sibling modules (`server.rs`) need to drive the
@@ -353,11 +359,6 @@ impl McpServiceHandle {
     /// (capability-gate regression for #1170).
     #[cfg(test)]
     pub async fn prime_connected_missing_tool_for_test(&self, missing_tool: &str) {
-        let client =
-            trusty_common::stdio_mcp_client::StdioMcpClient::spawn("cat", &[], "test-client")
-                .await
-                .expect("cat must be present for test setup");
-        let client_arc = Arc::new(Mutex::new(Box::new(client)));
         let mut tool_names = HashSet::new();
         tool_names.insert(CONSOLE_METRICS_METHOD.to_string());
         // Add several common analyze tools but NOT the one being tested as absent.
@@ -368,7 +369,27 @@ impl McpServiceHandle {
         }
         // Ensure the missing_tool is absent regardless of the defaults above.
         tool_names.remove(missing_tool);
+        self.prime_connected_for_test("cat", &[], tool_names).await;
+    }
 
+    /// Prime this handle to `Connected` over `program args` with `tool_names`
+    /// as the cached tool set — test helper.
+    ///
+    /// Why: #9979 — the chat route's timeout arm needs a connected handle whose
+    /// child never answers (`sleep`), with `sessions_chat` in the tool set so
+    /// the capability gate lets the call through.
+    /// Test: `call_tool_enveloped_timeout_is_an_error_and_resets_the_handle`.
+    #[cfg(test)]
+    pub async fn prime_connected_for_test(
+        &self,
+        program: &str,
+        args: &[&str],
+        tool_names: HashSet<String>,
+    ) {
+        let client = StdioMcpClient::spawn(program, args, "test-client")
+            .await
+            .expect("test child must spawn");
+        let client_arc = Arc::new(Mutex::new(Box::new(client)));
         let mut guard = self.state.lock().await;
         let (state_opt, backoff) = &mut *guard;
         backoff.reset();
@@ -423,34 +444,12 @@ impl McpServiceHandle {
     /// backoff gate; end-to-end smoke test validates the live pipe.
     pub async fn poll_metrics(&self) -> Result<ConsoleMetricsReport, McpHandleError> {
         let (client_arc, _tool_names) = self.ensure_connected().await?;
-
-        let mut client_guard = client_arc.lock().await;
-        let raw = client_guard
-            .call_tool(CONSOLE_METRICS_METHOD, json!({}))
-            .await
-            .with_context(|| {
-                format!(
-                    "McpServiceHandle: {} tool call failed for {}",
-                    CONSOLE_METRICS_METHOD, self.binary
-                )
-            });
-
-        drop(client_guard);
-
-        match raw {
-            Ok(value) => {
-                self.on_call_success().await;
-                parse_report(&value)
-                    .with_context(|| {
-                        format!("McpServiceHandle: parse_report failed for {}", self.binary)
-                    })
-                    .map_err(McpHandleError::Other)
-            }
-            Err(e) => {
-                self.on_call_failure().await;
-                Err(McpHandleError::Other(e))
-            }
-        }
+        let value = self
+            .invoke(&client_arc, CONSOLE_METRICS_METHOD, json!({}), None)
+            .await?;
+        parse_report(&value)
+            .with_context(|| format!("McpServiceHandle: parse_report failed for {}", self.binary))
+            .map_err(McpHandleError::Other)
     }
 
     /// Call any named MCP tool and return the unwrapped data `Value`.
@@ -470,27 +469,9 @@ impl McpServiceHandle {
     /// the on-demand route integration tests exercise the live path.
     pub async fn call_tool_raw(&self, tool: &str, args: Value) -> Result<Value, McpHandleError> {
         let (client_arc, _tool_names) = self.ensure_connected().await?;
-
-        let mut client_guard = client_arc.lock().await;
-        let result = client_guard.call_tool(tool, args).await.with_context(|| {
-            format!(
-                "McpServiceHandle: {} tool call failed for {}",
-                tool, self.binary
-            )
-        });
-
-        drop(client_guard);
-
-        match result {
-            Ok(raw) => {
-                self.on_call_success().await;
-                Ok(unwrap_mcp_content(raw))
-            }
-            Err(e) => {
-                self.on_call_failure().await;
-                Err(McpHandleError::Other(e))
-            }
-        }
+        self.invoke(&client_arc, tool, args, None)
+            .await
+            .map(unwrap_mcp_content)
     }
 
     /// Call a named MCP tool only if it is present in the cached tool set.
@@ -504,12 +485,37 @@ impl McpServiceHandle {
     /// re-probe populates the updated tool set, and the call becomes allowed again.
     /// What: Calls `ensure_connected` to obtain the cached tool set; if `tool` is
     /// not in the set, returns `McpHandleError::ToolUnavailable` immediately
-    /// without making a JSON-RPC round-trip. Otherwise delegates to `call_tool_raw`.
+    /// without making a JSON-RPC round-trip. Otherwise makes the call (via
+    /// [`Self::call_tool_enveloped`], default bound) and unwraps the envelope.
     /// Test: `call_tool_checked_returns_tool_unavailable_when_tool_absent` in `tests.rs`.
     pub async fn call_tool_checked(
         &self,
         tool: &str,
         args: Value,
+    ) -> Result<Value, McpHandleError> {
+        self.call_tool_enveloped(tool, args, None)
+            .await
+            .map(unwrap_mcp_content)
+    }
+
+    /// Capability-gated call that returns the raw `tools/call` result.
+    ///
+    /// Why: #9979 — the mpm chat route needs two things `call_tool_checked`
+    /// hides: a per-call bound longer than the 30 s default (an action-capable
+    /// `sessions_chat` turn runs for minutes), and the `isError` flag, which
+    /// `unwrap_mcp_content` drops.
+    /// What: the same gate as [`Self::call_tool_checked`]; then one call under
+    /// `call_timeout` (`None` keeps the client default). Returns the MCP
+    /// envelope `{content, isError}` unchanged. A fired timeout is an
+    /// `McpHandleError::Other` and resets the handle like any call failure; it
+    /// never retries, since the server-side call is not cancelled.
+    /// Test: `call_tool_enveloped_timeout_is_an_error_and_resets_the_handle`
+    /// (`tests.rs`); `routes::chat::tests`.
+    pub async fn call_tool_enveloped(
+        &self,
+        tool: &str,
+        args: Value,
+        call_timeout: Option<Duration>,
     ) -> Result<Value, McpHandleError> {
         let (client_arc, tool_names) = self.ensure_connected().await?;
 
@@ -530,8 +536,27 @@ impl McpServiceHandle {
             });
         }
 
+        self.invoke(&client_arc, tool, args, call_timeout).await
+    }
+
+    /// One `tools/call` on a connected client, with the success/failure
+    /// bookkeeping every call path shares; returns the raw result.
+    ///
+    /// What: holds the per-client lock for the call only. `call_timeout`
+    /// `None` uses the client's default bound. Test: via its three callers.
+    async fn invoke(
+        &self,
+        client_arc: &Mutex<Box<StdioMcpClient>>,
+        tool: &str,
+        args: Value,
+        call_timeout: Option<Duration>,
+    ) -> Result<Value, McpHandleError> {
         let mut client_guard = client_arc.lock().await;
-        let result = client_guard.call_tool(tool, args).await.with_context(|| {
+        let result = match call_timeout {
+            Some(bound) => client_guard.call_tool_with_timeout(tool, args, bound).await,
+            None => client_guard.call_tool(tool, args).await,
+        }
+        .with_context(|| {
             format!(
                 "McpServiceHandle: {} tool call failed for {}",
                 tool, self.binary
@@ -542,7 +567,7 @@ impl McpServiceHandle {
         match result {
             Ok(raw) => {
                 self.on_call_success().await;
-                Ok(unwrap_mcp_content(raw))
+                Ok(raw)
             }
             Err(e) => {
                 self.on_call_failure().await;
@@ -862,7 +887,7 @@ impl McpServiceHandle {
 /// text is not valid JSON (or the envelope shape is unexpected), returns the
 /// raw Value unchanged so the caller always gets *something*.
 /// Test: Inline unit test `unwrap_mcp_content_extracts_text_json` in `tests.rs`.
-pub(super) fn unwrap_mcp_content(raw: Value) -> Value {
+pub(crate) fn unwrap_mcp_content(raw: Value) -> Value {
     // Expected shape: {"content":[{"type":"text","text":"..."}],"isError":false}
     if let Some(text) = raw
         .get("content")
