@@ -233,8 +233,23 @@ unsound = "none"
 # string, which cargo-deny prints, so it is at least visible in gate output. The
 # same id is ignored in `.cargo/audit.toml` for cargo-audit; remove both in one
 # change.
+#
+# RUSTSEC-2026-0367 / -0368 / -0369 (zip extract-to-disk: SUID/SGID bits kept,
+# symlink targets escaping the destination, chmod through symlinks; published
+# 2026-10). Patched only in zip >= 9.0.0. The workspace's own zip moved to 9.0.4
+# in #10019. Four older zips remain, each pinned by an upstream parent with no
+# zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed
+# (zip 7.2.0), candle-core 0.8.4 behind the optional `candle` feature
+# (zip 1.1.4), and utoipa-swagger-ui 9.0.2 as a build-only dependency of the
+# optional `swagger-ui` feature (zip 3.0.0). No workspace code calls
+# `extract()`; every zip read is in memory through `ZipArchive::new`. Architect
+# ruling df-D59 (2026-10-17). The same ids are ignored in `.cargo/audit.toml`;
+# remove all of them in one change once those parents take zip 9.
 ignore = [
   { id = "RUSTSEC-2026-0258", reason = "REVIEW BY 2026-11-13. h2 unbounded empty DATA frames (low severity). Only h2 0.3.27 remains (0.4 line is on the patched 0.4.16); 0.3.27 has no patched version. Renewed 30 days by owner ruling Dd5 (2026-10-14, #6067). Remove with the hf-hub 0.5 bump. Nothing expires this row automatically — delete it when that lands or record a fresh decision." },
+  { id = "RUSTSEC-2026-0367", reason = "REVIEW BY 2026-11-20. zip extract keeps SUID/SGID bits. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
+  { id = "RUSTSEC-2026-0368", reason = "REVIEW BY 2026-11-20. zip extract creates symlinks escaping the destination. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
+  { id = "RUSTSEC-2026-0369", reason = "REVIEW BY 2026-11-20. zip extract applies permissions through symlinks. Pinned upstream with no zip-9 release: calamine 0.36 (zip 8.6.0), candle-core 0.10.2 via fastembed (zip 7.2.0), candle-core 0.8.4 optional candle (zip 1.1.4), utoipa-swagger-ui 9.0.2 build-only swagger-ui (zip 3.0.0). No extract-to-disk use: workspace reads zip in memory only (ZipArchive::new), see #10019. Ruling df-D59. Nothing expires this row automatically." },
 ]
 
 # ---------------------------------------------------------------------------

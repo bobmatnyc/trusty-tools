@@ -2254,7 +2254,7 @@ fn write_minimal_docx(path: &std::path::Path, text: &str) {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         zip.start_file("word/document.xml", opts).unwrap();
         zip.write_all(document_xml.as_bytes()).unwrap();
         zip.finish().unwrap();
@@ -2278,7 +2278,7 @@ fn write_minimal_xlsx(path: &std::path::Path, cell_text: &str) {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         zip.start_file("[Content_Types].xml", opts).unwrap();
         zip.write_all(content_types.as_bytes()).unwrap();
         zip.start_file("_rels/.rels", opts).unwrap();

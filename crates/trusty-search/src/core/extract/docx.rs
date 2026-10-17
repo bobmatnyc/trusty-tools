@@ -85,7 +85,8 @@ const OUTLINE_LEVEL_BODY_TEXT: u8 = 9;
 /// Why/What: see module docs. Decompression is bounded by
 /// [`MAX_PART_BYTES`] (zip-bomb defence; see that constant's docs).
 /// Test: `test_extracts_paragraphs_preserving_breaks`,
-/// `test_oversized_document_xml_rejected_by_declared_size`.
+/// `test_oversized_document_xml_rejected_by_declared_size`,
+/// `test_forged_declared_size_rejected_through_real_zip`.
 pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
     let file = std::fs::File::open(path).map_err(|source| ExtractError::Io {
         path: path.display().to_string(),
@@ -572,7 +573,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zip.start_file("[Content_Types].xml", opts).unwrap();
             zip.write_all(content_types.as_bytes()).unwrap();
             zip.start_file("_rels/.rels", opts).unwrap();
@@ -907,13 +908,39 @@ mod tests {
         assert_eq!(text.trim(), "Tom & Jerry: 1 < 2 > 0, café");
     }
 
+    /// #10019: the declared-size refusal must fire through the real zip
+    /// reader's `size()`, not only through `read_entry_bounded` over a
+    /// `Cursor`. A zip upgrade that changed which header `size()` reports, or
+    /// stopped reporting it, would otherwise pass every other guard test.
+    #[test]
+    fn test_forged_declared_size_rejected_through_real_zip() {
+        let mut bytes = build_minimal_docx("<w:p><w:r><w:t>small</w:t></w:r></w:p>");
+        let forged = u32::try_from(MAX_PART_BYTES + 1).expect("cap fits a zip32 size field");
+        let patched =
+            super::super::ooxml::forge_uncompressed_size(&mut bytes, DOCUMENT_XML_PATH, forged);
+        assert!(
+            patched >= 2,
+            "expected both size fields forged, patched {patched}"
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("forged.docx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let err = extract(&path).expect_err("a part declaring more than the cap must be refused");
+        assert!(
+            err.to_string()
+                .contains(&format!("declares {forged} uncompressed bytes")),
+            "expected the declared-size refusal, got: {err}"
+        );
+    }
+
     #[test]
     fn test_missing_document_xml_errors() {
         let mut buf = Vec::new();
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zip.start_file("readme.txt", opts).unwrap();
             zip.write_all(b"not a real docx").unwrap();
             zip.finish().unwrap();

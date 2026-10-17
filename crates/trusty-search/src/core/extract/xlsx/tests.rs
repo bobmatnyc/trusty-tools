@@ -13,6 +13,7 @@
 //! non-zip container, a package at the entry cap, a document exactly at the
 //! size cap).
 
+use super::super::ooxml::forge_uncompressed_size;
 use super::*;
 use calamine::{Data, Sheets};
 use std::io::Write;
@@ -78,7 +79,7 @@ fn build_minimal_xlsx(sheets: &[(&str, Vec<Vec<&str>>)]) -> Vec<u8> {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
 
         zip.start_file("[Content_Types].xml", opts).unwrap();
         zip.write_all(content_types.as_bytes()).unwrap();
@@ -185,7 +186,7 @@ fn test_pathological_cell_attribute_count_does_not_hang() {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
         let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
         let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
@@ -310,8 +311,8 @@ fn build_xlsx_zip_bomb(payload_bytes: usize) -> Vec<u8> {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zipw = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, body) in siblings {
             zipw.start_file(name, opts).unwrap();
             zipw.write_all(body.as_bytes()).unwrap();
@@ -562,54 +563,20 @@ fn test_zip_bomb_rejected_with_cap_in_message() {
     );
 }
 
-/// Patch every central-directory and local-header uncompressed-size field
-/// belonging to `target_name` so it reads `to`, and report how many fields
-/// were rewritten.
-///
-/// Both header copies are patched: rewriting only the central directory
-/// would leave the local header available as a second honest source, and
-/// the guard must hold when neither one can be trusted.
-fn forge_uncompressed_size(bytes: &mut [u8], target_name: &str, to: u32) -> usize {
-    const CD_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
-    const LOCAL_SIG: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
-    let mut patched = 0;
-    let mut i = 0;
-    while i + 46 <= bytes.len() {
-        if bytes[i..i + 4] == CD_SIG {
-            // Central directory header: name length at +28, uncompressed
-            // size at +24, name itself at +46.
-            let name_len = u16::from_le_bytes(bytes[i + 28..i + 30].try_into().unwrap()) as usize;
-            if i + 46 + name_len <= bytes.len()
-                && &bytes[i + 46..i + 46 + name_len] == target_name.as_bytes()
-            {
-                bytes[i + 24..i + 28].copy_from_slice(&to.to_le_bytes());
-                patched += 1;
-            }
-        } else if bytes[i..i + 4] == LOCAL_SIG {
-            // Local file header: name length at +26, uncompressed size at
-            // +22, name itself at +30.
-            let name_len = u16::from_le_bytes(bytes[i + 26..i + 28].try_into().unwrap()) as usize;
-            if i + 30 + name_len <= bytes.len()
-                && &bytes[i + 30..i + 30 + name_len] == target_name.as_bytes()
-            {
-                bytes[i + 22..i + 26].copy_from_slice(&to.to_le_bytes());
-                patched += 1;
-            }
-        }
-        i += 1;
-    }
-    patched
-}
-
 /// Pass 2 must reject a REAL zip whose size fields lie, not just a
 /// `Cursor` whose length exceeds a budget.
 ///
 /// Why this test and not just `test_drain_entry_bounded_*`: those exercise
-/// `Read::take` arithmetic. What actually makes pass 2 work is that `zip`
-/// bounds an entry reader by COMPRESSED length (`zip-2.4.2/src/read.rs`,
-/// `find_content` → `.take(data.compressed_size)`), so a forged
-/// uncompressed size cannot shorten the stream. Were a future `zip` to
-/// bound by the DECLARED uncompressed size instead, the drain would return
+/// `Read::take` arithmetic over a `Cursor`. Over a real archive the zip
+/// reader sits between the bytes and the drain, so what the drain sees
+/// depends on how that reader treats a forged uncompressed size. zip 2
+/// bounded the reader by COMPRESSED length and the drain's own `take`
+/// caught the overrun. zip 9 (#10019) also bounds it by the DECLARED size,
+/// and fails the read one byte past it
+/// (`zip-9.0.4/src/crc32.rs`, `Crc32Reader::count`), so the refusal now
+/// comes from zip's error, before the drain's `take` is reached. Either
+/// way pass 2 refuses. Were a future `zip` to stop at the declared size
+/// WITHOUT an error and without the CRC check, the drain would return
 /// exactly `declared`, the guard would pass, the whole defence would become
 /// a no-op — and every other test here would stay green. This one goes red.
 ///
@@ -641,9 +608,13 @@ fn test_forged_central_directory_size_still_rejected() {
 
     let err = preflight_package_bounds(Cursor::new(&bomb[..]), CAP)
         .expect_err("a package whose size fields lie must still be refused");
+    // #10019: under zip 9 the read error is zip's own declared-size refusal
+    // rather than the drain's "decompressed past"; both come from pass 2's
+    // read of the forged entry, which is what this asserts.
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("decompressed past"),
-        "expected the drain to catch it, got: {err}"
+        msg.contains("xl/worksheets/sheet1.xml") && !msg.contains("declares at least"),
+        "expected pass 2's read of the forged entry to refuse it, got: {err}"
     );
 }
 
@@ -657,8 +628,8 @@ fn test_entry_count_cap_rejects_many_empty_entries() {
     let mut buf = Vec::new();
     {
         let mut zipw = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for i in 0..(MAX_WORKBOOK_ENTRIES + 1) {
             zipw.start_file(format!("xl/media/e{i}"), opts).unwrap();
         }
@@ -691,8 +662,8 @@ fn test_entry_count_cap_accepts_package_at_the_limit() {
     let mut buf = Vec::new();
     {
         let mut zipw = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for i in 0..MAX_WORKBOOK_ENTRIES {
             zipw.start_file(format!("xl/media/e{i}"), opts).unwrap();
         }
@@ -811,7 +782,7 @@ fn test_non_zip_container_passes_preflight() {
 /// A container that IS a zip but that this crate's zip cannot open must be
 /// REFUSED, not waved through to calamine.
 ///
-/// Why it earns its place: the guard reads with `zip` 2.x and calamine parses
+/// Why it earns its place: the guard reads with `zip` 9.x and calamine parses
 /// the same bytes with its own `zip` 8.x, so an open failure here says nothing
 /// about whether calamine will open it. Passing that case through was a
 /// fail-open — every byte cap in this module is skipped and the package reaches

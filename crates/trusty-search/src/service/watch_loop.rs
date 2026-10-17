@@ -1073,7 +1073,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut docx_bytes);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zip.start_file("word/document.xml", opts)
                 .expect("start docx entry");
             zip.write_all(document_xml.as_bytes())
