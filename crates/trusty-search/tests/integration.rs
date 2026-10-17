@@ -50,6 +50,8 @@ mod reindex_quantize_env_conflict_8737;
 mod residency_cold_park;
 mod serve_no_http_9542;
 mod src_bin_coverage_7694;
+// #9993 G6: read-only storage probe (one ignored sandbox test + helper tests).
+mod storage_probe;
 mod warm_boot_corpus_open_failure;
 mod watcher_chunk_cap_orphans_100;
 

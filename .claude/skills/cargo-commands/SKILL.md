@@ -109,7 +109,7 @@ TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
 # trusty-search read-only storage probe (#9993 G6): per-file bytes, total,
 # bytes/chunk and daemon RSS for the same sandbox index, as envelope rows.
 # Same three variables; also needs the sandbox script's sandbox.pid.
-  cargo test -p trusty-search --test storage_probe -- --include-ignored --nocapture
+  cargo test -p trusty-search --test integration storage_probe:: -- --include-ignored --nocapture
 ```
 
 ## Ignore-Tagged Integration Tests

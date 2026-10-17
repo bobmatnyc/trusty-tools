@@ -16,7 +16,7 @@
 //! TRUSTY_SEARCH_BENCH_INDEX=<index id> \
 //! TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
 //! TRUSTY_SEARCH_BENCH_ENVELOPE=<absolute path> \
-//! cargo test -p trusty-search --test storage_probe -- --include-ignored --nocapture
+//! cargo test -p trusty-search --test integration storage_probe:: -- --include-ignored --nocapture
 //! ```
 //! Test: this file; the helpers' unit tests live in
 //! `support/storage_probe_tests.rs`.
