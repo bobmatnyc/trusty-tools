@@ -829,8 +829,9 @@ raw-`gh` fallback, one `statusCheckRollup` read must list at least one check
 outside the brief's waivers.
 
 🔴 **Never assume auto-merge is available (#8640).** `version-control` reads
-`gh repo view --json autoMergeAllowed` before planning a merge and reports it
-up front. When it is `false`, `--auto` fails with `Auto merge is not allowed
+`gh api repos/<owner>/<repo> --jq .allow_auto_merge` before planning a merge
+and reports it up front (#9747). An empty answer means the token cannot read
+the setting and counts as `false`. When it is `false`, `--auto` fails with `Auto merge is not allowed
 for this repository (enablePullRequestAutoMerge)`, and the merge is a direct
 `tm pr merge <PR>` once every check has settled. A brief that orders `--auto`
 does not change that answer.

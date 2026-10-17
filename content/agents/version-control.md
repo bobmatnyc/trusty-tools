@@ -155,8 +155,9 @@ suits a repo with no CI. Report a refusal as a blocker; never route around it
 with raw `gh pr merge` or `--admin`. Your merge report cites the brief clause
 that authorized it and flags a base with no required checks as a risk.
 
-🔴 **Read `gh repo view --json autoMergeAllowed` before planning a merge, and
-report it (#8640).** `false` means `--auto` fails: merge once checks settle.
+🔴 **Read `gh api repos/<owner>/<repo> --jq .allow_auto_merge` before
+planning a merge; report it (#9747).** `false` or empty: `--auto` fails, so
+merge once checks settle.
 
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
