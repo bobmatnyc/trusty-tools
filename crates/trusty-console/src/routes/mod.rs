@@ -19,6 +19,8 @@
 
 // #9474: the header's Architect dashboard link — discovered and probed live.
 pub mod architect;
+// #9979: the mpm chat turn behind the console chat page (D96).
+pub mod chat;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;

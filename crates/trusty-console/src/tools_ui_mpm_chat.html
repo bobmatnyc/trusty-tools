@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<!--
+  Why: the Session Manager chat page, moved from the trusty-mpm daemon's /web
+       to the console (#9979, owner ruling D96) so it survives the daemon's TCP
+       bind retiring (#6288). It embeds no session logic; it is a thin
+       presentation layer over the action-capable chat turn.
+  What: a single self-contained page (no build step, no external assets) that
+       POSTs the operator's message to POST /api/console/sessions/chat with
+       `actions: true`, renders the SM `reply`, and surfaces the `actions_taken`
+       audit trail. `conv_id` is echoed back and resent so the rolling SM
+       context continues across turns. Styled with Foundry v2 tokens
+       (docs/design/UI/design-system/tokens.css), the Night Shift palette when
+       the browser prefers dark.
+  Test: served by `mpm_chat_page` (tools_ui_mpm.rs); its tests pin the markers
+       and the fetch path against the registered route.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>trusty-mpm — Session Manager chat</title>
+  <style>
+    /* Foundry v2 tokens, light palette ("warm paper"). */
+    :root {
+      --trusty-sidebar-bg: #2b1c12; --trusty-sidebar-text: #e6d8c8;
+      --trusty-sidebar-muted: #a58a6b; --trusty-sidebar-border: #46311f;
+      --trusty-content-bg: #f5efe7; --trusty-card-bg: #fffdf9;
+      --trusty-border: #d8c9b4; --trusty-surface-raised: #efe6d8;
+      --trusty-text-primary: #2b1c12; --trusty-text-muted: #8a7460;
+      --trusty-text-inverse: #ffffff;
+      --trusty-accent: #b7410e; --trusty-accent-hover: #8a2f0b;
+      --trusty-accent-soft: #f3d9cb; --trusty-success-soft: #dcedd2;
+      --trusty-warning: #b07d10; --trusty-warning-soft: #f5e7c4;
+      --trusty-danger: #c2331f; --trusty-danger-soft: #f6d7d0;
+      --trusty-font: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+      --trusty-display: 'Chakra Petch', 'IBM Plex Sans', sans-serif;
+      --trusty-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+      --trusty-radius: 5px; --trusty-radius-lg: 8px;
+    }
+    /* Night Shift (dark) palette. */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --trusty-sidebar-bg: #171009; --trusty-sidebar-border: #382513;
+        --trusty-content-bg: #201612; --trusty-card-bg: #2b1c12;
+        --trusty-border: #46311f; --trusty-surface-raised: #382513;
+        --trusty-text-primary: #f0e7d8; --trusty-text-muted: #a58a6b;
+        --trusty-text-inverse: #201612;
+        --trusty-accent: #d97742; --trusty-accent-hover: #e8905c;
+        --trusty-accent-soft: rgba(217, 119, 66, 0.16);
+        --trusty-success-soft: rgba(143, 191, 106, 0.14);
+        --trusty-warning: #d9a83a; --trusty-warning-soft: rgba(217, 168, 58, 0.14);
+        --trusty-danger: #e06a52; --trusty-danger-soft: rgba(224, 106, 82, 0.14);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.5 var(--trusty-font);
+      background: var(--trusty-content-bg); color: var(--trusty-text-primary);
+      display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      padding: 12px 16px; border-bottom: 1px solid var(--trusty-sidebar-border);
+      background: var(--trusty-sidebar-bg); color: var(--trusty-sidebar-text);
+      display: flex; align-items: center; gap: 12px;
+    }
+    header h1 { font: 600 16px var(--trusty-display); margin: 0; }
+    header .conv { color: var(--trusty-sidebar-muted); font: 12px var(--trusty-mono);
+      margin-left: auto; }
+    #log { flex: 1; overflow-y: auto; padding: 16px; }
+    .msg { max-width: 760px; margin: 0 auto 12px; padding: 10px 14px;
+      border-radius: var(--trusty-radius-lg); border: 1px solid var(--trusty-border);
+      background: var(--trusty-card-bg); white-space: pre-wrap; word-wrap: break-word; }
+    .msg.user { background: var(--trusty-accent-soft); }
+    .msg.sm { background: var(--trusty-success-soft); }
+    .msg.error { background: var(--trusty-danger-soft); border-color: var(--trusty-danger); }
+    .role { font: 11px var(--trusty-mono); text-transform: uppercase;
+      letter-spacing: .05em; color: var(--trusty-text-muted); margin-bottom: 4px; }
+    .actions { max-width: 760px; margin: -6px auto 12px; padding: 8px 14px;
+      border-radius: var(--trusty-radius-lg); background: var(--trusty-warning-soft);
+      border: 1px solid var(--trusty-warning); font-size: 13px; }
+    .actions ul { margin: 4px 0 0; padding-left: 18px; }
+    .meta { color: var(--trusty-text-muted); font: 11px var(--trusty-mono); margin-top: 4px; }
+    form { display: flex; gap: 8px; padding: 12px 16px;
+      border-top: 1px solid var(--trusty-border); background: var(--trusty-surface-raised); }
+    #input { flex: 1; resize: none; background: var(--trusty-card-bg);
+      color: var(--trusty-text-primary); border: 1px solid var(--trusty-border);
+      border-radius: var(--trusty-radius); padding: 10px; font: inherit; }
+    #input:focus { outline: 2px solid var(--trusty-accent); outline-offset: -1px; }
+    #send { background: var(--trusty-accent); color: var(--trusty-text-inverse); border: 0;
+      border-radius: var(--trusty-radius); padding: 0 18px; font-weight: 600; cursor: pointer; }
+    #send:hover:not(:disabled) { background: var(--trusty-accent-hover); }
+    #send:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>trusty-mpm — Session Manager</h1>
+    <span class="conv" id="conv">new conversation</span>
+  </header>
+  <div id="log" aria-live="polite">
+    <div class="msg sm">
+      <div class="role">session manager</div>Ask me to spawn, list, send to, or stop managed sessions. I can run those actions inline and show you the audit trail.</div>
+  </div>
+  <form id="form">
+    <textarea id="input" rows="2" placeholder="Message the session manager…" autofocus></textarea>
+    <button id="send" type="submit">Send</button>
+  </form>
+  <script>
+    "use strict";
+    // Why: continue one SM rolling-context conversation across turns. Echoed by
+    // the endpoint and resent so the SM keeps its compressed history.
+    let convId = null;
+    const log = document.getElementById("log");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const convLabel = document.getElementById("conv");
+
+    function append(role, cls, text) {
+      const el = document.createElement("div");
+      el.className = "msg " + cls;
+      const r = document.createElement("div");
+      r.className = "role";
+      r.textContent = role;
+      el.appendChild(r);
+      el.appendChild(document.createTextNode(text));
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
+    function appendActions(actions, meta) {
+      const el = document.createElement("div");
+      el.className = "actions";
+      el.appendChild(document.createTextNode("Actions taken:"));
+      const ul = document.createElement("ul");
+      for (const a of actions) {
+        const li = document.createElement("li");
+        li.textContent = a;
+        ul.appendChild(li);
+      }
+      el.appendChild(ul);
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        el.appendChild(m);
+      }
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function submit(message) {
+      append("you", "user", message);
+      sendBtn.disabled = true;
+      try {
+        const body = { message, actions: true };
+        if (convId) body.conv_id = convId;
+        const resp = await fetch("/api/console/sessions/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          append("error", "error", "HTTP " + resp.status + ": " + t);
+          return;
+        }
+        const data = await resp.json();
+        if (data.conv_id) {
+          convId = data.conv_id;
+          convLabel.textContent = "conv " + convId.slice(0, 8);
+        }
+        append("session manager", "sm", data.reply || "(no reply)");
+        if (Array.isArray(data.actions_taken) && data.actions_taken.length) {
+          let meta = "";
+          if (typeof data.cost === "number") meta = "cost $" + data.cost.toFixed(4);
+          appendActions(data.actions_taken, meta);
+        }
+      } catch (e) {
+        append("error", "error", String(e));
+      } finally {
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      submit(message);
+    });
+    // Enter sends; Shift+Enter inserts a newline.
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+  </script>
+</body>
+</html>

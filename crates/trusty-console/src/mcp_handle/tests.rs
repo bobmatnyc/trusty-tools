@@ -1,5 +1,6 @@
 //! Tests for `mcp_handle` — split to `tests.rs` (1500-SLOC budget) per #1131.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -587,5 +588,58 @@ async fn outer_lock_not_held_during_probe_outer_lock_remains_acquirable() {
     assert!(
         matches!(r3.unwrap_err(), McpHandleError::Absent),
         "absent binary must return McpHandleError::Absent"
+    );
+}
+
+/// Why: #9979 — the chat route's per-call bound must actually bound the call,
+/// and a fired timeout must surface as an error that resets the handle, never
+/// a silent default the route carries on with (Fail-Open check).
+/// What: primes a `Connected` handle over `sleep` (reads the request, never
+/// answers) with `sessions_chat` in the tool set, calls it under a 200 ms
+/// bound, and asserts an `Other` error naming the timeout, inside 5 s, with
+/// the state reset to `None` and one failure recorded.
+/// Test: this test.
+#[tokio::test]
+async fn call_tool_enveloped_timeout_is_an_error_and_resets_the_handle() {
+    let handle = McpServiceHandle::new("tm", vec![]);
+    let tools: HashSet<String> = ["console_metrics", "sessions_chat"]
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    handle
+        .prime_connected_for_test("sleep", &["30"], tools)
+        .await;
+
+    let started = Instant::now();
+    let result = handle
+        .call_tool_enveloped(
+            "sessions_chat",
+            serde_json::json!({ "message": "hi" }),
+            Some(Duration::from_millis(200)),
+        )
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the caller's bound must apply, not the 30 s default"
+    );
+    match result {
+        Err(McpHandleError::Other(e)) => {
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains("timed out"),
+                "error must name the timeout: {msg}"
+            );
+        }
+        other => panic!("a fired timeout must be an Other error, got {other:?}"),
+    }
+    let guard = handle.state.lock().await;
+    let (state_opt, backoff) = &*guard;
+    assert!(
+        state_opt.is_none(),
+        "a timed-out call must reset the handle"
+    );
+    assert_eq!(
+        backoff.failure_count, 1,
+        "the timeout counts as one failure"
     );
 }
