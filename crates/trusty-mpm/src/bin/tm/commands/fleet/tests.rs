@@ -15,6 +15,7 @@ use super::*;
 use crate::cli::{Cli, Command};
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
+use trusty_mpm::core::project_skill_tier::architect_skills::SHIPPED;
 
 /// A tmux with no session and no stamp; the preflight tests use it too.
 pub(super) const NO_TMUX: Probe = Probe {
@@ -529,6 +530,29 @@ fn a_nested_claude_under_the_architect_is_not_this_session() {
 
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
+/// The pre-#9997 records directory: never seeded, only warned about.
+const STALE_DIR: &str = "records";
+
+/// #9997: every template `tm fleet init` seeds under `local/`.
+const LOCAL_TEMPLATES: &[&str] = &[
+    "local/state.md",
+    "local/actions.md",
+    "local/goals.md",
+    "local/user.md",
+    "local/instance.md",
+    "local/projects/_template.md",
+    "local/owner/README.md",
+    "local/owner/business.md",
+    "local/owner/process.md",
+    "local/owner/decision-making.md",
+    "local/owner/risk-tolerance.md",
+    "local/owner/detail-and-communication.md",
+    "local/owner/contradictions.md",
+    "local/owner/dream-log.md",
+    "local/mandates/README.md",
+    "local/mandates/example.toml",
+];
+
 /// The checkout's Architect seed, read from content once (#9132).
 fn seed() -> &'static ArchitectSeed {
     static SEED: std::sync::OnceLock<ArchitectSeed> = std::sync::OnceLock::new();
@@ -576,22 +600,40 @@ fn a_first_run_seeds_the_architect_project() {
     for rel in super::seed::DIRS {
         assert!(dir.join(rel).is_dir(), "{rel}");
     }
-    for skill in ["tm-fleet-check", "tm-context-refresh"] {
+    for skill in SHIPPED {
         assert!(
             dir.join(".claude/skills")
-                .join(skill)
+                .join(skill.stem)
                 .join("SKILL.md")
                 .is_file(),
-            "{skill}"
+            "{}",
+            skill.stem
         );
     }
+    // #9997: the `local/` layout, every template non-empty, and no `records/`.
+    for rel in LOCAL_TEMPLATES {
+        let body = std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(!body.trim().is_empty(), "{rel} was seeded empty");
+    }
+    assert!(dir.join("local/projects").is_dir());
+    assert!(
+        !dir.join(STALE_DIR).exists(),
+        "a fresh init created the stale layout"
+    );
     let claude_md = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
     assert!(
         !claude_md.contains("TRUSTY-MPM:"),
         "an override marker was seeded"
     );
     assert!(!claude_md.contains("TRUSTY_MPM_PM_UNRESTRICTED"));
-    assert!(claude_md.contains("records/"), "{claude_md}");
+    assert!(claude_md.contains("local/state.md"), "{claude_md}");
+    for file in seeded_files() {
+        assert!(
+            !file.contents.contains(&format!("{STALE_DIR}/")),
+            "{} still names the stale layout",
+            file.dest
+        );
+    }
     let rendered = report.render();
     assert!(
         rendered.contains("poller start (--no-launch)"),
@@ -661,7 +703,7 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     for (rel, text) in edited {
         std::fs::write(dir.join(rel), text).unwrap();
     }
-    std::fs::remove_file(dir.join("records/actions.md")).unwrap();
+    std::fs::remove_file(dir.join("local/actions.md")).unwrap();
     let report = fx.init().unwrap();
     for (rel, text) in edited {
         assert_eq!(
@@ -680,7 +722,7 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     assert!(
         report
             .steps
-            .contains(&Step::Changed("wrote records/actions.md".to_owned()))
+            .contains(&Step::Changed("wrote local/actions.md".to_owned()))
     );
     assert!(!report.failed(), "{}", report.render());
     let again = fx.init().unwrap();
@@ -702,14 +744,15 @@ fn every_path_a_ported_skill_names_exists_after_init() {
             .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
         {
             let word = raw.trim_end_matches(['.', ':', ';']);
-            let architect_path = ["scripts/", "records/", ".claude/"]
+            // #9997: the Architect's records live in `local/`.
+            let architect_path = ["scripts/", "local/", ".claude/"]
                 .iter()
                 .any(|p| word.starts_with(p))
                 || word == "CLAUDE.md";
             if !architect_path {
                 continue;
             }
-            // `records/projects/<project>.md` names a directory of per-project files.
+            // `local/projects/<project>.md` names a directory of per-project files.
             let path = match word.find('<') {
                 Some(i) => dir.join(&word[..i]),
                 None => dir.join(word),
@@ -1128,5 +1171,42 @@ fn the_skills_row_names_a_missing_or_custom_skill() {
         !report.skills.detail.contains("tm-context-refresh"),
         "{}",
         report.render()
+    );
+}
+
+/// #9997 (decisions 1a and 2): an Architect seeded before `local/` keeps its
+/// `records/`. `tm fleet status` names the stale directory, says the refreshed
+/// skills now name `local/`, and moves nothing.
+#[test]
+fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    assert!(fx.status().skills.ok, "{}", fx.status().render());
+    let dir = fx.dir();
+    let stale = dir.join(STALE_DIR);
+    std::fs::create_dir_all(stale.join("projects")).unwrap();
+    std::fs::write(stale.join("state.md"), "poll_count: 41\n").unwrap();
+    let local_state = std::fs::read(dir.join("local/state.md")).unwrap();
+
+    let report = fx.status();
+
+    assert!(!report.skills.ok, "{}", report.render());
+    let detail = &report.skills.detail;
+    for needle in [
+        format!("`{STALE_DIR}/`"),
+        "now name `local/`".to_owned(),
+        "moves nothing".to_owned(),
+    ] {
+        assert!(detail.contains(&needle), "missing `{needle}`: {detail}");
+    }
+    assert!(report.render().contains("WARN"), "{}", report.render());
+    assert_eq!(
+        std::fs::read_to_string(stale.join("state.md")).unwrap(),
+        "poll_count: 41\n"
+    );
+    assert!(stale.join("projects").is_dir());
+    assert_eq!(
+        std::fs::read(dir.join("local/state.md")).unwrap(),
+        local_state
     );
 }
