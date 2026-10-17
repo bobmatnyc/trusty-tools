@@ -268,16 +268,10 @@ async fn eager_python_failure_reports_python_intended_and_degraded() {
         "the note says degraded and why: {embedder}"
     );
 
-    let health = crate::service::server::health_report(Arc::new(state)).await;
-    assert_eq!(health["status"], "degraded", "{health}");
-    let py = &health["python_bootstrap"];
-    assert_eq!(py["state"], "failed", "{py}");
-    assert!(
-        py["note"]
-            .as_str()
-            .is_some_and(|n| n.contains("TRUSTY_UV_FETCH=0")),
-        "{py}"
-    );
+    // `/health` reads this snapshot; the lib test
+    // `health_reports_an_eager_python_fallback_as_degraded_with_the_cause`
+    // proves it reports the state degraded with the cause.
+    assert_eq!(switchable.active().bootstrap, BootstrapState::Failed);
 }
 
 /// #9970 AC2: once the eager path's fallback latch trips, `meta.embedder`
@@ -315,6 +309,9 @@ async fn eager_python_latch_trip_reports_ort_with_a_note() {
         note.starts_with("Degraded:") && note.contains("broken pipe"),
         "the note names the latch cause: {after}"
     );
-    let health = crate::service::server::health_report(Arc::new(state)).await;
-    assert_eq!(health["status"], "degraded", "{health}");
+    assert_eq!(
+        switchable.active().bootstrap,
+        BootstrapState::FellBackToOrt,
+        "the snapshot `/health` reads"
+    );
 }

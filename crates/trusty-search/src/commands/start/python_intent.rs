@@ -44,7 +44,9 @@ pub(super) enum PythonIntent {
 /// python serves, plus a latch listener that hot-swaps the snapshot to
 /// `Ort` / `FellBackToOrt` with the trip reason. `None` → `NotApplicable`.
 /// Test: `eager_python_failure_reports_python_intended_and_degraded`,
-/// `eager_python_latch_trip_reports_ort_with_a_note` in `start/tests_9970.rs`.
+/// `eager_python_latch_trip_reports_ort_with_a_note` in `start/tests_9970.rs`;
+/// `/health` on both states:
+/// `health_reports_an_eager_python_fallback_as_degraded_with_the_cause`.
 pub(super) fn wrap_switchable(
     raw: Arc<dyn crate::core::Embedder>,
     kind: BackendKind,

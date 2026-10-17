@@ -102,3 +102,42 @@ async fn health_carries_the_note_naming_the_cause() {
         "{py}"
     );
 }
+
+/// #9970 AC2 / Q5: the eager python path's two ort outcomes — a startup
+/// failure (`Failed`) and a fallback-latch trip (`FellBackToOrt`) — are
+/// degraded on `/health`, and `python_bootstrap.note` names the cause.
+#[tokio::test]
+#[serial_test::parallel]
+async fn health_reports_an_eager_python_fallback_as_degraded_with_the_cause() {
+    let cases = [
+        (
+            BootstrapState::Failed,
+            "failed",
+            "py-embedder venv bootstrap: uv not found and TRUSTY_UV_FETCH=0",
+        ),
+        (
+            BootstrapState::FellBackToOrt,
+            "fell_back_to_ort",
+            "its supervisor gave up restarting it; last error: broken pipe",
+        ),
+    ];
+    for (bootstrap, step, cause) in cases {
+        let (state, switchable) = state_with(bootstrap);
+        switchable
+            .bootstrap_control()
+            .update_report(|r| BootstrapReport {
+                last_error: Some(cause.to_string()),
+                ..r.clone()
+            });
+        let health = health_report(Arc::clone(&state)).await;
+        assert_eq!(health["status"], "degraded", "{step}: {health}");
+        let py = &health["python_bootstrap"];
+        assert_eq!(py["phase"], step, "{py}");
+        assert!(
+            py["note"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("Degraded:") && n.contains(cause)),
+            "{step}: {py}"
+        );
+    }
+}
