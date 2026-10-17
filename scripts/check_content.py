@@ -8,7 +8,7 @@ Why: ADR-0064 versions instructional content apart from every crate. A content
   member lands under a bundle version no content-v* release has used yet.
   Nothing checked any of that before this script.
 
-What: three subcommands, each failing closed with a named reason.
+What: four subcommands, each failing closed with a named reason.
 
   tree [--expect-version X.Y.Z]
       Validates content/ against content/manifest.toml:
@@ -38,6 +38,12 @@ What: three subcommands, each failing closed with a named reason.
   sync
       Rewrites content/manifest.toml's [[member]] tables from the tree, keeping
       [bundle] as it is. Refuses when any required member lacks a version.
+
+  leaks
+      Applies the shared leak patterns (scripts/architect_leak_patterns.txt, also
+      read by scripts/check_architect_subproject.sh) to
+      content/instructions/architect/** (#9996). Fails on a missing pattern file,
+      an empty or engine-rejected pattern, or a missing scan root.
 
 Exit: 0 pass; 1 a check failed; 2 bad usage or no Python 3.11+.
 Test: scripts/check_content_selftest.sh
@@ -331,6 +337,92 @@ def cmd_tree(root, expect):
     print(f"check_content tree: bundle {version}, schema_major {schema}, {len(listed)} member(s) — OK")
 
 
+LEAK_ROOT_REL = "content/instructions/architect"
+LEAK_SKIP_DIRS = {"inbox", "__pycache__", ".pytest_cache"}
+
+
+def load_leak_rules(path):
+    """Rules from the shared pattern file, the one scripts/check_architect_subproject.sh reads.
+
+    Why: the two Architect leak gates must not drift (#9996), and a missing,
+      malformed or empty pattern must fail the gate, never pass it vacuously.
+    What: parses `CLASS<TAB>FLAGS<TAB>MATCH[<TAB>ALLOW]`; each regex is compiled
+      here so an engine-rejected pattern fails too. Optional private names come
+      from the file named by ARCHITECT_LEAK_DENY_FILE (unset = skipped).
+    Test: selftest cases leaks-patterns-missing, leaks-empty-regex, leaks-bad-regex.
+    """
+    if not path.is_file():
+        raise Fail(f"PATTERNS: pattern file missing: {path}")
+    rules, errors = [], []
+    for num, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.rstrip("\r").split("\t")
+        if len(fields) < 3 or not fields[0] or fields[1] not in ("i", "-"):
+            errors.append(f"PATTERNS: {path}:{num}: expected CLASS<TAB>i|-<TAB>MATCH[<TAB>ALLOW]")
+            continue
+        if not fields[2]:
+            errors.append(f"PATTERNS: {path}:{num}: empty pattern for {fields[0]}")
+            continue
+        flags = re.I if fields[1] == "i" else 0
+        try:
+            allow = re.compile(fields[3], flags) if len(fields) > 3 and fields[3] else None
+            rules.append((fields[0], re.compile(fields[2], flags), allow))
+        except re.error as err:
+            errors.append(f"GREP_ERROR: {fields[0]}: regex rejected at {path}:{num}: {err}")
+    deny = os.environ.get("ARCHITECT_LEAK_DENY_FILE", "")
+    if deny:
+        names = []
+        try:
+            lines = Path(deny).read_text(encoding="utf-8").splitlines()
+        except OSError as err:
+            raise Fail(f"PATTERNS: deny file unreadable: {err}") from None
+        for num, name in enumerate(lines, 1):
+            name = name.strip()
+            if not name or name.startswith("#"):
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", name):
+                errors.append(f"PATTERNS: {deny}:{num}: a name holds only letters, digits, space . _ -")
+            else:
+                names.append(re.escape(name))
+        if not names and not errors:
+            errors.append(f"PATTERNS: {deny} holds no names")
+        if names:
+            rules.append(("OWNER_NAME", re.compile(r"(^|[^A-Za-z0-9_])(" + "|".join(names) + r")([^A-Za-z0-9_]|$)", re.I), None))
+    if not rules and not errors:
+        errors.append(f"PATTERNS: {path} holds no patterns")
+    if errors:
+        raise Fail("\n".join(errors))
+    return rules
+
+
+def cmd_leaks(root):
+    """Apply the shared leak patterns to content/instructions/architect/** (#9996)."""
+    top = root / LEAK_ROOT_REL
+    if not top.is_dir():
+        raise Fail(f"SCAN_ROOT: {LEAK_ROOT_REL} does not exist, so it was not scanned")
+    default = Path(__file__).resolve().parent / "architect_leak_patterns.txt"
+    rules = load_leak_rules(Path(os.environ.get("ARCHITECT_LEAK_PATTERNS") or default))
+    errors, scanned = [], 0
+    for path in sorted(p for p in top.rglob("*") if p.is_file() and not LEAK_SKIP_DIRS & set(p.relative_to(top).parts)):
+        data = path.read_bytes()
+        if b"\0" in data:
+            continue
+        scanned += 1
+        rel = path.relative_to(root).as_posix()
+        for num, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+            for cls, rx, allow in rules:
+                for m in rx.finditer(line):
+                    if allow is None or not allow.fullmatch(m.group(0)):
+                        shown = "(redacted)" if cls == "SECRET" else m.group(0)
+                        errors.append(f"{cls}: {rel}:{num}: {shown}")
+    if scanned == 0:
+        errors.append(f"SCAN_ROOT: {LEAK_ROOT_REL} holds no files")
+    if errors:
+        raise Fail("\n".join(errors))
+    print(f"check_content leaks: {scanned} file(s) scanned — OK")
+
+
 def cmd_sync(root):
     version, schema, _ = read_manifest(root)
     members = scan_tree(root)
@@ -417,12 +509,15 @@ def main():
     bump = sub.add_parser("bump")
     bump.add_argument("--base", default=os.environ.get("CONTENT_GATE_BASE") or "origin/main")
     sub.add_parser("sync")
+    sub.add_parser("leaks")
     args = parser.parse_args()
     try:
         if args.cmd == "tree":
             cmd_tree(REPO_ROOT, args.expect_version)
         elif args.cmd == "bump":
             cmd_bump(REPO_ROOT, args.base)
+        elif args.cmd == "leaks":
+            cmd_leaks(REPO_ROOT)
         else:
             cmd_sync(REPO_ROOT)
     except Fail as err:

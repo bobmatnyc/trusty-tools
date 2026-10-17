@@ -57,6 +57,32 @@ case_dir() { # $1 = case name; a directory name without slashes or colons
   printf '%s' "$1" | tr '/:' '__'
 }
 
+# #9996: one leak line per class; the gate must reject each in every scanned
+# tree (the content tree is the one the old scan skipped).
+leak_text() { # $1 = kind
+  case "$1" in
+    owner_handle) printf 'maintained by bobmatnyc\n' ;;
+    owner_first) printf 'ask masa before merging\n' ;;
+    owner_short) printf 'Bob wants this reviewed\n' ;;
+    org) printf 'clone https://github.com/realcorp/widgets\n' ;;
+    host_local) printf 'ssh studio.local\n' ;;
+    host_tailnet) printf 'ssh box.tail1234.ts.net\n' ;;
+    slack) printf 'notify U01ABC23DEF now\n' ;;
+    email) printf 'mail someone@corp.io\n' ;;
+  esac
+}
+
+plant_leak() { # $1 = leak-<kind>-<tree>, $2 = tree dir
+  local rest="${1#leak-}" tree kind
+  tree="${rest##*-}"
+  kind="${rest%-*}"
+  case "$tree" in
+    content) leak_text "$kind" >"$2/content/instructions/architect/skills/leak.md" ;;
+    python) leak_text "$kind" >"$2/python/trusty-architect/notes.md" ;;
+    assets) leak_text "$kind" >"$2/crates/trusty-mpm/src/assets/architect/scripts/leak.txt" ;;
+  esac
+}
+
 plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
   local t="$WORK/$(case_dir "$1")" sub="$WORK/$(case_dir "$1")/python/trusty-architect"
   case "$1" in
@@ -71,6 +97,7 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     claude-slug) printf 'D = "projects/-Users-someone-work"\n' >"$sub/scripts/bad.py" ;;
     private-checkout) printf 'see ~/trusty-mpm-projects/acme/supervisor\n' >"$sub/notes.md" ;;
     secret) printf 'TOKEN = "%s"\n' "$TOKEN" >"$sub/scripts/bad.py" ;;
+    leak-*) plant_leak "$1" "$t" ;;
     drift) printf 'edited\n' >>"$t/$SKILL_DST" ;;
     drift:*) printf 'edited\n' >>"$t/${1#drift:}" ;;
     shipped-missing) rm "$t/$SKILL_DST" ;;
@@ -101,6 +128,21 @@ drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
 unpaired${TAB}UNPAIRED
 empty${TAB}EMPTY"
+# #9996: every new class in the content tree and in the Python tree; the
+# assets copy gets a representative pair.
+for kind in owner_handle owner_first owner_short org host_local host_tailnet slack email; do
+  case "$kind" in
+    owner_*) class=OWNER_NAME ;; org) class=ORG ;; host_*) class=HOSTNAME ;;
+    slack) class=SLACK_ID ;; email) class=EMAIL ;;
+  esac
+  for tree in content python; do
+    CASES="$CASES
+leak-${kind}-${tree}${TAB}${class}"
+  done
+done
+CASES="$CASES
+leak-owner_handle-assets${TAB}OWNER_NAME
+leak-email-assets${TAB}EMAIL"
 # One planted drift per shipped copy the gate lists.
 for pair in $PAIRS; do
   CASES="$CASES
@@ -156,6 +198,70 @@ for name in crate-dependency; do
     pass=$((pass + 1))
   fi
 done
+
+# #9996: near misses that must stay clean, in both trees.
+for tree in content python; do
+  name="near-miss-$tree"
+  cp -R "$clean" "$WORK/$name"
+  if [ "$tree" = content ]; then f="$WORK/$name/content/instructions/architect/skills/near.md"
+  else f="$WORK/$name/python/trusty-architect/near.md"; fi
+  printf '%s\n' 'a bobcat and masala, Bobbin, robertson' \
+    'mail user@example.com or ops@docs.example.org' \
+    'see github.com/example/widgets and github.com/acme/tools' \
+    'repo github.com/bobmatnyc/trusty-tools' \
+    'localhost 127.0.0.1 .claude/settings.local.json' \
+    'TEMPLATES_REFRESH CONTEXTUALIZE U+1F600' >"$f"
+  rc=0
+  out="$("$GATE" --root "$WORK/$name" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: $name -> exit $rc (expected 0)" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    fail=1
+  else
+    pass=$((pass + 1))
+  fi
+done
+
+# #9996 fail-closed arms: a gate that cannot scan must not pass.
+closed() { # $1 name, $2 tree mutation, $3 env (VAR=val or -), $4 expected text, $5 expected exit
+  local t="$WORK/closed-$1" rc=0 out pf="$WORK/closed-$1.txt" envs="$3"
+  cp -R "$clean" "$t"
+  case "$2" in
+    rm-content) rm -rf "$t/content/instructions/architect" ;;
+    rm-assets) rm -rf "$t/crates/trusty-mpm/src/assets/architect" ;;
+    bad-regex) printf 'OWNER_NAME\ti\t(unclosed\n' >"$pf" ;;
+    empty-regex) printf 'OWNER_NAME\ti\t\n' >"$pf" ;;
+    garbage) printf 'only-one-field\n' >"$pf" ;;
+    deny-hit)
+      printf 'Zebediah\n' >"$pf"
+      printf 'ask Zebediah\n' >"$t/content/instructions/architect/skills/d.md" ;;
+    deny-clean) printf 'Zebediah\n' >"$pf" ;;
+    none) ;;
+  esac
+  envs="${envs//@PF@/$pf}"
+  if [ "$envs" = - ]; then
+    out="$("$GATE" --root "$t" 2>&1)" || rc=$?
+  else
+    out="$(env "$envs" "$GATE" --root "$t" 2>&1)" || rc=$?
+  fi
+  if [ "$rc" -ne "$5" ] || ! printf '%s\n' "$out" | grep -q -- "$4"; then
+    echo "FAIL: closed-$1 -> exit $rc (expected $5) with '$4'" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    fail=1
+  else
+    pass=$((pass + 1))
+  fi
+}
+closed patterns-missing none ARCHITECT_LEAK_PATTERNS=/nonexistent/patterns.txt 'FAIL PATTERNS' 1
+closed pattern-garbage garbage ARCHITECT_LEAK_PATTERNS=@PF@ 'FAIL PATTERNS' 1
+closed pattern-empty empty-regex ARCHITECT_LEAK_PATTERNS=@PF@ 'FAIL PATTERNS' 1
+closed grep-error bad-regex ARCHITECT_LEAK_PATTERNS=@PF@ 'FAIL GREP_ERROR' 1
+closed scan-root-content-missing rm-content - 'FAIL SCAN_ROOT' 1
+closed scan-root-assets-missing rm-assets - 'FAIL SCAN_ROOT' 1
+closed deny-file-missing none ARCHITECT_LEAK_DENY_FILE=/nonexistent/deny.txt 'FAIL PATTERNS' 1
+closed deny-file-hit deny-hit ARCHITECT_LEAK_DENY_FILE=@PF@ 'FAIL OWNER_NAME' 1
+closed deny-file-clean deny-clean ARCHITECT_LEAK_DENY_FILE=@PF@ 'check_architect_subproject: OK' 0
+closed deny-unset-skipped none - 'check_architect_subproject: OK' 0
 
 if [ "$fail" -ne 0 ]; then
   echo "check_architect_subproject selftest: FAILED ($pass cases passed)" >&2

@@ -1,0 +1,27 @@
+# architect_leak_patterns.txt — the ONE pattern table for the Architect leak gate (#9996).
+#
+# Read by scripts/check_architect_subproject.sh (grep -E) and by
+# `scripts/check_content.py leaks` (Python re). Edit here, never in either tool.
+# Both tools fail closed on a missing file, a malformed or empty line, or a
+# pattern their engine rejects.
+#
+# Line format, four TAB-separated fields (the last is optional):
+#   CLASS <TAB> FLAGS <TAB> MATCH <TAB> ALLOW
+#   FLAGS  "i" = case-insensitive, "-" = case-sensitive.
+#   MATCH  an extended regex. Keep it to the subset POSIX ERE and Python share:
+#          no [[:class:]], no lookaround, no backreferences.
+#   ALLOW  optional. A hit whose whole matched text matches ALLOW is not a leak.
+#          This is how an org or email domain is allow-listed.
+# Lines starting with # and blank lines are skipped.
+#
+# Private names that must not be committed go in an out-of-tree file named by
+# ARCHITECT_LEAK_DENY_FILE (one name per line; matched as whole words). Unset
+# means skipped. CI does not set it.
+OPERATOR_PATH	-	/Users/|/home/|-Users-
+OPERATOR_PATH	-	trusty-mpm-projects/[^/ ]+/supervisor
+SECRET	-	ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}
+OWNER_NAME	i	(github\.com[/:]|^|[^A-Za-z0-9_])(bobmatnyc|masa|bob)([^A-Za-z0-9_]|$)	github\.com[/:]bobmatnyc.*
+ORG	i	(github\.com|githubusercontent\.com|ghcr\.io)[/:][A-Za-z0-9_.-]+	(github\.com|githubusercontent\.com|ghcr\.io)[/:](example|acme|bobmatnyc)
+HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?	.*\.local\.[A-Za-z0-9]+|threading\.local
+SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
+EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*example\.(com|org|net)

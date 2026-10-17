@@ -57,6 +57,11 @@
 #     changelog-crate-non-ascii-fragment OK, crates/demo/changelog.d/8388-café.md
 #     changelog-{staged,untracked}-non-ascii-path FAIL, --staged sees café.md
 #     changelog-file-content-*          --file placement and validation
+#   leaks (scripts/check_content.py leaks, #9996):
+#     leaks-clean / leaks-near-miss  OK
+#     leaks-{owner,org,host,slack,email}  FAIL, one planted line per class
+#     leaks-patterns-missing / -empty-regex / -bad-regex / -scan-root-missing
+#                                    FAIL, the gate cannot scan: never a pass
 #   rollup (scripts/assemble-changelog.sh content <version>):
 #     rollup-writes-content-changelog   section written, fragment deleted
 #
@@ -101,7 +106,7 @@ new_repo() {
   git -C "$REPO" config user.email selftest@example.invalid
   git -C "$REPO" config user.name "content selftest"
   local f
-  for f in check_content.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh; do
+  for f in check_content.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh architect_leak_patterns.txt; do
     [[ -f "$SRC/$f" ]] && cp "$SRC/$f" "$REPO/scripts/"
   done
   cp "$SRC/lib/source_class.sh" "$REPO/scripts/lib/"
@@ -299,6 +304,34 @@ bump_repo c-staged && w content/agents/café.md '---' 'metadata: {version: "1.0.
 gate changelog-staged-non-ascii-path 1 "e.g. content/agents/café.md." --staged
 bump_repo c-untracked && w content/agents/café.md '---' 'metadata: {version: "1.0.0"}' '---'
 gate changelog-untracked-non-ascii-path 1 "e.g. content/agents/café.md." --staged
+
+# --- leaks (#9996) ----------------------------------------------------------
+leak="content/instructions/architect/skills/leak.md"
+leaks() { expect "$1" "$2" "$3" python3 scripts/check_content.py leaks; }
+new_repo leaks && w content/instructions/architect/architect.md '# clean architect'
+leaks leaks-clean 0 "check_content leaks: 1 file(s) scanned — OK"
+w "$leak" 'a bobcat, masala, user@example.com, github.com/acme/x, github.com/bobmatnyc/trusty-tools'
+leaks leaks-near-miss 0 "OK"
+w "$leak" 'ask masa first'
+leaks leaks-owner 1 "FAIL OWNER_NAME: $leak:1"
+w "$leak" 'clone github.com/realcorp/widgets'
+leaks leaks-org 1 "FAIL ORG: $leak:1"
+w "$leak" 'ssh studio.local'
+leaks leaks-host 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'notify U01ABC23DEF'
+leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
+w "$leak" 'mail someone@corp.io'
+leaks leaks-email 1 "FAIL EMAIL: $leak:1"
+w "$leak" 'clean'
+mv "$REPO/scripts/architect_leak_patterns.txt" "$REPO/scripts/patterns.bak"
+leaks leaks-patterns-missing 1 "FAIL PATTERNS: "
+printf 'OWNER_NAME\ti\t\n' >"$REPO/scripts/architect_leak_patterns.txt"
+leaks leaks-empty-regex 1 "FAIL PATTERNS: "
+printf 'OWNER_NAME\ti\t(unclosed\n' >"$REPO/scripts/architect_leak_patterns.txt"
+leaks leaks-bad-regex 1 "FAIL GREP_ERROR: "
+mv "$REPO/scripts/patterns.bak" "$REPO/scripts/architect_leak_patterns.txt"
+rm -rf "$REPO/content/instructions/architect"
+leaks leaks-scan-root-missing 1 "FAIL SCAN_ROOT: "
 
 # --- rollup -----------------------------------------------------------------
 new_repo rollup && w content/changelog.d/8388-edit.md 'Changed' '' '- engineer agent edited'
