@@ -8,8 +8,8 @@
 # union (`crate::agents::extends::merge_extends`, base-first, deduped). There
 # is no code branch for this persona anywhere — it resolves through
 # `AgentConfig::by_name` exactly as izzie does, and reaches an installed
-# machine through `crate::agents::bundled`, which embeds this whole directory
-# with `rust-embed` and deploys it to `~/.trusty-agents/agents/`.
+# machine through `crate::agents::bundled`, which reads this whole directory
+# from instructional content (#9014) and deploys it to `~/.trusty-agents/agents/`.
 #
 # This overlay declares DELTAS ONLY. Do not re-list a tool, scope or skill the
 # base already grants — `../assistant/agent.toml` is the single source of truth

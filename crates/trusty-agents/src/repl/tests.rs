@@ -362,16 +362,18 @@ fn handle_agent_command_resolves_when_standalone_cwd_lacks_agents_dir() {
 
 /// Why (#3303): the concrete regression from the issue — `/agent assistant`
 /// against the REAL bundled `assistant` directory package (shipped at
-/// `crates/trusty-agents/.trusty-agents/agents/assistant/`, no flat
-/// `assistant.toml` sibling) must activate the persona. `cargo test`'s
-/// working directory is the crate root, so `TrustyAgentsRepl::new`'s own
-/// project-dir detection resolves `agents_dir` to the bundled dir with no
-/// setup needed.
+/// `content/agents/trusty-agents/agents/assistant/`, no flat
+/// `assistant.toml` sibling) must activate the persona. #9014: the roster
+/// left the crate directory, so the test points `agents_dir` at the
+/// checkout's content tree.
 /// What: Dispatches `/agent assistant`, asserts activation.
 /// Test: Self-explanatory.
 #[test]
 fn handle_agent_command_activates_bundled_assistant_package() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let mut out = String::new();
     repl.handle_agent_command_into("assistant", &mut out);
 
@@ -397,7 +399,11 @@ fn handle_agent_command_activates_bundled_assistant_package() {
 /// Test: Self-explanatory.
 #[test]
 fn list_assistant_agents_into_surfaces_directory_package() {
-    let repl = TrustyAgentsRepl::new(None).unwrap();
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    // #9014: the bundled roster lives under content/, not the crate root.
+    repl.agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
     let mut out = String::new();
     repl.list_assistant_agents_into(&mut out);
 

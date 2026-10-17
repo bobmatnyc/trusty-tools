@@ -142,7 +142,7 @@ one:
    CWD-relative `.trusty-agents/agents/` (with a warn log on fallback).
 
 Both directory-package and flat-`.toml` agents are real and in use today —
-e.g. `crates/trusty-agents/.trusty-agents/agents/{ctrl,izzie,cto-assistant}/`
+e.g. `content/agents/trusty-agents/agents/{ctrl,izzie,cto-assistant}/`
 (package format: `agent.toml` + `persona.md`) alongside 15+ flat `<name>.toml`
 files in the same `agents/` directory.
 
@@ -650,7 +650,7 @@ the accompanying custom instructions/persona prose) as part of that overlay,
 never in the base package it extends.
 
 **Izzie is the reference overlay example, not a base agent.** The existing
-`crates/trusty-agents/.trusty-agents/agents/izzie/` package
+`content/agents/trusty-agents/agents/izzie/` package
 (`agent.toml`'s `display_name = "Izzie"` / `prompt_label = "Izzie"`, plus the
 ~109 lines of first-person persona prose in `persona.md`) is, under this
 rule, personalization content layered over a base assistant — not itself the

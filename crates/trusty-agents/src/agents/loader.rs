@@ -999,8 +999,11 @@ fn load_agent_package(dir: &Path, name: &str) -> Result<Option<AgentConfig>> {
     let raw = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("failed to read agent config {}", toml_path.display()))?;
     let persona_path = pkg_dir.join("persona.md");
-    let mut prompt = std::fs::read_to_string(&persona_path)
+    let raw_persona = std::fs::read_to_string(&persona_path)
         .with_context(|| format!("failed to read agent persona {}", persona_path.display()))?;
+    // #9014: a bundled persona carries `metadata: {version}` frontmatter
+    // (ADR-0064); the prompt is the body only.
+    let mut prompt = crate::skills::strip_frontmatter(&raw_persona).to_owned();
     let skills_path = pkg_dir.join("skills.md");
     if skills_path.exists() {
         let skills = std::fs::read_to_string(&skills_path)

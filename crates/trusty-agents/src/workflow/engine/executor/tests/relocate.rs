@@ -255,6 +255,15 @@ async fn qa_receives_correct_path_for_claude_code_runner() {
     });
 
     let out_dir = tmp.path().join("out");
+    let _env = crate::agents::tests::loading::ENV_LOCK.lock().await;
+    // #9014: the bundled roster lives under content/, not the cwd.
+    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
+        "TAGENT_CONFIG_DIR",
+        bundled_dir.to_str().expect("utf-8 path"),
+    );
     let engine = WorkflowEngine::new(mock, workflows_dir.clone());
     engine
         .run("qa-path", "build it".into(), Some(out_dir.clone()))

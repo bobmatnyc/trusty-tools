@@ -8,12 +8,23 @@
 //! `force_reprovision_bundled_agents` escape hatch must bypass the stamp
 //! check entirely.
 //! What: exercises `deploy_bundled_agents`, `ensure_bundled_agents_deployed_in`,
-//! and `force_reprovision_bundled_agents` against real embedded bundled
+//! and `force_reprovision_bundled_agents` against the checkout's bundled
 //! content, written to a tempdir so no test touches the real filesystem
 //! outside the sandbox.
 //! Test: this module IS the test surface.
 
 use super::*;
+use content::test_support::{repo_tree, repo_tree_dir};
+
+/// The checkout's agent tree (#9014: read from content, not compiled in).
+fn agents() -> &'static BundledTree {
+    repo_tree(BundledTreeKind::Agents)
+}
+
+/// The checkout's workflow tree (#9014).
+fn workflows() -> &'static BundledTree {
+    repo_tree(BundledTreeKind::Workflows)
+}
 
 /// Every archived backup of `dest`, found by NAME rather than by calling the
 /// implementation's own path builder (#4461).
@@ -118,7 +129,7 @@ fn record_as_deployed(target: &Path, rel: &str, content: &str) {
 #[test]
 fn deploy_writes_missing_files_only() {
     let tmp = tempfile::tempdir().unwrap();
-    let written = deploy_bundled_agents(tmp.path()).unwrap();
+    let written = deploy_bundled_agents(agents(), tmp.path()).unwrap();
     assert!(written > 0, "expected at least one bundled file deployed");
     assert!(
         tmp.path().join("analysis-agent.toml").is_file(),
@@ -134,7 +145,7 @@ fn deploy_writes_missing_files_only() {
 #[test]
 fn deploy_writes_directory_package_agents() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     assert!(
         tmp.path().join("assistant").join("agent.toml").is_file(),
         "assistant/agent.toml must be deployed"
@@ -151,9 +162,9 @@ fn deploy_writes_directory_package_agents() {
 #[test]
 fn deploy_is_idempotent_on_rerun() {
     let tmp = tempfile::tempdir().unwrap();
-    let first = deploy_bundled_agents(tmp.path()).unwrap();
+    let first = deploy_bundled_agents(agents(), tmp.path()).unwrap();
     assert!(first > 0);
-    let second = deploy_bundled_agents(tmp.path()).unwrap();
+    let second = deploy_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(second, 0, "re-running the deploy must write nothing new");
 }
 
@@ -171,7 +182,7 @@ fn deploy_never_overwrites_existing_file() {
         "# user customized\n",
     )
     .unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     let contents = std::fs::read_to_string(tmp.path().join("analysis-agent.toml")).unwrap();
     assert_eq!(contents, "# user customized\n");
 }
@@ -184,7 +195,7 @@ fn deploy_never_overwrites_existing_file() {
 #[test]
 fn deployed_assistant_resolves_via_by_name_in() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     let cfg = crate::agents::AgentConfig::by_name_in(&[tmp.path().to_path_buf()], "assistant")
         .expect("deployed assistant package must resolve");
     assert_eq!(cfg.agent.name, "assistant");
@@ -200,7 +211,7 @@ fn deployed_assistant_resolves_via_by_name_in() {
 fn stale_stamp_triggers_refresh() {
     let tmp = tempfile::tempdir().unwrap();
     // Baseline deploy, as if performed by an older binary build.
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     // Simulate a stale on-disk `assistant/agent.toml` — e.g. deployed before
     // the `delegate_to_agent` grant existed on the bundled template.
@@ -215,7 +226,7 @@ fn stale_stamp_triggers_refresh() {
     // A stamp that does not match the current binary's bundle content.
     stamp::write(tmp.path(), "deadbeef-not-the-real-stamp").unwrap();
 
-    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     assert_eq!(report.written, 0, "every path already existed on disk");
     assert_eq!(
@@ -236,7 +247,7 @@ fn stale_stamp_triggers_refresh() {
     let new_stamp = stamp::read(tmp.path());
     assert_eq!(
         new_stamp.as_deref(),
-        Some(current_bundle_stamp::<BundledAgents>().unwrap().as_str()),
+        Some(current_bundle_stamp(agents()).as_str()),
         "stamp must be updated to the current bundle content hash"
     );
 }
@@ -260,7 +271,7 @@ fn stale_stamp_triggers_refresh() {
 #[test]
 fn a_hand_edited_bundled_file_survives_a_stale_stamp_refresh() {
     let tmp = tempfile::tempdir().unwrap();
-    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let hand_edited = "# operator edit: the memory grants live here\n[agent]\nname = \"assistant\"\n\n[tools]\nallow = [\"memory_recall\", \"memory_remember\"]\n";
@@ -268,7 +279,7 @@ fn a_hand_edited_bundled_file_survives_a_stale_stamp_refresh() {
 
     // Exactly what a `cargo install` of a binary with a changed bundle produces.
     stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
-    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&assistant_toml).unwrap(),
@@ -291,7 +302,7 @@ fn a_hand_edited_bundled_file_survives_a_stale_stamp_refresh() {
 #[test]
 fn a_preserved_hand_edit_is_never_archived_or_rewritten() {
     let tmp = tempfile::tempdir().unwrap();
-    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let hand_edited = "# operator edit\n[agent]\nname = \"assistant\"\n";
@@ -299,7 +310,7 @@ fn a_preserved_hand_edit_is_never_archived_or_rewritten() {
 
     for stamp_value in ["deadbeef-one", "deadbeef-two"] {
         stamp::write(tmp.path(), stamp_value).unwrap();
-        let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+        let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
         assert_eq!(report.backed_up, 0, "no archive on a keep: {report:?}");
         assert_eq!(report.preserved, 1);
     }
@@ -326,7 +337,7 @@ fn a_preserved_hand_edit_is_never_archived_or_rewritten() {
 #[test]
 fn a_stale_deploy_this_tool_wrote_is_still_refreshed() {
     let tmp = tempfile::tempdir().unwrap();
-    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let older_template = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n";
@@ -334,7 +345,7 @@ fn a_stale_deploy_this_tool_wrote_is_still_refreshed() {
     record_as_deployed(tmp.path(), "assistant/agent.toml", older_template);
 
     stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
-    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     assert_eq!(report.refreshed, 1, "{report:?}");
     assert_eq!(report.preserved, 0, "{report:?}");
@@ -357,20 +368,20 @@ fn a_stale_deploy_this_tool_wrote_is_still_refreshed() {
 #[test]
 fn repair_still_overwrites_a_hand_edit_the_automatic_pass_kept() {
     let tmp = tempfile::tempdir().unwrap();
-    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let hand_edited = "# operator edit\n[agent]\nname = \"assistant\"\n";
     std::fs::write(&assistant_toml, hand_edited).unwrap();
     stamp::write(tmp.path(), "deadbeef-a-new-binary").unwrap();
     assert_eq!(
-        ensure_bundled_agents_deployed_in(tmp.path())
+        ensure_bundled_agents_deployed_in(agents(), tmp.path())
             .unwrap()
             .preserved,
         1
     );
 
-    let repaired = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let repaired = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
 
     assert_eq!(repaired.refreshed, 1, "{repaired:?}");
     assert_eq!(repaired.backed_up, 1, "{repaired:?}");
@@ -398,7 +409,7 @@ fn repair_still_overwrites_a_hand_edit_the_automatic_pass_kept() {
 #[test]
 fn a_target_with_no_manifest_keeps_its_edits_and_vouches_the_rest() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     // Stand in for a machine provisioned before #3844 existed.
     std::fs::remove_file(tmp.path().join(".bundled-provenance")).unwrap();
 
@@ -406,7 +417,7 @@ fn a_target_with_no_manifest_keeps_its_edits_and_vouches_the_rest() {
     let hand_edited = "# operator edit made before this protection shipped\n";
     std::fs::write(&assistant_toml, hand_edited).unwrap();
 
-    let first = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let first = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert_eq!(
         first.preserved, 1,
         "the pre-existing edit is kept: {first:?}"
@@ -424,7 +435,7 @@ fn a_target_with_no_manifest_keeps_its_edits_and_vouches_the_rest() {
     record_as_deployed(tmp.path(), "ctrl.toml", older_template);
     stamp::write(tmp.path(), "deadbeef-yet-another-binary").unwrap();
 
-    let second = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let second = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert_eq!(second.refreshed, 1, "{second:?}");
     assert_eq!(second.preserved, 1, "the edit is STILL kept: {second:?}");
     assert_ne!(std::fs::read_to_string(&ctrl_toml).unwrap(), older_template);
@@ -441,14 +452,14 @@ fn a_target_with_no_manifest_keeps_its_edits_and_vouches_the_rest() {
 #[test]
 fn refresh_backs_up_differing_content() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let hand_edited =
         "# hand-edited by a user, never committed upstream\n[agent]\nname = \"assistant\"\n";
     std::fs::write(&assistant_toml, hand_edited).unwrap();
 
-    let report = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let report = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(report.backed_up, 1);
     assert_eq!(report.refreshed, 1);
 
@@ -475,18 +486,18 @@ fn refresh_backs_up_differing_content() {
 #[test]
 fn repeated_divergence_is_recoverable_across_reprovisions() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
 
     let first_edit = "# edit one — an owner-requested tool grant\n[agent]\nname = \"assistant\"\n";
     std::fs::write(&assistant_toml, first_edit).unwrap();
-    let first_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let first_pass = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(first_pass.backed_up, 1, "the first edit must be archived");
 
     let second_edit =
         "# edit two — made after the first reprovision\n[agent]\nname = \"assistant\"\n";
     std::fs::write(&assistant_toml, second_edit).unwrap();
-    let second_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let second_pass = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(
         second_pass.backed_up, 1,
         "the second edit is new content and must be archived too"
@@ -515,14 +526,14 @@ fn repeated_divergence_is_recoverable_across_reprovisions() {
 #[test]
 fn identical_content_reuses_one_backup_path() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
 
     let edit =
         "# the same hand edit, re-applied after each repair\n[agent]\nname = \"assistant\"\n";
     for _ in 0..2 {
         std::fs::write(&assistant_toml, edit).unwrap();
-        force_reprovision_bundled_agents(tmp.path()).unwrap();
+        force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     }
 
     let backups = stale_backups_of(&assistant_toml);
@@ -543,10 +554,10 @@ fn identical_content_reuses_one_backup_path() {
 #[test]
 fn pristine_files_are_reprovisioned_without_littering_backups() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     for _ in 0..2 {
-        let report = force_reprovision_bundled_agents(tmp.path()).unwrap();
+        let report = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
         assert_eq!(report.backed_up, 0);
         assert_eq!(report.refreshed, 0, "on-disk content already matches");
     }
@@ -566,7 +577,7 @@ fn pristine_files_are_reprovisioned_without_littering_backups() {
 #[test]
 fn first_run_writes_no_backups() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     assert!(report.written > 0, "a first run establishes the roster");
     assert_eq!(report.backed_up, 0, "nothing existed to back up");
@@ -587,14 +598,14 @@ fn first_run_writes_no_backups() {
 #[test]
 fn existing_stale_backup_is_never_clobbered() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let first_edit =
         "# first hand edit — this is the one that must survive\n[agent]\nname = \"assistant\"\n";
     std::fs::write(&assistant_toml, first_edit).unwrap();
 
-    let first_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let first_pass = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(first_pass.backed_up, 1);
     assert_eq!(first_pass.refreshed, 1);
 
@@ -608,7 +619,7 @@ fn existing_stale_backup_is_never_clobbered() {
     let second_edit = "# a later pass's content — must NOT clobber the first backup\n";
     std::fs::write(&assistant_toml, second_edit).unwrap();
 
-    let second_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let second_pass = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(second_pass.refreshed, 1, "dest itself is still refreshed");
     assert_eq!(
         std::fs::read_to_string(&first_backup).unwrap(),
@@ -617,14 +628,14 @@ fn existing_stale_backup_is_never_clobbered() {
     );
 }
 
-/// Why: the refresh pass only ever iterates the embedded bundle's OWN rel
+/// Why: the refresh pass only ever iterates the bundled tree's OWN rel
 /// paths — a user-authored agent that isn't part of the bundle at all must
 /// never be read, backed up, or written, even during a stale-stamp refresh.
 /// Test: itself.
 #[test]
 fn non_bundled_user_file_untouched_by_refresh() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     let user_file = tmp.path().join("my-custom-agent.toml");
     let user_content = "[agent]\nname = \"my-custom-agent\"\n";
@@ -632,7 +643,7 @@ fn non_bundled_user_file_untouched_by_refresh() {
 
     // Force a stale-stamp refresh pass, as a real binary upgrade would.
     stamp::write(tmp.path(), "deadbeef").unwrap();
-    ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
 
     let after = std::fs::read_to_string(&user_file).unwrap();
     assert_eq!(
@@ -652,13 +663,13 @@ fn non_bundled_user_file_untouched_by_refresh() {
 #[test]
 fn matching_stamp_is_a_fast_noop() {
     let tmp = tempfile::tempdir().unwrap();
-    let first = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let first = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert!(
         first.total_touched() > 0,
         "first pass establishes the roster"
     );
 
-    let second = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let second = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert_eq!(
         second,
         ReprovisionReport::default(),
@@ -674,10 +685,10 @@ fn matching_stamp_is_a_fast_noop() {
 #[test]
 fn missing_stamp_establishes_baseline_without_rewriting_matching_content() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(stamp::read(tmp.path()), None, "sanity: no stamp yet");
 
-    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let report = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert_eq!(
         report,
         ReprovisionReport::default(),
@@ -696,7 +707,7 @@ fn missing_stamp_establishes_baseline_without_rewriting_matching_content() {
 #[test]
 fn force_reprovision_overwrites_even_when_stamp_matches() {
     let tmp = tempfile::tempdir().unwrap();
-    let first = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let first = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert!(first.total_touched() > 0);
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
@@ -705,12 +716,12 @@ fn force_reprovision_overwrites_even_when_stamp_matches() {
 
     // The automatic path would treat this as up to date (matching stamp)
     // and leave the edit alone.
-    let noop = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    let noop = ensure_bundled_agents_deployed_in(agents(), tmp.path()).unwrap();
     assert_eq!(noop, ReprovisionReport::default());
     assert_eq!(std::fs::read_to_string(&assistant_toml).unwrap(), edited);
 
     // `force_reprovision_bundled_agents` bypasses the stamp check entirely.
-    let repaired = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    let repaired = force_reprovision_bundled_agents(agents(), tmp.path()).unwrap();
     assert_eq!(repaired.refreshed, 1);
     assert_eq!(repaired.backed_up, 1);
     let restored = std::fs::read_to_string(&assistant_toml).unwrap();
@@ -731,7 +742,7 @@ fn force_reprovision_overwrites_even_when_stamp_matches() {
 #[test]
 fn concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh() {
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
 
     let assistant_toml = tmp.path().join("assistant").join("agent.toml");
     let stale_content = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n\n[tools]\nallow = [\"web_search\"]\n";
@@ -745,7 +756,7 @@ fn concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh(
     let handles: Vec<_> = (0..6)
         .map(|_| {
             let dir = std::sync::Arc::clone(&dir);
-            std::thread::spawn(move || ensure_bundled_agents_deployed_in(&dir).unwrap())
+            std::thread::spawn(move || ensure_bundled_agents_deployed_in(agents(), &dir).unwrap())
         })
         .collect();
     let reports: Vec<ReprovisionReport> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -782,7 +793,7 @@ fn concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh(
     );
     assert_eq!(
         stamp::read(tmp.path()).as_deref(),
-        Some(current_bundle_stamp::<BundledAgents>().unwrap().as_str()),
+        Some(current_bundle_stamp(agents()).as_str()),
         "final stamp must match the current bundle content hash"
     );
 }
@@ -800,7 +811,7 @@ fn ensure_deployed_blocks_on_externally_held_pass_lock() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let tmp = tempfile::tempdir().unwrap();
-    deploy_bundled_agents(tmp.path()).unwrap();
+    deploy_bundled_agents(agents(), tmp.path()).unwrap();
     let dir = tmp.path().to_path_buf();
 
     // Simulate "another process is mid-pass right now" by holding the SAME
@@ -811,7 +822,7 @@ fn ensure_deployed_blocks_on_externally_held_pass_lock() {
     let finished2 = Arc::clone(&finished);
     let dir2 = dir.clone();
     let handle = std::thread::spawn(move || {
-        let report = ensure_bundled_agents_deployed_in(&dir2).unwrap();
+        let report = ensure_bundled_agents_deployed_in(agents(), &dir2).unwrap();
         finished2.store(true, Ordering::SeqCst);
         report
     });
@@ -896,9 +907,10 @@ fn bundled_personas_carry_their_okg_store_bindings() {
             .find(|(name, ..)| name == agent_name)
             .unwrap_or_else(|| panic!("no expected binding declared for agent `{agent_name}`"));
 
-        let raw =
-            BundledAgents::get(file).unwrap_or_else(|| panic!("bundled asset missing: {file}"));
-        let text = std::str::from_utf8(&raw.data).unwrap();
+        let raw = agents()
+            .get(file)
+            .unwrap_or_else(|| panic!("bundled asset missing: {file}"));
+        let text = std::str::from_utf8(raw).unwrap();
         let parsed: Partial =
             toml::from_str(text).unwrap_or_else(|e| panic!("{file} is not valid TOML: {e}"));
         let binding = parsed
@@ -933,9 +945,10 @@ fn bundled_personas_grant_vector_search() {
     }
 
     for (file, _agent_name) in SEED_SPELLINGS {
-        let raw =
-            BundledAgents::get(file).unwrap_or_else(|| panic!("bundled asset missing: {file}"));
-        let text = std::str::from_utf8(&raw.data).unwrap();
+        let raw = agents()
+            .get(file)
+            .unwrap_or_else(|| panic!("bundled asset missing: {file}"));
+        let text = std::str::from_utf8(raw).unwrap();
         let parsed: Partial = toml::from_str(text).unwrap();
         assert!(
             parsed.tools.allow.iter().any(|t| t == "vector_search"),
@@ -955,7 +968,7 @@ fn bundled_personas_grant_vector_search() {
 #[test]
 fn bundled_workflows_deploy_to_target() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = ensure_embedded_deployed_in::<BundledWorkflows>(tmp.path()).unwrap();
+    let report = ensure_tree_deployed_in(workflows(), tmp.path()).unwrap();
 
     assert!(report.written > 0, "no bundled workflow files written");
     assert!(
@@ -964,7 +977,7 @@ fn bundled_workflows_deploy_to_target() {
     );
 
     // Stamp-aware: a second pass over an unchanged bundle writes nothing.
-    let again = ensure_embedded_deployed_in::<BundledWorkflows>(tmp.path()).unwrap();
+    let again = ensure_tree_deployed_in(workflows(), tmp.path()).unwrap();
     assert_eq!(again.total_touched(), 0, "re-deploy was not a no-op");
 }
 
@@ -975,27 +988,21 @@ fn bundled_workflows_deploy_to_target() {
 #[test]
 fn agent_and_workflow_bundles_hash_differently() {
     assert_ne!(
-        current_bundle_stamp::<BundledAgents>().unwrap(),
-        current_bundle_stamp::<BundledWorkflows>().unwrap()
+        current_bundle_stamp(agents()),
+        current_bundle_stamp(workflows())
     );
 }
 
-/// A synthetic embed tree standing in for a source asset directory that
-/// picked up stray local files before a build (#5226).
+/// A synthetic tree standing in for a source asset directory that picked up
+/// stray local files (#5226).
 ///
-/// Why: `RustEmbed` embeds whatever physically sits in the folder at build
-/// time and ignores `.gitignore`, so a `.env`, an editor backup, or one of
-/// `state_writer::atomic_write`'s `<file>.lock` sidecars left in
-/// `.trusty-agents/agents/` ships inside the distributed `tagent` binary and
-/// is then written into every user's home. A committed fixture directory
-/// cannot express that — `.env*` and `*.bak` are gitignored — so the file set
-/// is stated in code instead.
-/// What: a hand-written `RustEmbed` impl (no derive, no folder) over four
-/// paths: one legitimate bundled agent and three strays.
+/// Why: a `.env`, an editor backup, or one of `state_writer::atomic_write`'s
+/// `<file>.lock` sidecars left in the bundled source tree must never be
+/// written into a user's home. A committed fixture directory cannot express
+/// that — `.env*` and `*.bak` are gitignored — so the file set is stated in
+/// code instead.
+/// What: four paths: one legitimate bundled agent and three strays.
 /// Test: `stray_files_in_the_asset_tree_are_never_deployed`.
-struct StrayAssetTree;
-
-/// `(path, bytes)` pairs [`StrayAssetTree`] serves.
 const STRAY_TREE: &[(&str, &[u8])] = &[
     ("assistant/agent.toml", b"[agent]\nname = \"assistant\"\n"),
     (".env", b"OPENROUTER_API_KEY=sk-or-should-never-ship\n"),
@@ -1006,31 +1013,23 @@ const STRAY_TREE: &[(&str, &[u8])] = &[
     ("assistant/persona.md.bak", b"editor backup\n"),
 ];
 
-impl rust_embed::RustEmbed for StrayAssetTree {
-    fn get(file_path: &str) -> Option<rust_embed::EmbeddedFile> {
+/// [`STRAY_TREE`] as a [`BundledTree`], bypassing the read-time filter so the
+/// deploy-time one is what is under test (#9014).
+fn stray_tree() -> BundledTree {
+    BundledTree::from_files(
+        BundledTreeKind::Agents,
         STRAY_TREE
             .iter()
-            .find(|(path, _)| *path == file_path)
-            .map(|(_, bytes)| rust_embed::EmbeddedFile {
-                data: std::borrow::Cow::Borrowed(bytes),
-                // `Metadata` has no public constructor; this doc-hidden one is
-                // what the derive macro itself emits.
-                metadata: rust_embed::Metadata::__rust_embed_new([0u8; 32], None, None),
-            })
-    }
-
-    fn iter() -> impl Iterator<Item = std::borrow::Cow<'static, str>> + 'static {
-        STRAY_TREE
-            .iter()
-            .map(|(path, _)| std::borrow::Cow::Borrowed(*path))
-    }
+            .map(|(rel, bytes)| ((*rel).to_owned(), bytes.to_vec()))
+            .collect(),
+    )
 }
 
-/// Why (#5226): the deploy loop wrote every path the embed tree offered, so a
-/// stray file that reached the build reached the user's `$HOME` too — a `.env`
-/// among them. The filter is what stops a non-bundled path from ever being
+/// Why (#5226): the deploy loop wrote every path the tree offered, so a stray
+/// file that reached the tree reached the user's `$HOME` too — a `.env` among
+/// them. The filter is what stops a non-bundled path from ever being
 /// materialised.
-/// What: deploys [`StrayAssetTree`] into a tempdir and asserts the legitimate
+/// What: deploys [`stray_tree`] into a tempdir and asserts the legitimate
 /// agent file landed while none of the three strays did, and that the report
 /// counts only the file actually written.
 /// Test: itself.
@@ -1038,8 +1037,9 @@ impl rust_embed::RustEmbed for StrayAssetTree {
 fn stray_files_in_the_asset_tree_are_never_deployed() {
     let tmp = tempfile::tempdir().unwrap();
     let guard = lock::acquire(tmp.path()).unwrap();
-    let report = reprovision_embedded_locked::<StrayAssetTree>(
+    let report = reprovision_tree_locked(
         &guard,
+        &stray_tree(),
         tmp.path(),
         RefreshPolicy::WriteMissingOnly,
     )
@@ -1116,40 +1116,31 @@ fn source_tree_paths(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Why (#5226): the `#[include]` globs are the build-time half of the filter.
-/// Nothing that fails [`is_bundled_asset`] may reach the embedded set — and the
-/// globs must not have quietly dropped part of the real roster while excluding
-/// strays, which an anchor-file spot check would miss.
-/// What: compares each embedded set against the source tree it is built from,
+/// Why (#5226, #9014): the read-time filter in `BundledTree::from_content` is
+/// the first half of the allowlist. Nothing that fails [`is_bundled_asset`]
+/// may reach a loaded tree — and the filter must not have quietly dropped part
+/// of the real roster while excluding strays, which an anchor-file spot check
+/// would miss.
+/// What: compares each loaded tree against the source tree it is read from,
 /// filtered by the same predicate — so the assertion states the whole expected
-/// file list without hard-coding one that rots on the next roster change. A
-/// stray file a developer happens to have locally is filtered out of BOTH
-/// sides, so it cannot fail this test spuriously.
+/// file list without hard-coding one that rots on the next roster change.
 /// Test: itself.
 #[test]
-fn embedded_trees_carry_only_bundled_assets() {
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents");
-
-    for (tree, embedded) in [
-        ("agents", {
-            let mut v: Vec<String> = BundledAgents::iter().map(|r| r.to_string()).collect();
-            v.sort();
-            v
-        }),
-        ("workflows", {
-            let mut v: Vec<String> = BundledWorkflows::iter().map(|r| r.to_string()).collect();
-            v.sort();
-            v
-        }),
+fn loaded_trees_carry_only_bundled_assets() {
+    for (kind, tree) in [
+        (BundledTreeKind::Agents, agents()),
+        (BundledTreeKind::Workflows, workflows()),
     ] {
-        let expected: Vec<String> = source_tree_paths(&source_root.join(tree))
+        let mut loaded: Vec<String> = tree.files().iter().map(|(r, _)| r.clone()).collect();
+        loaded.sort();
+        let expected: Vec<String> = source_tree_paths(&repo_tree_dir(kind))
             .into_iter()
             .filter(|rel| is_bundled_asset(rel))
             .collect();
-        assert!(!expected.is_empty(), "{tree}: no source assets found");
+        assert!(!expected.is_empty(), "{kind:?}: no source assets found");
         assert_eq!(
-            embedded, expected,
-            "{tree}: the embedded set does not match the bundled source files"
+            loaded, expected,
+            "{kind:?}: the loaded set does not match the bundled source files"
         );
     }
 }
@@ -1167,9 +1158,9 @@ fn stray_files_do_not_move_the_bundle_stamp() {
         b"[agent]\nname = \"assistant\"\n".to_vec(),
     )]);
     assert_eq!(
-        current_bundle_stamp::<StrayAssetTree>().unwrap(),
+        current_bundle_stamp(&stray_tree()),
         bundled_only,
-        "the stamp must hash the bundled file set, not the raw embed tree"
+        "the stamp must hash the bundled file set, not the raw tree"
     );
 }
 
@@ -1207,25 +1198,22 @@ fn source_tree_entries(
     Ok(())
 }
 
-/// The two embedded source trees, as `(name, absolute path)` (#5226).
+/// The two bundled source trees, as `(name, absolute path)` (#5226; under
+/// `content/` since #9014).
 fn embedded_source_trees() -> [(&'static str, PathBuf); 2] {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".trusty-agents");
     [
-        ("agents", root.join("agents")),
-        ("workflows", root.join("workflows")),
+        ("agents", repo_tree_dir(BundledTreeKind::Agents)),
+        ("workflows", repo_tree_dir(BundledTreeKind::Workflows)),
     ]
 }
 
-/// Why (#5226): [`is_bundled_asset`] and the `#[include]` globs both match on
-/// the NAME, and `rust-embed-utils` walks the folder with `.follow_links(true)`
-/// (8.11.0, `lib.rs:18`). A symlink named `persona.md` planted in
-/// `.trusty-agents/agents/` before a release build therefore passes both
-/// filters and embeds its TARGET's bytes into the shipped binary — which is
-/// then written into every user's `~/.trusty-agents/`. A link to `~/.ssh/id_rsa`
-/// is the worst case, and the allowlist cannot see it: only the file type can.
+/// Why (#5226): [`is_bundled_asset`] matches on the NAME, so a symlink named
+/// `persona.md` planted in the bundled source tree passes it. The packager
+/// refuses a symlink and dev mode does not serve one (#9014: the trees are
+/// content now), but a link here would still break the release; a link to
+/// `~/.ssh/id_rsa` is the worst case, and only the file type can see it.
 /// What: walks both source trees without resolving links and fails naming every
-/// entry that is itself a symlink, file and directory alike. A symlinked
-/// directory would embed its whole target subtree, so it is caught the same way.
+/// entry that is itself a symlink, file and directory alike.
 /// Test: itself.
 #[test]
 fn no_symlink_reaches_the_embedded_asset_trees() {
@@ -1265,16 +1253,16 @@ fn is_known_junk(rel: &str) -> bool {
     name.starts_with('.') || name.ends_with(".bak") || name.ends_with(".lock")
 }
 
-/// Why (#5226): `embedded_trees_carry_only_bundled_assets` filters BOTH of its
+/// Why (#5226): `loaded_trees_carry_only_bundled_assets` filters BOTH of its
 /// comparands through [`is_bundled_asset`], so a real new asset kind — a
-/// `roster.yaml`, say — is subtracted from the embedded set and from the
+/// `roster.yaml`, say — is subtracted from the loaded set and from the
 /// expected set alike, and that test stays green while the asset silently never
 /// ships. Filtering both sides can only prove the two filters agree; it can
 /// never notice a file neither side was asked about.
 /// What: walks both source trees UNFILTERED and requires every file to be
 /// either accepted by [`is_bundled_asset`] or matched by [`is_known_junk`]. An
 /// unrecognised real extension fails here, at the point where a human can
-/// decide whether to add it to the allowlist and the `#[include]` globs or to
+/// decide whether to add it to the allowlist or to
 /// delete it.
 /// Test: itself.
 #[test]
@@ -1299,8 +1287,8 @@ fn every_source_file_is_a_bundled_asset_or_known_junk() {
     assert!(
         unrecognised.is_empty(),
         "these source files are neither bundled assets nor recognised strays, \
-         so they are silently absent from the shipped binary — extend \
-         `is_bundled_asset` and the `#[include]` globs if they belong in the \
+         so they are silently absent from every deploy — extend \
+         `is_bundled_asset` if they belong in the \
          bundle, or delete them (#5226): {unrecognised:?}"
     );
 }
@@ -1316,7 +1304,7 @@ fn every_source_file_is_a_bundled_asset_or_known_junk() {
 /// every fresh install's `~/.trusty-agents/agents/`: izzie's Gmail binding
 /// reached new machines as a warning plus nothing. A comment saying "use
 /// `[[channels]]`" is not a gate.
-/// What: reads the EMBEDDED bytes rather than the source tree — the embed is
+/// What: reads the LOADED tree rather than the source files — the tree is
 /// what [`deploy_bundled_agents`] actually writes — parses every `*.toml` in
 /// it, and fails on a top-level `listeners` key, naming every file that has
 /// one. The live binding's other half is
@@ -1327,14 +1315,12 @@ fn every_source_file_is_a_bundled_asset_or_known_junk() {
 fn no_bundled_persona_ships_a_retired_listeners_table() {
     let mut parsed = 0usize;
     let mut residual: Vec<String> = Vec::new();
-    for entry in BundledAgents::iter() {
-        let rel = entry.to_string();
+    for (rel, bytes) in agents().files() {
+        let rel = rel.clone();
         if !rel.ends_with(".toml") {
             continue;
         }
-        let file =
-            BundledAgents::get(&rel).unwrap_or_else(|| panic!("bundled asset missing: {rel}"));
-        let raw = std::str::from_utf8(file.data.as_ref())
+        let raw = std::str::from_utf8(bytes)
             .unwrap_or_else(|e| panic!("{rel}: a bundled manifest must be UTF-8: {e}"));
         let doc: toml::Value = toml::from_str(raw)
             .unwrap_or_else(|e| panic!("{rel}: a bundled manifest must parse: {e}"));

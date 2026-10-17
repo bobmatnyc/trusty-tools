@@ -1,3 +1,7 @@
+---
+metadata:
+  version: "0.1.0"
+---
 <!--
 Personal persona deltas for the "Izzie" overlay (#3054). The intent under #3055
 is that this text merges with the base `assistant` persona

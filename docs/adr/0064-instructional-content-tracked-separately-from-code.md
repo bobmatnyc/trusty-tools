@@ -46,8 +46,9 @@
   non-goal covers only trusty-code's own asset tree, not that re-export.
   Scope also adds three more embeds (owner ruling 2026-09-27): trusty-agents'
   `rust-embed` agents and workflows
-  (`crates/trusty-agents/src/agents/bundled/mod.rs`), moving into
-  `content/agents/trusty-agents/` — namespaced apart from the
+  (`crates/trusty-agents/src/agents/bundled/mod.rs`), moved into
+  `content/agents/trusty-agents/{agents,workflows}/` (#9014) and read at
+  runtime — namespaced apart from the
   trusty-agents-common roster already at `content/agents/`, so the two
   rosters do not collide; trusty-review's prompt templates
   (`crates/trusty-review/src/pipeline/prompt_templates.rs`), covered by the

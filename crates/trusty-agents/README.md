@@ -164,11 +164,15 @@ cargo run -- --version
 
 ### Bundled assistants
 
-Every assistant is a directory package under
-`.trusty-agents/agents/<name>/` — an `agent.toml` plus a `persona.md` — that
-declares `extends = "assistant"`. `crate::agents::bundled` embeds the whole
-tree at build time and deploys it to `~/.trusty-agents/agents/` on first run,
-so an installed `tagent` carries all of them with no extra step.
+Every assistant is a directory package — an `agent.toml` plus a `persona.md`
+— that declares `extends = "assistant"`. The bundled roster and workflows are
+instructional content, kept in the repository at
+`content/agents/trusty-agents/{agents,workflows}/` (ADR-0064, #9014). On each
+run `crate::agents::bundled` reads them from a trusty-tools checkout above the
+working directory, else from the content bundle `tm content update` installed,
+and deploys them to `~/.trusty-agents/{agents,workflows}/`. With no content
+installed, `tagent` logs one error naming `tm content update` and deploys
+nothing.
 
 | Assistant | Purpose |
 |---|---|
