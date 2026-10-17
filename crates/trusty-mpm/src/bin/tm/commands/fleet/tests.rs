@@ -1210,6 +1210,48 @@ fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept\n");
 }
 
+/// #9997: a re-init on a records-era Architect (a `records/` directory exists)
+/// writes no `local/` template row and creates no `local/` directory.
+#[test]
+fn a_reinit_beside_records_writes_no_local_templates() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    std::fs::remove_dir_all(dir.join("local")).unwrap();
+    std::fs::create_dir_all(dir.join(STALE_DIR)).unwrap();
+
+    let report = fx.init().unwrap();
+
+    assert!(
+        !dir.join("local").exists(),
+        "local/ was written beside records/:\n{}",
+        report.render()
+    );
+    assert!(!report.failed(), "{}", report.render());
+    assert!(dir.join("scripts/fleet-poll.py").is_file());
+}
+
+/// #9997: the init report warns, naming the path, when `records/` and a stale
+/// `local/` sit side by side; it deletes nothing. No `local/`: no warning.
+#[test]
+fn a_reinit_warns_about_a_stale_local_beside_records() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    std::fs::create_dir_all(dir.join(STALE_DIR)).unwrap();
+    let local = dir.join("local");
+
+    let rendered = fx.init().unwrap().render();
+
+    let needle = format!("stale `local/` directory at {}", local.display());
+    assert!(rendered.contains(&needle), "missing `{needle}`:\n{rendered}");
+    assert!(local.join("state.md").is_file(), "local/ was touched");
+
+    std::fs::remove_dir_all(&local).unwrap();
+    let rendered = fx.init().unwrap().render();
+    assert!(!rendered.contains("stale `local/`"), "{rendered}");
+}
+
 /// #9997 Fail-Open check: a records path that cannot be checked is a warning,
 /// never a silent pass; an absent one or a plain file is no warning.
 #[test]
