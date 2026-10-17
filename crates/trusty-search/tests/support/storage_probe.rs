@@ -111,8 +111,8 @@ pub fn snapshot(dir: &Path) -> Result<Snapshot, String> {
 
 fn walk(base: &Path, rel: &Path, out: &mut Vec<Entry>) -> Result<(), String> {
     let here = base.join(rel);
-    let listing = std::fs::read_dir(&here)
-        .map_err(|e| format!("read directory {}: {e}", here.display()))?;
+    let listing =
+        std::fs::read_dir(&here).map_err(|e| format!("read directory {}: {e}", here.display()))?;
     for item in listing {
         let item = item.map_err(|e| format!("read an entry of {}: {e}", here.display()))?;
         let child = rel.join(item.file_name());
@@ -175,7 +175,10 @@ pub fn unchanged(before: &[Snapshot], after: &[Snapshot]) -> Result<(), String> 
                     a.entries.len()
                 )
             });
-        return Err(format!("{} changed during the probe: {first}", b.dir.display()));
+        return Err(format!(
+            "{} changed during the probe: {first}",
+            b.dir.display()
+        ));
     }
     Ok(())
 }
@@ -205,7 +208,9 @@ pub fn storage_dirs(
     index_id: &str,
     root_path: &Path,
 ) -> Result<Vec<StorageDir>, String> {
-    let legacy = data_dir.join("indexes").join(sanitize_id_for_path(index_id));
+    let legacy = data_dir
+        .join("indexes")
+        .join(sanitize_id_for_path(index_id));
     let colocated = root_path.join(COLOCATED_DIR_NAME);
     let mut dirs = Vec::new();
     if stat_kind(&legacy)? == Some(Kind::Dir) {
@@ -344,7 +349,9 @@ fn process_argv(pid: u32) -> Result<String, String> {
             Ok(args.join(" "))
         }
         "macos" => ps(pid, "command="),
-        other => Err(format!("reading a process command line is unsupported on {other}")),
+        other => Err(format!(
+            "reading a process command line is unsupported on {other}"
+        )),
     }
 }
 
@@ -454,7 +461,9 @@ pub fn storage_rows(
         }
     }
     if total == 0 {
-        return Err(format!("{files} index files hold 0 bytes; the index is empty"));
+        return Err(format!(
+            "{files} index files hold 0 bytes; the index is empty"
+        ));
     }
     rows.push(bytes_row(
         "index storage total".into(),

@@ -75,7 +75,13 @@ async fn storage_probe_records_index_bytes_and_daemon_rss() {
             a.file_bytes()
         );
         for e in &a.entries {
-            println!("  {:?} {} {} {:?}", e.kind, e.rel.display(), e.len, e.modified);
+            println!(
+                "  {:?} {} {} {:?}",
+                e.kind,
+                e.rel.display(),
+                e.len,
+                e.modified
+            );
         }
     }
     let rows =
