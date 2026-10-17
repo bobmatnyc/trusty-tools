@@ -15,7 +15,14 @@
 use std::path::Path;
 
 /// Install the checkout's content into `home` as a verified bundle; idempotent.
+#[allow(dead_code)] // not every test crate that includes this module stages the full tree
 pub fn stage_repo_content(home: &Path) {
+    stage_repo_content_without(home, None);
+}
+
+/// [`stage_repo_content`] minus the bundle path `skip`, to stage content older
+/// than the release that added that file (#9014).
+pub fn stage_repo_content_without(home: &Path, skip: Option<&str>) {
     use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
     use trusty_common::integrity::Sha256Digest;
 
@@ -47,6 +54,7 @@ pub fn stage_repo_content(home: &Path) {
     for class in ["agents", "skills", "instructions"] {
         walk(&repo.join("content").join(class), class, &mut entries);
     }
+    entries.retain(|(path, _)| Some(path.as_str()) != skip);
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut tar = tar::Builder::new(gz);
     for (path, data) in &entries {

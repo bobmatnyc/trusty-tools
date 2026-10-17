@@ -534,6 +534,23 @@ pub fn not_installed_message(err: &anyhow::Error) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// The stderr text for a content error from a deploy (#9014).
+///
+/// Why: old or unusable content (`Missing`, `Invalid`, `EmptyRoster`) fails
+/// the load as surely as none does, and its remedy is the same `tm content
+/// update`; the REPL's tracing goes to a file, so startup prints it.
+/// What: `Some(<error text>)`, which carries the remedy and the path or origin,
+/// for every [`trusty_agents_common::agent_content::AgentContentError`] except
+/// `Write` (a plain I/O failure, not a content problem); else `None`.
+/// Test: `stale_content_startup_names_tm_content_update_and_the_missing_file`
+/// (tests/stale_content_e2e.rs).
+pub fn deploy_failure_message(err: &anyhow::Error) -> Option<String> {
+    use trusty_agents_common::agent_content::AgentContentError;
+    err.downcast_ref::<AgentContentError>()
+        .filter(|e| !matches!(e, AgentContentError::Write { .. }))
+        .map(ToString::to_string)
+}
+
 /// Logs a failed best-effort deploy of `what` (#9014).
 ///
 /// Why: with no content installed, the agent and workflow deploys fail for

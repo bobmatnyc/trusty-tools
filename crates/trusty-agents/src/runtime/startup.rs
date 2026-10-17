@@ -233,11 +233,12 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // merged in. Suppress in quiet/non-interactive modes (sub-agent IPC,
     // workflow runners, HTTP servers) where stderr output would corrupt
     // protocol streams or just be noise.
+    let quiet_mode = std::env::args()
+        .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
+    // #9014: a deploy error printed below is not logged a second time.
+    let printed_on_stderr =
+        |e: &anyhow::Error| !quiet_mode && agents::bundled::deploy_failure_message(e).is_some();
     {
-        let raw_args: Vec<String> = std::env::args().collect();
-        let quiet_mode = raw_args
-            .iter()
-            .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
         if !quiet_mode {
             // #3844: a bundled file the refresh KEPT because it carries a local
             // edit is the one thing here the operator has to know about — the
@@ -269,14 +270,20 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                 );
             }
             // #9014: tracing goes to repl.log in the REPL, so the remedy for
-            // missing content is printed here, the way #3844's note is.
-            if let Some(e) = agents_deploy_err
-                .iter()
-                .chain(workflows_deploy_err.iter())
-                .find_map(agents::bundled::not_installed_message)
-            {
-                eprintln!("[trusty-agents] ERROR {e}");
-                trusty_agents_common::agent_content::mark_not_installed_reported();
+            // missing, old or unusable content is printed here, the way
+            // #3844's note is. One line per distinct error.
+            let mut printed: Vec<String> = Vec::new();
+            for e in agents_deploy_err.iter().chain(workflows_deploy_err.iter()) {
+                let Some(msg) = agents::bundled::deploy_failure_message(e) else {
+                    continue;
+                };
+                if agents::bundled::not_installed_message(e).is_some() {
+                    trusty_agents_common::agent_content::mark_not_installed_reported();
+                }
+                if !printed.contains(&msg) {
+                    eprintln!("[trusty-agents] ERROR {msg}");
+                    printed.push(msg);
+                }
             }
             check_credentials_and_warn();
         }
@@ -337,13 +344,16 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .init();
     }
 
-    // #9014: the deploy errors held above; the not-installed one was printed
-    // already in non-quiet modes (and so stays at DEBUG), but a quiet mode
-    // (`--api`, `--serve`, ...) reaches stderr only through this line.
-    if let Some(e) = &agents_deploy_err {
+    // #9014: the deploy errors held above. Non-quiet modes printed every
+    // content error already, so only a write failure is logged there; a quiet
+    // mode (`--api`, `--serve`, ...) reaches stderr only through this line.
+    if let Some(e) = agents_deploy_err.as_ref().filter(|e| !printed_on_stderr(e)) {
         agents::bundled::log_deploy_failure("failed to deploy bundled agents to $HOME", e);
     }
-    if let Some(e) = &workflows_deploy_err {
+    if let Some(e) = workflows_deploy_err
+        .as_ref()
+        .filter(|e| !printed_on_stderr(e))
+    {
         agents::bundled::log_deploy_failure("failed to deploy bundled workflows to $HOME", e);
     }
 
