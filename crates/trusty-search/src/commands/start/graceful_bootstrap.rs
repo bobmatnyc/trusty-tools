@@ -550,6 +550,8 @@ fn give_up(switchable: &SwitchableEmbedder, attempts: u32, e: &anyhow::Error) {
 ///
 /// Fail-open check: a failed attempt writes its error into the report BEFORE
 /// the caller logs it, so `/health` always says why, never only a WARN line.
+/// Test: `retry_wait_after_a_failed_probe_reads_retrying_with_the_error` in
+/// `start/tests_9949.rs` (#9970: the failed attempt resets the step to `Idle`).
 async fn run_attempt(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
