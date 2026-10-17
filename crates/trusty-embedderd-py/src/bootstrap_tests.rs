@@ -876,3 +876,134 @@ fn uv_step_failures_are_typed_for_the_retry_decision() {
     };
     assert_eq!(failure_kind(&download), want, "{download:#}");
 }
+
+/// Write `script` at `path` and mark it executable from a `/bin/sh` child, so
+/// this process never holds a write fd on a file a later spawn execs (a
+/// concurrent fork would inherit it and the exec would fail with ETXTBSY).
+#[cfg(unix)]
+fn write_exec_script_via_child(path: &Path, script: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+            "sh",
+        ])
+        .args([script, path.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
+}
+
+/// #9971 regression: a build that follows a failed, not-ready build runs over
+/// the venv dir that attempt left. `/bin/sh` stands in for uv and runs the
+/// fake step scripts in the project dir. The fake `uv venv` exits 2 when the
+/// dir exists, as real uv does; `uv pip sync` fails while `net-down` exists.
+/// Attempt 1 fails at the sync after creating the venv, attempt 2 must
+/// finish and write `.ready`.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_build_after_a_failed_sync_starts_over_the_partial_venv() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    let net_down = tmp.path().join("net-down");
+    fs::write(&net_down, "").unwrap();
+    let steps = [
+        ("python", "exit 0\n".to_owned()),
+        (
+            "venv",
+            r#"if [ -e "$1" ]; then echo "error: A virtual environment already exists at $1" >&2; exit 2; fi
+mkdir -p "$1/bin" && printf '#!/bin/sh\nexit 0\n' > "$1/bin/python" && chmod 755 "$1/bin/python"
+"#
+            .to_owned(),
+        ),
+        ("export", "exit 0\n".to_owned()),
+        (
+            "pip",
+            format!("if [ -e '{}' ]; then exit 1; fi\n", net_down.display()),
+        ),
+    ];
+    fs::create_dir_all(&layout.project_dir).unwrap();
+    for (name, body) in &steps {
+        fs::write(layout.project_dir.join(name), body).unwrap();
+    }
+    let sh = Path::new("/bin/sh");
+
+    let first = super::build_venv_with(&layout, sh).expect_err("the sync is down");
+    assert!(
+        format!("{first:#}").contains("uv pip sync"),
+        "attempt 1 fails at the sync: {first:#}"
+    );
+    let free = fs4::available_space(tmp.path()).unwrap();
+    if free >= REQUIRED_FREE_BYTES {
+        assert_eq!(failure_kind(&first), FailureKind::Transient, "{first:#}");
+    }
+    assert!(layout.venv_python.is_file(), "attempt 1 left its venv");
+    assert!(!layout.ready_sentinel().exists());
+
+    fs::remove_file(&net_down).unwrap();
+    super::build_venv_with(&layout, sh).expect("attempt 2 starts over the partial venv");
+    assert!(is_ready(&layout), "attempt 2 wrote .ready");
+}
+
+/// #9971: the pre-`uv venv` clear never touches a venv marked `.ready`, and
+/// on a not-ready venv removes only the venv dir.
+/// Test: this test.
+#[test]
+fn clear_unready_venv_spares_a_ready_venv_and_its_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    fs::create_dir_all(layout.venv_dir.join("bin")).unwrap();
+    fs::write(&layout.venv_python, "").unwrap();
+    fs::create_dir_all(&layout.project_dir).unwrap();
+    fs::write(layout.project_dir.join("keep"), "").unwrap();
+    fs::write(layout.ready_sentinel(), lockfile_hash()).unwrap();
+
+    super::clear_unready_venv(&layout).unwrap();
+    assert!(
+        layout.venv_python.is_file(),
+        "a ready venv is never cleared"
+    );
+
+    fs::remove_file(layout.ready_sentinel()).unwrap();
+    super::clear_unready_venv(&layout).unwrap();
+    assert!(!layout.venv_dir.exists(), "the unfinished venv is removed");
+    assert!(layout.project_dir.join("keep").is_file());
+    assert!(layout.base.is_dir());
+    super::clear_unready_venv(&layout).expect("no venv dir is a no-op");
+}
+
+/// #9971 regression: the smoke test's network exit (the model download
+/// failed on the network) is transient while disk space remains; any other
+/// failing exit stays permanent.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_smoke_test_network_exit_is_transient_and_other_exits_permanent() {
+    use crate::venv_error::{failure_kind, FailureKind};
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = resolve_layout_in(tmp.path());
+    fs::create_dir_all(&layout.project_dir).unwrap();
+
+    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit \"$3\"\n");
+    let net = super::smoke_test(&layout).expect_err("network exit");
+    let free = fs4::available_space(&layout.project_dir).unwrap();
+    let want = if free < REQUIRED_FREE_BYTES {
+        FailureKind::Permanent
+    } else {
+        FailureKind::Transient
+    };
+    assert_eq!(failure_kind(&net), want, "{net:#}");
+    assert!(net.downcast_ref::<VenvBuildError>().is_some(), "{net:#}");
+
+    fs::remove_file(&layout.venv_python).unwrap();
+    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+    let other = super::smoke_test(&layout).expect_err("import error");
+    assert_eq!(failure_kind(&other), FailureKind::Permanent, "{other:#}");
+    assert!(
+        other.to_string().contains("py-embedder smoke test failed"),
+        "{other:#}"
+    );
+}

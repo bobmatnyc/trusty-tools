@@ -57,6 +57,7 @@ fn each_variant_maps_to_its_kind() {
 /// error are permanent.
 #[test]
 fn failure_kind_reads_the_first_typed_cause() {
+    let dir = Path::new("/data");
     let enospc = || io::Error::from(io::ErrorKind::StorageFull);
     let cases: Vec<(&str, anyhow::Error, FailureKind)> = vec![
         (
@@ -108,8 +109,24 @@ fn failure_kind_reads_the_first_typed_cause() {
             FailureKind::Permanent,
         ),
         (
+            "smoke test failed on something other than the network",
+            smoke_exit_with(Some(1), "exit status: 1".to_owned(), dir, Some(50 * GIB)),
+            FailureKind::Permanent,
+        ),
+        (
+            "smoke test's model download failed on the network",
+            smoke_exit_with(
+                Some(SMOKE_NETWORK_EXIT),
+                "exit status: 75".to_owned(),
+                dir,
+                None,
+            )
+            .context("py-embedder venv bootstrap"),
+            FailureKind::Transient,
+        ),
+        (
             "untyped",
-            anyhow::anyhow!("py-embedder smoke test failed: exit status: 1"),
+            anyhow::anyhow!("something else"),
             FailureKind::Permanent,
         ),
     ];
@@ -160,4 +177,35 @@ fn a_failed_download_step_is_classified_by_free_space() {
     assert!(exit(&sync, Some(50 * GIB))
         .to_string()
         .starts_with("uv pip sync --python"));
+}
+
+/// #9971: the smoke test's network exit is a download failure, so it is
+/// transient only while disk space remains; any other exit, or a signal, is
+/// the permanent untyped failure.
+#[test]
+fn a_smoke_test_network_exit_is_classified_by_free_space() {
+    let dir = Path::new("/data");
+    let exit = |code, free| smoke_exit_with(code, "exit status".to_owned(), dir, free);
+    let net = Some(SMOKE_NETWORK_EXIT);
+
+    assert_eq!(
+        failure_kind(&exit(net, Some(50 * GIB))),
+        FailureKind::Transient
+    );
+    assert_eq!(failure_kind(&exit(net, None)), FailureKind::Transient);
+    let full = exit(net, Some(GIB));
+    assert!(matches!(
+        full.downcast_ref::<VenvBuildError>(),
+        Some(VenvBuildError::InsufficientDisk { .. })
+    ));
+    assert_eq!(failure_kind(&full), FailureKind::Permanent);
+    for other in [Some(1), Some(2), None] {
+        let err = exit(other, Some(50 * GIB));
+        assert_eq!(
+            failure_kind(&err),
+            FailureKind::Permanent,
+            "{other:?}: {err:#}"
+        );
+        assert!(err.downcast_ref::<VenvBuildError>().is_none(), "{err:#}");
+    }
 }
