@@ -434,6 +434,8 @@ fn outside_sandbox_mode_the_bounded_resolver_runs() {
 /// fixed order — the store error is last because the bounded tier caches it
 /// for the rest of the process. The failure lists each wrong arm, never a value.
 /// Test: this test.
+// #9936: `channels` exists only with the `channels` feature; the daemon-only build has no resolvers to test.
+#[cfg(feature = "channels")]
 #[test]
 #[serial]
 fn slack_refs_resolve_the_store_before_the_environment_9936() {
