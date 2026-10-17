@@ -17,6 +17,15 @@ fn load_from(
     BundledTree::from_content(&content, kind)
 }
 
+/// A load result for a panic message: the error, or the loaded file names
+/// (never the bytes, which would bury the message).
+fn summary(result: &Result<BundledTree, AgentContentError>) -> Result<Vec<&str>, String> {
+    match result {
+        Ok(tree) => Ok(tree.files().iter().map(|(rel, _)| rel.as_str()).collect()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Why: the checkout's own trees are what a content release ships; each must
 /// carry its required files and nothing the allowlist refuses.
 /// Test: itself.
@@ -64,7 +73,7 @@ fn a_tree_missing_a_required_file_fails_closed_naming_it() {
                 Err(AgentContentError::Missing { path: named, .. }) => {
                     assert_eq!(named, path, "the error must name the absent file");
                 }
-                other => panic!("absent {path} must fail closed, got {other:?}"),
+                other => panic!("absent {path} must fail closed, got {:?}", summary(&other)),
             }
         }
     }
@@ -75,7 +84,9 @@ fn a_tree_missing_a_required_file_fails_closed_naming_it() {
 /// Test: itself.
 #[test]
 fn an_absent_tree_fails_closed_naming_its_first_required_file() {
-    let err = load_from(&[], BundledTreeKind::Agents).expect_err("no tree must not load");
+    let Err(err) = load_from(&[], BundledTreeKind::Agents) else {
+        panic!("no tree must not load");
+    };
     let message = err.to_string();
     assert!(
         matches!(&err, AgentContentError::Missing { path, .. }
@@ -100,7 +111,10 @@ fn an_empty_required_file_is_invalid() {
         Err(AgentContentError::Invalid { path, .. }) => {
             assert_eq!(path, "agents/trusty-agents/workflows/prescriptive.json");
         }
-        other => panic!("an empty required file must be invalid, got {other:?}"),
+        other => panic!(
+            "an empty required file must be invalid, got {:?}",
+            summary(&other)
+        ),
     }
 }
 
