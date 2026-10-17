@@ -24,9 +24,10 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_isolated_session_under, prepare_session,
-    prepare_session_for_managed, prepare_session_for_repair_under, prepare_session_with_home,
-    prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
-    prepare_session_with_style, prepare_session_with_style_and_native,
+    prepare_session_for_managed, prepare_session_for_repair_in, prepare_session_for_repair_under,
+    prepare_session_with_home, prepare_session_with_repo_url,
+    prepare_session_with_repo_url_and_exe, prepare_session_with_style,
+    prepare_session_with_style_and_native,
 };
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
@@ -70,6 +71,8 @@ mod skills;
 mod statusline;
 pub use statusline::{ensure_status_line, ensure_status_line_in};
 mod sync_assets;
+// #9846: the user-tier paths, relocated by `CLAUDE_CONFIG_DIR`.
+mod user_tier;
 // #7688: the four `--append-system-prompt` composers, split out of this module
 // when the addendum pushed it over the 500-SLOC production cap. Re-exported so
 // every existing `session_launch::build_system_prompt_for*` call site is
@@ -566,7 +569,9 @@ impl PrepError {
 /// the managed constructors relocate every `.claude/` path on it onto the
 /// workspace); `hook_exe` is the stable binary the project-tier hooks writer
 /// should bake, `None` meaning "resolve the running one"; `palace_registry` (#8311) is the trusty-memory registry the palace alias is
-/// written to, `None` meaning "the one the trusty-memory daemon reads".
+/// written to, `None` meaning "the one the trusty-memory daemon reads";
+/// `claude_config_dir` (#9846) relocates the user tier off `home`, as
+/// `CLAUDE_CONFIG_DIR` does for Claude Code, `None` meaning `<home>/.claude`.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
 /// `session_prep_writes_the_palace_alias_under_the_named_registry`, plus
 /// every `prepare_session_*` test.
@@ -575,6 +580,7 @@ pub(super) struct HostInputs<'a> {
     pub(super) home: Option<&'a Path>,
     pub(super) hook_exe: Option<&'a Path>,
     pub(super) palace_registry: Option<&'a Path>,
+    pub(super) claude_config_dir: Option<&'a Path>,
 }
 
 impl<'a> HostInputs<'a> {
@@ -993,7 +999,8 @@ pub(super) fn prepare_session_inner(
     // #7617: and into the user tier on the same call — provisioning owns both,
     // so the `💸` segment is core setup rather than a project's to arrange.
     // #8545: the injected home, not the ambient `$HOME` `ensure_status_line` reads.
-    let user_settings = home.map(|h| h.join(".claude").join("settings.json"));
+    // #9846: under `CLAUDE_CONFIG_DIR` when the caller named one.
+    let user_settings = user_tier::resolve(home, host.claude_config_dir).map(|t| t.settings_json());
     if let Err(err) = ensure_status_line_in(project_dir, user_settings.as_deref()) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
@@ -1078,14 +1085,14 @@ pub(super) fn prepare_session_inner(
     // user-scope declaration, so removing the approval removes the
     // name-squatting exploit #3918→#3950 kept re-opening rather than defusing it
     // once more. Non-fatal: a failure only means the operator sees the dialog.
-    if let Err(err) = preseed_workspace_trust_home(home, project_dir) {
+    if let Err(err) = preseed_workspace_trust_home(home, host.claude_config_dir, project_dir) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 
     // Remove the now-redundant global `trusty-memory` hook entries so they no
     // longer fire for every Claude Code session (including claude-mpm). The
     // project hooks above scope them to trusty-mpm sessions. Non-fatal.
-    if let Err(err) = remove_global_trusty_memory_hooks(home) {
+    if let Err(err) = remove_global_trusty_memory_hooks(home, host.claude_config_dir) {
         tracing::warn!("failed to remove global trusty-memory hooks: {err}");
     }
 

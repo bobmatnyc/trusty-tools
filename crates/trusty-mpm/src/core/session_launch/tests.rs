@@ -294,8 +294,9 @@ fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
 fn home_writes_are_skipped_when_the_home_is_unusable() {
     let workspace = tempdir().unwrap();
     for home in [None, Some(std::path::Path::new("."))] {
-        super::settings::preseed_workspace_trust_home(home, workspace.path()).expect("soft skip");
-        super::settings::remove_global_trusty_memory_hooks(home).expect("soft skip");
+        super::settings::preseed_workspace_trust_home(home, None, workspace.path())
+            .expect("soft skip");
+        super::settings::remove_global_trusty_memory_hooks(home, None).expect("soft skip");
     }
     assert!(
         !std::path::Path::new("./.claude.json").exists(),
