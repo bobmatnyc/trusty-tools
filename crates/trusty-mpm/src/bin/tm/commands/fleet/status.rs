@@ -11,7 +11,9 @@
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
 //! [`skills_check`] adds whether the Architect's shipped skills are current
 //! in its project tier (#9540); like `binding` it is never part of `complete`.
+//! It also warns on the pre-#9997 records directory and moves nothing.
 //! Test: `status_reports_incomplete_setup`,
+//! `status_warns_about_a_stale_records_dir_and_moves_nothing`,
 //! `fleet_status_names_why_this_session_is_not_bound`,
 //! `the_skills_row_names_a_missing_or_custom_skill`,
 //! `status_binding_needs_the_record_and_the_same_session`, `tests/tm_fleet.rs`.
@@ -250,14 +252,52 @@ pub(crate) fn this_session_env() -> HookEnv {
 /// Why: #9540 — the launch deploy is fail-open and keeps a project-custom
 /// copy, so a failed or skipped deploy must show here.
 /// What: [`architect_skills::health`]; it names each skill that is missing,
-/// stale, project-custom or unreadable. Read-only.
-/// Test: `the_skills_row_names_a_missing_or_custom_skill`.
+/// stale, project-custom or unreadable. #9997: a [`stale_records_warning`]
+/// also makes the row not ok and joins its detail. Read-only.
+/// Test: `the_skills_row_names_a_missing_or_custom_skill`,
+/// `status_warns_about_a_stale_records_dir_and_moves_nothing`.
 pub(crate) fn skills_check(dir: &Path) -> Check {
-    let (ok, detail) = architect_skills::health(dir);
+    let (mut ok, mut detail) = architect_skills::health(dir);
+    // #9997 (decision 1a): warn about the old layout; never move it.
+    if let Some(warning) = stale_records_warning(dir) {
+        ok = false;
+        detail = format!("{detail}; {warning}");
+    }
     Check {
         name: "skills",
         ok,
         detail,
+    }
+}
+
+/// The directory an Architect seeded before #9997 kept its records in.
+pub(crate) const STALE_RECORDS_DIR: &str = "records";
+
+/// A warning when `dir` still holds the pre-#9997 records directory.
+///
+/// Why: #9997 decisions 1a and 2. `tm fleet init` seeds `local/` on a fresh
+/// project only, and every launch refreshes the skills, which now name
+/// `local/`. An Architect whose records are still in the old directory reads
+/// the wrong paths until the owner moves them.
+/// What: `Some` when `dir`'s old records path is a directory, or when that
+/// cannot be checked (fail closed: a warning, never a silent pass); `None`
+/// when it is absent or a file. Reads only and moves nothing.
+/// Test: `status_warns_about_a_stale_records_dir_and_moves_nothing`,
+/// `an_uncheckable_stale_dir_is_a_warning`.
+pub(crate) fn stale_records_warning(dir: &Path) -> Option<String> {
+    let path = dir.join(STALE_RECORDS_DIR);
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => Some(format!(
+            "stale `{STALE_RECORDS_DIR}/` directory at {}: the refreshed skills now name \
+             `local/`; move its files into `local/` yourself (tm moves nothing)",
+            path.display()
+        )),
+        Ok(_) => None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => Some(format!(
+            "cannot check for a stale `{STALE_RECORDS_DIR}/` directory at {}: {err}",
+            path.display()
+        )),
     }
 }
 

@@ -42,20 +42,32 @@ alerts.
 | `scripts/` | The deterministic poller and its helpers. `scripts/start-fleet-poll.sh` starts `scripts/fleet-poll.py` in tmux session `<this session>-poll` (`tm fleet status --json` names this session); `tm architect input-state` classifies a pane's input box. |
 | `.claude/skills/` | `tm-fleet-check` and `tm-context-refresh`. |
 | `inbox/` | Poller runtime, not tracked: `alerts.jsonl`, `poll-state.json`, `poll.log`, and `events.jsonl` once the watched projects' hooks write it. |
-| `records/` | Your records, tracked by this project's local git repository. |
+| `local/` | Your records, tracked by this project's local git repository. |
 
 `tm fleet init` writes every file above only when it is absent, and reports a
 file you edited as skipped. It never overwrites your changes.
 
 ## Records
 
-- `records/state.md`: `poll_count`, `last_consumed_ts` (events),
+Read `local/instance.md`, `local/user.md`, `local/goals.md`, `local/state.md`
+and the tail of `local/actions.md` at the start of every pass.
+
+- `local/instance.md`: the facts about this installation you find and keep
+  current: hosts, builder slots, accounts, services, known quirks.
+- `local/user.md`: the user's profile: how they decide, communicate and work.
+- `local/goals.md`: the user's ranked goals, the standing goals, and the
+  session-to-goal map.
+- `local/state.md`: `poll_count`, `last_consumed_ts` (events),
   `last_alert_ts` (alerts), the pending questions, and the context-refresh
   queue.
-- `records/actions.md`: one dated entry per pass, newest last: the mode, what
+- `local/actions.md`: one dated entry per pass, newest last: the mode, what
   you sent and where, and what is still pending.
-- `records/projects/<project>.md`: one file per watched project: its state,
-  its rulings, its snapshots, each fact labelled reported or verified.
+- `local/projects/<project>.md`: one file per watched project, started from
+  `local/projects/_template.md`: its state, its rulings, its snapshots, each
+  fact labelled reported or verified.
+- `local/owner/`: the owner model; `local/owner/README.md` gives the format.
+- `local/mandates/`: the institutional mandates the user supplies;
+  `local/mandates/README.md` gives the schema.
 
-Commit the records at the end of every pass. The repository is local: never
-add a remote.
+The owner writes `AGENTS.md`; you never write it. Commit `local/` at the end
+of every pass. The repository is local: never add a remote.

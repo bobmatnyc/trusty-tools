@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use super::architect_skills::{ArchitectSkill, SHIPPED};
+use super::architect_skills::{ArchitectSkill, SHIPPED, ShippedSkill};
 use crate::core::content_source::{self, AgentContentError, Fetch, FrameworkContent};
 use crate::core::framework_content::INSTRUCTIONS_CLASS;
 
@@ -68,9 +68,21 @@ impl ArchitectSeed {
     /// [`ArchitectSeedError::Missing`] or [`ArchitectSeedError::Empty`] naming
     /// the first file that fails, `CLAUDE.md` first.
     pub fn load(content: &FrameworkContent) -> Result<Self, ArchitectSeedError> {
+        Self::load_from(content, SHIPPED)
+    }
+
+    /// [`Self::load`] with the skill table named; #9997 AC5 tests a table
+    /// with one more entry through it.
+    ///
+    /// # Errors
+    /// As [`Self::load`].
+    pub fn load_from(
+        content: &FrameworkContent,
+        shipped: &[ShippedSkill],
+    ) -> Result<Self, ArchitectSeedError> {
         Ok(Self {
             claude_md: seed_file(content, CLAUDE_MD_TEMPLATE)?.to_owned(),
-            skills: load_skills(content)?,
+            skills: load_skills_from(content, shipped)?,
         })
     }
 
@@ -106,12 +118,30 @@ impl ArchitectSeed {
 /// # Errors
 /// As [`ArchitectSeed::load`].
 pub fn load_skills(content: &FrameworkContent) -> Result<Vec<ArchitectSkill>, ArchitectSeedError> {
-    SHIPPED
+    load_skills_from(content, SHIPPED)
+}
+
+/// `shipped`'s skills with their text from `content`, in table order, or the
+/// first error.
+///
+/// Why: #9997 AC5 — the loader iterates whatever table it is given, so a new
+/// skill needs no code beyond its [`SHIPPED`] entry.
+/// What: reads [`ShippedSkill::source`] for each entry, failing closed as
+/// [`ArchitectSeed::load`] does.
+/// Test: `one_more_shipped_entry_and_content_file_load_seed_and_deploy`.
+///
+/// # Errors
+/// As [`ArchitectSeed::load`].
+pub fn load_skills_from(
+    content: &FrameworkContent,
+    shipped: &[ShippedSkill],
+) -> Result<Vec<ArchitectSkill>, ArchitectSeedError> {
+    shipped
         .iter()
         .map(|shipped| {
             Ok(ArchitectSkill {
                 stem: shipped.stem,
-                contents: seed_file(content, shipped.source)?.to_owned(),
+                contents: seed_file(content, &shipped.source())?.to_owned(),
                 previous: shipped.previous,
             })
         })

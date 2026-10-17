@@ -1,0 +1,26 @@
+# FAKE EXAMPLE. Not a real mandate. It shows the schema in README.md.
+# Real mandates live beside it as <id>.toml and come from the user.
+id = "example"
+title = "FAKE EXAMPLE: commit subjects start with an EXAMPLE ticket key"
+category = "commits-prs"
+scope = ["example-project"]
+severity = "info"
+rule = """
+FAKE EXAMPLE. Every commit subject on main starts with a ticket key of the
+form EXAMPLE-<number>, followed by a space.
+"""
+
+[check]
+kind = "command"
+# Exit 0 when the last 20 non-merge subjects all carry the key.
+command = "! git log -20 --no-merges --format=%s | grep -vqE '^EXAMPLE-[0-9]+ '"
+
+[source]
+owner = "Example Org platform team (fictional)"
+reference = "https://example.invalid/policies/commit-style"
+added = "2026-01-01"
+
+[[exceptions]]
+project = "example-sandbox"
+reason = "FAKE EXAMPLE: a throwaway repository"
+ruling = "user, 2026-01-01 (fictional)"

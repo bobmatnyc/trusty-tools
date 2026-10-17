@@ -52,6 +52,11 @@ fn mtime(path: &Path) -> SystemTime {
     std::fs::metadata(path).unwrap().modified().unwrap()
 }
 
+/// Every [`SHIPPED`] stem, in deploy order.
+fn shipped_stems() -> Vec<&'static str> {
+    SHIPPED.iter().map(|s| s.stem).collect()
+}
+
 #[test]
 fn an_absent_skill_is_written_byte_equal() {
     let project = tempdir().unwrap();
@@ -65,7 +70,7 @@ fn an_absent_skill_is_written_byte_equal() {
             path.display()
         );
     }
-    assert_eq!(report.written, vec!["tm-fleet-check", "tm-context-refresh"]);
+    assert_eq!(report.written, shipped_stems());
     assert!(report.errors.is_empty(), "{:?}", report.errors);
 }
 
@@ -250,11 +255,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 2] = [
         (
             "tm-fleet-check",
-            "7535d8bc496f17cd1a9d80e461073aa9539fd070329231cb2508a6e65981287a",
+            "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
         ),
         (
             "tm-context-refresh",
-            "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
+            "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
         ),
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
@@ -270,6 +275,57 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         assert!(
             !skill.previous.contains(&pinned),
             "{stem}: the current hash is listed as previous"
+        );
+    }
+}
+
+/// The `records/`-era text of each shipped skill, as `tm fleet init` seeded
+/// it before #9997.
+const RECORDS_ERA: [(&str, &str); 2] = [
+    (
+        "tm-fleet-check",
+        include_str!("testdata/9997/tm-fleet-check.md"),
+    ),
+    (
+        "tm-context-refresh",
+        include_str!("testdata/9997/tm-context-refresh.md"),
+    ),
+];
+
+/// #9997 upgrade path: an untouched `records/`-era seed with no deploy record
+/// is a `previous` hit and is refreshed to the `local/` text; the same seed
+/// with one hand-added line stays project-custom.
+#[test]
+fn a_records_era_seed_is_refreshed_and_an_edited_one_stays_custom() {
+    let skills = shipped();
+    let untouched = tempdir().unwrap();
+    for (stem, text) in RECORDS_ERA {
+        let path = skill_path(untouched.path(), stem);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+    }
+    let report = deploy_skills_into(untouched.path(), &skills);
+    assert_eq!(report.written, shipped_stems(), "{report:?}");
+    assert!(report.kept_custom.is_empty(), "{report:?}");
+    for skill in &skills {
+        let live = std::fs::read_to_string(skill_path(untouched.path(), skill.stem)).unwrap();
+        assert_eq!(live, skill.contents, "{}", skill.stem);
+        assert!(live.contains("local/state.md"), "{}", skill.stem);
+    }
+
+    let edited = tempdir().unwrap();
+    for (stem, text) in RECORDS_ERA {
+        let path = skill_path(edited.path(), stem);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{text}\nA project line.\n")).unwrap();
+    }
+    let report = deploy_skills_into(edited.path(), &skills);
+    assert_eq!(report.kept_custom, shipped_stems(), "{report:?}");
+    assert!(report.written.is_empty(), "{report:?}");
+    for (stem, text) in RECORDS_ERA {
+        assert_eq!(
+            std::fs::read_to_string(skill_path(edited.path(), stem)).unwrap(),
+            format!("{text}\nA project line.\n")
         );
     }
 }

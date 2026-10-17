@@ -6,22 +6,27 @@
 //! scratch sources missing or blanking one file.
 //! Test: this is the test module.
 
-use sha2::{Digest, Sha256};
 use trusty_agents_common::agent_content::checkout_content;
 
 use super::*;
 use crate::core::content_source::test_support::{rc, repo_content};
 use crate::core::framework_content::tests::{fake_checkout_with_package, legacy_content};
 use crate::core::project_skill_tier::architect_skills::{
-    self, CONTEXT_REFRESH, FLEET_CHECK, deploy_resolved,
+    self, CONTEXT_REFRESH, FLEET_CHECK, SHIPPED, ShippedSkill, deploy_resolved, deploy_skills_into,
 };
 
-/// sha256 of the `CLAUDE.md` template `include_str!` compiled in at eada92a230.
-const EMBEDDED_CLAUDE_MD: &str = "620df7a8a94a6db7e466917ea542002b597a46a32be8bb5f473949e07e8d2df1";
-
-fn sha256_hex(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
-}
+/// sha256 of each skill as `include_str!` compiled it in at eada92a230, before
+/// #9132 turned `version:` into a `metadata:` block.
+const COMPILED_IN: [(&str, &str); 2] = [
+    (
+        "tm-fleet-check",
+        "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
+    ),
+    (
+        "tm-context-refresh",
+        "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
+    ),
+];
 
 /// A content source with the repository's required instructions plus
 /// `extra` (`(path relative to instructions/, body)`).
@@ -44,32 +49,35 @@ fn shipped(rel: &str) -> String {
     rc().instruction(rel).expect("shipped").to_owned()
 }
 
-/// Acceptance 4: the default content seeds what the binary compiled in. The
-/// template is byte-identical; each skill differs only in its `version:`
-/// line, which ADR-0064 content declares as `metadata:`, and the compiled-in
-/// hash is in its history, so an untouched seed refreshes, never reads custom.
+/// Acceptance 4 (#9132), and #9997: the default content seeds every
+/// [`SHIPPED`] skill, each with a `metadata:` block, and each skill's
+/// compiled-in text is still in its history, so a seed of it refreshes, never
+/// reads custom. The template carries the `local/` layout.
 #[test]
 fn the_repository_content_seeds_the_architect() {
     let seed = ArchitectSeed::load(rc()).expect("the checkout carries the seed");
-    assert_eq!(sha256_hex(&seed.claude_md), EMBEDDED_CLAUDE_MD);
+    assert!(
+        seed.claude_md.contains("`local/state.md`"),
+        "{}",
+        seed.claude_md
+    );
+    assert!(!seed.claude_md.contains("records/"), "{}", seed.claude_md);
     let stems: Vec<&str> = seed.skills.iter().map(|s| s.stem).collect();
-    assert_eq!(stems, [FLEET_CHECK.stem, CONTEXT_REFRESH.stem]);
-    for skill in &seed.skills {
-        let embedded = skill.contents.replacen(
-            "metadata:\n  version: \"0.1.0\"\n",
-            "version: \"0.1.0\"\n",
-            1,
-        );
-        assert_ne!(
-            embedded, skill.contents,
-            "{}: no metadata block",
-            skill.stem
-        );
-        let embedded_hash = sha256_hex(&embedded);
+    let shipped_stems: Vec<&str> = SHIPPED.iter().map(|s| s.stem).collect();
+    assert_eq!(stems, shipped_stems);
+    for (stem, compiled_in) in COMPILED_IN {
+        let skill = seed
+            .skills
+            .iter()
+            .find(|s| s.stem == stem)
+            .unwrap_or_else(|| panic!("{stem} is not seeded"));
         assert!(
-            skill.previous.contains(&embedded_hash.as_str()),
-            "{}: the compiled-in text {embedded_hash} is not in its history",
-            skill.stem
+            skill.contents.contains("metadata:\n  version: "),
+            "{stem}: no metadata block"
+        );
+        assert!(
+            skill.previous.contains(&compiled_in),
+            "{stem}: the compiled-in text {compiled_in} is not in its history"
         );
     }
 }
@@ -93,7 +101,7 @@ fn a_source_without_the_seed_files_names_the_first_missing_one() {
 fn a_source_missing_one_skill_loads_nothing() {
     let content = content_with(&[
         (CLAUDE_MD_TEMPLATE, &shipped(CLAUDE_MD_TEMPLATE)),
-        (FLEET_CHECK.source, &shipped(FLEET_CHECK.source)),
+        (&FLEET_CHECK.source(), &shipped(&FLEET_CHECK.source())),
     ]);
     let err = ArchitectSeed::load(&content).expect_err("a skill is missing");
     assert!(
@@ -108,8 +116,11 @@ fn a_source_missing_one_skill_loads_nothing() {
 fn a_blank_seed_file_is_refused() {
     let content = content_with(&[
         (CLAUDE_MD_TEMPLATE, &shipped(CLAUDE_MD_TEMPLATE)),
-        (FLEET_CHECK.source, " \n\n"),
-        (CONTEXT_REFRESH.source, &shipped(CONTEXT_REFRESH.source)),
+        (&FLEET_CHECK.source(), " \n\n"),
+        (
+            &CONTEXT_REFRESH.source(),
+            &shipped(&CONTEXT_REFRESH.source()),
+        ),
     ]);
     let err = ArchitectSeed::load(&content).expect_err("a blank skill");
     assert!(
@@ -148,5 +159,43 @@ fn an_unreadable_seed_writes_no_skill_and_names_the_file() {
     assert!(
         !architect_skills::project_tier(project.path()).exists(),
         "a skill tier was written"
+    );
+}
+
+/// #9997 AC5: one more [`ShippedSkill`] entry plus its content file is the
+/// whole change: the loader, the seed and the deployer pick it up.
+#[test]
+fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
+    const EXTRA: ShippedSkill = ShippedSkill {
+        stem: "tm-probe-extra",
+        previous: &[],
+    };
+    let body = "---\nname: tm-probe-extra\n---\n\n# Probe\n";
+    let mut files: Vec<(String, String)> = SHIPPED
+        .iter()
+        .map(|s| (s.source(), shipped(&s.source())))
+        .collect();
+    files.push((CLAUDE_MD_TEMPLATE.to_owned(), shipped(CLAUDE_MD_TEMPLATE)));
+    files.push((EXTRA.source(), body.to_owned()));
+    let extra: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(rel, text)| (rel.as_str(), text.as_str()))
+        .collect();
+    let content = content_with(&extra);
+    let table: Vec<ShippedSkill> = SHIPPED.iter().copied().chain([EXTRA]).collect();
+
+    let seed = ArchitectSeed::load_from(&content, &table).expect("the extra skill loads");
+    let stems: Vec<&str> = seed.skills.iter().map(|s| s.stem).collect();
+    let want: Vec<&str> = table.iter().map(|s| s.stem).collect();
+    assert_eq!(stems, want);
+    assert_eq!(seed.skills.last().map(|s| s.contents.as_str()), Some(body));
+
+    let tier = tempfile::tempdir().expect("tier");
+    let report = deploy_skills_into(tier.path(), &seed.skills);
+    assert_eq!(report.written, want, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(architect_skills::skill_path(tier.path(), EXTRA.stem))
+            .expect("the extra skill was written"),
+        body
     );
 }
