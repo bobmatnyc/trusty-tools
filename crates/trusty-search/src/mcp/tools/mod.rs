@@ -430,6 +430,9 @@ mod tests;
 // #7676: the compact field mode — what a hit's JSON carries, and what it drops.
 #[cfg(test)]
 mod tests_compact;
+// #9970: the search tools relay `meta.embedder`.
+#[cfg(test)]
+mod tests_embedder_note_9970;
 // #7493: the serialized-response byte ceiling and its truncation notice.
 #[cfg(test)]
 mod tests_byte_cap;
