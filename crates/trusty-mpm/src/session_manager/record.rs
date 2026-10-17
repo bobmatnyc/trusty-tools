@@ -808,6 +808,8 @@ impl SessionRecord {
 /// What: one variant per failure mode — malformed data, missing fields, etc.
 /// Test: exercised indirectly through `SessionStore` tests.
 #[derive(Debug, Error)]
+// #9080: a new record failure mode must not be a breaking change for callers.
+#[non_exhaustive]
 pub enum RecordError {
     /// A required field was absent or invalid during deserialization.
     #[error("invalid session record: {0}")]
