@@ -20,6 +20,7 @@ use super::graceful_bootstrap::{
 };
 use crate::core::Embedder;
 use crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth;
+use crate::service::embedder_supervisor::embedder_view::EmbedderView;
 use crate::service::embedder_supervisor::{
     ActiveBackend, BackendKind, BootstrapState, SupervisorConfig, SwitchableEmbedder,
 };
@@ -508,4 +509,36 @@ fn background_retry_delay_holds_at_thirty_minutes() {
         .collect();
     assert_eq!(minutes, vec![2, 5, 10, 30, 30, 30, 30]);
     assert_eq!(background_retry_delay(usize::MAX).as_secs(), 30 * 60);
+}
+
+/// #9970: after a transient probe failure, the wait before the next attempt
+/// reads `retrying` and its note names the error. `run_attempt` resets the
+/// step to `Idle` on a failed attempt; without that reset the wait would read
+/// `probing` and the note would omit the error.
+#[tokio::test(start_paused = true)]
+#[serial_test::parallel]
+async fn retry_wait_after_a_failed_probe_reads_retrying_with_the_error() {
+    let switchable = ort_switchable();
+    let fake = ContendedBootstrap::failing_probes(1);
+    spawn_drive(&switchable, &fake, 1);
+    wait_until("a scheduled retry", || {
+        switchable.active().bootstrap == BootstrapState::Retrying
+    })
+    .await;
+
+    let view = EmbedderView::of(&switchable);
+    assert_eq!(view.bootstrap, "retrying", "{view:?}");
+    let note = view.note.expect("ort serves while python is intended");
+    assert!(note.contains("fake readiness probe failure"), "{note}");
+    assert_eq!(
+        fake.built(),
+        1,
+        "the next attempt waits for the retry delay"
+    );
+    assert!(
+        switchable
+            .bootstrap_control()
+            .shutdown(Duration::from_secs(5))
+            .await
+    );
 }

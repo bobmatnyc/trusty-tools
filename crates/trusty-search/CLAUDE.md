@@ -776,6 +776,17 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lane matched the literal against every chunk's content instead. A filename
     query compares path basenames and never scans content, so it reports
     `false`.
+  - `meta.embedder` (#9970): `{active, intended, bootstrap, note}`. `active`
+    is the backend that embedded this query (`ort`, `python`, ...);
+    `intended` is the one the host is configured or defaulted to (`python`
+    whenever a python bootstrap applies). `bootstrap` is `/health`'s
+    `embedder_bootstrap` refined to `installing_venv` or `probing` while an
+    attempt runs. `note` is a plain-language sentence for the agent whenever
+    `active != intended` — installing, retrying at a time, failed with the
+    cause, or fell back — and `null` otherwise. Omitted before the daemon
+    installs its embedder. The `search.query.all` fan-out carries the same
+    object as a top-level `embedder`. Whether the index's own vectors are
+    built is a separate signal: `vector_unavailable` and `search_capabilities`.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:
@@ -1316,7 +1327,7 @@ environment variable (issue #110 Phase 2):
 |-------------------------|-----------|
 | unset / `auto`          | **Default, platform-aware (epic #3524 slice 6, PR 5/5 — the default flip).** Resolves via `resolve_default_embedder_mode()`: **on Apple Silicon (aarch64 macOS), always** serves on the ort stdio sidecar immediately while bootstrapping the python/MPS sidecar in the background and hot-swapping when ready (see "Graceful Apple-Silicon default" below) — no ship-gate env var required; with `TRUSTY_EMBEDDER_PYTHON_EAGER` enabled on a non-Apple-Silicon host, takes the eager blocking `python` path below instead; otherwise (every other platform) arms a `LazyEmbedderHandle` at boot (issue #315 — deferred spawn): `trusty-embedderd --stdio` is spawned on the **first embed request** (reindex, hybrid search, `context_inference`), not at daemon startup. |
 | `stdio`                 | **Permanent user override back to ort — the escape hatch.** Always the plain ort stdio sidecar (identical to the unset/`auto` fallback on non-Apple-Silicon hosts), even on Apple Silicon where it is now the ONLY way to opt back out of the graceful-Python default — never routed through the platform-aware resolution (see `is_forced_ort_override`). `trusty-embedderd` is a **required runtime dependency** for this and the default ort path — binary discovery runs at boot and fails fast with an install hint if the binary is missing. **`cargo install trusty-search` installs `trusty-embedderd` automatically.** |
-| `python`                | **Explicit Python/MPS sidecar, eager/blocking, any platform (epic #3524).** Eagerly bootstraps a pinned `uv`-managed venv (torch + sentence-transformers) at `start`, then lazy-spawns `trusty-embedderd-py` speaking the exact same stdio JSON-RPC 2.0 protocol as the Rust sidecar. On Apple Silicon this embeds ~2.4x faster than the ort path with numerically identical (>=0.999 cosine) results — though on Apple Silicon the unset/`auto` default already reaches the same sidecar non-blocking, so this explicit value is mainly useful for testing the sidecar off Apple Silicon or forcing the eager/blocking startup path. On ANY bootstrap or launcher-discovery failure, falls back to the Rust ort stdio sidecar so search never hard-fails — see "Python/MPS sidecar tuning" below. Requires `uv` installed (or `TRUSTY_UV_BIN` set) and ~3 GB free disk on first use. |
+| `python`                | **Explicit Python/MPS sidecar, eager/blocking, any platform (epic #3524).** Eagerly bootstraps a pinned `uv`-managed venv (torch + sentence-transformers) at `start`, then lazy-spawns `trusty-embedderd-py` speaking the exact same stdio JSON-RPC 2.0 protocol as the Rust sidecar. On Apple Silicon this embeds ~2.4x faster than the ort path with numerically identical (>=0.999 cosine) results — though on Apple Silicon the unset/`auto` default already reaches the same sidecar non-blocking, so this explicit value is mainly useful for testing the sidecar off Apple Silicon or forcing the eager/blocking startup path. On ANY bootstrap or launcher-discovery failure, falls back to the Rust ort stdio sidecar so search never hard-fails, and reports it: `embedder_bootstrap` `failed` (startup) or `fell_back_to_ort` (runtime), with the cause in `meta.embedder.note` and `/health` `degraded` (#9970) — see "Python/MPS sidecar tuning" below. Requires `uv` installed (or `TRUSTY_UV_BIN` set) and ~3 GB free disk on first use. |
 | `in-process` / `local`  | Explicit escape hatch — in-process ONNX embedding. Use for tests, debugging, or environments where the sidecar cannot be installed. **Never activated silently**: you must set this variable explicitly to use the in-process path. |
 | `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
 | `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
@@ -1333,7 +1344,8 @@ retrying in the background (#9949) after 2, 5 and 10 minutes, then every 30
 minutes, and hot-swaps on the first success; ort serves throughout.
 `/health`'s `embedder_bootstrap` reports `"retrying"` (and `status:
 "degraded"`), and its `python_bootstrap` object carries `state`, `attempts`,
-`last_error` and `next_retry_at` (RFC 3339 UTC). Only a permanent failure — the
+`last_error` and `next_retry_at` (RFC 3339 UTC), plus `phase` and `note`
+(#9970, below). Only a permanent failure — the
 launcher is missing, or the venv build returns an error — is terminal: the
 first one ends the bootstrap, the daemon stays on ort for its lifetime and
 `embedder_bootstrap` reports `"failed"`, with `last_error` naming the cause.
@@ -1357,7 +1369,8 @@ Silicon hosts are completely unaffected (unchanged ort default).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH`. Missing `uv` is a bootstrap failure that triggers the ort fallback. |
+| `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH` and the well-known install dirs, then in the verified cache `<data>/py-embedder/uv/0.12.23/uv`, and finally fetched over HTTPS and checked against an embedded SHA-256 (#9966). |
+| `TRUSTY_UV_FETCH` | unset (on) | `0`/`false`/`off`/`no` turns the uv download off (#9966). With no uv found the bootstrap then fails naming this variable and `TRUSTY_UV_BIN`, and the daemon stays on ort. |
 | `TRUSTY_EMBEDDERD_PY_BIN` | — (sibling/PATH search) | Explicit path to the `trusty-embedderd-py` launcher binary. Overrides the sibling-binary/PATH discovery `locate_launcher_binary` performs. **`cargo install trusty-search` installs the launcher next to `trusty-search`** (#9468), where the sibling search finds it; the trusty-embedderd-py crate is library-only. |
 | `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS` | `600` | Bounded timeout applied to each individual `uv` bootstrap step (python install, venv create, export, pip sync) and to the post-build import+embed smoke test. Each step gets one retry on a transient failure. |
 | `TRUSTY_DEVICE` | `auto` | Device selection inside the sidecar: `auto` (MPS if available, else CUDA, else CPU), `gpu` (same as `auto` but logs a warning if it falls back to CPU), or `cpu` (force CPU). |
