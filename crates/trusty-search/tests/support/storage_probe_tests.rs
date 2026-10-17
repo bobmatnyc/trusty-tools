@@ -194,10 +194,20 @@ fn sandbox_pid_requires_the_pidfile_and_a_matching_argv() {
         .spawn()
         .expect("spawn a stand-in daemon");
     std::fs::write(&pidfile, format!("{}\n", child.id())).expect("child pid");
+    // `spawn` returns before the kernel publishes the new argv, so a read
+    // straight away can see an empty `/proc/<pid>/cmdline`. Wait for it, bounded.
+    let published = (0..250).any(|_| {
+        let ready = process_argv(child.id()).is_ok_and(|a| a.contains("sandbox-probe"));
+        if !ready {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        ready
+    });
     let accepted = sandbox_pid(&socket);
     let rss = rss_bytes(child.id());
     child.kill().expect("stop the stand-in");
     child.wait().expect("reap the stand-in");
+    assert!(published, "the stand-in's argv never appeared within 5 s");
     assert_eq!(accepted, Ok(child.id()));
     assert!(rss.expect("child rss").bytes > 0);
 }
