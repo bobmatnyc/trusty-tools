@@ -1,27 +1,30 @@
 //! The files `tm fleet init` writes into the Architect project (#8436, P4).
 //!
 //! Why: the Architect profile reads its fleet specifics from "this project's
-//! `CLAUDE.md`", runs the deterministic poller from `scripts/`, keeps its
-//! records in `local/` (#9997, superseding ruling C), and runs
-//! the Architect-only skills `tm-fleet-check` and `tm-context-refresh`
-//! (rulings D, E). Without them a fresh Architect has instructions that point
-//! at files that do not exist.
+//! `CLAUDE.md`", runs the deterministic poller and the relay scripts from
+//! `scripts/`, keeps its records in `local/` (#9997, superseding ruling C),
+//! and runs the Architect-only skills (`tm-fleet-check`, `tm-context-refresh`
+//! and, since #9997, the `architect-*` skills its manual indexes; rulings D,
+//! E). Without them a fresh Architect has instructions that point at files
+//! that do not exist.
 //! What: [`files`] lists each file in write order. The `CLAUDE.md` template
-//! and the two skills come from an [`ArchitectSeed`] read from content at
-//! runtime (#9132, ADR-0064); the scripts and the other templates are still
-//! embedded; every file under `src/assets/architect/templates/` is a
-//! `template!` row. The canonical copies live in `python/trusty-architect/` and
+//! and the skills come from an [`ArchitectSeed`] read from content at
+//! runtime (#9132, ADR-0064); the scripts, the voice guide and the other
+//! templates are still embedded; every file under
+//! `src/assets/architect/templates/` is a `template!` row. The canonical
+//! copies live in `python/trusty-architect/` and
 //! `scripts/check_architect_subproject.sh` fails when a shipped copy drifts.
-//! The two skills are not in the framework bundle (`core::bundle::ALL`): that
+//! The skills are not in the framework bundle (`core::bundle::ALL`): that
 //! bundle deploys to every session's user tier, and these must reach the
 //! Architect only. [`deploy`] writes each file only when it is absent. A file
 //! with other bytes is someone's edit and is reported skipped, never
-//! overwritten. The two skills' bytes are the ones every Architect launch
-//! also deploys (#9540).
+//! overwritten. The skills' bytes are the ones every Architect launch also
+//! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
+//! `the_relay_scripts_and_the_voice_guide_are_seeded`,
 //! `every_script_a_seeded_script_loads_by_path_is_seeded`,
 //! `a_seed_that_does_not_resolve_writes_nothing`.
 
@@ -107,6 +110,13 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/start-fleet-poll.sh",
         true
     ),
+    // #9997: the two-step relay send and the double-post guard the manual names.
+    embedded!("scripts/relay.sh", "scripts/relay.sh", true),
+    embedded!("scripts/posted.sh", "scripts/posted.sh", true),
+    // posted.sh runs this sibling by path.
+    embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
+    // #9997: the voice guide the manual and `architect-operating-rules` cite.
+    embedded!("docs/architect/voice.md", "docs/voice.md", false),
 ];
 
 /// Every file `tm fleet init` writes, in write order.
@@ -140,8 +150,9 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 }
 
 /// Directories `tm fleet init` guarantees, created when absent.
-// #9997: per-project records live in `local/projects/`.
-pub(crate) const DIRS: &[&str] = &["local/projects"];
+// #9997: per-project records live in `local/projects/`; the skills write
+// other users' profiles to `local/users/` and briefs to `local/briefs/`.
+pub(crate) const DIRS: &[&str] = &["local/projects", "local/users", "local/briefs"];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
 ///

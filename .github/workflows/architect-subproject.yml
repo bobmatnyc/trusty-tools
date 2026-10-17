@@ -27,6 +27,9 @@ on:
       - "scripts/check_architect_subproject_selftest.sh"
       - "scripts/architect_leak_patterns.txt"
       - "scripts/check_content.py"
+      - "scripts/check_architect_paths.sh"
+      - "scripts/check_architect_paths_selftest.sh"
+      - "scripts/lib/architect_paths.py"
       - ".github/workflows/architect-subproject.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
@@ -46,6 +49,9 @@ on:
       - "scripts/check_architect_subproject_selftest.sh"
       - "scripts/architect_leak_patterns.txt"
       - "scripts/check_content.py"
+      - "scripts/check_architect_paths.sh"
+      - "scripts/check_architect_paths_selftest.sh"
+      - "scripts/lib/architect_paths.py"
       - ".github/workflows/architect-subproject.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
@@ -76,6 +82,11 @@ jobs:
 
       - name: Independence/drift check
         run: bash scripts/check_architect_subproject.sh
+
+      # #9997 AC1: the path checker's planted cases; the run against a built
+      # `tm` is in capabilities-drift.yml, which builds one.
+      - name: Architect path checker selftest
+        run: ./scripts/check_architect_paths_selftest.sh
 
       # #9996: the same leak patterns over content/instructions/architect/**.
       - name: Architect leak gate (content tree)

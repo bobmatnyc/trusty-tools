@@ -19,7 +19,7 @@ exit 0
 """
 
 
-def _run(tmp_path, new_session):
+def _run(tmp_path, new_session, extra_env=None):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "tmux.log"
@@ -30,6 +30,7 @@ def _run(tmp_path, new_session):
            if k not in ("TMUX", "TMUX_SOCKET", "TMUX_PANE")}
     env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
     env["ARCHITECT_POLL_SESSION"] = "arch-test-poll"
+    env.update(extra_env or {})
     out = subprocess.run(["bash", SCRIPT], env=env, capture_output=True,
                          text=True, timeout=30)
     return out, log.read_text().splitlines()
@@ -48,3 +49,12 @@ def test_a_successful_new_session_exits_0(tmp_path):
     assert out.returncode == 0, out
     assert "started: arch-test-poll" in out.stdout
     assert calls[-1].startswith("new-session -d -s arch-test-poll")
+
+
+def test_the_context_bar_reaches_the_poller(tmp_path):
+    """#9997: the owner sets the bar for the poller through these two names."""
+    out, calls = _run(tmp_path, "exit 0", {"CONTEXT_BAR_TOKENS": "300000",
+                                            "CONTEXT_WINDOW_TOKENS": "200000"})
+    assert out.returncode == 0, out
+    assert "-e CONTEXT_BAR_TOKENS=300000" in calls[-1]
+    assert "-e CONTEXT_WINDOW_TOKENS=200000" in calls[-1]

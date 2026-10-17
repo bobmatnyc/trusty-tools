@@ -199,3 +199,48 @@ fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
         body
     );
 }
+
+/// The shipped manual, relative to `instructions/`.
+const MANUAL: &str = "architect/architect.md";
+
+/// #9997: one context bar. No shipped manual, skill or template states a
+/// percent threshold or a retired name, and the texts that set the bar name
+/// it in tokens.
+#[test]
+fn the_shipped_texts_name_the_250k_bar_and_no_percent_threshold() {
+    let mut texts: Vec<(String, String)> = SHIPPED
+        .iter()
+        .map(|s| (s.source(), shipped(&s.source())))
+        .collect();
+    for rel in [CLAUDE_MD_TEMPLATE, MANUAL] {
+        texts.push((rel.to_owned(), shipped(rel)));
+    }
+    assert!(texts.len() >= 4, "{} texts", texts.len());
+    for (rel, text) in &texts {
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for banned in [
+            "50%",
+            "45 to 49%",
+            "records/",
+            "trusty-fleet-",
+            "trusty-context-",
+        ] {
+            assert!(!flat.contains(banned), "{rel} still names `{banned}`");
+        }
+    }
+    for rel in [
+        MANUAL.to_owned(),
+        CLAUDE_MD_TEMPLATE.to_owned(),
+        FLEET_CHECK.source(),
+        CONTEXT_REFRESH.source(),
+    ] {
+        let flat = shipped(&rel)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("250k tokens"),
+            "{rel} does not name the 250k bar"
+        );
+    }
+}
