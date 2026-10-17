@@ -1113,5 +1113,10 @@ pub struct HealthSnapshot {
     /// `None` when the responding daemon predates the field.
     /// Test: `health_snapshot_unbound_delegations_is_none_when_absent`.
     #[serde(default)]
-    pub unbound_delegations: Option<Result<usize, String>>,
+    pub unbound_delegations: Option<usize>,
+    /// Why the count could not be taken (#9007); mirrors
+    /// `HealthResponse::unbound_delegations_error`.
+    /// Test: `health_snapshot_unbound_delegations_is_none_when_absent`.
+    #[serde(default)]
+    pub unbound_delegations_error: Option<String>,
 }

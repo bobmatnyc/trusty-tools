@@ -22,7 +22,7 @@ pub(crate) const CHECK_NAME: &str = "unbound_delegations";
 /// be read; that is not a pass.
 /// What: `None` snapshot is `Warn` (the daemon row names why); a daemon that
 /// predates the field, or one that reports a read error, is `Unknown` with the
-/// reason; `Ok(0)` is `Ok`; `Ok(n)` is `Warn` naming the count and the remedy.
+/// reason; a count of 0 is `Ok`; any other count is `Warn` naming it and the remedy.
 /// Test: `no_daemon_is_a_warning_not_a_pass_9007`,
 /// `a_daemon_without_the_field_is_unknown_9007`,
 /// `a_read_error_is_reported_never_a_pass_9007`, `zero_is_ok_9007`,
@@ -36,23 +36,26 @@ pub(crate) fn unbound_delegations_row(snapshot: Option<&HealthSnapshot>) -> Doct
             "not checked: the delegation records live in the daemon, and none answered".to_string(),
         );
     };
-    match &snapshot.unbound_delegations {
-        None => DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Unknown,
-            "the running daemon predates this count; restart it to read it".to_string(),
-        ),
-        Some(Err(why)) => DoctorCheck::new(
+    match (
+        &snapshot.unbound_delegations,
+        &snapshot.unbound_delegations_error,
+    ) {
+        (_, Some(why)) => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Unknown,
             format!("the daemon could not count delegation records of unbound sessions: {why}"),
         ),
-        Some(Ok(0)) => DoctorCheck::new(
+        (None, None) => DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            "the running daemon predates this count; restart it to read it".to_string(),
+        ),
+        (Some(0), None) => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
             "no live delegation record belongs to an unbound session".to_string(),
         ),
-        Some(Ok(n)) => DoctorCheck::new(
+        (Some(n), None) => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
             format!(

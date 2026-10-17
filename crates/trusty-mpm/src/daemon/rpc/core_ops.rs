@@ -55,6 +55,10 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
     // #7968: served from a bounded-age cache refreshed on the blocking pool; the
     // catalog walk used to run inline here, on a runtime worker, per request.
     let report = super::health_catalog::report(state).await;
+    let unbound = crate::daemon::services::delegation_unbound::count_unbound_waiting(
+        state,
+        chrono::Utc::now(),
+    );
     HealthResponse {
         status: "ok".to_owned(),
         catalog_stale: report.stale,
@@ -80,12 +84,8 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
             .into_iter()
             .collect(),
         // #9007: the records live in this process's memory only.
-        unbound_delegations: Some(
-            crate::daemon::services::delegation_unbound::count_unbound_waiting(
-                state,
-                chrono::Utc::now(),
-            ),
-        ),
+        unbound_delegations: unbound.as_ref().ok().copied(),
+        unbound_delegations_error: unbound.err(),
     }
 }
 

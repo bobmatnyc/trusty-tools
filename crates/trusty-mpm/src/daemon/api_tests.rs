@@ -116,7 +116,7 @@ async fn health_publishes_no_degraded_subsystem_when_idle() {
 }
 
 /// #9007: `/health` carries the unbound-session delegation count that the
-/// `tm doctor` row reads; an empty daemon reports `Ok(0)` on the wire.
+/// `tm doctor` row reads; one unbound live record reads 1 on the wire.
 /// Test: this test.
 #[tokio::test]
 async fn health_reports_the_unbound_delegation_count_9007() {
@@ -128,11 +128,12 @@ async fn health_reports_the_unbound_delegation_count_9007() {
         None,
     ));
     let Json(body) = health(State(state)).await;
-    assert_eq!(body.unbound_delegations, Some(Ok(1)));
+    assert_eq!(body.unbound_delegations, Some(1));
+    assert_eq!(body.unbound_delegations_error, None);
     let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
     assert_eq!(
         value.get("unbound_delegations"),
-        Some(&serde_json::json!({ "Ok": 1 })),
+        Some(&serde_json::json!(1)),
         "{value}"
     );
 }
