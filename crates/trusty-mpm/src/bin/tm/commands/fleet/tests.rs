@@ -1186,7 +1186,9 @@ fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
     let stale = dir.join(STALE_DIR);
     std::fs::create_dir_all(stale.join("projects")).unwrap();
     std::fs::write(stale.join("state.md"), "poll_count: 41\n").unwrap();
-    let local_state = std::fs::read(dir.join("local/state.md")).unwrap();
+    let kept = dir.join("local/projects/kept.md");
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, "kept\n").unwrap();
 
     let report = fx.status();
 
@@ -1205,8 +1207,5 @@ fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
         "poll_count: 41\n"
     );
     assert!(stale.join("projects").is_dir());
-    assert_eq!(
-        std::fs::read(dir.join("local/state.md")).unwrap(),
-        local_state
-    );
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept\n");
 }
