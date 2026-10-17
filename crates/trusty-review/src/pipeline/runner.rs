@@ -22,8 +22,8 @@ mod truncation;
 use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC headroom
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, resolve_diff_token,
-    subject_of,
+    claim_slot, content_or_abort, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
+    resolve_diff_token, subject_of,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
@@ -63,7 +63,6 @@ use crate::{
         trigger::TriggerDecision,
         verdict_status::judged_review, // #9310: verdict and ruling-50 grade floor
         verify_posted::{GateInputs, gate_then_verify},
-        voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors, // #9188 J
     },
     store::DedupStore,
@@ -250,6 +249,15 @@ async fn run_pipeline(
     } else {
         String::new()
     };
+    // #9015: no reviewer prompts (or configured voice), no review — before any
+    // claim, fetch or model call.
+    let subject = (owner.as_str(), repo.as_str(), pr_number, pr_url.as_str());
+    let supplied = options.prompts.as_ref();
+    let (prompts, voice_config) =
+        match content_or_abort(supplied, subject, config, &input, &deps).await {
+            std::ops::ControlFlow::Continue(content) => content,
+            std::ops::ControlFlow::Break(aborted) => return aborted,
+        };
 
     // ── Step 1b: posting requires the claim gate (#5113) ──────────────────
     // The dedup contract makes a live post idempotent, so a run that can reach
@@ -576,14 +584,16 @@ async fn run_pipeline(
             coverage_contrib,
             degraded_reason,
             applied,
+            prompts, // #9015
+            voice_config,
         };
         return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
     }
 
     // ── Step 6: build prompt and call LLM (UNIFIED PATH) ──────────────────
-    // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
-    let voice_config = build_voice_config(config);
+    // #9015: the 3-layer VoiceConfig was built with the prompts, before any fetch.
     let llm_req = build_review_prompt_with_sections(
+        &prompts, // #9015
         &owner,
         &repo,
         &pr_meta,

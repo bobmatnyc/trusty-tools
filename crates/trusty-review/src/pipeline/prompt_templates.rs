@@ -1,81 +1,116 @@
-//! System-prompt templates for the reviewer role.
+//! Reviewer system prompts, read at runtime from instructional content
+//! (ADR-0064, #9015).
 //!
-//! Why: the two prompt constants (stock and coverage-gating variant) are each
-//! ~140 lines of prose; keeping them as inline literals bloated this file to
-//! ~95% prose. Per the repo `include_str!` convention (see
-//! `trusty-mpm/src/core/bundle.rs`) the text now lives verbatim under
-//! `assets/prompts/` and is embedded at compile time, keeping the source lean
-//! while the rendered bytes stay byte-for-byte identical to the old literals.
+//! Why: the two reviewer prompts (stock and coverage-gating) are product
+//! prompts, an ADR-0064 content class. A published crate cannot embed a file
+//! outside its own directory, and a prompt fix must not need a crate release.
+//! So the text lives under `content/instructions/trusty-review/prompts/` and
+//! is read through `crate::runtime_content`: the sha256-pinned bundle `tm
+//! content update` installed, or a checkout the operator names (#9015).
+//! What: [`ReviewerPrompts::from_content`] reads both prompts from a resolved
+//! source; [`ReviewerPrompts::load`] does it for this process. No content, an
+//! absent prompt, or an empty one is a [`PromptContentError`] whose text names
+//! the remedy; nothing here answers with a default or partial prompt.
+//! Test: `prompt_templates_tests.rs` (one test per error arm), and the binary
+//! refusal in `tests/stale_content_e2e.rs`.
 //!
-//! What: two `pub const` strings exported to `prompt.rs`, each `include_str!`
-//! of its `.md` asset. The stock constant is the pre-#1014 text (unchanged
-//! behaviour when coverage gating is off). The coverage-gating variant replaces
-//! the "do not block on coverage" advisory with an informational note that the
-//! runner will apply a deterministic floor.
-//!
-//! Test: `system_prompt_coverage_gating_on`, `system_prompt_coverage_gating_off`
-//! in `prompt_tests.rs`; `prompt_assets_are_byte_identical` below pins the
-//! embedded bytes so the extraction can never silently drift.
+//! # Spec References
+//! - ADR-0064 decision 5: `docs/adr/0064-instructional-content-tracked-separately-from-code.md`
 
-/// Stock reviewer system prompt (no coverage-gating language).
+use trusty_common::content::ResolvedContent;
+
+// #9015: the content resolution and its error moved to `crate::runtime_content`,
+// which the templates and the voice read through too; re-exported here so the
+// prompt paths stay where callers found them.
+pub use crate::runtime_content::{PromptContentError, REMEDY, describe_source};
+use crate::runtime_content::{content_path, require_text, resolve_for_process};
+
+/// Bundle directory of trusty-review's prompts, under the `instructions`
+/// class (ADR-0064 amendment 2026-10-01, item 3).
+pub const PROMPTS_DIR: &str = "instructions/trusty-review/prompts";
+
+/// File name of the stock reviewer prompt under [`PROMPTS_DIR`].
+pub const STOCK_FILE: &str = "system_prompt_stock.md";
+
+/// File name of the coverage-gating reviewer prompt under [`PROMPTS_DIR`].
+pub const COVERAGE_GATING_FILE: &str = "system_prompt_coverage_gating.md";
+
+/// The bundle path of prompt file `file` (`system_prompt_stock.md`).
+pub fn prompt_path(file: &str) -> String {
+    content_path(&format!("prompts/{file}"))
+}
+
+/// The two reviewer system prompts, read from one content source.
 ///
-/// Why: the default reviewer prompt used when coverage gating is off; kept
-/// byte-identical to the pre-#1014 text so review behaviour is unchanged.
-/// What: embeds `assets/prompts/system_prompt_stock.md` verbatim at compile
-/// time via `include_str!`.
-/// Test: `prompt_assets_are_byte_identical`, `system_prompt_coverage_gating_off`.
-pub const SYSTEM_PROMPT_STOCK: &str = include_str!("../../assets/prompts/system_prompt_stock.md");
+/// Why: replaces the two `include_str!` constants (#9015) with the same text,
+/// read from content; a caller loads once and builds any number of prompts.
+/// What: built only by [`ReviewerPrompts::from_content`], which never returns
+/// an empty prompt.
+/// Test: `the_repository_prompts_load_byte_identical`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerPrompts {
+    stock: String,
+    coverage_gating: String,
+}
 
-/// Coverage-gating reviewer system prompt variant.
-///
-/// Why: used when a deterministic coverage floor is applied by the runner
-/// (#1014); the "do not block on coverage" advisory is replaced with an
-/// informational note. Kept byte-identical to the original inline literal.
-/// What: embeds `assets/prompts/system_prompt_coverage_gating.md` verbatim at
-/// compile time via `include_str!`.
-/// Test: `prompt_assets_are_byte_identical`, `system_prompt_coverage_gating_on`.
-pub const SYSTEM_PROMPT_COVERAGE_GATING: &str =
-    include_str!("../../assets/prompts/system_prompt_coverage_gating.md");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pin the embedded prompt bytes so the `include_str!` extraction can never
-    /// silently drift from the intended text.
+impl ReviewerPrompts {
+    /// Reads both prompts from `content`.
     ///
-    /// Why: the prompts feed the reviewer LLM and are part of the crate's
-    /// observable contract; a stray edit to an asset must be caught here.
-    /// What: asserts the exact opening line, exact closing text, and the frozen
-    /// byte lengths of both embedded prompts.
-    /// Test: this is the test.
-    #[test]
-    fn prompt_assets_are_byte_identical() {
-        // Both prompts open with the same role line.
-        let opening = "You are a senior software engineer performing a pull-request code review.";
-        assert!(SYSTEM_PROMPT_STOCK.starts_with(opening));
-        assert!(SYSTEM_PROMPT_COVERAGE_GATING.starts_with(opening));
+    /// # Errors
+    /// [`PromptContentError::Missing`] naming the first absent prompt,
+    /// [`PromptContentError::Invalid`] for an empty one, and the resolver's own
+    /// error otherwise.
+    /// Test: `a_release_without_the_prompts_is_missing_naming_the_path`,
+    /// `an_empty_prompt_is_invalid`.
+    pub fn from_content(content: &ResolvedContent) -> Result<Self, PromptContentError> {
+        Ok(Self {
+            stock: require_prompt(content, STOCK_FILE)?,
+            coverage_gating: require_prompt(content, COVERAGE_GATING_FILE)?,
+        })
+    }
 
-        // Both prompts end with the exact same closing sentence, no trailing
-        // newline (the original literals closed `"#;` on the same line).
-        let closing = "`findings` may be an empty array if there are no issues.";
-        assert!(SYSTEM_PROMPT_STOCK.ends_with(closing));
-        assert!(SYSTEM_PROMPT_COVERAGE_GATING.ends_with(closing));
-        assert!(!SYSTEM_PROMPT_STOCK.ends_with('\n'));
-        assert!(!SYSTEM_PROMPT_COVERAGE_GATING.ends_with('\n'));
+    /// [`ReviewerPrompts::from_content`] over the content resolved for this
+    /// process: the checkout `TRUSTY_REVIEW_CONTENT_CHECKOUT` names, else the
+    /// installed bundle; never the cwd (#9015). Never fetches.
+    ///
+    /// Test: `no_content_is_not_installed_naming_the_remedy`; end to end in
+    /// `tests/stale_content_e2e.rs`.
+    pub fn load() -> Result<Self, PromptContentError> {
+        let content = resolve_for_process()?;
+        Self::from_content(&content)
+    }
 
-        // Frozen byte lengths (updated in #PR84: both prompts gained the
-        // citable-findings gate + author-gated rule + the `code_provable` field
-        // docs; then the daemon-native inline citation grammar — Gap #1 of the
-        // #PR84 follow-up; then the `code_provable` worked examples —
-        // adversarial-review item 4; then the `[confluence: …]` citation form,
-        // #5022; then the `[apex: …]` citation form was dropped with APEX
-        // retrieval, #4999; then the quote-the-cited-line rule, #8905).
-        assert_eq!(SYSTEM_PROMPT_STOCK.len(), 14239);
-        assert_eq!(SYSTEM_PROMPT_COVERAGE_GATING.len(), 14555);
+    /// The stock prompt: no coverage-gating language.
+    pub fn stock(&self) -> &str {
+        &self.stock
+    }
 
-        // The coverage-gating variant is distinguished by its coverage-floor note.
-        assert!(SYSTEM_PROMPT_COVERAGE_GATING.contains("deterministic\ncoverage floor"));
-        assert!(!SYSTEM_PROMPT_STOCK.contains("deterministic\ncoverage floor"));
+    /// The coverage-gating variant (#1014): the "do not block on coverage"
+    /// advisory is replaced with a note that the runner applies a floor.
+    pub fn coverage_gating(&self) -> &str {
+        &self.coverage_gating
+    }
+
+    /// [`Self::coverage_gating`] when `coverage_gating_enabled`, else
+    /// [`Self::stock`].
+    pub fn for_coverage(&self, coverage_gating_enabled: bool) -> &str {
+        if coverage_gating_enabled {
+            &self.coverage_gating
+        } else {
+            &self.stock
+        }
     }
 }
+
+/// Reads prompt `file`, which must exist and hold text.
+fn require_prompt(content: &ResolvedContent, file: &str) -> Result<String, PromptContentError> {
+    require_text(content, &prompt_path(file))
+}
+
+#[cfg(test)]
+#[path = "prompt_templates_support.rs"]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+#[path = "prompt_templates_tests.rs"]
+mod tests;

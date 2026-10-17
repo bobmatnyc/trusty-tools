@@ -242,10 +242,62 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // #9015: the reviewer prompts are runtime content; refuse before any work.
+    preflight_prompts(&cli.command)?;
+
     // #6290: no synchronous launchd pre-dispatch any more — there is no
     // `service` subcommand, because there is no unit for it to manage.
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
     rt.block_on(async_main(cli))
+}
+
+/// What a missing reviewer prompt does to a command (#9015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptNeed {
+    /// The command reviews and nothing else: refuse to start.
+    Refuse,
+    /// A server that reviews per request: print the remedy, then serve; each
+    /// review refuses on its own through the pipeline.
+    Warn,
+    /// The command never builds a reviewer prompt.
+    None,
+}
+
+/// Which [`PromptNeed`] `command` has.
+fn prompt_need(command: &Commands) -> PromptNeed {
+    match command {
+        Commands::Run(_) | Commands::Compare(_) | Commands::Calibrate(_) => PromptNeed::Refuse,
+        #[cfg(feature = "mcp")]
+        Commands::Mcp(_) => PromptNeed::Warn,
+        Commands::WebhookListen => PromptNeed::Warn,
+        _ => PromptNeed::None,
+    }
+}
+
+/// Loads the reviewer prompts before a command that reviews (#9015).
+///
+/// Why: the prompts are runtime content (ADR-0064). A review without them can
+/// only fail, so the remedy must reach the operator on stderr before any
+/// config, network or model work, whatever `RUST_LOG` says.
+/// What: per [`prompt_need`]. `Refuse`: a load error is returned, so `main`
+/// prints `Error: <error>` (which names the remedy) and exits non-zero.
+/// `Warn`: the error is printed as `trusty-review: ERROR <error>` and the
+/// server starts. `None`: nothing is read.
+/// Test: `stale_or_absent_content_refuses_run_naming_the_remedy`,
+/// `mcp_without_content_prints_the_remedy_on_stderr` (tests/stale_content_e2e.rs).
+fn preflight_prompts(command: &Commands) -> Result<()> {
+    let need = prompt_need(command);
+    if need == PromptNeed::None {
+        return Ok(());
+    }
+    match trusty_review::pipeline::ReviewerPrompts::load() {
+        Ok(_) => Ok(()),
+        Err(e) if need == PromptNeed::Refuse => Err(anyhow::Error::new(e)),
+        Err(e) => {
+            eprintln!("trusty-review: ERROR {e}");
+            Ok(())
+        }
+    }
 }
 
 async fn async_main(cli: Cli) -> Result<()> {

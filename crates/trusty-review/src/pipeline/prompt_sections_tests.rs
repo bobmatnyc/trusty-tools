@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::integrations::search_client::SearchResult;
+use crate::pipeline::prompt_templates::test_support::prompts; // #9015
 
 // Inline fixtures: `prompt_test_helpers.rs` is already loaded by `prompt_tests.rs`.
 fn sample_meta() -> ReviewPrMeta {
@@ -41,6 +42,7 @@ fn context() -> ReviewContext {
 
 fn user(extra: &str) -> String {
     let req = build_review_prompt_with_sections(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),
@@ -60,6 +62,7 @@ fn user(extra: &str) -> String {
 #[test]
 fn an_empty_extra_section_renders_nothing() {
     let public = build_review_prompt_with_coverage(
+        prompts(),
         "acme",
         "backend",
         &sample_meta(),

@@ -32,6 +32,8 @@
 //! `every_label_span_exists_in_its_fixture_diff`, `anchors_are_specific`,
 //! `incomplete_rows_are_left_out_of_recall`, `live_leg_is_inert_without_opt_in`.
 
+#[path = "support/content.rs"]
+mod content;
 #[path = "support/eval.rs"]
 mod eval;
 #[path = "fakes/mod.rs"]
@@ -42,6 +44,8 @@ mod live;
 mod metered;
 #[path = "support/oracle.rs"]
 mod oracle;
+#[path = "support/prompts.rs"]
+mod prompts;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

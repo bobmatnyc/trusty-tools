@@ -17,6 +17,10 @@
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
+// #9015: the report templates are runtime content; this stages the checkout's.
+#[path = "support/content.rs"]
+mod content;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -139,6 +143,7 @@ async fn investigation_renders_verified_and_rejects_unverifiable() {
     let manifest = parse_manifest(&toml, Path::new("m.toml")).expect("manifest");
     let template_name = "report-technical-dd";
     let template = TemplateLoader::bundled_only()
+        .with_content(content::staged_content())
         .load(template_name)
         .expect("template");
     let mut model =
@@ -310,6 +315,7 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     let manifest = parse_manifest(&toml, Path::new("m.toml")).expect("manifest");
     let template_name = "report-technical-dd";
     let template = TemplateLoader::bundled_only()
+        .with_content(content::staged_content())
         .load(template_name)
         .expect("template");
     let mut model =

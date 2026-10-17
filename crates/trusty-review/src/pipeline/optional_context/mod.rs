@@ -15,6 +15,7 @@ use trusty_common::intent_source::TicketFetcher;
 
 use crate::integrations::context::{ContextSource, contents_at_ref::DocFetcher};
 use crate::models::{ContextSourceRecord, ReviewResult};
+use crate::pipeline::prompt_templates::ReviewerPrompts;
 
 pub(crate) mod assemble;
 pub(crate) mod callgraph; // #9196
@@ -228,6 +229,9 @@ pub struct ReviewOptions {
     pub(crate) external_sources: Option<ExternalSources>,
     /// Test seam for the linked-issue fetches (#9197, B2b).
     pub(crate) ticket_fetcher: Option<Arc<dyn TicketFetcher>>,
+    /// Reviewer prompts the caller already loaded (#9015); `None` loads them
+    /// from content when the review starts.
+    pub(crate) prompts: Option<Arc<ReviewerPrompts>>,
 }
 
 /// Builds the external context sources a review gathers from (#9194 seam).
@@ -242,7 +246,18 @@ impl ReviewOptions {
             doc_fetcher: None,
             external_sources: None,
             ticket_fetcher: None,
+            prompts: None,
         }
+    }
+
+    /// Reviews with `prompts` instead of loading them from content (#9015).
+    ///
+    /// Why: a caller running many reviews loads the prompts once, and a test
+    /// supplies them without a trusty-tools checkout or an installed bundle.
+    /// Test: `run_review_uses_supplied_prompts_without_loading`.
+    pub fn with_prompts(mut self, prompts: Arc<ReviewerPrompts>) -> Self {
+        self.prompts = Some(prompts);
+        self
     }
 }
 

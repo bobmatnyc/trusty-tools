@@ -62,7 +62,10 @@ async fn local_run(flags: &[&str]) -> (ReviewOutcome, bool) {
     config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.log_dir = dir.path().to_path_buf();
-    let outcome = run_review_with(&config, input, deps, ReviewOptions::new(request)).await;
+    // #9015: the prompts come from the checkout's content, not the cwd.
+    let options =
+        ReviewOptions::new(request).with_prompts(super::super::pr_tests::checkout_prompts());
+    let outcome = run_review_with(&config, input, deps, options).await;
     (outcome, wants_ledger)
 }
 

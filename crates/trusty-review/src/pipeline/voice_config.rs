@@ -7,18 +7,21 @@
 //! What: `build_voice_config` maps a `ReviewConfig` to a `VoiceConfig` by
 //! loading the configured voice package (if any) via `VoiceLoader`, enabling
 //! the principles layer per the config flag, and loading the named review
-//! template (if any, issue #2995) via `ReviewTemplateLoader`.
+//! template (if any, issue #2995) via `ReviewTemplateLoader`. A name the
+//! content ships but cannot supply is an error (#9015); the review refuses.
 //!
-//! Test: `build_voice_config_no_voice`, `build_voice_config_principles_on`,
+//! Test: `build_voice_config_no_voice` (principles on),
 //! `build_voice_config_principles_off`, `build_voice_config_duetto_bundled`,
 //! `build_voice_config_unknown_voice_degrades`,
 //! `build_voice_config_review_template_bundled`,
-//! `build_voice_config_unknown_review_template_degrades`.
+//! `build_voice_config_unknown_review_template_degrades`,
+//! `build_voice_config_refuses_when_the_content_lacks_the_voice`.
 
 use crate::{
     config::ReviewConfig,
-    review_template::ReviewTemplateLoader,
-    voice::{VoiceConfig, VoiceLoader, principles::principles_addendum},
+    review_template::{ReviewTemplateError, ReviewTemplateLoader},
+    runtime_content::PromptContentError,
+    voice::{VoiceConfig, VoiceLoader, VoiceLoaderError, principles::principles_addendum},
 };
 
 /// Build the resolved `VoiceConfig` from `ReviewConfig` for the prompt builder.
@@ -29,16 +32,22 @@ use crate::{
 /// Centralising resolution here keeps the prompt builder pure (no I/O, no
 /// config reading).
 /// What: enables/disables the principles layer per `config.voice_principles`;
-/// loads the named voice package (if any) via `VoiceLoader`, falling back to
-/// the bundled fixture for `"duetto"` or degrading silently to no-voice for
-/// unknown packages; loads the named review template (if any, issue #2995) via
-/// `ReviewTemplateLoader`, degrading silently to no-template on an unknown
-/// name. Neither a missing voice package nor a missing review template is
-/// fatal — the review proceeds with whichever earlier layers are present.
+/// loads the named voice package (if any) via `VoiceLoader` — the content's
+/// `duetto`, or a user-config package — degrading with a warning to no-voice
+/// for an unknown or rejected name; loads the named review template (if any,
+/// issue #2995) via `ReviewTemplateLoader` the same way. An unknown name is
+/// never fatal. Content that cannot supply a name it ships (not installed,
+/// stale, empty, unparseable) is: the [`PromptContentError`] is returned and
+/// the caller ends the review unreviewed (#9015).
+///
+/// # Errors
+/// [`PromptContentError`] from either loader's `Content` arm; no voice or
+/// template is configured, no content is read.
 /// Test: `build_voice_config_no_voice`, `build_voice_config_duetto_bundled`,
 /// `build_voice_config_review_template_bundled`,
-/// `build_voice_config_unknown_review_template_degrades`.
-pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
+/// `build_voice_config_unknown_review_template_degrades`,
+/// `build_voice_config_refuses_when_the_content_lacks_the_voice`.
+pub fn build_voice_config(config: &ReviewConfig) -> Result<VoiceConfig, PromptContentError> {
     let principles = if config.voice_principles {
         Some(principles_addendum().to_string())
     } else {
@@ -68,6 +77,8 @@ pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
                         (Some(addendum), Some(name.to_string()))
                     }
                 }
+                // #9015: content that ships the voice but cannot supply it refuses.
+                Err(VoiceLoaderError::Content(e)) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         voice = name,
@@ -97,6 +108,8 @@ pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
                     (None, None)
                 }
                 Ok(text) => (Some(text), Some(name.to_string())),
+                // #9015: content that ships the template but cannot supply it refuses.
+                Err(ReviewTemplateError::Content(e)) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         review_template = name,
@@ -109,13 +122,13 @@ pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
         }
     };
 
-    VoiceConfig {
+    Ok(VoiceConfig {
         principles,
         voice_addendum,
         voice_name,
         review_template,
         review_template_name,
-    }
+    })
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -158,7 +171,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = None;
         config.voice_principles = true;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.principles.is_some(),
             "principles must be enabled by default"
@@ -186,7 +199,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = None;
         config.voice_principles = false;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.principles.is_none(),
             "principles=false must produce None"
@@ -202,14 +215,14 @@ mod tests {
     /// Why: the bundled `duetto` fixture must be discoverable without external files.
     /// What: sets voice_package to "duetto"; asserts voice_addendum and voice_name
     /// are Some and contain expected content.
-    /// Test: uses bundled fixture; no network.
+    /// Test: uses shipped content voice; no network.
     #[test]
     #[serial_test::serial]
     fn build_voice_config_duetto_bundled() {
         let mut config = config_default_voice();
         config.voice_package = Some("duetto".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.voice_addendum.is_some(),
             "duetto voice must produce a non-None addendum"
@@ -242,7 +255,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = Some("nonexistent-voice-xyz".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.voice_addendum.is_none(),
             "unknown voice must degrade to None (not panic)"
@@ -263,14 +276,14 @@ mod tests {
     /// Why: the combined_addendum must have principles before the voice addendum;
     /// this mirrors the intended injection order in the system prompt.
     /// What: loads duetto; asserts principles text precedes duetto content.
-    /// Test: uses bundled fixture.
+    /// Test: uses shipped content voice.
     #[test]
     #[serial_test::serial]
     fn build_voice_config_combined_ordering() {
         let mut config = config_default_voice();
         config.voice_package = Some("duetto".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         let combined = vc.combined_addendum();
         // The principles layer mentions "Review principles" heading.
         let p_pos = combined.find("Review principles").unwrap_or(usize::MAX);
@@ -368,13 +381,13 @@ system_addendum = ""
     /// What: sets `review_template` to `"strict-security"`; asserts
     /// `review_template`/`review_template_name` are populated and the addendum
     /// composes into `combined_addendum` after voice/principles.
-    /// Test: uses bundled fixture; no network.
+    /// Test: uses shipped content voice; no network.
     #[test]
     #[serial_test::serial]
     fn build_voice_config_review_template_bundled() {
         let mut config = config_default_voice();
         config.review_template = Some("strict-security".to_string());
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.review_template.is_some(),
             "strict-security template must produce a non-None addendum"
@@ -401,7 +414,7 @@ system_addendum = ""
         let mut config = config_default_voice();
         config.review_template = Some("nonexistent-template-xyz".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(
             vc.review_template.is_none(),
             "unknown review template must degrade to None (not panic)"
@@ -428,8 +441,45 @@ system_addendum = ""
     fn build_voice_config_no_review_template() {
         let mut config = config_default_voice();
         config.review_template = None;
-        let vc = build_voice_config(&config);
+        let vc = build_voice_config(&config).expect("content supplies the voice config");
         assert!(vc.review_template.is_none());
         assert!(vc.review_template_name.is_none());
+    }
+
+    /// Content that ships a configured voice or review template but cannot
+    /// supply it is an error, never a review without that layer (#9015).
+    ///
+    /// Why: a stale content release must stop the review, not silently drop
+    /// the voice or the template the operator configured.
+    /// What: content without `voices/duetto/voice.toml`, then without
+    /// `templates/review/strict-security.md`; each configured name returns the
+    /// `Missing` error naming its path. No content is read with neither set.
+    /// Test: this test itself.
+    #[test]
+    #[serial_test::serial]
+    fn build_voice_config_refuses_when_the_content_lacks_the_voice() {
+        use crate::runtime_content::{
+            content_path,
+            test_support::{OverrideGuard, installed_without},
+        };
+        let voice = content_path("voices/duetto/voice.toml");
+        let template = content_path("templates/review/strict-security.md");
+        for (path, set_voice) in [(&voice, true), (&template, false)] {
+            let _guard = OverrideGuard::content(installed_without(path));
+            let mut config = config_default_voice();
+            if set_voice {
+                config.voice_package = Some("duetto".to_string());
+            } else {
+                config.review_template = Some("strict-security".to_string());
+            }
+            let err = build_voice_config(&config).expect_err("stale content must refuse");
+            assert!(
+                matches!(&err, PromptContentError::Missing { path: p, .. } if p == path),
+                "{err:?}"
+            );
+        }
+        let cache = tempfile::tempdir().expect("cache");
+        let _nothing = OverrideGuard::not_installed(cache.path());
+        build_voice_config(&config_default_voice()).expect("no layer configured reads nothing");
     }
 }

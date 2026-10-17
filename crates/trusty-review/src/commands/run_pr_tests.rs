@@ -20,12 +20,42 @@ use trusty_review::{
         search_client::{IndexIdentity, IndexStatusResponse},
     },
     llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
-    pipeline::{DiffSource, ReviewDeps, pr_index::PrIndex, run_review},
+    pipeline::{
+        DiffSource, ReviewDeps, ReviewOptions, ReviewerPrompts, pr_index::PrIndex, run_review_with,
+    },
 };
 
 use super::{
     PR_CONTEXT_FILE_CAP, RunArgs, RunPin, caller_context_from_args, pr_index_for_run, run_input,
 };
+
+/// The checkout's reviewer prompts, for a review this binary's tests drive
+/// (#9015).
+///
+/// Why: since #9015 the cwd checkout never serves content, and the bin test
+/// target links the library without `cfg(test)`, so it has no staged source;
+/// the prompts are read from a fake checkout of the runtime checkout's
+/// `content/instructions/trusty-review/prompts/` and handed to the pipeline.
+pub(super) fn checkout_prompts() -> Arc<ReviewerPrompts> {
+    use trusty_common::content::{DEV_CLASS_SOURCES, DevOverride, ResolveOptions, resolve};
+    let repo = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+    let root = tempfile::tempdir().expect("fake checkout");
+    for (_, rel) in DEV_CLASS_SOURCES {
+        std::fs::create_dir_all(root.path().join(rel)).expect("class dir");
+    }
+    std::fs::create_dir_all(root.path().join(".git")).expect(".git");
+    std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("Cargo.toml");
+    let prompts = "content/instructions/trusty-review/prompts";
+    std::fs::create_dir_all(root.path().join(prompts)).expect("prompts dir");
+    for entry in std::fs::read_dir(repo.join(prompts)).expect("read the checkout's prompts") {
+        let name = entry.expect("dir entry").file_name();
+        let rel = std::path::Path::new(prompts).join(name);
+        std::fs::copy(repo.join(&rel), root.path().join(&rel)).expect("copy a prompt");
+    }
+    let options = ResolveOptions::new(root.path(), DevOverride::At(root.path().to_path_buf()));
+    let content = resolve(&options).expect("the fake checkout resolves");
+    Arc::new(ReviewerPrompts::from_content(&content).expect("the checkout's prompts load"))
+}
 
 // ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -352,7 +382,7 @@ async fn reviewer_prompt(dir: &tempfile::TempDir, diff_text: &str, extra: &[&str
         analyze: None,
         dedup: None,
     };
-    // #9214: `run_review` resolves a transport for its context gate; keep it
+    // #9214: `run_review_with` resolves a transport for its context gate; keep it
     // off the live daemon whatever the shell exports.
     let _pin = MissingSearchSocket::pin();
     let mut config = ReviewConfig::load(None);
@@ -360,7 +390,9 @@ async fn reviewer_prompt(dir: &tempfile::TempDir, diff_text: &str, extra: &[&str
     config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.log_dir = dir.path().to_path_buf();
-    run_review(&config, input, deps).await;
+    // #9015: the prompts come from the checkout's content, not the cwd.
+    let options = ReviewOptions::default().with_prompts(checkout_prompts());
+    run_review_with(&config, input, deps, options).await;
 
     let prompts = llm.0.lock().map(|p| p.clone()).unwrap_or_default();
     prompts

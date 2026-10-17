@@ -27,8 +27,11 @@ use crate::{
         output::{print_review_result, write_review_log},
         post::{FinalizeAction, PostContext, decide_action, finalize_review},
         prompt::ReviewPrMeta,
+        prompt_templates::ReviewerPrompts,
+        voice_config::build_voice_config,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
+    voice::VoiceConfig,
 };
 
 use super::runner::{ReviewDeps, ReviewInput};
@@ -60,6 +63,46 @@ pub(super) fn subject_of(source: &DiffSource) -> (String, String, u64, bool) {
         }
         DiffSource::Stdin => (LOCAL_OWNER.to_string(), "stdin".to_string(), 0_u64, true),
     }
+}
+
+/// The reviewer prompts and voice layers this review builds from
+/// (`Continue`), or the finished abort (`Break`) (#9015).
+///
+/// Why: the prompts, and any voice or review template the config names, are
+/// runtime content (ADR-0064). Without them the review cannot run as
+/// configured, and the run must stop before it claims a dedup slot, fetches
+/// the PR or calls a model, so a retry once content is installed starts clean.
+/// What: the prompts the caller supplied, else [`ReviewerPrompts::load`]; then
+/// [`build_voice_config`]. On an error: one ERROR line, then
+/// [`ReviewResult::mark_infra_skip`] with `"not reviewed: <error>"` (the error
+/// text names its remedy; the MCP envelope turns `isError` on), finished by
+/// [`abort_dry`] with [`DedupClaim::NotHeld`]. Never a default or empty prompt,
+/// and never a review without the voice or template the config named.
+/// Test: `run_review_without_prompts_fails_closed_before_any_fetch_or_model_call`,
+/// `run_review_uses_supplied_prompts_without_loading`,
+/// `run_review_without_the_configured_voice_fails_closed_before_any_fetch`.
+pub(super) async fn content_or_abort(
+    supplied: Option<&Arc<ReviewerPrompts>>,
+    subject: (&str, &str, u64, &str),
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    deps: &ReviewDeps,
+) -> ControlFlow<ReviewResult, (Arc<ReviewerPrompts>, VoiceConfig)> {
+    let loaded = match supplied {
+        Some(prompts) => Ok(Arc::clone(prompts)),
+        None => ReviewerPrompts::load().map(Arc::new),
+    }
+    .and_then(|prompts| Ok((prompts, build_voice_config(config)?)));
+    let err = match loaded {
+        Ok(content) => return ControlFlow::Continue(content),
+        Err(err) => err,
+    };
+    let (owner, repo, pr, pr_url) = subject;
+    error!(error = %err, "review content unavailable — not reviewed (#9015)");
+    let mut result = ReviewResult::new(owner, repo, pr, format!("PR #{pr}"), pr_url);
+    result.mark_infra_skip(format!("not reviewed: {err}"));
+    // #9015: NotHeld — the load runs before any claim is attempted.
+    ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
 }
 
 /// Combine caller-supplied PR description + discussion into a single author-

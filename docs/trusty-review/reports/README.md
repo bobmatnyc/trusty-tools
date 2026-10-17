@@ -27,7 +27,7 @@ The pipeline:
 
 ## Templates
 
-Two templates are available in [`crates/trusty-review/templates/`](../../../crates/trusty-review/templates/):
+Two templates are available in [`content/instructions/trusty-review/templates/`](../../../content/instructions/trusty-review/templates/) (instructional content since #9015):
 
 1. **`report-technical-dd.md`** — Generic, vendor-neutral template. Sections: metadata, exec summary,
    scoring model, per-app scorecard, findings, risk registers, datasets, gaps.
