@@ -78,7 +78,7 @@ TAB="$(printf '\t')"
 # Shipped copies: "<path under the sub-project>|<path under the repo root>",
 # one per line. P4 added what `tm fleet init` writes into the Architect;
 # #9997 moved the records templates to local/ and added the rest of local/,
-# then the architect-* skills.
+# then the architect-* skills, the relay scripts and the voice guide.
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -97,6 +97,10 @@ scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-stat
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
 scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
+scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
+scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh
+scripts/relay-marker.py|crates/trusty-mpm/src/assets/architect/scripts/relay-marker.py
+docs/voice.md|crates/trusty-mpm/src/assets/architect/docs/voice.md
 templates/CLAUDE.md|content/instructions/architect/templates/CLAUDE.md
 templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
 templates/local/state.md|crates/trusty-mpm/src/assets/architect/templates/local/state.md

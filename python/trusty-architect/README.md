@@ -16,6 +16,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
+| `skills/architect-*.md` | The eight skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model). Seeded the same way. |
+| `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`). |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
 | `scripts/fleet-classify.py` | The poller's pure half: pane parsing and alert evaluation, with no tmux call or file I/O. `fleet-poll.py` loads it by path, so it ships beside it. |
@@ -23,6 +25,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/self-ctx.py` | Measures the Architect's own context from its newest interactive Claude Code transcript. |
 | `scripts/quiet-sessions.py` | Reads the quiet-session list (idle alerts dropped) and matches throwaway test-fixture session names (`exited` alerts dropped). |
 | `scripts/start-fleet-poll.sh` | Starts the poller in its own tmux session unless it is already running. Arguments pass through. |
+| `scripts/relay.sh` | The two-step relay send: refuses unless the box is empty or a suggestion, types the text, and presses Enter only when the box starts with the Architect marker. |
+| `scripts/posted.sh`, `scripts/relay-marker.py` | The double-post guard for a shared pane: lists relays sent since a time, or prints `NONE`. |
 | `tests/` | pytest suite for the scripts above. |
 
 ## Configuration
@@ -39,7 +43,8 @@ account or session name is built in.
 | `ARCHITECT_PROJECT_DIR` | `~/trusty-mpm-projects/architect` | The Architect's project, used to find its transcripts. |
 | `CLAUDE_CONFIG_DIR` | `~/.trusty-tools/trusty-mpm/claude-config` | The Claude Code config dir trusty-mpm launches under. |
 | `SELF_CTX_DIR` | `<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>` | Transcript directory override. |
-| `SELF_CTX_WINDOW`, `SELF_CTX_THRESHOLD` | `1000000`, `40` | Context window in tokens, and the alert threshold in percent. |
+| `CONTEXT_BAR_TOKENS` | `250000` | The context bar for every watched session and the Architect itself (#9997). |
+| `CONTEXT_WINDOW_TOKENS` | `1000000` | The window a pane's `ctx N%` is read against; keep it above the bar. |
 | `LOAD_FACTOR` | `1.5` | Load alert when the 5-minute average exceeds this many times the core count. |
 | `TMUX_SOCKET` | tmux's own default | Selects the tmux server. |
 
@@ -55,17 +60,19 @@ selftest, only when this directory or the check changes.
 ## Deployment
 
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,
-`skills/` and `templates/`, and the drift check fails when one differs.
-`tm fleet init` writes them into the Architect project: `scripts/`,
-`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore` and `local/`.
+`skills/`, `templates/` and `docs/`, and the drift check fails when one
+differs. `tm fleet init` writes them into the Architect project: `scripts/`,
+`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore`, `local/` and
+`docs/architect/voice.md`.
 It writes a file only when it is absent and reports an edited one as skipped.
 With a launch it starts the poller through `scripts/start-fleet-poll.sh`, and
 a start that fails fails the command.
 
 ## Not here yet
 
-The relay tooling, the question collector, the review, drift-check and
-provision skills, and `fleet-restart` stay in the prototype for now (#8536).
+The question collector, the host-admin, review, drift-check, improvements,
+provision and dashboard skills, and `fleet-restart` stay in the prototype for
+now (#8536).
 
 ## Provision by hand
 
@@ -111,16 +118,20 @@ Copy each file only if the target is absent. Never overwrite an edited one.
 
 ```sh
 src=<src>
-mkdir -p "$dir/scripts" "$dir/local" \
-  "$dir/.claude/skills/tm-fleet-check" "$dir/.claude/skills/tm-context-refresh"
+mkdir -p "$dir/scripts" "$dir/local/projects" "$dir/local/users" "$dir/local/briefs" \
+  "$dir/docs/architect"
 cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
 cp -Rn "$src/templates/local/."         "$dir/local/"
 cp -n "$src"/scripts/*.py "$src"/scripts/*.sh "$dir/scripts/"
-cp -n "$src/skills/tm-fleet-check.md"     "$dir/.claude/skills/tm-fleet-check/SKILL.md"
-cp -n "$src/skills/tm-context-refresh.md" "$dir/.claude/skills/tm-context-refresh/SKILL.md"
+cp -n "$src/docs/voice.md"             "$dir/docs/architect/voice.md"
+for f in "$src"/skills/tm-fleet-check.md "$src"/skills/tm-context-refresh.md "$src"/skills/architect-*.md; do
+  stem="$(basename "$f" .md)"
+  mkdir -p "$dir/.claude/skills/$stem"
+  cp -n "$f" "$dir/.claude/skills/$stem/SKILL.md"
+done
 chmod 755 "$dir/scripts/fleet-poll.py" "$dir/scripts/input-state.py" \
-  "$dir/scripts/start-fleet-poll.sh"
+  "$dir/scripts/start-fleet-poll.sh" "$dir/scripts/relay.sh" "$dir/scripts/posted.sh"
 ```
 
 This is the same set `tm fleet init` writes. The setup skill

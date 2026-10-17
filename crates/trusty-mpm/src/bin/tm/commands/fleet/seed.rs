@@ -24,6 +24,7 @@
 //! `every_template_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
+//! `the_relay_scripts_and_the_voice_guide_are_seeded`,
 //! `every_script_a_seeded_script_loads_by_path_is_seeded`,
 //! `a_seed_that_does_not_resolve_writes_nothing`.
 
@@ -109,6 +110,13 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/start-fleet-poll.sh",
         true
     ),
+    // #9997: the two-step relay send and the double-post guard the manual names.
+    embedded!("scripts/relay.sh", "scripts/relay.sh", true),
+    embedded!("scripts/posted.sh", "scripts/posted.sh", true),
+    // posted.sh runs this sibling by path.
+    embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
+    // #9997: the voice guide the manual and `architect-operating-rules` cite.
+    embedded!("docs/architect/voice.md", "docs/voice.md", false),
 ];
 
 /// Every file `tm fleet init` writes, in write order.
