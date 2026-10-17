@@ -2,7 +2,9 @@
 #
 # Read by scripts/check_architect_subproject.sh (grep -E) and by
 # `scripts/check_content.py leaks` (Python re). Edit here, never in either tool.
-# Both tools fail closed on a missing file, a malformed or empty line, or a
+# Both tools never print a credential: an EMAIL hit shows as ***@domain and a
+# line that also matches SECRET prints no matched text. Both scan binary and
+# non-UTF-8 files as bytes. Both tools fail closed on a missing file, a malformed or empty line, or a
 # pattern their engine rejects.
 #
 # Line format, four TAB-separated fields (the last is optional):
@@ -20,8 +22,11 @@
 OPERATOR_PATH	-	/Users/|/home/|-Users-
 OPERATOR_PATH	-	trusty-mpm-projects/[^/ ]+/supervisor
 SECRET	-	ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}
-OWNER_NAME	i	(github\.com[/:]|^|[^A-Za-z0-9_])(bobmatnyc|masa|bob)([^A-Za-z0-9_]|$)	github\.com[/:]bobmatnyc.*
-ORG	i	(github\.com|githubusercontent\.com|ghcr\.io)[/:][A-Za-z0-9_.-]+	(github\.com|githubusercontent\.com|ghcr\.io)[/:](example|acme|bobmatnyc)
+OWNER_NAME	i	(github\.com[/:]|--repo[ =]+|^|[^A-Za-z0-9_])(bobmatnyc|masa|bob)([^A-Za-z0-9_]|$)	(github\.com[/:]|--repo[ =]+)bobmatnyc.*
+ORG	i	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:][A-Za-z0-9_.-]+	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:](example|acme|bobmatnyc)
+ORG	i	--repo[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	--repo[ =]+(example|acme|bobmatnyc)/
+ORG	-	(^|[^A-Za-z0-9_-])gh [^|;&]*-R[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	.*-R[ =]+(example|acme|bobmatnyc)/
+ORG	i	[A-Za-z0-9][A-Za-z0-9-]*\.github\.io	(example|acme|bobmatnyc)\.github\.io
 HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?	.*\.local\.[A-Za-z0-9]+|threading\.local
 SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
 EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*example\.(com|org|net)

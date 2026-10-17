@@ -121,11 +121,11 @@ for rel in "$CONTENT_REL" "$ASSETS_REL"; do
 done
 
 scan_rule() { # $1 class, $2 flags (i|-), $3 ERE, $4 allow ERE or "", $5.. roots
-  local class="$1" flags="$2" match="$3" allow="$4" rc out line f rest n m opt=-rInoE a=-xE
+  local class="$1" flags="$2" match="$3" allow="$4" rc out line f rest n m opt=-rnoE a=-xE
   shift 4
-  if [ "$flags" = i ]; then opt=-rInoEi; a=-xEi; fi
+  if [ "$flags" = i ]; then opt=-rnoEi; a=-xEi; fi
   rc=0
-  out="$(grep "$opt" --exclude-dir=inbox --exclude-dir=__pycache__ \
+  out="$(LC_ALL=C grep -a "$opt" --exclude-dir=inbox --exclude-dir=__pycache__ \
     --exclude-dir=.pytest_cache -e "$match" "$@" 2>"$ERRF")" || rc=$?
   if [ "$rc" -ge 2 ]; then
     report GREP_ERROR "$class: grep exited $rc: $(head -n 1 "$ERRF")"
@@ -136,15 +136,18 @@ scan_rule() { # $1 class, $2 flags (i|-), $3 ERE, $4 allow ERE or "", $5.. roots
     f="${line%%:*}"; rest="${line#*:}"; n="${rest%%:*}"; m="${rest#*:}"
     if [ -n "$allow" ]; then
       rc=0
-      printf '%s\n' "$m" | grep "$a" -e "$allow" >/dev/null 2>"$ERRF" || rc=$?
+      printf '%s\n' "$m" | LC_ALL=C grep "$a" -e "$allow" >/dev/null 2>"$ERRF" || rc=$?
       if [ "$rc" -eq 0 ]; then continue; fi
       if [ "$rc" -ge 2 ]; then
         report GREP_ERROR "$class: allow pattern failed: $(head -n 1 "$ERRF")"
         return 0
       fi
     fi
-    # A secret is named by place only: the gate must not echo it into a log.
-    if [ "$class" = SECRET ]; then m="(redacted)"; fi
+    # A credential must not reach a log (#9996): SECRET hits are recorded, and
+    # every hit on such a line, and every EMAIL (URL userinfo), prints no text.
+    if [ "$class" = SECRET ]; then SECRET_LINES="$SECRET_LINES$f:$n$NL"; fi
+    case "$NL$SECRET_LINES" in *"$NL$f:$n$NL"*) m="(redacted)" ;; esac
+    if [ "$class" = EMAIL ]; then m="***@${m##*@}"; fi
     report "$class" "${f#"$ROOT"/}:$n: $m"
   done <<EOF
 $out
@@ -211,6 +214,9 @@ load_deny() { # $1 = file
 }
 
 RULES=""
+SECRET_LINES=""
+NL="
+"
 load_rules "$PATTERNS_FILE"
 if [ -n "$DENY_FILE" ]; then load_deny "$DENY_FILE"; fi
 if [ "$fail" -ne 0 ]; then
@@ -244,15 +250,20 @@ scan MAIN_TREE_IMPORT '(^|[^A-Za-z0-9_.-])crates/'
 scan MAIN_TREE_IMPORT '\.\./\.\.'
 # The shared table: operator paths, secrets and the #9996 leak classes, over
 # every scan root.
-while IFS= read -r rule; do
-  [ -n "$rule" ] || continue
-  c="${rule%%"$TAB"*}"; r="${rule#*"$TAB"}"
-  fl="${r%%"$TAB"*}"; r="${r#*"$TAB"}"
-  mt="${r%%"$TAB"*}"; al="${r#*"$TAB"}"
-  scan_rule "$c" "$fl" "$mt" "$al" "${ROOTS[@]}"
-done <<EOF
+# SECRET rules run first so every later hit on a secret line is redacted.
+for pass in secret rest; do
+  while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    c="${rule%%"$TAB"*}"; r="${rule#*"$TAB"}"
+    fl="${r%%"$TAB"*}"; r="${r#*"$TAB"}"
+    mt="${r%%"$TAB"*}"; al="${r#*"$TAB"}"
+    if [ "$pass" = secret ] && [ "$c" != SECRET ]; then continue; fi
+    if [ "$pass" = rest ] && [ "$c" = SECRET ]; then continue; fi
+    scan_rule "$c" "$fl" "$mt" "$al" "${ROOTS[@]}"
+  done <<EOF
 $RULES
 EOF
+done
 
 for pair in $PAIRS; do
   src="$SUB/${pair%%|*}"

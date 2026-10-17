@@ -322,6 +322,27 @@ w "$leak" 'notify U01ABC23DEF'
 leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
 w "$leak" 'mail someone@corp.io'
 leaks leaks-email 1 "FAIL EMAIL: $leak:1"
+for kind in 'gh pr view 1 --repo realcorp/widgets' 'gh pr list -R realcorp/widgets' \
+  'docs at realcorp.github.io' 'clone gitlab.com/realcorp/widgets'; do
+  w "$leak" "$kind"
+  leaks "leaks-org-form: $kind" 1 "FAIL ORG: $leak:1"
+done
+w "$leak" 'gh pr view 1 --repo bobmatnyc/trusty-tools' 'acme.github.io gitlab.com/example/x'
+leaks leaks-org-forms-allowed 0 "OK"
+printf 'x\000y\nask masa\n' >"$REPO/$leak"
+leaks leaks-nul-file 1 "FAIL OWNER_NAME: $leak:2"
+printf '\377\376 ask masa\n' >"$REPO/$leak"
+leaks leaks-non-utf8-file 1 "FAIL OWNER_NAME: $leak:1"
+tok="ghp""_$(printf 'a%.0s' $(seq 1 36))"
+w "$leak" "https://x-access-token:$tok@github.com/acme/x" 'https://deploy:Hunter2Secret@registry.corp.io/x'
+out="$(cd "$REPO" && python3 scripts/check_content.py leaks 2>&1)" && rc=0 || rc=$?
+if [[ "$rc" -ne 1 || "$out" == *"$tok"* || "$out" == *Hunter2Secret* || "$out" != *"FAIL EMAIL"* ]]; then
+  echo "FAIL leaks-credential-not-printed: exit $rc, output:" >&2
+  printf '%s\n' "$out" | sed 's/^/       /' >&2
+  fail=1
+else
+  echo "ok   leaks-credential-not-printed"
+fi
 w "$leak" 'clean'
 mv "$REPO/scripts/architect_leak_patterns.txt" "$REPO/scripts/patterns.bak"
 leaks leaks-patterns-missing 1 "FAIL PATTERNS: "

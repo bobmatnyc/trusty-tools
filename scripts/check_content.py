@@ -405,16 +405,21 @@ def cmd_leaks(root):
     rules = load_leak_rules(Path(os.environ.get("ARCHITECT_LEAK_PATTERNS") or default))
     errors, scanned = [], 0
     for path in sorted(p for p in top.rglob("*") if p.is_file() and not LEAK_SKIP_DIRS & set(p.relative_to(top).parts)):
+        # Bytes, not text: a NUL or an invalid UTF-8 byte must not hide a leak.
         data = path.read_bytes()
-        if b"\0" in data:
-            continue
         scanned += 1
         rel = path.relative_to(root).as_posix()
-        for num, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+        for num, raw in enumerate(data.split(b"\n"), 1):
+            line = raw.decode("latin-1")
+            secret_line = any(c == "SECRET" and rx.search(line) for c, rx, _ in rules)
             for cls, rx, allow in rules:
                 for m in rx.finditer(line):
                     if allow is None or not allow.fullmatch(m.group(0)):
-                        shown = "(redacted)" if cls == "SECRET" else m.group(0)
+                        shown = m.group(0)
+                        if secret_line:
+                            shown = "(redacted)"
+                        elif cls == "EMAIL":
+                            shown = "***@" + shown.rsplit("@", 1)[-1]
                         errors.append(f"{cls}: {rel}:{num}: {shown}")
     if scanned == 0:
         errors.append(f"SCAN_ROOT: {LEAK_ROOT_REL} holds no files")

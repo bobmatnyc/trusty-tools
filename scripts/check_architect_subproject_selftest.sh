@@ -69,6 +69,13 @@ leak_text() { # $1 = kind
     host_tailnet) printf 'ssh box.tail1234.ts.net\n' ;;
     slack) printf 'notify U01ABC23DEF now\n' ;;
     email) printf 'mail someone@corp.io\n' ;;
+    org_repo) printf 'gh pr view 1 --repo realcorp/widgets\n' ;;
+    org_cli) printf 'gh pr list -R realcorp/widgets\n' ;;
+    org_pages) printf 'docs at realcorp.github.io\n' ;;
+    org_gitlab) printf 'clone gitlab.com/realcorp/widgets\n' ;;
+    # Binary and non-UTF-8 files must still be scanned (#9996 fix round).
+    owner_nul) printf 'x\000y\nask masa\n' ;;
+    owner_badutf8) printf '\377\376 ask masa\n' ;;
   esac
 }
 
@@ -130,9 +137,9 @@ unpaired${TAB}UNPAIRED
 empty${TAB}EMPTY"
 # #9996: every new class in the content tree and in the Python tree; the
 # assets copy gets a representative pair.
-for kind in owner_handle owner_first owner_short org host_local host_tailnet slack email; do
+for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_tailnet slack email; do
   case "$kind" in
-    owner_*) class=OWNER_NAME ;; org) class=ORG ;; host_*) class=HOSTNAME ;;
+    owner_*) class=OWNER_NAME ;; org*) class=ORG ;; host_*) class=HOSTNAME ;;
     slack) class=SLACK_ID ;; email) class=EMAIL ;;
   esac
   for tree in content python; do
@@ -208,6 +215,8 @@ for tree in content python; do
   printf '%s\n' 'a bobcat and masala, Bobbin, robertson' \
     'mail user@example.com or ops@docs.example.org' \
     'see github.com/example/widgets and github.com/acme/tools' \
+    'gh pr view 1 --repo bobmatnyc/trusty-tools; gh pr list -R acme/x --repo example/y' \
+    'acme.github.io gitlab.com/example/x cp -R src/ dst' \
     'repo github.com/bobmatnyc/trusty-tools' \
     'localhost 127.0.0.1 .claude/settings.local.json' \
     'TEMPLATES_REFRESH CONTEXTUALIZE U+1F600' >"$f"
@@ -262,6 +271,28 @@ closed deny-file-missing none ARCHITECT_LEAK_DENY_FILE=/nonexistent/deny.txt 'FA
 closed deny-file-hit deny-hit ARCHITECT_LEAK_DENY_FILE=@PF@ 'FAIL OWNER_NAME' 1
 closed deny-file-clean deny-clean ARCHITECT_LEAK_DENY_FILE=@PF@ 'check_architect_subproject: OK' 0
 closed deny-unset-skipped none - 'check_architect_subproject: OK' 0
+
+# #9996 fix round: a hit must never print a credential. Each line carries a
+# token or password in URL userinfo; neither may appear in the output.
+exposure() { # $1 name, $2 tree (content|python), $3 line, $4 secret text
+  local t="$WORK/exposure-$1" rc=0 out
+  cp -R "$clean" "$t"
+  if [ "$2" = content ]; then f="$t/content/instructions/architect/skills/x.md"
+  else f="$t/python/trusty-architect/x.md"; fi
+  printf '%s\n' "$3" >"$f"
+  out="$("$GATE" --root "$t" 2>&1)" || rc=$?
+  if [ "$rc" -ne 1 ] || printf '%s\n' "$out" | grep -q -- "$4"; then
+    echo "FAIL: exposure-$1 -> exit $rc (expected 1) or the output carries the credential" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    fail=1
+  else
+    pass=$((pass + 1))
+  fi
+}
+exposure token-content content "https://x-access-token:$TOKEN@github.com/acme/x" "$TOKEN"
+exposure token-python python "https://x-access-token:$TOKEN@github.com/acme/x" "$TOKEN"
+exposure password-content content 'https://deploy:Hunter2Secret@registry.corp.io/x' 'Hunter2Secret'
+exposure password-python python 'https://deploy:Hunter2Secret@registry.corp.io/x' 'Hunter2Secret'
 
 if [ "$fail" -ne 0 ]; then
   echo "check_architect_subproject selftest: FAILED ($pass cases passed)" >&2
