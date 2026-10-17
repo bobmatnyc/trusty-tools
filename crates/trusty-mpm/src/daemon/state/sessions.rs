@@ -55,6 +55,23 @@ pub(crate) const RUNNING_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
 /// Test: `declared_but_never_dispatched_goes_stale_quickly`.
 pub(crate) const DECLARED_STALE_AFTER_SECS: i64 = 15 * 60;
 
+/// The staling budget of a live delegation: how long it may go without a
+/// terminal signal before the sweep marks it `Stale` (#9007).
+///
+/// Why: the sweep and the `tm doctor` unbound-delegation count must read one
+/// threshold, so the count cannot disagree with when a record actually stales.
+/// What: [`DECLARED_STALE_AFTER_SECS`] for an undispatched `McpDeclared`
+/// declaration, else [`RUNNING_STALE_AFTER_SECS`].
+/// Test: `declared_but_never_dispatched_goes_stale_quickly`,
+/// `stale_running_delegation_stops_suppressing_the_nudge`.
+pub(crate) fn live_stale_budget_secs(d: &Delegation) -> i64 {
+    if d.status == DelegationStatus::Queued && d.source == DelegationSource::McpDeclared {
+        DECLARED_STALE_AFTER_SECS
+    } else {
+        RUNNING_STALE_AFTER_SECS
+    }
+}
+
 /// How long a **terminal** delegation is retained after `ended_at` (#2864
 /// review).
 ///
@@ -1127,13 +1144,8 @@ impl DaemonState {
         self.delegations.retain(|_, d| {
             let age_from = d.started_at.unwrap_or(d.created_at);
             if d.status.is_live() {
-                let budget = if d.status == DelegationStatus::Queued
-                    && d.source == DelegationSource::McpDeclared
-                {
-                    DECLARED_STALE_AFTER_SECS
-                } else {
-                    RUNNING_STALE_AFTER_SECS
-                };
+                // #9007: `tm doctor` counts against the same budget.
+                let budget = live_stale_budget_secs(d);
                 if now - age_from > chrono::Duration::seconds(budget) {
                     // Status only. Stamping `ended_at` here would both overload
                     // that field's meaning and put a still-possibly-live record

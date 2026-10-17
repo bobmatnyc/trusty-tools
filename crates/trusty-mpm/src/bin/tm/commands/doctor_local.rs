@@ -170,6 +170,10 @@ async fn daemon_rows(daemon: &trusty_mpm::client::DaemonClient) -> Vec<DoctorChe
         ));
         rows.push(super::doctor_orphan::orphan_daemon_check(Some(snapshot)));
     }
+    // #9007: the records live in the daemon's memory; no answer is a Warn, never Ok.
+    rows.push(super::doctor_unbound_delegations::unbound_delegations_row(
+        snapshot.as_ref(),
+    ));
     // #8261: build leases are local flocks, so this row needs no daemon answer.
     rows.push(super::doctor_builder_cap::builder_cap_row());
     // #8451: the slot pool's volume against the daemon's eviction threshold.

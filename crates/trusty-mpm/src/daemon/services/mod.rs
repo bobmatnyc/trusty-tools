@@ -18,6 +18,8 @@ pub mod agent_worktree_reap;
 pub(crate) mod delegation_quiet_stale;
 pub mod delegation_records;
 pub mod delegation_repair;
+// #9007: the unbound-session record count behind the `tm doctor` row.
+pub mod delegation_unbound;
 // #8531: the repair caller, established from the socket's kernel peer pid.
 pub mod delegation_repair_caller;
 pub(crate) mod delegation_repair_probe;
