@@ -26,19 +26,23 @@ use tempfile::TempDir;
 /// installed `tm` for the PATH fallback, so `HooksMissing` stayed a gap and a
 /// repair could never report complete.
 /// What: shadows [`super::validate_and_repair`] with the identical signature,
-/// delegating to [`super::validate_and_repair_with_exe`] with
-/// [`crate::test_support::STABLE_HOOK_EXE`].
+/// delegating to [`super::repair_with`] with
+/// [`crate::test_support::STABLE_HOOK_EXE`], the process home, and no config
+/// dir — #9846: an ambient `CLAUDE_CONFIG_DIR` must not become the user tier
+/// these `$HOME`-guarded cases write.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`.
 fn validate_and_repair(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
 ) -> RepairOutcome {
-    super::validate_and_repair_with_exe(
+    super::repair_with(
         fw,
         workspace,
         repo_url,
         Some(Path::new(crate::test_support::STABLE_HOOK_EXE)),
+        dirs::home_dir().as_deref(),
+        None,
     )
 }
 
@@ -706,6 +710,73 @@ fn repair_writes_auto_memory_off() {
         serde_json::json!(false),
         "a repair with trusty-memory down must still turn auto memory OFF"
     );
+}
+
+/// #9846: with a Claude config dir named, the repair's user-tier writes land in
+/// it and the home's `.claude` / `.claude.json` stay untouched.
+///
+/// Why: `tm validate --repair` joined the statusLine seed, the trust seed and
+/// the legacy-hook strip onto `$HOME`, while Claude Code reads its user tier
+/// from `CLAUDE_CONFIG_DIR` — so the operator's sessions never got the
+/// statusLine and legacy global hooks there were never stripped.
+/// What: the `repair_writes_auto_memory_off` fixture plus a legacy
+/// `trusty-memory` hook seeded in the config dir's `settings.json`, repaired
+/// through [`super::repair_with`] with one temp dir as the home and another as
+/// the config dir. Both are arguments; no process environment is written.
+/// Test: itself.
+#[test]
+fn repair_writes_the_user_tier_under_claude_config_dir() {
+    let home = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let user_settings = config_dir.path().join("settings.json");
+    std::fs::write(
+        &user_settings,
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory hooks fire claude.stop"}]}]}}"#,
+    )
+    .unwrap();
+    let base = TempDir::new().unwrap();
+    let workspace = base.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = FrameworkPaths::for_managed_project(base.path(), &workspace);
+    fw.trusty_mpm_root = None;
+    seed_agent_source(&fw, &["engineer"]);
+    seed_skill_source(&fw, &["tm-doctor"]);
+    assert!(
+        !validate_workspace(&fw).is_complete(),
+        "fixture must start incomplete so the repair pipeline runs"
+    );
+
+    super::repair_with(
+        &fw,
+        &workspace,
+        None,
+        Some(stable_exe()),
+        Some(home.path()),
+        Some(config_dir.path()),
+    );
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&user_settings).unwrap()).unwrap();
+    assert!(
+        settings.get("statusLine").is_some(),
+        "the user-tier statusLine must be seeded in the config dir: {settings}"
+    );
+    assert!(
+        settings.get("hooks").and_then(|h| h.get("Stop")).is_none(),
+        "the legacy trusty-memory hook in the config dir must be stripped: {settings}"
+    );
+    let claude_json = std::fs::read_to_string(config_dir.path().join(".claude.json"))
+        .expect("the trust seed must land in <config_dir>/.claude.json");
+    assert!(
+        claude_json.contains("hasTrustDialogAccepted"),
+        "the config dir's .claude.json must carry the trust seed: {claude_json}"
+    );
+    for stray in [".claude", ".claude.json"] {
+        assert!(
+            !home.path().join(stray).exists(),
+            "nothing may be written to <home>/{stray} when a config dir is named"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

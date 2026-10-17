@@ -294,8 +294,9 @@ fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
 fn home_writes_are_skipped_when_the_home_is_unusable() {
     let workspace = tempdir().unwrap();
     for home in [None, Some(std::path::Path::new("."))] {
-        super::settings::preseed_workspace_trust_home(home, workspace.path()).expect("soft skip");
-        super::settings::remove_global_trusty_memory_hooks(home).expect("soft skip");
+        super::settings::preseed_workspace_trust_home(home, None, workspace.path())
+            .expect("soft skip");
+        super::settings::remove_global_trusty_memory_hooks(home, None).expect("soft skip");
     }
     assert!(
         !std::path::Path::new("./.claude.json").exists(),
@@ -2256,6 +2257,22 @@ fn ensure_status_line_in_seeds_both_tiers() {
         assert_eq!(v["statusLine"]["type"], "command", "{}", path.display());
         assert_resolved_statusline_command(v["statusLine"]["command"].as_str().unwrap());
     }
+}
+
+/// Why (#9846): the statusLine seed obeys the same write guard as the trust seed.
+/// What: a relative config dir resolves no settings path; an absolute one does.
+/// Test: itself.
+#[test]
+fn user_settings_path_in_refuses_a_relative_config_dir() {
+    let home = std::path::Path::new("/h");
+    assert_eq!(
+        super::statusline::user_settings_path_in(Some(home), Some(std::path::Path::new("rel"))),
+        None
+    );
+    assert_eq!(
+        super::statusline::user_settings_path_in(Some(home), Some(std::path::Path::new("/cfg"))),
+        Some(std::path::PathBuf::from("/cfg/settings.json"))
+    );
 }
 
 /// Why (#7617): a stripped environment with no home resolves no user tier, and

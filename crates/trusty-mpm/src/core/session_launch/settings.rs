@@ -1002,49 +1002,27 @@ pub(super) fn preseed_workspace_trust(
 /// asking. `~/.claude.json` belongs to the USER, under every root. Production
 /// passes `dirs::home_dir()`, exactly as before this change; only tests pass
 /// anything else.
-/// What: resolves `<home>/.claude.json` and delegates. An absent or relative
-/// home is a soft skip (logged) — seeding a trust record beside the process's
-/// working directory would be worse than not seeding one.
+/// What: resolves the user-tier `.claude.json` through
+/// [`super::user_tier::resolve_for_write`] — `<config_dir>/.claude.json` when a
+/// config dir is named (#9846), else `<home>/.claude.json` — and delegates. An
+/// unusable location is a soft skip (logged) — seeding a trust record beside
+/// the process's working directory would be worse than not seeding one.
 /// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`,
-/// `home_writes_are_skipped_when_the_home_is_unusable`; the seeding behaviour
+/// `home_writes_are_skipped_when_the_home_is_unusable`,
+/// `repair_writes_the_user_tier_under_claude_config_dir`; the seeding behaviour
 /// itself by the inner `preseed_trust_*` tests.
 pub(super) fn preseed_workspace_trust_home(
     home: Option<&Path>,
+    config_dir: Option<&Path>,
     workspace: &Path,
 ) -> Result<(), PrepError> {
-    let Some(home) = usable_home(home) else {
+    // #9846: `CLAUDE_CONFIG_DIR` relocates `.claude.json` with the rest of the tier.
+    let Some(tier) = super::user_tier::resolve_for_write(home, config_dir) else {
         return Ok(());
     };
     // #8545: the operator's `~/.claude.json`; fenced in tests.
-    crate::core::home_write_fence::check(&home.join(".claude.json"));
-    preseed_workspace_trust(&home.join(".claude.json"), workspace)
-}
-
-/// The supplied home, when it is usable for a user-global write.
-///
-/// Why (#5544): `dirs::home_dir()` returns `None` on a stripped environment, and
-/// a caller that substituted a relative fallback would send the write beside the
-/// process's working directory — the stray-file outcome this change exists to
-/// prevent. Declining is the correct answer; both callers are best-effort side
-/// effects.
-/// What: passes an absolute path through, logging at `warn!` otherwise so a
-/// declined write is visible rather than silent.
-/// Test: `home_writes_are_skipped_when_the_home_is_unusable`.
-fn usable_home(home: Option<&Path>) -> Option<&Path> {
-    match home {
-        Some(home) if home.is_absolute() => Some(home),
-        Some(home) => {
-            tracing::warn!(
-                home = %home.display(),
-                "skipping user-global session writes: the home directory is not absolute"
-            );
-            None
-        }
-        None => {
-            tracing::warn!("skipping user-global session writes: no home directory resolved");
-            None
-        }
-    }
+    crate::core::home_write_fence::check(&tier.claude_json);
+    preseed_workspace_trust(&tier.claude_json, workspace)
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
@@ -1060,20 +1038,25 @@ fn usable_home(home: Option<&Path>) -> Option<&Path> {
 /// missing file is success by contract, so the operator's REAL global hooks were
 /// never removed and kept double-firing with nothing to show for it. No second
 /// implementation of this cleanup exists to catch it.
-/// What: reads `<home>/.claude/settings.json`, and for each event in
+/// What: reads the user-tier `settings.json` — under `config_dir` when one is
+/// named (#9846), else `<home>/.claude/settings.json` — and for each event in
 /// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
 /// array contains a command matching `trusty-memory hooks fire`. An event key
 /// whose array becomes empty is removed entirely. Writes the file back. A
 /// missing or malformed file is treated as success (nothing to clean up).
 /// Test: `remove_global_hooks_removes_trusty_memory_entries`,
 /// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
-pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(), PrepError> {
-    let Some(home) = usable_home(home) else {
+pub(super) fn remove_global_trusty_memory_hooks(
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+) -> Result<(), PrepError> {
+    // #9846: strip the file sessions read — `CLAUDE_CONFIG_DIR` when set.
+    let Some(tier) = super::user_tier::resolve_for_write(home, config_dir) else {
         return Ok(());
     };
     // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
-    crate::core::home_write_fence::check(&home.join(".claude"));
-    clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
+    crate::core::home_write_fence::check(&tier.dir);
+    clean_global_trusty_memory_hooks(&tier.settings_json())
 }
 
 /// Filter `trusty-memory` hook entries out of the settings file at `settings_path`.

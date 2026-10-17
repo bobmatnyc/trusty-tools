@@ -35,7 +35,9 @@ use super::tests::FakeTmuxDriver;
 /// `preseed_workspace_trust_home`, writing into the operator's real
 /// `~/.claude.json`. Pairs with `#[serial_test::serial]`.
 /// Test: used by every `reconcile_*` test below that resolves a pane cwd.
-struct HomeGuard(Option<String>);
+// #9846: also holds the ambient `CLAUDE_CONFIG_DIR`, cleared while the guard
+// lives — `validate_and_repair` now follows it, bypassing the fake `$HOME`.
+struct HomeGuard(Option<String>, Option<std::ffi::OsString>);
 impl Drop for HomeGuard {
     fn drop(&mut self) {
         // SAFETY: paired with `#[serial_test::serial]` — no other thread
@@ -43,6 +45,10 @@ impl Drop for HomeGuard {
         match self.0 {
             Some(ref p) => unsafe { std::env::set_var("HOME", p) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+        match self.1 {
+            Some(ref p) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", p) },
+            None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
         }
     }
 }
@@ -52,8 +58,12 @@ impl Drop for HomeGuard {
 fn set_home(home: &std::path::Path) -> HomeGuard {
     let prior = std::env::var("HOME").ok();
     // SAFETY: serialized via `#[serial_test::serial]`.
-    unsafe { std::env::set_var("HOME", home) };
-    HomeGuard(prior)
+    let prior_ccd = std::env::var_os("CLAUDE_CONFIG_DIR");
+    unsafe {
+        std::env::set_var("HOME", home);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+    HomeGuard(prior, prior_ccd)
 }
 
 /// The full `tm-<leaf>-NN` naming convention (issue #1955): a `tm-` prefix

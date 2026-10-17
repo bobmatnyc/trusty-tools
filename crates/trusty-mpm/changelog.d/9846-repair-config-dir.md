@@ -1,0 +1,2 @@
+Fixed
+- `tm validate --repair`, and the launch preparation it shares, now write the user-tier statusLine to `$CLAUDE_CONFIG_DIR/settings.json`, the workspace trust seed to `$CLAUDE_CONFIG_DIR/.claude.json`, and strip legacy `trusty-memory` hooks from `$CLAUDE_CONFIG_DIR/settings.json` when `CLAUDE_CONFIG_DIR` is set. Before, they wrote `~/.claude/settings.json` and `~/.claude.json`, which a session with `CLAUDE_CONFIG_DIR` set does not read. With `CLAUDE_CONFIG_DIR` unset nothing changes (#9846).
