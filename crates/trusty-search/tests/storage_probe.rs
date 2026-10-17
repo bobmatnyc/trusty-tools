@@ -21,16 +21,18 @@
 //! Test: this file; the helpers' unit tests live in
 //! `support/storage_probe_tests.rs`.
 
+// #9993 G7: `pub(crate)` so `freshness_probe` reuses these mounts instead of
+// compiling (and running the unit tests of) a second copy in this binary.
 #[path = "support/isolated_benchmark.rs"]
-mod isolated_benchmark;
+pub(crate) mod isolated_benchmark;
 #[path = "support/latency_stats.rs"]
-mod latency_stats;
+pub(crate) mod latency_stats;
 #[path = "support/perf_envelope.rs"]
-mod perf_envelope;
+pub(crate) mod perf_envelope;
 #[path = "support/storage_probe.rs"]
-mod probe;
+pub(crate) mod probe;
 #[path = "support/socket_benchmark.rs"]
-mod socket_benchmark;
+pub(crate) mod socket_benchmark;
 
 use perf_envelope::{load_now, RunContext};
 use probe::{rss_bytes, sandbox_pid, snapshots, storage_dirs, storage_rows, unchanged};
