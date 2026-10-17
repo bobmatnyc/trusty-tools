@@ -152,9 +152,9 @@ impl AttemptError {
     /// missing uv or a failed local step is permanent. `Probe` is transient:
     /// a contended host can answer minutes later (#9949).
     /// Test: `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
-    /// `graceful_bootstrap_transient_failure_keeps_retrying`,
+    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`;
     /// `venv_network_failure_retries_then_swaps_to_python`,
-    /// `venv_disk_full_failure_is_not_retried` in `start/tests_9949.rs`.
+    /// `venv_disk_full_failure_is_not_retried` in `start/venv_retry_9971_tests.rs`.
     fn at(step: FailedStep, e: anyhow::Error) -> Self {
         use trusty_embedderd_py::FailureKind;
         match step {
@@ -442,8 +442,9 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
 /// `graceful_bootstrap_transient_failure_keeps_retrying`,
 /// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
-/// `graceful_bootstrap_background_decided_failure_is_terminal`,
-/// `venv_network_failure_retries_then_swaps_to_python` in `start/tests_9949.rs`.
+/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`;
+/// `venv_network_failure_retries_then_swaps_to_python` in
+/// `start/venv_retry_9971_tests.rs`.
 pub(super) async fn drive_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
