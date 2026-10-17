@@ -267,6 +267,38 @@ path = "agents/web-ui-engineer.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/architect/skills/architect-completion-standard.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-github.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-operating-rules.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-owner-model.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-search-memory.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-strategy.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-tmux-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-workflow.md"
+version = "0.1.0"
+
+[[member]]
 path = "instructions/architect/skills/tm-context-refresh.md"
 version = "0.1.0"
 

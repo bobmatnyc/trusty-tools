@@ -103,27 +103,38 @@ its `CLAUDE.md`.
    that belongs to the user or another agent; `no-prompt` means a turn or a
    dialog is running. Wait for the next pass in both cases. `missing`, with
    exit status 1, means the pane could not be captured: send nothing.
-8. **Send with the two-step pattern**, never in one call:
+8. **Send with the two-step pattern**, never in one call.
+   `scripts/relay.sh <session> '<text>'` types the text, checks the box and
+   presses Enter only when both checks pass; then capture to confirm:
 
    ```sh
-   tmux send-keys -t '=<session>:' -l '[<Name> supervisor HH:MMZ] Supervisor answer: … (basis: …)'
+   scripts/relay.sh <session> '[<Name> Architect HH:MMZ] Architect answer: … (basis: …)'
+   tmux capture-pane -p -t '=<session>:' -S -20    # a submitted turn and an acknowledgement
+   ```
+
+   By hand, the same steps are:
+
+   ```sh
+   tmux send-keys -t '=<session>:' -l '[<Name> Architect HH:MMZ] Architect answer: … (basis: …)'
    tm architect input-state '=<session>:'    # typed | <the start of your text>
    tmux send-keys -t '=<session>:' Enter
-   tmux capture-pane -p -t '=<session>:' -S -20    # a submitted turn and an acknowledgement
    ```
 
    Press Enter only when the state is `typed` and your message starts with
    the printed text. The command prints only the `❯` row, cut at 100
    characters, so a message that wraps shows its first row alone. Otherwise
-   do not press Enter; record it and check again next pass.
+   do not press Enter; record it and check again next pass. Before typing
+   into a session another Architect also watches, run
+   `scripts/posted.sh <session> <HH:MMZ the question appeared>` and send only
+   on `NONE`.
    `HH:MMZ` comes from `date -u`. When the fleet runs on a non-default tmux
    server, add `-S "$TMUX_SOCKET"` to each `tmux` call and export
-   `TMUX_SOCKET` for `tm architect input-state`.
+   `TMUX_SOCKET` for `tm architect input-state` and the scripts.
 9. **Check context and goals.**
-   - A pane whose status line shows `ctx` at or above 50% needs a refresh;
-     45 to 49% is approaching. 50% is the default; this project's
-     `CLAUDE.md` may set another threshold. Run `tm-context-refresh` at a
-     safe boundary. Never force it over active work or a draft: queue it in
+   - A session at the context bar (250k tokens by default; set in
+     `CLAUDE.md`) needs a refresh. The poller's `ctx` alert says
+     `approaching` at 90% of the bar and `bar` at the bar. Run
+     `tm-context-refresh` at a safe boundary. Never force it over active work or a draft: queue it in
      `local/state.md` and record the deferral. A `self_ctx` alert is your own
      context; refresh yourself the same way at a quiet moment.
    - Map each live session and its current work to a goal in
@@ -161,4 +172,6 @@ its `CLAUDE.md`.
 ## Related skills
 
 - `tm-context-refresh`: the pause, clear and resume procedure step 9 starts.
+- `architect-tmux-ops`: capture, classify and send.
+- `architect-operating-rules`: the relay format and the decisions.
 - `tm-architect-setup`: how this project and its poller were set up.

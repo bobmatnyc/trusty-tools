@@ -29,8 +29,10 @@
 #     SCAN_ROOT         the content or assets scan root does not exist
 #     GREP_ERROR        grep failed (exit 2+); "no match" alone stays exit 0
 #     DRIFT             a shipped copy is missing or differs from its source
-#     UNPAIRED          a file under crates/trusty-mpm/src/assets/architect/
-#                       is no pair's shipped copy, so no source guards it
+#     UNPAIRED          a file under crates/trusty-mpm/src/assets/architect/,
+#                       or under content/instructions/architect/skills/ or
+#                       templates/, is no pair's shipped copy, so no source
+#                       guards it
 #     EMPTY             the sub-project holds no files (a vacuous pass)
 #   Runtime state (inbox/, __pycache__/, .pytest_cache/) is not scanned.
 #   The leak classes (#9996) come from scripts/architect_leak_patterns.txt,
@@ -75,11 +77,20 @@ TAB="$(printf '\t')"
 
 # Shipped copies: "<path under the sub-project>|<path under the repo root>",
 # one per line. P4 added what `tm fleet init` writes into the Architect;
-# #9997 moved the records templates to local/ and added the rest of local/.
+# #9997 moved the records templates to local/ and added the rest of local/,
+# then the architect-* skills.
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
 skills/tm-context-refresh.md|content/instructions/architect/skills/tm-context-refresh.md
+skills/architect-tmux-ops.md|content/instructions/architect/skills/architect-tmux-ops.md
+skills/architect-operating-rules.md|content/instructions/architect/skills/architect-operating-rules.md
+skills/architect-workflow.md|content/instructions/architect/skills/architect-workflow.md
+skills/architect-search-memory.md|content/instructions/architect/skills/architect-search-memory.md
+skills/architect-github.md|content/instructions/architect/skills/architect-github.md
+skills/architect-strategy.md|content/instructions/architect/skills/architect-strategy.md
+skills/architect-completion-standard.md|content/instructions/architect/skills/architect-completion-standard.md
+skills/architect-owner-model.md|content/instructions/architect/skills/architect-owner-model.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
@@ -292,12 +303,16 @@ for pair in $PAIRS; do
   fi
 done
 
-# #8436 P4 fix: a new asset file with no pair would ship unguarded.
-ASSET_REL="crates/trusty-mpm/src/assets/architect"
+# #8436 P4 fix: a new asset file with no pair would ship unguarded. #9997:
+# the content skills and templates are shipped copies too; the manual and the
+# core (architect.md, core.md) have no sub-project source, so they are not.
 NL="
 "
-if [ -d "$ROOT/$ASSET_REL" ]; then
-  shipped="$(find "$ROOT/$ASSET_REL" -type f ! -name .DS_Store \
+for unpaired_rel in "crates/trusty-mpm/src/assets/architect" \
+                    "content/instructions/architect/skills" \
+                    "content/instructions/architect/templates"; do
+  [ -d "$ROOT/$unpaired_rel" ] || continue
+  shipped="$(find "$ROOT/$unpaired_rel" -type f ! -name .DS_Store \
     ! -path '*/__pycache__/*' | LC_ALL=C sort)"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -309,7 +324,7 @@ if [ -d "$ROOT/$ASSET_REL" ]; then
   done <<EOF
 $shipped
 EOF
-fi
+done
 
 if [ "$fail" -ne 0 ]; then
   echo "check_architect_subproject: FAILED (fix the lines above)" >&2

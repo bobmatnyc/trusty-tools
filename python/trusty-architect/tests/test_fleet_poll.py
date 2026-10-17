@@ -414,6 +414,8 @@ def test_self_ctx_missing_or_empty_dir_never_crashes(tmp_path, monkeypatch):
 def test_self_ctx_compares_tokens_with_the_bar_and_no_window(tmp_path, monkeypatch, tokens, alerts):
     """#9997: the own-context bar is the same 250k tokens; a window plays no part."""
     monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
+    monkeypatch.setattr(fp, "LOG", str(tmp_path / "poll.log"))  # the window warning
+    monkeypatch.setattr(fp, "_LOGGED_BAR_WARNINGS", set())
     (tmp_path / "t.jsonl").write_text(_usage_line({"input_tokens": tokens}))
     assert len(fp.self_ctx_alerts(0.0)) == alerts
     monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "100000")  # far below the tokens
