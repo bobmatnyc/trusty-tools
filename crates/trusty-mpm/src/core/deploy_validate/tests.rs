@@ -699,7 +699,7 @@ fn repair_writes_auto_memory_off() {
         "fixture must start incomplete so the repair pipeline runs"
     );
 
-    super::validate_and_repair_under(&fw, &workspace, None, Some(fake_home.path()));
+    super::validate_and_repair_under(&fw, &workspace, None, Some(fake_home.path()), None);
 
     let settings = workspace.join(".claude").join("settings.json");
     let value: serde_json::Value =

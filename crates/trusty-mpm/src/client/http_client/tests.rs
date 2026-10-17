@@ -148,6 +148,47 @@ async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
     }
 }
 
+/// #9999: `session_connect`'s prep seeds the user tier under the config dir —
+/// `CLAUDE_CONFIG_DIR` in production, pinned here — never `<home>/.claude`.
+#[tokio::test]
+async fn launch_session_writes_the_user_tier_under_the_config_dir_9999() {
+    use std::future::IntoFuture as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let router = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/sessions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"name": "tm-9999-fake"}))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    let bin_dir = tempfile::tempdir().unwrap();
+    let tmux = bin_dir.path().join("fake-tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let home = crate::test_support::hermetic_temp_dir();
+    let config_dir = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let workdir = project.path().to_string_lossy().into_owned();
+    let client = DaemonClient::new(format!("http://{addr}"))
+        .with_home(home.path())
+        .with_claude_config_dir(config_dir.path());
+    let result = crate::core::tmux::with_tmux_binary(tmux, client.launch_session(&workdir)).await;
+    assert!(result.is_err(), "the fake tmux ends this launch");
+
+    let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
+        .expect("prep seeds the user tier in the config dir");
+    assert!(user.contains("statusLine"), "{user}");
+    assert!(config_dir.path().join(".claude.json").exists());
+    assert!(!home.path().join(".claude").join("settings.json").exists());
+    assert!(!home.path().join(".claude.json").exists());
+}
+
 #[tokio::test]
 async fn connect_session_errors_when_daemon_unreachable() {
     // Why: `tm connect` registers via `POST /api/v1/sessions/connect`

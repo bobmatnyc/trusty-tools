@@ -105,6 +105,9 @@ pub struct DaemonClient {
     /// The user home `launch_session` prepares under; `None` resolves the
     /// process home. #8545: only a test pins it.
     pub(in crate::client::http_client) home: Option<std::path::PathBuf>,
+    /// #9999: the user-tier config dir a test pins beside `home`; unused unless
+    /// `home` is pinned, when `CLAUDE_CONFIG_DIR` decides instead.
+    pub(in crate::client::http_client) claude_config_dir: Option<std::path::PathBuf>,
     /// #6288: the daemon's unix socket; `Some` means every request goes there
     /// and never to `base`/`http`.
     pub(in crate::client::http_client) socket: Option<std::path::PathBuf>,
@@ -148,6 +151,7 @@ impl DaemonClient {
             base,
             http: client,
             home: None,
+            claude_config_dir: None,
             base_url_pinned: false,
         }
     }
@@ -176,6 +180,13 @@ impl DaemonClient {
     #[cfg(test)]
     pub(crate) fn with_home(mut self, home: &std::path::Path) -> Self {
         self.home = Some(home.to_path_buf());
+        self
+    }
+
+    /// Pin the user-tier config dir `launch_session` prepares under (#9999).
+    #[cfg(test)]
+    pub(crate) fn with_claude_config_dir(mut self, dir: &std::path::Path) -> Self {
+        self.claude_config_dir = Some(dir.to_path_buf());
         self
     }
 

@@ -682,6 +682,37 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
+/// #9999: the daemon's deployment repair takes its user tier from the state —
+/// the config dir when one is set — so the statusLine and trust seed land
+/// there and nothing is written under `<home>/.claude`.
+#[test]
+fn the_daemon_repair_writes_the_user_tier_under_the_config_dir_9999() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut state = crate::daemon::state::DaemonState::with_root(root.path().join("fw"));
+    state.pin_user_tier(home.clone(), config_dir.path().to_path_buf());
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = crate::core::paths::FrameworkPaths::for_managed_project(root.path(), &workspace);
+    fw.trusty_mpm_root = None;
+
+    let host = RepairHost::for_state(&state);
+    let _ = ensure_deployment_complete(&fw, &workspace, None, &ManagedSessionId::new(), host);
+
+    let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
+        .expect("the repair seeds the user tier in the config dir");
+    assert!(user.contains("statusLine"), "{user}");
+    assert!(config_dir.path().join(".claude.json").exists());
+    for stray in [".claude", ".claude.json"] {
+        assert!(
+            !home.join(stray).exists(),
+            "nothing may be written to <home>/{stray} when a config dir is named"
+        );
+    }
+}
+
 /// Why (#2231): when neither carrier is present (no output-style gap
 /// resolved AND no prompt-file stash), an empty `gaps` slice trivially
 /// satisfies the output-style branch — this proves that specific

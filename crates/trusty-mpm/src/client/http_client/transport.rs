@@ -472,6 +472,7 @@ impl DaemonClient {
             base: format!("unix:{}", socket.display()),
             http: config::default_client(),
             home: None,
+            claude_config_dir: None,
             socket: Some(socket),
             base_url_pinned: false,
         }

@@ -32,6 +32,8 @@ pub(crate) mod session_claudes;
 mod sm;
 // #8535, #8161: which records write in a given tree.
 mod tree_membership;
+// #9999: the user-tier config dir the daemon writes into.
+mod user_tier;
 
 #[cfg(test)]
 mod tests;

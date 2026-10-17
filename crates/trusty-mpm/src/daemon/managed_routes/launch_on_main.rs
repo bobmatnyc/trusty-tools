@@ -220,7 +220,7 @@ pub(super) async fn spawn_managed_on_main(
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        RepairHost::new(state.user_home()),
+        RepairHost::for_state(state),
     ) {
         warn!(
             id = %session_id,

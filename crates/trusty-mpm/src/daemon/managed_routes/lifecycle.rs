@@ -868,7 +868,7 @@ pub(super) async fn spawn_managed_inproject(
     // Deployment-completeness check (#2158, made non-blocking by #2172): a
     // false positive must never withhold the runtime launch. Reuses the `fw`
     // already resolved above for `prepare_inproject_session`.
-    let host = RepairHost::new(state.user_home());
+    let host = RepairHost::for_state(state);
     let url = record.repo_url.as_deref();
     if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, host) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
@@ -1120,7 +1120,7 @@ pub async fn resume_managed(
     // `~/.trusty-tools/trusty-mpm/claude-config/` on every test run of this route.
     let fw_root = state.framework_root();
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
-    let host = RepairHost::new(state.user_home());
+    let host = RepairHost::for_state(state);
     let url = record.repo_url.as_deref();
     if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, host) {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
