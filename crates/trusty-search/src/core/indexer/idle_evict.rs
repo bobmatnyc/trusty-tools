@@ -368,6 +368,42 @@ const DEFAULT_REHYDRATE_WAIT_MS: u64 = 9_000;
 pub(crate) static TEST_REHYDRATE_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Test-only per-indexer count of started rehydrate scans.
+///
+/// Why: `rehydrate_dedupes_concurrent_callers_onto_one_scan` must observe how
+/// many scans ran, not how long they took. Keyed by the indexer's
+/// `rehydrate_inflight` address (as the #9513 panic hook is) so a concurrent
+/// test's scan never reaches another test's count.
+/// What: `(gate address, scans started)` pairs; bumped by the blocking scan.
+/// Compiled out of non-test builds.
+/// Test: `rehydrate_dedupes_concurrent_callers_onto_one_scan`.
+// #10015: scan counter replaces the wall-clock dedupe assertion.
+#[cfg(test)]
+static TEST_REHYDRATE_SCAN_COUNTS: StdMutex<Vec<(usize, u64)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_rehydrate_scan(key: usize) {
+    let mut counts = TEST_REHYDRATE_SCAN_COUNTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match counts.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, n)) => *n += 1,
+        None => counts.push((key, 1)),
+    }
+}
+
+/// Test-only: how many rehydrate scans `indexer` has started.
+#[cfg(test)]
+pub(crate) fn rehydrate_scan_count(indexer: &CodeIndexer) -> u64 {
+    let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
+    TEST_REHYDRATE_SCAN_COUNTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(0, |(_, n)| *n)
+}
+
 /// Read `TRUSTY_REHYDRATE_WAIT_MS`, falling back to
 /// [`DEFAULT_REHYDRATE_WAIT_MS`] when unset, zero, or unparsable.
 fn rehydrate_wait_budget() -> Duration {
@@ -765,6 +801,7 @@ impl CodeIndexer {
             let loaded = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
                 #[cfg(test)]
                 {
+                    record_rehydrate_scan(commit_panic_key);
                     let delay_ms = TEST_REHYDRATE_DELAY_MS.load(Ordering::Relaxed);
                     if delay_ms > 0 {
                         std::thread::sleep(Duration::from_millis(delay_ms));
