@@ -32,7 +32,12 @@ pub(super) fn validate(bytes: &[u8]) -> Result<(), AttachmentError> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(invalid)?;
         // Match calamine's case-insensitive ZIP lookup, including stored backslashes.
-        let name = entry.name().replace('\\', "/").to_ascii_lowercase();
+        // #10019: zip 9's `name()` is fallible; an undecodable name is refused.
+        let name = entry
+            .name()
+            .map_err(invalid)?
+            .replace('\\', "/")
+            .to_ascii_lowercase();
         let mut xml = Vec::new();
         entry
             .by_ref()
