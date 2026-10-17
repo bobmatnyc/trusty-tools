@@ -63,7 +63,7 @@ case "${before%%|*}" in
   *) echo "$s SKIP input=${before%%|*}"; exit 1 ;;
 esac
 
-if ! "${T[@]}" send-keys -t "$t" -l "$text"; then
+if ! "${T[@]}" send-keys -t "=$s:" -l "$text"; then
   echo "$s FAILED send-keys; nothing submitted"
   exit 1
 fi
@@ -83,7 +83,7 @@ case "$boxtext" in
   *) echo "$s NOT-OURS ${boxtext:0:70}"; exit 1 ;;
 esac
 
-if ! "${T[@]}" send-keys -t "$t" Enter; then
+if ! "${T[@]}" send-keys -t "=$s:" Enter; then
   echo "$s FAILED Enter; the text is typed, not submitted"
   exit 1
 fi
