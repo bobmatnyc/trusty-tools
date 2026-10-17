@@ -610,7 +610,11 @@ fn canonical_var(provider: &str) -> String {
 }
 
 /// The caller-facing error for a failed bounded store read of `var`.
-fn store_failure_error(var: String, failure: StoreFailure, timeout: Duration) -> SecretResolveError {
+fn store_failure_error(
+    var: String,
+    failure: StoreFailure,
+    timeout: Duration,
+) -> SecretResolveError {
     match failure {
         // #8236: `cached` comes from the read, never from a constant — an
         // operator's next step differs by whether the store was just asked.
