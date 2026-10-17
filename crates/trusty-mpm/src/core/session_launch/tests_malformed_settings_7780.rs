@@ -216,7 +216,9 @@ fn prepare_session_backs_up_a_malformed_settings_file_exactly_once() {
     )
     .unwrap();
 
-    prepare_session_with_repo_url_and_exe(&fw, project, None, Some(std::path::Path::new(TEST_EXE)))
+    // #9846: the home named, so an ambient `CLAUDE_CONFIG_DIR` is not the user tier.
+    let exe = Some(std::path::Path::new(TEST_EXE));
+    prepare_session_for_repair_under(&fw, project, None, exe, Some(tmp_home.path()))
         .expect("preparation succeeds over a malformed settings file");
 
     let names = copies(project);

@@ -454,6 +454,9 @@ mod tests {
     #[serial_test::serial]
     fn run_prepare_session_never_writes_real_home_claude_dirs() {
         let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        // #9846: entry points now read the ambient CLAUDE_CONFIG_DIR; clear it
+        // so the user tier follows the fake HOME, not the armed write fence.
+        let _ccd_guard = EnvClearGuard::clear("CLAUDE_CONFIG_DIR");
 
         let fake_home = crate::test_support::hermetic_temp_dir();
         let _home_guard = {

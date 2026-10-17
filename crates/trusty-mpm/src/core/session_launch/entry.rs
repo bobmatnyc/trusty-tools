@@ -123,14 +123,24 @@ pub fn prepare_session_with_repo_url_and_exe(
     hook_exe: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let home = dirs::home_dir();
-    prepare_session_for_repair_under(fw, project_dir, repo_url, hook_exe, home.as_deref())
+    // #9846: the ambient user tier is `CLAUDE_CONFIG_DIR` when that is set.
+    let config_dir = crate::core::session_record::claude_config_dir_override();
+    prepare_session_for_repair_in(
+        fw,
+        project_dir,
+        repo_url,
+        hook_exe,
+        home.as_deref(),
+        config_dir.as_deref(),
+    )
 }
 
 /// [`prepare_session_with_repo_url_and_exe`] with the user home named (#8545).
 ///
 /// Why: a daemon pinned to a test home repairs through here, so the user-tier
 /// statusLine and trust seed land under that home, never `$HOME`.
-/// What: the same preparation with `home` as the user-global home.
+/// What: [`prepare_session_for_repair_in`] with no config dir, so the user tier
+/// is `<home>/.claude`.
 /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
 pub fn prepare_session_for_repair_under(
     fw: &FrameworkPaths,
@@ -138,6 +148,26 @@ pub fn prepare_session_for_repair_under(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
     home: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
+    prepare_session_for_repair_in(fw, project_dir, repo_url, hook_exe, home, None)
+}
+
+/// [`prepare_session_for_repair_under`] with the user tier's config dir named.
+///
+/// Why (#9846): with `CLAUDE_CONFIG_DIR` set, Claude Code reads the user tier
+/// from that dir, so the repair's statusLine seed, trust seed and legacy-hook
+/// strip must land there. Taking it as an argument lets a test name it without
+/// a process-global env write.
+/// What: the same preparation, with `claude_config_dir` relocating the user
+/// tier off `home` (`None` keeps `<home>/.claude` and `<home>/.claude.json`).
+/// Test: `repair_writes_the_user_tier_under_claude_config_dir`.
+pub fn prepare_session_for_repair_in(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+    home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
@@ -151,6 +181,7 @@ pub fn prepare_session_for_repair_under(
             home,
             hook_exe,
             palace_registry: None,
+            claude_config_dir,
         },
     )
 }

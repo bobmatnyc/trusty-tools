@@ -588,7 +588,7 @@ pub fn validate_and_repair_under(
     repo_url: Option<&str>,
     home: Option<&Path>,
 ) -> RepairOutcome {
-    repair_with(fw, workspace, repo_url, None, home)
+    repair_with(fw, workspace, repo_url, None, home, None)
 }
 
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
@@ -598,7 +598,8 @@ pub fn validate_and_repair_under(
 /// no installed `tm`, so `HooksMissing` stayed a gap and the repair could never
 /// report complete. Pinning the path keeps the assertion about the pipeline.
 /// What: [`repair_with`], forwarding `hook_exe` to
-/// [`crate::core::session_launch::prepare_session_for_repair_under`].
+/// [`crate::core::session_launch::prepare_session_for_repair_in`], with the
+/// process home and `CLAUDE_CONFIG_DIR` as the user tier (#9846).
 /// Test: `repair_closes_gaps_on_incomplete_workspace`.
 pub fn validate_and_repair_with_exe(
     fw: &FrameworkPaths,
@@ -606,33 +607,38 @@ pub fn validate_and_repair_with_exe(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
 ) -> RepairOutcome {
+    // #9846: the user tier `tm doctor` reads — `CLAUDE_CONFIG_DIR` when set.
+    let config_dir = crate::core::session_record::claude_config_dir_override();
     repair_with(
         fw,
         workspace,
         repo_url,
         hook_exe,
         dirs::home_dir().as_deref(),
+        config_dir.as_deref(),
     )
 }
 
 /// The shared body of the `validate_and_repair*` entry points.
 ///
-/// Why (#7763): the hook binary and the user home are host inputs a caller may
-/// pin, and each public wrapper pins a different subset. One body keeps them
-/// from drifting.
+/// Why (#7763): the hook binary, the user home and (#9846) the user tier's
+/// config dir are host inputs a caller may pin, and each public wrapper pins a
+/// different subset. One body keeps them from drifting.
 /// What: validate; return early when complete; resync in place for a
 /// hook-group-only gap; otherwise re-run the preparation pipeline through
-/// [`crate::core::session_launch::prepare_session_for_repair_under`] and
+/// [`crate::core::session_launch::prepare_session_for_repair_in`] and
 /// re-validate.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
 /// `repair_writes_auto_memory_off`,
-/// `repair_is_not_reported_when_the_pipeline_fails_fatally`.
+/// `repair_is_not_reported_when_the_pipeline_fails_fatally`,
+/// `repair_writes_the_user_tier_under_claude_config_dir`.
 fn repair_with(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
     home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> RepairOutcome {
     let before = validate_workspace_with_exe(fw, hook_exe);
     if before.is_complete() {
@@ -666,8 +672,13 @@ fn repair_with(
         };
     }
 
-    let repair_error = match crate::core::session_launch::prepare_session_for_repair_under(
-        fw, workspace, repo_url, hook_exe, home,
+    let repair_error = match crate::core::session_launch::prepare_session_for_repair_in(
+        fw,
+        workspace,
+        repo_url,
+        hook_exe,
+        home,
+        claude_config_dir,
     ) {
         Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
         Ok(_) => None,
