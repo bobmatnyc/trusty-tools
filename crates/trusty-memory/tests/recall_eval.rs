@@ -24,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Duration;
 use recall_support::{backdate, create_palaces, fact_key, rank_of, recall, remember, supersede};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use trusty_common::embedder::Embedder;
 use trusty_memory::AppState;
@@ -38,6 +38,10 @@ const GROUPS: usize = 12;
 const SUPERSEDED_PIN: usize = 0;
 /// Hits each query recalls.
 const TOP_K: u64 = 10;
+/// Cutoff for the summary line's `recall_at_k` (perf plan gap 2).
+const SUMMARY_K: usize = 5;
+/// Prefix of the machine-readable summary line a consumer greps for.
+const SUMMARY_PREFIX: &str = "recall-eval-summary ";
 /// Tags production demotion treats as a snapshot (`tools::recall_rank`).
 const SNAPSHOT_TAGS: &[&str] = &["status", "resume-target", "snapshot", "session-snapshot"];
 
@@ -418,9 +422,104 @@ struct Report {
     groups: Vec<GroupOutcome>,
 }
 
+/// One group's ranks on the summary line: corpus group id, no drawer text.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct GroupRanks {
+    id: String,
+    current: Option<usize>,
+    superseded: Option<usize>,
+}
+
+/// The machine-readable run summary; field order is the line's key order.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct Summary {
+    mode: String,
+    n: usize,
+    k: usize,
+    hit_at_1: usize,
+    hit_at_3: usize,
+    hit_at_5: usize,
+    mrr: f64,
+    recall_at_k: f64,
+    superseded_above_current: usize,
+    superseded_groups: usize,
+    group_ranks: Vec<GroupRanks>,
+}
+
+/// Round a ratio to four decimals, ties to even (as `{:.4}` formats).
+///
+/// Why: MRR 29/32 and recall@5 31/32 sit exactly on a fourth-decimal tie, so a
+/// sum that lands one ulp off would flip the printed digit between runs.
+/// What: snaps to 1e-9 first to absorb summation error, then rounds ties to
+/// even; 0.90625 prints 0.9062 and 0.96875 prints 0.9688.
+/// Test: `the_summary_scores_a_hand_built_rank_list`.
+fn round4(x: f64) -> f64 {
+    let snapped = (x * 1e9).round() / 1e9;
+    (snapped * 1e4).round_ties_even() / 1e4
+}
+
+/// `num / n`, or 0 for an empty run (never NaN on the line).
+fn ratio(num: f64, n: usize) -> f64 {
+    if n == 0 { 0.0 } else { num / n as f64 }
+}
+
 impl Report {
     fn hit_at_1(&self) -> usize {
         self.queries.iter().filter(|q| q.rank == Some(0)).count()
+    }
+
+    /// Queries whose expected drawer ranks in the top `k` (ranks are 0-based).
+    fn hits_within(&self, k: usize) -> usize {
+        self.queries
+            .iter()
+            .filter(|q| q.rank.is_some_and(|r| r < k))
+            .count()
+    }
+
+    /// Why (perf plan gap 2): the per-query log is for a person; a perf
+    /// record needs one parseable line per mechanisms mode.
+    /// What: a pure function of the recorded ranks. MRR is the mean of
+    /// 1/(rank+1) over every query, and a query whose expected drawer is not in
+    /// the returned list adds 0. Each query expects one drawer, so
+    /// `recall_at_k` is hits within `SUMMARY_K` over `n`. `hit_at_1` and
+    /// `superseded_above_current` reuse the gate's own counts.
+    /// Test: `the_summary_scores_a_hand_built_rank_list`.
+    fn summarize(&self, mode: &str) -> Summary {
+        let n = self.queries.len();
+        let reciprocal: f64 = self
+            .queries
+            .iter()
+            .filter_map(|q| q.rank)
+            .map(|r| 1.0 / (r + 1) as f64)
+            .sum();
+        Summary {
+            mode: mode.to_string(),
+            n,
+            k: SUMMARY_K,
+            hit_at_1: self.hit_at_1(),
+            hit_at_3: self.hits_within(3),
+            hit_at_5: self.hits_within(5),
+            mrr: round4(ratio(reciprocal, n)),
+            recall_at_k: round4(ratio(self.hits_within(SUMMARY_K) as f64, n)),
+            superseded_above_current: self.superseded_above().len(),
+            superseded_groups: self.groups.len(),
+            group_ranks: self
+                .groups
+                .iter()
+                .map(|g| GroupRanks {
+                    id: g.id.clone(),
+                    current: g.current,
+                    superseded: g.superseded,
+                })
+                .collect(),
+        }
+    }
+
+    /// The summary as one `recall-eval-summary {json}` line.
+    fn summary_line(&self, mode: &str) -> String {
+        let json = serde_json::to_string(&self.summarize(mode))
+            .expect("a Summary of plain numbers and strings always serializes");
+        format!("{SUMMARY_PREFIX}{json}")
     }
 
     fn superseded_above(&self) -> Vec<&GroupOutcome> {
@@ -469,6 +568,9 @@ impl Report {
             );
         }
         eprintln!("recall-eval [{label}] {}", self.summary());
+        // stderr, like the rank lines: libtest can leave `test <name> ... `
+        // unterminated on stdout, which would break the line prefix.
+        eprintln!("{}", self.summary_line(label));
     }
 }
 
@@ -920,4 +1022,72 @@ fn an_unrecalled_drawer_counts_against_the_gate() {
         format!("{err:#}").contains("superseded-above-current"),
         "{err:#}"
     );
+}
+
+/// Why (perf plan gap 2): the summary line feeds the perf record, so its
+/// arithmetic is pinned without the real model.
+/// What: a six-query list with a miss, a shared rank and both hit@k cutoffs
+/// (ranks 2 and 4 count, rank 5 does not); then the shipped mechanisms-on
+/// ranks, whose MRR (29/32) and recall@5 (31/32) sit on fourth-decimal ties.
+#[test]
+fn the_summary_scores_a_hand_built_rank_list() {
+    let report = |ranks: &[Option<usize>], groups: Vec<GroupOutcome>| Report {
+        queries: ranks
+            .iter()
+            .map(|&rank| QueryOutcome {
+                id: "q".into(),
+                expected: "d".into(),
+                rank,
+                top: None,
+            })
+            .collect(),
+        groups,
+    };
+    let g = |id: &str, current, superseded| GroupOutcome {
+        id: id.into(),
+        mechanism: Mechanism::Demotion,
+        current,
+        superseded,
+        scores: [None, None],
+    };
+    let small = report(
+        &[Some(0), Some(2), Some(2), Some(4), Some(5), None],
+        vec![
+            g("g01", Some(0), Some(1)),
+            g("g02", Some(2), Some(0)),
+            g("g03", None, Some(3)),
+        ],
+    );
+    let s = small.summarize("mechanisms on");
+    assert_eq!((s.n, s.k, s.hit_at_1, s.hit_at_3, s.hit_at_5), (6, 5, 1, 3, 4));
+    // (1 + 1/3 + 1/3 + 1/5 + 1/6 + 0) / 6 = 0.33889; the miss adds 0.
+    assert_eq!(s.mrr, 0.3389);
+    assert_eq!(s.recall_at_k, 0.6667);
+    assert_eq!((s.superseded_above_current, s.superseded_groups), (2, 3));
+    assert_eq!(
+        s.group_ranks[2],
+        GroupRanks {
+            id: "g03".into(),
+            current: None,
+            superseded: Some(3),
+        }
+    );
+    let line = small.summary_line("mechanisms on");
+    let json = line
+        .strip_prefix(SUMMARY_PREFIX)
+        .expect("the line carries its prefix");
+    assert!(!line.contains('\n'), "one line: {line}");
+    let parsed: serde_json::Value = serde_json::from_str(json).expect("the line is JSON");
+    assert_eq!(parsed["mode"], "mechanisms on");
+    assert_eq!(parsed["mrr"], 0.3389);
+    assert_eq!(parsed["group_ranks"][2]["current"], serde_json::Value::Null);
+
+    let mut on_ranks = vec![Some(0); 32];
+    for (q, rank) in [(2, 2), (8, 1), (10, 5), (31, 1), (32, 1)] {
+        on_ranks[q - 1] = Some(rank);
+    }
+    let s = report(&on_ranks, Vec::new()).summarize("mechanisms on");
+    assert_eq!((s.hit_at_1, s.hit_at_3, s.hit_at_5), (27, 31, 31));
+    assert_eq!((s.mrr, s.recall_at_k), (0.9062, 0.9688));
+    assert_eq!(report(&[], Vec::new()).summarize("empty").mrr, 0.0);
 }
