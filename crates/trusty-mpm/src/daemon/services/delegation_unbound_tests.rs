@@ -47,12 +47,16 @@ fn only_unbound_unstaled_live_records_count_9007() {
 #[test]
 fn a_sealed_registry_is_an_error_not_a_zero_9007() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        dir.path().join(SESSION_CLAUDES_FILE),
-        b"{\"version\":1,\"sessions\":",
-    )
-    .expect("corrupt");
+    // Write a registry through a real state so the file sits where a daemon
+    // loads it from, then corrupt it and load again.
+    let first = DaemonState::with_paths(&FrameworkPaths::under(dir.path()));
+    first
+        .settle_unproven_session(SessionId::new())
+        .expect("saved");
+    let file = first.framework_root().join(SESSION_CLAUDES_FILE);
+    std::fs::write(&file, b"{\"version\":1,\"sessions\":").expect("corrupt");
     let state = DaemonState::with_paths(&FrameworkPaths::under(dir.path()));
+    assert!(state.session_claudes().sealed().is_some(), "loaded sealed");
     state.upsert_delegation(Delegation::observed(
         SessionId::new(),
         "engineer",
