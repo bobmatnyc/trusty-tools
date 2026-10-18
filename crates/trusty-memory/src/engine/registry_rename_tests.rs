@@ -563,3 +563,72 @@ fn rename_palace_refuses_while_a_detached_vector_job_holds_the_database() {
         .expect("open the renamed palace");
     assert!(!reopened.is_read_only(), "reopened on a read-only snapshot");
 }
+
+/// Build palace `id` through a scratch registry, drop it, and wait until no
+/// store in this process tracks its redb files.
+fn create_untracked(root: &Path, id: &str) {
+    drop(create(&PalaceRegistry::new(), root, id));
+    let dir = root.join(id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while KgStoreRedb::is_cached(&dir.join(KG_FILE))
+        || vector_db_is_open(&dir.join("index.usearch"))
+    {
+        assert!(Instant::now() < deadline, "the scratch stores never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Hold a raw redb lock on `path` from another thread until the returned
+/// sender fires, is dropped, or `hold` elapses; returns once it is held.
+fn hold_redb_lock(
+    path: PathBuf,
+    hold: Duration,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (locked, lock_held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let db = redb::Database::create(&path).expect("hold the redb lock");
+        locked.send(()).expect("signal");
+        let _ = released.recv_timeout(hold);
+        drop(db);
+    });
+    lock_held.recv().expect("the lock is held");
+    (holder, release)
+}
+
+/// Why (#10035): the #9945 wait polls in-process strong counts, which reach
+/// zero before `redb::Database::drop` releases the OS file lock. A reopen
+/// racing that drop outlasted the open retry and got a read-only snapshot.
+/// What: a raw `redb::Database` with no cached store holds `<src>/kg.redb`
+/// for ~500 ms; the rename must wait for the lock, so the new id reopens
+/// writable.
+/// Test: itself.
+#[test]
+fn rename_palace_waits_for_a_held_kg_file_lock() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    create_untracked(root, "lock-src");
+    let reg = PalaceRegistry::new();
+    // Kept alive (not `_`) so the holder waits out the full hold.
+    let (holder, _release) = hold_redb_lock(
+        root.join("lock-src").join(KG_FILE),
+        Duration::from_millis(500),
+    );
+
+    let opts = RenameOptions {
+        busy_wait: Duration::from_secs(5),
+        ..RenameOptions::default()
+    };
+    reg.rename_palace(root, "lock-src", "lock-dst", &opts)
+        .expect("rename");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("lock-dst"))
+        .expect("open the renamed palace");
+    let read_only = reopened.is_read_only();
+    drop(reopened);
+    holder.join().expect("the lock holder");
+    assert!(
+        !read_only,
+        "the renamed palace reopened on a read-only snapshot"
+    );
+}
