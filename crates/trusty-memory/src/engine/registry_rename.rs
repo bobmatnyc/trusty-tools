@@ -27,10 +27,11 @@ use crate::engine::palace_emptiness::{
 use crate::engine::store::kg_redb::KgStoreRedb;
 use crate::engine::store::palace_format::{KG_FILE, mirror_to_preserve};
 use crate::engine::store::palace_store::PalaceStore;
-use crate::engine::store::vector::vector_db_is_open;
+use crate::engine::store::vector::{redb_path_for, vector_db_is_open};
 use trusty_common::palace_alias::{
     AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent,
 };
+use trusty_common::redb_cache::open_palace_db_read_only;
 
 /// Default bound on waiting for an open-lock or for a cached handle to go idle.
 pub(crate) const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);
@@ -242,7 +243,9 @@ impl PalaceRegistry {
     /// `rename_palace_refuses_a_target_with_chat_sessions`,
     /// `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
     /// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
-    /// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
+    /// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`,
+    /// `rename_palace_waits_for_a_held_kg_file_lock`,
+    /// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
     pub(crate) fn rename_palace(
         &self,
         data_root: &Path,
@@ -485,25 +488,51 @@ fn invalid(new: &str, reason: &str) -> PalaceRenameError {
 /// gets `DatabaseAlreadyOpen` and falls back to a read-only snapshot.
 /// What: polls the KG cache for `<root>/<key>/kg.redb` and the live vector
 /// `Database` of `<root>/<key>/index.usearch.redb` (alive while any clone of
-/// its store is, even in a detached blocking job); a file still open after
+/// its store is, even in a detached blocking job), then the OS redb lock on
+/// both files ([`redb_file_locked`]); a file still open or locked after
 /// `wait` is `Busy`, with nothing changed. Also run on the `replace_empty`
 /// target after `check_target` opened it.
 /// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
 /// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
-/// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
+/// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`,
+/// `rename_palace_waits_for_a_held_kg_file_lock`,
+/// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
 fn await_files_closed(data_root: &Path, keys: &[String], wait: Duration) -> RenameResult<()> {
     let deadline = Instant::now() + wait;
     for key in keys {
         let dir = data_root.join(key);
         let (kg, vectors) = (dir.join(KG_FILE), dir.join("index.usearch"));
-        while KgStoreRedb::is_cached(&kg) || vector_db_is_open(&vectors) {
+        let files = [kg.clone(), redb_path_for(&vectors)];
+        // #10035: a zero strong count is not a released lock — `Database::drop`
+        // commits a trim and flushes before redb unlocks the file.
+        while KgStoreRedb::is_cached(&kg)
+            || vector_db_is_open(&vectors)
+            || files.iter().any(|f| redb_file_locked(f))
+        {
             if Instant::now() >= deadline {
-                return Err(busy(key, "its store files are still open in this process"));
+                return Err(busy(key, "its store files are still open"));
             }
             std::thread::sleep(RELEASE_POLL);
         }
     }
     Ok(())
+}
+
+/// Whether a redb `Database` — in this process or another — locks `path`.
+///
+/// Why (#10035): redb releases its file lock only at the end of
+/// `Database::drop`, after the last strong reference is gone.
+/// What: a read-only open ([`open_palace_db_read_only`]): no write, no repair,
+/// no file creation; it is dropped before returning, so it holds no lock a
+/// later open trips on. Only `DatabaseAlreadyOpen` counts as locked; a missing
+/// file (no vector index yet) or any other error is not a held lock.
+/// Test: `rename_palace_waits_for_a_held_kg_file_lock`,
+/// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
+fn redb_file_locked(path: &Path) -> bool {
+    matches!(
+        open_palace_db_read_only(path),
+        Err(redb::DatabaseError::DatabaseAlreadyOpen)
+    )
 }
 
 /// `Busy` for `palace`.

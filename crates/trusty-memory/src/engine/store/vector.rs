@@ -299,7 +299,8 @@ const MIGRATED_SUFFIX: &str = ".migrated";
 /// the new HNSW vectors. Keeping the redb file co-located (just with a
 /// `.redb` extension) makes upgrade-in-place obvious to operators and keeps
 /// per-palace cleanup simple ("delete the palace data dir").
-fn redb_path_for(usearch_path: &Path) -> PathBuf {
+// #10035: crate-visible so the palace rename probes the same file's lock.
+pub(crate) fn redb_path_for(usearch_path: &Path) -> PathBuf {
     let mut s = usearch_path.as_os_str().to_owned();
     s.push(".redb");
     PathBuf::from(s)
