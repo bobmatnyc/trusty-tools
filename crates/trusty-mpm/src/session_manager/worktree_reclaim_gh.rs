@@ -140,6 +140,8 @@ pub(crate) fn gh_command(dir: &Path, gh_env: &GhEnv) -> Command {
     for (key, value) in gh_env.vars() {
         cmd = cmd.env(key, value);
     }
+    // #9750: a binding runs the real gh, not the calling session's shim.
+    let cmd = crate::core::gh_shim_path::bind_gh_path(cmd, gh_env.vars(), gh_env.unset_vars());
     cmd.env("GH_PAGER", "")
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")

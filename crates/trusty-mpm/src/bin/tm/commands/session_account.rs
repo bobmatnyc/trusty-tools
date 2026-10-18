@@ -32,7 +32,9 @@ pub(crate) fn spawn_dir(action: &SessionAction) -> anyhow::Result<Option<PathBuf
 
 /// `tm sessions <verb>` with the global `--account` applied (#8914).
 ///
-/// What: no account → the plain [`super::session::session`] dispatch. With an
+/// What: a spawn verb first passes the #9750 launch check
+/// ([`refuse_unverified_launch`]) unless `--account-token-stdin` supplied the
+/// token. No account → the plain [`super::session::session`] dispatch. With an
 /// account, a spawn verb pins it first ([`pin_account_for_dir`]) and any other
 /// verb is refused, so the flag is never silently dropped.
 /// Test: `spawn_dir_is_none_for_a_verb_that_spawns_nothing` covers the
@@ -43,8 +45,16 @@ pub(crate) async fn session_as_account(
     account: Option<&str>,
     account_token: Option<&str>,
 ) -> anyhow::Result<()> {
+    let dir = spawn_dir(&action)?;
+    // #9750 Q1: an interactive launch of a pinned project verifies its login
+    // first. A `--account-token-stdin` token is proven by the pin step itself.
+    if let Some(dir) = &dir
+        && account_token.is_none()
+    {
+        refuse_unverified_launch(dir, account).await?;
+    }
     if let Some(login) = account {
-        let Some(dir) = spawn_dir(&action)? else {
+        let Some(dir) = dir else {
             anyhow::bail!(
                 "--account {login} applies to `tm sessions new` and `tm sessions start`; this \
                  verb spawns no session. A resumed session keeps the account its project pins."
@@ -53,6 +63,30 @@ pub(crate) async fn session_as_account(
         pin_account_for_dir(daemon, &dir, login, account_token).await?;
     }
     super::session::session(daemon, action).await
+}
+
+/// Exit 1 with the plan's message when `dir`'s pinned gh login — `account`,
+/// else the project's pin — is not proven in the keyring (#9750, plan Q1).
+///
+/// Why: the daemon's spawn never blocks (#3025) and fails a refused pin closed
+/// with the nobody-token, so an interactive launch is refused here, before the
+/// daemon is asked, and the operator reads why.
+/// What: [`trusty_mpm::core::gh_login_verify::check_launch_login`] off the
+/// executor; on refusal the message is printed as is and the process exits 1.
+/// A check that cannot run (a panicked task) is an `Err`.
+/// Test: the decisions are `check_launch_login`'s (`check_pin`,
+/// `session_pin_with`); the exit is process wiring.
+async fn refuse_unverified_launch(dir: &Path, account: Option<&str>) -> anyhow::Result<()> {
+    let (dir, account) = (dir.to_path_buf(), account.map(str::to_string));
+    let checked = tokio::task::spawn_blocking(move || {
+        trusty_mpm::core::gh_login_verify::check_launch_login(&dir, account.as_deref())
+    })
+    .await?;
+    if let Err(refusal) = checked {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Prove `login` for the checkout at `dir`, then pin it on the project (#8914).

@@ -902,6 +902,13 @@ const SPAWN_ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
 /// An Enterprise Server repository whose registry record pins only an account.
 const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
 
+/// #9750 Q4: the proven-token credential tm's own git call still uses.
+fn proven_credential(
+    proven: &crate::core::gh_account_proof::ProvenToken,
+) -> crate::core::gh_session_shim::PinnedCredential {
+    crate::core::gh_session_shim::PinnedCredential::from_proven(proven)
+}
+
 /// The account-only `octo-pinned` pin.
 fn account_only_pin() -> super::PinnedGhIdentity {
     super::PinnedGhIdentity {
@@ -929,8 +936,8 @@ fn spawn_with(
         cache: None,
     };
     let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
-    super::pinned_spawn_env(&account_only_pin(), origin, |login| {
-        super::spawn_proof(&prover, login, origin, &aliases)
+    super::pinned_spawn_env(&account_only_pin(), origin, None, |login| {
+        super::spawn_proof(&prover, login, origin, &aliases).map(|p| proven_credential(&p))
     })
     .expect("a pin must produce an env")
     .expect("the spawn env never errs")
@@ -972,7 +979,7 @@ fn an_account_only_spawn_pin_gets_the_proven_token() {
 /// Test: itself.
 #[test]
 fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
-    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, |_| {
+    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, None, |_| {
         Err("/x: the token gh returned for 'octo-pinned' authenticates as 'octo-other'".into())
     })
     .expect("a pinned account must never resolve to no identity")
@@ -1004,7 +1011,7 @@ fn a_config_dir_spawn_pin_is_proven_not_used_bare() {
         config_dir: Some(dir.path().to_path_buf()),
         ..Default::default()
     };
-    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |login| {
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, None, |login| {
         assert_eq!(login, "octo-pinned");
         Err("not proven".into())
     })
@@ -1118,6 +1125,8 @@ impl std::io::Write for LogBuffer {
 /// proof and the production logger alike — under a capturing subscriber;
 /// return the injected vars and every log line.
 fn logged_spawn(who: Result<&str, &str>) -> (Vec<(String, String)>, String) {
+    // #4931: a thread-local capture records nothing until the global level is raised.
+    crate::test_support::enable_event_capture();
     let buffer = LogBuffer::default();
     let writer = buffer.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -1234,4 +1243,39 @@ fn proof_origin_refusals_never_quote_the_origin_token() {
         assert!(!err.contains(TOKEN), "the token reached the refusal");
         assert!(err.contains("://***@"), "{err}");
     }
+}
+
+/// 🔴 #9750 (D6e): an account-only pin's session gets the shim and `GH_USER`,
+/// and no token variable: the inherited ones are cleared by the launch, which
+/// the shim's presence arms.
+#[test]
+fn a_shimmed_account_only_spawn_injects_no_token() {
+    let shim = Path::new("/state/gh-shim/octo-pinned@github.com-0");
+    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, None, |login| {
+        assert_eq!(login, "octo-pinned");
+        Ok(crate::core::gh_session_shim::PinnedCredential::shim(shim))
+    })
+    .expect("a pin must produce an env")
+    .expect("the spawn env never errs");
+    for var in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        // #9750 (ruling D7c): no token variable, not even the sentinel.
+        assert!(
+            env.vars.iter().all(|(k, _)| k != var),
+            "{var}: {:?}",
+            env.vars
+        );
+    }
+    assert_eq!(
+        value_of(&env.vars, crate::core::gh_session_shim::GH_SHIM_ENV),
+        shim.to_string_lossy()
+    );
+    assert_eq!(value_of(&env.vars, GH_USER_ENV_VAR), "octo-pinned");
+    let cleared = crate::core::gh_identity::inherited_identity_to_clear(&env.vars);
+    assert!(cleared.iter().any(|c| c == "GITHUB_TOKEN"), "{cleared:?}");
+    assert!(env.warning.is_none(), "{:?}", env.warning);
 }

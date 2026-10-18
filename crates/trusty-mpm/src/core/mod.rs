@@ -184,10 +184,16 @@ pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #9091: asks gh about a login in the daemon's env and in tm's account dirs.
 pub(crate) mod gh_login_probe;
+// #9750: the launch-time keyring login check for a pinned project (D6e).
+pub mod gh_login_verify;
 // #9091: `[accounts]` org → gh account map and the one account resolver.
 pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
 pub mod gh_session_account;
+// #9750: the per-call gh credential shim a pinned session runs (D6e).
+pub mod gh_session_shim;
+// #9750: tm's own gh children run the real gh, not a pinned session's shim.
+pub mod gh_shim_path;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]

@@ -981,6 +981,68 @@ fn inplace_exec_command_clears_an_inherited_gh_token() {
     );
 }
 
+/// The GLOBAL `config_dir` fallback as the CLI resolves it (#8383): it sets
+/// `GH_CONFIG_DIR` and clears nothing. `hosts_yml` is written into the dir when
+/// `Some`.
+fn global_gh(hosts_yml: Option<&str>) -> (tempfile::TempDir, trusty_mpm::core::gh_identity::GhEnv) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    if let Some(text) = hosts_yml {
+        std::fs::write(dir.path().join("hosts.yml"), text).expect("write hosts.yml");
+    }
+    let cfg = trusty_mpm::core::trusty_tools_config::GithubConfig {
+        config_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    let env = trusty_mpm::core::gh_identity::resolve_tiered_gh_env(None, Some(&cfg))
+        .expect("a config_dir binding resolves");
+    (dir, env)
+}
+
+/// #9750: a relaunched PM inherited the pane shell's `GH_TOKEN`, a snapshot
+/// that went stale, because the global fallback clears nothing (#8383). Once
+/// gh resolves a login under the dir, the launch drops the inherited token.
+#[test]
+fn inplace_exec_command_clears_a_stale_token_under_a_keyring_login_9750() {
+    let keyring_login = "github.com:\n  users:\n    octo: {}\n  user: octo\n";
+    let (_dir, gh) = global_gh(Some(keyring_login));
+    let launch = gh.for_session_launch_with(None, |_, host| {
+        assert_eq!(host, "github.com");
+        Ok(())
+    });
+    let resume = synthetic_resume(&[]);
+    let cmd =
+        build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &launch, false);
+
+    let envs = env_of(&cmd);
+    for name in ["GH_TOKEN", "GITHUB_TOKEN", "GH_USER"] {
+        assert!(
+            envs.contains(&(name.to_owned(), None)),
+            "{name} must be removed so gh reads the live login: {envs:?}"
+        );
+    }
+}
+
+/// #9750 error arm: `hosts.yml` names an account but no credential resolves
+/// (a logout elsewhere, a reset or locked keychain), so the inherited
+/// `GH_TOKEN` stays — it may be the only working credential.
+#[test]
+fn inplace_exec_command_keeps_the_token_without_a_dir_login_9750() {
+    let named = "github.com:\n  users:\n    octo: {}\n  user: octo\n";
+    for hosts_yml in [None, Some("not: [valid"), Some(named)] {
+        let (_dir, gh) = global_gh(hosts_yml);
+        let launch = gh.for_session_launch_with(None, |_, _| Err("gh exited 1".to_owned()));
+        let resume = synthetic_resume(&[]);
+        let cmd =
+            build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"), &launch, false);
+
+        let envs = env_of(&cmd);
+        assert!(
+            !envs.iter().any(|(k, _)| k == "GH_TOKEN"),
+            "{hosts_yml:?}: no credential resolves, so the inherited GH_TOKEN stays: {envs:?}"
+        );
+    }
+}
+
 #[test]
 fn inplace_exec_command_forwards_every_arg_in_order() {
     // #4336 core regression: the Command handed to `exec` must carry the

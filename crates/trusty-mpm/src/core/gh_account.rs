@@ -474,9 +474,12 @@ pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
         // `nonempty_stdout_blocking`; the failure message stays local because
         // it names the pinned account.
         Some(
-            trusty_common::gh::GhCommand::new(["auth", "token", "-u", &owned])
-                .nonempty_stdout_blocking()
-                .map_err(|e| format!("`gh auth token -u {owned}` failed: {e}")),
+            // #9750: `-u` names the account; the session's shim must not answer.
+            crate::core::gh_shim_path::bypass_session_shim(trusty_common::gh::GhCommand::new([
+                "auth", "token", "-u", &owned,
+            ]))
+            .nonempty_stdout_blocking()
+            .map_err(|e| format!("`gh auth token -u {owned}` failed: {e}")),
         )
     })
     .unwrap_or_else(|| {
@@ -796,24 +799,24 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
         use crate::core::gh_session_account::session_spawn_env;
         let state_root = crate::core::paths::FrameworkPaths::default().root;
         let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user();
-        // #8510: an account-only pin gets only a token `GET /user` proves.
-        let prove = |login: &str| {
-            prove_pinned_login(
+        // #9750 (D6e): the login is verified, then the session's gh reads
+        // the keyring per call through a shim; no token reaches the env.
+        let launch = |login: &str| {
+            crate::core::gh_session_shim::launch_pinned_login_cli(
                 &pinned_for_task,
                 &origin_for_task,
                 &state_root,
                 &aliases,
                 login,
-                None,
             )
         };
-        // #8914: every config-dir pin is proven, never used bare.
+        // #8914: every config-dir pin is verified, never used bare.
         let env = session_spawn_env(
             &pinned_for_task,
             &origin_for_task,
             &state_root,
             &aliases,
-            prove,
+            launch,
         );
         log_spawn_env(env, &cwd_for_log)
     })
@@ -821,10 +824,11 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
     joined_spawn_vars(joined, &pinned, &origin, cwd)
 }
 
-/// Prove `login`'s token for `pinned` on `origin` the way a spawn does (#8510).
+/// Prove `login`'s token for `pinned` on `origin` for tm's own git call (#8510).
 ///
 /// Why: #9160 — session-ref git calls prove the same pin with the same
-/// candidates; one function keeps the two from drifting.
+/// candidates as a launch; #9750: a session spawn verifies instead and injects
+/// no token ([`crate::core::gh_session_shim::launch_pinned_login`]).
 /// What: candidates from [`crate::core::gh_account_dir::AccountDirSources`],
 /// a registry config-dir pin first (#8914 HIGH 3), a stored token before `gh`,
 /// `GET /user`, and `cache` (`None` proves every time).
@@ -839,15 +843,14 @@ pub(crate) fn prove_pinned_login(
     cache: Option<&crate::core::gh_account_proof::ProofCache>,
 ) -> Result<crate::core::gh_account_proof::ProvenToken, String> {
     use crate::core::gh_account_proof::{AccountProver, CliTokenProbe, HttpUserCheck};
-    let mut sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
-        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+    // #9750: the launch check asks the same dirs (`pin_sources`).
+    let sources = crate::core::gh_login_verify::pin_sources(
+        pinned,
         origin,
-        state_root.to_path_buf(),
+        state_root,
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
         gh_config_dir(),
     );
-    if let Some(dir) = &pinned.config_dir {
-        sources.static_config_dir = Some(dir.clone());
-    }
     let prover = AccountProver {
         sources: &sources,
         probe: &crate::core::gh_session_account::StoredTokenFirst(&CliTokenProbe),
@@ -950,13 +953,18 @@ pub(crate) const REFUSED_GH_TOKEN: &str = "tm-refused-unverified-gh-account-pin"
 /// pins a credential-less config dir and lets `gh` fail inside it.
 /// What: #8914: config-dir pins are
 /// [`crate::core::gh_session_account::session_spawn_env`]'s; this reads only
-/// the account. An account pin gets the token `prove` returns (see
-/// [`crate::core::gh_account_proof::prove_account_token`]) in the token
-/// variable for its host class, the nobody-token in the other, and `GH_USER`;
-/// never a config dir, which gh would re-read against the keyring on every
-/// call. Otherwise [`refused_spawn_env`], so the session's `gh` fails closed
-/// and the caller logs why. `None` when nothing is pinned.
+/// the account. An account pin gets the vars `credential` accepts and
+/// `GH_USER`: #9750, a session's gh shim and no token
+/// ([`crate::core::gh_session_shim::launch_pinned_login`]); tm's own git call
+/// (#9160), the token [`crate::core::gh_account_proof::prove_account_token`]
+/// proves. Otherwise [`refused_spawn_env`], so the session's `gh` fails closed
+/// and the caller logs why. #9750: when `host` (the origin's) is known, git's
+/// credential helper for it is pinned to the credential's helper — the shim —
+/// or, refused, to gh's own, which then reads the nobody-token. `None` when
+/// nothing is pinned.
 /// Test: `an_account_only_spawn_pin_gets_the_proven_token`,
+/// `a_shimmed_account_only_spawn_injects_no_token`,
+/// `a_shimmed_account_only_spawn_pins_git_to_the_shim`,
 /// `an_account_only_spawn_pin_with_no_proven_token_fails_closed`,
 /// `a_config_dir_spawn_pin_is_proven_not_used_bare`,
 /// `a_ghes_spawn_pin_puts_the_token_in_gh_enterprise_token`,
@@ -964,8 +972,10 @@ pub(crate) const REFUSED_GH_TOKEN: &str = "tm-refused-unverified-gh-account-pin"
 pub(crate) fn pinned_spawn_env(
     pinned: &PinnedGhIdentity,
     origin: &str,
-    prove: impl FnOnce(&str) -> Result<crate::core::gh_account_proof::ProvenToken, String>,
+    host: Option<&str>,
+    credential: impl FnOnce(&str) -> Result<crate::core::gh_session_shim::PinnedCredential, String>,
 ) -> Option<Result<GhSpawnEnv, String>> {
+    use crate::core::gh_session_account::{GH_CREDENTIAL_HELPER, git_credential_pin};
     let account = pinned
         .account
         .as_deref()
@@ -974,18 +984,29 @@ pub(crate) fn pinned_spawn_env(
     // #8914 HIGH 3: a config-dir pin is proven by `session_spawn_env`; here
     // only its account is read, never its dir.
     let login = account?;
-    // #8510 (owner ruling 2026-09-24): the token is injected, never logged.
-    Some(Ok(match prove(login) {
-        Ok(proven) => {
-            let mut vars = proven.identity_vars();
+    // #9750 (D6e): a session's credential is its shim; nothing is logged.
+    let (mut env, helper) = match credential(login) {
+        Ok(cred) => {
+            let mut vars = cred.vars;
             vars.push((GH_USER_ENV_VAR.to_string(), login.to_string()));
-            GhSpawnEnv {
+            let env = GhSpawnEnv {
                 vars,
                 warning: None,
-            }
+            };
+            (env, cred.helper)
         }
-        Err(reason) => refused_spawn_env(Some(login), origin, &reason, pinned.source),
-    }))
+        Err(reason) => (
+            refused_spawn_env(Some(login), origin, &reason, pinned.source),
+            GH_CREDENTIAL_HELPER.to_string(),
+        ),
+    };
+    // #9750: with no token in the env, a global `!gh auth git-credential`
+    // would answer as the keyring's active account; pin git to the helper.
+    env.vars.extend(
+        host.map(|h| git_credential_pin(h, &helper))
+            .unwrap_or_default(),
+    );
+    Some(Ok(env))
 }
 
 /// The fail-closed spawn env for an account pin no token is proven for (#8510).

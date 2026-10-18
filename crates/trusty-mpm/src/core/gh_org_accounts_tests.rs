@@ -317,7 +317,7 @@ fn an_org_map_refusal_names_the_table_not_the_registry() {
         config_dir: None,
         source: AccountSource::OrgMap,
     };
-    let env = crate::core::gh_account::pinned_spawn_env(&mapped, &origin("duetto"), |_| {
+    let env = crate::core::gh_account::pinned_spawn_env(&mapped, &origin("duetto"), None, |_| {
         Err("no candidate token".into())
     })
     .expect("a pin")

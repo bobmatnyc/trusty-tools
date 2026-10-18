@@ -724,6 +724,15 @@ pub(crate) async fn run_inplace_relaunch(
         }
     };
 
+    // #8233 review (HIGH): resolve the session workspace's pinned `gh` identity
+    // — the pane shell stopped carrying it when the launch moved into a spec.
+    // #9750: before reactivating, so a pinned login the keyring cannot prove
+    // refuses the relaunch (plan Q1) without leaving the record Active.
+    let gh_env = match crate::gh_identity::relaunch_gh_env(&cwd) {
+        Ok(gh_env) => gh_env,
+        Err(refusal) => return InPlaceOutcome::Result(Err(anyhow::anyhow!("{refusal}"))),
+    };
+
     // Reactivate immediately before exec — and HONOR the result (#2027):
     // a refused/failed reactivate aborts rather than proceeding to exec.
     // #2789: forward this pane's own id so the daemon's stale-`Active`
@@ -734,16 +743,6 @@ pub(crate) async fn run_inplace_relaunch(
     if !reactivate_managed_session(client, url, id, caller_pane_id, pane_confirmed_dead).await {
         return InPlaceOutcome::FallThrough;
     }
-
-    // #8233 review (HIGH): resolve the session workspace's pinned `gh` identity
-    // — the pane shell stopped carrying it when the launch moved into a spec.
-    // A refusal here (the `account`-only strategy) is logged, not fatal: losing
-    // the relaunch entirely is worse than relaunching on the ambient identity,
-    // which is what every pre-#3025 session had.
-    let gh_env = crate::gh_identity::load_gh_env_for(&cwd).unwrap_or_else(|e| {
-        eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
-        trusty_mpm::core::gh_identity::GhEnv::default()
-    });
 
     InPlaceOutcome::Result(exec_claude_in_place(inplace_exec_command_for(
         // #8405: the operator's config decides the renderer.
@@ -826,6 +825,8 @@ pub(crate) fn inplace_exec_command_for(
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_carries_the_pinned_gh_identity`,
 /// `inplace_exec_command_clears_an_inherited_gh_token`,
+/// `inplace_exec_command_clears_a_stale_token_under_a_keyring_login_9750`,
+/// `inplace_exec_command_keeps_the_token_without_a_dir_login_9750`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,

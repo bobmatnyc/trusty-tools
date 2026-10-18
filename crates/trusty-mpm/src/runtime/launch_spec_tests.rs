@@ -328,3 +328,48 @@ fn mark_started_writes_the_sentinel_beside_the_spec() {
         "the shim must leave a sentinel the daemon can see"
     );
 }
+
+/// #9750: a pinned launch spec carries no token, removes the inherited ones,
+/// and puts the gh shim dir first on the `PATH` the pane hands `claude`.
+#[test]
+fn a_shimmed_spec_puts_the_shim_first_on_path_9750() {
+    let gh_env = vec![
+        (
+            crate::core::gh_session_shim::GH_SHIM_ENV.to_owned(),
+            "/state/gh-shim/octo".to_owned(),
+        ),
+        ("GH_USER".to_owned(), "octo".to_owned()),
+    ];
+    let spec = LaunchSpec {
+        env_unset: crate::core::gh_identity::inherited_identity_to_clear(&gh_env),
+        env_set: gh_env,
+        ..sample()
+    };
+    let cmd = spec.to_command();
+    let envs: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    for var in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        assert!(envs.contains(&(var.to_owned(), None)), "{var}: {envs:?}");
+    }
+    let path = envs
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .and_then(|(_, v)| v.clone())
+        .expect("PATH is set");
+    assert!(
+        path == "/state/gh-shim/octo" || path.starts_with("/state/gh-shim/octo:"),
+        "{path}"
+    );
+}

@@ -472,7 +472,8 @@ impl ProofCache {
 }
 
 /// One candidate: exists, is safe to run gh in, and yields `login`'s token.
-fn prove_one(
+/// #9750: `pub(crate)` so the launch check proves a dir and drops the token.
+pub(crate) fn prove_one(
     dir: &Path,
     login: &str,
     host: &str,
