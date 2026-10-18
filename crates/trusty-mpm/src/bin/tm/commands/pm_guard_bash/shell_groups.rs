@@ -522,7 +522,7 @@ pub(super) fn has_brace_expanded_program(segment: &str) -> bool {
 }
 
 /// Whether `word` holds a `{…}` with a `,` or `..` in it that is not `${…}`.
-fn is_brace_expansion(word: &str) -> bool {
+pub(super) fn is_brace_expansion(word: &str) -> bool {
     word.match_indices('{').any(|(at, _)| {
         !word[..at].ends_with('$')
             && word[at + 1..].find('}').is_some_and(|end| {
