@@ -67,15 +67,27 @@ impl FleetEnv {
 
     /// `tm <args>`, dialling the daemon at `socket` when one is given.
     fn tm_with_socket(&self, args: &[&str], socket: Option<&Path>) -> Output {
+        let mut cmd = common::tm_command_in(self.home.path());
+        if let Some(socket) = socket {
+            cmd.env("TRUSTY_MPM_SOCKET", socket);
+        }
+        self.confine(cmd, args)
+    }
+
+    /// `tm <args>` with one more environment variable set.
+    fn tm_with_env(&self, args: &[&str], key: &str, value: &Path) -> Output {
+        let mut cmd = common::tm_command_in(self.home.path());
+        cmd.env(key, value);
+        self.confine(cmd, args)
+    }
+
+    /// Run `cmd` with `args` on this environment's tmux server and `PATH`.
+    fn confine(&self, mut cmd: Command, args: &[&str]) -> Output {
         let path = format!(
             "{}:{}",
             self.bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = common::tm_command_in(self.home.path());
-        if let Some(socket) = socket {
-            cmd.env("TRUSTY_MPM_SOCKET", socket);
-        }
         cmd.args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
@@ -1196,4 +1208,128 @@ fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
         text(&out)
     );
     assert_eq!(env.status_json()["binding"]["ok"], false);
+}
+
+/// The one launch record's PID; panics unless there is exactly one.
+fn only_record(env: &FleetEnv) -> u32 {
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+    pid
+}
+
+/// The `--model` lines in the fake `claude`'s argv log: one per launch.
+fn launch_count(env: &FleetEnv) -> usize {
+    std::fs::read_to_string(env.bin.path().join(ARGV_LOG))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "--model"))
+        .count()
+}
+
+/// #9092 critic HIGH: a split Architect session's active pane is not the
+/// Architect's, so `relaunch` refuses before it signals or types anything.
+#[test]
+fn fleet_relaunch_refuses_a_split_architect_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let old = only_record(&env);
+    let split = Command::new("tmux")
+        .args([
+            "split-window",
+            "-t",
+            &format!(
+                "{}:",
+                trusty_common::tmux::exact_session_target("tm-architect")
+            ),
+        ])
+        .env("TMUX_TMPDIR", env.tmux_dir.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .status()
+        .expect("tmux");
+    assert!(split.success(), "split-window");
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("has 2 panes"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::process_name_is_claude(old),
+        "the Architect was stopped"
+    );
+    assert_eq!(launch_count(&env), 1, "a claude was started");
+    assert_eq!(only_record(&env), old);
+}
+
+/// #9092 critic HIGH: a launch that cannot be prepared — here the prompt
+/// file cannot be written, since `TMPDIR` names a file — refuses before the
+/// running Architect is stopped.
+#[test]
+fn fleet_relaunch_stops_nothing_when_the_launch_cannot_be_prepared() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let old = only_record(&env);
+    let not_a_dir = env.home.path().join("tmp-is-a-file");
+    std::fs::write(&not_a_dir, "").unwrap();
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_env(&relaunch, "TMPDIR", &not_a_dir);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing was stopped"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::process_name_is_claude(old),
+        "the Architect was stopped"
+    );
+    assert_eq!(launch_count(&env), 1, "a claude was started");
+    assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+/// #9092 critic MEDIUM: a relaunched resume that dies keeps the session,
+/// clears the conversation record and names `tm fleet relaunch`, which then
+/// starts a new conversation in the same session.
+#[test]
+fn fleet_relaunch_keeps_the_session_when_the_resume_fails() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    let id = env.write_transcript(&first).expect("a fresh --session-id");
+    let old = only_record(&env);
+    env.mark(RESUME_FAILS);
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm(&relaunch);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for want in [
+        format!("stopped claude pid {old} in tmux session tm-architect"),
+        format!("resuming the Architect's conversation {id} failed"),
+        "kept tmux session tm-architect".to_owned(),
+        "the next `tm fleet relaunch` starts a new conversation".to_owned(),
+    ] {
+        assert!(stderr.contains(&want), "{want}: {}", text(&out));
+    }
+    assert!(!stderr.contains("tm fleet init"), "{}", text(&out));
+    assert!(env.has_session("tm-architect"), "the session was killed");
+    assert!(!env.conversation_record().exists(), "the record was kept");
+
+    // The hint holds: a relaunch now starts a new conversation and binds it.
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    let third = env.launches(3).get(2).cloned().unwrap_or_default();
+    assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
+    assert_eq!(env.status_json()["binding"]["ok"], true);
 }

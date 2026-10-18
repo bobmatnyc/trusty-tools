@@ -11,7 +11,7 @@ use trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
 use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::twin_identity::ArmingRecord;
 
-use super::super::launch::{Launched, PaneState};
+use super::super::launch::{Launched, PaneState, Pending};
 use super::super::session_name::SessionNames;
 use super::super::{Probe, Step};
 use super::*;
@@ -54,23 +54,40 @@ fn stop_ok(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn restart_bound(dir: &Path, _: &Path, _: &str) -> anyhow::Result<Launched> {
-    CALLS.with(|c| c.borrow_mut().push("restart".to_owned()));
-    let record = ArmingRecord {
-        pid: NEW_PID,
-        start_time: 1,
-        project_dir: dir.to_path_buf(),
-        armed_at: String::new(),
-    };
-    Ok((Ok(record), ConversationStart::Resume("c-1".to_owned())))
+fn call(name: &str) {
+    CALLS.with(|c| c.borrow_mut().push(name.to_owned()));
 }
 
-fn restart_unbound(_: &Path, _: &Path, _: &str) -> anyhow::Result<Launched> {
-    CALLS.with(|c| c.borrow_mut().push("restart".to_owned()));
-    Ok((
-        Err("no `claude` process appeared".to_owned()),
-        ConversationStart::Resume("c-1".to_owned()),
-    ))
+fn one_pane(_: &str) -> Result<usize, String> {
+    Ok(1)
+}
+
+/// A prepare that succeeds; its send records `NEW_PID`.
+fn prepare_bound(dir: &Path, _: &Path, _: &str) -> anyhow::Result<Pending> {
+    call("prepare");
+    let dir = dir.to_path_buf();
+    Ok(Box::new(move || {
+        call("send");
+        let record = ArmingRecord {
+            pid: NEW_PID,
+            start_time: 1,
+            project_dir: dir,
+            armed_at: String::new(),
+        };
+        Ok((Ok(record), ConversationStart::Resume("c-1".to_owned())))
+    }))
+}
+
+fn prepare_unbound(_: &Path, _: &Path, _: &str) -> anyhow::Result<Pending> {
+    call("prepare");
+    Ok(Box::new(|| {
+        call("send");
+        let launched: Launched = (
+            Err("no `claude` process appeared".to_owned()),
+            ConversationStart::Resume("c-1".to_owned()),
+        );
+        Ok(launched)
+    }))
 }
 
 const STUB: Ops = Ops {
@@ -80,9 +97,10 @@ const STUB: Ops = Ops {
         claude: old_claude,
     },
     architect: architect_ok,
+    panes: one_pane,
     pane_claude,
     stop: stop_ok,
-    restart: restart_bound,
+    prepare: prepare_bound,
 };
 
 /// A scratch home and Architect directory, with the stubs' state planted.
@@ -202,7 +220,14 @@ fn relaunch_refuses_a_directory_that_is_not_an_architect() {
 fn relaunch_stops_the_old_claude_before_the_new_one_starts() {
     let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Absent]);
     let report = fx.relaunch(STUB).expect("relaunched");
-    assert_eq!(calls(), [format!("stop {OLD_PID}"), "restart".to_owned()]);
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            format!("stop {OLD_PID}"),
+            "send".to_owned()
+        ]
+    );
     assert!(!report.failed(), "{}", report.render());
     let text = report.render();
     assert!(
@@ -227,8 +252,97 @@ fn relaunch_stops_the_old_claude_before_the_new_one_starts() {
 fn relaunch_starts_a_claude_when_none_ran() {
     let fx = Fixture::new(live(), &[PaneClaude::Absent]);
     let report = fx.relaunch(STUB).expect("relaunched");
-    assert_eq!(calls(), ["restart".to_owned()]);
+    assert_eq!(calls(), ["prepare".to_owned(), "send".to_owned()]);
     assert!(matches!(&report.steps[0], Step::Unchanged(t) if t.contains("no `claude` ran")));
+}
+
+#[test]
+fn relaunch_refuses_a_session_with_more_than_one_pane() {
+    // #9092 critic HIGH: a split or a second window makes the active pane
+    // another than the Architect's, so nothing may be read, stopped or typed.
+    let fx = Fixture::new(live(), &[PaneClaude::Present]);
+    let mut ops = STUB;
+    ops.panes = |_| Ok(2);
+    let err = fx.relaunch(ops).expect_err("two panes are refused");
+    assert!(format!("{err:#}").contains("has 2 panes"), "{err:#}");
+    assert!(calls().is_empty(), "{:?}", calls());
+
+    let fx = Fixture::new(live(), &[PaneClaude::Present]);
+    ops.panes = |_| Err("no server".to_owned());
+    let err = fx
+        .relaunch(ops)
+        .expect_err("an uncounted session is refused");
+    assert!(
+        format!("{err:#}").contains("cannot count the panes"),
+        "{err:#}"
+    );
+    assert!(calls().is_empty(), "{:?}", calls());
+}
+
+#[test]
+fn relaunch_stops_nothing_when_the_launch_cannot_be_prepared() {
+    // #9092 critic HIGH: every launch-path refusal precedes the stop.
+    let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Absent]);
+    let mut ops = STUB;
+    ops.prepare = |_, _, _| {
+        call("prepare");
+        anyhow::bail!("cannot compose the PM instructions")
+    };
+    let err = fx.relaunch(ops).expect_err("a failed prepare refuses");
+    let text = format!("{err:#}");
+    assert!(text.contains("nothing was stopped"), "{text}");
+    assert!(
+        text.contains("cannot compose the PM instructions"),
+        "{text}"
+    );
+    assert_eq!(calls(), ["prepare".to_owned()], "no stop, no send");
+}
+
+#[test]
+fn relaunch_names_the_stopped_pid_when_the_new_claude_fails() {
+    let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Absent]);
+    let mut ops = STUB;
+    ops.prepare = |_, _, _| {
+        call("prepare");
+        Ok(Box::new(|| -> anyhow::Result<Launched> {
+            call("send");
+            anyhow::bail!("tmux refused the keys")
+        }))
+    };
+    let err = fx.relaunch(ops).expect_err("a failed send is an error");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains(&format!(
+            "stopped claude pid {OLD_PID} in tmux session tm-architect"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("tmux refused the keys"), "{text}");
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            format!("stop {OLD_PID}"),
+            "send".to_owned()
+        ]
+    );
+
+    // A second pane appearing after the stop also names the stopped PID.
+    let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Absent]);
+    ops.prepare = prepare_bound;
+    ops.panes = |_| {
+        let stopped = CALLS.with(|c| c.borrow().iter().any(|n| n.starts_with("stop")));
+        Ok(if stopped { 2 } else { 1 })
+    };
+    let err = fx
+        .relaunch(ops)
+        .expect_err("a split after the stop is refused");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains(&format!("stopped claude pid {OLD_PID}")),
+        "{text}"
+    );
+    assert!(!calls().contains(&"send".to_owned()), "{:?}", calls());
 }
 
 #[test]
@@ -239,7 +353,11 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
         format!("{err:#}").contains("still holds a `claude`"),
         "{err:#}"
     );
-    assert_eq!(calls(), [format!("stop {OLD_PID}")], "no restart");
+    assert_eq!(
+        calls(),
+        ["prepare".to_owned(), format!("stop {OLD_PID}")],
+        "no send"
+    );
 
     let fx = Fixture::new(live(), &[PaneClaude::Present]);
     let mut ops = STUB;
@@ -249,14 +367,14 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
         format!("{err:#}").contains("could not stop claude pid"),
         "{err:#}"
     );
-    assert!(calls().is_empty(), "{:?}", calls());
+    assert_eq!(calls(), ["prepare".to_owned()], "no send");
 }
 
 #[test]
 fn relaunch_reports_an_unrecorded_claude_as_failed() {
     let fx = Fixture::new(live(), &[PaneClaude::Absent]);
     let mut ops = STUB;
-    ops.restart = restart_unbound;
+    ops.prepare = prepare_unbound;
     let report = fx.relaunch(ops).expect("the run completes");
     assert!(report.failed());
     assert!(report.registration.is_none());
@@ -369,4 +487,21 @@ fn stop_claude_refuses_a_process_not_named_claude() {
     let _ = std::process::Command::new("kill")
         .arg(pid.to_string())
         .status();
+}
+
+#[test]
+fn stop_claude_refuses_an_ancestor_of_this_process() {
+    // #9092 critic MEDIUM: run from inside the Architect, the pane's `claude`
+    // is an ancestor of `tm`; stopping it would kill the caller.
+    let me = std::process::id();
+    let parent = process_facts(me)
+        .ok()
+        .and_then(|f| f.parent)
+        .expect("the test process has a parent");
+    for pid in [me, parent] {
+        let err = stop_claude(pid).expect_err("an ancestor is refused");
+        assert!(err.contains("runs this `tm`"), "{err}");
+        assert!(err.contains("operator terminal"), "{err}");
+        assert!(process::is_process_alive(pid), "pid {pid} was signalled");
+    }
 }
