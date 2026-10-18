@@ -35,6 +35,16 @@
 #     welcome. This is the same shape as scripts/rustdoc-link-baseline.tsv and
 #     the SLOC ratchet allowlist, for the same reason.
 #
+#   THE FEATURE SET (#9663). A default-feature build never compiles a test
+#     gated behind a non-default feature, so it was never counted. The
+#     enumeration therefore runs twice — default features, and with the
+#     explicit IGNORED_TEST_FEATURES list below — and counts the union. The
+#     list is explicit rather than `--all-features`, which would pull heavy
+#     backends (Candle, CUDA) into the build. A test behind a feature NOT on
+#     the list is still uncounted; adding the feature to the list is how it
+#     joins the ratchet. The RUN phase keeps default features, so a manifest
+#     row may only select a test the default build compiles.
+#
 # WHAT THIS GATE DOES NOT CLAIM. It does not claim the unselected ignored tests
 #   pass, and it never prints a line that could be read that way. Its summary
 #   states both numbers — ran N, did not run M — because "0 failed" and
@@ -47,27 +57,34 @@
 #     the stale-manifest failure mode, and the reason this is not just a
 #     hand-written `-E` string in the workflow.
 #   - An enumeration that lists zero ignored tests FAILS as a vacuous scan.
+#     Each of the two enumerations is held to this on its own (#9663).
+#   - A featured build that fails (compile error, unknown feature) FAILS; it is
+#     never read as "no feature-gated tests" (#9663).
+#   - A RUN row selecting a test only the featured build compiles FAILS: the
+#     default-feature run phase would silently not run it (#9663).
 #   - An unselected count above the baseline FAILS.
 #   - A nextest invocation that errors FAILS; a zero exit is never inferred.
 #
 # Exit codes: 0 = every selected test passed and the unselected count is at or
 #   below baseline. 1 = a selected test failed, or the unselected count grew.
 #   3 = the gate could not compute a verdict (vacuous enumeration, stale row,
-#     nextest failure). 2 = usage error.
+#     row needing features, nextest failure). 2 = usage error.
 #
-# Test: verified by construction against a real `cargo nextest list` stream
-#   captured at e39183c3 (218 suites, 160 ignored tests) via `--from-list`,
-#   which is the entry point a fixture-driven self-test would use. That run
-#   confirmed 11 selected, 149 unselected, and every manifest row matching.
-#   A self-test covering the STALE-ROW and VACUOUS branches is NOT yet written.
+# Test: scripts/check_ignored_tests_selftest.sh drives the live path through a
+#   stub cargo: the feature-only count, the RATCHET, every fail-closed arm of
+#   both enumerations, ROW-NEEDS-FEATURES, and the default-feature run phase.
+#   The STALE-ROW branch has no self-test case yet.
 
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/check_ignored_tests.sh [--list-only] [--from-list <file>]" >&2
-  echo "       --list-only        enumerate and reconcile; do not run any test" >&2
-  echo "       --from-list <file> score a captured 'cargo nextest list" >&2
-  echo "                          --message-format json' stream (self-test)" >&2
+  echo "usage: scripts/check_ignored_tests.sh [--list-only]" >&2
+  echo "           [--from-list <file> --from-features-list <file>]" >&2
+  echo "       --list-only                 enumerate and reconcile; do not run any test" >&2
+  echo "       --from-list <file>          score a captured default-feature 'cargo nextest" >&2
+  echo "                                   list --message-format json' stream" >&2
+  echo "       --from-features-list <file> the same, captured with --features" >&2
+  echo "                                   \$IGNORED_TEST_FEATURES; required with --from-list" >&2
   exit 2
 }
 
@@ -78,15 +95,25 @@ cd "$REPO_ROOT"
 MANIFEST="${REPO_ROOT}/scripts/prepublish-ignored-tests.tsv"
 LIST_ONLY=0
 FROM_LIST=""
+FROM_FEATURES_LIST=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --list-only) LIST_ONLY=1; shift ;;
     --from-list) FROM_LIST="${2:-}"; [ -n "$FROM_LIST" ] || usage; shift 2 ;;
+    --from-features-list)
+      FROM_FEATURES_LIST="${2:-}"; [ -n "$FROM_FEATURES_LIST" ] || usage; shift 2 ;;
     -h|--help) usage ;;
     *) echo "check_ignored_tests: unknown argument: $1" >&2; usage ;;
   esac
 done
+
+# #9663: scoring one stream would count the default build alone — the defect.
+if { [ -n "$FROM_LIST" ] && [ -z "$FROM_FEATURES_LIST" ]; } \
+  || { [ -z "$FROM_LIST" ] && [ -n "$FROM_FEATURES_LIST" ]; }; then
+  echo "check_ignored_tests: --from-list and --from-features-list go together" >&2
+  usage
+fi
 
 [ -f "$MANIFEST" ] || {
   echo "[FAIL] ignored-tests: manifest missing: ${MANIFEST}" >&2
@@ -101,16 +128,26 @@ EXCLUDES=(
   --exclude trusty-agents-ui
 )
 
+# #9663: the non-default features whose `#[ignore]` tests the enumeration
+# counts. `memory-test-support` only takes effect beside `sm-memory` /
+# `manager-memory`; this is the set ci.yml's trusty-mpm feature lane builds.
+IGNORED_TEST_FEATURES="trusty-mpm/sm-memory,trusty-mpm/manager-memory,trusty-mpm/memory-test-support"
+
 TMP_LIST="$(mktemp "${TMPDIR:-/tmp}/ignored-tests.list.XXXXXX")"
+TMP_FLIST="$(mktemp "${TMPDIR:-/tmp}/ignored-tests.flist.XXXXXX")"
 TMP_SEL="$(mktemp "${TMPDIR:-/tmp}/ignored-tests.sel.XXXXXX")"
-trap 'rm -f "$TMP_LIST" "$TMP_SEL"' EXIT
+trap 'rm -f "$TMP_LIST" "$TMP_FLIST" "$TMP_SEL"' EXIT
 
 # ---------------------------------------------------------------------------
-# STEP 1 — enumerate every ignored test in the workspace.
+# STEP 1 — enumerate every ignored test in the workspace, twice: default
+# features, then with IGNORED_TEST_FEATURES (#9663).
 # ---------------------------------------------------------------------------
 if [ -n "$FROM_LIST" ]; then
-  [ -f "$FROM_LIST" ] || { echo "check_ignored_tests: no such file: $FROM_LIST" >&2; exit 2; }
+  for f in "$FROM_LIST" "$FROM_FEATURES_LIST"; do
+    [ -f "$f" ] || { echo "check_ignored_tests: no such file: $f" >&2; exit 2; }
+  done
   cp "$FROM_LIST" "$TMP_LIST"
+  cp "$FROM_FEATURES_LIST" "$TMP_FLIST"
 else
   echo "==> enumerating ignored tests (cargo nextest list --run-ignored ignored-only)" >&2
   # #5890: stderr used to go to /dev/null here, with no comment recorded
@@ -135,6 +172,20 @@ else
     echo "       above for why the build failed, fix it, and re-run." >&2
     exit 3
   fi
+
+  # #9663: the featured enumeration. A failure here (compile error under the
+  # feature, a renamed feature) is exit 3, never "no feature-gated tests".
+  echo "==> enumerating ignored tests with --features ${IGNORED_TEST_FEATURES}" >&2
+  rc=0
+  SKIP_UI_BUILD=1 cargo nextest list --workspace --locked "${EXCLUDES[@]}" \
+    --features "$IGNORED_TEST_FEATURES" \
+    --run-ignored ignored-only --message-format json > "$TMP_FLIST" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[FAIL] ignored-tests: 'cargo nextest list --features ${IGNORED_TEST_FEATURES}' exited ${rc}" >&2
+    echo "       — the feature-gated ignored tests were not enumerated. A failed featured build" >&2
+    echo "       is not a count of zero. See the compiler output above, fix it, and re-run." >&2
+    exit 3
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -142,10 +193,10 @@ fi
 # Emits the nextest filterset for step 3 on fd 3 (TMP_SEL).
 # ---------------------------------------------------------------------------
 RECONCILE_RC=0
-python3 - "$TMP_LIST" "$MANIFEST" "$TMP_SEL" <<'PY' || RECONCILE_RC=$?
+python3 - "$TMP_LIST" "$TMP_FLIST" "$MANIFEST" "$TMP_SEL" "$IGNORED_TEST_FEATURES" <<'PY' || RECONCILE_RC=$?
 import json, sys, collections, os, re
 
-list_path, manifest_path, sel_path = sys.argv[1], sys.argv[2], sys.argv[3]
+list_path, flist_path, manifest_path, sel_path, features = sys.argv[1:6]
 
 # --- Parse the manifest. Rows: <package>\t<exact test name>\t<why it is safe>
 rows, baseline = [], None
@@ -167,36 +218,44 @@ if baseline is None:
           "the gate cannot tell whether the unselected set grew")
     sys.exit(3)
 
-# --- Parse the nextest enumeration.
-all_tests = []   # (package, test-name)
-with open(list_path) as fh:
-    data = fh.read().strip()
-try:
-    doc = json.loads(data)
-except json.JSONDecodeError:
-    print("FAIL\tENUMERATION\tcould not parse the nextest list output as JSON")
-    sys.exit(3)
+# --- Parse one nextest enumeration into a set of (package, test-name).
+# #9663: called once per stream; each must parse and list at least one test.
+def enumerate_ignored(path, label):
+    with open(path) as fh:
+        data = fh.read().strip()
+    try:
+        doc = json.loads(data)
+    except json.JSONDecodeError:
+        print(f"FAIL\tENUMERATION\tcould not parse the {label} nextest list output as JSON")
+        sys.exit(3)
+    found = set()
+    for _bin_id, binfo in (doc.get("rust-suites") or {}).items():
+        pkg = binfo.get("package-name") or ""
+        for tname, tinfo in (binfo.get("testcases") or {}).items():
+            # `ignored-only` already filtered, but assert rather than assume.
+            if tinfo.get("ignored") is False:
+                continue
+            found.add((pkg, tname))
+    if not found:
+        print(f"FAIL\tVACUOUS\tthe {label} enumeration listed ZERO ignored tests — "
+              "either the filter is wrong or nothing was built; both mean this gate examined nothing")
+        sys.exit(3)
+    return found
 
-for _bin_id, binfo in (doc.get("rust-suites") or {}).items():
-    pkg = binfo.get("package-name") or ""
-    for tname, tinfo in (binfo.get("testcases") or {}).items():
-        # `ignored-only` already filtered, but assert rather than assume.
-        if tinfo.get("ignored") is False:
-            continue
-        all_tests.append((pkg, tname))
-
-if not all_tests:
-    print("FAIL\tVACUOUS\tthe enumeration listed ZERO ignored tests — "
-          "either the filter is wrong or nothing was built; both mean this gate examined nothing")
-    sys.exit(3)
+default_tests = enumerate_ignored(list_path, "default-feature")
+featured_tests = enumerate_ignored(flist_path, f"--features {features}")
+# The union: a `cfg(not(feature))` test exists only in the default stream.
+all_tests = sorted(default_tests | featured_tests)
+feature_only = featured_tests - default_tests
 
 # --- Match manifest rows against the enumeration.
-selected, stale = set(), []
+selected, stale, needs_features = set(), [], []
 for pkg, pattern, _why in rows:
     hits = [(p, t) for (p, t) in all_tests if p == pkg and re.fullmatch(pattern, t)]
     if not hits:
         stale.append(f"{pkg}\t{pattern}")
         continue
+    needs_features.extend(h for h in hits if h in feature_only)
     selected.update(hits)
 
 unselected = [t for t in all_tests if t not in selected]
@@ -204,11 +263,22 @@ by_crate = collections.Counter(p for p, _ in unselected)
 
 print(f"SUMMARY\t{len(all_tests)} ignored test(s) in the workspace; "
       f"{len(selected)} selected to RUN; {len(unselected)} NOT run "
-      f"(baseline {baseline})")
+      f"(baseline {baseline}); {len(feature_only)} compiled only under "
+      f"--features {features}")
 for crate, n in sorted(by_crate.items(), key=lambda kv: -kv[1]):
     print(f"UNSELECTED\t{crate}\t{n}")
+for pkg, tname in sorted(feature_only):
+    print(f"FEATURE-ONLY\t{pkg}\t{tname}")
 
 failed = False
+
+# FAIL CLOSED (#9663): the run phase builds default features, so a row that
+# selects a feature-only test would run nothing for it and still pass.
+for pkg, tname in sorted(set(needs_features)):
+    print(f"FAIL\tROW-NEEDS-FEATURES\t{pkg}\t{tname} is compiled only under "
+          f"--features {features}; the run phase keeps default features and "
+          "would not run it. Remove the row; the test counts as unselected.")
+    failed = True
 
 # FAIL CLOSED: a row that selects nothing is a manifest that has drifted from
 # the tree. Left unreported it shrinks the gate invisibly.
@@ -236,7 +306,7 @@ with open(sel_path, "w") as fh:
         expr = " + ".join(f"(package({p}) and test(={t}))" for p, t in sorted(selected))
         fh.write(expr)
 
-sys.exit(3 if stale else (1 if failed else 0))
+sys.exit(3 if (stale or needs_features) else (1 if failed else 0))
 PY
 
 if [ "$RECONCILE_RC" -ne 0 ]; then
@@ -251,6 +321,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # STEP 3 — run the selected tests.
+# #9663: default features only, deliberately. IGNORED_TEST_FEATURES widens the
+# COUNT, not the run; STEP 2 refuses a row that would need the featured build.
 # ---------------------------------------------------------------------------
 EXPR="$(cat "$TMP_SEL")"
 if [ -z "$EXPR" ]; then

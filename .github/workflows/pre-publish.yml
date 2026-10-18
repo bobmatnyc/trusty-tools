@@ -613,6 +613,12 @@ jobs:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
 
+      # #9663: the gate's selftest drives its live path through a stub cargo,
+      # so a fail-open featured enumeration goes red here in seconds, before
+      # the real build starts. Same selftest-then-gate order as line-cap.yml.
+      - name: Ignored-tests gate selftest (feature-gated count, fail-closed arms)
+        run: bash scripts/check_ignored_tests_selftest.sh
+
       - name: Run the selected ignored tests + reconcile the rest
         env:
           # #8643: authenticates trusty-installer's live GitHub release reads.

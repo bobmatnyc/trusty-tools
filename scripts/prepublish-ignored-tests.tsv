@@ -149,15 +149,27 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # (`chunk_backfill_measure_tests.rs`). It stays unselected: it is an ONNX
 # measurement run by hand, not a gate test. 125 -> 126.
 #
-# This gate runs on Linux CI, and 126 is the Linux count. Four
+# #9663: the enumeration now also builds with
+# `--features trusty-mpm/sm-memory,trusty-mpm/manager-memory,trusty-mpm/memory-test-support`
+# (IGNORED_TEST_FEATURES in check_ignored_tests.sh) and counts the union. That
+# adds three trusty-mpm tests the default build never compiled:
+# `core::sm::memory::tests::hold_the_sm_palace_as_writer_child`,
+# `core::sm::memory::tests::open_the_sm_palace_as_the_daemon_child` and
+# `daemon::manager::memory::tests::open_the_portfolio_palace_as_the_daemon_child`.
+# They stay unselected: each is a child-process helper its parent test
+# re-executes with `--ignored`, not a test on its own, and the run phase keeps
+# default features, which do not compile them. 126 -> 129.
+#
+# This gate runs on Linux CI, and 129 is the Linux count for the trees this
+# note names. Four
 # `#[cfg(target_os = "macos")]` ignored tests are not compiled there:
 # trusty-mpm `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`
 # (PR #3314) and `claude_pid_resolves_from_inside_its_own_pane` (PR #8944),
 # trusty-mpm `tm_secrets_exec_live::live_keychain_flag_on_write_proof`
 # (PR #9653), and trusty-secrets `ancestry::tests::macos_live_ancestor_walk_probe`
-# (PR #9629). `--list-only` on a Mac therefore reads 130 and fails locally
-# against 126; that is expected, not a regression. No per-platform baseline.
-# Architect ruling 12:58Z (option A): baseline 126.
+# (PR #9629). `--list-only` on a Mac therefore reads four more than Linux (133 against
+# 129 for these trees); that is expected, not a regression. No per-platform
+# baseline. Architect ruling 12:58Z (option A); #9663 adds the three above.
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 126
+# UNSELECTED-BASELINE: 129
