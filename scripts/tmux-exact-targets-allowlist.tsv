@@ -24,3 +24,4 @@ crates/trusty-mpm/tests/tm_hook_pm_guard_architect_pane_8902.rs	-t (\{pane\}|\{w
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/tmux_exact_target_tests.rs	-t (nos|x\b|\{target\})	#9001 classifier fixtures, not tmux calls: the deny rows spell the bare (prefix-matching) target forms and bypass shapes the exact-target floor must refuse
 crates/trusty-mpm/tests/tm_hook_pm_guard_tmux_target_9001.rs	-t (nos|x\b)	#9001 fixtures judged by tm hook --pm-guard, not tmux calls: the deny rows spell the bare (prefix-matching) targets and bypass shapes the exact-target floor must refuse
 crates/trusty-mpm/src/bin/tm/tests.rs	^\s*"-t",$	`tm mcp add -t http` transport flag (clap test args), not a tmux -t
+scripts/check_ignored_tests_selftest.sh	^WORK="\$\(mktemp -d -t check_ignored_tests_selftest\.XXXXXX\)"$	mktemp template flag, not tmux

@@ -10,7 +10,7 @@
 # which the job authenticates with its own GITHUB_TOKEN, and the workspace
 # build. It must not need an API key, a live daemon, a compiled binary on disk,
 # a Python/torch venv, tmux, macOS hardware, or minutes of soak time. Those are
-# the reasons the other 122 ignored tests stay unselected; see the baseline
+# the reasons the unselected ignored tests stay unselected; see the baseline
 # note at the bottom.
 #
 # ADDING A ROW is how you widen the gate, and it is always welcome. Removing one
@@ -52,6 +52,10 @@ trusty-search	migration_e2e::migration_e2e_empty_corpus_advances_to_current	load
 trusty-search	service::server::typeahead_tests::typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 trusty-search	hnsw_recall_9414::recall_holds_on_a_150k_clustered_index_after_reload	CPU only: builds a 150K-vector HNSW index and brute-forces 200 queries (~20 s debug, #9414); no model, no daemon
 trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: builds a 150K x 384 HNSW index and compacts it twice (~100 s debug, #9450); asserts the abandon-on-write and no-lost-vector outcomes; no model, no daemon
+trusty-architect	sigkill_between_append_and_save_reemits_identical_keys	re-runs its own test binary as a child poller and SIGKILLs it (#9171); temp dir only, no tmux, no daemon
+trusty-installer	commands::standalone_launcher::tests::real_cargo_force_install_drops_the_standalone_record	real `cargo install --force` on offline path fixtures in a temp root (#9974); no network, no key
+trusty-memory	engine::store::hnsw_store::op_budget::progress_tests::exactly_cap_group_completes_through_the_real_budget_path	CPU only: a cap-sized HNSW group at 384 dims through the real op budget (52 s debug on EVO, #9728); no model, no daemon
+trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built trusty-secrets binary (file backend, temp HOME) and a child/grandchild tree (#9071); not under Claude Code; no Keychain, no network
 
 # THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
 # on the Linux runner; the 29 rows above run, and 122 do not. A macOS checkout
@@ -149,15 +153,51 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # (`chunk_backfill_measure_tests.rs`). It stays unselected: it is an ONNX
 # measurement run by hand, not a gate test. 125 -> 126.
 #
-# This gate runs on Linux CI, and 126 is the Linux count. Four
+# #9663: the enumeration now also builds with
+# `--features trusty-mpm/sm-memory,trusty-mpm/manager-memory,trusty-mpm/memory-test-support`
+# (IGNORED_TEST_FEATURES in check_ignored_tests.sh) and counts the union. That
+# adds three trusty-mpm tests the default build never compiled:
+# `core::sm::memory::tests::hold_the_sm_palace_as_writer_child`,
+# `core::sm::memory::tests::open_the_sm_palace_as_the_daemon_child` and
+# `daemon::manager::memory::tests::open_the_portfolio_palace_as_the_daemon_child`.
+# They stay unselected: each is a child-process helper its parent test
+# re-executes with `--ignored`, not a test on its own, and the run phase keeps
+# default features, which do not compile them. 126 -> 129.
+#
+# #9663 r2 (Architect ruling 2026-10-10, Gate 4 ratchet): ten ignored tests
+# merged after the last green Gate 4 run (38269730126 at e912d2e, 126) with
+# no row and no baseline change. Each ran on EVO Linux with this gate's run
+# command (default features, `--run-ignored all`, `--test-threads 1`). Four
+# passed and joined the rows above. Six stay unselected, each for a named need:
+# - trusty-architect `poller::wake::live_tests::live_wake_keys_reach_only_the_target_pane`,
+#   `live_wake_reads_a_wide_dim_suggestion_row` and
+#   `live_wake_types_then_enters_and_refuses_a_draft` (src/poller/wake_live_tests.rs),
+#   and `live_cycle_renames_exactly_and_sends_nothing` (tests/cycle_live.rs):
+#   `#[ignore = "live: starts a scratch tmux server on a /tmp socket; ..."]`.
+#   They need the tmux binary. All four passed on EVO, which has tmux. The
+#   ubuntu-24.04 runner image lists no tmux among its apt packages, and this
+#   job installs only build-essential, pkg-config and libssl-dev, so a row
+#   would fail here at `Command::new("tmux")`.
+# - trusty-search `freshness_probe::freshness_probe_measures_write_to_searchable_lag`
+#   and `storage_probe::storage_probe_records_index_bytes_and_daemon_rss`
+#   (`integration` target): `#[ignore = "needs a sandbox trusty-search daemon
+#   (support/socket_benchmark.rs)"]`. They need a running sandbox daemon whose
+#   socket TRUSTY_SEARCH_BENCH_SOCKET names (scripts/sandbox_search_daemon.sh).
+#   On EVO both panicked at tests/support/socket_benchmark.rs:152, "set
+#   TRUSTY_SEARCH_BENCH_SOCKET to the sandbox daemon's socket".
+# trusty-search's seven `baseline_trusty_tools` tests are not part of the ten:
+# the 126 already counted them. 129 + 10 - 4 -> 135.
+#
+# This gate runs on Linux CI, and 135 is the Linux count for the trees this
+# note names. Four
 # `#[cfg(target_os = "macos")]` ignored tests are not compiled there:
 # trusty-mpm `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`
 # (PR #3314) and `claude_pid_resolves_from_inside_its_own_pane` (PR #8944),
 # trusty-mpm `tm_secrets_exec_live::live_keychain_flag_on_write_proof`
 # (PR #9653), and trusty-secrets `ancestry::tests::macos_live_ancestor_walk_probe`
-# (PR #9629). `--list-only` on a Mac therefore reads 130 and fails locally
-# against 126; that is expected, not a regression. No per-platform baseline.
-# Architect ruling 12:58Z (option A): baseline 126.
+# (PR #9629). `--list-only` on a Mac therefore reads four more than Linux (139 against
+# 135 for these trees); that is expected, not a regression. No per-platform
+# baseline. Architect ruling 12:58Z (option A); #9663 adds the three above.
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 126
+# UNSELECTED-BASELINE: 135
