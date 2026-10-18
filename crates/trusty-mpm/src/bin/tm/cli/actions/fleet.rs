@@ -2,9 +2,10 @@
 //!
 //! Why: the name must not collide with `tm supervisor` (the unattended
 //! auto-resumer) or `tm overseer` (ruling 2026-09-23).
-//! What: [`FleetAction`] — `init` and `status`. `add` and `remove` arrive in
-//! phase P3 of #8436.
-//! Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+//! What: [`FleetAction`] — `init`, `status` and `relaunch` (#9092). `add` and
+//! `remove` arrive in phase P3 of #8436.
+//! Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`,
+//! `cli_parses_fleet_relaunch`.
 
 use clap::Subcommand;
 
@@ -48,6 +49,24 @@ pub(crate) enum FleetAction {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Architect tmux session name (default: the name `init` recorded,
+        /// else `tm-architect`).
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Restart the Architect's `claude` in its running session and bind it.
+    ///
+    /// Stops the `claude` in the Architect's tmux session, starts a new one
+    /// with the flags `init` uses, and records it as the Architect, so its
+    /// anchor writes are allowed again. Removes the replaced launch record
+    /// and re-registers with the daemon. Use this instead of a bare `tm` in
+    /// the Architect's pane (#9092). Exits 1 when no session runs; start one
+    /// with `tm fleet init`.
+    Relaunch {
+        /// Project directory (default: the Architect recorded in `[supervisor]
+        /// projects`, else `~/trusty-mpm-projects/architect`).
+        #[arg(long)]
+        dir: Option<String>,
         /// Architect tmux session name (default: the name `init` recorded,
         /// else `tm-architect`).
         #[arg(long)]

@@ -19,6 +19,8 @@
 //! fresh. A pane that cannot be read twice keeps both, with a warning
 //! ([`resume_check`]). Daemon registration is not here: `fleet::run`
 //! registers a bound Architect after the poller step (`register`, #8942).
+//! #9092: [`restart`] runs the same path in the existing session for
+//! `tm fleet relaunch` (`relaunch`).
 //! Test: `fleet_init_launches_the_architect_and_status_is_complete`,
 //! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 //! `fleet_init_clears_the_conversation_record_when_the_resume_fails`,
@@ -169,11 +171,38 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// `fleet_init_with_a_session_override_names_every_session`,
 /// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 /// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
-pub(crate) fn start(
-    dir: &Path,
-    home: &Path,
-    session: &str,
-) -> anyhow::Result<(Result<ArmingRecord, String>, ConversationStart)> {
+pub(crate) fn start(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Launched> {
+    launch_claude(dir, home, session, Pane::Create)
+}
+
+/// Start a new Architect `claude` in the existing `session`, whose pane runs
+/// an idle shell (#9092).
+///
+/// Why: `tm fleet relaunch` must start the new `claude` with the flags `init`
+/// uses, so it shares [`start`]'s launch path instead of copying it.
+/// What: [`start`] without creating the session, and without killing it when
+/// the `claude` line cannot be sent; the stamp is set again. The caller has
+/// stopped the old `claude` and proved the pane holds none.
+/// Test: `fleet_relaunch_restarts_the_architect_and_rebinds_it`.
+pub(crate) fn restart(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Launched> {
+    launch_claude(dir, home, session, Pane::Existing)
+}
+
+/// What [`start`] and [`restart`] return: the [`record_process`] outcome and
+/// how the conversation started (#8981).
+pub(crate) type Launched = (Result<ArmingRecord, String>, ConversationStart);
+
+/// Whether [`launch_claude`] creates the session or types into an existing one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    /// `tm fleet init`: create the session exclusively.
+    Create,
+    /// `tm fleet relaunch` (#9092): the session exists with an idle shell.
+    Existing,
+}
+
+/// The one Architect launch path behind [`start`] and [`restart`].
+fn launch_claude(dir: &Path, home: &Path, session: &str, pane: Pane) -> anyhow::Result<Launched> {
     require_architect(dir, session)?;
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
         Ok(report) => {
@@ -235,18 +264,23 @@ pub(crate) fn start(
     let workdir = dir
         .to_str()
         .context("the Architect directory is not valid UTF-8")?;
-    let created = tmux::create_managed_session_exclusive(None, session, Some(workdir))
-        .with_context(|| format!("failed to run tmux to create {session}"))?;
-    if !created.output.status.success() {
-        bail!(
-            "tmux refused to create {session}: {}",
-            String::from_utf8_lossy(&created.output.stderr).trim()
-        );
+    if pane == Pane::Create {
+        let created = tmux::create_managed_session_exclusive(None, session, Some(workdir))
+            .with_context(|| format!("failed to run tmux to create {session}"))?;
+        if !created.output.status.success() {
+            bail!(
+                "tmux refused to create {session}: {}",
+                String::from_utf8_lossy(&created.output.stderr).trim()
+            );
+        }
     }
     if let Err(err) = stamp_and_send(&cli.profile, &claude_spec, &spec_dir, session) {
-        let _ = tmux::run_tmux(&TmuxCommand::KillSession {
-            name: session.to_owned(),
-        });
+        // #9092: a relaunch never kills a session it did not create.
+        if pane == Pane::Create {
+            let _ = tmux::run_tmux(&TmuxCommand::KillSession {
+                name: session.to_owned(),
+            });
+        }
         return Err(err);
     }
     // #8981: a fresh conversation's id is recorded only once `claude` was
@@ -454,7 +488,7 @@ fn stamp_and_send(
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.
-fn require_architect(dir: &Path, session: &str) -> anyhow::Result<()> {
+pub(crate) fn require_architect(dir: &Path, session: &str) -> anyhow::Result<()> {
     if session_profile::resolve_ambient(dir).is_architect() {
         return Ok(());
     }
