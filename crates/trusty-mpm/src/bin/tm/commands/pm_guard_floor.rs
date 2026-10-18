@@ -45,11 +45,13 @@ use crate::commands::pm_guard_architect_envfile::{
 use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
 };
+use crate::commands::pm_guard_bash::fleet_relaunch::{
+    FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch,
+};
 use crate::commands::pm_guard_bash::{
-    ARCHITECT_PANE_RULE, FLEET_RELAUNCH_RULE, GitProbe, LiveGit, LivePanes, PaneProbe,
-    TMUX_TARGET_RULE, evaluate_architect_pane, evaluate_d4_floor,
-    evaluate_destructive_delete_command, evaluate_fleet_relaunch, evaluate_tmux_exact_target,
-    unclassifiable_reason,
+    ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
+    evaluate_architect_pane, evaluate_d4_floor, evaluate_destructive_delete_command,
+    evaluate_tmux_exact_target, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
