@@ -108,7 +108,12 @@ fn a_hooked_session_is_denied_tm_fleet_relaunch_under_each_bypass() {
         "tm fl rel",
         "trusty-mpm fleet relaunch",
         "bash -c 'tm fleet relaunch'",
+        // #10033 critic r1: shell syntax, a fed shell, `cargo run` without `--`.
+        "tm fleet relaunch 2>&1",
+        "echo tm fleet relaunch | sh",
+        "cargo run --bin tm fleet relaunch",
     ];
+    let passed = ["tm fleet status", "git ls-files | xargs grep -l trusty-mpm"];
     for bypass in BYPASSES {
         let env: Vec<(&str, &str)> = bypass.into_iter().collect();
         for command in denied {
@@ -118,7 +123,9 @@ fn a_hooked_session_is_denied_tm_fleet_relaunch_under_each_bypass() {
                 "{bypass:?} {command}: {out}"
             );
         }
-        let out = fx.guard("tm fleet status", &env);
-        assert!(!out.contains("#10033"), "{bypass:?} status: {out}");
+        for command in passed {
+            let out = fx.guard(command, &env);
+            assert!(!out.contains("#10033"), "{bypass:?} {command}: {out}");
+        }
     }
 }
