@@ -744,6 +744,8 @@ pub(crate) async fn run_inplace_relaunch(
         eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
         trusty_mpm::core::gh_identity::GhEnv::default()
     });
+    // #9750: drop the pane shell's stale token only when gh resolves a login.
+    let gh_env = gh_env.for_session_launch();
 
     InPlaceOutcome::Result(exec_claude_in_place(inplace_exec_command_for(
         // #8405: the operator's config decides the renderer.
@@ -826,6 +828,8 @@ pub(crate) fn inplace_exec_command_for(
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_carries_the_pinned_gh_identity`,
 /// `inplace_exec_command_clears_an_inherited_gh_token`,
+/// `inplace_exec_command_clears_a_stale_token_under_a_keyring_login_9750`,
+/// `inplace_exec_command_keeps_the_token_without_a_dir_login_9750`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_a_non_empty_mcp_env`,
