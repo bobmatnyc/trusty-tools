@@ -37,6 +37,7 @@ trusty-agents	lib	workflow::engine::executor::tests::relocate::qa_receives_corre
 trusty-agents	test:cli_project	*	runtime: the spawned tagent reads the bundled agents and workflows copied from content/agents/trusty-agents (#9014)
 trusty-agents	test:plain_cli_repl	plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier	runtime: the spawned tagent deploys the roster from content staged into its HOME (#9014)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
+trusty-agents-common	lib	agents::deployer::tests::stock_tcode_roster_deploys_every_frontmatter_key	reads literal 'content/agents'
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
