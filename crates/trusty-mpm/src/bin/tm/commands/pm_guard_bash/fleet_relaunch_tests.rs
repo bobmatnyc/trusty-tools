@@ -75,6 +75,20 @@ fn an_expanded_word_where_the_subcommand_goes_denies() {
     ]);
 }
 
+/// Fail-open check: each arm that could let an unread `tm` through denies —
+/// a `$'…'`-spelled program, text nested past the depth bound, and an
+/// expanded program word with an expanded subcommand in a command naming
+/// `tm`. An expanded program in a command that never names `tm` passes.
+#[test]
+fn every_unreadable_arm_naming_tm_denies() {
+    assert_denied(&[
+        r"$'\x74\x6d' fleet relaunch",
+        "echo $(echo $(echo $(echo $(tm fleet relaunch))))",
+        "T=tm; $T $VERB",
+    ]);
+    assert_passed(&["$RUNNER $ARG", "echo $(echo $(echo $(echo $(ls))))"]);
+}
+
 /// An expanded word after a leaf subcommand, or under a group other than
 /// `fleet`, cannot reach `fleet relaunch`, so it passes.
 #[test]

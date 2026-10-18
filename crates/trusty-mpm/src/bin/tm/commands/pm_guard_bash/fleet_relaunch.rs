@@ -11,12 +11,16 @@
 //! `trusty-mpm` program word, and the argv after `--` of a `cargo run` naming
 //! one, with the `tm` clap definition itself, so prefixes (`tm fl rel`),
 //! aliases and global options read exactly as `tm` reads them.
-//! FAIL-CLOSED: a command or segment the guard cannot lex denies when it names
-//! `tm`; a word the shell expands — or operands `xargs` or `find -exec {}`
-//! supply — denies when it sits where the subcommand could still become
-//! `fleet relaunch` (at the top level or under `fleet`).
+//! FAIL-CLOSED: a command or segment the guard cannot lex, and text nested
+//! past [`MAX_DEPTH`], denies when it names `tm` (a `$'…'` quote is decoded
+//! first, #9001); a word the shell expands — or operands `xargs` or
+//! `find -exec {}` supply — denies when it sits where the subcommand could
+//! still become `fleet relaunch` (at the top level or under `fleet`). An
+//! expanded program word denies on a definite relaunch, or on an unresolved
+//! one when the command names `tm`.
 //! Residual: a script file the command runs, a shell function or alias, a
-//! shell reading commands from a pipe, and an interpreter (`python3 -c`).
+//! shell reading commands from a pipe, an interpreter (`python3 -c`), and a
+//! wrapper nested past the shared segment walk's depth.
 //! Test: `fleet_relaunch_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_fleet_relaunch_10033.rs`.
 
@@ -31,7 +35,8 @@ use crate::cli::Cli;
 /// The rule name recorded with a `tm fleet relaunch` deny.
 pub(crate) const FLEET_RELAUNCH_RULE: &str = "fleet-relaunch";
 
-/// Nesting depth past which runner operands and substitutions are not read.
+/// Nesting depth past which runner operands and substitutions are not read;
+/// text past it denies when it names `tm`.
 const MAX_DEPTH: usize = 3;
 
 /// What one `tm` argv runs, as far as the guard can tell.
@@ -53,6 +58,7 @@ enum Reading {
 /// Test: `every_spelling_of_tm_fleet_relaunch_is_denied`,
 /// `a_relaunch_reached_through_a_wrapper_is_denied`,
 /// `an_expanded_word_where_the_subcommand_goes_denies`,
+/// `every_unreadable_arm_naming_tm_denies`,
 /// `other_tm_commands_and_mentions_pass`.
 pub(crate) fn evaluate_fleet_relaunch(command: &str) -> Option<String> {
     shell(command, 0)
@@ -61,6 +67,10 @@ pub(crate) fn evaluate_fleet_relaunch(command: &str) -> Option<String> {
 /// Read `command` as shell text; the first deny wins.
 fn shell(command: &str, depth: usize) -> Option<String> {
     let command = without_data_bodies(command);
+    // #10033 fail-closed: past the depth bound, text naming `tm` denies.
+    if depth > MAX_DEPTH {
+        return names_tm(&command).then(|| unreadable(command.trim()));
+    }
     // #10033: a command the guard cannot read could run `tm fleet relaunch`;
     // judge what a `$'…'` quote spells (#9001). The universal #6660 floor
     // refuses what stays unclassifiable whether or not it names `tm`.
@@ -70,6 +80,7 @@ fn shell(command: &str, depth: usize) -> Option<String> {
             _ => names_tm(&command).then(|| unreadable(command.trim())),
         };
     }
+    let named = names_tm(&command);
     for seg in segments(&command) {
         let Some(argv) = shlex::split(seg.text.trim()) else {
             if names_tm(&seg.text) {
@@ -80,26 +91,19 @@ fn shell(command: &str, depth: usize) -> Option<String> {
         let words = with_dynamics(&seg.text, argv);
         let texts: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         for (pos, base) in positions(&texts) {
-            if let Some(reason) = judge_program(&words, &texts, pos, &base) {
+            if let Some(reason) = judge_program(&words, &texts, pos, &base, named) {
                 return Some(reason);
             }
-            if depth < MAX_DEPTH {
-                for text in runner_texts(&texts, pos) {
-                    if let Some(reason) = shell(&text, depth + 1) {
-                        return Some(reason);
-                    }
+            for text in runner_texts(&texts, pos) {
+                if let Some(reason) = shell(&text, depth + 1) {
+                    return Some(reason);
                 }
             }
         }
     }
-    if depth < MAX_DEPTH {
-        for body in command_substitutions(&command) {
-            if let Some(reason) = shell(body.text(), depth + 1) {
-                return Some(reason);
-            }
-        }
-    }
-    None
+    command_substitutions(&command)
+        .iter()
+        .find_map(|body| shell(body.text(), depth + 1))
 }
 
 /// The program positions of `texts` ([`program_positions`]), plus each `tm`
@@ -132,9 +136,15 @@ fn is_xargs(word: &str) -> bool {
 ///
 /// What: a `tm`/`trusty-mpm` word (any case: APFS runs `TM` as `tm`) or a
 /// `cargo run … --` naming one is read by [`read_tm_args`]. A program word
-/// the shell expands is read the same way, but denies only on a definite
-/// relaunch, since it may be any program.
-fn judge_program(words: &[Word], texts: &[String], pos: usize, base: &str) -> Option<String> {
+/// the shell expands is read the same way; it may be any program, so an
+/// unresolved reading denies only when the command names `tm` (`named`).
+fn judge_program(
+    words: &[Word],
+    texts: &[String],
+    pos: usize,
+    base: &str,
+    named: bool,
+) -> Option<String> {
     let dynamic = dynamic_name(&words[pos]);
     let args = if dynamic || is_tm(base) {
         tm_operands(words, texts, pos)
@@ -145,7 +155,7 @@ fn judge_program(words: &[Word], texts: &[String], pos: usize, base: &str) -> Op
     };
     match read_tm_args(&args) {
         Reading::Relaunch => Some(denied()),
-        Reading::Unresolved(word) if !dynamic => Some(unresolved(&word)),
+        Reading::Unresolved(word) if !dynamic || named => Some(unresolved(&word)),
         _ => None,
     }
 }
