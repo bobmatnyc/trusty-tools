@@ -261,6 +261,7 @@ fn pinned_to_the_composer_emission() {
         "---\nname: kitchen-sink\nrole: qa\ndescription: 'Every field the composer models.'\n\
          model: sonnet\nmax_tokens: 4096\nresource_tier: standard\nextends: base-qa\n\
          skills: [test-driven-development]\ntools: [Read, Write]\ntcode_tools: [read_file]\n\
+         permissions:\n  bash: ask\n  write_file: ask\n  edit:\n    \"*.md\": allow\n\
          initialPrompt: \"Go.\"\nmetadata:\n  version: \"1.2.3\"\n---\n\nChild body.\n",
     )
     .expect("write child");
@@ -290,6 +291,11 @@ fn pinned_to_the_composer_emission() {
     assert!(
         keys.contains(&"metadata".to_string()) && !keys.contains(&"version".to_string()),
         "the composer emits `metadata:` and its child `version:` is no key of its own: {keys:?}"
+    );
+    // #8199: the `permissions:` rule keys are the block's children, not keys.
+    assert!(
+        keys.contains(&"permissions".to_string()) && !keys.contains(&"bash".to_string()),
+        "the composer emits `permissions:` and its rule keys are no keys of their own: {keys:?}"
     );
 }
 

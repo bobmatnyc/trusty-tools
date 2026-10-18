@@ -98,6 +98,9 @@ const TRUSTY_MPM_KEYS: &[&str] = &[
     "skills",
     "tools",
     "tcode_tools",
+    // #8199: trusty-code's rule map, emitted verbatim. Its indented rule keys
+    // are not keys of their own; see `split_keys_and_body`.
+    "permissions",
     "initialprompt",
     // #9011: `metadata: {version}` (ADR-0064). Its indented children are not
     // keys of their own; see `split_keys_and_body`.
@@ -244,7 +247,8 @@ fn split_keys_and_body(content: &str) -> Option<(Vec<String>, &str)> {
     let mut keys = Vec::new();
     let mut cursor = rest;
     // #9011: inside a block-form `metadata:` map, an indented `version:` is the
-    // map's child, not the top-level claude-mpm `version:` key.
+    // map's child, not the top-level claude-mpm `version:` key. #8199: the same
+    // holds for the rule keys indented under a `permissions:` block.
     let mut in_metadata = false;
     while let Some(newline) = cursor.find('\n') {
         let (line, tail) = cursor.split_at(newline);
@@ -258,7 +262,8 @@ fn split_keys_and_body(content: &str) -> Option<(Vec<String>, &str)> {
         }
         in_metadata = false;
         if let Some((key, value)) = parse_kv_line(line) {
-            in_metadata = key == "metadata" && value.trim().is_empty();
+            in_metadata =
+                matches!(key.as_str(), "metadata" | "permissions") && value.trim().is_empty();
             keys.push(key);
         }
         cursor = tail;
