@@ -38,6 +38,7 @@ use std::path::Path;
 use crate::agents::manifest::Result;
 use crate::skills::deployer::{DeployStats, deploy_skills_filtered};
 use crate::skills::manifest::SkillManifest;
+use crate::skills::source_scan::scan_skill_sources;
 
 /// The three skill source tiers, ordered highest precedence first.
 ///
@@ -291,9 +292,14 @@ pub struct TierDeploy {
 /// [`deploy_skills_filtered`] for the bundled-then-user survivors. Project-custom
 /// files already on disk are never rewritten (the deployer skips unmanaged
 /// targets). Deploying the two tiers over DISJOINT stem sets means each skill is
-/// written at most once and the winner is never clobbered by a loser.
+/// written at most once and the winner is never clobbered by a loser. An empty
+/// or absent user tier skips its pass silently (#9540); an empty or missing
+/// bundled source still warns.
 /// Test: `deploy_all_user_overrides_bundled`, `deploy_all_preserves_project`,
-/// `deploy_all_no_user_tier_matches_bundled_only`.
+/// `deploy_all_no_user_tier_matches_bundled_only`,
+/// `deploy_all_empty_or_absent_user_tier_warns_for_no_destination`,
+/// `deploy_all_empty_or_missing_bundled_tier_still_warns`,
+/// `deploy_all_user_tier_with_only_a_malformed_skill_still_reports_it`.
 pub fn deploy_all_skill_tiers(
     bundled_source: &Path,
     user_source: &Path,
@@ -304,7 +310,11 @@ pub fn deploy_all_skill_tiers(
         .into_iter()
         .filter(|s| select(s))
         .collect();
-    let user = list_source_stems(user_source)?;
+    // #9540: scan the user tier once — its stems feed the planner, and whether
+    // it holds anything at all decides whether its deploy pass runs.
+    let user_scan = scan_skill_sources(user_source)?;
+    let user_tier_is_empty = user_scan.skills.is_empty() && user_scan.rejected.is_empty();
+    let user: BTreeSet<String> = user_scan.skills.into_iter().map(|s| s.stem).collect();
     let project = list_project_custom_stems(dest)?;
 
     let plan = plan_skill_tiers(&project, &user, &bundled);
@@ -340,7 +350,19 @@ pub fn deploy_all_skill_tiers(
     })?;
     merge_stats(&mut deploy.stats, bundled_stats);
 
-    if user_source.is_dir() {
+    // #9540: the user tier is optional, so an empty or absent one is normal.
+    // Passing it to the deployer made it warn "skill source directory is empty"
+    // once per destination on every launch. Skip the pass instead; a user tier
+    // holding only a malformed skill is not empty and still reaches the
+    // deployer, which reports it. The required bundled pass above is unchanged.
+    if user_tier_is_empty {
+        tracing::debug!(
+            tier = SkillTier::User.label(),
+            source = %user_source.display(),
+            dest = %dest.display(),
+            "optional user skill tier is empty or absent — nothing to deploy from it"
+        );
+    } else {
         let user_stats =
             deploy_skills_filtered(user_source, dest, |name| plan.user_deploy.contains(name))?;
         merge_stats(&mut deploy.stats, user_stats);
