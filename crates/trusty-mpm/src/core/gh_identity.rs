@@ -312,9 +312,10 @@ impl GhEnv {
     /// one call site reintroduces the bug there alone. One applier is what
     /// keeps every `std::process::Command` spawn site identical.
     /// What: `env_remove` for each [`unset_vars`](Self::unset_vars) entry, then
-    /// `env` for each [`vars`](Self::vars) pair. A default (`is_empty`) `GhEnv`
-    /// touches nothing.
-    /// Test: `apply_to_removes_then_sets`.
+    /// `env` for each [`vars`](Self::vars) pair, then #9750's shim dir first on
+    /// `PATH` ([`crate::core::gh_session_shim::apply_shim_path`]). A default
+    /// (`is_empty`) `GhEnv` touches nothing.
+    /// Test: `apply_to_removes_then_sets`, `apply_to_puts_a_shim_first_on_path_9750`.
     pub fn apply_to(&self, cmd: &mut std::process::Command) {
         for key in &self.unset {
             cmd.env_remove(key);
@@ -322,6 +323,7 @@ impl GhEnv {
         for (key, value) in &self.vars {
             cmd.env(key, value);
         }
+        crate::core::gh_session_shim::apply_shim_path(cmd, &self.vars);
     }
 
     /// Whether any override is set (i.e. an identity binding is active).
@@ -569,20 +571,25 @@ fn gh_token_resolves(dir: &std::path::Path, host: &str) -> Result<(), String> {
 /// the project's pinned `GH_CONFIG_DIR` for the session's whole lifetime.
 /// Deriving the answer from the set-vars, in one function both callers ask,
 /// keeps the precedence rule single-sourced rather than restated per site.
-/// What: EMPTY unless `set_vars` selects an identity (`GH_CONFIG_DIR` or
-/// `GH_TOKEN`) — a host-only or informational-only binding changes nothing.
+/// What: EMPTY unless `set_vars` selects an identity (`GH_CONFIG_DIR`,
+/// `GH_TOKEN`, or #9750's shim dir) — a host-only or informational-only binding
+/// changes nothing.
 /// Otherwise every [`GH_INHERITED_IDENTITY_ENV`] entry `set_vars` does not
 /// itself set. `GH_USER` alone does not count as selecting an identity: it is
 /// `trusty-mpm`'s own informational var, not one gh reads.
 /// Test: `binding_removes_the_inherited_identity_vars`,
 /// `absent_config_and_host_only_binding_remove_nothing`,
 /// `inherited_identity_to_clear_ignores_an_informational_only_binding`,
+/// `a_shim_binding_clears_every_inherited_token_9750`,
 /// and `env_unset_clears_an_inherited_gh_token` in
 /// `runtime::claude_code_gh_env_tests`.
 pub fn inherited_identity_to_clear(set_vars: &[(String, String)]) -> Vec<String> {
-    let selects_identity = set_vars
-        .iter()
-        .any(|(k, _)| k == ENV_GH_CONFIG_DIR || k == ENV_GH_TOKEN);
+    // #9750: a gh shim selects the pinned account as surely as a token does.
+    let selects_identity = set_vars.iter().any(|(k, _)| {
+        k == ENV_GH_CONFIG_DIR
+            || k == ENV_GH_TOKEN
+            || k == crate::core::gh_session_shim::GH_SHIM_ENV
+    });
     if !selects_identity {
         return Vec::new();
     }
@@ -1301,5 +1308,54 @@ mod tests {
                 ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
             );
         }
+    }
+
+    /// #9750: a pinned session's shim selects its account, so every inherited
+    /// token variable is cleared — a stale pane `GH_TOKEN` must never outrank
+    /// the shim's per-call token.
+    #[test]
+    fn a_shim_binding_clears_every_inherited_token_9750() {
+        let set = vec![
+            (
+                crate::core::gh_session_shim::GH_SHIM_ENV.to_string(),
+                "/state/gh-shim/octo".to_string(),
+            ),
+            ("GH_USER".to_string(), "octo".to_string()),
+        ];
+        let cleared = inherited_identity_to_clear(&set);
+        for var in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            assert!(cleared.iter().any(|c| c == var), "{var}: {cleared:?}");
+        }
+        assert!(!cleared.iter().any(|c| c == "GH_USER"), "{cleared:?}");
+    }
+
+    /// #9750: `apply_to` puts a shim dir first on the child's `PATH`.
+    #[test]
+    fn apply_to_puts_a_shim_first_on_path_9750() {
+        let env = GhEnv::from_identity_vars(vec![(
+            crate::core::gh_session_shim::GH_SHIM_ENV.to_string(),
+            "/state/gh-shim/octo".to_string(),
+        )]);
+        let mut cmd = std::process::Command::new("true");
+        env.apply_to(&mut cmd);
+        let path = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+            .expect("PATH is set");
+        assert!(
+            path == "/state/gh-shim/octo" || path.starts_with("/state/gh-shim/octo:"),
+            "{path}"
+        );
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "GH_TOKEN" && v.is_none()),
+            "an inherited GH_TOKEN must be removed"
+        );
     }
 }

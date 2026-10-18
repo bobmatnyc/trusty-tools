@@ -408,12 +408,14 @@ impl LaunchSpec {
     /// string, so nothing about the launch depends on pane-shell quoting.
     /// What: `program` + `args`, `current_dir(cwd)`, one `env_remove` per
     /// `env_unset` entry FIRST (mirroring POSIX `env -u` preceding every
-    /// assignment), then one `env` per `env_set` pair, then
+    /// assignment), then one `env` per `env_set` pair, then #9750's gh shim dir
+    /// first on the pane's `PATH`, then
     /// `TM_MANAGED_SESSION_ID` (#2023 component B) and the
     /// `core::alt_screen` managed defaults, which yield per-variable to a value
     /// the pane already exports exactly as the `${NAME-1}` shell form did
     /// (#6495/#7160), and never replace an `env_set` pair (#8405).
     /// Test: `spec_command_carries_cwd_program_argv_and_env`,
+    /// `a_shimmed_spec_puts_the_shim_first_on_path_9750`,
     /// `spec_command_yields_the_alt_screen_default_to_the_pane`,
     /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
     /// `a_cli_spec_exports_no_managed_session_id` (`cli_launch_tests.rs`).
@@ -426,6 +428,8 @@ impl LaunchSpec {
         for (name, value) in &self.env_set {
             cmd.env(name, value);
         }
+        // #9750: a pinned session's gh shim leads the pane's own PATH.
+        crate::core::gh_session_shim::apply_shim_path(&mut cmd, &self.env_set);
         // #8308: a CLI launch has no managed session; it exports nothing.
         if !self.session_id.is_empty() {
             cmd.env(

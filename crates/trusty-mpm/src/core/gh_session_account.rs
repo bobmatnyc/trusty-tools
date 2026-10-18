@@ -12,8 +12,9 @@
 //! and writes that token into the dir's 0600 `hosts.yml` itself. It never runs
 //! or suggests `gh auth login`: gh's login activates the account in the
 //! machine-wide keyring slot. [`session_spawn_env`] is the daemon-side env
-//! builder: every config-dir pin gets a proven token, `GH_CONFIG_DIR` and a git
-//! credential helper pin, or the nobody-token.
+//! builder: every config-dir pin gets a verified credential (#9750: the gh
+//! shim, no token), `GH_CONFIG_DIR` and a git credential helper pin, or the
+//! nobody-token.
 //! Test: `gh_session_account_tests.rs`, and
 //! `a_tm_account_dir_pin_never_leaves_the_session_on_the_active_account`.
 
@@ -24,16 +25,17 @@ use crate::core::gh_account_dir::{
     AccountDirSources, GH_ACCOUNTS_DIR_NAME, ensure_config_version, tm_account_dir,
 };
 use crate::core::gh_account_proof::{
-    CliTokenProbe, GhTokenProbe, GhUserCheck, HttpUserCheck, ProvenToken, api_base_url,
-    identity_token_vars, origin_host, prove_account_token,
+    CliTokenProbe, GhTokenProbe, GhUserCheck, HttpUserCheck, api_base_url, identity_token_vars,
+    origin_host, prove_account_token,
 };
+use crate::core::gh_session_shim::PinnedCredential;
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// The `gh` config dir variable.
 const GH_CONFIG_DIR_ENV_VAR: &str = "GH_CONFIG_DIR";
 
-/// The git credential helper a pinned session uses: `gh` itself, which returns
-/// the session's `GH_TOKEN` to git.
+/// The git credential helper a proven-token env uses: `gh` itself, which
+/// returns the env's `GH_TOKEN` to git. #9750: a session uses its shim instead.
 pub(crate) const GH_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
 /// The one-time fix every refusal names (#8914 HIGH 1).
@@ -354,16 +356,17 @@ fn make_private(_dir: &Path) -> Result<(), String> {
 /// could answer with another account's stored password. An empty value clears
 /// the list; `GIT_CONFIG_*` entries are read after every config file.
 /// What: `GIT_CONFIG_COUNT=2`, then `credential.https://<host>.helper` set to
-/// empty and then to [`GH_CREDENTIAL_HELPER`].
-/// Test: `a_proven_tm_account_dir_pin_isolates_gh_and_git`.
-pub(crate) fn git_credential_pin(host: &str) -> Vec<(String, String)> {
+/// empty and then to `helper` — [`GH_CREDENTIAL_HELPER`], or #9750's shim.
+/// Test: `a_proven_tm_account_dir_pin_isolates_gh_and_git`,
+/// `a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim`.
+pub(crate) fn git_credential_pin(host: &str, helper: &str) -> Vec<(String, String)> {
     let key = format!("credential.https://{host}.helper");
     [
         ("GIT_CONFIG_COUNT", "2".to_string()),
         ("GIT_CONFIG_KEY_0", key.clone()),
         ("GIT_CONFIG_VALUE_0", String::new()),
         ("GIT_CONFIG_KEY_1", key),
-        ("GIT_CONFIG_VALUE_1", GH_CREDENTIAL_HELPER.to_string()),
+        ("GIT_CONFIG_VALUE_1", helper.to_string()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -408,7 +411,7 @@ impl GhTokenProbe for StoredTokenFirst<'_> {
 }
 
 /// The login `<dir>/hosts.yml` names as `host`'s active user, if any.
-fn hosts_yml_user(dir: &Path, host: &str) -> Option<String> {
+pub(crate) fn hosts_yml_user(dir: &Path, host: &str) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("hosts.yml")).ok()?;
     let doc: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
     let user = doc.get(host)?.get("user")?.as_str()?.trim();
@@ -424,13 +427,15 @@ fn hosts_yml_user(dir: &Path, host: &str) -> Option<String> {
 /// What: a pin with no `config_dir` is
 /// [`crate::core::gh_account::pinned_spawn_env`]'s. A config-dir pin's login
 /// is its `account`, else the dir's `hosts.yml` user for the origin's host
-/// (resolved through `aliases`). A login `prove` proves gets its token in the
-/// token variable for its host class; every failure — no host, no login, no
-/// proven token — gets the nobody-token in both token variables and a warning
+/// (resolved through `aliases`). A login `credential` accepts gets its vars —
+/// #9750: a session's shim, never a token; tm's own git call (#9160) gets a
+/// proven token — and its git helper; every failure — no host, no login, no
+/// credential — gets the nobody-token in both token variables and a warning
 /// naming [`setup_hint`]. Every config-dir pin also gets `GH_USER` (when a
 /// login is known), `GH_CONFIG_DIR=<dir>`, and, when the host is known,
 /// [`git_credential_pin`].
 /// Test: `a_proven_tm_account_dir_pin_isolates_gh_and_git`,
+/// `a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim`,
 /// `an_unproven_tm_account_dir_pin_fails_closed`,
 /// `an_operator_config_dir_pin_is_proven_and_injected`,
 /// `an_operator_config_dir_pin_without_a_proven_token_fails_closed`,
@@ -441,10 +446,10 @@ pub(crate) fn session_spawn_env(
     origin: &str,
     state_root: &Path,
     aliases: &SshHostAliases,
-    prove: impl FnOnce(&str) -> Result<ProvenToken, String>,
+    credential: impl FnOnce(&str) -> Result<PinnedCredential, String>,
 ) -> Option<Result<GhSpawnEnv, String>> {
     let Some(dir) = pinned.config_dir.as_deref() else {
-        return crate::core::gh_account::pinned_spawn_env(pinned, origin, prove);
+        return crate::core::gh_account::pinned_spawn_env(pinned, origin, credential);
     };
     // #8914 LOW: no host is a refusal, never a guessed `github.com`.
     let host = crate::session_manager::worktree_reclaim_gh::proof_origin(origin, aliases)
@@ -462,10 +467,16 @@ pub(crate) fn session_spawn_env(
             "gh config dir {} names no account for {h}, so tm cannot prove who it is",
             dir.display()
         )),
-        (Ok(_), Some(login)) => prove(login),
+        (Ok(_), Some(login)) => credential(login),
     };
+    let mut helper = GH_CREDENTIAL_HELPER.to_string();
     let (mut vars, warning) = match proven {
-        Ok(proven) => (proven.identity_vars(), None),
+        // #9750: a session's credential is its shim; only tm's own git call
+        // still carries a proven token.
+        Ok(cred) => {
+            helper = cred.helper;
+            (cred.vars, None)
+        }
         Err(reason) => {
             let who = login.as_deref().unwrap_or("<login>");
             let store = tm_account_dir(state_root, who)
@@ -481,7 +492,7 @@ pub(crate) fn session_spawn_env(
     }
     vars.push((GH_CONFIG_DIR_ENV_VAR.to_string(), dir.display().to_string()));
     if let Ok(host) = &host {
-        vars.extend(git_credential_pin(host));
+        vars.extend(git_credential_pin(host, &helper));
     }
     Some(Ok(GhSpawnEnv { vars, warning }))
 }

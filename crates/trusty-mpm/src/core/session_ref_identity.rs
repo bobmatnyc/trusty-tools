@@ -261,8 +261,10 @@ pub(crate) fn session_ref_git_env_with(
 
     // The proof's own reason, which names the candidate dirs it tried.
     let failure = RefCell::new(None::<String>);
+    // #9750 Q4: tm's own one-child git call keeps the proven token.
     let prove = |login: &str| {
         (seams.prove)(&pinned, &origin, login)
+            .map(|proven| crate::core::gh_session_shim::PinnedCredential::from_proven(&proven))
             .inspect_err(|e| *failure.borrow_mut() = Some(e.clone()))
     };
     let env = crate::core::gh_session_account::session_spawn_env(
@@ -350,7 +352,10 @@ fn pinned_env(
         let host = crate::session_manager::worktree_reclaim_gh::proof_origin(origin, aliases)
             .and_then(|o| crate::core::gh_account_proof::origin_host(&o));
         match host {
-            Ok(host) => vars.extend(crate::core::gh_session_account::git_credential_pin(&host)),
+            Ok(host) => vars.extend(crate::core::gh_session_account::git_credential_pin(
+                &host,
+                crate::core::gh_session_account::GH_CREDENTIAL_HELPER,
+            )),
             Err(reason) => return refused(&reason, login.as_deref(), dir.as_deref()),
         }
     }

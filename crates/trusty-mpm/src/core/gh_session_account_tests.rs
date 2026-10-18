@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::core::gh_account::REFUSED_GH_TOKEN;
 use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe};
+use crate::core::gh_account_proof::ProvenToken;
 
 const ORIGIN: &str = "https://github.com/acme/itinerary";
 const API: &str = "https://api.github.com";
@@ -482,12 +483,14 @@ fn spawn(
     origin: &str,
     prove: impl FnOnce(&str) -> Result<ProvenToken, String>,
 ) -> GhSpawnEnv {
+    // #9750: tm's own git call still carries a proven token (plan Q4).
+    let credential = |login: &str| prove(login).map(|p| PinnedCredential::from_proven(&p));
     session_spawn_env(
         pinned,
         origin,
         Path::new("/state"),
         &SshHostAliases::empty(),
-        prove,
+        credential,
     )
     .expect("a pin yields an env")
     .expect("the env never errs")
@@ -633,4 +636,40 @@ fn a_config_dir_pin_whose_origin_names_no_host_fails_closed() {
         "{:?}",
         env.vars
     );
+}
+
+/// 🔴 #9750 (D6e): a config-dir pin's session gets the shim, not a token: no
+/// token variable, `GH_CONFIG_DIR` kept, and git's helper is the shim itself.
+#[test]
+fn a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim() {
+    let shim = Path::new("/state/gh-shim/octo-pinned@github.com-0");
+    let env = session_spawn_env(
+        &operator_dir_pin(),
+        ORIGIN,
+        Path::new("/state"),
+        &SshHostAliases::empty(),
+        |login| {
+            assert_eq!(login, "octo-pinned");
+            Ok(PinnedCredential::shim(shim))
+        },
+    )
+    .expect("a pin yields an env")
+    .expect("the env never errs");
+    for var in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        assert!(value_of(&env.vars, var).is_none(), "{var}: {:?}", env.vars);
+    }
+    assert_eq!(
+        value_of(&env.vars, "GH_CONFIG_DIR").as_deref(),
+        Some("/home/me/.config/gh-duetto")
+    );
+    assert_eq!(
+        value_of(&env.vars, "GIT_CONFIG_VALUE_1").as_deref(),
+        Some("!'/state/gh-shim/octo-pinned@github.com-0/gh' auth git-credential")
+    );
+    assert!(env.warning.is_none(), "{:?}", env.warning);
 }
