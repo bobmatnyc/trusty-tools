@@ -254,7 +254,7 @@ impl FleetEnv {
             .args([
                 "send-keys",
                 "-t",
-                &format!("{}:", trusty_common::tmux::exact_session_target(name)),
+                &trusty_common::tmux::exact_window_target(name),
                 line,
                 "Enter",
             ])
@@ -1240,10 +1240,7 @@ fn fleet_relaunch_refuses_a_split_architect_session() {
         .args([
             "split-window",
             "-t",
-            &format!(
-                "{}:",
-                trusty_common::tmux::exact_session_target("tm-architect")
-            ),
+            &trusty_common::tmux::exact_window_target("tm-architect"),
         ])
         .env("TMUX_TMPDIR", env.tmux_dir.path())
         .env_remove("TMUX")
