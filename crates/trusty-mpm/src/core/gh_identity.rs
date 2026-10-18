@@ -216,6 +216,66 @@ impl GhEnv {
         Self::from_identity_vars(crate::core::remote_mode::local_only_gh_vars())
     }
 
+    /// This binding as a LAUNCHED Claude Code session must receive it (#9750).
+    ///
+    /// Why: #8383 lets the global `config_dir` fallback keep the caller's
+    /// `GH_TOKEN`, which is right for a one-shot `tm` gh call. A relaunched
+    /// session instead inherits the pane shell's token, a snapshot taken when
+    /// the pane was set up; it goes stale while the session runs on.
+    /// What: [`Self::for_session_launch_with`], with the inherited `GH_HOST`
+    /// and [`gh_token_resolves`] as the probe.
+    /// Test: `a_launch_keeps_the_token_when_the_named_account_resolves_nothing_9750`.
+    pub fn for_session_launch(&self) -> Self {
+        let inherited_host = std::env::var("GH_HOST").ok();
+        self.for_session_launch_with(inherited_host.as_deref(), gh_token_resolves)
+    }
+
+    /// [`Self::for_session_launch`] with the inherited host and the probe given.
+    ///
+    /// Why (#9750 review HIGH): a `hosts.yml` that names an account proves no
+    /// credential resolves — a logout elsewhere, a reset or locked keychain
+    /// leaves the name behind — and it names only `github.com`.
+    /// What: acts only on a binding that sets `GH_CONFIG_DIR` and no `GH_TOKEN`
+    /// and clears nothing. The host is the binding's `GH_HOST`, else
+    /// `inherited_host`, else `github.com`. When `resolves(dir, host)` is `Ok`,
+    /// the inherited token vars of that host's class are cleared: `GH_TOKEN`,
+    /// `GITHUB_TOKEN` and `GH_USER` for `github.com`/`*.ghe.com`, the two
+    /// `*_ENTERPRISE_TOKEN` vars for an Enterprise Server. On `Err` nothing is
+    /// cleared and a warning names the kept vars, never a value.
+    /// Test: `a_launch_clears_only_the_github_token_vars_when_a_login_resolves_9750`,
+    /// `a_launch_against_an_enterprise_host_clears_only_the_enterprise_vars_9750`,
+    /// `inplace_exec_command_keeps_the_token_without_a_dir_login_9750`.
+    pub fn for_session_launch_with(
+        &self,
+        inherited_host: Option<&str>,
+        resolves: impl FnOnce(&std::path::Path, &str) -> Result<(), String>,
+    ) -> Self {
+        let mut env = self.clone();
+        let var = |name: &str| env.vars.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        let Some(dir) = var(ENV_GH_CONFIG_DIR).map(std::path::PathBuf::from) else {
+            return env;
+        };
+        if !env.unset.is_empty() || var(ENV_GH_TOKEN).is_some() {
+            return env;
+        }
+        let host = var(ENV_GH_HOST)
+            .map(String::as_str)
+            .or(inherited_host)
+            .unwrap_or(DEFAULT_GITHUB_HOST);
+        let cleared = crate::core::gh_account_proof::normalize_gh_host(host)
+            .and_then(|host| resolves(&dir, &host).map(|()| launch_token_vars(&host)));
+        match cleared {
+            Ok(names) => env.unset = names.iter().map(|n| (*n).to_string()).collect(),
+            Err(why) => tracing::warn!(
+                dir = %dir.display(),
+                host,
+                "keeping the inherited gh token vars for this launch: no credential resolves \
+                 in the bound config dir ({why})"
+            ),
+        }
+        env
+    }
+
     /// Borrow the resolved `(name, value)` overrides.
     ///
     /// Why: callers iterate these to call `Command::env`; tests iterate them
@@ -252,9 +312,12 @@ impl GhEnv {
     /// one call site reintroduces the bug there alone. One applier is what
     /// keeps every `std::process::Command` spawn site identical.
     /// What: `env_remove` for each [`unset_vars`](Self::unset_vars) entry, then
-    /// `env` for each [`vars`](Self::vars) pair. A default (`is_empty`) `GhEnv`
-    /// touches nothing.
-    /// Test: `apply_to_removes_then_sets`.
+    /// `env` for each [`vars`](Self::vars) pair, then #9750's `PATH`
+    /// ([`crate::core::gh_shim_path::apply_gh_path`]): a shim binding leads
+    /// with its shim, a binding that selects another credential drops an
+    /// inherited session shim, and #8383's global tier keeps it. A default
+    /// (`is_empty`) `GhEnv` touches nothing.
+    /// Test: `apply_to_removes_then_sets`, `apply_to_puts_a_shim_first_on_path_9750`.
     pub fn apply_to(&self, cmd: &mut std::process::Command) {
         for key in &self.unset {
             cmd.env_remove(key);
@@ -262,6 +325,8 @@ impl GhEnv {
         for (key, value) in &self.vars {
             cmd.env(key, value);
         }
+        // #9750: a binding runs its own credential, not the session's shim.
+        crate::core::gh_shim_path::apply_gh_path(cmd, &self.vars, &self.unset);
     }
 
     /// Whether any override is set (i.e. an identity binding is active).
@@ -453,6 +518,50 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
     Ok(GhEnv { vars, unset })
 }
 
+/// The inherited vars a launch clears once `host`'s credential resolves (#9750).
+///
+/// What: gh reads `GH_TOKEN` for `github.com` and `*.ghe.com` and
+/// `GH_ENTERPRISE_TOKEN` for an Enterprise Server, so only that class's two
+/// spellings go, plus `GH_USER`, which names the `GH_TOKEN` account.
+fn launch_token_vars(host: &str) -> &'static [&'static str] {
+    if crate::core::gh_account_proof::token_var_for(host) == ENV_GH_TOKEN {
+        &[ENV_GH_TOKEN, "GITHUB_TOKEN", "GH_USER"]
+    } else {
+        &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+    }
+}
+
+/// Whether `gh` under `dir` resolves a token for `host` (#9750).
+///
+/// Why: the probe answers with gh's own resolution — keyring first, then
+/// `hosts.yml` — which is what the launched session's `gh` will use.
+/// What: refuses an unmigrated dir first ([`crate::core::gh_account_dir::refuse_unmigrated_config`]),
+/// then runs `gh auth token --hostname <host>` with `GH_CONFIG_DIR=<dir>` and
+/// every inherited identity var removed, bounded by
+/// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`]. `Ok` only for a zero exit
+/// with output; the token is dropped unread. A unit-test build never runs gh.
+/// Test: `a_launch_keeps_the_token_when_the_named_account_resolves_nothing_9750`.
+fn gh_token_resolves(dir: &std::path::Path, host: &str) -> Result<(), String> {
+    use crate::session_manager::worktree_reclaim_gh::{gh_command, run_with_timeout};
+    if cfg!(test) {
+        return Err("a unit-test build never runs gh (#8510)".to_string());
+    }
+    crate::core::gh_account_dir::refuse_unmigrated_config(dir)?;
+    let cfg = GithubConfig {
+        config_dir: Some(dir.to_path_buf()),
+        ..GithubConfig::default()
+    };
+    let env = resolve_gh_env(Some(&cfg)).map_err(|e| e.to_string())?;
+    let mut cmd = gh_command(dir, &env);
+    cmd.args(["auth", "token", "--hostname", host]);
+    let token = run_with_timeout(cmd, crate::core::gh_account::GH_ENFORCE_TIMEOUT)
+        .map_err(|failure| format!("`gh auth token --hostname {host}` failed: {failure}"))?;
+    if token.trim().is_empty() {
+        return Err(format!("`gh auth token --hostname {host}` printed nothing"));
+    }
+    Ok(())
+}
+
 /// Which inherited identity vars a child must NOT keep, given what is set on it.
 ///
 /// Why (#6668): two places bind a gh identity onto a child and neither may
@@ -465,20 +574,25 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
 /// the project's pinned `GH_CONFIG_DIR` for the session's whole lifetime.
 /// Deriving the answer from the set-vars, in one function both callers ask,
 /// keeps the precedence rule single-sourced rather than restated per site.
-/// What: EMPTY unless `set_vars` selects an identity (`GH_CONFIG_DIR` or
-/// `GH_TOKEN`) — a host-only or informational-only binding changes nothing.
+/// What: EMPTY unless `set_vars` selects an identity (`GH_CONFIG_DIR`,
+/// `GH_TOKEN`, or #9750's shim dir) — a host-only or informational-only binding
+/// changes nothing.
 /// Otherwise every [`GH_INHERITED_IDENTITY_ENV`] entry `set_vars` does not
 /// itself set. `GH_USER` alone does not count as selecting an identity: it is
 /// `trusty-mpm`'s own informational var, not one gh reads.
 /// Test: `binding_removes_the_inherited_identity_vars`,
 /// `absent_config_and_host_only_binding_remove_nothing`,
 /// `inherited_identity_to_clear_ignores_an_informational_only_binding`,
+/// `a_shim_binding_clears_every_inherited_token_9750`,
 /// and `env_unset_clears_an_inherited_gh_token` in
 /// `runtime::claude_code_gh_env_tests`.
 pub fn inherited_identity_to_clear(set_vars: &[(String, String)]) -> Vec<String> {
-    let selects_identity = set_vars
-        .iter()
-        .any(|(k, _)| k == ENV_GH_CONFIG_DIR || k == ENV_GH_TOKEN);
+    // #9750: a gh shim selects the pinned account as surely as a token does.
+    let selects_identity = set_vars.iter().any(|(k, _)| {
+        k == ENV_GH_CONFIG_DIR
+            || k == ENV_GH_TOKEN
+            || k == crate::core::gh_session_shim::GH_SHIM_ENV
+    });
     if !selects_identity {
         return Vec::new();
     }
@@ -1136,5 +1250,115 @@ mod tests {
             "shown: {shown}"
         );
         assert!(shown.contains("ghe.corp"), "shown: {shown}");
+    }
+
+    /// The global `config_dir` fallback (#8383) over a temp dir whose
+    /// `hosts.yml` names `octo`; `host` is the binding's own `GH_HOST`.
+    fn global_binding(host: Option<&str>) -> (tempfile::TempDir, GhEnv) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("hosts.yml"),
+            "github.com:\n  users:\n    octo: {}\n  user: octo\n",
+        )
+        .expect("write hosts.yml");
+        let cfg = GithubConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            host: host.map(str::to_owned),
+            ..GithubConfig::default()
+        };
+        let env = resolve_tiered_gh_env(None, Some(&cfg)).expect("resolves");
+        (dir, env)
+    }
+
+    /// #9750 review HIGH: a `hosts.yml` that names an account is no proof a
+    /// credential resolves. The production probe fails here (a unit-test build
+    /// never runs gh), so the launch keeps every inherited token var.
+    #[test]
+    fn a_launch_keeps_the_token_when_the_named_account_resolves_nothing_9750() {
+        let (_dir, env) = global_binding(None);
+        let launch = env.for_session_launch();
+        assert!(launch.unset_vars().is_empty(), "{launch:?}");
+        assert_eq!(launch.vars(), env.vars());
+    }
+
+    /// #9750: a resolved `github.com` login clears that class's vars only.
+    #[test]
+    fn a_launch_clears_only_the_github_token_vars_when_a_login_resolves_9750() {
+        let (_dir, env) = global_binding(None);
+        let launch = env.for_session_launch_with(None, |_, host| {
+            assert_eq!(host, "github.com");
+            Ok(())
+        });
+        assert_eq!(launch.unset_vars(), ["GH_TOKEN", "GITHUB_TOKEN", "GH_USER"]);
+    }
+
+    /// #9750 review HIGH: an Enterprise Server host — the binding's `GH_HOST`,
+    /// else the inherited one — is the host probed, and only its vars go.
+    #[test]
+    fn a_launch_against_an_enterprise_host_clears_only_the_enterprise_vars_9750() {
+        let (_bound_dir, bound) = global_binding(Some("ghe.corp.example"));
+        let (_plain_dir, plain) = global_binding(None);
+        for (env, inherited) in [
+            (&bound, Some("other.example")),
+            (&plain, Some("GHE.corp.example")),
+        ] {
+            let launch = env.for_session_launch_with(inherited, |_, host| {
+                assert_eq!(host, "ghe.corp.example");
+                Ok(())
+            });
+            assert_eq!(
+                launch.unset_vars(),
+                ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+            );
+        }
+    }
+
+    /// #9750: a pinned session's shim selects its account, so every inherited
+    /// token variable is cleared — a stale pane `GH_TOKEN` must never outrank
+    /// the shim's per-call token.
+    #[test]
+    fn a_shim_binding_clears_every_inherited_token_9750() {
+        let set = vec![
+            (
+                crate::core::gh_session_shim::GH_SHIM_ENV.to_string(),
+                "/state/gh-shim/octo".to_string(),
+            ),
+            ("GH_USER".to_string(), "octo".to_string()),
+        ];
+        let cleared = inherited_identity_to_clear(&set);
+        for var in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            assert!(cleared.iter().any(|c| c == var), "{var}: {cleared:?}");
+        }
+        assert!(!cleared.iter().any(|c| c == "GH_USER"), "{cleared:?}");
+    }
+
+    /// #9750: `apply_to` puts a shim dir first on the child's `PATH`.
+    #[test]
+    fn apply_to_puts_a_shim_first_on_path_9750() {
+        let env = GhEnv::from_identity_vars(vec![(
+            crate::core::gh_session_shim::GH_SHIM_ENV.to_string(),
+            "/state/gh-shim/octo".to_string(),
+        )]);
+        let mut cmd = std::process::Command::new("true");
+        env.apply_to(&mut cmd);
+        let path = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+            .expect("PATH is set");
+        assert!(
+            path == "/state/gh-shim/octo" || path.starts_with("/state/gh-shim/octo:"),
+            "{path}"
+        );
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "GH_TOKEN" && v.is_none()),
+            "an inherited GH_TOKEN must be removed"
+        );
     }
 }

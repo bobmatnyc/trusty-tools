@@ -411,7 +411,8 @@ fn scoped_gh<const N: usize>(
     config_dir: &str,
     host: &str,
 ) -> trusty_common::gh::GhCommand {
-    trusty_common::gh::GhCommand::new(args)
+    // #9750: a scoped probe runs the real gh, not the calling session's shim.
+    crate::core::gh_shim_path::bypass_session_shim(trusty_common::gh::GhCommand::new(args))
         .env(GH_CONFIG_DIR_ENV, config_dir)
         .env(GH_HOST_ENV, host)
         .env_remove(GH_TOKEN_ENV_VARS[0])

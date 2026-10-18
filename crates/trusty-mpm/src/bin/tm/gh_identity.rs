@@ -150,6 +150,32 @@ pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
     Ok(env)
 }
 
+/// The gh identity a bare-`tm` in-place relaunch hands `claude` (#9750).
+///
+/// Why: plan Q1 — a pinned project's relaunch is interactive, so its login is
+/// verified against the keyring and the session's gh runs through the
+/// per-call shim; plan Q5 — an unpinned relaunch keeps the #8383 tiers and
+/// drops the pane's stale token only when gh resolves a login.
+/// What: [`trusty_mpm::core::gh_session_shim::pinned_relaunch_env`] when a pin
+/// applies, its refusal as `Err` (the plan's message). Otherwise
+/// [`load_gh_env_for`] — #8233 review: its refusal is printed, not fatal, and
+/// the relaunch runs on the ambient identity — then
+/// [`GhEnv::for_session_launch`].
+/// Test: the pinned arm is `a_pinned_relaunch_env_clears_inherited_tokens_and_adds_the_shim`
+/// and `a_refused_pinned_relaunch_is_the_launch_refusal`; the unpinned arm is
+/// `inplace_exec_command_clears_a_stale_token_under_a_keyring_login_9750` and
+/// `inplace_exec_command_keeps_the_token_without_a_dir_login_9750`.
+pub(crate) fn relaunch_gh_env(dir: &std::path::Path) -> Result<GhEnv, String> {
+    if let Some(env) = trusty_mpm::core::gh_session_shim::pinned_relaunch_env(dir)? {
+        return Ok(env);
+    }
+    let env = load_gh_env_for(dir).unwrap_or_else(|e| {
+        eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
+        GhEnv::default()
+    });
+    Ok(env.for_session_launch())
+}
+
 /// The #8934 "no remote, no gh" binding a `tm` gh call gets, if any.
 ///
 /// Why: a `tm` gh call from a local-only repository must not fall back to the

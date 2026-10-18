@@ -157,7 +157,8 @@ impl Gh for RealGh {
         for (k, v) in &self.env {
             cmd = cmd.env(k, v);
         }
-        let out = cmd
+        // #9750: a binding runs the real gh, not the calling session's shim.
+        let out = crate::core::gh_shim_path::bind_gh_path(cmd, &self.env, &self.unset)
             .output_blocking()
             .with_context(|| format!("`gh {}` could not be run", args.join(" ")))?;
         Ok(CmdOut {
