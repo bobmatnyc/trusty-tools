@@ -106,6 +106,8 @@ pub(crate) mod guided_outside_git;
 pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
+// #9092: a supervisor session is never relaunched in place.
+pub(crate) mod guided_supervisor_guard;
 // #8454: the `tm hook` mode dispatch, out of `main.rs`.
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
