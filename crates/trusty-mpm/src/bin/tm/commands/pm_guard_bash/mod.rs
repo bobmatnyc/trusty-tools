@@ -124,6 +124,9 @@ mod tmux_exact_target;
 #[cfg(test)]
 pub(crate) use tmux_exact_target::TmuxObject;
 pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
+// #10033: no hooked session runs `tm fleet relaunch`, the Architect included.
+mod fleet_relaunch;
+pub(crate) use fleet_relaunch::{FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch};
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
 mod floor_d4;
 mod floor_d4_rules;

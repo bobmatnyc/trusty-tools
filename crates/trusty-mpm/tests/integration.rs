@@ -84,6 +84,8 @@ mod tm_hook_pm_guard_build_lease;
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+// #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
+mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
