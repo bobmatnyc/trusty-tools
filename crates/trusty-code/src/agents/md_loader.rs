@@ -88,8 +88,8 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     // document declared no `tcode_tools:`. Embedded agents never take this
     // path, so the roster's #7683 behaviour is unchanged.
     super::claude_tools::apply_claude_tools_fallback(&mut config, &metadata);
-    // #7948: parse the file's OWN bytes — `compose_agent` does not re-emit
-    // `permissions:`, so a block is not inherited through `extends:`. A
+    // #7948: parse the file's OWN bytes, so a block is not inherited through
+    // `extends:` (#8199: the composer re-emits the leaf's block only). A
     // malformed block fails the load; it never degrades to "no permissions".
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read agent file {}: {e}", path.display()))?;
@@ -103,15 +103,15 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 /// The EMBEDDED roster card's `permissions:` block, when `raw` is a deployed
 /// copy of that same card and carries none of its own (#8184).
 ///
-/// Why: the roster deployer re-emits frontmatter from a fixed key list
-/// (`trusty_agents_common::agents::builder`), which does not include
-/// `permissions:`, so a materialized `<project>/.trusty-code/agents/<name>.md`
-/// silently loses the block its source declared — and an agent with no block is
-/// allowed everything. Since #8184's interactive default runs the stock `pm`
+/// Why: before #8199 the roster deployer
+/// (`trusty_agents_common::agents::builder`) did not re-emit `permissions:`,
+/// so a materialized `<project>/.trusty-code/agents/<name>.md` written by an
+/// older build lost the block its source declared — and an agent with no block
+/// is allowed everything. Since #8184's interactive default runs the stock `pm`
 /// SOLO, with `write_file`/`edit`/`bash` in the user's own project root, that
-/// drop would turn a card that asks into a run that never prompts. Restoring
-/// the source's block here keeps the shipped card authoritative until the
-/// shared emitter carries the key itself.
+/// drop would turn a card that asks into a run that never prompts. The emitter
+/// now carries the block, so this covers only those stale pre-#8199 deployed
+/// copies until they are redeployed.
 /// What: applies ONLY to a file the deployer wrote — read as the PARSED
 /// `provenance:` key, not as a substring, so a quoting or ordering change in
 /// the emitter cannot silently turn this into a no-op — whose stem names a

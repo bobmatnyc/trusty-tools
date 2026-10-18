@@ -1628,3 +1628,59 @@ fn metadata_non_map_value_is_rejected() {
         );
     }
 }
+
+/// #8199: a `permissions:` block — including a nested argument table — is
+/// re-emitted verbatim, and its indented rule keys never leak into the
+/// top-level fields (`model:` below is a tool glob, not the agent's model).
+/// FAILS before #8199: the composer had no `permissions` field and dropped it.
+/// Test: this test.
+#[test]
+fn permissions_block_survives_compose_verbatim() {
+    let block =
+        "permissions:\n  bash:\n    \"rm *\": deny\n    \"*\": ask\n  model: deny\n  edit: ask\n";
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "solo",
+        &format!("---\nname: solo\nrole: pm\n{block}model: sonnet\n---\n\nBODY\n"),
+    );
+    let composed = compose_agent("solo", tmp.path()).unwrap();
+    assert!(composed.contains(&format!("\n{block}")), "{composed}");
+    assert!(composed.contains("\nmodel: sonnet\n"), "{composed}");
+    assert!(crate::agents::frontmatter::validate_frontmatter(&composed).is_ok());
+}
+
+/// #8199: the block belongs to the file that declares it (#7948) — a base's
+/// block is not inherited, and a chain declaring none emits no key at all.
+/// Test: this test.
+#[test]
+fn permissions_block_is_leaf_only_and_absent_emits_nothing() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base",
+        "---\nname: base\npermissions:\n  bash: deny\n---\n\nBASE\n",
+    );
+    write_agent(
+        tmp.path(),
+        "child",
+        "---\nname: child\nextends: base\n---\n\nCHILD\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nextends: base\npermissions:\n  bash: ask\n---\n\nLEAF\n",
+    );
+    let child = compose_agent("child", tmp.path()).unwrap();
+    assert!(!child.contains("permissions"), "{child}");
+    let leaf = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(leaf.contains("\npermissions:\n  bash: ask\n"), "{leaf}");
+    assert!(!leaf.contains("bash: deny"), "{leaf}");
+    // The deploy path appends a provenance stamp entry; it must not clear it.
+    let stamped =
+        compose_agent_with_provenance("leaf", tmp.path(), Provenance::FrameworkOwned).unwrap();
+    assert!(
+        stamped.contains("\npermissions:\n  bash: ask\n"),
+        "{stamped}"
+    );
+}

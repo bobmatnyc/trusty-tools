@@ -1,0 +1,3 @@
+Fixed
+- The agent composer now carries a source card's `permissions:` block into the composed and deployed file verbatim, so a deployed trusty-code card keeps its `ask`/`deny` rules instead of running with every tool allowed. The block comes from the requested agent only and is not inherited through `extends:`. Its indented rule keys are no longer read as top-level frontmatter fields. An agent with no block deploys byte-identical to before. (#8199)
+- The agent-schema classifier lists `permissions:` as a key the composer emits and skips the rule keys indented under it, so a deployed agent that carries a block still classifies as trusty-mpm's own and stays eligible for the stale-tier quarantine. (#8199)

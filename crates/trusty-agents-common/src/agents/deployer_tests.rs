@@ -915,3 +915,77 @@ fn deploy_stamps_an_agent_whose_source_declares_no_provenance() {
             .contains("provenance: framework-owned")
     );
 }
+
+/// `doc`'s top-level frontmatter entries: each key with its own line plus
+/// every indented or blank line under it, in source order.
+fn frontmatter_entries(doc: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in doc.lines().skip(1).take_while(|l| l.trim() != "---") {
+        if line.starts_with([' ', '\t']) || line.trim().is_empty() {
+            if let Some((_, block)) = out.last_mut() {
+                block.push_str(line);
+                block.push('\n');
+            }
+            continue;
+        }
+        let key = line.split(':').next().unwrap_or_default().to_string();
+        out.push((key, format!("{line}\n")));
+    }
+    out
+}
+
+/// #8199: every card in trusty-code's stock roster deploys with every
+/// top-level frontmatter key its source declares (`extends:` is consumed by
+/// composition), and `pm`'s `permissions:` block lands byte-identical.
+/// FAILS before #8199: the deployed `pm.md` carried no `permissions:` key.
+/// Test: this test.
+#[test]
+fn stock_tcode_roster_deploys_every_frontmatter_key() {
+    let agents = crate::agent_content::tests::repo_root().join("content/agents");
+    let tcode = agents.join("trusty-code");
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    // The cards extend the shared `BASE-*` templates, so those are staged too.
+    for entry in fs::read_dir(&agents).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("BASE-") {
+            fs::copy(entry.path(), src.path().join(entry.file_name())).unwrap();
+        }
+    }
+    let mut cards = Vec::new();
+    for entry in fs::read_dir(&tcode).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(".md") {
+            fs::copy(entry.path(), src.path().join(&name)).unwrap();
+            cards.push(stem.to_string());
+        }
+    }
+    assert!(cards.iter().any(|c| c == "pm"), "stock roster: {cards:?}");
+
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
+    assert!(result.failed.is_empty(), "{:?}", result.failed);
+
+    let entries =
+        |path: std::path::PathBuf| frontmatter_entries(&fs::read_to_string(path).unwrap());
+    let block = |doc: &[(String, String)]| {
+        doc.iter()
+            .find(|(k, _)| k == "permissions")
+            .map(|(_, b)| b.trim_end().to_string())
+    };
+    let mut missing = Vec::new();
+    for card in &cards {
+        let source = entries(tcode.join(format!("{card}.md")));
+        let deployed = entries(tgt.path().join(format!("{card}.md")));
+        for (key, _) in source.iter().filter(|(k, _)| k != "extends") {
+            if !deployed.iter().any(|(k, _)| k == key) {
+                missing.push(format!("{card}: {key}"));
+            }
+        }
+        assert_eq!(block(&deployed), block(&source), "{card}: permissions");
+    }
+    assert!(
+        missing.is_empty(),
+        "deployed cards dropped keys: {missing:?}"
+    );
+    let pm = entries(tcode.join("pm.md"));
+    assert!(block(&pm).is_some(), "the stock `pm` card declares a block");
+}

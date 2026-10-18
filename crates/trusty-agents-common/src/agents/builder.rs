@@ -34,6 +34,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::builder_metadata::{self, MetadataMap};
+use super::builder_permissions::PermissionsBlock;
 use super::builder_yaml::{escape_yaml_double_quoted, render_scalar, unescape_yaml_double_quoted};
 use super::frontmatter::{parse_kv_line, parse_list_value};
 // #4698: the `provenance:` field's typed value and parse error.
@@ -335,6 +336,15 @@ pub(crate) struct Frontmatter {
     /// Test: `tcode_tools_parses_and_overrides_independently_of_tools` in
     /// builder_tests.rs.
     pub(crate) tcode_tools: Option<Vec<String>>,
+    /// The verbatim `permissions:` block trusty-code compiles (#8199).
+    ///
+    /// Why: dropping it on deploy left a deployed card with every tool
+    /// allowed.
+    /// What: the raw block text from [`PermissionsBlock`]; taken from the
+    /// LEAF only by [`merge_frontmatter`], because #7948 never inherits a
+    /// block through `extends:`, and emitted unchanged.
+    /// Test: `permissions_block_is_leaf_only_and_absent_emits_nothing`.
+    pub(crate) permissions: Option<String>,
     /// The `metadata:` map, e.g. `version` (#9011, ADR-0064). Merged per key
     /// child-wins and re-emitted last; see [`super::builder_metadata`].
     pub(crate) metadata: MetadataMap,
@@ -401,8 +411,9 @@ fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
 
 /// Take one optional inline-list frontmatter key out of the parsed field map.
 ///
-/// Why: `tools:` and `tcode_tools:` (#7683) share one grammar, one
-/// warn-and-degrade rule, and one load-bearing outer `Option` — the `Option`
+/// Why: `tools:`, `tcode_tools:` (#7683) and inline `skills:` (#8199) share
+/// one grammar, one warn-and-degrade rule, and one load-bearing outer
+/// `Option` — the `Option`
 /// is what lets [`merge_frontmatter`] tell "inherit the parent" (key absent)
 /// from "explicit deny-all" (`tools: []`, which parses to `Some(vec![])`).
 /// Writing that twice invites the two copies to drift apart.
@@ -487,6 +498,8 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     // #9011: indented `key: value` lines under a bare `metadata:` key.
     let mut in_metadata_block = false;
     let mut metadata = MetadataMap::new();
+    // #8199: the `permissions:` block, carried through verbatim.
+    let mut permissions = PermissionsBlock::default();
 
     for line in lines {
         consumed += line.len() + 1; // +1 for the newline `lines()` strips.
@@ -521,6 +534,11 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
             // line normally (it may be the next key, or the closing fence,
             // already handled above).
             in_skills_block = false;
+        }
+
+        // #8199: the block's indented rule keys must never reach `fields`.
+        if permissions.consume(line) {
+            continue;
         }
 
         // Use the shared parser so colon-containing values (URLs, timestamps,
@@ -567,18 +585,8 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     // value was non-empty and not the deliberate `[]` empty-array spelling,
     // yet parsed to nothing — this is the "malformed" branch
     // §SPEC-AGENTSKILLS-01 requires be logged, not silently swallowed.
-    let inline_skills = fields.remove("skills").map(|raw_value| {
-        let parsed = parse_list_value(&raw_value);
-        let trimmed_raw = raw_value.trim();
-        if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
-            tracing::warn!(
-                value = %raw_value,
-                "agent frontmatter `skills:` value could not be parsed as a list — \
-                 treating as empty"
-            );
-        }
-        parsed
-    });
+    // #8199: the same warn-and-degrade `take_optional_list` applies below.
+    let inline_skills = take_optional_list(&mut fields, "skills");
 
     // #2897: `tools:` uses the same inline flow-array grammar as `skills:`
     // (via `parse_list_value`) — same malformed-value warn-and-degrade
@@ -672,6 +680,7 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         tools,
         tcode_tools,
         provenance,
+        permissions: permissions.finish(),
         metadata,
     };
     Ok((fm, body))
@@ -714,13 +723,15 @@ fn first_line_len(s: &str) -> usize {
 /// deny-all `Some(vec![])` from `tools: []`) replaces the parent's list
 /// entirely, so a restrictive leaf agent can narrow a permissive base's tool
 /// set down to zero; a child that omits `tools:` (`None`) inherits the
-/// parent's list unchanged. Emits the populated keys in a stable order.
+/// parent's list unchanged. `permissions:` (#8199) comes from the last entry
+/// only and is emitted verbatim. Emits the populated keys in a stable order.
 /// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
 /// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
 /// `initial_prompt_explicit_wins`, `skills_union_across_chain`,
 /// `skills_deduplicated_across_chain`, `max_tokens_child_wins_across_chain`,
 /// `tools_override_across_chain`, `tools_override_contrasts_with_skills_union`,
-/// `tools_empty_list_overrides_to_deny_all` in builder_tests.rs.
+/// `tools_empty_list_overrides_to_deny_all`,
+/// `permissions_block_is_leaf_only_and_absent_emits_nothing` in builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -785,6 +796,8 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
             builder_metadata::set(&mut merged.metadata, key.clone(), value.clone());
         }
     }
+    // #8199: the leaf's own block only — #7948 never inherits one.
+    merged.permissions = chain.last().and_then(|fm| fm.permissions.clone());
 
     // HR-1 Part C: derive `model` from `resource_tier` only when no explicit
     // `model` survived the merge. Explicit model always wins.
@@ -851,6 +864,8 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     if let Some(v) = &merged.tcode_tools {
         out.push_str(&format!("tcode_tools: [{}]\n", v.join(", ")));
     }
+    // #8199: verbatim, so trusty-code's nested rule tables survive deploy.
+    out.push_str(merged.permissions.as_deref().unwrap_or_default());
     if let Some(v) = &merged.initial_prompt {
         // Emit a YAML double-quoted scalar. The value is escaped so a `"` or
         // `\` inside the prompt cannot break out of the quotes and produce
@@ -970,9 +985,11 @@ pub fn compose_agent(name: &str, source_dir: &Path) -> Result<String, AgentBuild
 /// What: composes `name` as [`compose_agent`] does, then overrides the merged
 /// `provenance:` with `stamp` before rendering. A source-declared value is
 /// replaced, not merged — the writer's claim about its own authorship is the
-/// only one that can be true.
+/// only one that can be true. The leaf's `permissions:` block survives the
+/// stamp (#8199).
 /// Test: `compose_with_provenance_stamps_the_field`,
-/// `compose_with_provenance_overrides_a_source_declaration`.
+/// `compose_with_provenance_overrides_a_source_declaration`,
+/// `permissions_block_is_leaf_only_and_absent_emits_nothing`.
 pub fn compose_agent_with_provenance(
     name: &str,
     source_dir: &Path,
@@ -986,6 +1003,8 @@ pub fn compose_agent_with_provenance(
     // this one key overrides any source declaration and touches nothing else.
     frontmatters.push(Frontmatter {
         provenance: Some(stamp),
+        // #8199: the merge reads the LAST entry's block; keep the leaf's.
+        permissions: frontmatters.last().and_then(|fm| fm.permissions.clone()),
         ..Frontmatter::default()
     });
     Ok(render_composed(&frontmatters, &bodies))
