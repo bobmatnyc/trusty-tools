@@ -474,9 +474,12 @@ pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
         // `nonempty_stdout_blocking`; the failure message stays local because
         // it names the pinned account.
         Some(
-            trusty_common::gh::GhCommand::new(["auth", "token", "-u", &owned])
-                .nonempty_stdout_blocking()
-                .map_err(|e| format!("`gh auth token -u {owned}` failed: {e}")),
+            // #9750: `-u` names the account; the session's shim must not answer.
+            crate::core::gh_shim_path::bypass_session_shim(trusty_common::gh::GhCommand::new([
+                "auth", "token", "-u", &owned,
+            ]))
+            .nonempty_stdout_blocking()
+            .map_err(|e| format!("`gh auth token -u {owned}` failed: {e}")),
         )
     })
     .unwrap_or_else(|| {
@@ -955,9 +958,13 @@ pub(crate) const REFUSED_GH_TOKEN: &str = "tm-refused-unverified-gh-account-pin"
 /// ([`crate::core::gh_session_shim::launch_pinned_login`]); tm's own git call
 /// (#9160), the token [`crate::core::gh_account_proof::prove_account_token`]
 /// proves. Otherwise [`refused_spawn_env`], so the session's `gh` fails closed
-/// and the caller logs why. `None` when nothing is pinned.
+/// and the caller logs why. #9750: when `host` (the origin's) is known, git's
+/// credential helper for it is pinned to the credential's helper — the shim —
+/// or, refused, to gh's own, which then reads the nobody-token. `None` when
+/// nothing is pinned.
 /// Test: `an_account_only_spawn_pin_gets_the_proven_token`,
 /// `a_shimmed_account_only_spawn_injects_no_token`,
+/// `a_shimmed_account_only_spawn_pins_git_to_the_shim`,
 /// `an_account_only_spawn_pin_with_no_proven_token_fails_closed`,
 /// `a_config_dir_spawn_pin_is_proven_not_used_bare`,
 /// `a_ghes_spawn_pin_puts_the_token_in_gh_enterprise_token`,
@@ -965,8 +972,10 @@ pub(crate) const REFUSED_GH_TOKEN: &str = "tm-refused-unverified-gh-account-pin"
 pub(crate) fn pinned_spawn_env(
     pinned: &PinnedGhIdentity,
     origin: &str,
+    host: Option<&str>,
     credential: impl FnOnce(&str) -> Result<crate::core::gh_session_shim::PinnedCredential, String>,
 ) -> Option<Result<GhSpawnEnv, String>> {
+    use crate::core::gh_session_account::{GH_CREDENTIAL_HELPER, git_credential_pin};
     let account = pinned
         .account
         .as_deref()
@@ -976,17 +985,28 @@ pub(crate) fn pinned_spawn_env(
     // only its account is read, never its dir.
     let login = account?;
     // #9750 (D6e): a session's credential is its shim; nothing is logged.
-    Some(Ok(match credential(login) {
+    let (mut env, helper) = match credential(login) {
         Ok(cred) => {
             let mut vars = cred.vars;
             vars.push((GH_USER_ENV_VAR.to_string(), login.to_string()));
-            GhSpawnEnv {
+            let env = GhSpawnEnv {
                 vars,
                 warning: None,
-            }
+            };
+            (env, cred.helper)
         }
-        Err(reason) => refused_spawn_env(Some(login), origin, &reason, pinned.source),
-    }))
+        Err(reason) => (
+            refused_spawn_env(Some(login), origin, &reason, pinned.source),
+            GH_CREDENTIAL_HELPER.to_string(),
+        ),
+    };
+    // #9750: with no token in the env, a global `!gh auth git-credential`
+    // would answer as the keyring's active account; pin git to the helper.
+    env.vars.extend(
+        host.map(|h| git_credential_pin(h, &helper))
+            .unwrap_or_default(),
+    );
+    Some(Ok(env))
 }
 
 /// The fail-closed spawn env for an account pin no token is proven for (#8510).

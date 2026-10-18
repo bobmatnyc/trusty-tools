@@ -190,12 +190,7 @@ pub(crate) fn check_pin(
     let host = pinned_host(origin, seams.aliases)
         .map_err(|e| format!("tm: cannot start session: {e}. No token was injected."))?;
     let Some(login) = pin_login(pinned, &host) else {
-        let dir = pinned.config_dir.as_deref().unwrap_or(Path::new("<none>"));
-        return Err(format!(
-            "tm: cannot start session: gh config dir {} names no account for {host}, so tm \
-             cannot prove who the session runs as. No token was injected.",
-            dir.display()
-        ));
+        return Err(no_login_refusal(pinned, Ok(&host)));
     };
     let sources = pin_sources(
         pinned,
@@ -207,6 +202,28 @@ pub(crate) fn check_pin(
     verify_pinned_login(&sources, &login, &host, seams.probe, seams.check)
         .map(Some)
         .map_err(|reason| launch_refusal(&login, &host, &reason))
+}
+
+/// The refusal for a pin that names no login tm can verify on `host` (#9750).
+///
+/// Why: the launch check ([`check_pin`]) and the in-place relaunch must refuse
+/// the same pin with the same words.
+/// What: `host`'s own error when it does not resolve; otherwise the pin's
+/// config dir (or `<none>`) names no account for `host`.
+/// Test: `a_config_dir_pin_naming_no_login_refuses`,
+/// `a_blank_account_pin_refuses_the_relaunch_as_check_pin_does`.
+pub(crate) fn no_login_refusal(pinned: &PinnedGhIdentity, host: Result<&str, &str>) -> String {
+    match host {
+        Err(e) => format!("tm: cannot start session: {e}. No token was injected."),
+        Ok(host) => {
+            let dir = pinned.config_dir.as_deref().unwrap_or(Path::new("<none>"));
+            format!(
+                "tm: cannot start session: gh config dir {} names no account for {host}, so \
+                 tm cannot prove who the session runs as. No token was injected.",
+                dir.display()
+            )
+        }
+    }
 }
 
 /// A checkout's gh pin, found the way the daemon's spawn finds it.
@@ -243,12 +260,23 @@ pub(crate) fn session_pin_with(
 
 /// The origin of `checkout`, when git reads one.
 ///
-/// What: `None` for a checkout with no `origin`, a non-repository, or a git
-/// failure — none of these is a pinned launch, and the daemon handles each.
-pub(crate) fn checkout_origin(checkout: &Path) -> Option<String> {
+/// What: `Ok(None)` for a checkout with no `origin` or a non-repository —
+/// neither is a pinned launch. #9750: a git failure (an unreadable `.git`, a
+/// `safe.directory` refusal) is an `Err` refusal: tm cannot tell whether the
+/// checkout is pinned, so it must not launch it as unpinned, just as an
+/// unreadable registry refuses.
+/// Test: `a_relaunch_whose_origin_git_cannot_read_is_refused`,
+/// `a_launch_check_whose_origin_git_cannot_read_is_refused`.
+pub(crate) fn checkout_origin(checkout: &Path) -> Result<Option<String>, String> {
+    use crate::core::remote_mode::RemoteMode;
     match crate::core::remote_mode::remote_mode(checkout) {
-        Ok(crate::core::remote_mode::RemoteMode::Origin(origin)) => Some(origin),
-        _ => None,
+        Ok(RemoteMode::Origin(origin)) => Ok(Some(origin)),
+        Ok(RemoteMode::LocalOnly { .. } | RemoteMode::NotARepository) => Ok(None),
+        Err(e) => Err(format!(
+            "tm: cannot start session: git cannot read the origin of {} ({e}), so tm cannot \
+             tell whether its gh account is pinned. No token was injected.",
+            checkout.display()
+        )),
     }
 }
 
@@ -260,12 +288,14 @@ pub(crate) fn checkout_origin(checkout: &Path) -> Option<String> {
 /// What: `account` (the `--account` flag) is an account-only pin; otherwise
 /// [`session_pin_with`] over the host's registry and `[accounts]` table. Then
 /// [`check_pin`] with the real `gh` and `GET /user`. `Ok(())` for an unpinned
-/// checkout. Blocking; run it off the async executor.
-/// Test: none directly (real `gh`, registry and network); the decisions are
-/// [`session_pin_with`]'s and [`check_pin`]'s.
+/// checkout; an `Err` when git cannot read the origin ([`checkout_origin`]).
+/// Blocking; run it off the async executor.
+/// Test: `a_launch_check_whose_origin_git_cannot_read_is_refused`; the other
+/// decisions are [`session_pin_with`]'s and [`check_pin`]'s.
 pub fn check_launch_login(checkout: &Path, account: Option<&str>) -> Result<(), String> {
     use crate::core::gh_account_proof::{CliTokenProbe, HttpUserCheck};
-    let Some(origin) = checkout_origin(checkout) else {
+    // #9750: a git error reading `origin` refuses the launch.
+    let Some(origin) = checkout_origin(checkout)? else {
         return Ok(());
     };
     let aliases = SshHostAliases::for_current_user();

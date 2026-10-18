@@ -6,13 +6,15 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GH_SHIM_ENV, LaunchSeams, PinnedCredential, apply_shim_path, find_real_gh, launch_pinned_login,
-    prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
+    GH_SHIM_ENV, LaunchSeams, PinnedCredential, find_real_gh, launch_pinned_login, prefixed_path,
+    shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
+use crate::core::gh_account::REFUSED_GH_TOKEN;
 use crate::core::gh_account_dir::AccountDirSources;
 use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe, migrated_dir};
 use crate::core::gh_login_verify::VerifiedLogin;
+use crate::core::gh_shim_path::apply_gh_path;
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// A planted token: no shim, env, message or log may ever contain it.
@@ -42,6 +44,20 @@ fn value_of<'a>(vars: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// #9750: `vars` carries no token value — each token variable is absent or the
+/// nobody sentinel, and `GH_TOKEN` is the sentinel, so a gh run outside the
+/// shim fails closed.
+fn assert_no_token_value(vars: &[(String, String)]) {
+    for var in TOKEN_VARS {
+        let value = value_of(vars, var);
+        assert!(
+            value.is_none() || value == Some(REFUSED_GH_TOKEN),
+            "{var}: {vars:?}"
+        );
+    }
+    assert_eq!(value_of(vars, "GH_TOKEN"), Some(REFUSED_GH_TOKEN));
+}
+
 /// Write an executable script.
 #[cfg(unix)]
 fn write_script(path: &Path, body: &str) {
@@ -51,14 +67,13 @@ fn write_script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
-/// #9750: a shim credential sets no token variable, only the shim dir, and
-/// makes the shim git's credential helper.
+/// #9750: a shim credential sets no token value — only the shim dir and the
+/// nobody sentinel the shim unsets — and makes the shim git's credential
+/// helper.
 #[test]
 fn a_shim_credential_carries_no_token_and_names_the_shim_helper() {
     let cred = PinnedCredential::shim(Path::new("/state/gh-shim/octo@github.com-1"));
-    for var in TOKEN_VARS {
-        assert!(value_of(&cred.vars, var).is_none(), "{var}: {cred:?}");
-    }
+    assert_no_token_value(&cred.vars);
     assert_eq!(
         value_of(&cred.vars, GH_SHIM_ENV),
         Some("/state/gh-shim/octo@github.com-1")
@@ -87,11 +102,11 @@ fn apply_shim_path_prefixes_only_a_shimmed_launch() {
             .map(|v| v.to_string_lossy().into_owned())
     };
     let mut plain = std::process::Command::new("true");
-    apply_shim_path(&mut plain, &[("GH_USER".into(), "octo".into())]);
+    apply_gh_path(&mut plain, &[("GH_USER".into(), "octo".into())], &[]);
     assert_eq!(path_of(&plain), None);
 
     let mut shimmed = std::process::Command::new("true");
-    apply_shim_path(&mut shimmed, &[(GH_SHIM_ENV.into(), "/shim".into())]);
+    apply_gh_path(&mut shimmed, &[(GH_SHIM_ENV.into(), "/shim".into())], &[]);
     let path = path_of(&shimmed).expect("PATH is set");
     assert!(
         path == "/shim" || path.starts_with("/shim:"),
@@ -334,9 +349,7 @@ fn a_verified_login_launches_with_the_shim_and_no_token() {
     let cred = launch_pinned_login("octo", "github.com", seams).expect("launched");
     let shim = PathBuf::from(value_of(&cred.vars, GH_SHIM_ENV).expect("shim dir"));
     assert_eq!(shim, shim_dir(tmp.path(), &verified("github.com", &dir)));
-    for var in TOKEN_VARS {
-        assert!(value_of(&cred.vars, var).is_none(), "{var}: {cred:?}");
-    }
+    assert_no_token_value(&cred.vars);
     let script = std::fs::read_to_string(shim.join("gh")).expect("shim");
     assert!(!script.contains(SENTINEL), "the token reached the shim");
     assert!(!format!("{cred:?}").contains(SENTINEL));
@@ -394,17 +407,22 @@ impl std::io::Write for LogBuffer {
     }
 }
 
-/// 🔴 #9750: a full config-dir pin spawn — verify, shim, env, the production
-/// logger — under a capturing subscriber: no token reaches the log or the
-/// env, in the accepted and the refused arm; the refusal is still logged.
+/// 🔴 #9750: a full spawn — verify, shim, env, the production logger — for a
+/// config-dir pin and an account-only pin, under a capturing subscriber: no
+/// token reaches the log or the env, in the accepted and the refused arm; the
+/// refusal is still logged.
 #[test]
 fn a_shimmed_spawn_logs_and_injects_no_token() {
-    for who in [Ok("octo"), Ok("octo-other")] {
+    let arms = [(Ok("octo"), true), (Ok("octo-other"), true)];
+    let arms = arms
+        .into_iter()
+        .chain([(Ok("octo"), false), (Ok("octo-other"), false)]);
+    for (who, with_dir) in arms {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (sources, probe, check, dir) = launch_fixture(tmp.path(), who);
         let pinned = PinnedGhIdentity {
             account: Some("octo".into()),
-            config_dir: Some(dir.clone()),
+            config_dir: with_dir.then(|| dir.clone()),
             ..Default::default()
         };
         // #4931: a thread-local capture records nothing until the global level is raised.
@@ -444,11 +462,124 @@ fn a_shimmed_spawn_logs_and_injects_no_token() {
         if who == Ok("octo-other") {
             assert!(log.contains("authenticates as 'octo-other'"), "{log}");
         } else {
-            for var in TOKEN_VARS {
-                assert!(value_of(&vars, var).is_none(), "{var}: {vars:?}");
-            }
+            assert_no_token_value(&vars);
         }
     }
+}
+
+/// 🔴 #9750: an account-only pin (registry `gh_account`, `[accounts]`,
+/// `--account`) pins git's credential helper for the origin's host to the
+/// shim, cleared first so no earlier helper answers — before this, a global
+/// `!gh auth git-credential` answered as the keyring's active account.
+#[test]
+fn a_shimmed_account_only_spawn_pins_git_to_the_shim() {
+    let pinned = PinnedGhIdentity {
+        account: Some("octo".into()),
+        ..Default::default()
+    };
+    let shim = Path::new("/state/gh-shim/octo@github.com-0");
+    let env = crate::core::gh_session_account::session_spawn_env(
+        &pinned,
+        "https://github.com/acme-9750/widget",
+        Path::new("/state"),
+        &SshHostAliases::empty(),
+        |_| Ok(PinnedCredential::shim(shim)),
+    )
+    .expect("a pin")
+    .expect("an env");
+    let key = "credential.https://github.com.helper";
+    assert_eq!(value_of(&env.vars, "GIT_CONFIG_COUNT"), Some("2"));
+    assert_eq!(value_of(&env.vars, "GIT_CONFIG_KEY_0"), Some(key));
+    assert_eq!(value_of(&env.vars, "GIT_CONFIG_VALUE_0"), Some(""));
+    assert_eq!(value_of(&env.vars, "GIT_CONFIG_KEY_1"), Some(key));
+    assert_eq!(
+        value_of(&env.vars, "GIT_CONFIG_VALUE_1"),
+        Some("!'/state/gh-shim/octo@github.com-0/gh' auth git-credential")
+    );
+    assert_no_token_value(&env.vars);
+    assert!(env.warning.is_none(), "{:?}", env.warning);
+}
+
+/// 🔴 #9750: inside a pinned session, a gh that bypasses the shim (run by
+/// absolute path) receives the nobody sentinel as its token, so it fails
+/// closed instead of acting as the keyring's active account. Tested on the
+/// env the relaunched session actually receives.
+#[cfg(unix)]
+#[test]
+fn a_gh_run_outside_the_shim_fails_closed_in_a_pinned_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("bin").join("gh");
+    write_script(&real, "#!/bin/sh\nprintf 'GH_TOKEN=%s\\n' \"$GH_TOKEN\"\n");
+    let pinned = PinnedGhIdentity {
+        account: Some("octo".into()),
+        ..Default::default()
+    };
+    let shim = tmp.path().join("gh-shim").join("octo@github.com-0");
+    let env = super::pinned_relaunch_env_with(
+        &pinned,
+        "https://github.com/acme-9750/widget",
+        tmp.path(),
+        &SshHostAliases::empty(),
+        |_| Ok(PinnedCredential::shim(&shim)),
+    )
+    .expect("a verified relaunch");
+    let mut cmd = std::process::Command::new(&real);
+    cmd.env("GH_TOKEN", "pane-token")
+        .env("GITHUB_TOKEN", "pane-token");
+    env.apply_to(&mut cmd);
+    let out = cmd.output().expect("gh runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("GH_TOKEN={REFUSED_GH_TOKEN}\n")
+    );
+}
+
+/// 🔴 #9750: a relaunch in a checkout whose origin git cannot read (an
+/// unreadable `.git`) is refused — never relaunched as unpinned.
+#[cfg(unix)]
+#[test]
+fn a_relaunch_whose_origin_git_cannot_read_is_refused() {
+    let checkout = unreadable_checkout();
+    let result = super::pinned_relaunch_env(checkout.path());
+    restore_checkout(checkout.path());
+    let err = result.expect_err("refused");
+    assert!(err.contains("git cannot read the origin"), "{err}");
+    assert!(err.ends_with("No token was injected."), "{err}");
+}
+
+/// A git checkout with an `origin`, whose `.git` is then made unreadable.
+#[cfg(unix)]
+pub(crate) fn unreadable_checkout() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme-9750/widget",
+        ][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    }
+    let git_dir = dir.path().join(".git");
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    dir
+}
+
+/// Undo [`unreadable_checkout`]'s chmod so the temp dir can be removed.
+#[cfg(unix)]
+pub(crate) fn restore_checkout(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let git_dir = dir.join(".git");
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
 }
 
 /// 🔴 #9750 Q1: a pinned in-place relaunch clears every inherited token
@@ -468,10 +599,13 @@ fn a_pinned_relaunch_env_clears_inherited_tokens_and_adds_the_shim() {
         |_| Ok(PinnedCredential::shim(shim)),
     )
     .expect("a verified relaunch");
+    // #9750: each inherited token is removed or overridden by the sentinel.
     for var in TOKEN_VARS {
-        assert!(env.unset_vars().iter().any(|v| v == var), "{var}: {env:?}");
-        assert!(value_of(env.vars(), var).is_none(), "{var}: {env:?}");
+        let unset = env.unset_vars().iter().any(|v| v == var);
+        let refused = value_of(env.vars(), var) == Some(REFUSED_GH_TOKEN);
+        assert!(unset != refused, "{var}: {env:?}");
     }
+    assert_no_token_value(env.vars());
     let mut cmd = std::process::Command::new("true");
     env.apply_to(&mut cmd);
     let path = cmd

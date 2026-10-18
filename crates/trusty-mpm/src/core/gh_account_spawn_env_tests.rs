@@ -936,7 +936,7 @@ fn spawn_with(
         cache: None,
     };
     let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
-    super::pinned_spawn_env(&account_only_pin(), origin, |login| {
+    super::pinned_spawn_env(&account_only_pin(), origin, None, |login| {
         super::spawn_proof(&prover, login, origin, &aliases).map(|p| proven_credential(&p))
     })
     .expect("a pin must produce an env")
@@ -979,7 +979,7 @@ fn an_account_only_spawn_pin_gets_the_proven_token() {
 /// Test: itself.
 #[test]
 fn an_account_only_spawn_pin_with_no_proven_token_fails_closed() {
-    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, |_| {
+    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, None, |_| {
         Err("/x: the token gh returned for 'octo-pinned' authenticates as 'octo-other'".into())
     })
     .expect("a pinned account must never resolve to no identity")
@@ -1011,7 +1011,7 @@ fn a_config_dir_spawn_pin_is_proven_not_used_bare() {
         config_dir: Some(dir.path().to_path_buf()),
         ..Default::default()
     };
-    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |login| {
+    let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, None, |login| {
         assert_eq!(login, "octo-pinned");
         Err("not proven".into())
     })
@@ -1246,12 +1246,13 @@ fn proof_origin_refusals_never_quote_the_origin_token() {
 }
 
 /// 🔴 #9750 (D6e): an account-only pin's session gets the shim and `GH_USER`,
-/// and none of the four token variables — the inherited ones are cleared by
-/// the launch, which the shim's presence arms.
+/// and no token value: the token variables gh reads hold only the nobody
+/// sentinel (which the shim unsets), and the inherited rest are cleared by the
+/// launch, which the shim's presence arms.
 #[test]
 fn a_shimmed_account_only_spawn_injects_no_token() {
     let shim = Path::new("/state/gh-shim/octo-pinned@github.com-0");
-    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, |login| {
+    let env = super::pinned_spawn_env(&account_only_pin(), SPAWN_ORIGIN, None, |login| {
         assert_eq!(login, "octo-pinned");
         Ok(crate::core::gh_session_shim::PinnedCredential::shim(shim))
     })
@@ -1264,7 +1265,9 @@ fn a_shimmed_account_only_spawn_injects_no_token() {
         "GITHUB_ENTERPRISE_TOKEN",
     ] {
         assert!(
-            !env.vars.iter().any(|(k, _)| k == var),
+            env.vars
+                .iter()
+                .all(|(k, v)| k != var || v == super::REFUSED_GH_TOKEN),
             "{var}: {:?}",
             env.vars
         );
@@ -1275,6 +1278,6 @@ fn a_shimmed_account_only_spawn_injects_no_token() {
     );
     assert_eq!(value_of(&env.vars, GH_USER_ENV_VAR), "octo-pinned");
     let cleared = crate::core::gh_identity::inherited_identity_to_clear(&env.vars);
-    assert!(cleared.iter().any(|c| c == "GH_TOKEN"), "{cleared:?}");
+    assert!(cleared.iter().any(|c| c == "GITHUB_TOKEN"), "{cleared:?}");
     assert!(env.warning.is_none(), "{:?}", env.warning);
 }

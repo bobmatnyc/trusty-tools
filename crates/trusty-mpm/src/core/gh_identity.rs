@@ -312,9 +312,10 @@ impl GhEnv {
     /// one call site reintroduces the bug there alone. One applier is what
     /// keeps every `std::process::Command` spawn site identical.
     /// What: `env_remove` for each [`unset_vars`](Self::unset_vars) entry, then
-    /// `env` for each [`vars`](Self::vars) pair, then #9750's shim dir first on
-    /// `PATH` ([`crate::core::gh_session_shim::apply_shim_path`]). A default
-    /// (`is_empty`) `GhEnv` touches nothing.
+    /// `env` for each [`vars`](Self::vars) pair, then #9750's `PATH`
+    /// ([`crate::core::gh_shim_path::apply_gh_path`]): a shim binding leads
+    /// with its shim, any other binding drops an inherited session shim. A
+    /// default (`is_empty`) `GhEnv` touches nothing.
     /// Test: `apply_to_removes_then_sets`, `apply_to_puts_a_shim_first_on_path_9750`.
     pub fn apply_to(&self, cmd: &mut std::process::Command) {
         for key in &self.unset {
@@ -323,7 +324,8 @@ impl GhEnv {
         for (key, value) in &self.vars {
             cmd.env(key, value);
         }
-        crate::core::gh_session_shim::apply_shim_path(cmd, &self.vars);
+        // #9750: a binding runs its own credential, not the session's shim.
+        crate::core::gh_shim_path::apply_gh_path(cmd, &self.vars, &self.unset);
     }
 
     /// Whether any override is set (i.e. an identity binding is active).

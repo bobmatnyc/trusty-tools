@@ -448,12 +448,14 @@ pub(crate) fn session_spawn_env(
     aliases: &SshHostAliases,
     credential: impl FnOnce(&str) -> Result<PinnedCredential, String>,
 ) -> Option<Result<GhSpawnEnv, String>> {
-    let Some(dir) = pinned.config_dir.as_deref() else {
-        return crate::core::gh_account::pinned_spawn_env(pinned, origin, credential);
-    };
     // #8914 LOW: no host is a refusal, never a guessed `github.com`.
     let host = crate::session_manager::worktree_reclaim_gh::proof_origin(origin, aliases)
         .and_then(|o| origin_host(&o));
+    let Some(dir) = pinned.config_dir.as_deref() else {
+        // #9750: an account-only pin also pins git's helper for the host.
+        let host = host.as_deref().ok();
+        return crate::core::gh_account::pinned_spawn_env(pinned, origin, host, credential);
+    };
     let login = pinned
         .account
         .as_deref()

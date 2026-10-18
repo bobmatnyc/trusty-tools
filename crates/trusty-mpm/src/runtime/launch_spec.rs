@@ -428,8 +428,9 @@ impl LaunchSpec {
         for (name, value) in &self.env_set {
             cmd.env(name, value);
         }
-        // #9750: a pinned session's gh shim leads the pane's own PATH.
-        crate::core::gh_session_shim::apply_shim_path(&mut cmd, &self.env_set);
+        // #9750: a pinned session's gh shim leads the pane's own PATH; a
+        // session bound to another identity drops an inherited shim.
+        crate::core::gh_shim_path::apply_gh_path(&mut cmd, &self.env_set, &self.env_unset);
         // #8308: a CLI launch has no managed session; it exports nothing.
         if !self.session_id.is_empty() {
             cmd.env(

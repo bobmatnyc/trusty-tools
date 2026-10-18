@@ -12,8 +12,9 @@
 //! --user <login>` under the config dir the launch check verified, bounded,
 //! with every inherited token variable removed; puts the answer in the one
 //! token variable gh reads for that host; and `exec`s the real gh. A spawn env
-//! names the dir in [`GH_SHIM_ENV`]; [`apply_shim_path`] turns that into a
-//! `PATH` prefix where the child is built. [`launch_pinned_login`] is the
+//! names the dir in [`GH_SHIM_ENV`];
+//! [`crate::core::gh_shim_path::apply_gh_path`] turns that into a `PATH`
+//! prefix where the child is built. [`launch_pinned_login`] is the
 //! launch: verify, find the real gh, write the shim.
 //! Test: `gh_session_shim_tests.rs`.
 
@@ -29,7 +30,8 @@ use crate::session_manager::ssh_host_alias::SshHostAliases;
 /// The spawn-env variable naming a pinned session's shim dir (#9750).
 ///
 /// Why: the daemon builds the env, but the `PATH` it must prefix is the pane's,
-/// known only where the child is built ([`apply_shim_path`]).
+/// known only where the child is built
+/// ([`crate::core::gh_shim_path::apply_gh_path`]).
 /// What: also counts as selecting a gh identity, so
 /// [`crate::core::gh_identity::inherited_identity_to_clear`] strips every
 /// inherited token variable from the child.
@@ -87,13 +89,20 @@ impl PinnedCredential {
         }
     }
 
-    /// #9750's shape: [`GH_SHIM_ENV`] naming `dir`, and the shim itself as
-    /// git's helper, so git also gets the pinned account's token per call.
+    /// #9750's shape: [`GH_SHIM_ENV`] naming `dir`, the shim itself as git's
+    /// helper, so git also gets the pinned account's token per call, and
+    /// [`crate::core::gh_account::REFUSED_GH_TOKEN`] in both token variables.
+    /// The shim unsets the sentinel; a gh run outside the shim (an absolute
+    /// path, a reordered `PATH`) authenticates as nobody instead of as the
+    /// keyring's active account.
     /// Test: `a_shim_credential_carries_no_token_and_names_the_shim_helper`.
     pub(crate) fn shim(dir: &Path) -> Self {
         let gh = dir.join("gh");
+        let mut vars = vec![(GH_SHIM_ENV.to_string(), dir.display().to_string())];
+        // #9750: fail closed for a gh reached outside the shim.
+        vars.extend(crate::core::gh_account_proof::identity_token_vars(None));
         Self {
-            vars: vec![(GH_SHIM_ENV.to_string(), dir.display().to_string())],
+            vars,
             helper: format!("!'{}' auth git-credential", gh.display()),
         }
     }
@@ -108,20 +117,6 @@ pub(crate) fn prefixed_path(dir: &OsStr, inherited: Option<&OsStr>) -> OsString 
         path.push(rest);
     }
     path
-}
-
-/// Put a pinned session's shim dir first on `cmd`'s `PATH` (#9750).
-///
-/// Why: the shim only works when `gh` resolves to it; the dir must precede the
-/// real gh's dir in the `PATH` the child inherits.
-/// What: when `vars` names [`GH_SHIM_ENV`], sets `PATH` to that dir followed by
-/// this process's `PATH`; otherwise touches nothing.
-/// Test: `apply_shim_path_prefixes_only_a_shimmed_launch`.
-pub fn apply_shim_path(cmd: &mut std::process::Command, vars: &[(String, String)]) {
-    if let Some((_, dir)) = vars.iter().find(|(k, _)| k == GH_SHIM_ENV) {
-        let inherited = std::env::var_os("PATH");
-        cmd.env("PATH", prefixed_path(OsStr::new(dir), inherited.as_deref()));
-    }
 }
 
 /// The root every shim dir lives under.
@@ -395,9 +390,11 @@ pub(crate) fn launch_pinned_login_cli(
 /// variable and names the shim. A refused `launch` is
 /// [`crate::core::gh_login_verify::launch_refusal`]; any other refusal the env
 /// builder reports (no host, no login) is a message ending "No token was
-/// injected."
+/// injected."; a pin with no usable account (a blank `account`) is
+/// [`crate::core::gh_login_verify::no_login_refusal`], as `check_pin` refuses.
 /// Test: `a_pinned_relaunch_env_clears_inherited_tokens_and_adds_the_shim`,
-/// `a_refused_pinned_relaunch_is_the_launch_refusal`.
+/// `a_refused_pinned_relaunch_is_the_launch_refusal`,
+/// `a_blank_account_pin_refuses_the_relaunch_as_check_pin_does`.
 pub(crate) fn pinned_relaunch_env_with(
     pinned: &PinnedGhIdentity,
     origin: &str,
@@ -432,7 +429,12 @@ pub(crate) fn pinned_relaunch_env_with(
             Some(warning) => Err(unusable(&warning)),
         },
         Some(Err(reason)) => Err(unusable(&reason)),
-        None => Ok(crate::core::gh_identity::GhEnv::default()),
+        // #9750: the caller passes a pin, so a pin with nothing usable in it
+        // refuses, as `check_pin` does — never keeps the pane's own token.
+        None => Err(crate::core::gh_login_verify::no_login_refusal(
+            pinned,
+            host.as_deref().map_err(String::as_str),
+        )),
     }
 }
 
@@ -442,12 +444,14 @@ pub(crate) fn pinned_relaunch_env_with(
 /// What: the checkout's origin, its pin
 /// ([`crate::core::gh_login_verify::session_pin_with`] over the host's registry
 /// and `[accounts]` table), then [`pinned_relaunch_env_with`] with
-/// [`launch_pinned_login_cli`]. An unreadable pin is an `Err`, as the daemon
-/// fails it closed. Blocking (gh and `GET /user`).
-/// Test: none directly (real gh, registry and network); the decisions are
-/// [`pinned_relaunch_env_with`]'s and `session_pin_with`'s.
+/// [`launch_pinned_login_cli`]. An origin git cannot read, or an unreadable
+/// pin, is an `Err`, as the daemon fails it closed. Blocking (gh and
+/// `GET /user`).
+/// Test: `a_relaunch_whose_origin_git_cannot_read_is_refused`; the other
+/// decisions are [`pinned_relaunch_env_with`]'s and `session_pin_with`'s.
 pub fn pinned_relaunch_env(cwd: &Path) -> Result<Option<crate::core::gh_identity::GhEnv>, String> {
-    let Some(origin) = crate::core::gh_login_verify::checkout_origin(cwd) else {
+    // #9750: a git error reading `origin` refuses; it never relaunches unpinned.
+    let Some(origin) = crate::core::gh_login_verify::checkout_origin(cwd)? else {
         return Ok(None);
     };
     let aliases = SshHostAliases::for_current_user();
@@ -470,4 +474,4 @@ pub fn pinned_relaunch_env(cwd: &Path) -> Result<Option<crate::core::gh_identity
 
 #[cfg(test)]
 #[path = "gh_session_shim_tests.rs"]
-mod gh_session_shim_tests;
+pub(crate) mod gh_session_shim_tests;

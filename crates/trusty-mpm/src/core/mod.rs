@@ -192,6 +192,8 @@ pub mod gh_org_accounts;
 pub mod gh_session_account;
 // #9750: the per-call gh credential shim a pinned session runs (D6e).
 pub mod gh_session_shim;
+// #9750: tm's own gh children run the real gh, not a pinned session's shim.
+pub mod gh_shim_path;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]

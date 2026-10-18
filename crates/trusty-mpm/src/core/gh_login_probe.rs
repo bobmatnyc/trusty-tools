@@ -84,7 +84,8 @@ pub(crate) fn classify_auth_status(run: Result<GhOutput, String>) -> GhAuthProbe
 fn run_auth_status(dir: Option<&Path>) -> Result<GhOutput, String> {
     let mut cmd = GhCommand::new(["auth", "status"]);
     if let Some(dir) = dir {
-        cmd = cmd.env(GH_CONFIG_DIR_ENV, dir);
+        // #9750: a scoped probe runs the real gh, not the calling session's shim.
+        cmd = crate::core::gh_shim_path::bypass_session_shim(cmd).env(GH_CONFIG_DIR_ENV, dir);
     }
     cmd.output_blocking().map_err(|e| e.to_string())
 }

@@ -232,6 +232,49 @@ fn a_config_dir_pin_naming_no_login_refuses() {
     assert!(probe.calls().is_empty(), "gh ran for a pin naming no login");
 }
 
+/// 🔴 #9750: a pin whose `account` is blank refuses the in-place relaunch with
+/// the launch check's own words — it never relaunches with the pane's token.
+#[test]
+fn a_blank_account_pin_refuses_the_relaunch_as_check_pin_does() {
+    let (_root, dir, probe, check) = fixture(Ok(SENTINEL), Ok("octo"));
+    let pinned = PinnedGhIdentity {
+        account: Some("   ".into()),
+        ..Default::default()
+    };
+    let (config, aliases) = (TrustyToolsConfig::default(), SshHostAliases::empty());
+    let launch = check_pin(
+        &pinned,
+        ORIGIN,
+        &seams(&dir, &config, &aliases, &probe, &check),
+    )
+    .expect_err("the launch check refuses");
+    let relaunch = crate::core::gh_session_shim::pinned_relaunch_env_with(
+        &pinned,
+        ORIGIN,
+        Path::new("/nonexistent-9750-state"),
+        &aliases,
+        |_| Err("no launch may run for a blank account".into()),
+    )
+    .expect_err("the relaunch refuses");
+    assert_eq!(relaunch, launch);
+    assert!(probe.calls().is_empty(), "gh ran for a blank account");
+}
+
+/// 🔴 #9750: the interactive launch check refuses a checkout whose origin git
+/// cannot read, instead of treating it as unpinned.
+#[cfg(unix)]
+#[test]
+fn a_launch_check_whose_origin_git_cannot_read_is_refused() {
+    use crate::core::gh_session_shim::gh_session_shim_tests::{
+        restore_checkout, unreadable_checkout,
+    };
+    let checkout = unreadable_checkout();
+    let result = super::check_launch_login(checkout.path(), None);
+    restore_checkout(checkout.path());
+    let err = result.expect_err("refused");
+    assert!(err.contains("git cannot read the origin"), "{err}");
+}
+
 /// #8510 r4: an SSH alias no `~/.ssh/config` entry renames names no host; the
 /// launch is refused before gh runs.
 #[test]
