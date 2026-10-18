@@ -4,7 +4,8 @@
 //! every refusal must leave both untouched and every partial run must either
 //! roll back or be finishable by a re-run.
 //! What: one test per refusal class, the happy path, `replace_empty`, both
-//! resume points, the rolled-back move, and the reversed rename.
+//! resume points, the rolled-back move, the reversed rename, and the waits
+//! for closed store files and released redb locks.
 //! Test: this file.
 
 use super::*;
@@ -630,5 +631,45 @@ fn rename_palace_waits_for_a_held_kg_file_lock() {
     assert!(
         !read_only,
         "the renamed palace reopened on a read-only snapshot"
+    );
+}
+
+/// Why (#10035): a file lock that outlasts `busy_wait` must refuse the rename
+/// with nothing changed, and the lock probe must never create a file.
+/// What: `<src>` has no vector file; a raw redb lock on `<src>/kg.redb`
+/// outlasts the wait, so the rename is `Busy` with `<src>`, the aliases and
+/// `palace.json` unchanged and no vector file created. Once the lock is
+/// released the rename succeeds, still creating no vector file.
+/// Test: itself.
+#[test]
+fn rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    create_untracked(root, "held-src");
+    let vectors = root.join("held-src").join("index.usearch.redb");
+    std::fs::remove_file(&vectors).expect("a new palace has a vector file");
+    let reg = PalaceRegistry::new();
+    let (holder, release) =
+        hold_redb_lock(root.join("held-src").join(KG_FILE), Duration::from_secs(30));
+
+    let err = reg
+        .rename_palace(root, "held-src", "held-dst", &opts())
+        .unwrap_err();
+    assert!(matches!(err, PalaceRenameError::Busy { .. }), "{err:?}");
+    assert_eq!(
+        json_id(root, "held-src"),
+        ("held-src".into(), "held-src".into())
+    );
+    assert!(!root.join("held-dst").exists(), "the target was created");
+    assert!(aliases(root).is_empty(), "an alias was written");
+    assert!(!vectors.exists(), "the probe created the vector file");
+
+    drop(release);
+    holder.join().expect("the lock holder");
+    reg.rename_palace(root, "held-src", "held-dst", &opts())
+        .expect("rename once the lock is released");
+    assert!(
+        !root.join("held-dst").join("index.usearch.redb").exists(),
+        "the probe created the vector file"
     );
 }
