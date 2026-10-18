@@ -411,8 +411,9 @@ fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
 
 /// Take one optional inline-list frontmatter key out of the parsed field map.
 ///
-/// Why: `tools:`, `tcode_tools:` (#7683) and inline `skills:` (#8199) share one grammar, one
-/// warn-and-degrade rule, and one load-bearing outer `Option` — the `Option`
+/// Why: `tools:`, `tcode_tools:` (#7683) and inline `skills:` (#8199) share
+/// one grammar, one warn-and-degrade rule, and one load-bearing outer
+/// `Option` — the `Option`
 /// is what lets [`merge_frontmatter`] tell "inherit the parent" (key absent)
 /// from "explicit deny-all" (`tools: []`, which parses to `Some(vec![])`).
 /// Writing that twice invites the two copies to drift apart.
