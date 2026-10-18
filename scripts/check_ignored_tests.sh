@@ -45,6 +45,14 @@
 #     joins the ratchet. The RUN phase keeps default features, so a manifest
 #     row may only select a test the default build compiles.
 #
+#   EXCLUDED FEATURES (#9663). Two features gate `#[ignore]` tests and stay off
+#     IGNORED_TEST_FEATURES on purpose: trusty-common `embedder-candle` (3
+#     tests, src/embedder/candle_embedder.rs) and trusty-search `candle` (2
+#     tests, src/service/candle_embedder.rs). Counting them means compiling
+#     the Candle ML stack in this job, and the run phase could never select
+#     them. These 5 tests are uncounted, and the baseline excludes them.
+#     Architect ruling 2026-10-10 (Gate 4 ratchet).
+#
 # WHAT THIS GATE DOES NOT CLAIM. It does not claim the unselected ignored tests
 #   pass, and it never prints a line that could be read that way. Its summary
 #   states both numbers — ran N, did not run M — because "0 failed" and
