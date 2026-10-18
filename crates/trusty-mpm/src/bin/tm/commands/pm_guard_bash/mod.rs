@@ -124,6 +124,8 @@ mod tmux_exact_target;
 #[cfg(test)]
 pub(crate) use tmux_exact_target::TmuxObject;
 pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
+// #10033: no hooked session runs `tm fleet relaunch`, the Architect included.
+pub(crate) mod fleet_relaunch;
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
 mod floor_d4;
 mod floor_d4_rules;
@@ -148,9 +150,9 @@ pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
 pub(crate) use process_env_dump::evaluate_process_env_dump_command;
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
-pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
-// #8454 S3: the egress Bash arm walks the same segments and nested bodies.
-pub(crate) use write_targets::shell_segments_map;
+// #8454 S3: the egress Bash arm walks the same segments and nested bodies
+// (`shell_segments_map`). #10033: one line, for the 500-SLOC cap.
+pub(crate) use write_targets::{UnplaceableWrite, shell_segments_map, shell_write_targets};
 // #8454 S3 critic round 2: and peels the same leading shell keywords.
 pub(crate) use credential_print::keyword_words;
 // #7266: the secret-read guard frames here-document bodies through the SAME

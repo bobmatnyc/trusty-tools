@@ -20,7 +20,8 @@
 //! at the Architect's pane (`pm_guard_bash::evaluate_architect_pane`).
 //! Universal on every path since #9001: a tmux target that does not resolve
 //! exactly to an existing pane, window or session
-//! (`pm_guard_bash::evaluate_tmux_exact_target`).
+//! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
+//! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`).
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -43,6 +44,9 @@ use crate::commands::pm_guard_architect_envfile::{
 };
 use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
+};
+use crate::commands::pm_guard_bash::fleet_relaunch::{
+    FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch,
 };
 use crate::commands::pm_guard_bash::{
     ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
@@ -174,7 +178,8 @@ pub(crate) async fn deny_floors(
 /// universal floors are evaluated only when `bypassed`.
 /// Test: `the_universal_floors_bind_the_architect`,
 /// `the_architect_is_exempt_from_the_d4_remainder`,
-/// `every_identity_failure_denies_the_d4_remainder`.
+/// `every_identity_failure_denies_the_d4_remainder`,
+/// `fleet_relaunch_binds_every_caller_on_every_path`.
 pub(crate) fn evaluate_floors(
     payload: &Value,
     hook_cwd: &Path,
@@ -216,6 +221,14 @@ pub(crate) fn evaluate_floors(
     if let Some(reason) = command.and_then(|c| evaluate_tmux_exact_target(c, probes.panes)) {
         return Some(FloorDeny {
             rule: TMUX_TARGET_RULE,
+            reason,
+        });
+    }
+    // #10033: `tm fleet relaunch` replaces the Architect's pane; no hooked
+    // session runs it, the Architect included, so no gate is asked.
+    if let Some(reason) = command.and_then(evaluate_fleet_relaunch) {
+        return Some(FloorDeny {
+            rule: FLEET_RELAUNCH_RULE,
             reason,
         });
     }

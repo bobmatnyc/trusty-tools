@@ -20,6 +20,8 @@
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
 mod config;
+// #10033: relaunch refuses inside a Claude Code session.
+mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
 mod poller;
@@ -103,6 +105,9 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             Ok(())
         }
         FleetAction::Relaunch { dir, session } => {
+            // #10033: refuse inside a Claude Code session before anything is
+            // read, so a bypass of the pm-guard's text floor cannot relaunch.
+            inside_claude::refuse_inside_claude_code(|name| std::env::var_os(name))?;
             // #9092: the flag, else the recorded name; an unreadable one refuses.
             let names = match session.as_deref() {
                 Some(name) => SessionNames::new(name)?,

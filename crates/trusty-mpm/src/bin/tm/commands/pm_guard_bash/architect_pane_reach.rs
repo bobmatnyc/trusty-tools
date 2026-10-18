@@ -158,24 +158,60 @@ pub(super) fn opaque_route(
     if program == "xargs" && after.iter().any(|w| basename(w) == "tmux") {
         return Some("`xargs` appends arguments from stdin the guard cannot read");
     }
-    // #9001 critic r3: `echo tmux | xargs -I{} env {} kill-server`.
-    if program == "xargs" && xargs_replaces(after) && names_tmux(command) {
-        return Some("`xargs` puts words from stdin the guard cannot read into its command");
-    }
-    // #9053: `echo 'tmux kill-server' | xargs env` — stdin is the program.
-    if program == "xargs" && stdin_is_the_program(after) && names_tmux(command) {
-        return Some("`xargs` runs a wrapper whose program comes from stdin the guard cannot read");
-    }
-    // #9053: GNU `parallel` builds commands from inputs the guard cannot read.
-    if program == "parallel" && names_tmux(command) {
-        return Some("`parallel` runs commands built from inputs the guard cannot read");
-    }
     if program == "tmux" {
         let in_exec = before.iter().any(|w| EXEC_FLAGS.contains(&w.as_str()));
         if in_exec && after.iter().any(|w| w == "+") {
             return Some("`find -exec … +` appends paths the guard cannot read");
         }
         return None;
+    }
+    // #10033: the program-agnostic arms are shared with the fleet floor.
+    fed_route(argv, pos, piped, &|_| names_tmux(command))
+}
+
+/// Which [`fed_route`] arm is asking whether the command names the guarded
+/// program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FedRoute {
+    /// An `xargs` with a replacement string (`-I{}`).
+    XargsReplace,
+    /// An `xargs` whose utility takes its program from stdin (`xargs env`).
+    XargsProgram,
+    /// GNU `parallel`.
+    Parallel,
+    /// An evaluator reading program text on stdin (`| sh`, `bash <<<`).
+    Evaluator,
+}
+
+/// The routes of [`opaque_route`] that feed a program text the guard cannot
+/// read, whatever program that text names: an `xargs` replacement string or
+/// wrapper utility, GNU `parallel`, and an evaluator reading stdin. `names`
+/// says, for the arm that matched, whether the command names the program the
+/// caller guards.
+///
+/// Why: #10033 critic r1 — the `tm fleet relaunch` floor refuses these same
+/// routes for `tm`, so the arms live once here.
+/// Test: `an_xargs_replacement_string_or_a_fed_shell_naming_tmux_denies`,
+/// `an_opaque_route_in_a_command_naming_tm_denies`.
+pub(super) fn fed_route(
+    argv: &[String],
+    pos: usize,
+    piped: bool,
+    names: &dyn Fn(FedRoute) -> bool,
+) -> Option<&'static str> {
+    let program = basename(&argv[pos]);
+    let after = &argv[pos + 1..];
+    // #9001 critic r3: `echo tmux | xargs -I{} env {} kill-server`.
+    if program == "xargs" && xargs_replaces(after) && names(FedRoute::XargsReplace) {
+        return Some("`xargs` puts words from stdin the guard cannot read into its command");
+    }
+    // #9053: `echo 'tmux kill-server' | xargs env` — stdin is the program.
+    if program == "xargs" && stdin_is_the_program(after) && names(FedRoute::XargsProgram) {
+        return Some("`xargs` runs a wrapper whose program comes from stdin the guard cannot read");
+    }
+    // #9053: GNU `parallel` builds commands from inputs the guard cannot read.
+    if program == "parallel" && names(FedRoute::Parallel) {
+        return Some("`parallel` runs commands built from inputs the guard cannot read");
     }
     let evaluator = evaluator_name(&program)?;
     let fed = piped
@@ -185,7 +221,7 @@ pub(super) fn opaque_route(
         });
     // #9001 critic r3: `cat log | bash scripts/report.sh tmux` runs the script.
     let reads_stdin = code_operands(evaluator, after).is_empty() && !runs_script(evaluator, after);
-    (fed && reads_stdin && names_tmux(command))
+    (fed && reads_stdin && names(FedRoute::Evaluator))
         .then_some("a shell runs program text it reads on stdin")
 }
 
