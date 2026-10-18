@@ -639,8 +639,7 @@ fn a_config_dir_pin_whose_origin_names_no_host_fails_closed() {
 }
 
 /// 🔴 #9750 (D6e): a config-dir pin's session gets the shim, not a token: no
-/// token value (only the nobody sentinel the shim unsets), `GH_CONFIG_DIR`
-/// kept, and git's helper is the shim itself.
+/// token variable, `GH_CONFIG_DIR` kept, and git's helper is the shim itself.
 #[test]
 fn a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim() {
     let shim = Path::new("/state/gh-shim/octo-pinned@github.com-0");
@@ -662,12 +661,8 @@ fn a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim() {
         "GH_ENTERPRISE_TOKEN",
         "GITHUB_ENTERPRISE_TOKEN",
     ] {
-        let value = value_of(&env.vars, var);
-        assert!(
-            value.is_none() || value.as_deref() == Some(crate::core::gh_account::REFUSED_GH_TOKEN),
-            "{var}: {:?}",
-            env.vars
-        );
+        // #9750 (ruling D7c): no token variable, not even the sentinel.
+        assert_eq!(value_of(&env.vars, var), None, "{var}: {:?}", env.vars);
     }
     assert_eq!(
         value_of(&env.vars, "GH_CONFIG_DIR").as_deref(),

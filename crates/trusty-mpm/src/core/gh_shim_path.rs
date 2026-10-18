@@ -6,8 +6,9 @@
 //! session's account. tm runs inside such sessions. A tm gh child that selects
 //! its own credential — another project's binding, a scoped config dir, an
 //! explicit token — must run the real gh, or the shim replaces that credential
-//! with the session's account. A child that selects nothing keeps the shim: it
-//! acts as its caller, the session (#8383 T1).
+//! with the session's account. A child that selects nothing — no binding, or
+//! the #8383 global tier's bare config dir — keeps the shim: it acts as its
+//! caller, the session (#8383 T1).
 //! What: [`gh_child_path`] decides the child's `PATH`; [`apply_gh_path`] and
 //! [`bind_gh_path`] apply it to a `std::process::Command` and a
 //! [`GhCommand`]; [`bypass_session_shim`] is the form for a child that picks
@@ -21,15 +22,14 @@ use trusty_common::gh::GhCommand;
 
 use crate::core::gh_session_shim::{GH_SHIM_ENV, prefixed_path, shim_root};
 
-/// The variables that select a gh credential for a child.
-const SELECTING_VARS: [&str; 4] = [
-    "GH_TOKEN",
-    "GH_ENTERPRISE_TOKEN",
-    "GH_CONFIG_DIR",
-    GH_SHIM_ENV,
-];
+/// The variables that select a gh credential for a child when set.
+///
+/// #9750: `GH_CONFIG_DIR` is absent. Set with nothing removed — #8383's global
+/// tier — it leaves the inherited credential deciding, as an inherited
+/// `GH_TOKEN` would; in a pinned session that credential is the shim.
+const SELECTING_VARS: [&str; 3] = ["GH_TOKEN", "GH_ENTERPRISE_TOKEN", GH_SHIM_ENV];
 
-/// The token variables a pinned session sets to the refusal sentinel.
+/// Every variable gh reads a token from.
 const TOKEN_VARS: [&str; 4] = [
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -80,9 +80,9 @@ impl GhPathEnv {
 
 /// Does a child with these overrides select its own gh credential?
 ///
-/// What: it removes an inherited gh token or config dir, or sets a token, a
-/// config dir or a shim dir. `GH_USER` alone selects nothing, nor does
-/// removing a variable gh never reads.
+/// What: it removes an inherited gh token or config dir, or sets a token or a
+/// shim dir. `GH_USER` alone selects nothing, nor does a bare `GH_CONFIG_DIR`
+/// (see [`SELECTING_VARS`]), nor removing a variable gh never reads.
 fn selects_identity(vars: &[(String, String)], unset: &[String]) -> bool {
     let removes = |k: &str| TOKEN_VARS.contains(&k) || k == "GH_CONFIG_DIR";
     unset.iter().any(|k| removes(k))
@@ -171,8 +171,8 @@ pub(crate) fn bind_gh_path_with(
 ///
 /// What: drops every shim dir from `PATH`, and removes each inherited token
 /// variable holding [`crate::core::gh_account::REFUSED_GH_TOKEN`] — the
-/// sentinel a pinned session carries so a gh outside its shim fails. Call it
-/// before the command sets its own variables.
+/// sentinel a refused pin's session carries. Call it before the command sets
+/// its own variables.
 /// Test: `bypass_session_shim_with_drops_the_shim_and_the_sentinel`.
 pub(crate) fn bypass_session_shim(cmd: GhCommand) -> GhCommand {
     let inherited: Vec<(String, String)> = TOKEN_VARS

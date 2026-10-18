@@ -1246,9 +1246,8 @@ fn proof_origin_refusals_never_quote_the_origin_token() {
 }
 
 /// 🔴 #9750 (D6e): an account-only pin's session gets the shim and `GH_USER`,
-/// and no token value: the token variables gh reads hold only the nobody
-/// sentinel (which the shim unsets), and the inherited rest are cleared by the
-/// launch, which the shim's presence arms.
+/// and no token variable: the inherited ones are cleared by the launch, which
+/// the shim's presence arms.
 #[test]
 fn a_shimmed_account_only_spawn_injects_no_token() {
     let shim = Path::new("/state/gh-shim/octo-pinned@github.com-0");
@@ -1264,10 +1263,9 @@ fn a_shimmed_account_only_spawn_injects_no_token() {
         "GH_ENTERPRISE_TOKEN",
         "GITHUB_ENTERPRISE_TOKEN",
     ] {
+        // #9750 (ruling D7c): no token variable, not even the sentinel.
         assert!(
-            env.vars
-                .iter()
-                .all(|(k, v)| k != var || v == super::REFUSED_GH_TOKEN),
+            env.vars.iter().all(|(k, _)| k != var),
             "{var}: {:?}",
             env.vars
         );

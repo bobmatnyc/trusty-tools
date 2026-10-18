@@ -89,20 +89,17 @@ impl PinnedCredential {
         }
     }
 
-    /// #9750's shape: [`GH_SHIM_ENV`] naming `dir`, the shim itself as git's
-    /// helper, so git also gets the pinned account's token per call, and
-    /// [`crate::core::gh_account::REFUSED_GH_TOKEN`] in both token variables.
-    /// The shim unsets the sentinel; a gh run outside the shim (an absolute
-    /// path, a reordered `PATH`) authenticates as nobody instead of as the
-    /// keyring's active account.
-    /// Test: `a_shim_credential_carries_no_token_and_names_the_shim_helper`.
+    /// #9750's shape: [`GH_SHIM_ENV`] naming `dir`, and the shim itself as
+    /// git's helper, so git also gets the pinned account's token per call. No
+    /// token variable is set, not even a placeholder.
+    /// Test: `a_shim_credential_carries_no_token_and_names_the_shim_helper`,
+    /// `a_global_tier_gh_call_in_a_pinned_session_resolves_through_the_shim`.
     pub(crate) fn shim(dir: &Path) -> Self {
         let gh = dir.join("gh");
-        let mut vars = vec![(GH_SHIM_ENV.to_string(), dir.display().to_string())];
-        // #9750: fail closed for a gh reached outside the shim.
-        vars.extend(crate::core::gh_account_proof::identity_token_vars(None));
+        // #9750 (ruling D7c): no sentinel `GH_TOKEN`; a tm child under the
+        // #8383 global tier inherits it and gh sent it, an HTTP 401.
         Self {
-            vars,
+            vars: vec![(GH_SHIM_ENV.to_string(), dir.display().to_string())],
             helper: format!("!'{}' auth git-credential", gh.display()),
         }
     }

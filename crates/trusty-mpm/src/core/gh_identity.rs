@@ -314,8 +314,9 @@ impl GhEnv {
     /// What: `env_remove` for each [`unset_vars`](Self::unset_vars) entry, then
     /// `env` for each [`vars`](Self::vars) pair, then #9750's `PATH`
     /// ([`crate::core::gh_shim_path::apply_gh_path`]): a shim binding leads
-    /// with its shim, any other binding drops an inherited session shim. A
-    /// default (`is_empty`) `GhEnv` touches nothing.
+    /// with its shim, a binding that selects another credential drops an
+    /// inherited session shim, and #8383's global tier keeps it. A default
+    /// (`is_empty`) `GhEnv` touches nothing.
     /// Test: `apply_to_removes_then_sets`, `apply_to_puts_a_shim_first_on_path_9750`.
     pub fn apply_to(&self, cmd: &mut std::process::Command) {
         for key in &self.unset {

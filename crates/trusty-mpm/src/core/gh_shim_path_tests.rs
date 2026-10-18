@@ -42,9 +42,10 @@ fn a_child_selecting_a_credential_drops_every_shim_from_path() {
         Path::new("/state/gh-shim/a@github.com-1"),
         "/usr/local/bin:/state/gh-shim/old@github.com-2:/usr/bin",
     );
-    let bound = vars(&[("GH_CONFIG_DIR", "/b/gh")]);
+    // A project binding: its config dir, with the inherited token removed.
+    let bound = GhEnv::from_identity_vars(vars(&[("GH_CONFIG_DIR", "/b/gh")]));
     assert_eq!(
-        gh_child_path(&bound, &[], &env),
+        gh_child_path(bound.vars(), bound.unset_vars(), &env),
         Some(OsString::from("/usr/local/bin:/usr/bin"))
     );
     let outside = GhPathEnv {
@@ -61,7 +62,8 @@ fn a_child_selecting_a_credential_drops_every_shim_from_path() {
 }
 
 /// #9750, #8383 T1: a child selecting nothing — no binding, `GH_USER` alone,
-/// or removing a variable gh never reads — keeps the session's shim and acts
+/// removing a variable gh never reads, or (ruling D7c) the global tier's bare
+/// `GH_CONFIG_DIR`, which removes no token — keeps the session's shim and acts
 /// as its caller.
 #[test]
 fn an_ambient_child_keeps_the_session_shim() {
@@ -74,6 +76,8 @@ fn an_ambient_child_keeps_the_session_shim() {
     let informational = vars(&[("GH_USER", "octo")]);
     assert_eq!(gh_child_path(&informational, &[], &env), None);
     assert_eq!(gh_child_path(&[], &["CLAUDECODE".to_string()], &env), None);
+    let global = vars(&[("GH_CONFIG_DIR", "/global/gh"), ("GH_HOST", "github.com")]);
+    assert_eq!(gh_child_path(&global, &[], &env), None);
 }
 
 /// #9750: a child naming its own shim leads with it, and the inherited `PATH`
@@ -159,9 +163,9 @@ fn stdout_of(mut cmd: std::process::Command) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// 🔴 #9750: run inside session A (its shim first on `PATH`, the nobody
-/// sentinel in `GH_TOKEN`), a `std::process::Command` gh bound to project B's
-/// config dir resolves the REAL gh, with B's dir and without the sentinel —
+/// 🔴 #9750: run inside session A (its shim first on `PATH`, an inherited
+/// token in `GH_TOKEN`), a `std::process::Command` gh bound to project B's
+/// config dir resolves the REAL gh, with B's dir and without that token —
 /// never A's shim.
 #[cfg(unix)]
 #[test]

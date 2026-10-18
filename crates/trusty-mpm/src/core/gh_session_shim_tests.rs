@@ -10,7 +10,6 @@ use super::{
     shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
-use crate::core::gh_account::REFUSED_GH_TOKEN;
 use crate::core::gh_account_dir::AccountDirSources;
 use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe, migrated_dir};
 use crate::core::gh_login_verify::VerifiedLogin;
@@ -44,18 +43,12 @@ fn value_of<'a>(vars: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// #9750: `vars` carries no token value — each token variable is absent or the
-/// nobody sentinel, and `GH_TOKEN` is the sentinel, so a gh run outside the
-/// shim fails closed.
+/// #9750 (ruling D7c): `vars` sets no token variable, not even the nobody
+/// sentinel.
 fn assert_no_token_value(vars: &[(String, String)]) {
     for var in TOKEN_VARS {
-        let value = value_of(vars, var);
-        assert!(
-            value.is_none() || value == Some(REFUSED_GH_TOKEN),
-            "{var}: {vars:?}"
-        );
+        assert_eq!(value_of(vars, var), None, "{var}: {vars:?}");
     }
-    assert_eq!(value_of(vars, "GH_TOKEN"), Some(REFUSED_GH_TOKEN));
 }
 
 /// Write an executable script.
@@ -67,9 +60,8 @@ fn write_script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
-/// #9750: a shim credential sets no token value — only the shim dir and the
-/// nobody sentinel the shim unsets — and makes the shim git's credential
-/// helper.
+/// #9750: a shim credential sets no token variable — only the shim dir — and
+/// makes the shim git's credential helper.
 #[test]
 fn a_shim_credential_carries_no_token_and_names_the_shim_helper() {
     let cred = PinnedCredential::shim(Path::new("/state/gh-shim/octo@github.com-1"));
@@ -500,13 +492,13 @@ fn a_shimmed_account_only_spawn_pins_git_to_the_shim() {
     assert!(env.warning.is_none(), "{:?}", env.warning);
 }
 
-/// 🔴 #9750: inside a pinned session, a gh that bypasses the shim (run by
-/// absolute path) receives the nobody sentinel as its token, so it fails
-/// closed instead of acting as the keyring's active account. Tested on the
-/// env the relaunched session actually receives.
+/// 🔴 #9750 (ruling D7c): inside a pinned session, a gh that bypasses the
+/// shim (run by absolute path) receives no token at all: the pane's tokens
+/// are removed and no placeholder replaces them. Tested on the env the
+/// relaunched session actually receives.
 #[cfg(unix)]
 #[test]
-fn a_gh_run_outside_the_shim_fails_closed_in_a_pinned_session() {
+fn a_gh_run_outside_the_shim_gets_no_token_in_a_pinned_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let real = tmp.path().join("bin").join("gh");
     write_script(&real, "#!/bin/sh\nprintf 'GH_TOKEN=%s\\n' \"$GH_TOKEN\"\n");
@@ -528,9 +520,60 @@ fn a_gh_run_outside_the_shim_fails_closed_in_a_pinned_session() {
         .env("GITHUB_TOKEN", "pane-token");
     env.apply_to(&mut cmd);
     let out = cmd.output().expect("gh runs");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "GH_TOKEN=\n");
+}
+
+/// 🔴 #9750 (ruling D7c, #8383 global tier): inside a pinned session, a `tm`
+/// gh call bound by the global `config_dir` fallback — which removes nothing,
+/// so the caller's credential decides — runs through the session's shim and
+/// reaches gh with the pinned account's token. At 29eb6600d8 the bare config
+/// dir dropped the shim and gh sent the session's nobody sentinel: HTTP 401.
+#[cfg(unix)]
+#[test]
+fn a_global_tier_gh_call_in_a_pinned_session_resolves_through_the_shim() {
+    use crate::core::gh_shim_path::{GhPathEnv, apply_gh_path_with};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gh_dir = tmp.path().join("gh-config");
+    let real = tmp.path().join("bin").join("gh");
+    fake_gh(&real, &gh_dir, "echo \"tok-for-$4-$6\"; exit 0");
+    let shim =
+        write_gh_shim(tmp.path(), &verified("github.com", &gh_dir), &real, 5).expect("written");
+    // Session A's PATH: its shim, the fake real gh, then `env`/`sleep`.
+    let rest = format!("{}:/usr/bin:/bin", real.parent().expect("bin").display());
+    let session_path = prefixed_path(shim.as_os_str(), Some(OsStr::new(&rest)));
+    let global = crate::core::trusty_tools_config::GithubConfig {
+        config_dir: Some(PathBuf::from("/global/gh")),
+        ..Default::default()
+    };
+    let tiered = crate::core::gh_identity::resolve_tiered_gh_env(None, Some(&global))
+        .expect("the global tier resolves");
+    let mut cmd = std::process::Command::new("gh");
+    cmd.args(["api", "user"]).env("PATH", &session_path);
+    for var in TOKEN_VARS {
+        cmd.env_remove(var);
+    }
+    // The session's own environment, as its spawn env sets it.
+    for (key, value) in &PinnedCredential::shim(&shim).vars {
+        cmd.env(key, value);
+    }
+    // The `tm gh` binding on top, as `GhEnv::apply_to` applies it.
+    for key in tiered.unset_vars() {
+        cmd.env_remove(key);
+    }
+    for (key, value) in tiered.vars() {
+        cmd.env(key, value);
+    }
+    let session = GhPathEnv {
+        path: Some(session_path.clone()),
+        shim: Some(shim.as_os_str().to_os_string()),
+        shim_root: shim_root(tmp.path()),
+    };
+    apply_gh_path_with(&mut cmd, tiered.vars(), tiered.unset_vars(), &session);
+    let out = cmd.output().expect("gh runs");
+    assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("GH_TOKEN={REFUSED_GH_TOKEN}\n")
+        "GH_TOKEN=tok-for-github.com-octo GITHUB_TOKEN= ARGS=api user\n"
     );
 }
 
@@ -599,11 +642,9 @@ fn a_pinned_relaunch_env_clears_inherited_tokens_and_adds_the_shim() {
         |_| Ok(PinnedCredential::shim(shim)),
     )
     .expect("a verified relaunch");
-    // #9750: each inherited token is removed or overridden by the sentinel.
+    // #9750 (ruling D7c): each inherited token is removed, none replaced.
     for var in TOKEN_VARS {
-        let unset = env.unset_vars().iter().any(|v| v == var);
-        let refused = value_of(env.vars(), var) == Some(REFUSED_GH_TOKEN);
-        assert!(unset != refused, "{var}: {env:?}");
+        assert!(env.unset_vars().iter().any(|v| v == var), "{var}: {env:?}");
     }
     assert_no_token_value(env.vars());
     let mut cmd = std::process::Command::new("true");
