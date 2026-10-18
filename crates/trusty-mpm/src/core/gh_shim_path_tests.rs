@@ -169,7 +169,9 @@ fn apply_gh_path_with_drops_the_session_shim_for_a_bound_child() {
     let layout = Layout::new();
     let b = GhEnv::from_identity_vars(vars(&[("GH_CONFIG_DIR", "/b/gh")]));
     let mut cmd = std::process::Command::new("gh");
-    cmd.env("GH_TOKEN", REFUSED_GH_TOKEN);
+    // Session A's own env; an unbound lookup would find A's fake shim.
+    cmd.env("PATH", layout.env().path.expect("path"))
+        .env("GH_TOKEN", REFUSED_GH_TOKEN);
     for key in b.unset_vars() {
         cmd.env_remove(key);
     }
@@ -191,7 +193,11 @@ fn bind_gh_path_with_runs_the_real_gh_for_another_project() {
     use trusty_common::gh::GhCommand;
     let layout = Layout::new();
     let b = GhEnv::from_identity_vars(vars(&[("GH_CONFIG_DIR", "/b/gh")]));
-    let mut cmd = GhCommand::new(["api", "user"]).env("GH_TOKEN", REFUSED_GH_TOKEN);
+    // Session A's own PATH, so an unbound lookup finds A's fake shim and
+    // never this machine's gh.
+    let mut cmd = GhCommand::new(["api", "user"])
+        .env("PATH", layout.env().path.expect("path"))
+        .env("GH_TOKEN", REFUSED_GH_TOKEN);
     for key in b.unset_vars() {
         cmd = cmd.env_remove(key);
     }
