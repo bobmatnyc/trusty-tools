@@ -239,13 +239,15 @@ pub(crate) fn no_login_refusal(pinned: &PinnedGhIdentity, host: Result<&str, &st
 /// Test: `an_unregistered_origin_is_unpinned`,
 /// `a_registry_pin_is_found_for_its_origin`,
 /// `an_org_mapped_origin_is_pinned_to_the_mapped_login`,
-/// `a_token_env_only_record_is_unpinned`.
+/// `a_token_env_only_record_is_unpinned`,
+/// `an_unreadable_registry_or_broken_org_map_refuses_the_launch`.
 pub(crate) fn session_pin_with(
     origin: &str,
     registry_dir: &Path,
     aliases: &SshHostAliases,
     load: impl FnOnce() -> Result<OrgAccounts, OrgAccountsError>,
 ) -> Result<Option<PinnedGhIdentity>, String> {
+    // #9750: both `Err` arms below refuse; neither reads as unpinned.
     let pinned = match crate::core::gh_account_registry::read_pin(registry_dir, origin)? {
         Some(pin) => Some(crate::core::gh_account_registry::pinned_identity(&pin)),
         None => {

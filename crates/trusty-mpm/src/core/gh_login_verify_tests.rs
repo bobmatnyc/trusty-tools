@@ -382,3 +382,38 @@ fn a_token_env_only_record_is_unpinned() {
     let pin = session_pin_with(ORIGIN, registry.path(), &SshHostAliases::empty(), no_map);
     assert_eq!(pin, Ok(None));
 }
+
+/// An `[accounts]` loader whose table is named but does not parse.
+fn broken_map() -> Result<OrgAccounts, OrgAccountsError> {
+    OrgAccounts::from_toml(
+        "[accounts]\nacme-9750 = \n",
+        Path::new("/home/u/.trusty-mpm/config.toml"),
+    )
+}
+
+/// #9750: an unreadable registry or a broken `[accounts]` table refuses, never
+/// reads as unpinned, and the refusal never echoes a token in the origin.
+#[test]
+fn an_unreadable_registry_or_broken_org_map_refuses_the_launch() {
+    type Load = fn() -> Result<OrgAccounts, OrgAccountsError>;
+    let origin = format!("https://x-access-token:{SENTINEL}@github.com/acme-9750/widget");
+    let rows: [(&str, Option<&str>, Load, &str); 2] = [
+        (
+            "unreadable registry",
+            Some("{not json"),
+            no_map,
+            "did not parse",
+        ),
+        ("broken org map", None, broken_map, "[accounts]"),
+    ];
+    for (label, registry_text, load, needle) in rows {
+        let registry = registry_with(&[]);
+        if let Some(text) = registry_text {
+            std::fs::write(registry.path().join("projects.json"), text).expect("projects.json");
+        }
+        let err = session_pin_with(&origin, registry.path(), &SshHostAliases::empty(), load)
+            .expect_err(label);
+        assert!(err.contains(needle), "{label}: {err}");
+        assert!(!err.contains(SENTINEL), "{label} leaked the token: {err}");
+    }
+}
