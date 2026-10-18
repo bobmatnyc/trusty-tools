@@ -367,3 +367,142 @@ fn deploy_all_lets_a_directory_user_skill_shadow_a_bundled_one() {
     assert_eq!(deploy.shadowed.len(), 1);
     assert_eq!(deploy.shadowed[0].winner, SkillTier::User);
 }
+
+// ---------------------------------------------------------------------------
+// #9540 — an empty optional user tier is quiet; a required tier still warns
+// ---------------------------------------------------------------------------
+
+/// A `MakeWriter` over a shared buffer, so a test can read what was logged.
+#[derive(Clone)]
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Run `f` under a thread-local WARN-level subscriber; return its output.
+fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(CaptureWriter(std::sync::Arc::clone(&buffer)))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let logs =
+        String::from_utf8_lossy(&buffer.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
+    (out, logs)
+}
+
+#[test]
+fn deploy_all_empty_or_absent_user_tier_warns_for_no_destination() {
+    // #9540: every launch deploys into two or more destinations, and an empty
+    // `~/.trusty-mpm/skills` warned once per destination. The tier is optional.
+    let bundled = TempDir::new().unwrap();
+    write_skill(bundled.path(), "a", "A");
+    let user_root = TempDir::new().unwrap();
+    let empty_user = user_root.path().join("skills");
+    fs::create_dir_all(&empty_user).unwrap();
+    let absent_user = user_root.path().join("absent");
+    let dests = [
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+    ];
+
+    let (results, logs) = capture_warnings(|| {
+        [
+            deploy_all_skill_tiers(bundled.path(), &empty_user, dests[0].path(), |_| true),
+            deploy_all_skill_tiers(bundled.path(), &empty_user, dests[1].path(), |_| true),
+            deploy_all_skill_tiers(bundled.path(), &absent_user, dests[2].path(), |_| true),
+        ]
+    });
+
+    for (result, dest) in results.into_iter().zip(&dests) {
+        let deploy = result.expect("deploy succeeds");
+        assert_eq!(deploy.stats.deployed, vec!["a".to_string()]);
+        assert!(dest.path().join("a").join("SKILL.md").is_file());
+    }
+    let user_path = user_root.path().display().to_string();
+    assert!(
+        !logs.contains(&user_path) && !logs.contains("skill source directory"),
+        "an empty or absent optional user tier must log no warning:\n{logs}"
+    );
+}
+
+#[test]
+fn deploy_all_empty_or_missing_bundled_tier_still_warns() {
+    // #9540: only the OPTIONAL user tier goes quiet. A required bundled source
+    // that is empty or missing is a real misconfiguration (A2) and must still
+    // warn, once per destination, naming the source.
+    let user = TempDir::new().unwrap();
+    write_skill(user.path(), "mine", "MINE");
+    let bundled_root = TempDir::new().unwrap();
+    let empty_bundled = bundled_root.path().join("empty");
+    fs::create_dir_all(&empty_bundled).unwrap();
+    let missing_bundled = bundled_root.path().join("missing");
+    let dests = [TempDir::new().unwrap(), TempDir::new().unwrap()];
+
+    let (results, logs) = capture_warnings(|| {
+        [
+            deploy_all_skill_tiers(&empty_bundled, user.path(), dests[0].path(), |_| true),
+            deploy_all_skill_tiers(&missing_bundled, user.path(), dests[1].path(), |_| true),
+        ]
+    });
+
+    for result in results {
+        let deploy = result.expect("deploy succeeds");
+        assert_eq!(deploy.stats.deployed, vec!["mine".to_string()]);
+    }
+    let empty_line = logs
+        .lines()
+        .find(|l| l.contains("skill source directory is empty"))
+        .unwrap_or_else(|| panic!("an empty bundled tier must warn:\n{logs}"));
+    assert!(empty_line.contains(&empty_bundled.display().to_string()));
+    let missing_line = logs
+        .lines()
+        .find(|l| l.contains("skill source directory missing"))
+        .unwrap_or_else(|| panic!("a missing bundled tier must warn:\n{logs}"));
+    assert!(missing_line.contains(&missing_bundled.display().to_string()));
+}
+
+#[test]
+fn deploy_all_user_tier_with_only_a_malformed_skill_still_reports_it() {
+    // #9540: "empty" means the scan found nothing at all. A user tier whose
+    // only entry is a directory with no SKILL.md is not empty — the deployer
+    // must still name it in `skipped` and warn, as #4949 requires.
+    let bundled = TempDir::new().unwrap();
+    write_skill(bundled.path(), "a", "A");
+    let user = TempDir::new().unwrap();
+    fs::create_dir_all(user.path().join("broken")).unwrap();
+    let dest = TempDir::new().unwrap();
+
+    let (result, logs) = capture_warnings(|| {
+        deploy_all_skill_tiers(bundled.path(), user.path(), dest.path(), |_| true)
+    });
+
+    let deploy = result.expect("deploy succeeds");
+    assert_eq!(deploy.stats.skipped, vec!["broken".to_string()]);
+    assert!(
+        logs.contains("skill directory has no SKILL.md"),
+        "a malformed user skill must still warn:\n{logs}"
+    );
+}

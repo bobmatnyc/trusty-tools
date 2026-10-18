@@ -111,3 +111,6 @@ serial_test = { workspace = true }
 # transport_tests exercises EventSource over a real tokio broadcast channel,
 # wrapped as a Stream via BroadcastStream (#3299).
 tokio-stream = { workspace = true }
+# #9540: skills::tiers tests capture tracing output to prove an empty optional
+# user tier logs no warning. Already in the normal graph via trusty-common.
+tracing-subscriber = { workspace = true }
