@@ -161,10 +161,15 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
                 current_pane_id.as_deref(),
                 true,
                 &trusty_mpm::core::paths::FrameworkPaths::default(),
+                super::fleet::launch::launch_stamp,
             )
             .await
             {
                 super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
+                // #9092: a refusal exits 1; it is never a reconnect fallback.
+                super::guided_inplace::InPlaceOutcome::Refused(why) => {
+                    return Err(anyhow::anyhow!("{why}"));
+                }
                 super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
                     // #2789: we are provably inside THIS record's OWN pane
                     // (`pane_identity_confirmed`). The pre-existing fallback —
@@ -226,10 +231,15 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
                     current_pane_id.as_deref(),
                     false,
                     &trusty_mpm::core::paths::FrameworkPaths::default(),
+                    super::fleet::launch::launch_stamp,
                 )
                 .await
                 {
                     super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
+                    // #9092: a refusal exits 1; it is never a reconnect fallback.
+                    super::guided_inplace::InPlaceOutcome::Refused(why) => {
+                        return Err(anyhow::anyhow!("{why}"));
+                    }
                     super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
                         eprintln!("tm: in-place relaunch failed ({e})");
                         eprintln!("{}", inplace_self_relaunch_hint(&record));

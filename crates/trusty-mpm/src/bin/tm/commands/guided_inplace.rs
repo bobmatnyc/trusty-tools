@@ -528,6 +528,9 @@ pub(crate) enum InPlaceOutcome {
     /// The daemon refused/failed to confirm reactivation — abort, fall
     /// through to the ordinary guided picker (no exec attempted).
     FallThrough,
+    /// #9092: a supervisor session, which only `tm fleet relaunch` may
+    /// relaunch; every caller exits 1 with this text, never falls through.
+    Refused(String),
 }
 
 /// Drive the full in-place relaunch once [`plan_inplace`] selected it — OR
@@ -563,7 +566,10 @@ pub(crate) enum InPlaceOutcome {
 /// (cwd/binary resolution) or post-reactivate (`exec` itself failing) alike
 /// — as a fall-back-to-reconnect condition, matching that call site's
 /// pre-#2453 behavior of never hard-failing.
-/// What, IN ORDER (#2027 exec-ordering fix, extended by #2790 and #4204): (1)
+/// What, IN ORDER (#2027 exec-ordering fix, extended by #2790 and #4204): (0)
+/// #9092: returns [`InPlaceOutcome::Refused`] for a supervisor session
+/// ([`super::guided_supervisor_guard::refusal`] over `record.name`, its
+/// workdir, `fw.root` and `stamp`), before any output or daemon call; (1)
 /// prints a one-line notice; (2) resolves the workdir; (2a) #2790/#4204
 /// CRITICAL: verifies the resolved workdir IS STILL LIVE via
 /// [`trusty_mpm::core::workspace_liveness::workspace_liveness`] — a
@@ -585,7 +591,9 @@ pub(crate) enum InPlaceOutcome {
 /// rather than proceeding; (5) execs `claude` in place.
 /// Test: `run_inplace_relaunch_never_reactivates_when_command_build_fails`,
 /// `run_inplace_relaunch_falls_through_on_gutted_worktree`,
-/// `run_inplace_relaunch_serves_live_linked_worktree`. The argv/environment the
+/// `run_inplace_relaunch_serves_live_linked_worktree`,
+/// `run_inplace_relaunch_refuses_a_supervisor_session_before_any_daemon_call`,
+/// `run_inplace_relaunch_still_serves_a_pm_session`. The argv/environment the
 /// final step hands to `exec` is pinned by [`build_inplace_exec_command`]'s own
 /// tests (#4336). The exec CALL itself is still not
 /// unit-tested (it replaces the process image); the gate-2a tests pin the
@@ -596,6 +604,8 @@ pub(crate) enum InPlaceOutcome {
 /// this CLI-side check) by
 /// `mark_reactivated_refuses_when_workspace_removed_by_decommission` in
 /// `session_manager::reactivate_tests`.
+// #9092: the eighth argument is the stamp reader, the guard's test seam.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
@@ -605,7 +615,21 @@ pub(crate) async fn run_inplace_relaunch(
     pane_confirmed_dead: bool,
     // #8545: the layout the resume command provisions; production passes the default.
     fw: &trusty_mpm::core::paths::FrameworkPaths,
+    // #9092: the session's launch-stamp reader; production reads tmux.
+    stamp: super::guided_supervisor_guard::StampReader,
 ) -> InPlaceOutcome {
+    // #9092: an in-place exec writes no Architect launch record; refuse first.
+    let guard_cwd = record
+        .workspace_path
+        .as_deref()
+        .or(record.cwd.as_deref())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(why) =
+        super::guided_supervisor_guard::refusal(&record.name, guard_cwd.as_deref(), &fw.root, stamp)
+    {
+        return InPlaceOutcome::Refused(why);
+    }
     eprintln!("tm: this pane belongs to managed session {id} — relaunching in place…");
 
     let cwd = match record
@@ -908,10 +932,13 @@ pub(crate) async fn try_inplace_relaunch(
         target.current_pane_id.as_deref(),
         target.pane_confirmed_dead,
         &trusty_mpm::core::paths::FrameworkPaths::default(),
+        super::fleet::launch::launch_stamp,
     )
     .await
     {
         InPlaceOutcome::Result(r) => Some(r),
+        // #9092: exit 1 with the refusal; never fall through to the picker.
+        InPlaceOutcome::Refused(why) => Some(Err(anyhow::anyhow!("{why}"))),
         InPlaceOutcome::FallThrough => {
             tracing::debug!(
                 id = %env_id,

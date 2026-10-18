@@ -108,6 +108,18 @@ fn cli_parses_fleet_status() {
 }
 
 #[test]
+fn cli_parses_fleet_relaunch() {
+    // #9092: `relaunch` takes `status`'s `--dir` and `--session`.
+    let cli = Cli::try_parse_from(["tm", "fleet", "relaunch", "--session", "tm-sup"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Fleet {
+            action: FleetAction::Relaunch { dir: None, session: Some(s) }
+        } if s == "tm-sup"
+    ));
+}
+
+#[test]
 fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     let fx = Fixture::new();
     let report = fx.init().unwrap();

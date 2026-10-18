@@ -13,10 +13,11 @@
 //! ([`register`], #8942). [`status()`] reads the four session facts back and exits 1
 //! when any is missing. The session is
 //! `tm-architect` unless `--session` chose and recorded another name
-//! ([`session_name`], #8878 R1). Twin mode (#8878) is out of scope (ruling
-//! Q7). `add` and `remove` are phase P3.
+//! ([`session_name`], #8878 R1). [`relaunch`] restarts the running
+//! Architect's `claude` and binds it (#9092). Twin mode (#8878) is out of
+//! scope (ruling Q7). `add` and `remove` are phase P3.
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
-//! `tests/tm_fleet.rs`.
+//! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
 mod config;
 // #8902: the pm-guard's Architect pane floor names the launch session.
@@ -25,6 +26,8 @@ mod poller;
 mod preflight;
 // #8942: daemon registration and the ruling-2 sidecar prune.
 mod register;
+// #9092: restart the Architect's `claude` in its session and bind it.
+mod relaunch;
 mod seed;
 mod session_name;
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
@@ -51,9 +54,10 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
-/// What: resolves the home and the directory, runs [`init_with_session`] or
-/// [`status()`], and prints the report. `init` returns an error, so exit 1,
-/// when a step failed; `status` does when the setup is incomplete.
+/// What: resolves the home and the directory, runs [`init_with_session`],
+/// [`status()`] or [`relaunch::relaunch`], and prints the report. `init` and
+/// `relaunch` return an error, so exit 1, when a step failed; `status` does
+/// when the setup is incomplete.
 /// Test: `tests/tm_fleet.rs`.
 pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     let home = dirs::home_dir().context("cannot resolve the home directory")?;
@@ -95,6 +99,23 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             }
             if !report.complete {
                 bail!("the Architect is not fully set up in {}", dir.display());
+            }
+            Ok(())
+        }
+        FleetAction::Relaunch { dir, session } => {
+            // #9092: the flag, else the recorded name; an unreadable one refuses.
+            let names = match session.as_deref() {
+                Some(name) => SessionNames::new(name)?,
+                None => session_name::recorded_names(&home).map_err(anyhow::Error::msg)?,
+            };
+            let dir = resolve_dir(dir.as_deref(), &home)?;
+            let mut report = relaunch::relaunch(&dir, &home, &names, relaunch::LIVE)?;
+            if let Some(reg) = report.registration.take() {
+                report.steps.push(register::register(&reg).await);
+            }
+            print!("{}", report.render());
+            if report.failed() {
+                bail!("tm fleet relaunch failed; see the FAILED step above");
             }
             Ok(())
         }
@@ -174,6 +195,19 @@ pub(crate) enum Step {
     Failed(String),
 }
 
+impl Step {
+    /// The step's report line; shared by `init` and `relaunch` (#9092).
+    pub(crate) fn render_line(&self) -> String {
+        let (mark, text) = match self {
+            Self::Changed(t) => ("done     ", t),
+            Self::Unchanged(t) => ("unchanged", t),
+            Self::Skipped(t) => ("skipped  ", t),
+            Self::Failed(t) => ("FAILED   ", t),
+        };
+        format!("  {mark}  {text}\n")
+    }
+}
+
 /// The steps one `init` run took, in order.
 #[derive(Debug, Default)]
 pub(crate) struct InitReport {
@@ -201,16 +235,7 @@ impl InitReport {
 
     /// One line per step, then a summary line.
     pub(crate) fn render(&self) -> String {
-        let mut out = String::new();
-        for step in &self.steps {
-            let (mark, text) = match step {
-                Step::Changed(t) => ("done     ", t),
-                Step::Unchanged(t) => ("unchanged", t),
-                Step::Skipped(t) => ("skipped  ", t),
-                Step::Failed(t) => ("FAILED   ", t),
-            };
-            out.push_str(&format!("  {mark}  {text}\n"));
-        }
+        let mut out: String = self.steps.iter().map(Step::render_line).collect();
         out.push_str(if self.failed() {
             "The Architect is not fully set up: fix the FAILED step and run `tm fleet init` again.\n"
         } else if self.unbound {

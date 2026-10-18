@@ -692,6 +692,7 @@ async fn run_inplace_relaunch_falls_through_on_gutted_worktree() {
         None,
         false,
         &FrameworkPaths::under(fw_home.path()),
+        no_stamp,
     )
     .await;
 
@@ -746,6 +747,7 @@ async fn run_inplace_relaunch_serves_live_linked_worktree() {
         None,
         false,
         &FrameworkPaths::under(fw_home.path()),
+        no_stamp,
     )
     .await;
 
@@ -783,7 +785,8 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     let record = stopped_record_at(tmp.path());
     let client = reqwest::Client::new();
 
-    let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None, false, &fw).await;
+    let outcome =
+        run_inplace_relaunch(&client, &url, TEST_ID, record, None, false, &fw, no_stamp).await;
 
     assert!(
         matches!(outcome, InPlaceOutcome::Result(Err(_))),
@@ -793,6 +796,81 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
         hits.load(Ordering::SeqCst),
         0,
         "reactivate must NEVER be called when command resolution fails first (#2027)"
+    );
+}
+
+/// The stamp reader for a session that carries no launch stamp (#9092).
+fn no_stamp(_: &str) -> Option<String> {
+    None
+}
+
+/// Write an `*.architect-session` sidecar naming `session` under `root`.
+fn write_architect_sidecar(root: &std::path::Path, session: &str) {
+    let dir = root.join("architect-launch");
+    std::fs::create_dir_all(&dir).expect("record dir");
+    std::fs::write(
+        dir.join("4242.architect-session"),
+        format!(r#"{{"pid": 4242, "start_time": 7, "session": "{session}"}}"#),
+    )
+    .expect("sidecar");
+}
+
+#[tokio::test]
+async fn run_inplace_relaunch_refuses_a_supervisor_session_before_any_daemon_call() {
+    // #9092: the in-place exec writes no Architect launch record, so a
+    // supervisor session must be refused, naming `tm fleet relaunch`, before
+    // any output or daemon call. The 409 keeps pre-fix code from exec'ing.
+    let live = tempfile::tempdir().expect("tempdir");
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_home.path());
+    let record = stopped_record_at(live.path());
+    write_architect_sidecar(&fw.root, &record.name);
+    let (url, hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
+    let client = reqwest::Client::new();
+
+    let outcome =
+        run_inplace_relaunch(&client, &url, TEST_ID, record, None, false, &fw, no_stamp).await;
+
+    match outcome {
+        InPlaceOutcome::Refused(why) => {
+            assert!(why.contains("tm fleet relaunch"), "{why}");
+            assert!(why.contains("supervisor session tm-test"), "{why}");
+        }
+        _ => panic!("a supervisor session must be refused, not relaunched in place"),
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the refusal precedes every daemon call"
+    );
+}
+
+#[tokio::test]
+async fn run_inplace_relaunch_still_serves_a_pm_session() {
+    // #9092 guard: a session no supervisor signal marks is not refused — the
+    // Architect's own record names another session.
+    let live = tempfile::tempdir().expect("tempdir");
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_home.path());
+    write_architect_sidecar(&fw.root, "tm-architect");
+    let (url, _hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
+    let client = reqwest::Client::new();
+
+    let outcome = run_inplace_relaunch(
+        &client,
+        &url,
+        TEST_ID,
+        stopped_record_at(live.path()),
+        None,
+        false,
+        &fw,
+        no_stamp,
+    )
+    .await;
+
+    assert!(
+        !matches!(outcome, InPlaceOutcome::Refused(_)),
+        "a PM session must reach the in-place relaunch"
     );
 }
 

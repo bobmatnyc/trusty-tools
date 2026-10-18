@@ -51,6 +51,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
   - `init` — Set up the Architect project and start its session
+  - `relaunch` — Restart the Architect's `claude` in its running session and bind it
   - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
   - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files

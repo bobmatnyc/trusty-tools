@@ -19,6 +19,8 @@
 //! fresh. A pane that cannot be read twice keeps both, with a warning
 //! ([`resume_check`]). Daemon registration is not here: `fleet::run`
 //! registers a bound Architect after the poller step (`register`, #8942).
+//! #9092: [`prepare_restart`] runs the same path in the existing session for
+//! `tm fleet relaunch` (`relaunch`).
 //! Test: `fleet_init_launches_the_architect_and_status_is_complete`,
 //! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 //! `fleet_init_clears_the_conversation_record_when_the_resume_fails`,
@@ -169,107 +171,198 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// `fleet_init_with_a_session_override_names_every_session`,
 /// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 /// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
-pub(crate) fn start(
-    dir: &Path,
-    home: &Path,
-    session: &str,
-) -> anyhow::Result<(Result<ArmingRecord, String>, ConversationStart)> {
-    require_architect(dir, session)?;
-    match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
-        Ok(report) => {
-            for err in &report.roster_errors {
-                eprintln!(
-                    "warning: roster provisioning gap for {}: {err}",
-                    dir.display()
+pub(crate) fn start(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Launched> {
+    Prepared::new(dir, home, session)?.send(Pane::Create)
+}
+
+/// Prepare a new Architect `claude` for the existing `session`; the returned
+/// [`Pending`] starts it there (#9092).
+///
+/// Why: `tm fleet relaunch` must start the new `claude` with the flags `init`
+/// uses, so it shares [`start`]'s launch path instead of copying it. Every
+/// refusal of that path must come before the old `claude` is stopped (#9092
+/// critic HIGH), so the preparation runs first and touches no tmux session.
+/// What: the preparation half of [`start`] now; the [`Pending`] is the send
+/// half without creating the session and without killing it when the
+/// `claude` line cannot be sent or the resume fails ([`settle_resume`]). The
+/// caller runs it once it has stopped the old `claude` and proved the pane
+/// holds none.
+/// Test: `fleet_relaunch_restarts_the_architect_and_rebinds_it`,
+/// `relaunch_stops_nothing_when_the_launch_cannot_be_prepared`,
+/// `fleet_relaunch_keeps_the_session_when_the_resume_fails`.
+pub(crate) fn prepare_restart(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Pending> {
+    let prepared = Prepared::new(dir, home, session)?;
+    Ok(Box::new(move || prepared.send(Pane::Existing)))
+}
+
+/// What [`start`] and a [`Pending`] return: the [`record_process`] outcome
+/// and how the conversation started (#8981).
+pub(crate) type Launched = (Result<ArmingRecord, String>, ConversationStart);
+
+/// A prepared relaunch: starts the `claude` in the existing session (#9092).
+pub(crate) type Pending = Box<dyn FnOnce() -> anyhow::Result<Launched>>;
+
+/// Whether [`Prepared::send`] creates the session or types into an existing one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    /// `tm fleet init`: create the session exclusively.
+    Create,
+    /// `tm fleet relaunch` (#9092): the session exists with an idle shell.
+    Existing,
+}
+
+/// Everything a launch needs before it touches tmux (#9092).
+struct Prepared {
+    dir: PathBuf,
+    home: PathBuf,
+    session: String,
+    profile: session_profile::SessionProfile,
+    claude_spec: trusty_mpm::runtime::launch_spec::LaunchSpec,
+    spec_dir: PathBuf,
+    workdir: String,
+    root: PathBuf,
+    conversation: ConversationStart,
+}
+
+impl Prepared {
+    /// The preparation half of the one Architect launch path: every refusal
+    /// of [`start`] before the session is created.
+    fn new(dir: &Path, home: &Path, session: &str) -> anyhow::Result<Self> {
+        require_architect(dir, session)?;
+        match trusty_mpm::core::session_launch::prepare_isolated_session_under(
+            dir,
+            None,
+            Some(home),
+        ) {
+            Ok(report) => {
+                for err in &report.roster_errors {
+                    eprintln!(
+                        "warning: roster provisioning gap for {}: {err}",
+                        dir.display()
+                    );
+                }
+            }
+            Err(err) if err.is_fatal() => bail!("{err}"),
+            Err(err) => eprintln!(
+                "warning: session prep failed for {} (non-fatal): {err}",
+                dir.display()
+            ),
+        }
+        let config_dir = crate::commands::launch_home::relocate_config_dir(dir, Some(home));
+        // #9012: the PM instructions are runtime content; none refuses here.
+        let content = trusty_mpm::core::content_source::framework_content_for(dir)
+            .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+        let cli = trusty_mpm::core::session_launch::cli_launch(&content, dir, None);
+        if !cli.profile.is_architect() {
+            bail!("{}", pm_refusal(dir, session));
+        }
+        let config = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(dir));
+        let model = session_profile::launch_model(cli.profile, &config);
+        // #8286: the same shared refusal as every other PM launch.
+        let prompt = trusty_mpm::core::model_inject::write_pm_prompt_file_in(
+            &std::env::temp_dir(),
+            &cli.prompt,
+            dir,
+            "launch",
+        )?;
+        // #8988: an Architect dir sits at depth 1, so it resolves no owner.
+        // #8992: the profile is passed anyway; an Architect never gets skills/tools.
+        let files = crate::commands::launch_home::launch_files(
+            dir,
+            config_dir.as_deref(),
+            Some(home),
+            cli.profile,
+        )?;
+        // #8308: the launch travels in a spec under `home`; the pane types a short line.
+        let mut claude_spec = crate::commands::launch::launch_claude_spec(
+            dir,
+            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+            &model,
+            Some(prompt.as_path()),
+            config_dir.as_deref(),
+            &cli.env,
+            &files,
+        );
+        // #8981: the conversation id comes from tm's own record, which outlives
+        // the daemon's session record.
+        let root = home.join(".trusty-mpm");
+        let conversation =
+            architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
+        claude_spec.args.extend(architect_args(&conversation));
+        let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
+        let workdir = dir
+            .to_str()
+            .context("the Architect directory is not valid UTF-8")?
+            .to_owned();
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            home: home.to_path_buf(),
+            session: session.to_owned(),
+            profile: cli.profile,
+            claude_spec,
+            spec_dir,
+            workdir,
+            root,
+            conversation,
+        })
+    }
+
+    /// The send half: create the session for `init`, then stamp it, type the
+    /// `claude` line, record the process and check a resume.
+    fn send(self, pane: Pane) -> anyhow::Result<Launched> {
+        let Self {
+            dir,
+            home,
+            session,
+            profile,
+            claude_spec,
+            spec_dir,
+            workdir,
+            root,
+            conversation,
+        } = self;
+        let (dir, home, session) = (dir.as_path(), home.as_path(), session.as_str());
+        if pane == Pane::Create {
+            let created = tmux::create_managed_session_exclusive(None, session, Some(&workdir))
+                .with_context(|| format!("failed to run tmux to create {session}"))?;
+            if !created.output.status.success() {
+                bail!(
+                    "tmux refused to create {session}: {}",
+                    String::from_utf8_lossy(&created.output.stderr).trim()
                 );
             }
         }
-        Err(err) if err.is_fatal() => bail!("{err}"),
-        Err(err) => eprintln!(
-            "warning: session prep failed for {} (non-fatal): {err}",
-            dir.display()
-        ),
+        if let Err(err) = stamp_and_send(&profile, &claude_spec, &spec_dir, session) {
+            // #9092: a relaunch never kills a session it did not create.
+            if pane == Pane::Create {
+                let _ = tmux::run_tmux(&TmuxCommand::KillSession {
+                    name: session.to_owned(),
+                });
+            }
+            return Err(err);
+        }
+        // #8981: a fresh conversation's id is recorded only once `claude` was
+        // started under it; a failed write means the next launch starts fresh.
+        if let ConversationStart::Fresh { id, .. } = &conversation
+            && let Err(err) = architect_conversation::record_conversation(&root, dir, id)
+        {
+            eprintln!(
+                "warning: conversation {id} was NOT recorded, so the next launch starts fresh: \
+             {err}"
+            );
+        }
+        let binding = record_process(dir, home, session);
+        // #8981 critic HIGH: a dead resume must not be retried by every later run.
+        if let ConversationStart::Resume(id) = &conversation {
+            let check = resume_check(
+                &binding,
+                || trusty_mpm::core::process::pane_claude(session),
+                std::thread::sleep,
+            );
+            settle_resume(check, &root, id, session, pane)?;
+        }
+        Ok((binding, conversation))
     }
-    let config_dir = crate::commands::launch_home::relocate_config_dir(dir, Some(home));
-    // #9012: the PM instructions are runtime content; none refuses here.
-    let content = trusty_mpm::core::content_source::framework_content_for(dir)
-        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
-    let cli = trusty_mpm::core::session_launch::cli_launch(&content, dir, None);
-    if !cli.profile.is_architect() {
-        bail!("{}", pm_refusal(dir, session));
-    }
-    let config = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(dir));
-    let model = session_profile::launch_model(cli.profile, &config);
-    // #8286: the same shared refusal as every other PM launch.
-    let prompt = trusty_mpm::core::model_inject::write_pm_prompt_file_in(
-        &std::env::temp_dir(),
-        &cli.prompt,
-        dir,
-        "launch",
-    )?;
-    // #8988: an Architect dir sits at depth 1, so it resolves no owner.
-    // #8992: the profile is passed anyway; an Architect never gets skills/tools.
-    let files = crate::commands::launch_home::launch_files(
-        dir,
-        config_dir.as_deref(),
-        Some(home),
-        cli.profile,
-    )?;
-    // #8308: the launch travels in a spec under `home`; the pane types a short line.
-    let mut claude_spec = crate::commands::launch::launch_claude_spec(
-        dir,
-        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        &model,
-        Some(prompt.as_path()),
-        config_dir.as_deref(),
-        &cli.env,
-        &files,
-    );
-    // #8981: the conversation id comes from tm's own record, which outlives
-    // the daemon's session record.
-    let root = home.join(".trusty-mpm");
-    let conversation =
-        architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
-    claude_spec.args.extend(architect_args(&conversation));
-    let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
-    let workdir = dir
-        .to_str()
-        .context("the Architect directory is not valid UTF-8")?;
-    let created = tmux::create_managed_session_exclusive(None, session, Some(workdir))
-        .with_context(|| format!("failed to run tmux to create {session}"))?;
-    if !created.output.status.success() {
-        bail!(
-            "tmux refused to create {session}: {}",
-            String::from_utf8_lossy(&created.output.stderr).trim()
-        );
-    }
-    if let Err(err) = stamp_and_send(&cli.profile, &claude_spec, &spec_dir, session) {
-        let _ = tmux::run_tmux(&TmuxCommand::KillSession {
-            name: session.to_owned(),
-        });
-        return Err(err);
-    }
-    // #8981: a fresh conversation's id is recorded only once `claude` was
-    // started under it; a failed write means the next launch starts fresh.
-    if let ConversationStart::Fresh { id, .. } = &conversation
-        && let Err(err) = architect_conversation::record_conversation(&root, dir, id)
-    {
-        eprintln!(
-            "warning: conversation {id} was NOT recorded, so the next `tm fleet init` \
-             starts fresh: {err}"
-        );
-    }
-    let binding = record_process(dir, home, session);
-    // #8981 critic HIGH: a dead resume must not be retried by every later run.
-    if let ConversationStart::Resume(id) = &conversation {
-        let check = resume_check(
-            &binding,
-            || trusty_mpm::core::process::pane_claude(session),
-            std::thread::sleep,
-        );
-        settle_resume(check, &root, id, session)?;
-    }
-    Ok((binding, conversation))
 }
 
 /// What [`resume_check`] found in the resumed Architect's pane (#8981).
@@ -328,12 +421,22 @@ pub(crate) fn resume_check(
 /// Act on [`resume_check`]'s answer for conversation `id` in `session`.
 ///
 /// What: `Running` is `Ok`. `Unknown` keeps the session and the record and
-/// warns on stderr, naming both. `Failed` kills the session, clears the
-/// record and is `Err`, saying whether each step worked.
+/// warns on stderr, naming both. `Failed` clears the record and is `Err`,
+/// saying whether each step worked; for `init` ([`Pane::Create`]) it first
+/// kills the session it created. #9092: a relaunch ([`Pane::Existing`])
+/// keeps the session, so its retry hint names `tm fleet relaunch`, which then
+/// finds the session and starts a new conversation.
 /// Test: `fleet_init_clears_the_conversation_record_when_the_resume_fails`,
 /// `fleet_init_keeps_the_resumed_architect_when_its_pane_cannot_be_read`,
-/// `fleet_init_says_so_when_the_failed_resume_session_cannot_be_killed`.
-fn settle_resume(check: ResumeCheck, root: &Path, id: &str, session: &str) -> anyhow::Result<()> {
+/// `fleet_init_says_so_when_the_failed_resume_session_cannot_be_killed`,
+/// `fleet_relaunch_keeps_the_session_when_the_resume_fails`.
+fn settle_resume(
+    check: ResumeCheck,
+    root: &Path,
+    id: &str,
+    session: &str,
+    pane: Pane,
+) -> anyhow::Result<()> {
     let path = architect_conversation::conversation_path(root);
     let why = match check {
         ResumeCheck::Running => return Ok(()),
@@ -349,21 +452,27 @@ fn settle_resume(check: ResumeCheck, root: &Path, id: &str, session: &str) -> an
         ResumeCheck::Failed(why) => why,
     };
     // #8981 critic LOW: a kill that failed must not be reported as done.
-    let killed = match kill_session(session) {
-        Ok(()) => format!("killed tmux session {session}"),
-        Err(err) => format!(
-            "could NOT kill tmux session {session}; run `tmux kill-session -t ={session}` \
-             ({err})"
-        ),
+    let (killed, next) = match pane {
+        // #9092: the relaunched session stays; its idle shell takes the retry.
+        Pane::Existing => (format!("kept tmux session {session}"), "tm fleet relaunch"),
+        Pane::Create => match kill_session(session) {
+            Ok(()) => (format!("killed tmux session {session}"), "tm fleet init"),
+            Err(err) => (
+                format!(
+                    "could NOT kill tmux session {session}; run `tmux kill-session -t \
+                     ={session}` ({err})"
+                ),
+                "tm fleet init",
+            ),
+        },
     };
     let record = match architect_conversation::clear_conversation(root) {
         Ok(()) => format!(
-            "cleared {}, so the next `tm fleet init` starts a new conversation",
+            "cleared {}, so the next `{next}` starts a new conversation",
             path.display()
         ),
         Err(err) => format!(
-            "could NOT clear {} ({err}); remove it, or the next `tm fleet init` resumes {id} \
-             again",
+            "could NOT clear {} ({err}); remove it, or the next `{next}` resumes {id} again",
             path.display()
         ),
     };
@@ -454,7 +563,7 @@ fn stamp_and_send(
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.
-fn require_architect(dir: &Path, session: &str) -> anyhow::Result<()> {
+pub(crate) fn require_architect(dir: &Path, session: &str) -> anyhow::Result<()> {
     if session_profile::resolve_ambient(dir).is_architect() {
         return Ok(());
     }
