@@ -22,8 +22,10 @@ trusty-events serve
 `--ring-capacity` (default 8192). Logs go to stderr; set `RUST_LOG` to change
 the level.
 
-Version 0.1.0 has no launchd job, `tctl` member or `tm doctor` row yet; those
-ship with [#10042](https://github.com/bobmatnyc/trusty-tools/issues/10042).
+`tctl install trusty-events` installs the binary and its LaunchAgent, and
+`tctl start|stop|status trusty-events` manage it. `tm doctor` reports the
+socket in its `events` row, and the console lists it as Trusty Events
+([#10042](https://github.com/bobmatnyc/trusty-tools/issues/10042)).
 
 ## The socket
 
@@ -69,10 +71,12 @@ console's old `trusty-console/event_log/` directory is not read.
 
 ### Under launchd
 
-The launchd job (#10042) is expected to use `KeepAlive`. If another
+The LaunchAgent `tctl` writes (#10042) runs `trusty-events serve` with
+`KeepAlive` set to restart only after a non-zero exit, and a `ThrottleInterval`
+of 10 s. A clean exit 0 after SIGTERM is not restarted. If another
 `trusty-events` already serves the socket, for example one started by hand,
 the launchd copy exits 1 and launchd starts it again after its throttle
-interval (10 s by default). Each attempt costs one process start, one connect
+interval (10 s). Each attempt costs one process start, one connect
 to the live socket, and one stderr line. The attempt binds nothing and opens
 no log, because the socket is taken before the log, so it never writes beside
 the live instance. When the other instance exits, the next attempt binds and

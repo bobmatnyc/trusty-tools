@@ -9,8 +9,8 @@
 //! What: [`EVENTS_PLIST_TEMPLATE`] and [`fill_events_template`] render the
 //! plist; [`install_events_plist_for`] writes it under
 //! `~/Library/LaunchAgents/` and bootstraps it through an injected
-//! [`super::plist_bootstrap::LaunchctlPort`], so a test never reaches the live `gui/<uid>` domain
-//! (#3551). The job runs `trusty-events serve`, restarts it only after an
+//! [`super::plist_bootstrap::LaunchctlPort`], so a test never reaches the
+//! live `gui/<uid>` domain (#3551). The job runs `trusty-events serve`, restarts it only after an
 //! unsuccessful exit (`KeepAlive` → `SuccessfulExit: false`) no sooner than
 //! every 10 s (`ThrottleInterval`), and carries no socket, port or address:
 //! the daemon binds its Unix socket itself and never TCP (ADR-0032). Exit 1 —
