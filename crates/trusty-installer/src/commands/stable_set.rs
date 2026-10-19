@@ -569,30 +569,33 @@ mod tests {
         );
     }
 
-    /// Why (#10042, ADR-0065 decision 4): no daemon may need the bus to do its
-    /// own job, so `tctl` installs trusty-events as a SOFT member. A hard
-    /// `requires` edge would make `tctl install trusty-mpm` fail on a host where
-    /// trusty-events cannot be installed.
-    /// What: trusty-events is OPTIONAL, and no other member's transitive
-    /// install set pulls it in.
+    /// Why (#10042, ADR-0065 decision 4): `tctl` installs trusty-events WITH
+    /// each producer as a SOFT member. With no edge at all, `tctl install
+    /// trusty-mpm` never installed the bus its producers push to; with a hard
+    /// edge, a host that cannot install the bus would fail the producer's
+    /// install.
+    /// What: selecting a producer (trusty-mpm, trusty-analyze) also selects
+    /// trusty-events, as an OPTIONAL daemon, and a non-producer (tga) does not.
     /// Test: This is the test.
     #[test]
-    fn a_missing_trusty_events_cannot_fail_another_members_install() {
-        let set = stable_set();
-        let events = set
-            .iter()
-            .find(|m| m.crate_name == "trusty-events")
-            .expect("trusty-events is a stable-set member");
-        assert!(!events.required, "trusty-events must be OPTIONAL");
-        assert!(events.daemon, "trusty-events is a supervised daemon");
-        for m in set.iter().filter(|m| m.crate_name != "trusty-events") {
-            let sel = select_members_transitive(std::slice::from_ref(&m.crate_name));
-            assert!(
-                sel.members.iter().all(|s| s.crate_name != "trusty-events"),
-                "`tctl install {}` must not pull in trusty-events: {sel:?}",
-                m.crate_name
-            );
+    fn selecting_a_producer_softly_selects_trusty_events() {
+        for producer in ["trusty-mpm", "trusty-analyze"] {
+            let sel = select_members_transitive(&[producer.to_owned()]);
+            let events = sel
+                .members
+                .iter()
+                .find(|m| m.crate_name == "trusty-events")
+                .unwrap_or_else(|| {
+                    panic!("`tctl install {producer}` must also select trusty-events: {sel:?}")
+                });
+            assert!(!events.required, "a soft member is never REQUIRED");
+            assert!(events.daemon, "trusty-events is a supervised daemon");
         }
+        let tga = select_members_transitive(&["tga".to_owned()]);
+        assert!(
+            tga.members.iter().all(|m| m.crate_name != "trusty-events"),
+            "a non-producer pulls nothing in: {tga:?}"
+        );
     }
 
     /// Why (#5805): the whole point — `tctl install trusty-installer` used to
