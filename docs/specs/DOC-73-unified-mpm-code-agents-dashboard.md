@@ -660,7 +660,8 @@ make telemetry able to break the work it observes.
    lags only console's own SSE buffer (§8.2) — never the ring, and never a
    producer.
 3. The log is written by console as frames arrive, so a lagged SSE reader
-   loses nothing permanently — it re-reads from the log via `since_seq`.
+   loses nothing permanently — it re-reads from the log via `since_seq` and
+   `since_id` (§4.4).
 
 ### 4.4 Fan-out to viewers
 
@@ -679,8 +680,18 @@ viewer reads console; console is the only fan-out point to browsers.
 
 **SSE, not WebSocket.** The stream is one-directional by construction — the views
 are non-interactive and send nothing back. SSE reconnects on its own with
-`Last-Event-ID`, which maps exactly onto `since_seq`, and it needs no new
-dependency in the axum server console already runs. A WebSocket buys a return
+`Last-Event-ID`, and it needs no new dependency in the axum server console
+already runs. `Last-Event-ID` does not map onto `since_seq` alone: since #9075
+the bus refuses a resume unless it also names the event held at that seq
+(`since_id`), because a crash can hand one `seq` to two events. Console's relay
+therefore sends `id: <seq>:<uuid>` on each event and splits it back into
+`since_seq` and `since_id` on reconnect. When the bus refuses the resume (a
+restart reassigned the seq, or retention dropped it), console resubscribes with
+`since_seq: 0` and drops events it already relayed by `EventId` (#9076). A gap
+carries no `id:`, so it does not move the reader's `Last-Event-ID`. Console's
+own connection state is served at `GET /api/console/events/status` (`200`
+connected, `503` otherwise), so a page can tell "no events" from "cannot see
+the bus" (§8.5). A WebSocket buys a return
 channel this spec has no use for. The existing `console_metrics` polling loop
 (`crates/trusty-console/src/metrics_poller.rs`) is unchanged and keeps serving
 the gauge routes.

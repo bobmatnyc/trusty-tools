@@ -147,11 +147,13 @@ fn event(seq: u64) -> HarnessEvent {
     }
 }
 
+/// Short liveness checks; a backoff long enough that a test sees the
+/// `Reconnecting` state before the next attempt replaces it.
 fn fast(socket: &Path) -> ClientConfig {
     let mut config = ClientConfig::new(socket.to_path_buf());
     config.liveness_interval = Duration::from_millis(50);
-    config.backoff_initial = Duration::from_millis(20);
-    config.backoff_max = Duration::from_millis(200);
+    config.backoff_initial = Duration::from_millis(300);
+    config.backoff_max = Duration::from_millis(300);
     config
 }
 
@@ -441,7 +443,10 @@ async fn a_malformed_frame_is_reported_and_the_client_reconnects() {
 async fn a_missing_socket_is_reported_and_retried_with_backoff() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-events.sock");
-    let (relay, _client) = run(fast(&socket));
+    let mut config = fast(&socket);
+    config.backoff_initial = Duration::from_millis(100);
+    config.backoff_max = Duration::from_millis(400);
+    let (relay, _client) = run(config);
 
     let first = status_until(&relay, "a failure", |s| s.failures >= 1).await;
     assert_eq!(first.state, BusState::Reconnecting);
@@ -458,7 +463,7 @@ async fn a_missing_socket_is_reported_and_retried_with_backoff() {
         later.retry_in_ms.unwrap_or(0),
     );
     assert!(b > a, "the delay grows: {a} then {b}");
-    assert!(b <= 200, "the delay is capped at backoff_max: {b}");
+    assert!(b <= 400, "the delay is capped at backoff_max: {b}");
 
     let mut stub = bind_stub(&socket);
     stub.next_conn().await;
