@@ -4,7 +4,11 @@
 //! nondeterministic. This fake speaks just enough LSP, deterministically, and can
 //! be told to stall, crash, fail its start-up, cut a frame short, ignore `exit`,
 //! stop reading its stdin (`no_read`),
-//! or leave a grandchild behind.
+//! or leave a grandchild behind. For the `analyze.lsp_*` methods (L3) it can
+//! also publish diagnostics with no version (`unversioned`) and answer
+//! `textDocument/references` with LSP error -32801 "content modified", either
+//! twice and then normally (`content_modified`) or every time
+//! (`content_modified_forever`).
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
 //! `<exe> --exact fake_lsp_server_entry --nocapture 3>&1 1>&2`, with the mode in
@@ -12,9 +16,13 @@
 //! frames this module writes to fd 3 are the only bytes on the child's stdout.
 //! With the variable unset, [`run_if_requested`] returns at once and the entry
 //! test is a no-op.
-//! Test: exercised by every subprocess test in `tests/lsp_child.rs`.
+//! Test: exercised by every subprocess test in `tests/lsp_child.rs` and
+//! `tests/lsp_rpc.rs`.
+
+#![allow(dead_code)] // each test binary compiles this module and uses a subset
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -24,6 +32,33 @@ pub const MODE_ENV: &str = "TRUSTY_ANALYZE_FAKE_LSP";
 pub const PIDFILE_ENV: &str = "TRUSTY_ANALYZE_FAKE_LSP_PIDFILE";
 /// What `fail_init` prints, matching the mise-shim crash DOC-72 §2 records.
 pub const FAIL_INIT_STDERR: &str = "error: infinite recursion detected";
+
+/// LSP error code a server sends while its workspace is still loading.
+pub const CONTENT_MODIFIED: i64 = -32801;
+/// How many `textDocument/references` requests `content_modified` refuses.
+pub const CONTENT_MODIFIED_REFUSALS: u32 = 2;
+
+/// A command that re-executes the current test binary as the fake in `mode`.
+///
+/// The binary must define a `fake_lsp_server_entry` test that calls
+/// [`run_if_requested`]; `pidfile` is where `grandchild` mode writes its pid.
+pub fn command(mode: &str, pidfile: &Path) -> trusty_analyze::lsp::LspCommand {
+    let exe = std::env::current_exe().expect("current_exe");
+    let script = format!(
+        "{MODE_ENV}=\"$1\" {PIDFILE_ENV}=\"$2\" exec \"$0\" --exact fake_lsp_server_entry \
+         --nocapture --test-threads=1 3>&1 1>&2"
+    );
+    trusty_analyze::lsp::LspCommand {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            script,
+            exe.display().to_string(),
+            mode.into(),
+            pidfile.display().to_string(),
+        ],
+    }
+}
 
 /// Run as the fake server when [`MODE_ENV`] is set; otherwise return.
 pub fn run_if_requested() {
@@ -41,6 +76,7 @@ fn serve(mode: &str) -> i32 {
     }
     let mut out = lsp_stdout();
     let mut input = BufReader::new(std::io::stdin().lock());
+    let mut references_seen = 0u32;
     while let Some(msg) = read_frame(&mut input) {
         let method = msg["method"].as_str().unwrap_or_default().to_string();
         let id = msg.get("id").cloned();
@@ -74,23 +110,41 @@ fn serve(mode: &str) -> i32 {
             ("exit", None) => return 0,
             ("textDocument/didOpen" | "textDocument/didChange", None) => {
                 let doc = &msg["params"]["textDocument"];
+                let mut params = json!({"uri": doc["uri"], "version": doc["version"], "diagnostics": [{
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": 0, "character": 1}},
+                    "severity": 1,
+                    "code": "E0001",
+                    "source": "fake-lsp",
+                    "message": "canned diagnostic"
+                }]});
+                if mode == "unversioned" {
+                    // rust-analyzer's cargo-check pass publishes with no version.
+                    if let Some(p) = params.as_object_mut() {
+                        p.remove("version");
+                    }
+                }
                 send(
                     &mut out,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/publishDiagnostics",
-                        "params": {"uri": doc["uri"], "version": doc["version"], "diagnostics": [{
-                            "range": {"start": {"line": 0, "character": 0},
-                                      "end": {"line": 0, "character": 1}},
-                            "severity": 1,
-                            "message": "canned diagnostic"
-                        }]}
-                    }),
+                    &json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                            "params": params}),
                 );
             }
             (_, None) => {}
             (_, Some(_)) if mode == "crash" => return 3,
             (_, Some(_)) if mode == "stall" => {}
+            ("textDocument/references", Some(id))
+                if mode == "content_modified_forever"
+                    || (mode == "content_modified"
+                        && references_seen < CONTENT_MODIFIED_REFUSALS) =>
+            {
+                references_seen += 1;
+                send(
+                    &mut out,
+                    &json!({"jsonrpc": "2.0", "id": id,
+                            "error": {"code": CONTENT_MODIFIED, "message": "content modified"}}),
+                );
+            }
             ("textDocument/references", Some(id)) => {
                 let uri = msg["params"]["textDocument"]["uri"].clone();
                 reply(

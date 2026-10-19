@@ -1,0 +1,30 @@
+{
+  "scope": "file",
+  "path": "<ROOT>/src/lib.rs",
+  "document_version": 1,
+  "snapshot": "<SNAPSHOT>",
+  "files": [
+    {
+      "path": "<ROOT>/src/lib.rs",
+      "uri": "file://<ROOT>/src/lib.rs",
+      "version": 1,
+      "unversioned": false,
+      "diagnostics": [
+        {
+          "start": {
+            "line": 0,
+            "column": 0
+          },
+          "end": {
+            "line": 0,
+            "column": 1
+          },
+          "severity": 1,
+          "code": "E0001",
+          "source": "fake-lsp",
+          "message": "canned diagnostic"
+        }
+      ]
+    }
+  ]
+}
