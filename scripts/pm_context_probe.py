@@ -25,6 +25,15 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
                        refs and write the session cache when it is given a
                        session id (crates/trusty-mpm/src/daemon/mcp_context.rs,
                        mcp_context_session_refs.rs).
+    claude-md-off      --project-dir only: claudeMdExcludes for the project's CLAUDE.md files
+    project-skills-off --project-dir only: skillOverrides "off" for the project-tier skills
+    project-files-off  --project-dir only: claude-md-off + project-skills-off together
+  --project-dir DIR runs every lever in that existing checkout instead of a
+  fresh throwaway project, so the real project's CLAUDE.md, .claude/ and the
+  tm-composed prompt for it are loaded. It must be a CLEAN git checkout the
+  caller can discard (never a live PM's directory): the probe refuses a dirty
+  tree, never initialises, edits or removes it, and re-checks it is still clean
+  afterwards. Both checks ignore gitignored paths (`.trusty-mpm/` is ignored). The catchup lever then defaults to DIR itself.
   The --settings levers use the same subtractive keys the #8988/#8992 owner
   policy writes (crates/trusty-mpm/src/core/launch_policy/carrier.rs).
   `parse` reads one saved stream-json file; `report` renders a results JSON as
@@ -46,7 +55,8 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
 
 Usage:
   scripts/pm_context_probe.py run [--runs 3] [--lever-runs 1] [--levers a,b]
-      [--tm PATH] [--model M] [--catchup-project DIR] [--out results.json]
+      [--tm PATH] [--model M] [--project-dir DIR] [--catchup-project DIR]
+      [--out results.json]
   scripts/pm_context_probe.py parse <stream.jsonl>
   scripts/pm_context_probe.py report <results.json>
 Exit: 0 on success; 1 when a run or a parse fails (the raw error is printed);
@@ -62,12 +72,17 @@ import os
 import re
 import shutil
 import signal
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+# `python3 -I` drops the script directory from sys.path; the sibling module needs it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pm_context_probe_readout import (  # noqa: E402,F401
+    CATCHUP_TOOL, LEVERS, PROJECT_LEVERS, ProbeError, parse_stream, render_report, run_problem,
+    usage_tokens)
 
 # The current main PM launch, stated in one place. Each entry names its source.
 LAUNCH = {
@@ -104,28 +119,11 @@ ENV_ALLOWLIST = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|_KEY$|^GH_|^GITHUB_", re.I)
 REFUSED_ROOTS = ("Documents", "Desktop")
 FIRST_TURN_PROMPT = "Reply with the single word OK. Do not call any tool."
-CATCHUP_TOOL = "session_context_catchup"
 CATCHUP_PROMPT = (
     "Call the MCP tool {tool} exactly once with project_dir set to \"{project}\" "
     "(load it with ToolSearch first if it is deferred). Call no other tool. Then "
     "reply with the single word DONE."
 )
-LEVERS = {
-    # name: (drop_prompt, strict_mcp, settings parts, catchup)
-    "baseline": (False, False, (), False),
-    "no-prompt": (True, False, (), False),
-    "mcp-off": (False, True, (), False),
-    "connectors-off": (False, False, ("connectors",), False),
-    "skills-off": (False, False, ("skills",), False),
-    "agents-off": (False, False, ("agents",), False),
-    "skills-agents-off": (False, False, ("skills", "agents"), False),
-    "all-trims": (False, True, ("connectors", "skills", "agents"), False),
-    "catchup": (False, False, (), True),
-}
-
-
-class ProbeError(Exception):
-    """A run or a parse that produced no usable number; the message is the raw cause."""
 
 
 class Interrupted(Exception):
@@ -197,13 +195,55 @@ def tier_names(config_dir: Path) -> tuple[list[str], list[str]]:
     return sorted(skills), sorted(agents)
 
 
-def settings_body(parts: tuple[str, ...], skills: list[str], agents: list[str]) -> dict:
+def project_tier(project: Path) -> dict:
+    """What a real project adds to a PM's context: the files each project lever switches off.
+
+    What: absolute paths of the project's CLAUDE.md files, project-tier skill
+    and agent names (`.claude/skills`, `.claude/agents`) and `.mcp.json` server
+    names. Names only; nothing is read beyond frontmatter and the `.mcp.json` keys.
+    """
+    skills, agents = tier_names(project / ".claude")
+    mdfiles = [project / "CLAUDE.md", project / "CLAUDE.local.md", project / ".claude" / "CLAUDE.md"]
+    servers: list[str] = []
+    try:
+        servers = sorted((json.loads((project / ".mcp.json").read_text()).get("mcpServers") or {}))
+    except (OSError, ValueError):
+        pass
+    return {"claude_md": [str(f) for f in mdfiles if f.is_file()], "skills": skills,
+            "agents": agents, "mcp_servers": servers}
+
+
+def not_applicable(lever: str, project: dict | None) -> str | None:
+    """Why a project lever has nothing to switch off, or None when it has a target.
+
+    What: claude-md-off needs a CLAUDE.md, project-skills-off a project skill,
+    project-files-off either. Without a target the run would equal the baseline
+    and read as a measured delta of 0, so the caller records a failed row.
+    """
+    if lever not in PROJECT_LEVERS or project is None:
+        return None
+    md, sk = bool(project["claude_md"]), bool(project["skills"])
+    missing = {"claude-md-off": not md, "project-skills-off": not sk,
+               "project-files-off": not (md or sk)}[lever]
+    if not missing:
+        return None
+    what = {"claude-md-off": "CLAUDE.md", "project-skills-off": "skills",
+            "project-files-off": "CLAUDE.md or skills"}[lever]
+    return f"not applicable (project has no {what})"
+
+
+def settings_body(parts: tuple[str, ...], skills: list[str], agents: list[str],
+                  project: dict | None = None) -> dict:
     """The --settings JSON for a lever's parts (subtractive keys only)."""
     body: dict = {}
+    if project is not None and "claude-md" in parts:
+        body["claudeMdExcludes"] = list(project["claude_md"])
+    if project is not None and "project-skills" in parts:
+        body.setdefault("skillOverrides", {}).update({name: "off" for name in project["skills"]})
     if "connectors" in parts:
         body["disableClaudeAiConnectors"] = True
     if "skills" in parts:
-        body["skillOverrides"] = {name: "off" for name in skills}
+        body.setdefault("skillOverrides", {}).update({name: "off" for name in skills})
     if "agents" in parts:
         # The subagent tool is `Task` in some Claude Code builds, `Agent` in others.
         body["permissions"] = {"deny": [f"{tool}({name})" for name in agents for tool in ("Agent", "Task")]}
@@ -227,87 +267,6 @@ def build_argv(lever: str, prompt_file: Path | None, mcp_file: Path,
         argv += ["--settings", str(settings_file)]
     argv += LAUNCH["disallowed_tools"] + LAUNCH["permission_flag"]
     return argv
-
-
-def usage_tokens(usage: dict) -> int:
-    """Context size of one API call: input + cache creation + cache read."""
-    return sum(int(usage.get(k) or 0) for k in
-               ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-
-
-def parse_stream(lines) -> dict:
-    """Read a `claude -p --output-format stream-json --verbose` transcript.
-
-    What: one entry per distinct assistant message id, in order, sized by
-    usage_tokens. `first_turn` is the first call; `post_catchup` is the first
-    call after the tool_result answering a *session_context_catchup tool_use.
-    Raises ProbeError when no assistant call carries usage, or when the
-    catchup tool returned an error, quoting the result event's text.
-    """
-    init, result, calls, seen = None, None, [], set()
-    catchup_ids: set[str] = set()
-    catchup_after = None
-    for raw in lines:
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            continue
-        kind = obj.get("type")
-        if kind == "system" and obj.get("subtype") == "init":
-            init = obj
-        elif kind == "assistant":
-            msg = obj.get("message") or {}
-            mid = msg.get("id")
-            if msg.get("usage") and mid not in seen:
-                seen.add(mid)
-                calls.append(usage_tokens(msg["usage"]))
-            for block in msg.get("content") or []:
-                if block.get("type") == "tool_use" and str(block.get("name", "")).endswith(CATCHUP_TOOL):
-                    catchup_ids.add(block.get("id"))
-        elif kind == "user":
-            content = (obj.get("message") or {}).get("content")
-            for block in content if isinstance(content, list) else []:
-                if block.get("type") == "tool_result" and block.get("tool_use_id") in catchup_ids:
-                    if block.get("is_error"):
-                        raise ProbeError(f"{CATCHUP_TOOL} failed: {str(block.get('content'))[:500]}")
-                    catchup_after = len(calls)
-        elif kind == "result":
-            result = obj
-    if not calls:
-        text = (result or {}).get("result") or (result or {}).get("subtype") or "no result event"
-        raise ProbeError(f"no assistant call with usage; result: {text}")
-    servers = (init or {}).get("mcp_servers") or []
-    return {
-        "first_turn": calls[0],
-        "post_catchup": calls[catchup_after] if catchup_after is not None and catchup_after < len(calls) else None,
-        "calls": calls,
-        "model": (init or {}).get("model"),
-        "tools": len((init or {}).get("tools") or []),
-        "mcp_servers": sorted(f"{s.get('name')}:{s.get('status')}" for s in servers),
-        "result_is_error": bool((result or {}).get("is_error")),
-        "result_text": str((result or {}).get("result") or "")[:300],
-    }
-
-
-def run_problem(rec: dict) -> str | None:
-    """Why a run must not count as measured, or None when it may.
-
-    What: an existing `error`; a non-zero `exit_code` (absent = unknown, as in
-    a parsed stream); `result_is_error`; a missing or non-positive
-    `first_turn`; or a catchup run with no `post_catchup`. #8998 review: the
-    readout fails closed, so a failed run can never become a baseline row.
-    """
-    if rec.get("error"):
-        return str(rec["error"])
-    if rec.get("exit_code") not in (None, 0):
-        return f"claude exited {rec['exit_code']}"
-    if rec.get("result_is_error"):
-        return f"result is_error: {str(rec.get('result_text') or '')[:300]}".rstrip(": ")
-    if not isinstance(rec.get("first_turn"), int) or rec["first_turn"] <= 0:
-        return f"first turn is {rec.get('first_turn')}"
-    if rec.get("lever") == "catchup" and rec.get("post_catchup") is None:
-        return f"catchup tool not called: no API call followed a {CATCHUP_TOOL} result"
-    return None
 
 
 def group_gone(pgid: int) -> bool:
@@ -356,10 +315,13 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
             names: tuple[list[str], list[str]], index: int) -> dict:
     """Launch one throwaway PM for `lever` in `root/project`; return its numbers or the error."""
     parts = LEVERS[lever][2]
+    skip = not_applicable(lever, args.project_info)
+    if skip:  # #8998 review: a lever with no target is never a measured 0.
+        return {"lever": lever, "run": index, "error": skip, "leaked_pids": []}
     settings_file = None
     if parts:
         settings_file = root / f"settings-{lever}.json"
-        settings_file.write_text(json.dumps(settings_body(parts, *names), indent=1))
+        settings_file.write_text(json.dumps(settings_body(parts, *names, project=args.project_info), indent=1))
     catchup = LEVERS[lever][3]
     prompt = (CATCHUP_PROMPT.format(tool=CATCHUP_TOOL, project=args.catchup_project)
               if catchup else FIRST_TURN_PROMPT)
@@ -368,7 +330,7 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
     stream, errlog = root / f"{lever}-{index}.jsonl", root / f"{lever}-{index}.err"
     record = {"lever": lever, "run": index}
     with open(stream, "w") as out, open(errlog, "w") as err:
-        child = subprocess.Popen(argv, cwd=root / "project", env=env, stdin=subprocess.DEVNULL,
+        child = subprocess.Popen(argv, cwd=args.project, env=env, stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=err, start_new_session=True)
         try:
             child.wait(timeout=args.timeout)
@@ -390,10 +352,11 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
 
 
 def prepare(root: Path, args, env: dict) -> tuple[Path, Path]:
-    """The throwaway project (git repo + tm-composed PM prompt) and the builtin MCP file."""
-    proj = root / "project"
-    proj.mkdir()
-    subprocess.run(["git", "init", "-q", str(proj)], check=True, env=env)
+    """The project (throwaway git repo, or --project-dir as given), the tm-composed PM prompt and the builtin MCP file."""
+    proj = args.project
+    if not args.project_dir:
+        proj.mkdir()
+        subprocess.run(["git", "init", "-q", str(proj)], check=True, env=env)
     prompt = subprocess.run([args.tm, "session", "instructions", "--dir", str(proj)], cwd=proj, env=env,
                             stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if prompt.returncode != 0 or not prompt.stdout.strip():
@@ -407,6 +370,14 @@ def prepare(root: Path, args, env: dict) -> tuple[Path, Path]:
     return prompt_file, mcp_file
 
 
+def porcelain(project: Path) -> str:
+    """`git status --porcelain` of `project`; raises ProbeError when it is not a git checkout."""
+    out = subprocess.run(["git", "-C", str(project), "status", "--porcelain"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise ProbeError(f"{project} is not a git checkout: {out.stderr.strip()[:200]}")
+    return out.stdout.strip()
+
+
 def stray_processes(root: Path) -> list[str]:
     """Live processes whose command line names `root` (each run's claude does)."""
     out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
@@ -417,29 +388,49 @@ def cmd_run(args) -> int:
     config_dir = Path(args.config_dir)
     levers = args.levers.split(",")
     unknown = [lv for lv in levers if lv not in LEVERS]
+    needs_dir = [lv for lv in levers if lv in PROJECT_LEVERS]
+    if needs_dir and not args.project_dir:
+        print(f"pm_context_probe: lever(s) {needs_dir} needs --project-dir", file=sys.stderr)
+        return 2
     if unknown or not config_dir.is_dir():
         print(f"pm_context_probe: unknown lever(s) {unknown} (known: {list(LEVERS)}) "
               f"or no CLAUDE_CONFIG_DIR at {config_dir}", file=sys.stderr)
         return 2
+    root = None
     try:
         env = child_env(dict(os.environ), config_dir)
         root = Path(tempfile.mkdtemp(prefix="pm-context-probe-"))
         check_root(root)
+        args.project = Path(args.project_dir).resolve() if args.project_dir else root / "project"
+        if args.project_dir:
+            check_root(args.project)
+            dirty = porcelain(args.project)
+            if dirty:
+                raise ProbeError(f"--project-dir {args.project} is not clean; the probe needs a "
+                                 f"disposable checkout:\n{dirty[:400]}")
     except ProbeError as exc:
+        if root:
+            shutil.rmtree(root, ignore_errors=True)
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 2
     records, failed = [], False
     # #8998 review: catchup reads a throwaway project unless the caller opts in.
-    args.catchup_project = args.catchup_project or str(root / "project")
+    args.catchup_project = args.catchup_project or str(args.project)
+    slug_dir = config_dir / "projects" / project_slug(args.project)
+    slug_existed = slug_dir.exists()
     try:
         prompt_file, mcp_file = prepare(root, args, env)
         names = tier_names(config_dir)
+        args.project_info = project_tier(args.project) if args.project_dir else None
         meta = {"tm": subprocess.run([args.tm, "--version"], capture_output=True, text=True, env=env).stdout.strip(),
                 "claude": subprocess.run(["claude", "--version"], capture_output=True, text=True, env=env).stdout.strip(),
                 "prompt_bytes": prompt_file.stat().st_size,
                 "user_tier_skills": len(names[0]), "user_tier_agents": len(names[1]),
                 "date_utc": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
-                "catchup_project": args.catchup_project, "launch": LAUNCH}
+                "catchup_project": args.catchup_project, "launch": LAUNCH,
+                "project_dir": args.project_dir and str(args.project), "project_tier": args.project_info,
+                "project_head": args.project_dir and subprocess.run(
+                    ["git", "-C", str(args.project), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()}
         for lever in levers:
             for i in range(args.runs if lever == "baseline" else args.lever_runs):
                 rec = one_run(lever, args, env, root, prompt_file, mcp_file, names, i + 1)
@@ -451,12 +442,16 @@ def cmd_run(args) -> int:
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 1
     finally:
-        shutil.rmtree(config_dir / "projects" / project_slug(root / "project"), ignore_errors=True)
+        if not slug_existed:  # never remove transcripts that predate this run
+            shutil.rmtree(slug_dir, ignore_errors=True)
         meta_stray = stray_processes(root)
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
     meta["stray_processes"] = meta_stray
     failed |= bool(meta_stray)
+    if args.project_dir:
+        meta["project_clean_after"] = not porcelain(args.project)
+        failed |= not meta["project_clean_after"]
     results = {"meta": meta, "runs": records}
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=1) + "\n")
@@ -465,37 +460,6 @@ def cmd_run(args) -> int:
     return 1 if failed else 0
 
 
-def render_report(results: dict) -> str:
-    """Markdown table: one row per lever (median of runs) and the catchup rows."""
-    by: dict[str, list[dict]] = {}
-    for rec in results["runs"]:
-        by.setdefault(rec["lever"], []).append(rec)
-    ok = lambda recs, key: [r[key] for r in recs if r.get(key) is not None and run_problem(r) is None]
-    base = ok(by.get("baseline", []), "first_turn")
-    base_med = statistics.median(base) if base else None
-    rows = ["| Lever | First-turn input tokens (median) | Runs | Delta vs baseline | Status |",
-            "|---|---|---|---|---|"]
-    for lever in LEVERS:
-        recs = by.get(lever)
-        if not recs:
-            continue
-        vals = ok(recs, "first_turn")
-        if not vals:
-            rows.append(f"| {lever} | - | 0/{len(recs)} | - | failed: {(run_problem(recs[0]) or '')[:120]} |")
-            continue
-        med = statistics.median(vals)
-        delta = f"{med - base_med:+,.0f}" if base_med is not None else "-"
-        status = "measured" if len(vals) == len(recs) else f"measured ({len(recs) - len(vals)} of {len(recs)} runs failed)"
-        rows.append(f"| {lever} | {med:,.0f} | {', '.join(f'{v:,}' for v in vals)} | {delta} | {status} |")
-    post = ok(by.get("catchup", []), "post_catchup")
-    if post:
-        first = ok(by.get("catchup", []), "first_turn")
-        med = statistics.median(post)
-        delta = f"{med - base_med:+,.0f}" if base_med is not None else "-"
-        rows.append(f"| post-{CATCHUP_TOOL} | {med:,.0f} | {', '.join(f'{v:,}' for v in post)} | {delta} | measured |")
-        rows.append(f"| catchup payload (post - first turn, same run) | {med - statistics.median(first):,.0f} | - | - | inferred |")
-    return "\n".join(rows)
-
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -503,7 +467,10 @@ def main(argv: list[str]) -> int:
     run = sub.add_parser("run")
     run.add_argument("--runs", type=int, default=3, help="baseline runs")
     run.add_argument("--lever-runs", type=int, default=1, help="runs per other lever")
-    run.add_argument("--levers", default=",".join(LEVERS))
+    run.add_argument("--levers", default=None,
+                     help="comma list (default: every lever; the project levers only with --project-dir)")
+    run.add_argument("--project-dir", default=None,
+                     help="run in this CLEAN, disposable git checkout instead of a throwaway project")
     run.add_argument("--tm", default="tm", help="tm binary composing the PM prompt")
     run.add_argument("--model", default=None)
     run.add_argument("--config-dir", default=os.environ.get("PM_PROBE_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))
@@ -519,6 +486,8 @@ def main(argv: list[str]) -> int:
     penv = sub.add_parser("print-env")
     penv.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR))
     args = ap.parse_args(argv)
+    if args.cmd == "run" and args.levers is None:
+        args.levers = ",".join(lv for lv in LEVERS if args.project_dir or lv not in PROJECT_LEVERS)
     # #8998 review: TERM/HUP raise into cmd_run's and one_run's `finally`, which
     # reap the process group and remove the temp tree.
     for sig in (signal.SIGTERM, signal.SIGHUP):
