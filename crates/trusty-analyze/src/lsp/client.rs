@@ -368,6 +368,12 @@ impl LspClient {
 }
 
 impl LspClient {
+    /// The publication counter now; every later publication carries a larger
+    /// [`PublishedDiagnostics::seq`].
+    pub fn publication_seq(&self) -> u64 {
+        *self.shared.changes.borrow()
+    }
+
     /// Every document's latest diagnostics, keyed by URI.
     pub fn all_diagnostics(&self) -> Vec<(String, PublishedDiagnostics)> {
         lock(&self.shared.diagnostics)

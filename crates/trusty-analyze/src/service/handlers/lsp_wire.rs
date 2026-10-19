@@ -164,10 +164,15 @@ pub struct LspDiagnosticsResponse {
     /// The version of `path`.
     pub document_version: i64,
     pub snapshot: String,
-    /// True for `scope: file`. False for `scope: workspace`, which lists only
-    /// the files the server has published for so far; 1.9.0 runs no full
-    /// workspace pass (#9078).
+    /// True only for `scope: file` with both the pull and a push describing
+    /// this version (#9078). Always false for `scope: workspace`, which lists
+    /// only the files the server has published for so far; 1.9.0 runs no full
+    /// workspace pass.
     pub complete: bool,
+    /// Why `complete` is false: `check_pending` (no `cargo check` push for
+    /// this version yet) or `published_files_only` (workspace scope).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     pub files: Vec<FileDiagnostics>,
 }
 
@@ -276,31 +281,57 @@ pub fn file_diagnostics(uri: &str, p: &PublishedDiagnostics) -> Result<FileDiagn
     })
 }
 
-/// Convert a `textDocument/diagnostic` (pull) answer for `uri`, computed after
-/// the server received `version`, into the file's entry (#9078).
+/// Merge a `textDocument/diagnostic` (pull) answer for `uri` at `version` with
+/// the push held for the same URI (#9078).
 ///
-/// The pull is ordered after the sync on the server's input, so its items
-/// describe `version`; the entry is stamped with it.
+/// Why: rust-analyzer's pull carries only its native analysis; `cargo check`
+/// (flycheck) findings such as E0382 arrive only as a push. Either half alone
+/// is not the file's diagnostics.
+/// What: the pull is ordered after the sync on the server's input, so its
+/// items describe `version`. The push is added when it describes the same
+/// text (rule below); items present in both are listed once. Returns the
+/// entry, stamped `version`, and whether the push half was present.
 ///
 /// # Errors
-/// [`LspError::Protocol`] for anything but a `full` report with `items`.
+/// [`LspError::Protocol`] for anything but a `full` report with `items`, or a
+/// malformed diagnostic.
 ///
-/// Test: `a_clean_file_opened_during_loading_is_answered_after_quiescence`,
-/// `file_diagnostics_are_pulled_even_when_pushes_are_unversioned`.
-pub fn pulled(uri: &str, version: i64, result: &Value) -> Result<FileDiagnostics, LspError> {
-    let items = match (
-        result.get("kind").and_then(Value::as_str),
-        result.get("items"),
-    ) {
+/// Test: `file_scope_merges_the_pull_with_the_check_push`,
+/// `with_no_check_push_yet_the_answer_is_incomplete`,
+/// `a_changed_file_is_pulled_at_its_new_version`.
+pub fn merged(
+    uri: &str,
+    version: i64,
+    synced_at: u64,
+    pull: &Value,
+    push: Option<&PublishedDiagnostics>,
+) -> Result<(FileDiagnostics, bool), LspError> {
+    let mut items = match (pull.get("kind").and_then(Value::as_str), pull.get("items")) {
         (Some("full"), Some(Value::Array(items))) => items.clone(),
         _ => return Err(protocol("diagnostic report", "{kind: full, items}")),
     };
+    // #9078: a push describes `version` when it is stamped with exactly that
+    // version, or, when unstamped (flycheck may omit the version), only if it
+    // arrived after `version`'s text was sent (`seq > synced_at`). Any other
+    // push may describe other text and is left out, so the answer is
+    // incomplete rather than wrong.
+    let check = push.filter(|p| match p.version {
+        Some(v) => v == version,
+        None => p.seq > synced_at,
+    });
+    if let Some(p) = check {
+        for d in &p.diagnostics {
+            if !items.contains(d) {
+                items.push(d.clone());
+            }
+        }
+    }
     let report = PublishedDiagnostics {
         version: Some(version),
         diagnostics: items,
         seq: 0,
     };
-    file_diagnostics(uri, &report)
+    Ok((file_diagnostics(uri, &report)?, check.is_some()))
 }
 
 /// Put an [`LspError`] on the wire: [`CODE_LSP_ERROR`], the error's text, and

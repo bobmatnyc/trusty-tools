@@ -27,7 +27,7 @@ use trusty_common::control_bus::EventId;
 use trusty_common::uds::server::RpcError;
 
 use super::lsp_wire::{
-    file_diagnostics, locations, lsp_rpc_error, max_barrier_ms, pulled, BarrierState,
+    file_diagnostics, locations, lsp_rpc_error, max_barrier_ms, merged, BarrierState,
     DiagnosticsScope, FileDiagnostics, LspAnalysedAtRequest, LspAnalysedAtResponse,
     LspDiagnosticsRequest, LspDiagnosticsResponse, LspReferencesRequest, LspReferencesResponse,
 };
@@ -105,8 +105,16 @@ impl Opened {
             .await
     }
 
-    /// Pull this file's diagnostics, bounded by `timeout` (#9078).
-    async fn pull(&self, timeout: Duration) -> Result<FileDiagnostics, LspError> {
+    /// This file's diagnostics at the synced version: the pull, bounded by
+    /// `timeout`, merged with the matching push (`lsp_wire::merged`). The
+    /// second value says whether the push half was present (#9078).
+    ///
+    /// # Errors
+    /// [`LspError::Stale`] when another call synced a newer version while the
+    /// pull was in flight: a v2 answer never goes out stamped v1. Otherwise
+    /// the pull's own error.
+    async fn answer(&self, timeout: Duration) -> Result<(FileDiagnostics, bool), LspError> {
+        let client = self.lease.client();
         let result = self
             .lease
             .request_within(
@@ -115,7 +123,22 @@ impl Opened {
                 timeout,
             )
             .await?;
-        pulled(&self.doc.uri, self.doc.version, &result)
+        // #9078: re-check after the pull; a concurrent sync moves the version.
+        let current = client.document_version(&self.file).await;
+        if current != Some(self.doc.version) {
+            return Err(LspError::Stale {
+                requested: self.doc.version,
+                current: current.unwrap_or_default(),
+            });
+        }
+        let push = client.diagnostics(&self.doc.uri);
+        merged(
+            &self.doc.uri,
+            self.doc.version,
+            self.doc.synced_at,
+            &result,
+            push.as_ref(),
+        )
     }
 }
 
@@ -162,12 +185,13 @@ pub async fn lsp_references(
 /// `analyze.lsp_diagnostics`: the server's type-checked diagnostics.
 ///
 /// `scope: file` pulls (`textDocument/diagnostic`) the synced text of `path`
-/// once the server is loaded, and answers `complete: true`. rust-analyzer
-/// pushes a set only when it changes, so a push can never decide the answer
-/// (#9078). `scope: workspace` pulls the same file, then lists every other
-/// file the server has pushed for under the root, answering
-/// `complete: false`: 1.9.0 runs no full workspace pass, so a directory `path`
-/// is refused.
+/// once the server is loaded and merges the `cargo check` push held for the
+/// same version (#9078): rust-analyzer's pull omits check findings, and it
+/// pushes a set only when it changes. Without that push the answer is
+/// `complete: false, reason: "check_pending"`. `scope: workspace` builds the
+/// same merged entry for `path`, then lists every other file the server has
+/// pushed for under the root, answering `complete: false`: 1.9.0 runs no full
+/// workspace pass, so a directory `path` is refused.
 ///
 /// # Errors
 /// `invalid_params` for a missing or relative `path`, or a directory with
@@ -179,7 +203,11 @@ pub async fn lsp_references(
 /// `diagnostics_wait_for_the_server_to_finish_loading`,
 /// `a_clean_file_opened_during_loading_is_answered_after_quiescence`,
 /// `workspace_scope_returns_published_files_marked_incomplete`,
-/// `a_directory_workspace_scope_is_refused`.
+/// `a_directory_workspace_scope_is_refused`,
+/// `file_scope_merges_the_pull_with_the_check_push`,
+/// `with_no_check_push_yet_the_answer_is_incomplete`,
+/// `workspace_scope_keeps_the_push_for_the_requested_file`,
+/// `a_sync_during_the_pull_makes_the_answer_stale`.
 pub async fn lsp_diagnostics(
     state: &AnalyzerAppState,
     req: LspDiagnosticsRequest,
@@ -203,17 +231,24 @@ pub async fn lsp_diagnostics(
     let run = async {
         let o = open(state, &path, req.version).await?;
         o.ready().await?;
-        let own = o.pull(o.lease.request_timeout()).await?;
-        let files = match req.scope {
-            DiagnosticsScope::File => vec![own],
+        let (own, checked) = o.answer(o.lease.request_timeout()).await?;
+        let (files, reason) = match req.scope {
+            DiagnosticsScope::File => (vec![own], (!checked).then_some("check_pending")),
             DiagnosticsScope::Workspace => {
+                // #9078: `own` already merges this file's push; the raw push
+                // entry it replaces is a subset of it.
                 let mut files: Vec<FileDiagnostics> = published_under(&o.lease, &o.root)?
                     .into_iter()
                     .filter(|f| f.uri != own.uri)
                     .collect();
                 files.push(own);
                 files.sort_by(|a, b| a.uri.cmp(&b.uri));
-                files
+                let why = if checked {
+                    "published_files_only"
+                } else {
+                    "check_pending"
+                };
+                (files, Some(why))
             }
         };
         Ok(LspDiagnosticsResponse {
@@ -221,7 +256,8 @@ pub async fn lsp_diagnostics(
             path: o.file,
             document_version: o.doc.version,
             snapshot: o.snapshot,
-            complete: req.scope == DiagnosticsScope::File,
+            complete: reason.is_none(),
+            reason,
             files,
         })
     };
@@ -281,7 +317,7 @@ pub async fn lsp_analysed_at(
             let left = deadline.saturating_duration_since(Instant::now());
             client.wait_until_quiescent(left).await?;
             let left = deadline.saturating_duration_since(Instant::now());
-            o.pull(left).await
+            o.answer(left).await
         };
         let state = match waited.await {
             Ok(_) => BarrierState::Ready,
