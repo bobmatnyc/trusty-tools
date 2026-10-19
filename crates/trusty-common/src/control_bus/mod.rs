@@ -62,3 +62,6 @@ pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome
 
 #[cfg(test)]
 mod tests;
+// #9075: golden frames for the `events.subscribe` contract (ADR-0065).
+#[cfg(test)]
+mod subscribe_tests;
