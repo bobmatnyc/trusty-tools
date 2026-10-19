@@ -205,6 +205,37 @@ pub async fn push(socket: &Path, events: Vec<HarnessEvent>) {
     assert_eq!(outcome.sent, count, "flush wrote every buffered frame");
 }
 
+/// Push `events`, then prove the bus applied them: subscribe from `seq` 0 and
+/// read them back by id, within [`BOUND`]. Returns the pushed events as the
+/// bus sequenced them, in push order.
+///
+/// Why: [`push`] returns once the frames are written to the socket, not once
+/// the daemon has ingested them, so a subscribe on another connection can win
+/// the race and see an older head (#9075, df-G01). A test whose assertion
+/// depends on the bus holding the push calls this instead.
+pub async fn push_and_settle(socket: &Path, events: Vec<HarnessEvent>) -> Vec<HarnessEvent> {
+    let ids: Vec<EventId> = events.iter().map(|e| e.id).collect();
+    push(socket, events).await;
+    let mut stream = subscribe(socket, Some(0), SubscribeFilter::default()).await;
+    let mut seen: Vec<Option<HarnessEvent>> = ids.iter().map(|_| None).collect();
+    let settled = tokio::time::timeout(BOUND, async {
+        while seen.iter().any(Option::is_none) {
+            let event = next_full_event(&mut stream).await;
+            if let Some(slot) = ids.iter().position(|id| *id == event.id) {
+                seen[slot] = Some(event);
+            }
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the bus did not apply all {} pushed events within {BOUND:?}; read back {}",
+        ids.len(),
+        seen.iter().flatten().count()
+    );
+    seen.into_iter().flatten().collect()
+}
+
 /// Open an `events.subscribe` stream.
 ///
 /// The client's per-frame timeout is set far above [`BOUND`]: a live
