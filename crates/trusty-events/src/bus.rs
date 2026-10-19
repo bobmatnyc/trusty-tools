@@ -390,27 +390,6 @@ impl EventBus {
         }
     }
 
-    /// The id the durable log holds for `seq`: `None` without a log,
-    /// `Some(Ok(None))` when no retained day file holds `seq` (#9075).
-    ///
-    /// # Errors
-    ///
-    /// `Some(Err(_))` when a day file could not be listed or read.
-    ///
-    /// Test: `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
-    pub(crate) async fn logged_id(
-        &self,
-        seq: u64,
-    ) -> Option<Result<Option<EventId>, super::log::LogError>> {
-        let replayed = self.replay_since(seq.saturating_sub(1)).await?;
-        Some(replayed.map(|items| {
-            items.into_iter().find_map(|item| match item {
-                super::log::ReplayItem::Event(event) if event.seq == seq => Some(event.id),
-                _ => None,
-            })
-        }))
-    }
-
     /// Stop assigning `seq` and release the durable log's writer (#9075).
     ///
     /// Why: at shutdown, an event accepted after the writer's last line would
@@ -437,13 +416,32 @@ impl EventBus {
     ///
     /// `Some(Err(_))` when the log is wired but a day file could not be
     /// listed or read.
-    // #9075: read by `events.subscribe` replay (`crate::subscribe`).
+    // #10071 review: `events.subscribe` reads through `replay_files`.
+    #[cfg(test)]
     pub(crate) async fn replay_since(
         &self,
         since_seq: u64,
     ) -> Option<Result<Vec<super::log::ReplayItem>, super::log::LogError>> {
         let log = self.log.as_ref()?;
         Some(log.replay_since(since_seq).await)
+    }
+
+    /// The durable log after `since_seq`, one day file per step; `None`
+    /// without a log (#10071 review: a subscription beats between reads and
+    /// stops when its reader leaves).
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err(_))` when the log directory could not be listed.
+    ///
+    /// Test: `super::serve_tests::a_slow_replay_read_still_beats`,
+    /// `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
+    pub(crate) async fn replay_files(
+        &self,
+        since_seq: u64,
+    ) -> Option<Result<super::log::ReplayFiles, super::log::LogError>> {
+        let log = self.log.as_ref()?;
+        Some(log.replay_files(since_seq).await)
     }
 
     /// A snapshot of the counters as of this call.

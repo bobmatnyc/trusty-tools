@@ -24,8 +24,11 @@
 //! can lose a `seq` the bus already handed out, and the next start hands it
 //! out again; the id is what tells the two events apart.
 //! #10071: a subscription that sets `heartbeat_ms` is sent a `Heartbeat
-//! { head }` once it is accepted, before any replay, and then once per
-//! interval while it follows. A heartbeat is a `try_send`: one that finds the
+//! { head }` once it is accepted, before the `since_id` check and the replay,
+//! and then once per interval for as long as it is open. The log is read one
+//! day file per step, each step raced against the next beat and against the
+//! reader leaving, so a slow read neither silences the stream nor outlives
+//! its reader (#10071 review). A heartbeat is a `try_send`: one that finds the
 //! reader's buffer full is dropped, since that reader has frames to read. It
 //! is not filtered, never moves the cursor and never reports a gap. A
 //! subscription without `heartbeat_ms` gets no heartbeat, so a reader that
@@ -175,14 +178,45 @@ fn id_unverifiable(since: u64) -> RpcError {
     ))
 }
 
-/// Check a resume's `since_id` against the durable log. `false` when the
-/// stream has ended with a refusal.
-async fn check_against_log(bus: &EventBus, since: u64, id: EventId, cursor: &Cursor) -> bool {
-    let refusal = match bus.logged_id(since).await {
-        Some(Ok(Some(found))) if found == id => return true,
-        Some(Ok(Some(_))) => id_mismatch(since),
-        Some(Ok(None)) | None => id_unverifiable(since),
+/// Check a resume's `since_id` against the durable log, one day file per
+/// step. `false` when the stream has ended: refused, or the reader left.
+///
+/// Test: `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`,
+/// `super::serve_tests::a_slow_since_id_check_still_beats`.
+async fn check_against_log(
+    bus: &EventBus,
+    since: u64,
+    id: EventId,
+    cursor: &Cursor,
+    beats: &mut Beats,
+) -> bool {
+    let Some(opened) = while_beating(bus.replay_files(since - 1), bus, cursor, beats).await else {
+        return false;
+    };
+    let refusal = match opened {
+        None => id_unverifiable(since),
         Some(Err(e)) => RpcError::internal(format!("read the event log: {e}")),
+        Some(Ok(mut files)) => loop {
+            let Some(step) = while_beating(files.next_file(), bus, cursor, beats).await else {
+                return false;
+            };
+            let items = match step {
+                None => break id_unverifiable(since),
+                Some(Err(e)) => break RpcError::internal(format!("read the event log: {e}")),
+                Some(Ok(items)) => items,
+            };
+            // Events come in seq order after `since - 1`: the first decides.
+            let first = items.into_iter().find_map(|item| match item {
+                ReplayItem::Event(event) => Some(event),
+                ReplayItem::Gap { .. } => None,
+            });
+            match first {
+                None => {}
+                Some(event) if event.seq != since => break id_unverifiable(since),
+                Some(event) if event.id == id => return true,
+                Some(_) => break id_mismatch(since),
+            }
+        },
     };
     cursor.fail(refusal).await;
     false
@@ -271,36 +305,74 @@ async fn pump(
         mut receiver,
         ..
     } = attach;
-    if let Some((seq, id)) = check
-        && !check_against_log(&bus, seq, id, &cursor).await
-    {
+    let mut beats = heartbeat.map(|every| {
+        let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        beats.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        beats
+    });
+    // #10071: "alive" at once, before any log read can delay it.
+    if beats.is_some() && !cursor.beat(bus.head()) {
         return;
     }
-    // #10071: "alive" before the replay, so a long replay does not delay it.
-    if heartbeat.is_some() && !cursor.beat(bus.head()) {
+    if let Some((seq, id)) = check
+        && !check_against_log(&bus, seq, id, &cursor, &mut beats).await
+    {
         return;
     }
     if let Some(since) = since
-        && !replay(&bus, since, head, backlog, &mut cursor).await
+        && !replay(&bus, since, head, backlog, &mut cursor, &mut beats).await
     {
         return;
     }
-    follow(&bus, &mut receiver, &mut cursor, heartbeat).await;
+    follow(&bus, &mut receiver, &mut cursor, &mut beats).await;
 }
 
-/// Send the log's events up to the ring, then the ring backlog. `false` when
-/// the stream has ended.
+/// A subscription's heartbeat schedule; `None` when it did not ask.
+type Beats = Option<Interval>;
+
+/// Await `work` while beating on schedule (#10071 review). `None`, with
+/// `work` dropped, once the reader has gone.
+async fn while_beating<T>(
+    work: impl std::future::Future<Output = T>,
+    bus: &EventBus,
+    cursor: &Cursor,
+    beats: &mut Beats,
+) -> Option<T> {
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            out = &mut work => return Some(out),
+            () = cursor.tx.closed() => return None,
+            () = next_beat(beats) => {
+                if !cursor.beat(bus.head()) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Send the log's events up to the ring, one day file per step, then the
+/// ring backlog. `false` when the stream has ended.
+///
+/// Test: `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`,
+/// `super::serve_tests::a_slow_replay_read_still_beats`,
+/// `super::serve_tests::a_pump_whose_reader_left_stops_reading_the_log`.
 async fn replay(
     bus: &EventBus,
     since: u64,
     head: u64,
     backlog: Vec<HarnessEvent>,
     cursor: &mut Cursor,
+    beats: &mut Beats,
 ) -> bool {
     // The ring holds `[boundary, head]`; the log serves `(since, boundary)`.
     let boundary = backlog.first().map_or(head + 1, |event| event.seq);
     if since + 1 < boundary {
-        match bus.replay_since(since).await {
+        let Some(opened) = while_beating(bus.replay_files(since), bus, cursor, beats).await else {
+            return false;
+        };
+        match opened {
             None => {}
             Some(Err(e)) => {
                 cursor
@@ -308,20 +380,33 @@ async fn replay(
                     .await;
                 return false;
             }
-            Some(Ok(items)) => {
+            Some(Ok(mut files)) => 'files: loop {
+                let Some(step) = while_beating(files.next_file(), bus, cursor, beats).await else {
+                    return false;
+                };
+                let items = match step {
+                    None => break,
+                    Some(Ok(items)) => items,
+                    Some(Err(e)) => {
+                        cursor
+                            .fail(RpcError::internal(format!("replay the event log: {e}")))
+                            .await;
+                        return false;
+                    }
+                };
                 for item in items {
                     // A `ReplayItem::Gap` needs no arm: the next event's seq,
                     // or the boundary check below, reports the same hole.
                     if let ReplayItem::Event(event) = item {
                         if event.seq >= boundary {
-                            break;
+                            break 'files;
                         }
                         if !cursor.deliver(*event, true).await {
                             return false;
                         }
                     }
                 }
-            }
+            },
         }
         if !cursor.skip_to(boundary - 1).await {
             return false;
@@ -341,18 +426,13 @@ async fn follow(
     bus: &EventBus,
     receiver: &mut broadcast::Receiver<BusFrame>,
     cursor: &mut Cursor,
-    heartbeat: Option<Duration>,
+    beats: &mut Beats,
 ) {
-    let mut beats = heartbeat.map(|every| {
-        let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-        beats.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        beats
-    });
     loop {
         let next = tokio::select! {
             frame = receiver.recv() => frame,
             () = cursor.tx.closed() => return,
-            () = next_beat(&mut beats) => {
+            () = next_beat(beats) => {
                 if !cursor.beat(bus.head()) {
                     return;
                 }
