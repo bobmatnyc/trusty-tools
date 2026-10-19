@@ -32,7 +32,12 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
   process group, which is killed and checked empty afterwards. At the end the
   temp tree and the project's transcript directory under
   CLAUDE_CONFIG_DIR/projects are removed and `ps` is checked for any process
-  naming the temp tree. No tmux is used. Results: pm_context_probe_baseline.md.
+  naming the temp tree. SIGTERM and SIGHUP run the same cleanup and exit
+  128+signal. No tmux is used. Results: pm_context_probe_baseline.md.
+
+  A run counts as measured only when claude exited 0, the result is not an
+  error, the first turn is positive and, for catchup, the tool was called
+  (run_problem); anything else is a failed row quoting the raw cause.
 
 Usage:
   scripts/pm_context_probe.py run [--runs 3] [--lever-runs 1] [--levers a,b]
@@ -116,6 +121,21 @@ LEVERS = {
 
 class ProbeError(Exception):
     """A run or a parse that produced no usable number; the message is the raw cause."""
+
+
+class Interrupted(Exception):
+    """SIGTERM or SIGHUP, raised so the run's `finally` cleanup still executes."""
+
+    def __init__(self, signum: int):
+        super().__init__(f"interrupted by signal {signum}")
+        self.signum = signum
+
+
+def raise_interrupted(signum: int, _frame) -> None:
+    """Signal handler: ignore further TERM/HUP so cleanup is not cut short, then raise."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(signum)
 
 
 def child_env(parent: dict[str, str], config_dir: Path) -> dict[str, str]:
@@ -260,25 +280,66 @@ def parse_stream(lines) -> dict:
         "tools": len((init or {}).get("tools") or []),
         "mcp_servers": sorted(f"{s.get('name')}:{s.get('status')}" for s in servers),
         "result_is_error": bool((result or {}).get("is_error")),
+        "result_text": str((result or {}).get("result") or "")[:300],
     }
 
 
-def reap_group(pgid: int, grace: float = 5.0) -> list[int]:
-    """Kill process group `pgid`; return the pids still in it afterwards (empty = clean)."""
+def run_problem(rec: dict) -> str | None:
+    """Why a run must not count as measured, or None when it may.
+
+    What: an existing `error`; a non-zero `exit_code` (absent = unknown, as in
+    a parsed stream); `result_is_error`; a missing or non-positive
+    `first_turn`; or a catchup run with no `post_catchup`. #8998 review: the
+    readout fails closed, so a failed run can never become a baseline row.
+    """
+    if rec.get("error"):
+        return str(rec["error"])
+    if rec.get("exit_code") not in (None, 0):
+        return f"claude exited {rec['exit_code']}"
+    if rec.get("result_is_error"):
+        return f"result is_error: {str(rec.get('result_text') or '')[:300]}".rstrip(": ")
+    if not isinstance(rec.get("first_turn"), int) or rec["first_turn"] <= 0:
+        return f"first turn is {rec.get('first_turn')}"
+    if rec.get("lever") == "catchup" and rec.get("post_catchup") is None:
+        return f"catchup tool not called: no API call followed a {CATCHUP_TOOL} result"
+    return None
+
+
+def group_gone(pgid: int) -> bool:
+    """True when no signallable process is left in group `pgid`.
+
+    macOS answers EPERM, not ESRCH, for a group whose only members are zombies.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    return False
+
+
+def reap_group(child: subprocess.Popen, grace: float = 5.0) -> list[int]:
+    """Kill `child`'s process group; return the live pids left in it (empty = clean).
+
+    What: SIGTERM, then SIGKILL, to the group. After each signal it waits for
+    the leader, so a reaped leader is never a zombie counted as leaked, then
+    polls the group until it is gone. `ps` has the last word, skipping zombies.
+    """
+    pgid = child.pid
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return []
+        except (ProcessLookupError, PermissionError):
+            break
         deadline = time.monotonic() + grace
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                return []
+        try:
+            child.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            continue
+        while not group_gone(pgid) and time.monotonic() < deadline:
             time.sleep(0.2)
-    out = subprocess.run(["ps", "-axo", "pid=,pgid="], capture_output=True, text=True).stdout
-    return [int(p) for p, g in (l.split() for l in out.splitlines() if l.strip()) if int(g) == pgid]
+    out = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True).stdout
+    rows = (line.split() for line in out.splitlines() if line.strip())
+    return [int(r[0]) for r in rows if len(r) >= 3 and int(r[1]) == pgid and not r[2].startswith("Z")]
 
 
 def project_slug(path: Path) -> str:
@@ -309,13 +370,17 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
         except subprocess.TimeoutExpired:
             record["error"] = f"timed out after {args.timeout}s"
         finally:
-            record["leaked_pids"] = reap_group(child.pid)
+            record["leaked_pids"] = reap_group(child)
+    record["exit_code"] = child.returncode
     try:
         with open(stream) as fh:
             record.update(parse_stream(fh))
     except ProbeError as exc:
+        record["error"] = f"{record.get('error', '')} {exc}".strip()
+    problem = run_problem(record)
+    if problem:  # #8998 review: fail closed, quoting the raw cause.
         tail = errlog.read_text(errors="replace")[-800:]
-        record["error"] = f"{record.get('error', '')} {exc}; exit={child.returncode}; stderr: {tail}".strip()
+        record["error"] = f"{problem}; exit={child.returncode}; stderr: {tail}"
     return record
 
 
@@ -398,7 +463,7 @@ def render_report(results: dict) -> str:
     by: dict[str, list[dict]] = {}
     for rec in results["runs"]:
         by.setdefault(rec["lever"], []).append(rec)
-    ok = lambda recs, key: [r[key] for r in recs if r.get(key) is not None and "error" not in r]
+    ok = lambda recs, key: [r[key] for r in recs if r.get(key) is not None and run_problem(r) is None]
     base = ok(by.get("baseline", []), "first_turn")
     base_med = statistics.median(base) if base else None
     rows = ["| Lever | First-turn input tokens (median) | Runs | Delta vs baseline | Status |",
@@ -409,11 +474,12 @@ def render_report(results: dict) -> str:
             continue
         vals = ok(recs, "first_turn")
         if not vals:
-            rows.append(f"| {lever} | - | 0/{len(recs)} | - | failed: {recs[0].get('error', '')[:120]} |")
+            rows.append(f"| {lever} | - | 0/{len(recs)} | - | failed: {(run_problem(recs[0]) or '')[:120]} |")
             continue
         med = statistics.median(vals)
         delta = f"{med - base_med:+,.0f}" if base_med is not None else "-"
-        rows.append(f"| {lever} | {med:,.0f} | {', '.join(f'{v:,}' for v in vals)} | {delta} | measured |")
+        status = "measured" if len(vals) == len(recs) else f"measured ({len(recs) - len(vals)} of {len(recs)} runs failed)"
+        rows.append(f"| {lever} | {med:,.0f} | {', '.join(f'{v:,}' for v in vals)} | {delta} | {status} |")
     post = ok(by.get("catchup", []), "post_catchup")
     if post:
         first = ok(by.get("catchup", []), "first_turn")
@@ -453,13 +519,21 @@ def main(argv: list[str]) -> int:
     penv = sub.add_parser("print-env")
     penv.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR))
     args = ap.parse_args(argv)
+    # #8998 review: TERM/HUP raise into cmd_run's and one_run's `finally`, which
+    # reap the process group and remove the temp tree.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, raise_interrupted)
     try:
         if args.cmd == "run":
             args.catchup_project = args.catchup_project or main_checkout()
             return cmd_run(args)
         if args.cmd == "parse":
             with open(args.stream) as fh:
-                print(json.dumps(parse_stream(fh)))
+                parsed = parse_stream(fh)
+            print(json.dumps(parsed))
+            problem = run_problem(parsed)
+            if problem:
+                raise ProbeError(problem)
             return 0
         if args.cmd == "report":
             print(render_report(json.loads(Path(args.results).read_text())))
@@ -469,6 +543,9 @@ def main(argv: list[str]) -> int:
     except ProbeError as exc:
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 1
+    except Interrupted as exc:
+        print(f"pm_context_probe: {exc}; process group reaped, temp tree removed", file=sys.stderr)
+        return 128 + exc.signum
 
 
 if __name__ == "__main__":

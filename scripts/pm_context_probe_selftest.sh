@@ -7,17 +7,25 @@
 #   message twice, or reads the call after ToolSearch instead of the one after
 #   session_context_catchup reports a plausible wrong baseline. The child
 #   environment must also never carry a credential variable.
-# What: no `claude` and no network. Fixture streams drive `parse`; a fixture
-#   results file drives `report`; `print-env` runs under a parent environment
-#   holding token variables; the remaining pure functions run in-process.
+# What: no real `claude` and no network. Fixture streams drive `parse`; fixture
+#   results files drive `report`; `print-env` runs under a parent environment
+#   holding token variables; the pure functions run in-process; stub `claude`
+#   and `tm` binaries drive `run` for the cleanup cases.
 #     parse-first-turn       input + cache creation + cache read of call 1
 #     parse-dedup            a message id repeated across events counts once
 #     parse-post-catchup     the call after the catchup result, not after ToolSearch
 #     parse-catchup-error    FAIL, an is_error catchup result
 #     parse-no-call          FAIL, quoting the result text (e.g. a login error)
 #     report-table           medians, deltas, a failed lever, the inferred row
+#     fail-closed            FAIL rows for a non-zero exit, a result is_error, a
+#                            first turn of 0, and a catchup run whose tool was
+#                            never called; `parse` exits 1 on the first three
 #     env-no-credentials     GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY dropped
 #     functions              argv per lever, settings bodies, tier names, refused roots
+#     timeout-*              a stub `claude` that never answers: the group is
+#                            reaped, the leader is not reported leaked
+#     signal-TERM/HUP        the probe killed mid-run exits 128+signal with no
+#                            stub process and no temp tree left behind
 # Usage: ./scripts/pm_context_probe_selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing each mismatch.
 # Test: this IS the test.
@@ -90,8 +98,30 @@ cat >"$WORK/results.json" <<'EOF'
  {"lever": "baseline", "run": 3, "first_turn": 98, "leaked_pids": []},
  {"lever": "mcp-off", "run": 1, "first_turn": 60, "leaked_pids": []},
  {"lever": "skills-off", "run": 1, "error": "no assistant call with usage; result: boom", "leaked_pids": []},
- {"lever": "catchup", "run": 1, "first_turn": 101, "post_catchup": 151, "leaked_pids": []}
+ {"lever": "catchup", "run": 1, "first_turn": 101, "post_catchup": 151, "leaked_pids": []},
+ {"lever": "no-prompt", "run": 1, "first_turn": 90, "exit_code": 1, "leaked_pids": []},
+ {"lever": "connectors-off", "run": 1, "first_turn": 95, "result_is_error": true, "leaked_pids": []},
+ {"lever": "agents-off", "run": 1, "first_turn": 0, "leaked_pids": []}
 ]}
+EOF
+
+cat >"$WORK/results-no-catchup.json" <<'EOF'
+{"meta": {}, "runs": [
+ {"lever": "baseline", "run": 1, "first_turn": 100, "exit_code": 0, "leaked_pids": []},
+ {"lever": "catchup", "run": 1, "first_turn": 101, "post_catchup": null, "exit_code": 0, "leaked_pids": []}
+]}
+EOF
+
+cat >"$WORK/result-error.jsonl" <<EOF
+$INIT
+{"type":"assistant","message":{"id":"m1","usage":$U1,"content":[{"type":"text","text":"API Error: 529 overloaded"}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded"}
+EOF
+
+cat >"$WORK/zero-usage.jsonl" <<EOF
+$INIT
+{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":0,"output_tokens":0},"content":[]}}
+{"type":"result","subtype":"success","is_error":false,"result":""}
 EOF
 
 # ------------------------------------------------------------------ cases
@@ -111,6 +141,18 @@ check report-post-catchup 0 '| post-session_context_catchup | 151 | 151 | +51 | 
   python3 "$PROBE" report "$WORK/results.json"
 check report-inferred 0 '| catchup payload (post - first turn, same run) | 50 | - | - | inferred |' \
   python3 "$PROBE" report "$WORK/results.json"
+# #8998 review: a run that did not succeed is never measured.
+check report-nonzero-exit 0 '| no-prompt | - | 0/1 | - | failed: claude exited 1' \
+  python3 "$PROBE" report "$WORK/results.json"
+check report-result-error 0 '| connectors-off | - | 0/1 | - | failed: result is_error' \
+  python3 "$PROBE" report "$WORK/results.json"
+check report-zero-first-turn 0 '| agents-off | - | 0/1 | - | failed: first turn is 0' \
+  python3 "$PROBE" report "$WORK/results.json"
+check report-catchup-not-called 0 '| catchup | - | 0/1 | - | failed: catchup tool not called' \
+  python3 "$PROBE" report "$WORK/results-no-catchup.json"
+check parse-result-error 1 'result is_error: API Error: 529 overloaded' \
+  python3 "$PROBE" parse "$WORK/result-error.jsonl"
+check parse-zero-first-turn 1 'first turn is 0' python3 "$PROBE" parse "$WORK/zero-usage.jsonl"
 
 ENV_OUT="$(env GH_TOKEN=x CLAUDE_CODE_OAUTH_TOKEN=x ANTHROPIC_API_KEY=x TMUX=x \
   python3 "$PROBE" print-env --config-dir "$WORK" 2>&1)"
@@ -183,6 +225,81 @@ print("\n".join(fails) if fails else "functions ok")
 sys.exit(1 if fails else 0)
 EOF
 check functions 0 'functions ok' python3 -I "$WORK/functions.py" "$REPO_ROOT/scripts" "$WORK"
+
+# ------------------------------------------------------------------ cleanup
+# A stub `claude` that never answers (it backgrounds a `sleep` and waits) and a
+# stub `tm`; the probe's real `run` drives them. Each stub writes its pid.
+make_stubs() {
+  local dir="$1"
+  mkdir -p "$dir/bin" "$dir/tmp"
+  cat >"$dir/bin/claude" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = "--version" ] && { echo "stub-claude 0"; exit 0; }
+sleep 300 &
+echo \$! >"$dir/sleep.pid"
+echo \$\$ >"$dir/claude.pid"
+wait
+EOF
+  cat >"$dir/bin/tm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *--version*) echo "stub-tm 0" ;; *instructions*) echo "STUB PM PROMPT" ;; *) exit 2 ;; esac
+EOF
+  chmod +x "$dir/bin/claude" "$dir/bin/tm"
+}
+
+stub_run() { # stub_run <dir> <timeout>: the probe against the stubs, in the foreground.
+  PATH="$1/bin:$PATH" TMPDIR="$1/tmp" python3 "$PROBE" run --runs 1 --levers baseline \
+    --tm "$1/bin/tm" --config-dir "$WORK/cfg" --timeout "$2"
+}
+
+# alive <dir>: the stub pids still running (empty = none).
+alive() {
+  local f
+  for f in "$1/claude.pid" "$1/sleep.pid"; do
+    [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && printf '%s ' "$(basename "$f" .pid)"
+  done
+}
+
+reap_stubs() { local f; for f in "$WORK"/stub-*/*.pid; do [ -f "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null; done; }
+trap 'reap_stubs; rm -rf "$WORK"' EXIT
+
+# timeout-reaps-leader: a run that times out kills its group, waits for the
+# leader, and reports no leaked pid.
+make_stubs "$WORK/stub-timeout"
+check timeout-reaps-leader 1 '"leaked_pids": []' stub_run "$WORK/stub-timeout" 2
+CASES=$((CASES + 1))
+left="$(alive "$WORK/stub-timeout")$(ls -A "$WORK/stub-timeout/tmp")"
+if [ -n "$left" ]; then
+  FAILURES=$((FAILURES + 1))
+  echo "  FAIL: timeout-cleans-up: left behind: $left"
+else
+  printf '  ok   %-28s -> nothing left\n' "timeout-cleans-up"
+fi
+
+# signal-<SIG>: the probe killed mid-run reaps the group, removes its temp
+# tree and exits 128+signal.
+for sig in TERM HUP; do
+  dir="$WORK/stub-$sig"
+  make_stubs "$dir"
+  # `env` execs python3, so $! is the probe itself, not a subshell.
+  env PATH="$dir/bin:$PATH" TMPDIR="$dir/tmp" python3 "$PROBE" run --runs 1 --levers baseline \
+    --tm "$dir/bin/tm" --config-dir "$WORK/cfg" --timeout 120 >"$dir/out" 2>&1 &
+  probe_pid=$!
+  for _ in $(seq 1 100); do [ -s "$dir/claude.pid" ] && break; sleep 0.1; done
+  kill "-$sig" "$probe_pid"
+  wait "$probe_pid"
+  rc=$?
+  want=$((128 + $(kill -l "$sig")))
+  CASES=$((CASES + 1))
+  left="$(alive "$dir")$(ls -A "$dir/tmp")"
+  if [ "$rc" != "$want" ] || [ -n "$left" ]; then
+    FAILURES=$((FAILURES + 1))
+    echo "  FAIL: signal-$sig: exit $rc (want $want); left behind: ${left:-nothing}"
+    sed 's/^/        /' "$dir/out"
+  else
+    printf '  ok   %-28s -> exit %s, nothing left\n' "signal-$sig" "$rc"
+  fi
+done
 
 echo
 if [ "$FAILURES" -gt 0 ]; then
