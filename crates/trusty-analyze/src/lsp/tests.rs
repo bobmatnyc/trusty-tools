@@ -629,3 +629,70 @@ fn workspace_root_prefers_the_index_root_then_the_git_toplevel() {
         Err(LspError::Document { .. })
     ));
 }
+
+// ---- process group ---------------------------------------------------------
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only probes for existence.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// #9078 round 2: the monitor sweeps the group once, at reap time, and no
+/// `killpg` on that pgid runs after the leader is reaped.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_group_is_swept_once_at_reap_and_never_signalled_again() {
+    use super::group::{monitor, ProcessGroup};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("helper.pid");
+    // The leader leaves a helper in its group and exits on its own.
+    let script = format!("sleep 300 & echo $! > '{}'; exit 0", pidfile.display());
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.args(["-c", &script])
+        .stdin(std::process::Stdio::null())
+        .process_group(0);
+    let child = cmd.spawn().unwrap();
+    let pid = child.id().unwrap();
+    let group = Arc::new(ProcessGroup::new(pid));
+    let (exit_tx, mut exit) = tokio::sync::watch::channel(None);
+    let kill = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn(monitor(
+        child,
+        Arc::clone(&group),
+        Arc::clone(&kill),
+        exit_tx,
+    ));
+
+    let status = tokio::time::timeout(Duration::from_secs(5), exit.wait_for(Option::is_some))
+        .await
+        .expect("the monitor observes the exit")
+        .expect("watch")
+        .clone();
+    assert!(
+        status.is_some_and(|s| s.contains('0')),
+        "exit status recorded"
+    );
+    assert!(group.is_gone(), "the reaped group is marked gone");
+    assert_eq!(group.signals_sent(), 1, "exactly one sweep, at reap time");
+
+    // The sweep killed the helper the leader left behind.
+    let helper: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while pid_alive(helper) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!pid_alive(helper), "the reap-time sweep killed the helper");
+
+    // Every later kill request is a no-op on the reaped pgid.
+    group.kill();
+    kill.notify_one();
+    group.kill();
+    assert_eq!(group.signals_sent(), 1, "no killpg after the reap");
+}

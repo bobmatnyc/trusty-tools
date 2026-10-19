@@ -102,16 +102,19 @@ impl LspLease {
     ///
     /// # Errors
     /// As [`LspClient::request`]; once `max_consecutive_timeouts` requests in a
-    /// row have timed out, the server is killed and this returns
+    /// row have timed out, or a timeout left a write unfinished (the server
+    /// stopped reading), the server is killed and this returns
     /// [`LspError::Hung`].
     ///
-    /// Test: `stalled_requests_time_out_then_the_hung_child_is_reaped`.
+    /// Test: `stalled_requests_time_out_then_the_hung_child_is_reaped`,
+    /// `a_server_that_stops_reading_is_killed_as_hung`.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, LspError> {
         let client = self.client();
         let res = client.request(method, params, self.request_timeout).await;
         if matches!(res, Err(LspError::Timeout { .. })) {
             let consecutive = client.consecutive_timeouts();
-            if consecutive >= self.max_timeouts {
+            // #9078: a wedged write closes the client; that server is hung.
+            if consecutive >= self.max_timeouts || client.is_closed() {
                 self.session.child.kill_as_hung(consecutive).await;
                 return Err(LspError::Hung { consecutive });
             }
@@ -293,6 +296,21 @@ async fn sweep(inner: Weak<Inner>) {
         let config = &inner.config;
         let (expired, usable) = {
             let mut slots = inner.slots.lock().await;
+            // #9078: retire dead or hung servers here too, so a slot never
+            // stays Live once its child cannot serve.
+            let mut retired = Vec::new();
+            for slot in slots.map.values_mut() {
+                if let Slot::Live(s) = slot {
+                    if !s.child.is_usable() {
+                        let dead = Arc::clone(s);
+                        *slot = Slot::Failed {
+                            error: dead.child.failure(),
+                            at: Instant::now(),
+                        };
+                        retired.push(dead);
+                    }
+                }
+            }
             let idle: Vec<Key> = slots
                 .map
                 .iter()
@@ -310,13 +328,14 @@ async fn sweep(inner: Weak<Inner>) {
                     _ => None,
                 })
                 .collect();
-            let expired: Vec<Arc<Session>> = idle
+            let mut expired: Vec<Arc<Session>> = idle
                 .iter()
                 .filter_map(|k| match slots.map.remove(k) {
                     Some(Slot::Live(s)) => Some(s),
                     _ => None,
                 })
                 .collect();
+            expired.extend(retired);
             let usable = slots
                 .map
                 .values()
@@ -327,7 +346,10 @@ async fn sweep(inner: Weak<Inner>) {
             (expired, usable)
         };
         for s in &expired {
-            tracing::info!(pid = s.child.pid(), "language server idle; stopping it");
+            tracing::info!(
+                pid = s.child.pid(),
+                "language server idle or dead; stopping it"
+            );
             s.child.shutdown(config.shutdown_grace).await;
         }
         if !usable {

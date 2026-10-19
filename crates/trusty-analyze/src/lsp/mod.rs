@@ -22,6 +22,7 @@ pub mod client;
 pub mod config;
 pub mod documents;
 pub mod framing;
+pub(crate) mod group;
 pub mod manager;
 
 pub use child::LspChild;

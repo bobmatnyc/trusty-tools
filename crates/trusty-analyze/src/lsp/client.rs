@@ -4,16 +4,23 @@
 //! Why: a language server answers out of order, sends its own requests, and
 //! pushes diagnostics whenever it likes. One reader task must route every
 //! inbound message, or a slow answer blocks a fast one.
-//! What: [`LspClient`] owns the write half and a reader task over the read
-//! half. Each request registers a waiter keyed by a fresh integer id; the
-//! reader completes it. A timed-out waiter is removed and the request is
-//! cancelled, so a late answer is dropped by id and cannot reach the next call.
-//! When the stream closes or loses its framing, every waiter and every later
-//! call fails with the same typed reason.
+//! What: [`LspClient`] runs a reader task over the read half and a single
+//! writer task that owns the write half. Every outgoing frame is handed to the
+//! writer whole, so a caller that gives up mid-write can never leave half a
+//! frame on the wire. Each write is bounded: a request's deadline covers its
+//! write and its answer, and the writer abandons any one write after the
+//! client's write timeout. A write that cannot finish closes the client,
+//! because the server has stopped reading (#9078). Each request registers a
+//! waiter keyed by a fresh integer id; the reader completes it. A timed-out
+//! waiter is removed and the request is cancelled, so a late answer is dropped
+//! by id and cannot reach the next call. When the stream closes or loses its
+//! framing, every waiter and every later call fails with the same typed reason.
 //! Test: `client_correlates_responses_that_arrive_out_of_order`,
 //! `late_response_after_timeout_does_not_desync`,
 //! `peer_closing_mid_request_is_an_error_not_a_hang`,
-//! `write_to_a_dead_peer_is_an_error`, `server_initiated_requests_are_answered`.
+//! `write_to_a_dead_peer_is_an_error`, `server_initiated_requests_are_answered`,
+//! `a_peer_that_never_reads_cannot_wedge_a_request`,
+//! `a_cancelled_request_never_leaves_a_partial_frame`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -22,15 +29,32 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use super::documents::DocumentSet;
 use super::framing::{encode, FrameDecoder};
 use super::{lock, LspError};
 
-type Writer = tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>;
 type Waiter = oneshot::Sender<Result<Value, LspError>>;
+type Outbox = mpsc::UnboundedSender<WriteJob>;
+
+/// The bound on one write when [`LspClient::new`] picks it.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One whole frame for the writer task, and who to tell when it is written.
+struct WriteJob {
+    bytes: Vec<u8>,
+    done: Option<oneshot::Sender<Result<(), LspError>>>,
+}
+
+/// Why a send did not complete.
+enum SendFailure {
+    /// The caller's deadline passed with the frame still unwritten.
+    Deadline,
+    Failed(LspError),
+}
 
 /// The latest `textDocument/publishDiagnostics` for one document.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,16 +105,30 @@ impl Shared {
 /// Test: `client_correlates_responses_that_arrive_out_of_order`.
 pub struct LspClient {
     shared: Arc<Shared>,
-    writer: Arc<Writer>,
+    outbox: Outbox,
+    write_timeout: Duration,
     reader: JoinHandle<()>,
+    writer: JoinHandle<()>,
     pub(super) documents: DocumentSet,
 }
 
 impl LspClient {
-    /// Start a client over `reader` (server stdout) and `writer` (server stdin).
+    /// Start a client over `reader` (server stdout) and `writer` (server
+    /// stdin), with [`DEFAULT_WRITE_TIMEOUT`].
     ///
-    /// Must run inside a tokio runtime: it spawns the reader task.
+    /// Must run inside a tokio runtime: it spawns the reader and writer tasks.
     pub fn new<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::with_write_timeout(reader, writer, DEFAULT_WRITE_TIMEOUT)
+    }
+
+    /// [`LspClient::new`], abandoning any single write after `write_timeout`.
+    ///
+    /// Test: `a_peer_that_never_reads_cannot_wedge_a_request`.
+    pub fn with_write_timeout<R, W>(reader: R, writer: W, write_timeout: Duration) -> Self
     where
         R: AsyncRead + Send + Unpin + 'static,
         W: AsyncWrite + Send + Unpin + 'static,
@@ -105,22 +143,76 @@ impl LspClient {
             changes,
             consecutive_timeouts: AtomicU32::new(0),
         });
-        let writer: Arc<Writer> = Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
-        let reader = tokio::spawn(read_loop(reader, Arc::clone(&shared), Arc::clone(&writer)));
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(write_loop(
+            writer,
+            inbox,
+            Arc::clone(&shared),
+            write_timeout,
+        ));
+        let reader = tokio::spawn(read_loop(reader, Arc::clone(&shared), outbox.clone()));
         Self {
             shared,
-            writer,
+            outbox,
+            write_timeout,
             reader,
+            writer,
             documents: DocumentSet::default(),
         }
     }
 
-    /// Send a request and wait at most `timeout` for its answer.
+    /// Hand `msg` to the writer and wait until it is written or `deadline`.
+    async fn send(&self, msg: &Value, deadline: Instant) -> Result<(), SendFailure> {
+        let bytes = encode(msg).map_err(SendFailure::Failed)?;
+        let (done, written) = oneshot::channel();
+        let job = WriteJob {
+            bytes,
+            done: Some(done),
+        };
+        if self.outbox.send(job).is_err() {
+            return Err(SendFailure::Failed(self.stopped("the writer stopped")));
+        }
+        match tokio::time::timeout_at(deadline, written).await {
+            Ok(Ok(res)) => res.map_err(SendFailure::Failed),
+            Ok(Err(_)) => Err(SendFailure::Failed(self.stopped("the writer stopped"))),
+            Err(_) => {
+                // #9078: the server is not reading; the stream is unusable.
+                self.shared.close(LspError::Write(
+                    "a write did not finish in time; the server is not reading its stdin".into(),
+                ));
+                Err(SendFailure::Deadline)
+            }
+        }
+    }
+
+    /// Queue a frame without waiting for it (replies, cancellations).
+    fn post(&self, msg: &Value) {
+        post(&self.outbox, msg);
+    }
+
+    fn stopped(&self, detail: &str) -> LspError {
+        self.closed_reason().unwrap_or(LspError::ServerExited {
+            detail: detail.into(),
+        })
+    }
+
+    fn count_timeout(&self, method: &str, timeout: Duration) -> LspError {
+        self.shared
+            .consecutive_timeouts
+            .fetch_add(1, Ordering::SeqCst);
+        LspError::Timeout {
+            method: method.to_string(),
+            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// Send a request; `timeout` bounds its write and its answer together.
     ///
     /// # Errors
     /// [`LspError::Timeout`] (the request is then cancelled with
-    /// `$/cancelRequest`), [`LspError::ServerError`], [`LspError::Write`], or the
-    /// close reason ([`LspError::ServerExited`] / [`LspError::Protocol`]).
+    /// `$/cancelRequest`; a write still unfinished at the deadline also closes
+    /// the client), [`LspError::ServerError`], [`LspError::Write`], or the close
+    /// reason ([`LspError::ServerExited`] / [`LspError::Protocol`]).
     ///
     /// Test: `late_response_after_timeout_does_not_desync`,
     /// `server_error_response_is_a_typed_error`.
@@ -130,6 +222,7 @@ impl LspClient {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, LspError> {
+        let deadline = Instant::now() + timeout;
         let (tx, rx) = oneshot::channel();
         let id = {
             let mut t = lock(&self.shared.table);
@@ -145,34 +238,31 @@ impl LspClient {
         if !params.is_null() {
             msg["params"] = params;
         }
-        if let Err(e) = write_frame(&self.writer, &msg).await {
+        if let Err(failure) = self.send(&msg, deadline).await {
             lock(&self.shared.table).waiters.remove(&id);
-            return Err(e);
+            return Err(match failure {
+                SendFailure::Deadline => self.count_timeout(method, timeout),
+                SendFailure::Failed(e) => e,
+            });
         }
-        match tokio::time::timeout(timeout, rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(answer)) => answer,
-            Ok(Err(_)) => Err(self.closed_reason().unwrap_or(LspError::ServerExited {
-                detail: "the reader stopped".into(),
-            })),
+            Ok(Err(_)) => Err(self.stopped("the reader stopped")),
             Err(_) => {
                 // #9078: drop the waiter so a late answer is discarded by id.
                 lock(&self.shared.table).waiters.remove(&id);
-                self.shared
-                    .consecutive_timeouts
-                    .fetch_add(1, Ordering::SeqCst);
-                let _ = self.notify("$/cancelRequest", json!({"id": id})).await;
-                Err(LspError::Timeout {
-                    method: method.to_string(),
-                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                })
+                self.post(&json!({"jsonrpc": "2.0", "method": "$/cancelRequest",
+                                  "params": {"id": id}}));
+                Err(self.count_timeout(method, timeout))
             }
         }
     }
 
-    /// Send a notification (no answer expected).
+    /// Send a notification (no answer expected), bounded by the write timeout.
     ///
     /// # Errors
-    /// The close reason, or [`LspError::Write`].
+    /// The close reason, or [`LspError::Write`] (a write that did not finish in
+    /// time also closes the client).
     ///
     /// Test: `write_to_a_dead_peer_is_an_error`.
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), LspError> {
@@ -183,7 +273,11 @@ impl LspClient {
         if !params.is_null() {
             msg["params"] = params;
         }
-        write_frame(&self.writer, &msg).await
+        let deadline = Instant::now() + self.write_timeout;
+        self.send(&msg, deadline).await.map_err(|f| match f {
+            SendFailure::Deadline => self.stopped("a write did not finish in time"),
+            SendFailure::Failed(e) => e,
+        })
     }
 
     /// Why the stream closed, if it has.
@@ -249,19 +343,54 @@ impl LspClient {
 impl Drop for LspClient {
     fn drop(&mut self) {
         self.reader.abort();
+        self.writer.abort();
     }
 }
 
-async fn write_frame(writer: &Writer, msg: &Value) -> Result<(), LspError> {
-    let bytes = encode(msg)?;
-    let mut w = writer.lock().await;
-    w.write_all(&bytes)
-        .await
-        .map_err(|e| LspError::Write(e.to_string()))?;
-    w.flush().await.map_err(|e| LspError::Write(e.to_string()))
+fn post(outbox: &Outbox, msg: &Value) {
+    if let Ok(bytes) = encode(msg) {
+        let _ = outbox.send(WriteJob { bytes, done: None });
+    }
 }
 
-async fn read_loop<R: AsyncRead + Unpin>(mut reader: R, shared: Arc<Shared>, writer: Arc<Writer>) {
+/// The only owner of the server's stdin. Each frame is written whole or the
+/// client is closed: an I/O error or a write past `limit` leaves the stream
+/// unusable, so every queued and later frame fails with that reason.
+async fn write_loop<W: AsyncWrite + Unpin>(
+    mut writer: W,
+    mut inbox: mpsc::UnboundedReceiver<WriteJob>,
+    shared: Arc<Shared>,
+    limit: Duration,
+) {
+    while let Some(job) = inbox.recv().await {
+        let res = match shared.closed_reason() {
+            Some(reason) => Err(reason),
+            None => {
+                let write = async {
+                    writer.write_all(&job.bytes).await?;
+                    writer.flush().await
+                };
+                let res = match tokio::time::timeout(limit, write).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(LspError::Write(e.to_string())),
+                    Err(_) => Err(LspError::Write(format!(
+                        "a write did not finish within {} ms; the server is not reading its stdin",
+                        limit.as_millis()
+                    ))),
+                };
+                if let Err(e) = &res {
+                    shared.close(e.clone());
+                }
+                res
+            }
+        };
+        if let Some(done) = job.done {
+            let _ = done.send(res);
+        }
+    }
+}
+
+async fn read_loop<R: AsyncRead + Unpin>(mut reader: R, shared: Arc<Shared>, outbox: Outbox) {
     let mut decoder = FrameDecoder::default();
     let mut chunk = vec![0u8; 16 * 1024];
     let reason = loop {
@@ -281,7 +410,7 @@ async fn read_loop<R: AsyncRead + Unpin>(mut reader: R, shared: Arc<Shared>, wri
         decoder.extend(&chunk[..n]);
         let failed = loop {
             match decoder.next_message() {
-                Ok(Some(msg)) => route(msg, &shared, &writer),
+                Ok(Some(msg)) => route(msg, &shared, &outbox),
                 Ok(None) => break None,
                 Err(e) => break Some(e),
             }
@@ -298,7 +427,7 @@ fn exited(detail: String) -> LspError {
     LspError::ServerExited { detail }
 }
 
-fn route(msg: Value, shared: &Shared, writer: &Arc<Writer>) {
+fn route(msg: Value, shared: &Shared, outbox: &Outbox) {
     let method = msg.get("method").and_then(Value::as_str);
     match (method, msg.get("id")) {
         (None, Some(id)) => {
@@ -308,8 +437,8 @@ fn route(msg: Value, shared: &Shared, writer: &Arc<Writer>) {
             };
             shared.consecutive_timeouts.store(0, Ordering::SeqCst);
             let waiter = lock(&shared.table).waiters.remove(&id);
-            let answer = match msg.get("error") {
-                Some(err) => Err(LspError::ServerError {
+            let answer = match (msg.get("result"), msg.get("error")) {
+                (_, Some(err)) => Err(LspError::ServerError {
                     code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
                     message: err
                         .get("message")
@@ -317,7 +446,11 @@ fn route(msg: Value, shared: &Shared, writer: &Arc<Writer>) {
                         .unwrap_or_default()
                         .to_string(),
                 }),
-                None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                (Some(result), None) => Ok(result.clone()),
+                // #9078 Fail-Open Check: never a null success.
+                (None, None) => Err(LspError::Protocol(format!(
+                    "response {id} carries neither result nor error"
+                ))),
             };
             match waiter {
                 Some(w) => {
@@ -326,7 +459,7 @@ fn route(msg: Value, shared: &Shared, writer: &Arc<Writer>) {
                 None => tracing::debug!(id, "late lsp response after timeout; dropped"),
             }
         }
-        (Some(method), Some(id)) => answer_server_request(method, id.clone(), &msg, writer),
+        (Some(method), Some(id)) => answer_server_request(method, id.clone(), &msg, outbox),
         (Some("textDocument/publishDiagnostics"), None) => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let Some(uri) = params.get("uri").and_then(Value::as_str) else {
@@ -351,8 +484,8 @@ fn route(msg: Value, shared: &Shared, writer: &Arc<Writer>) {
 
 /// Answer a request the server sent us. The three a server sends during normal
 /// work get a neutral success; anything else gets `MethodNotFound`. The reply is
-/// written from its own task so a full stdin pipe never stalls the reader.
-fn answer_server_request(method: &str, id: Value, msg: &Value, writer: &Arc<Writer>) {
+/// queued for the writer task, so a full stdin pipe never stalls the reader.
+fn answer_server_request(method: &str, id: Value, msg: &Value, outbox: &Outbox) {
     let reply = match method {
         "workspace/configuration" => {
             let n = msg["params"]["items"].as_array().map_or(0, Vec::len);
@@ -364,10 +497,5 @@ fn answer_server_request(method: &str, id: Value, msg: &Value, writer: &Arc<Writ
         _ => json!({"jsonrpc": "2.0", "id": id,
             "error": {"code": -32601, "message": format!("unsupported: {method}")}}),
     };
-    let writer = Arc::clone(writer);
-    tokio::spawn(async move {
-        if let Err(e) = write_frame(&writer, &reply).await {
-            tracing::debug!(error = %e, "could not answer a server request");
-        }
-    });
+    post(outbox, &reply);
 }

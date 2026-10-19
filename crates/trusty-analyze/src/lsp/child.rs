@@ -7,8 +7,9 @@
 //! stdin/stdout piped to an [`LspClient`] and stderr drained into a bounded
 //! tail, then runs `initialize`/`initialized`. A monitor task owns the process
 //! and reaps it the moment it exits, so a crash leaves no zombie and its exit
-//! status is known. Every kill is a `killpg(SIGKILL)` on the group;
-//! [`LspChild::shutdown`] tries `shutdown`/`exit` first, and `Drop` kills.
+//! status is known. Every kill is a `killpg(SIGKILL)` through the group gate in
+//! `group.rs`, which never signals a reaped pgid. [`LspChild::shutdown`] tries
+//! `shutdown`/`exit` within its grace, then kills; `Drop` kills.
 //! Test: `spawned_server_initializes_and_answers`,
 //! `failed_initialize_carries_the_stderr_tail`,
 //! `dropping_the_manager_kills_the_child_and_its_descendants`,
@@ -18,19 +19,20 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr};
+use tokio::process::ChildStderr;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use super::client::LspClient;
 use super::config::{LspCommand, LspConfig};
 use super::documents::file_uri;
+use super::group::{monitor, ProcessGroup};
 use super::{lock, LspError};
 
 const STDERR_TAIL_LINES: usize = 40;
@@ -48,13 +50,12 @@ pub struct LspChild {
     program: String,
     /// `Some(exit status)` once the monitor has reaped the process.
     exit: watch::Receiver<Option<String>>,
+    group: Arc<ProcessGroup>,
     kill: Arc<Notify>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
     /// Non-zero once killed as hung: the timeout count that condemned it.
     hung: AtomicU32,
-    /// Set once `shutdown` has swept the group; `Drop` then has nothing to do.
-    finished: AtomicBool,
 }
 
 impl LspChild {
@@ -122,17 +123,24 @@ impl LspChild {
         let stderr_task = tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail), pid));
         let (exit_tx, exit) = watch::channel(None);
         let kill = Arc::new(Notify::new());
-        tokio::spawn(monitor(child, Arc::clone(&kill), exit_tx));
+        let group = Arc::new(ProcessGroup::new(pid));
+        tokio::spawn(monitor(
+            child,
+            Arc::clone(&group),
+            Arc::clone(&kill),
+            exit_tx,
+        ));
         let me = Self {
-            client: LspClient::new(stdout, stdin),
+            // #9078: writes are bounded by the request timeout.
+            client: LspClient::with_write_timeout(stdout, stdin, config.request_timeout),
             pid,
             program,
             exit,
+            group,
             kill,
             stderr_tail,
             stderr_task: Mutex::new(Some(stderr_task)),
             hung: AtomicU32::new(0),
-            finished: AtomicBool::new(false),
         };
         tracing::info!(pid, program = %me.program, root = %root.display(), "language server spawned");
         if let Err(e) = me.initialize(root, config.initialize_timeout).await {
@@ -229,28 +237,35 @@ impl LspChild {
         self.wait_exit(REAP_BUDGET).await;
     }
 
-    /// SIGKILL the whole process group now. Never blocks.
+    /// SIGKILL the whole process group now, unless it is already reaped.
+    /// Never blocks.
     pub fn kill_now(&self) {
-        kill_group(self.pid);
+        self.group.kill();
         self.kill.notify_one();
     }
 
-    /// Stop the server: `shutdown` then `exit` within `grace`, then kill the
-    /// group regardless (descendants, or a server that ignored `exit`), and
-    /// wait for the reap.
+    /// Stop the server: `shutdown` then `exit`, the whole exchange bounded by
+    /// `grace`; then kill the group regardless (descendants, a server that
+    /// ignored `exit`, or one that stopped reading), and wait for the reap.
     ///
-    /// Test: `shutdown_all_kills_a_child_that_ignores_exit`.
+    /// Test: `shutdown_all_kills_a_child_that_ignores_exit`,
+    /// `shutdown_all_returns_while_a_write_is_wedged`.
     pub async fn shutdown(&self, grace: Duration) {
         if !self.client.is_closed() && !self.exited() {
-            let _ = self.client.request("shutdown", Value::Null, grace).await;
-            let _ = self.client.notify("exit", Value::Null).await;
-            self.wait_exit(grace).await;
+            // #9078: one deadline over request, notify and wait, so a server
+            // that stopped reading cannot hold `kill_now` back.
+            let _ = tokio::time::timeout(grace, async {
+                let _ = self.client.request("shutdown", Value::Null, grace).await;
+                let _ = self.client.notify("exit", Value::Null).await;
+                let mut exit = self.exit.clone();
+                let _ = exit.wait_for(Option::is_some).await;
+            })
+            .await;
         }
         self.kill_now();
         if self.wait_exit(REAP_BUDGET).await.is_none() {
             tracing::error!(pid = self.pid, "language server not reaped after SIGKILL");
         }
-        self.finished.store(true, Ordering::SeqCst);
     }
 
     /// Wait up to `budget` for the reap; the exit status, if it came.
@@ -279,28 +294,10 @@ impl LspChild {
 
 impl Drop for LspChild {
     fn drop(&mut self) {
-        // #9078: the panic and plain-drop paths. The monitor task reaps.
-        if !self.finished.load(Ordering::SeqCst) {
-            self.kill_now();
-        }
+        // #9078: the panic and plain-drop paths. The gate makes this a no-op
+        // once the monitor has reaped the leader.
+        self.kill_now();
     }
-}
-
-/// Own the process until it exits; a kill request SIGKILLs the leader too, for
-/// platforms without process groups.
-async fn monitor(mut child: Child, kill: Arc<Notify>, exit: watch::Sender<Option<String>>) {
-    let status = tokio::select! {
-        status = child.wait() => status,
-        () = kill.notified() => {
-            let _ = child.start_kill();
-            child.wait().await
-        }
-    };
-    let status = match status {
-        Ok(s) => s.to_string(),
-        Err(e) => format!("wait failed: {e}"),
-    };
-    let _ = exit.send(Some(status));
 }
 
 async fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>, pid: u32) {
@@ -325,22 +322,3 @@ async fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>, p
         tail.push_back(text);
     }
 }
-
-#[cfg(unix)]
-fn kill_group(pid: u32) {
-    let Ok(pgid) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-    // Never signal init or our own group: pgid is a child we spawned with
-    // `process_group(0)`, so it is a group of its own.
-    if pgid > 1 {
-        // SAFETY: killpg only sends a signal; ESRCH (group already gone) is
-        // the expected outcome after a clean exit and is ignored.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_pid: u32) {}
