@@ -10,12 +10,13 @@
 //! ([`SnapshotBudget`]); past any bound it fails closed, never reading an
 //! unbounded tree on every call.
 //!
-//! Untracked files follow the repository's own `status.showUntrackedFiles`
-//! (no `--untracked-files` flag is passed): `no` leaves them out, and the
-//! default `normal` lists an untracked directory as one `dir/` entry whose
-//! name, not contents, is hashed. That is the set the user has told git
-//! matters, and it keeps a large untracked tree from being read per call.
+//! Untracked files are listed one by one (`--untracked-files=all`, which
+//! overrides `status.showUntrackedFiles`): git's `normal` mode collapses a new
+//! directory to one `dir/` entry, so an edit inside it would not move the
+//! stamp, and a new module is exactly what a language server analyses (#9078).
+//! The budget above bounds what that costs and fails closed past it.
 //! Test: `snapshot_moves_with_the_dirty_bytes_and_only_with_them`,
+//! `snapshot_sees_an_edit_inside_a_new_untracked_directory`,
 //! `snapshot_over_its_byte_budget_fails_closed`,
 //! `snapshot_budget_bounds_files_bytes_and_time`.
 //!
@@ -86,7 +87,11 @@ async fn compute(root: &Path, budget: SnapshotBudget) -> Result<String, LspError
     };
     let head = git(root, &["rev-parse", "--verify", "HEAD"]).await?;
     let head = String::from_utf8_lossy(&head).trim().to_string();
-    let status = git(root, &["status", "--porcelain=v1", "-z"]).await?;
+    let status = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .await?;
     let paths = dirty_paths(&status);
     if paths.len() > budget.max_files {
         return Err(fail(format!(

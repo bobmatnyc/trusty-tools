@@ -276,6 +276,33 @@ pub fn file_diagnostics(uri: &str, p: &PublishedDiagnostics) -> Result<FileDiagn
     })
 }
 
+/// Convert a `textDocument/diagnostic` (pull) answer for `uri`, computed after
+/// the server received `version`, into the file's entry (#9078).
+///
+/// The pull is ordered after the sync on the server's input, so its items
+/// describe `version`; the entry is stamped with it.
+///
+/// # Errors
+/// [`LspError::Protocol`] for anything but a `full` report with `items`.
+///
+/// Test: `a_clean_file_opened_during_loading_is_answered_after_quiescence`,
+/// `file_diagnostics_are_pulled_even_when_pushes_are_unversioned`.
+pub fn pulled(uri: &str, version: i64, result: &Value) -> Result<FileDiagnostics, LspError> {
+    let items = match (
+        result.get("kind").and_then(Value::as_str),
+        result.get("items"),
+    ) {
+        (Some("full"), Some(Value::Array(items))) => items.clone(),
+        _ => return Err(protocol("diagnostic report", "{kind: full, items}")),
+    };
+    let report = PublishedDiagnostics {
+        version: Some(version),
+        diagnostics: items,
+        seq: 0,
+    };
+    file_diagnostics(uri, &report)
+}
+
 /// Put an [`LspError`] on the wire: [`CODE_LSP_ERROR`], the error's text, and
 /// `data = {kind, ...}` with the fields a caller branches on.
 ///

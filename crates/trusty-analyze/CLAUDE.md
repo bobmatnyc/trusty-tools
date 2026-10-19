@@ -418,7 +418,9 @@ The three `analyze.lsp_*` answers carry `document_version` and `snapshot`
 (`<git head>+<dirty hash>`), per DOC-72 §3 and §5. Every read waits for the
 server's `experimental/serverStatus` to report `quiescent` (a loading
 rust-analyzer answers `[]`); past the request timeout it refuses with
-`lsp_not_ready`. `scope: workspace` takes a file `path` and answers
+`lsp_not_ready`, and `health: "error"` (the workspace failed to load) is
+refused as `lsp_workspace_failed`. A file's diagnostics and the barrier come
+from a pull (`textDocument/diagnostic`), never from waiting on a push. `scope: workspace` takes a file `path` and answers
 `complete: false`; a directory is refused. The barrier's `timeout_ms` is capped
 at the MCP client timeout minus 30 s.
 
@@ -429,7 +431,7 @@ implementation-defined `-32000..=-32099` band:
 |---|---|---|
 | `-32004` | `service::events::CODE_NOT_FOUND` | The request is well formed and names something absent — `analyze.scip_status` for an index nobody ingested (#5049). |
 | `-32005` | `service::events::CODE_DEADLINE_EXCEEDED` | The handler exhausted its own deadline. `trusty-review` reads this to print "ran out of time" rather than "could not be reached". |
-| `-32006` | `service::events::CODE_LSP_ERROR` | An `analyze.lsp_*` refusal; `data.kind` names it (`lsp_disabled`, `lsp_not_ready`, `lsp_stale`, `lsp_timeout`, `lsp_hung`, `lsp_file_not_found`, `lsp_outside_workspace`, …) (#9078). |
+| `-32006` | `service::events::CODE_LSP_ERROR` | An `analyze.lsp_*` refusal; `data.kind` names it (`lsp_disabled`, `lsp_not_ready`, `lsp_workspace_failed`, `lsp_stale`, `lsp_timeout`, `lsp_hung`, `lsp_file_not_found`, `lsp_outside_workspace`, …) (#9078). |
 
 ---
 

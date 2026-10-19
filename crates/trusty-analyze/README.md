@@ -314,7 +314,7 @@ analyze.lsp_analysed_at
 
 The `analyze.lsp_*` methods (DOC-72 §5, #9078) are off unless the daemon runs
 with `ANALYZE_LSP=1`; a refusal is error code `-32006` with `data.kind` naming
-it (`lsp_disabled`, `lsp_not_ready`, `lsp_stale`, `lsp_timeout`, …). Reads wait
+it (`lsp_disabled`, `lsp_not_ready`, `lsp_workspace_failed`, `lsp_stale`, `lsp_timeout`, …). Reads wait
 for the language server to finish loading; `scope: workspace` diagnostics are
 marked `complete: false`.
 

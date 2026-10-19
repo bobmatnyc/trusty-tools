@@ -27,9 +27,9 @@ use trusty_common::control_bus::EventId;
 use trusty_common::uds::server::RpcError;
 
 use super::lsp_wire::{
-    file_diagnostics, locations, lsp_rpc_error, max_barrier_ms, BarrierState, DiagnosticsScope,
-    FileDiagnostics, LspAnalysedAtRequest, LspAnalysedAtResponse, LspDiagnosticsRequest,
-    LspDiagnosticsResponse, LspReferencesRequest, LspReferencesResponse,
+    file_diagnostics, locations, lsp_rpc_error, max_barrier_ms, pulled, BarrierState,
+    DiagnosticsScope, FileDiagnostics, LspAnalysedAtRequest, LspAnalysedAtResponse,
+    LspDiagnosticsRequest, LspDiagnosticsResponse, LspReferencesRequest, LspReferencesResponse,
 };
 use crate::lsp::documents::check_version;
 use crate::lsp::manager::resolve_workspace_root;
@@ -104,6 +104,19 @@ impl Opened {
             .wait_until_quiescent(self.lease.request_timeout())
             .await
     }
+
+    /// Pull this file's diagnostics, bounded by `timeout` (#9078).
+    async fn pull(&self, timeout: Duration) -> Result<FileDiagnostics, LspError> {
+        let result = self
+            .lease
+            .request_within(
+                "textDocument/diagnostic",
+                json!({"textDocument": {"uri": self.doc.uri}}),
+                timeout,
+            )
+            .await?;
+        pulled(&self.doc.uri, self.doc.version, &result)
+    }
 }
 
 /// `analyze.lsp_references`: resolved reference sites at a position.
@@ -148,19 +161,23 @@ pub async fn lsp_references(
 
 /// `analyze.lsp_diagnostics`: the server's type-checked diagnostics.
 ///
-/// `scope: file` waits for diagnostics describing the synced text of `path`
-/// and answers `complete: true`. `scope: workspace` does the same, then lists
-/// every file the server has published for under the root, answering
+/// `scope: file` pulls (`textDocument/diagnostic`) the synced text of `path`
+/// once the server is loaded, and answers `complete: true`. rust-analyzer
+/// pushes a set only when it changes, so a push can never decide the answer
+/// (#9078). `scope: workspace` pulls the same file, then lists every other
+/// file the server has pushed for under the root, answering
 /// `complete: false`: 1.9.0 runs no full workspace pass, so a directory `path`
 /// is refused.
 ///
 /// # Errors
 /// `invalid_params` for a missing or relative `path`, or a directory with
 /// `scope: workspace`; otherwise a typed LSP refusal (`lsp_not_ready` while the
-/// server loads, `lsp_timeout` when it publishes nothing fresh in time).
+/// server loads, `lsp_workspace_failed` when it could not load the workspace,
+/// `lsp_timeout` when the pull outlives the request timeout).
 ///
 /// Test: `lsp_diagnostics_for_a_file_are_versioned_and_stamped`,
 /// `diagnostics_wait_for_the_server_to_finish_loading`,
+/// `a_clean_file_opened_during_loading_is_answered_after_quiescence`,
 /// `workspace_scope_returns_published_files_marked_incomplete`,
 /// `a_directory_workspace_scope_is_refused`.
 pub async fn lsp_diagnostics(
@@ -186,18 +203,18 @@ pub async fn lsp_diagnostics(
     let run = async {
         let o = open(state, &path, req.version).await?;
         o.ready().await?;
-        let client = o.lease.client();
-        let fresh = client
-            .wait_for_fresh_diagnostics(
-                &o.doc.uri,
-                o.doc.version,
-                o.doc.synced_at,
-                o.lease.request_timeout(),
-            )
-            .await?;
+        let own = o.pull(o.lease.request_timeout()).await?;
         let files = match req.scope {
-            DiagnosticsScope::File => vec![file_diagnostics(&o.doc.uri, &fresh)?],
-            DiagnosticsScope::Workspace => published_under(&o.lease, &o.root)?,
+            DiagnosticsScope::File => vec![own],
+            DiagnosticsScope::Workspace => {
+                let mut files: Vec<FileDiagnostics> = published_under(&o.lease, &o.root)?
+                    .into_iter()
+                    .filter(|f| f.uri != own.uri)
+                    .collect();
+                files.push(own);
+                files.sort_by(|a, b| a.uri.cmp(&b.uri));
+                files
+            }
         };
         Ok(LspDiagnosticsResponse {
             scope: req.scope,
@@ -226,13 +243,14 @@ fn published_under(lease: &LspLease, root: &Path) -> Result<Vec<FileDiagnostics>
         .collect()
 }
 
-/// `analyze.lsp_analysed_at`: block until the loaded server has published
-/// diagnostics describing `version` (the diagnostics rule: stamped `version`,
-/// or unversioned after the sync), or the deadline passes (DOC-72 §3).
+/// `analyze.lsp_analysed_at`: block until the loaded server has analysed
+/// `version`, proven by a pull (`textDocument/diagnostic`) answered after the
+/// sync, as `lsp_diagnostics` does; or until the deadline passes (DOC-72 §3).
 ///
 /// A server still loading at the deadline is `timed_out`: §3 makes the
 /// deadline an answer, never an error, and `version_seen` then counts only
-/// publications made after the server became quiescent.
+/// publications made after the server became quiescent. A server that failed
+/// to load the workspace is refused (`lsp_workspace_failed`).
 ///
 /// # Errors
 /// `invalid_params` for a relative path or a `timeout_ms` over
@@ -241,7 +259,8 @@ fn published_under(lease: &LspLease, root: &Path) -> Result<Vec<FileDiagnostics>
 ///
 /// Test: `analysed_at_is_ready_once_the_version_is_published`,
 /// `analysed_at_times_out_with_the_version_seen`,
-/// `analysed_at_accepts_an_unversioned_publication_after_the_sync`.
+/// `analysed_at_accepts_an_unversioned_publication_after_the_sync`,
+/// `a_workspace_that_failed_to_load_is_refused`.
 pub async fn lsp_analysed_at(
     state: &AnalyzerAppState,
     req: LspAnalysedAtRequest,
@@ -262,9 +281,7 @@ pub async fn lsp_analysed_at(
             let left = deadline.saturating_duration_since(Instant::now());
             client.wait_until_quiescent(left).await?;
             let left = deadline.saturating_duration_since(Instant::now());
-            client
-                .wait_for_fresh_diagnostics(&o.doc.uri, req.version, o.doc.synced_at, left)
-                .await
+            o.pull(left).await
         };
         let state = match waited.await {
             Ok(_) => BarrierState::Ready,

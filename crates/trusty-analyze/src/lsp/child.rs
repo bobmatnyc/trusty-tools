@@ -173,7 +173,10 @@ impl LspChild {
                 "textDocument": {
                     "synchronization": {"dynamicRegistration": false, "didSave": false},
                     "publishDiagnostics": {"versionSupport": true},
-                    "references": {"dynamicRegistration": false}
+                    "references": {"dynamicRegistration": false},
+                    // #9078: answers come from pull; rust-analyzer pushes a set
+                    // only when it changes, so a push may never arrive.
+                    "diagnostic": {"dynamicRegistration": false}
                 },
                 "workspace": {"workspaceFolders": true, "configuration": false},
                 "window": {"workDoneProgress": false},

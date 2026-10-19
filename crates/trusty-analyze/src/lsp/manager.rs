@@ -129,7 +129,25 @@ impl LspLease {
     /// `content_modified_is_retried_then_answers`,
     /// `content_modified_that_never_clears_is_a_timeout`.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, LspError> {
-        let deadline = Instant::now() + self.request_timeout;
+        self.request_within(method, params, self.request_timeout)
+            .await
+    }
+
+    /// [`LspLease::request`] bounded by `timeout` instead of the configured
+    /// request timeout; the barrier's pull runs inside the caller's deadline
+    /// (#9078).
+    ///
+    /// # Errors
+    /// As [`LspLease::request`].
+    ///
+    /// Test: `a_clean_file_opened_during_loading_is_answered_after_quiescence`.
+    pub async fn request_within(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, LspError> {
+        let deadline = Instant::now() + timeout;
         let mut backoff = RETRY_FIRST_BACKOFF;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -139,8 +157,7 @@ impl LspLease {
                     if left <= backoff {
                         return Err(LspError::Timeout {
                             method: method.to_string(),
-                            timeout_ms: u64::try_from(self.request_timeout.as_millis())
-                                .unwrap_or(u64::MAX),
+                            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                         });
                     }
                     tokio::time::sleep(backoff).await;

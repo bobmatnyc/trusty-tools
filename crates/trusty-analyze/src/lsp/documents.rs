@@ -26,7 +26,6 @@ use super::LspError;
 struct DocState {
     version: i64,
     hash: u64,
-    synced_at: u64,
 }
 
 /// Per-client table of open documents, keyed by canonical path.
@@ -44,9 +43,6 @@ pub struct SyncedDocument {
     pub version: i64,
     /// Whether this call sent `didOpen` or `didChange`.
     pub changed: bool,
-    /// [`LspClient::publication_seq`] just before this version's text was
-    /// sent; an unversioned publication after it describes this text (#9078).
-    pub synced_at: u64,
 }
 
 impl LspClient {
@@ -82,7 +78,6 @@ impl LspClient {
                     uri,
                     version: s.version,
                     changed: false,
-                    synced_at: s.synced_at,
                 })
             }
             Some(s) => {
@@ -97,21 +92,12 @@ impl LspClient {
                 (1, "textDocument/didOpen", params)
             }
         };
-        let synced_at = self.publication_seq();
         self.notify(method, params).await?;
-        docs.insert(
-            path,
-            DocState {
-                version,
-                hash,
-                synced_at,
-            },
-        );
+        docs.insert(path, DocState { version, hash });
         Ok(SyncedDocument {
             uri,
             version,
             changed: true,
-            synced_at,
         })
     }
 

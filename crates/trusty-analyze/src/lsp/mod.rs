@@ -93,6 +93,14 @@ pub enum LspError {
     /// loading, and its answers would be empty rather than true (#9078).
     #[error("language server still loading after {waited_ms} ms; ask again later")]
     NotReady { waited_ms: u64 },
+    /// The server finished loading with `health: "error"`: it could not load
+    /// the workspace (a broken `Cargo.toml`) and answers `[]` to everything.
+    /// Retrying does not help until the project is fixed, so this is not
+    /// [`LspError::NotReady`]. The server's own message is never echoed (#9078).
+    #[error(
+        "the language server could not load this workspace; fix the project manifest and retry"
+    )]
+    WorkspaceFailed,
     /// The `<git head>+<dirty hash>` stamp could not be computed (DOC-72 §3).
     #[error("workspace snapshot of {root}: {reason}")]
     Snapshot { root: String, reason: String },
@@ -120,6 +128,7 @@ impl LspError {
             Self::OutsideWorkspace { .. } => "lsp_outside_workspace",
             Self::UnsupportedLanguage { .. } => "lsp_unsupported_language",
             Self::NotReady { .. } => "lsp_not_ready",
+            Self::WorkspaceFailed => "lsp_workspace_failed",
             Self::Snapshot { .. } => "lsp_snapshot_failed",
         }
     }
