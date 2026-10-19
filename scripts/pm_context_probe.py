@@ -33,7 +33,7 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
   tm-composed prompt for it are loaded. It must be a CLEAN git checkout the
   caller can discard (never a live PM's directory): the probe refuses a dirty
   tree, never initialises, edits or removes it, and re-checks it is still clean
-  afterwards. The catchup lever then defaults to DIR itself.
+  afterwards. Both checks ignore gitignored paths (`.trusty-mpm/` is ignored). The catchup lever then defaults to DIR itself.
   The --settings levers use the same subtractive keys the #8988/#8992 owner
   policy writes (crates/trusty-mpm/src/core/launch_policy/carrier.rs).
   `parse` reads one saved stream-json file; `report` renders a results JSON as
@@ -230,6 +230,25 @@ def project_tier(project: Path) -> dict:
             "agents": agents, "mcp_servers": servers}
 
 
+def not_applicable(lever: str, project: dict | None) -> str | None:
+    """Why a project lever has nothing to switch off, or None when it has a target.
+
+    What: claude-md-off needs a CLAUDE.md, project-skills-off a project skill,
+    project-files-off either. Without a target the run would equal the baseline
+    and read as a measured delta of 0, so the caller records a failed row.
+    """
+    if lever not in PROJECT_LEVERS or project is None:
+        return None
+    md, sk = bool(project["claude_md"]), bool(project["skills"])
+    missing = {"claude-md-off": not md, "project-skills-off": not sk,
+               "project-files-off": not (md or sk)}[lever]
+    if not missing:
+        return None
+    what = {"claude-md-off": "CLAUDE.md", "project-skills-off": "skills",
+            "project-files-off": "CLAUDE.md or skills"}[lever]
+    return f"not applicable (project has no {what})"
+
+
 def settings_body(parts: tuple[str, ...], skills: list[str], agents: list[str],
                   project: dict | None = None) -> dict:
     """The --settings JSON for a lever's parts (subtractive keys only)."""
@@ -394,6 +413,9 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
             names: tuple[list[str], list[str]], index: int) -> dict:
     """Launch one throwaway PM for `lever` in `root/project`; return its numbers or the error."""
     parts = LEVERS[lever][2]
+    skip = not_applicable(lever, args.project_info)
+    if skip:  # #8998 review: a lever with no target is never a measured 0.
+        return {"lever": lever, "run": index, "error": skip, "leaked_pids": []}
     settings_file = None
     if parts:
         settings_file = root / f"settings-{lever}.json"
@@ -472,6 +494,7 @@ def cmd_run(args) -> int:
         print(f"pm_context_probe: unknown lever(s) {unknown} (known: {list(LEVERS)}) "
               f"or no CLAUDE_CONFIG_DIR at {config_dir}", file=sys.stderr)
         return 2
+    root = None
     try:
         env = child_env(dict(os.environ), config_dir)
         root = Path(tempfile.mkdtemp(prefix="pm-context-probe-"))
@@ -484,7 +507,8 @@ def cmd_run(args) -> int:
                 raise ProbeError(f"--project-dir {args.project} is not clean; the probe needs a "
                                  f"disposable checkout:\n{dirty[:400]}")
     except ProbeError as exc:
-        shutil.rmtree(root, ignore_errors=True)
+        if root:
+            shutil.rmtree(root, ignore_errors=True)
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 2
     records, failed = [], False

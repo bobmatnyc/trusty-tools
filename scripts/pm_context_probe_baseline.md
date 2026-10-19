@@ -148,7 +148,7 @@ git worktree add --detach <scratch>/real-checkout origin/main   # 6e5b9cb02e, cl
 
 - The project was a scratch worktree at `origin/main` (`6e5b9cb02e`), never the
   main checkout and never a live PM's directory. The probe refuses a dirty tree
-  and re-checked it clean afterwards (`meta.project_clean_after: true`). A
+  and re-checked it clean afterwards (`meta.project_clean_after: true`; the check ignores gitignored paths such as `.trusty-mpm/`). A
   scratch path has no ancestor `CLAUDE.md`, as with the main checkout.
 - tm 1.9.0 debug build, Claude Code 2.1.303, model `claude-opus-5-5`, the same
   `CLAUDE_CONFIG_DIR` as the empty-project baseline. No stray processes remained.

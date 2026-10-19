@@ -349,6 +349,13 @@ rm -f "$PROJ/untracked.txt"
 check project-lever-needs-dir 2 'needs --project-dir' \
   env PATH="$WORK/stub-proj/bin:$PATH" TMPDIR="$WORK/stub-proj/tmp" python3 "$PROBE" run --runs 1 \
   --levers claude-md-off --tm "$WORK/stub-proj/bin/tm" --config-dir "$WORK/cfg"
+# project-lever-not-applicable: a project lever with no target (no CLAUDE.md,
+# no skills) is a failed row, never a measured delta of 0 (#8998 review).
+PROJ2="$WORK/bare-proj"
+mkdir -p "$PROJ2" && git init -q "$PROJ2"
+check project-lever-not-applicable 1 'failed: not applicable (project has no CLAUDE.md)' \
+  env PATH="$WORK/stub-proj/bin:$PATH" TMPDIR="$WORK/stub-proj/tmp" python3 "$PROBE" run --runs 1 \
+  --levers claude-md-off --project-dir "$PROJ2" --tm "$WORK/stub-proj/bin/tm" --config-dir "$WORK/cfg" --timeout 2
 
 # signal-<SIG>: the probe killed mid-run reaps the group, removes its temp
 # tree and exits 128+signal.
