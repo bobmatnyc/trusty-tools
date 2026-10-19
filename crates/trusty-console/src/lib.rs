@@ -51,7 +51,8 @@ pub mod connector;
 pub mod console_ui;
 pub mod detect;
 // #9075: the event-bus core that lived here (#6848) moved to the
-// `trusty-events` daemon (ADR-0065); console reads it over UDS from #9076.
+// `trusty-events` daemon (ADR-0065). #9076: console reads it as a UDS client.
+pub mod events_uds;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
@@ -529,7 +530,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
 
     // #9075: console no longer binds an event-bus ingest socket; producers
-    // push to the trusty-events daemon (ADR-0065).
+    // push to the trusty-events daemon (ADR-0065). #9076: console subscribes
+    // to it as a client, best-effort; its state is on /api/console/events/status.
+    let _events = events_uds::start(state.events());
 
     // ── bind and serve every listener ───────────────────────────────────────
     // #7524: the gate is chosen per listener by IP, so an Explicit non-loopback

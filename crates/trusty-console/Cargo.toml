@@ -119,6 +119,9 @@ libc               = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
+# #9076: tests build `HarnessEvent`s, whose `at` is a chrono timestamp.
+# Already in the graph through trusty-common, so this compiles nothing new.
+chrono         = { workspace = true }
 # #8271: `test-util` gives the socket-budget tests a paused clock; it must
 # never reach the production build, so it lives here only.
 tokio          = { workspace = true, features = ["test-util"] }
