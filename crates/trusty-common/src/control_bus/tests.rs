@@ -41,12 +41,40 @@ fn harness_source_round_trips() {
         (HarnessSource::Agents, "\"agents\""),
         (HarnessSource::Mpm, "\"mpm\""),
         (HarnessSource::Code, "\"code\""),
+        // #9078: trusty-analyze is the fourth producer (DOC-73 §4.4).
+        (HarnessSource::Analyze, "\"analyze\""),
     ] {
         let s = serde_json::to_string(&src).expect("serialize source");
         assert_eq!(s, tag);
         let back: HarnessSource = serde_json::from_str(&s).expect("deserialize source");
         assert_eq!(back, src);
     }
+}
+
+/// #9078: the version-skew case. A reader built before `Analyze` existed has
+/// the three-variant table below; it rejects `"analyze"` with a decode error
+/// rather than mapping it to some other source. The current table accepts it.
+#[test]
+fn old_three_variant_reader_rejects_analyze_source() {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum PreAnalyzeHarnessSource {
+        Agents,
+        Mpm,
+        Code,
+    }
+
+    let err = serde_json::from_str::<PreAnalyzeHarnessSource>("\"analyze\"")
+        .expect_err("a pre-#9078 reader must reject the analyze source");
+    assert!(err.to_string().contains("analyze"), "{err}");
+
+    let now: HarnessSource = serde_json::from_str("\"analyze\"").expect("current reader");
+    assert_eq!(now, HarnessSource::Analyze);
+
+    // A value newer than this build is still a decode error here, not a default.
+    serde_json::from_str::<HarnessSource>("\"some_future_harness\"")
+        .expect_err("an unknown source must be a decode error");
 }
 
 // ---- LifecycleEvent ----
@@ -577,6 +605,27 @@ fn filter_by_source() {
     assert!(f.matches(&ev));
     ev.source = HarnessSource::Agents;
     assert!(!f.matches(&ev));
+}
+
+/// #9078: an `analyze` source filter keeps analyze events and drops mpm ones,
+/// on both the in-process `Filter` and the wire `SubscribeFilter`.
+#[test]
+fn filter_matches_analyze_source() {
+    let f = Filter {
+        source: Some(HarnessSource::Analyze),
+        ..Default::default()
+    };
+    let wire: SubscribeFilter =
+        serde_json::from_value(json!({ "source": "analyze" })).expect("wire filter decodes");
+    assert_eq!(wire, SubscribeFilter::from(&f));
+
+    let mut ev = envelope(HarnessPayload::Ping, None);
+    ev.source = HarnessSource::Analyze;
+    assert!(f.matches(&ev));
+    assert!(wire.matches(&ev));
+    ev.source = HarnessSource::Mpm;
+    assert!(!f.matches(&ev));
+    assert!(!wire.matches(&ev));
 }
 
 #[test]

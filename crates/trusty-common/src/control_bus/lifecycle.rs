@@ -21,15 +21,22 @@ use serde::{Deserialize, Serialize};
 
 /// Which harness emitted an event.
 ///
-/// Why: With all three harnesses pushing to one bus, a subscriber (UI, relay,
-///      aggregator) must tell trusty-agents events from trusty-mpm or
-///      trusty-code events without inspecting the payload. Encoding the origin
-///      in the envelope keeps that routing decision O(1) and explicit.
-/// What: A copy-able enum with three variants serialising as snake_case
-///       (`"agents"`, `"mpm"`, `"code"`).
-/// Test: `super::tests::harness_source_round_trips`.
+/// Why: With every producer pushing to one bus, a subscriber (UI, relay,
+///      aggregator) must tell trusty-agents events from trusty-mpm,
+///      trusty-code or trusty-analyze events without inspecting the payload.
+///      Encoding the origin in the envelope keeps that routing decision O(1)
+///      and explicit.
+/// What: A copy-able enum serialising as snake_case (`"agents"`, `"mpm"`,
+///       `"code"`, `"analyze"`). `#[non_exhaustive]` so adding a producer does
+///       not break a downstream `match`. A value this build does not know is a
+///       decode error, never a default: a reader older than a variant rejects
+///       the whole event carrying it.
+/// Test: `super::tests::harness_source_round_trips`,
+///       `super::tests::old_three_variant_reader_rejects_analyze_source`.
+// #9078: `non_exhaustive` added with `Analyze`, so a later producer is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HarnessSource {
     /// The `trusty-agents` orchestration harness.
     Agents,
@@ -37,6 +44,15 @@ pub enum HarnessSource {
     Mpm,
     /// The `trusty-code` per-project harness.
     Code,
+    /// The `trusty-analyze` daemon.
+    ///
+    /// Why: analyze pushes its LSP calls to the bus as `ActionEvent::Tool`
+    ///      leaves (DOC-73 §4.4), so a subscriber needs a source to filter on.
+    /// What: wire value `"analyze"`.
+    /// Test: `super::tests::harness_source_round_trips`,
+    ///       `super::tests::filter_matches_analyze_source`.
+    // #9078: the fourth producer, added for the LSP event push.
+    Analyze,
 }
 
 /// Real-time lifecycle events streamed to UI clients across all harnesses.
