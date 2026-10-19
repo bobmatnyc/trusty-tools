@@ -104,7 +104,12 @@ async fn a_subscriber_that_falls_behind_the_ring_gets_a_gap() {
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let daemon = start(tmp.path(), &["--ring-capacity", "4"]).await;
-    let mut stream = subscribe(&daemon.socket, None, SubscribeFilter::default()).await;
+    let mut stream = subscribe(&daemon.socket, Some(0), SubscribeFilter::default()).await;
+    // A marker read back proves the subscription is attached and live before
+    // the reader stalls; the bulk events then carry seqs 2..=EVENTS + 1.
+    push(&daemon.socket, vec![event("marker")]).await;
+    let (marker, _, _) = next_event(&mut stream).await;
+    assert_eq!(marker, 1);
 
     for _ in 0..(EVENTS as usize / BATCH) {
         push(
@@ -119,9 +124,9 @@ async fn a_subscriber_that_falls_behind_the_ring_gets_a_gap() {
     let mut gaps = 0u64;
     // The seq the next event must carry: one past the last event, moved on by
     // every gap reported since it.
-    let mut next = 1u64;
-    let mut last = 0u64;
-    while last < EVENTS {
+    let mut next = 2u64;
+    let mut last = 1u64;
+    while last < EVENTS + 1 {
         match next_item(&mut stream).await {
             SubscribeItem::Event { event, .. } => {
                 assert_eq!(

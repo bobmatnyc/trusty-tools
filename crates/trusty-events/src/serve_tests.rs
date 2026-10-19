@@ -198,10 +198,14 @@ async fn a_first_line_with_jsonrpc_is_routed_to_subscribe() {
 #[tokio::test]
 async fn a_subscriber_beyond_the_limit_is_refused() {
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    bus.ingest(event());
     let shared = Arc::new(Connection::new(bus, limits(1, 3)));
-    let _first = subscribe(&shared, SubscribeParams::default()).await;
-    // Give the first subscription time to take the only slot.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut first = subscribe(&shared, since(0)).await;
+    // An item on the first stream proves it holds the only slot.
+    assert!(matches!(
+        item(&mut first).await,
+        SubscribeItem::Event { .. }
+    ));
     let mut second = subscribe(&shared, SubscribeParams::default()).await;
     let message = error_message(&mut second).await;
     assert!(message.contains("subscriber slot"), "got {message:?}");
