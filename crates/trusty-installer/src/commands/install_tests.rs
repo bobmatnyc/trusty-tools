@@ -1419,3 +1419,67 @@ fn dry_run_reports_the_content_step_without_running_it() {
         None
     );
 }
+
+/// Resolve a picker selection the way `install::run` does: the picker's
+/// expansion (`select_members_transitive` over the chosen names), flattened by
+/// `picker::override_names`, resolved again.
+fn picker_round_trip(chosen: &[&str]) -> Vec<StableMember> {
+    let names: Vec<String> = chosen.iter().map(|n| (*n).to_owned()).collect();
+    let expanded = select_members_transitive(&names).members;
+    let override_names = crate::commands::picker::override_names(&expanded);
+    select_members_transitive(&override_names).members
+}
+
+/// Why (#10042): `install::run` flattened the picker's expanded list to names
+/// and resolved it again, so the soft bus came back as an explicitly named
+/// member, `soft: false`. Picking only trusty-analyze (no REQUIRED member)
+/// then made a failed bus gate the run and exit 2.
+/// What: after the round trip from `[trusty-analyze]` the bus is still
+/// `soft: true, required: false`, and an install report over that selection
+/// with the bus failed is `all_ok`.
+/// Test: This is the test.
+#[test]
+fn the_picker_round_trip_keeps_the_bus_soft() {
+    let members = picker_round_trip(&["trusty-analyze"]);
+    let bus = members
+        .iter()
+        .find(|m| m.crate_name == "trusty-events")
+        .expect("the bus joins a producer's selection");
+    assert!(
+        bus.soft,
+        "the round trip must keep the bus soft: {members:?}"
+    );
+    assert!(!bus.required);
+
+    let report = InstallReport::build(
+        members
+            .iter()
+            .map(|m| InstallOutcome {
+                required: m.required,
+                soft: m.soft,
+                ..outcome(
+                    &m.crate_name,
+                    m.crate_name != "trusty-events",
+                    "no prebuilt for this platform",
+                )
+            })
+            .collect(),
+    );
+    assert!(report.all_ok, "a failed soft bus must not fail the run");
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// Why (#10042): naming the bus in the picker is the operator's request, so
+/// it must gate like any other named member.
+/// What: picking trusty-analyze and trusty-events keeps the bus `soft: false`
+/// through the round trip.
+/// Test: This is the test.
+#[test]
+fn a_picked_bus_stays_explicit_through_the_round_trip() {
+    let members = picker_round_trip(&["trusty-analyze", "trusty-events"]);
+    let bus = members
+        .iter()
+        .find(|m| m.crate_name == "trusty-events")
+        .expect("the picked bus is selected");
+    assert!(!bus.soft, "a picked bus is explicit: {members:?}");
+}
