@@ -24,7 +24,7 @@ use trusty_common::uds::encode_frame;
 use trusty_common::uds::server::{RpcError, RpcStreamFrame};
 
 use super::client::{self, ClientConfig, Start};
-use super::relay::{BusState, BusStatus, EventsRelay, RelayItem};
+use super::relay::{BusState, BusStatus, EventsRelay, FailureKind, RelayItem};
 use super::token::{ResumeToken, ResumeTokenError};
 
 /// How long any one step of a test may take.
@@ -302,7 +302,7 @@ async fn a_hangup_resumes_with_seq_and_id() {
     })
     .await;
     assert!(
-        status.last_error.is_some(),
+        status.last_error == Some(FailureKind::HungUp),
         "the hang-up is named: {status:?}"
     );
     let conn = stub.next_conn().await;
@@ -369,10 +369,7 @@ async fn a_refused_resume_resyncs_from_zero_and_drops_duplicates() {
         (1, 2, 3)
     );
     assert!(
-        status
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("since_id")),
+        status.last_error == Some(FailureKind::Refused),
         "the refusal is visible: {status:?}"
     );
 }
@@ -425,7 +422,11 @@ async fn an_undecodable_event_is_a_gap_and_the_client_moves_past_it() {
     let conn = stub.next_conn().await;
     assert_eq!(conn.since(), (Some(3), Some(three.id)));
     let status = relay.status();
-    assert_eq!((status.gaps, status.skipped), (1, 1), "{status:?}");
+    assert_eq!(
+        (status.gaps, status.skipped, status.undecodable),
+        (1, 1, 2),
+        "one undecodable event and one unknown item: {status:?}"
+    );
 }
 
 #[tokio::test]
@@ -476,10 +477,7 @@ async fn a_malformed_frame_is_reported_and_the_client_reconnects() {
     })
     .await;
     assert!(
-        status
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("malformed")),
+        status.last_error == Some(FailureKind::Decode),
         "the bad frame is named: {status:?}"
     );
     let conn = stub.next_conn().await;
@@ -502,10 +500,7 @@ async fn a_missing_socket_is_reported_and_retried_with_backoff() {
     let first = status_until(&relay, "a failure", |s| s.failures >= 1).await;
     assert_eq!(first.state, BusState::Reconnecting);
     assert!(
-        first
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("trusty-events.sock") && e.contains("not running")),
+        first.last_error == Some(FailureKind::NotRunning),
         "the error names the absent socket: {first:?}"
     );
     let later = status_until(&relay, "four failures", |s| s.failures >= 4).await;
@@ -537,10 +532,7 @@ async fn a_socket_that_vanishes_under_a_quiet_subscription_is_detected() {
     })
     .await;
     assert!(
-        status
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("no longer served")),
+        status.last_error == Some(FailureKind::SocketLost),
         "the lost socket is named: {status:?}"
     );
 }
@@ -557,7 +549,7 @@ async fn a_clean_end_of_stream_is_not_read_as_healthy() {
         s.state == BusState::Reconnecting
     })
     .await;
-    assert!(status.last_error.is_some(), "{status:?}");
+    assert_eq!(status.last_error, Some(FailureKind::Ended), "{status:?}");
     stub.next_conn().await;
 }
 
@@ -580,12 +572,7 @@ async fn an_unresolvable_socket_is_reported_unavailable() {
     assert!(spawned.is_none());
     let status = relay.status();
     assert_eq!(status.state, BusState::Unavailable);
-    assert!(
-        status
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("no data dir"))
-    );
+    assert_eq!(status.last_error, Some(FailureKind::Unavailable));
 }
 
 #[test]
@@ -597,4 +584,52 @@ fn backoff_doubles_and_stops_at_its_ceiling() {
     assert!(delays.windows(2).all(|w| w[1] >= w[0]));
     assert_eq!(*delays.last().expect("eight delays"), max);
     assert_eq!(client::backoff(u32::MAX, initial, max), max);
+}
+
+/// A gap carries no SSE `id:`, so it never moves a reader's `Last-Event-ID`;
+/// an event's `id:` is its token (#9076).
+#[test]
+fn a_gap_carries_no_sse_id() {
+    let ev = event(4);
+    let token = ResumeToken::of(&ev);
+    let gap = RelayItem::Gap {
+        skipped: 2,
+        after: Some(token),
+    };
+    assert_eq!(gap.sse_id(), None);
+    let item = RelayItem::Event {
+        token,
+        event: Arc::new(ev),
+        persisted: false,
+    };
+    assert_eq!(item.sse_id(), Some(token.to_string()));
+}
+
+/// A refusal of a request that is not a resume (`since_seq: 0`) cannot be
+/// cured by resyncing, so it backs off instead of reconnecting at once.
+#[tokio::test]
+async fn a_refusal_at_seq_zero_backs_off_rather_than_resyncing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let mut config = fast(&stub.socket);
+    config.start = Start::Beginning;
+    let (relay, _client) = run(config);
+
+    let mut conn = stub.next_conn().await;
+    assert_eq!(conn.since(), (Some(0), None));
+    conn.error(RpcError::invalid_params("filters rejected"))
+        .await;
+
+    let status = status_until(&relay, "reconnecting", |s| {
+        s.state == BusState::Reconnecting
+    })
+    .await;
+    assert!(status.retry_in_ms.is_some_and(|ms| ms > 0), "{status:?}");
+    assert_eq!(
+        (status.resyncs, status.last_error),
+        (0, Some(FailureKind::Refused))
+    );
+    // `fast` backs off 300 ms: no reconnect inside it, one after it.
+    stub.no_conn_within(Duration::from_millis(150)).await;
+    stub.next_conn().await;
 }

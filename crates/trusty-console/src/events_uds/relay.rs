@@ -13,7 +13,6 @@
 //! Test: `super::tests` (status transitions per error arm),
 //! `crate::server::tests::events_status_route_reports_a_bus_that_was_never_reached`.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -83,24 +82,57 @@ pub enum BusState {
     Unavailable,
 }
 
+/// Why an attempt ended, as the status route names it.
+///
+/// Why a category and not the error text: the route is served on every TCP
+/// listener, tailnet peers included, and the raw text carries absolute paths
+/// and daemon messages (#9076 review). The text goes to the log.
+/// What: one variant per way an attempt ends; serialised `snake_case`.
+/// Test: `super::tests::a_missing_socket_is_reported_and_retried_with_backoff`,
+/// `super::tests::a_malformed_frame_is_reported_and_the_client_reconnects`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FailureKind {
+    /// No socket file: trusty-events is not running.
+    NotRunning,
+    /// The socket exists but the dial failed (permissions, refused connect).
+    DialFailed,
+    /// Opening or reading took longer than its budget.
+    Timeout,
+    /// The bus closed the connection mid-stream.
+    HungUp,
+    /// The bus refused the resume point.
+    Refused,
+    /// The bus ended the stream with an error other than a refusal.
+    ServerError,
+    /// A frame that is not a stream frame, or an item with no seq to skip.
+    Decode,
+    /// The bus ended the stream cleanly.
+    Ended,
+    /// The socket path stopped being served under an open subscription.
+    SocketLost,
+    /// The socket path could not be resolved.
+    Unavailable,
+}
+
 /// A snapshot of the client, as the status route serves it.
 ///
 /// Why: each failure arm must leave a visible trace, so the reason, the
 /// retry delay and the counters are part of the answer, not only the log.
-/// What: `last_error` is the most recent failure and is kept after recovery;
-/// `retry_in_ms` is set only while waiting to retry. `last_event` is the
-/// token of the newest event held. The counters are totals since start.
+/// What: `last_error` is the most recent failure's category and is kept
+/// after recovery; `retry_in_ms` is set only while waiting to retry.
+/// `last_event` is the token of the newest event held. The counters are
+/// totals since start. No path is served (#9076 review).
 /// Test: `super::tests::a_missing_socket_is_reported_and_retried_with_backoff`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BusStatus {
     /// See [`BusState`].
     pub state: BusState,
-    /// The socket dialled.
-    pub socket: Option<String>,
     /// When `state` last changed, in Unix milliseconds.
     pub since_unix_ms: u64,
     /// The most recent failure.
-    pub last_error: Option<String>,
+    pub last_error: Option<FailureKind>,
     /// How long until the next attempt, while waiting.
     pub retry_in_ms: Option<u64>,
     /// Failed attempts since the last delivered item.
@@ -117,13 +149,15 @@ pub struct BusStatus {
     pub skipped: u64,
     /// Resume points the bus refused, each followed by a resync from 0.
     pub resyncs: u64,
+    /// Items this build could not decode and passed over. An undecodable
+    /// event is also relayed as a one-event gap.
+    pub undecodable: u64,
 }
 
 impl BusStatus {
     fn starting() -> Self {
         Self {
             state: BusState::Starting,
-            socket: None,
             since_unix_ms: now_ms(),
             last_error: None,
             retry_in_ms: None,
@@ -134,6 +168,7 @@ impl BusStatus {
             gaps: 0,
             skipped: 0,
             resyncs: 0,
+            undecodable: 0,
         }
     }
 
@@ -194,15 +229,10 @@ impl EventsRelay {
         self.items.subscribe()
     }
 
-    pub(crate) fn note_target(&self, socket: &Path) {
-        let socket = socket.display().to_string();
-        self.status.send_modify(|s| s.socket = Some(socket));
-    }
-
-    pub(crate) fn note_unavailable(&self, reason: String) {
+    pub(crate) fn note_unavailable(&self) {
         self.status.send_modify(|s| {
             s.enter(BusState::Unavailable);
-            s.last_error = Some(reason);
+            s.last_error = Some(FailureKind::Unavailable);
         });
     }
 
@@ -213,19 +243,19 @@ impl EventsRelay {
         });
     }
 
-    pub(crate) fn note_failure(&self, reason: String, retry_in: Duration, failures: u32) {
+    pub(crate) fn note_failure(&self, kind: FailureKind, retry_in: Duration, failures: u32) {
         self.status.send_modify(|s| {
             s.enter(BusState::Reconnecting);
-            s.last_error = Some(reason);
+            s.last_error = Some(kind);
             s.retry_in_ms = Some(u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX));
             s.failures = failures;
         });
     }
 
-    pub(crate) fn note_resync(&self, reason: String) {
+    pub(crate) fn note_resync(&self) {
         self.status.send_modify(|s| {
             s.enter(BusState::Reconnecting);
-            s.last_error = Some(reason);
+            s.last_error = Some(FailureKind::Refused);
             s.retry_in_ms = Some(0);
             s.resyncs += 1;
         });
@@ -263,6 +293,21 @@ impl EventsRelay {
             s.duplicates += 1;
             s.failures = 0;
             s.last_event = Some(token.to_string());
+        });
+    }
+
+    /// #9076: an event this build cannot decode — a one-event gap after
+    /// `after`, counted as undecodable too.
+    pub(crate) fn publish_undecodable_event(&self, after: Option<ResumeToken>) {
+        self.status.send_modify(|s| s.undecodable += 1);
+        self.publish_gap(1, after);
+    }
+
+    /// #9076: an item of a kind this build does not know; no event is lost.
+    pub(crate) fn note_unknown_item(&self) {
+        self.status.send_modify(|s| {
+            s.undecodable += 1;
+            s.failures = 0;
         });
     }
 

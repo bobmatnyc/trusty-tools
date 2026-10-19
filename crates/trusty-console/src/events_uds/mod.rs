@@ -19,6 +19,7 @@
 //! `tests/events_uds_live.rs` (the real `trusty-events` binary).
 
 pub mod client;
+mod decode;
 pub mod relay;
 pub mod token;
 
@@ -29,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use client::{ClientConfig, Start, spawn};
-pub use relay::{BusState, BusStatus, EventsRelay, RelayItem, status_handler};
+pub use relay::{BusState, BusStatus, EventsRelay, FailureKind, RelayItem, status_handler};
 pub use token::{ResumeToken, ResumeTokenError};
 
 /// Start console's bus client in the background.
@@ -55,8 +56,8 @@ pub(crate) fn start_with(
     match socket {
         Ok(socket) => Some(spawn(ClientConfig::new(socket), relay)),
         Err(e) => {
-            tracing::warn!(error = %e, "event bus client disabled");
-            relay.note_unavailable(format!("cannot resolve the trusty-events socket: {e:#}"));
+            tracing::warn!(error = %format!("{e:#}"), "event bus client disabled: cannot resolve the trusty-events socket");
+            relay.note_unavailable();
             None
         }
     }

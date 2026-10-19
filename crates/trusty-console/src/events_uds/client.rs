@@ -13,10 +13,12 @@
 //! (`seq` + `EventId`), and a later attempt resumes from it with
 //! `since_seq` and `since_id`. When the bus refuses a resume
 //! (`invalid_params`), the next attempt starts at once from `since_seq: 0`,
-//! and events already relayed are dropped by `EventId`. Any other end — a
-//! failed dial, a hang-up, a server error, a malformed frame, a clean end, a
-//! socket that is no longer served — is recorded on the relay and retried
-//! after a doubling, capped backoff.
+//! and events already relayed are dropped by `EventId`. An event this build
+//! cannot decode is stepped over as a one-event gap (`super::decode`). Any
+//! other end — a failed dial, a hang-up, a server error, a malformed frame, a
+//! clean end, a socket that is no longer served — is recorded on the relay as
+//! a `FailureKind` (the text goes to the log) and retried after a doubling,
+//! capped backoff.
 //! Limits: before the first event there is no cursor, so a `Live` client that
 //! reconnects resumes live. Dedupe remembers [`DEDUPE_WINDOW`] ids; after a
 //! resync, an event older than that is relayed again. A daemon that hangs
@@ -28,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
 use trusty_common::control_bus::{
     EventId, SubscribeFilter, SubscribeItem, SubscribeParams, SubscribeRequest,
 };
@@ -36,7 +39,8 @@ use trusty_common::uds::{
     FramedStream, SocketVerdict, UdsRpcError, probe_socket_verdict, send_framed_stream_request,
 };
 
-use super::relay::EventsRelay;
+use super::decode::{Decoded, decode};
+use super::relay::{EventsRelay, FailureKind};
 use super::token::ResumeToken;
 
 /// How long opening a subscription may take: the dial and the request write.
@@ -154,7 +158,6 @@ pub(crate) fn backoff(failures: u32, initial: Duration, max: Duration) -> Durati
 /// What: never returns. Publishes every state change and item on `relay`.
 /// Test: `super::tests`, `tests/events_uds_live.rs`.
 pub async fn run(config: ClientConfig, relay: Arc<EventsRelay>) {
-    relay.note_target(&config.socket);
     let mut session = Session {
         seen: SeenIds::new(config.dedupe_window),
         config,
@@ -168,19 +171,44 @@ pub async fn run(config: ClientConfig, relay: Arc<EventsRelay>) {
     }
 }
 
-/// Why one attempt ended.
-enum Ended {
-    /// The bus refused the request's parameters.
-    Refused(String),
-    /// Anything else.
-    Failed(String),
+/// Why one attempt ended: the category the status shows, and the detail the
+/// log keeps (#9076 review: no raw text on the route).
+struct Failure {
+    kind: FailureKind,
+    detail: String,
+}
+
+impl Failure {
+    fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    /// The category of an error the stream reported.
+    fn of_stream(e: UdsRpcError) -> Self {
+        let kind = match &e {
+            UdsRpcError::Stream { error, .. } if error.code == CODE_INVALID_PARAMS => {
+                FailureKind::Refused
+            }
+            UdsRpcError::Stream { .. } => FailureKind::ServerError,
+            UdsRpcError::Decode { .. }
+            | UdsRpcError::FrameTooLarge { .. }
+            | UdsRpcError::NotAStream { .. } => FailureKind::Decode,
+            UdsRpcError::Timeout { .. } => FailureKind::Timeout,
+            _ => FailureKind::HungUp,
+        };
+        Self::new(kind, e.to_string())
+    }
 }
 
 /// The client's state across attempts.
 struct Session {
     config: ClientConfig,
     relay: Arc<EventsRelay>,
-    /// The newest event relayed or recognised as a duplicate.
+    /// The newest event relayed, recognised as a duplicate, or passed over as
+    /// undecodable.
     cursor: Option<ResumeToken>,
     /// The next attempt replays from 0: the bus refused the cursor.
     resync: bool,
@@ -212,88 +240,79 @@ impl Session {
     async fn attempt(&mut self) {
         let params = self.params();
         let resuming = params.since_seq.is_some_and(|seq| seq > 0);
-        match self.subscribe(params).await {
-            // #9076: the bus no longer holds the resume point (a restart
-            // reassigned the seq, or retention dropped it). Replay what it
-            // retains and drop what was already relayed; no backoff, because
-            // `since_seq: 0` has no resume point to refuse.
-            Ended::Refused(reason) if resuming => {
-                tracing::warn!(%reason, "event bus refused the resume point; resyncing from 0");
-                self.cursor = None;
-                self.resync = true;
-                self.relay.note_resync(reason);
-            }
-            Ended::Refused(reason) | Ended::Failed(reason) => {
-                self.failures = self.failures.saturating_add(1);
-                let delay = backoff(
-                    self.failures,
-                    self.config.backoff_initial,
-                    self.config.backoff_max,
-                );
-                if self.failures == 1 {
-                    tracing::warn!(%reason, retry_in = ?delay, "event bus subscription lost");
-                } else {
-                    tracing::debug!(%reason, retry_in = ?delay, failures = self.failures, "event bus still unreachable");
-                }
-                self.relay.note_failure(reason, delay, self.failures);
-                tokio::time::sleep(delay).await;
-            }
+        let failure = self.subscribe(params).await;
+        // #9076: the bus no longer holds the resume point (a restart
+        // reassigned the seq, or retention dropped it). Replay what it
+        // retains and drop what was already relayed; no backoff, because
+        // `since_seq: 0` has no resume point to refuse. A refusal of a
+        // request that was not a resume backs off like any other failure.
+        if failure.kind == FailureKind::Refused && resuming {
+            tracing::warn!(detail = %failure.detail, "event bus refused the resume point; resyncing from 0");
+            self.cursor = None;
+            self.resync = true;
+            self.relay.note_resync();
+            return;
         }
+        self.failures = self.failures.saturating_add(1);
+        let delay = backoff(
+            self.failures,
+            self.config.backoff_initial,
+            self.config.backoff_max,
+        );
+        if self.failures == 1 {
+            tracing::warn!(kind = ?failure.kind, detail = %failure.detail, retry_in = ?delay, "event bus subscription lost");
+        } else {
+            tracing::debug!(kind = ?failure.kind, detail = %failure.detail, retry_in = ?delay, failures = self.failures, "event bus still unreachable");
+        }
+        self.relay.note_failure(failure.kind, delay, self.failures);
+        tokio::time::sleep(delay).await;
     }
 
     /// Open one subscription and read it until it ends.
-    async fn subscribe(&mut self, params: SubscribeParams) -> Ended {
+    async fn subscribe(&mut self, params: SubscribeParams) -> Failure {
         let socket = self.config.socket.clone();
         let request = SubscribeRequest::new(1, params);
         let opened = tokio::time::timeout(
             self.config.open_timeout,
-            send_framed_stream_request::<_, SubscribeItem>(
-                &socket,
-                &request,
-                self.config.frame_timeout,
-            ),
+            send_framed_stream_request::<_, Value>(&socket, &request, self.config.frame_timeout),
         )
         .await;
         let mut stream = match opened {
             Ok(Ok(stream)) => stream,
             // Resolving the path creates its directory 0755, which the dial
             // then reports as a permission fault; name the absent socket first.
-            Ok(Err(_)) if !socket.exists() => {
-                return Ended::Failed(format!(
-                    "{} does not exist: trusty-events is not running",
-                    socket.display()
-                ));
+            Ok(Err(e)) if !socket.exists() => {
+                return Failure::new(FailureKind::NotRunning, e.to_string());
             }
-            Ok(Err(e)) => return Ended::Failed(format!("cannot subscribe: {e}")),
+            Ok(Err(e @ UdsRpcError::Timeout { .. })) => {
+                return Failure::new(FailureKind::Timeout, e.to_string());
+            }
+            Ok(Err(e)) => return Failure::new(FailureKind::DialFailed, e.to_string()),
             Err(_) => {
-                return Ended::Failed(format!(
-                    "opening a subscription on {} took longer than {:?}",
-                    socket.display(),
-                    self.config.open_timeout
-                ));
+                return Failure::new(
+                    FailureKind::Timeout,
+                    format!(
+                        "opening {} took longer than {:?}",
+                        socket.display(),
+                        self.config.open_timeout
+                    ),
+                );
             }
         };
         self.relay.note_connected();
         loop {
             let next = match self.next_while_live(&mut stream).await {
                 Ok(next) => next,
-                Err(reason) => return Ended::Failed(reason),
+                Err(failure) => return failure,
             };
             match next {
-                Some(Ok(item)) => self.accept(item),
-                Some(Err(UdsRpcError::Stream { error, .. }))
-                    if error.code == CODE_INVALID_PARAMS =>
-                {
-                    return Ended::Refused(format!(
-                        "the bus refused the subscription: {}",
-                        error.message
-                    ));
+                Some(Ok(value)) => {
+                    if let Err(detail) = self.accept(value) {
+                        return Failure::new(FailureKind::Decode, detail);
+                    }
                 }
-                Some(Err(e @ UdsRpcError::Decode { .. })) => {
-                    return Ended::Failed(format!("malformed frame from the bus: {e}"));
-                }
-                Some(Err(e)) => return Ended::Failed(format!("subscription failed: {e}")),
-                None => return Ended::Failed("the bus ended the subscription".to_string()),
+                Some(Err(e)) => return Failure::of_stream(e),
+                None => return Failure::new(FailureKind::Ended, "the bus ended the subscription"),
             }
         }
     }
@@ -305,8 +324,8 @@ impl Session {
     /// check runs beside the pending read, not in place of it.
     async fn next_while_live(
         &mut self,
-        stream: &mut FramedStream<SubscribeItem>,
-    ) -> Result<Option<Result<SubscribeItem, UdsRpcError>>, String> {
+        stream: &mut FramedStream<Value>,
+    ) -> Result<Option<Result<Value, UdsRpcError>>, Failure> {
         let read = stream.next_frame();
         tokio::pin!(read);
         let every = self.config.liveness_interval;
@@ -317,10 +336,13 @@ impl Session {
                 _ = tick.tick() => {
                     let verdict = probe_socket_verdict(&self.config.socket, LIVENESS_PROBE_TIMEOUT).await;
                     if verdict == SocketVerdict::NotServing {
-                        return Err(format!(
-                            "{} is no longer served; this subscription is attached to a bus \
-                             that producers cannot reach",
-                            self.config.socket.display()
+                        return Err(Failure::new(
+                            FailureKind::SocketLost,
+                            format!(
+                                "{} is no longer served; this subscription is attached to a \
+                                 bus that producers cannot reach",
+                                self.config.socket.display()
+                            ),
                         ));
                     }
                     // A connection that outlives an interval is healthy:
@@ -332,27 +354,59 @@ impl Session {
         }
     }
 
-    /// Relay one item and move the cursor.
-    fn accept(&mut self, item: SubscribeItem) {
-        self.failures = 0;
-        match item {
-            SubscribeItem::Event { event, persisted } => {
-                let token = ResumeToken::of(&event);
-                self.cursor = Some(token);
-                self.resync = false;
-                if self.seen.insert(event.id) {
-                    self.relay.publish_event(token, Arc::from(event), persisted);
-                } else {
-                    self.relay.note_duplicate(token);
+    /// Relay one item and move the cursor. `Err` when the item has no seq to
+    /// move past, so the subscription must be reopened.
+    fn accept(&mut self, value: Value) -> Result<(), String> {
+        match decode(value) {
+            Decoded::Item(item) => {
+                self.failures = 0;
+                match item {
+                    SubscribeItem::Event { event, persisted } => {
+                        let token = ResumeToken::of(&event);
+                        if self.advance(token) {
+                            self.relay.publish_event(token, Arc::from(event), persisted);
+                        }
+                    }
+                    SubscribeItem::Gap { skipped } => {
+                        self.relay.publish_gap(skipped, self.cursor);
+                    }
+                    // `decode` reports a kind this build lacks as `Unknown`.
+                    _ => self.relay.note_unknown_item(),
                 }
+                Ok(())
             }
-            SubscribeItem::Gap { skipped } => self.relay.publish_gap(skipped, self.cursor),
-            // `SubscribeItem` is non_exhaustive; serde rejects an unknown
-            // `type`, so a variant this build lacks cannot be decoded here.
-            other => {
-                tracing::warn!(item = ?other, "event bus sent an item this console does not relay")
+            // #9076 review: an event from a newer daemon (DOC-73 §3.3). Its
+            // seq and id still read, so it is passed over as a one-event gap
+            // and the cursor moves past it: a replay cannot stall on it.
+            Decoded::UndecodableEvent { token, error } => {
+                self.failures = 0;
+                tracing::warn!(%token, %error, "event bus sent an event this console cannot decode; relayed as a gap");
+                let after = self.cursor;
+                if self.advance(token) {
+                    self.relay.publish_undecodable_event(after);
+                }
+                Ok(())
             }
+            Decoded::Unknown(kind) => {
+                self.failures = 0;
+                tracing::warn!(%kind, "event bus sent an item kind this console does not know");
+                self.relay.note_unknown_item();
+                Ok(())
+            }
+            Decoded::Malformed(error) => Err(format!("malformed item from the bus: {error}")),
         }
+    }
+
+    /// Move the cursor to `token`. `true` when its event is new; a duplicate
+    /// is counted on the relay.
+    fn advance(&mut self, token: ResumeToken) -> bool {
+        self.cursor = Some(token);
+        self.resync = false;
+        let new = self.seen.insert(token.id);
+        if !new {
+            self.relay.note_duplicate(token);
+        }
+        new
     }
 }
 
