@@ -923,39 +923,51 @@ fn a_target_dir_after_the_double_dash_is_never_read_as_cargos_own_flag() {
     );
 }
 
-/// A real `tm daemon` on `port`, confined to `home` (#8819).
+/// The socket a test daemon under `home` serves: its data-dir override is
+/// `<home>/data` (#6288 S3a: the daemon has no TCP port to find it by).
+fn daemon_socket(home: &Path) -> PathBuf {
+    home.join("data").join("trusty-mpm").join("trusty-mpm.sock")
+}
+
+/// A real `tm daemon` confined to `home`, serving [`daemon_socket`] (#8819).
 ///
 /// What: `common::daemon_command` — a cleared environment with the scratch
 /// `$HOME`, so it touches nothing outside `home` and inherits no operator
-/// secret (#9121).
-fn spawn_daemon(home: &Path, port: u16) -> Child {
+/// secret (#9121) — plus the data-dir override [`daemon_socket`] names.
+fn spawn_daemon(home: &Path) -> Child {
+    let socket = daemon_socket(home);
     let child = common::daemon_command(home, &home.join("trusty-mpm-projects"))
-        .arg("--addr")
-        .arg(format!("127.0.0.1:{port}"))
+        .env("TRUSTY_DATA_DIR_OVERRIDE", home.join("data"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn a daemon");
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !daemon_healthy(port) {
-        assert!(Instant::now() < deadline, "no daemon answered on {port}");
+    while !daemon_healthy(&socket) {
+        assert!(
+            Instant::now() < deadline,
+            "no daemon answered on {}",
+            socket.display()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     child
 }
 
-/// Whether `GET /health` on `port` answers 200.
-fn daemon_healthy(port: u16) -> bool {
-    use std::io::{Read, Write};
-    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+/// Whether `mpm.health` on `socket` answers with a result.
+fn daemon_healthy(socket: &Path) -> bool {
+    use std::io::{BufRead, Write};
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(socket) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"mpm.health\",\"params\":{}}\n";
     let mut reply = String::new();
-    stream.write_all(request.as_bytes()).is_ok()
-        && stream.read_to_string(&mut reply).is_ok()
-        && reply.starts_with("HTTP/1.1 200")
+    stream.write_all(frame.as_bytes()).is_ok()
+        && std::io::BufReader::new(stream)
+            .read_line(&mut reply)
+            .is_ok()
+        && reply.contains("\"result\"")
 }
 
 /// Whether `pid` is a live process.
@@ -970,21 +982,18 @@ fn pid_alive(pid: u32) -> bool {
 ///
 /// A holder leases the only slot and logs its decision in a real daemon. That
 /// daemon is SIGKILLed (the `launchctl kickstart -k` case) and a new one is
-/// started on the same port. While the holder runs, a second lease is refused
+/// started on the same socket. While the holder runs, a second lease is refused
 /// naming the holder's pid, and the restarted daemon logs the refusal. Once the
 /// holding process exits, the slot is granted — so the refused lease also left
 /// nothing held behind it (#8816).
 #[test]
 fn a_held_slot_survives_a_daemon_restart_8819() {
     let home = home_with_ceiling(1, "");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("a free port")
-        .port();
-    let url = format!("http://127.0.0.1:{port}");
-    let mut daemon = spawn_daemon(home.path(), port);
+    // #6288 S3a: the leases reach the daemon on its socket; it has no port.
+    let socket = daemon_socket(home.path());
+    let mut daemon = spawn_daemon(home.path());
     let holder = build_lease(home.path())
-        .env("TRUSTY_MPM_URL", &url)
+        .env("TRUSTY_MPM_SOCKET", &socket)
         .args(["--", "sleep", "30"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -995,10 +1004,10 @@ fn a_held_slot_survives_a_daemon_restart_8819() {
 
     daemon.kill().expect("SIGKILL the daemon");
     let _ = daemon.wait();
-    let restarted = spawn_daemon(home.path(), port);
+    let restarted = spawn_daemon(home.path());
 
     let refused = build_lease(home.path())
-        .env("TRUSTY_MPM_URL", &url)
+        .env("TRUSTY_MPM_SOCKET", &socket)
         .args(["--wait-secs", "2", "--", "true"])
         .output()
         .expect("a second lease");
@@ -1006,7 +1015,7 @@ fn a_held_slot_survives_a_daemon_restart_8819() {
     let holder_ran = pid_alive(holder_pid);
     stop(holder);
     let next = build_lease(home.path())
-        .env("TRUSTY_MPM_URL", &url)
+        .env("TRUSTY_MPM_SOCKET", &socket)
         .args(["--wait-secs", "5", "--", "true"])
         .output()
         .expect("a lease after the holder exits");
