@@ -14,7 +14,7 @@
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use trusty_analyze::lsp::{LspConfig, LspLanguage, LspManager};
+use trusty_analyze::lsp::{LspConfig, LspError, LspLanguage, LspManager};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs rust-analyzer on PATH; CI has no language server (DOC-72 §12)"]
@@ -47,10 +47,15 @@ async fn real_rust_analyzer_answers_references() {
 
     let deadline = Instant::now() + Duration::from_secs(120);
     let refs = loop {
-        let refs = lease
+        // While it loads the workspace, rust-analyzer answers `-32801 content
+        // modified`; that, like an empty list, means "ask again".
+        let refs = match lease
             .request("textDocument/references", params.clone())
             .await
-            .expect("references");
+        {
+            Err(LspError::ServerError { code: -32801, .. }) => json!([]),
+            other => other.expect("references"),
+        };
         if refs.as_array().is_some_and(|a| !a.is_empty()) || Instant::now() > deadline {
             break refs;
         }
