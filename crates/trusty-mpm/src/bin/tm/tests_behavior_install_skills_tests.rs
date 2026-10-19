@@ -53,6 +53,15 @@ fn install_then_deploy_deploys_skills() {
         gaps.is_empty(),
         "deployed skills != content/skills on disk: {gaps:#?}"
     );
+    // #10055: the bundle tests' known-gaps data file is testdata and never deploys.
+    assert!(
+        !result
+            .deployed
+            .iter()
+            .any(|key| key.contains("reference-reach-gaps")),
+        "testdata must never deploy: {:?}",
+        result.deployed
+    );
     // Mutation: one reference dropped, or one key deployed twice, is reported.
     let mut dropped = result.deployed.clone();
     let reference = dropped

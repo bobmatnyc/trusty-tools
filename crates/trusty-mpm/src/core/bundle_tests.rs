@@ -850,6 +850,14 @@ fn bundle_table_is_complete() {
         gaps.is_empty(),
         "deployed artifacts != content tree: {gaps:#?}"
     );
+    let data_file = KNOWN_REFERENCE_REACH_GAPS_FILE
+        .rsplit('/')
+        .next()
+        .expect("a file name");
+    assert!(
+        !produced.iter().any(|path| path.ends_with(data_file)),
+        "{KNOWN_REFERENCE_REACH_GAPS_FILE} is test data and must never ship"
+    );
     for artifact in &artifacts {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -2851,49 +2859,52 @@ fn task_table_gaps(entry: &str, references: &[(&str, &str)]) -> Vec<String> {
 }
 
 /// Gaps [`reference_reach_gaps`] found when #10055 widened the check from
-/// tm-ticketing to every skill with `references/`, each `(entry bundle path,
-/// gap)`. Content fixes belong to a content PR, so they are pinned here
-/// shrink-only: a gap not listed fails, and a listed gap that no longer
-/// occurs fails as stale until its entry is dropped.
-const KNOWN_REFERENCE_REACH_GAPS: &[(&str, &str)] = &[
-    (
-        "skills/api-design-patterns.md",
-        "the entry is not under 500 lines",
-    ),
-    ("skills/env-manager.md", "the entry is not under 500 lines"),
-    (
-        "skills/test-driven-development.md",
-        "references/anti-patterns.md is not reached from the entry",
-    ),
-    (
-        "skills/test-driven-development.md",
-        "references/examples.md is not reached from the entry",
-    ),
-    (
-        "skills/test-driven-development.md",
-        "references/integration.md is not reached from the entry",
-    ),
-    (
-        "skills/test-driven-development.md",
-        "references/philosophy.md is not reached from the entry",
-    ),
-    (
-        "skills/test-driven-development.md",
-        "references/workflow.md is not reached from the entry",
-    ),
-    (
-        "skills/test-quality-inspector.md",
-        "references/assertion-quality.md is not reached from the entry",
-    ),
-    (
-        "skills/test-quality-inspector.md",
-        "references/inspection-checklist.md is not reached from the entry",
-    ),
-    (
-        "skills/test-quality-inspector.md",
-        "references/red-flags.md is not reached from the entry",
-    ),
-];
+/// tm-ticketing to every skill with `references/`, kept in a testdata file
+/// read at test time (df-D77: closing a gap is a content-PR line deletion,
+/// never a Rust change or a rebuild). Shrink-only: a gap not listed fails,
+/// and a listed gap that no longer occurs fails as stale. Outside `src/`,
+/// which `build.rs` watches, so editing it reruns no build.
+const KNOWN_REFERENCE_REACH_GAPS_FILE: &str = "crates/trusty-mpm/testdata/reference-reach-gaps.tsv";
+
+/// The `(entry bundle path, gap)` rows of the known-gaps data file `text`:
+/// one `<entry>\t<gap>` per line; `#` lines and blank lines are skipped.
+fn parse_known_reach_gaps(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (entry, gap) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("`{line}`: expected <entry><TAB><gap>"));
+            (entry.to_owned(), gap.to_owned())
+        })
+        .collect()
+}
+
+/// `found` checked against `known`: `Err` names every new gap and every
+/// stale row, the stale ones with the data file to drop them from.
+fn reach_gap_verdict(found: &[(String, String)], known: &[(String, String)]) -> Result<(), String> {
+    let new: Vec<_> = found.iter().filter(|gap| !known.contains(gap)).collect();
+    let stale: Vec<_> = known.iter().filter(|gap| !found.contains(gap)).collect();
+    let mut report = String::new();
+    if !new.is_empty() {
+        report.push_str(&format!(
+            "an entry file no longer reaches its references — link the file from \
+             the entry (and its task-table row, if it has one) (#10055): {new:#?}\n"
+        ));
+    }
+    if !stale.is_empty() {
+        report.push_str(&format!(
+            "a known gap closed — drop its line from {KNOWN_REFERENCE_REACH_GAPS_FILE} \
+             (#10055): {stale:#?}\n"
+        ));
+    }
+    if report.is_empty() {
+        Ok(())
+    } else {
+        Err(report)
+    }
+}
 
 /// Every way `entry` fails to reach `references` (`(file name, body)`): the
 /// entry is at or over [`SKILL_ENTRY_LINE_LIMIT`]; a file the entry never
@@ -2933,7 +2944,7 @@ fn reference_reach_gaps(entry: &str, references: &[(&str, &str)]) -> Vec<String>
 /// text no reader reaches, and a pointer naming a moved section resolves
 /// only through the task table.
 /// What: for every skill with `references/` ([`progressive_skills`]),
-/// [`reference_reach_gaps`] equals [`KNOWN_REFERENCE_REACH_GAPS`]. Mutation,
+/// [`reference_reach_gaps`] equals [`KNOWN_REFERENCE_REACH_GAPS_FILE`]. Mutation,
 /// per skill: an entry that stops naming one reached file is reported, and
 /// for a task-table skill so is dropping that file's row.
 /// Test: this test.
@@ -2976,21 +2987,24 @@ fn every_references_skill_entry_reaches_every_reference_file_10055() {
         }
     }
 
-    let known: Vec<(String, String)> = KNOWN_REFERENCE_REACH_GAPS
-        .iter()
-        .map(|(entry, gap)| ((*entry).to_owned(), (*gap).to_owned()))
-        .collect();
-    let new: Vec<_> = found.iter().filter(|gap| !known.contains(gap)).collect();
-    let stale: Vec<_> = known.iter().filter(|gap| !found.contains(gap)).collect();
-    assert!(
-        new.is_empty(),
-        "an entry file no longer reaches its references — link the file from \
-         the entry (and its task-table row, if it has one) (#10055): {new:#?}"
+    let data = crate::core::content_source::test_support::repo_root()
+        .join(KNOWN_REFERENCE_REACH_GAPS_FILE);
+    let known = parse_known_reach_gaps(
+        &std::fs::read_to_string(&data).unwrap_or_else(|e| panic!("{}: {e}", data.display())),
     );
-    assert!(
-        stale.is_empty(),
-        "a known gap closed — drop it from KNOWN_REFERENCE_REACH_GAPS (#10055): {stale:#?}"
-    );
+    if let Err(report) = reach_gap_verdict(&found, &known) {
+        panic!("{report}");
+    }
+
+    // Mutation: a row deleted while its gap remains is a new gap; a row kept
+    // for a closed gap is stale and names the data file.
+    if let Some(row) = known.first() {
+        let unlisted = reach_gap_verdict(&found, &known[1..]).expect_err("a deleted row");
+        assert!(unlisted.contains("no longer reaches"), "{unlisted}");
+        let closed: Vec<_> = found.iter().filter(|gap| *gap != row).cloned().collect();
+        let stale = reach_gap_verdict(&closed, &known).expect_err("a stale row");
+        assert!(stale.contains(KNOWN_REFERENCE_REACH_GAPS_FILE), "{stale}");
+    }
 }
 
 /// Words in the window that pre-filters [`reference_leaks`]; a references line
@@ -3309,7 +3323,7 @@ fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
 #[test]
 fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
     for needle in [
-        "### Pulling After a Merge — Check Untracked Collisions First",
+        "Pulling After a Merge — Check Untracked Collisions First",
         "git status --porcelain",
         "git show origin/<base>:<path>",
         "**Identical content**",
@@ -3317,7 +3331,8 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
         "Never delete an untracked path to clear the abort without diffing it",
     ] {
         assert!(
-            skill_text("skills/git-workflow.md").contains(needle),
+            // #10055: entry plus references, so a split may move the section.
+            skill_with_references("skills/git-workflow.md").contains(needle),
             "git-workflow skill is missing the #7558 pre-pull untracked-collision \
              guidance: {needle:?}"
         );
@@ -3330,6 +3345,8 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
 /// `version-control` body must point at that section.
 #[test]
 fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
+    // #10055: entry file only, on purpose — the spend checks are resident
+    // text, and version-control points at the entry's section.
     let deployed = deployed()
         .into_iter()
         .find(|a| a.rel_path == "skills/git-workflow.md")
