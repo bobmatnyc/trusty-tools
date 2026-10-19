@@ -5,7 +5,8 @@
 mod common;
 
 use common::{
-    event, next_frame, next_full_event, push, resume, stall_the_writer, start, subscribe,
+    event, next_frame, next_full_event, push, push_and_settle, resume, stall_the_writer, start,
+    subscribe,
 };
 use trusty_common::control_bus::{SubscribeFilter, SubscribeItem};
 
@@ -32,7 +33,12 @@ async fn a_resume_after_a_kill_with_an_undrained_log_is_refused_not_skipped() {
     std::fs::remove_file(&fifo).expect("remove the FIFO");
 
     let second = start(tmp.path(), &[]).await;
-    push(&second.socket, vec![event("after-1"), event("after-2")]).await;
+    // `push` returns when the frames are written, not when the bus holds
+    // them; settle first so the stale resume below sees the new events and
+    // reaches the `since_id` check, not the "past the bus" one (#9075).
+    let pushed = push_and_settle(&second.socket, vec![event("after-1"), event("after-2")]).await;
+    let now_first = &pushed[0];
+    assert_eq!(now_first.session.as_deref(), Some("after-1"));
 
     // Resuming from the held event must not start at seq 2: seq 1 is now
     // "after-1", which this reader has never seen.
@@ -56,9 +62,6 @@ async fn a_resume_after_a_kill_with_an_undrained_log_is_refused_not_skipped() {
     }
 
     // The same seq with the id now stored there resumes normally.
-    let mut stream = subscribe(&second.socket, Some(0), SubscribeFilter::default()).await;
-    let now_first = next_full_event(&mut stream).await;
-    assert_eq!(now_first.session.as_deref(), Some("after-1"));
     let mut good = resume(
         &second.socket,
         Some(1),
