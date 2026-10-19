@@ -11,6 +11,7 @@
 //! - `facts` — CRUD for the FactStore knowledge triples
 //! - `review` — diff review, GitHub PR review
 //! - `deep` — LLM deep-analysis pass (`analyze.deep_analysis`)
+//! - `lsp`, `lsp_wire` — the language-server reads and barrier (`analyze.lsp_*`, #9078)
 //!
 //! Every handler takes `(&AnalyzerAppState, Request)` and returns
 //! `Result<Response, ApiError>`; `service::rpc` is what maps them onto method
@@ -22,6 +23,8 @@ pub mod analysis;
 pub mod deep;
 pub mod facts;
 pub mod graph;
+pub mod lsp;
+pub mod lsp_wire;
 pub mod review;
 pub mod system;
 

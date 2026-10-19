@@ -1,4 +1,4 @@
-//! The wire half of the service: twenty methods over a hardened Unix socket.
+//! The wire half of the service: the [`METHODS`] over a hardened Unix socket.
 //!
 //! Why (#6287, ADR-0032): trusty-analyze used to bind TCP loopback HTTP on
 //! `127.0.0.1:7879`, publish the address in an `http_addr` discovery file, and
@@ -28,7 +28,7 @@ use tracing::info;
 use trusty_common::uds::server::{RpcRouter, RpcServeOptions};
 
 use crate::service::events::AnalyzerAppState;
-use crate::service::handlers::{analysis, deep, facts, graph, review, system};
+use crate::service::handlers::{analysis, deep, facts, graph, lsp, lsp_wire, review, system};
 
 /// Liveness, dependency reachability and this daemon's version.
 ///
@@ -75,12 +75,16 @@ pub const METHODS: &[&str] = &[
     "analyze.facts_list",
     "analyze.facts_upsert",
     "analyze.facts_delete",
+    // #9078: DOC-72 §5's language-server reads and barrier (1.9.0 slice).
+    "analyze.lsp_diagnostics",
+    "analyze.lsp_references",
+    "analyze.lsp_analysed_at",
 ];
 
 /// Largest REQUEST frame this service will read, in bytes.
 ///
 /// Why: [`trusty_common::uds::MAX_FRAME_BYTES`] is 8 MiB, sized for
-/// control-plane frames. Most of these twenty methods fit inside it with room
+/// control-plane frames. Most of these methods fit inside it with room
 /// to spare — an index id and a handful of integers. Two do not, and both carry
 /// caller-supplied bulk that nothing bounds before it arrives:
 ///
@@ -95,7 +99,7 @@ pub const METHODS: &[&str] = &[
 /// the same figure `trusty-review`'s `rpc::MAX_FRAME_BYTES` uses, for the same
 /// reason. The budget is per connection, not per method (the method name lives
 /// inside the frame the budget governs the reading of), so it has to cover the
-/// largest of the twenty.
+/// largest of them.
 ///
 /// **This figure is inherited, not measured.** It is `trusty-review`'s, adopted
 /// because both services face the same shape of problem — caller-supplied bulk
@@ -310,8 +314,9 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
     // it is the one method a caller can legitimately invoke with no `params` at
     // all — which arrives as `null`. A struct refuses `null` (that is why
     // [`NoParams`] exists), and `Option<T>` is what accepts both it and a real
-    // filter object. The other nineteen methods all require `index_id`, so
-    // `null` is correctly a decode failure there.
+    // filter object. Every other method with params requires a field
+    // (`index_id`, or `path` for `analyze.lsp_*`), so `null` is correctly a
+    // decode failure there.
     let facts_state = state.clone();
     let router = router.typed::<Option<facts::FactQueryRequest>, serde_json::Value, _, _>(
         "analyze.facts_list",
@@ -331,12 +336,35 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
         serde_json::Value,
         facts::upsert_fact
     );
-    bind!(
+    let router = bind!(
         router,
         "analyze.facts_delete",
         facts::DeleteFactRequest,
         serde_json::Value,
         facts::delete_fact
+    );
+    // #9078: ordinary `typed` registrations, so a call re-arms the idle
+    // window; the handlers return typed `RpcError`s (`lsp_wire::lsp_rpc_error`).
+    let router = bind!(
+        router,
+        "analyze.lsp_diagnostics",
+        lsp_wire::LspDiagnosticsRequest,
+        lsp_wire::LspDiagnosticsResponse,
+        lsp::lsp_diagnostics
+    );
+    let router = bind!(
+        router,
+        "analyze.lsp_references",
+        lsp_wire::LspReferencesRequest,
+        lsp_wire::LspReferencesResponse,
+        lsp::lsp_references
+    );
+    bind!(
+        router,
+        "analyze.lsp_analysed_at",
+        lsp_wire::LspAnalysedAtRequest,
+        lsp_wire::LspAnalysedAtResponse,
+        lsp::lsp_analysed_at
     )
 }
 

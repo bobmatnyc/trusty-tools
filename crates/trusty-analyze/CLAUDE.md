@@ -409,15 +409,31 @@ analyze.deep_analysis           { index_id, model? }
 analyze.facts_list              { subject?, predicate?, object? }
 analyze.facts_upsert            { subject, predicate, object, index_id, … }
 analyze.facts_delete            { id }
+analyze.lsp_diagnostics         { scope: file|workspace, path, version?, parent_event_id? }  (#9078, ANALYZE_LSP=1)
+analyze.lsp_references          { path, line, column, version?, parent_event_id? }            (#9078, ANALYZE_LSP=1)
+analyze.lsp_analysed_at         { path, version, timeout_ms, parent_event_id? } → ready | timed_out
 ```
 
-Two error codes carry meaning beyond the JSON-RPC standard set, both in the
+The three `analyze.lsp_*` answers carry `document_version` and `snapshot`
+(`<git head>+<dirty hash>`), per DOC-72 §3 and §5. Every read waits for the
+server's `experimental/serverStatus` to report `quiescent` (a loading
+rust-analyzer answers `[]`); past the request timeout it refuses with
+`lsp_not_ready`, and `health: "error"` (the workspace failed to load) is
+refused as `lsp_workspace_failed`. A file's diagnostics and the barrier come
+from a pull (`textDocument/diagnostic`), never from waiting on a push; the
+pull is merged with the `cargo check` push for the same version, and without
+that push the answer is `complete: false, reason: "check_not_run"`. A check push counts only for the opening version (v1): `cargo check` runs only at startup. `scope: workspace` takes a file `path` and answers
+`complete: false`; a directory is refused. The barrier's `timeout_ms` is capped
+at the MCP client timeout minus 30 s.
+
+Three error codes carry meaning beyond the JSON-RPC standard set, all in the
 implementation-defined `-32000..=-32099` band:
 
 | Code | Constant | Meaning |
 |---|---|---|
 | `-32004` | `service::events::CODE_NOT_FOUND` | The request is well formed and names something absent — `analyze.scip_status` for an index nobody ingested (#5049). |
 | `-32005` | `service::events::CODE_DEADLINE_EXCEEDED` | The handler exhausted its own deadline. `trusty-review` reads this to print "ran out of time" rather than "could not be reached". |
+| `-32006` | `service::events::CODE_LSP_ERROR` | An `analyze.lsp_*` refusal; `data.kind` names it (`lsp_disabled`, `lsp_not_ready`, `lsp_workspace_failed`, `lsp_stale`, `lsp_timeout`, `lsp_hung`, `lsp_file_not_found`, `lsp_outside_workspace`, …) (#9078). |
 
 ---
 
@@ -426,7 +442,7 @@ implementation-defined `-32000..=-32099` band:
 Parity rule: every RPC method has an MCP tool equivalent.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools** with default features, **25 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+The MCP server registers **24 tools** with default features, **28 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Available | Arguments | Summary |
@@ -446,6 +462,9 @@ this table is generated from it, not maintained by hand.
 | `list_analyze_indexes` | always | — | List all indexes known to the trusty-analyze daemon. |
 | `list_entities` | always | `index?`, `index_id?`, `kind?`, `language?` | List symbol-level entities (functions, classes, ...) for an index |
 | `list_facts` | always | `object?`, `predicate?`, `subject?` | List canonical facts, optionally filtered by subject/predicate/object |
+| `lsp_analysed_at` | always | `path`, `version`, `timeout_ms`, `parent_event_id?` | Block until the language server has published diagnostics for a file at a document version, or the deadline passes: answers ready or… |
+| `lsp_diagnostics` | always | `scope`, `path`, `parent_event_id?`, `version?` | Type-checked diagnostics from the language server (rust-analyzer), stamped with the document version and workspace snapshot they describe. |
+| `lsp_references` | always | `path`, `line`, `column`, `parent_event_id?`, `version?` | Resolved reference sites of the symbol at a zero-based position, from the language server, stamped with document version and snapshot. |
 | `review_diff` | always | `diff`, `index_id` | Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). |
 | `review_github_pr` | always | `owner`, `repo`, `pr`, `index_id`, `post_comment?` | Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. |
 | `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |

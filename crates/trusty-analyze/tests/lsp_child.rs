@@ -13,7 +13,7 @@
 #[path = "support/fake_lsp_server.rs"]
 mod fake_lsp_server;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,26 +28,7 @@ fn fake_lsp_server_entry() {
     fake_lsp_server::run_if_requested();
 }
 
-/// A command that re-executes this binary as the fake server in `mode`.
-fn fake(mode: &str, pidfile: &Path) -> LspCommand {
-    let exe = std::env::current_exe().expect("current_exe");
-    let script = format!(
-        "{}=\"$1\" {}=\"$2\" exec \"$0\" --exact fake_lsp_server_entry --nocapture \
-         --test-threads=1 3>&1 1>&2",
-        fake_lsp_server::MODE_ENV,
-        fake_lsp_server::PIDFILE_ENV
-    );
-    LspCommand {
-        program: "/bin/sh".into(),
-        args: vec![
-            "-c".into(),
-            script,
-            exe.display().to_string(),
-            mode.into(),
-            pidfile.display().to_string(),
-        ],
-    }
-}
+use fake_lsp_server::command as fake;
 
 struct Fixture {
     dir: tempfile::TempDir,
