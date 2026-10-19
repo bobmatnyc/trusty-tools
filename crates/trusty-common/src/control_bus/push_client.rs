@@ -88,14 +88,17 @@ pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_millis(500);
 ///      frames actually left the buffer and, when draining stopped early,
 ///      why — without `flush` needing to be infallible in a way that hides
 ///      partial progress.
-/// What: `sent` is always accurate even when `error` is `Some`: it counts only
-///       frames the trusty-events socket accepted. `error` is `None` when the
-///       buffer was fully drained (including the empty-buffer case).
+/// What: `sent` is always accurate even when `error` is `Some`: it counts the
+///       frames written to the trusty-events socket. There is no delivery
+///       acknowledgement, so a written frame can still be lost if the bus dies
+///       before ingesting it (#9075). `error` is `None` when the buffer was
+///       fully drained (including the empty-buffer case).
 /// Test: `tests::push_client_flushes_once_the_socket_appears`,
 ///       `tests::push_client_buffers_when_the_socket_is_absent`.
 #[derive(Debug)]
 pub struct PushFlushOutcome {
-    /// Frames the trusty-events socket accepted this call.
+    /// Frames written to the trusty-events socket this call; written, not
+    /// acknowledged (#9075).
     pub sent: usize,
     /// Set when draining stopped before the buffer was empty; the frame that
     /// failed is left at the front of the buffer for the next flush attempt.
@@ -288,8 +291,10 @@ impl PushClient {
     ///       already used per-frame. Half-closes the connection once every
     ///       buffered frame has been written. Stops and re-queues the frame
     ///       at the front of the buffer on the first failure (dial, write, or
-    ///       per-operation timeout), so a transient failure loses nothing and
-    ///       the next `flush` call resumes where this one stopped.
+    ///       per-operation timeout), so the frame that failed is kept and the
+    ///       next `flush` call resumes where this one stopped. A frame counts
+    ///       as sent once it is written to the socket; the bus sends no
+    ///       delivery acknowledgement (#9075).
     ///
     /// # Errors
     ///
