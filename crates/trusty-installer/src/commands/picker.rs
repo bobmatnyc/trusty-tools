@@ -172,10 +172,19 @@ fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
 /// Why: `install::run` hands the picker's expanded list back to
 /// [`select_members_transitive`] as names, so this list decides which members
 /// the resolver treats as explicitly asked for.
-/// What: the crate name of every member in `chosen`.
-/// Test: `install::tests::the_picker_round_trip_keeps_the_bus_soft`.
+/// What: the crate name of every member in `chosen` except a SOFT one.
+/// #10042: a soft member (a producer's bus) was added by the resolver, not
+/// picked; passing it back by name made it explicit and `soft: false`, so a
+/// failed bus gated an optional producer's run. Left out, the resolver adds it
+/// again, softly. A bus the operator picked is `soft: false` and stays.
+/// Test: `install::tests::the_picker_round_trip_keeps_the_bus_soft`,
+/// `install::tests::a_picked_bus_stays_explicit_through_the_round_trip`.
 pub fn override_names(chosen: &[StableMember]) -> Vec<String> {
-    chosen.iter().map(|m| m.crate_name.clone()).collect()
+    chosen
+        .iter()
+        .filter(|m| !m.soft)
+        .map(|m| m.crate_name.clone())
+        .collect()
 }
 
 /// Print the numbered component menu to stderr.
