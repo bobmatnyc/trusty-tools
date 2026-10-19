@@ -16,6 +16,10 @@
 //!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), and
 //!       — behind the `uds` feature, unix only — `PushClient` (the buffered
 //!       producer-side transport to console's ingest socket, DOC-73 §4).
+//!       The `events.subscribe` contract (#9075, ADR-0065 decision 3) adds
+//!       `EVENTS_SERVICE`, `METHOD_EVENTS_SUBSCRIBE`, `events_socket_path`,
+//!       `SubscribeParams`, `SubscribeFilter` and `SubscribeItem`, plus — behind
+//!       `uds`, unix only — `SubscribeRequest` and `SubscribeFrameError`.
 //!       Everything except `PushClient` is a type with no transport: no
 //!       channel, no process-global sender, no sequence counter. A producer
 //!       stamps `seq`, `at`, and `id` itself and hands the envelope to
@@ -27,7 +31,8 @@
 //!       sources to keep the types-only boundary from eroding — `PushClient`
 //!       is the one deliberate, scanned-and-allowed exception (its own
 //!       module doc explains why it still satisfies that scan); its own
-//!       behavioral tests live beside it in `push_client.rs`.
+//!       behavioral tests live beside it in `push_client.rs`. The subscribe
+//!       contract's golden frames live in `subscribe_tests`.
 
 // #6846: hoisted out of `trusty_agents_common::events`, which keeps its
 // in-process channel and stderr relay until slice 9 (#6854) removes them.
@@ -48,6 +53,12 @@ mod filter;
 mod lifecycle;
 #[cfg(all(unix, feature = "uds"))]
 mod push_client;
+// #9075: the subscribe half of the wire contract (ADR-0065 decision 3). The
+// request frame and its error need `uds::server` and `thiserror`, so they are
+// gated like `push_client`; the types and the socket path are not.
+mod subscribe;
+#[cfg(all(unix, feature = "uds"))]
+mod subscribe_frame;
 
 pub use action::{
     ActionEvent, ActionMeta, Actor, AgentPhase, CallPhase, FilePhase, ObjectRef, ObjectType,
@@ -59,6 +70,15 @@ pub use filter::Filter;
 pub use lifecycle::{HarnessSource, LifecycleEvent};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
+pub use subscribe::{
+    EVENTS_SERVICE, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter, SubscribeItem, SubscribeParams,
+    events_socket_path,
+};
+#[cfg(all(unix, feature = "uds"))]
+pub use subscribe_frame::{SubscribeFrameError, SubscribeRequest};
 
 #[cfg(test)]
 mod tests;
+// #9075: golden frames for the `events.subscribe` contract (ADR-0065).
+#[cfg(test)]
+mod subscribe_tests;

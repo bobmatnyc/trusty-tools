@@ -1,0 +1,2 @@
+Added
+- `control_bus` carries the subscribe half of the event-bus wire contract (ADR-0065): `events_socket_path()` resolves `<data dir>/trusty-events/trusty-events.sock`, `METHOD_EVENTS_SUBSCRIBE` names the streaming `events.subscribe` method, and `SubscribeParams`, `SubscribeFilter` (with `kind` and `actor` axes) and `SubscribeItem` are its serde frames. Behind `uds`, `SubscribeRequest` builds and decodes the request line and `SubscribeFrameError` names each reason one is refused; an unknown params or filter field is an error (#9075).
