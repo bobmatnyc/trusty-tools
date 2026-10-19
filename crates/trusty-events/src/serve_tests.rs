@@ -180,6 +180,15 @@ fn since(seq: u64) -> SubscribeParams {
     }
 }
 
+/// A resume at `seq` naming `id` as the event held there (#9075).
+fn resume_at(seq: u64, id: Option<EventId>) -> SubscribeParams {
+    SubscribeParams {
+        since_seq: Some(seq),
+        since_id: id,
+        ..SubscribeParams::default()
+    }
+}
+
 #[tokio::test]
 async fn a_first_line_with_jsonrpc_is_routed_to_subscribe() {
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
@@ -253,7 +262,10 @@ async fn replay_reads_the_log_up_to_the_ring_then_the_ring() {
         Some(log),
         recovered.next_seq,
     ));
-    for _ in 0..5 {
+    let first = event();
+    let first_id = first.id;
+    bus.ingest(first);
+    for _ in 0..4 {
         bus.ingest(event());
     }
     let deadline = tokio::time::Instant::now() + BOUND;
@@ -270,7 +282,8 @@ async fn replay_reads_the_log_up_to_the_ring_then_the_ring() {
     }
 
     let shared = Arc::new(Connection::new(bus, limits(4, 3)));
-    let mut stream = subscribe(&shared, since(1)).await;
+    // Seq 1 has left the 2-event ring, so its id is checked against the log.
+    let mut stream = subscribe(&shared, resume_at(1, Some(first_id))).await;
     for (want, from_log) in [(2, true), (3, true), (4, false), (5, false)] {
         match item(&mut stream).await {
             SubscribeItem::Event { event, persisted } => {
@@ -280,4 +293,63 @@ async fn replay_reads_the_log_up_to_the_ring_then_the_ring() {
             other => panic!("expected seq {want}, got {other:?}"),
         }
     }
+}
+
+// ─── #9075 (HIGH-1): a resume names the event it holds ─────────────────────
+
+/// A bus holding seqs 1-3 in its ring; returns the bus and seq 2's id.
+fn three_events() -> (Arc<EventBus>, EventId) {
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    bus.ingest(event());
+    let second = event();
+    let id = second.id;
+    bus.ingest(second);
+    bus.ingest(event());
+    (bus, id)
+}
+
+#[tokio::test]
+async fn a_resume_whose_since_id_names_another_event_is_refused() {
+    let (bus, _) = three_events();
+    let shared = Arc::new(Connection::new(bus, limits(4, 3)));
+    let mut stream = subscribe(&shared, resume_at(2, Some(EventId::new()))).await;
+    let message = error_message(&mut stream).await;
+    assert!(message.contains("since_id"), "got {message:?}");
+}
+
+#[tokio::test]
+async fn a_resume_without_since_id_is_refused() {
+    let (bus, _) = three_events();
+    let shared = Arc::new(Connection::new(bus, limits(4, 3)));
+    let mut stream = subscribe(&shared, since(2)).await;
+    let message = error_message(&mut stream).await;
+    assert!(message.contains("since_id"), "got {message:?}");
+}
+
+#[tokio::test]
+async fn a_resume_whose_since_id_matches_continues_after_it() {
+    let (bus, id) = three_events();
+    let shared = Arc::new(Connection::new(bus, limits(4, 3)));
+    let mut stream = subscribe(&shared, resume_at(2, Some(id))).await;
+    match item(&mut stream).await {
+        SubscribeItem::Event { event, .. } => assert_eq!(event.seq, 3),
+        other => panic!("expected seq 3, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_resume_from_a_seq_no_tier_holds_is_refused() {
+    // No log and a 2-event ring: seq 1 cannot be checked, so it is refused
+    // rather than trusted.
+    let bus = Arc::new(EventBus::new(EventBusConfig { capacity: 2 }));
+    let first = event();
+    let id = first.id;
+    bus.ingest(first);
+    for _ in 0..4 {
+        bus.ingest(event());
+    }
+    let shared = Arc::new(Connection::new(bus, limits(4, 3)));
+    let mut stream = subscribe(&shared, resume_at(1, Some(id))).await;
+    let message = error_message(&mut stream).await;
+    assert!(message.contains("since_id"), "got {message:?}");
 }

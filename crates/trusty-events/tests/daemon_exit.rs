@@ -6,7 +6,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{BOUND, event, push, socket_in, spawn, start, subscribe};
+use common::{
+    BOUND, chmod, event, log_dir_in, push, socket_in, spawn, stall_the_writer, start, subscribe,
+};
 use trusty_common::control_bus::SubscribeFilter;
 use trusty_common::uds::{SocketVerdict, probe_socket_verdict};
 
@@ -85,5 +87,54 @@ async fn an_unopenable_log_directory_exits_non_zero() {
         probe_socket_verdict(&socket_in(tmp.path()), Duration::from_millis(200)).await,
         SocketVerdict::Serving,
         "nothing answers on the socket after the exit"
+    );
+}
+
+/// A log write the writer cannot make ends the daemon with exit 1, instead of
+/// an `error!` while it goes on handing out `seq` it never records.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_log_write_failure_exits_non_zero() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut daemon = start(tmp.path(), &[]).await;
+    // Read-only log directory: the writer cannot create today's day file.
+    let log_dir = log_dir_in(tmp.path());
+    chmod(&log_dir, 0o500);
+
+    push(&daemon.socket, vec![event("unwritable")]).await;
+    let status = daemon.wait_exit(BOUND).await;
+    chmod(&log_dir, 0o700);
+    let status = status.unwrap_or_else(|| {
+        panic!(
+            "the daemon ran on after a failed log write; stderr:\n{}",
+            daemon.stderr_text()
+        )
+    });
+    assert!(
+        !status.success(),
+        "a failed log write is a failure exit, got {status}"
+    );
+}
+
+/// A SIGTERM whose log writer cannot drain in time exits non-zero, so
+/// launchd and the operator see that queued events were not written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_timeout_on_sigterm_exits_non_zero() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut daemon = start(tmp.path(), &[]).await;
+    let fifo = stall_the_writer(tmp.path());
+    push(&daemon.socket, vec![event("queued")]).await;
+
+    daemon.sigterm();
+    let status = daemon.wait_exit(BOUND).await;
+    std::fs::remove_file(&fifo).expect("remove the FIFO");
+    let status = status.unwrap_or_else(|| {
+        panic!(
+            "the daemon did not exit after SIGTERM; stderr:\n{}",
+            daemon.stderr_text()
+        )
+    });
+    assert!(
+        !status.success(),
+        "an undrained log at shutdown is a failure exit, got {status}"
     );
 }

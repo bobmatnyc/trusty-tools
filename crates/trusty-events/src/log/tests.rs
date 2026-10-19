@@ -431,6 +431,37 @@ async fn open_recovers_next_seq_from_an_existing_log() {
     assert_eq!(recovered.next_seq, 3);
 }
 
+// #9075 (HIGH-2): after more than `retain_days` idle days every day file is
+// expired; deleting them all would restart `seq` at 1.
+#[tokio::test]
+async fn seq_survives_a_restart_past_the_retention_window() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let today = Utc::now().date_naive();
+    let long_ago = today - chrono::Days::new(30);
+    let older = today - chrono::Days::new(40);
+    seed_file(tmp.path(), older, &[event(1), event(2)]).await;
+    seed_file(tmp.path(), long_ago, &[event(3)]).await;
+    // An empty file newer still, as a crash between rotate and the first
+    // write leaves; it holds no seq, so it cannot be the one kept.
+    seed_file(tmp.path(), long_ago + chrono::Days::new(1), &[]).await;
+
+    let (_log, recovered) = DurableLog::open(config(tmp.path()))
+        .await
+        .expect("open an idle log");
+    assert_eq!(
+        recovered.next_seq, 4,
+        "seq continues from the newest event however old its file is"
+    );
+    assert!(
+        tmp.path().join(day_file_name(long_ago)).exists(),
+        "the newest file holding an event is kept"
+    );
+    assert!(
+        !tmp.path().join(day_file_name(older)).exists(),
+        "older expired files are still deleted"
+    );
+}
+
 #[tokio::test]
 async fn events_written_are_readable_back_in_order() {
     let tmp = tempfile::TempDir::new().expect("tempdir");

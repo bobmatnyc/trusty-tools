@@ -164,6 +164,13 @@ async fn seq_continues_after_a_restart() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut first = start(tmp.path(), &[]).await;
     push(&first.socket, vec![event("a"), event("a"), event("a")]).await;
+    // Read all three back first, so SIGTERM cannot arrive before they are
+    // ingested.
+    let mut seen = subscribe(&first.socket, Some(0), SubscribeFilter::default()).await;
+    for expected in 1..=3u64 {
+        assert_eq!(next_event(&mut seen).await.0, expected);
+    }
+    drop(seen);
     let status = first.terminate().await;
     assert!(status.success(), "SIGTERM is a clean exit, got {status}");
     drop(first);

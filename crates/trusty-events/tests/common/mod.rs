@@ -12,8 +12,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use trusty_common::control_bus::{
-    HarnessEvent, HarnessPayload, HarnessSource, PushClient, SubscribeFilter, SubscribeItem,
-    SubscribeParams, SubscribeRequest,
+    EventId, HarnessEvent, HarnessPayload, HarnessSource, PushClient, SubscribeFilter,
+    SubscribeItem, SubscribeParams, SubscribeRequest,
 };
 use trusty_common::uds::{
     FramedStream, SocketVerdict, probe_socket_verdict, send_framed_stream_request,
@@ -116,6 +116,22 @@ impl Daemon {
         }
     }
 
+    /// SIGKILL the daemon and reap it: no shutdown path runs.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Send SIGTERM (what launchd sends) without waiting.
+    pub fn sigterm(&self) {
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .expect("run kill");
+        assert!(sent.success(), "kill -TERM {pid} failed");
+    }
+
     /// SIGTERM the daemon (what launchd sends) and wait for it to exit.
     pub async fn terminate(&mut self) -> ExitStatus {
         let pid = self.child.id().to_string();
@@ -195,10 +211,65 @@ pub async fn subscribe(
     since_seq: Option<u64>,
     filters: SubscribeFilter,
 ) -> FramedStream<SubscribeItem> {
-    let request = SubscribeRequest::new(1, SubscribeParams { since_seq, filters });
+    resume(socket, since_seq, None, filters).await
+}
+
+/// Open an `events.subscribe` stream that resumes at `since_seq`, naming the
+/// event the reader holds there (#9075).
+pub async fn resume(
+    socket: &Path,
+    since_seq: Option<u64>,
+    since_id: Option<EventId>,
+    filters: SubscribeFilter,
+) -> FramedStream<SubscribeItem> {
+    let request = SubscribeRequest::new(
+        1,
+        SubscribeParams {
+            since_seq,
+            since_id,
+            filters,
+        },
+    );
     send_framed_stream_request(socket, &request, Duration::from_secs(600))
         .await
         .expect("open events.subscribe")
+}
+
+/// The next frame of `stream`, whatever it is, bounded by [`BOUND`].
+pub async fn next_frame(
+    stream: &mut FramedStream<SubscribeItem>,
+) -> Option<Result<SubscribeItem, trusty_common::uds::UdsRpcError>> {
+    tokio::time::timeout(BOUND, stream.next_frame())
+        .await
+        .expect("a frame or the end of the stream within the bound")
+}
+
+/// Today's day file in the log directory under `root`.
+pub fn todays_day_file(root: &Path) -> PathBuf {
+    let name = format!(
+        "{}.ndjson",
+        chrono::Utc::now().date_naive().format("%Y-%m-%d")
+    );
+    log_dir_in(root).join(name)
+}
+
+/// Put a FIFO where today's day file goes. The writer's next open or read of
+/// it blocks with no peer, so every event after this is broadcast but never
+/// written: the writer has not drained when the daemon dies.
+pub fn stall_the_writer(root: &Path) -> PathBuf {
+    let fifo = todays_day_file(root);
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    fifo
+}
+
+/// Set `path`'s permission bits.
+pub fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
 
 /// The next item, failing the test after [`BOUND`] or on a stream error.
@@ -208,6 +279,14 @@ pub async fn next_item(stream: &mut FramedStream<SubscribeItem>) -> SubscribeIte
         Ok(Some(Err(e))) => panic!("subscription failed: {e}"),
         Ok(None) => panic!("subscription ended"),
         Err(_) => panic!("no subscription item within {BOUND:?}"),
+    }
+}
+
+/// The next item, which must be an event.
+pub async fn next_full_event(stream: &mut FramedStream<SubscribeItem>) -> HarnessEvent {
+    match next_item(stream).await {
+        SubscribeItem::Event { event, .. } => *event,
+        other => panic!("expected an event, got {other:?}"),
     }
 }
 
