@@ -19,7 +19,10 @@
 //! does on a broken `Cargo.toml`. It advertises `diagnosticProvider` and
 //! answers `textDocument/diagnostic` (pull) with the canned set once loaded.
 //! `unversioned_open_only` publishes an unversioned set on `didOpen` and
-//! nothing on `didChange`.
+//! nothing on `didChange`. Like rust-analyzer's `cargo check` (flycheck),
+//! `check` and `check_unversioned` push a check-only set (an E0382) that the
+//! pull never returns, with and without a version; `check_pending` pushes
+//! nothing; `slow_pull` holds each pull for [`SLOW_PULL_MS`].
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
 //! `<exe> --exact fake_lsp_server_entry --nocapture 3>&1 1>&2`, with the mode in
@@ -41,6 +44,11 @@ use serde_json::{json, Value};
 
 /// How long `loading` mode stays not quiescent after `initialized`.
 pub const LOADING_MS: u64 = 400;
+/// How long `slow_pull` holds a `textDocument/diagnostic` answer.
+pub const SLOW_PULL_MS: u64 = 800;
+/// The message of the check-only (flycheck-like) diagnostic the `check*`
+/// modes push and never pull, as rust-analyzer does for `cargo check`.
+pub const CHECK_MESSAGE: &str = "use of moved value: `s`";
 
 /// The fake's stdout, shared with the `loading` timer thread; each frame is
 /// written whole under the lock.
@@ -155,7 +163,9 @@ fn serve(mode: &str) -> i32 {
                 // readiness between the check and the frame.
                 let mut last = open_doc.lock().expect("open_doc");
                 *last = Some((doc["uri"].clone(), doc["version"].clone()));
-                if !(mode == "unversioned_open_only" && method == "textDocument/didChange") {
+                let silent = mode == "check_pending"
+                    || (mode == "unversioned_open_only" && method == "textDocument/didChange");
+                if !silent {
                     let loaded = ready.load(Ordering::SeqCst);
                     publish(&mut out, mode, &doc["uri"], &doc["version"], loaded);
                 }
@@ -168,6 +178,10 @@ fn serve(mode: &str) -> i32 {
                 reply(&mut out, id, json!([]));
             }
             ("textDocument/diagnostic", Some(id)) => {
+                if mode == "slow_pull" {
+                    // A sync can land while this pull is in flight.
+                    std::thread::sleep(std::time::Duration::from_millis(SLOW_PULL_MS));
+                }
                 let loaded = ready.load(Ordering::SeqCst) && mode != "loading_clean";
                 let items = if loaded { canned() } else { json!([]) };
                 reply(
@@ -261,12 +275,29 @@ fn canned() -> Value {
     }])
 }
 
-/// Publish diagnostics for one document: the canned one once loaded, an
-/// empty set while loading; no version in the `unversioned*` modes.
+/// The check-only set the `check*` modes push and the pull never returns.
+fn check_set() -> Value {
+    json!([{
+        "range": {"start": {"line": 2, "character": 50},
+                  "end": {"line": 2, "character": 51}},
+        "severity": 1,
+        "code": "E0382",
+        "source": "rustc",
+        "message": CHECK_MESSAGE
+    }])
+}
+
+/// Publish diagnostics for one document: the canned one once loaded (the
+/// check-only set in the `check*` modes), an empty set while loading; no
+/// version in the `unversioned*` and `check_unversioned` modes.
 fn publish(out: &mut impl Write, mode: &str, uri: &Value, version: &Value, loaded: bool) {
-    let diagnostics = if loaded { canned() } else { json!([]) };
+    let diagnostics = match (loaded, mode.starts_with("check")) {
+        (false, _) => json!([]),
+        (true, true) => check_set(),
+        (true, false) => canned(),
+    };
     let mut params = json!({"uri": uri, "version": version, "diagnostics": diagnostics});
-    if mode.starts_with("unversioned") {
+    if mode.starts_with("unversioned") || mode == "check_unversioned" {
         // rust-analyzer's cargo-check pass publishes with no version.
         if let Some(p) = params.as_object_mut() {
             p.remove("version");

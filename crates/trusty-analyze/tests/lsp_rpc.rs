@@ -261,6 +261,92 @@ async fn a_changed_file_is_pulled_at_its_new_version() {
     let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
     assert_eq!(v["document_version"], 2, "{v}");
     assert_eq!(v["files"][0]["version"], 2, "{v}");
+    // The only push is the unversioned one sent before the v2 sync, so it
+    // cannot describe v2: the check half is still pending.
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["reason"], "check_pending", "{v}");
+}
+
+// ---- pull + push merge ------------------------------------------------------
+
+fn codes(file: &Value) -> Vec<String> {
+    let mut c: Vec<String> = file["diagnostics"]
+        .as_array()
+        .map(|a| a.iter().map(|d| d["code"].to_string()).collect())
+        .unwrap_or_default();
+    c.sort();
+    c
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_scope_merges_the_pull_with_the_check_push() {
+    // (a) rust-analyzer's pull carries only native analysis; `cargo check`
+    // findings (E0382) arrive only as a push, with or without a version.
+    for mode in ["check", "check_unversioned"] {
+        let rig = Rig::new(mode);
+        let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+        assert_eq!(
+            codes(&v["files"][0]),
+            vec!["\"E0001\"", "\"E0382\""],
+            "{mode}: {v}"
+        );
+        assert_eq!(v["complete"], true, "{mode}: {v}");
+        assert_eq!(v["files"][0]["version"], 1, "{mode}: {v}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_check_push_yet_the_answer_is_incomplete() {
+    // (b) the pull alone is never a complete answer.
+    let rig = Rig::new("check_pending");
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(v["complete"], false, "{v}");
+    assert_eq!(v["reason"], "check_pending", "{v}");
+    assert_eq!(codes(&v["files"][0]), vec!["\"E0001\""], "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_scope_keeps_the_push_for_the_requested_file() {
+    // (c) the pulled entry is merged with the push, not swapped for it.
+    let rig = Rig::new("check");
+    let v = rig
+        .ok(
+            "analyze.lsp_diagnostics",
+            json!({"scope": "workspace", "path": rig.file()}),
+        )
+        .await;
+    assert_eq!(v["files"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(codes(&v["files"][0]), vec!["\"E0001\"", "\"E0382\""], "{v}");
+    assert_eq!(v["complete"], false, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sync_during_the_pull_makes_the_answer_stale() {
+    // (d) a v2 sync lands while the v1 pull is in flight; the v1 answer
+    // must not go out stamped as current.
+    let rig = Arc::new(Rig::new("slow_pull"));
+    // Warm the server so the race is between the pull and the second sync.
+    rig.ok("analyze.lsp_references", rig.refs_params()).await;
+    let first = {
+        let rig = Arc::clone(&rig);
+        tokio::spawn(async move { rig.call("analyze.lsp_diagnostics", rig.diag_params()).await })
+    };
+    tokio::time::sleep(Duration::from_millis(fake_lsp_server::SLOW_PULL_MS / 4)).await;
+    std::fs::write(rig.file(), "pub fn answer() -> u32 { 43 }\n").unwrap();
+    let second = {
+        let rig = Arc::clone(&rig);
+        tokio::spawn(async move { rig.call("analyze.lsp_references", rig.refs_params()).await })
+    };
+    let r = first.await.expect("first call");
+    let err = r
+        .error
+        .unwrap_or_else(|| panic!("a v1 answer went out after a v2 sync: {:?}", r.result));
+    assert_eq!(
+        err.data,
+        Some(json!({"kind": "lsp_stale", "requested": 1, "current": 2})),
+        "{err:?}"
+    );
+    second.await.expect("second call");
 }
 
 #[tokio::test(flavor = "multi_thread")]
