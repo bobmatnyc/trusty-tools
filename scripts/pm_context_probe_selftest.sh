@@ -139,6 +139,9 @@ check parse-catchup-error 1 'session_context_catchup failed: daemon unreachable'
   python3 "$PROBE" parse "$WORK/catchup-error.jsonl"
 check parse-no-call 1 'result: Not logged in · Please run /login' \
   python3 "$PROBE" parse "$WORK/no-call.jsonl"
+# split-imports-under-I: the sibling readout module loads with the script dir dropped from sys.path.
+check split-imports-under-I 0 '| baseline | 100 | 100, 104, 98 | +0 | measured |' \
+  python3 -I "$PROBE" report "$WORK/results.json"
 check report-baseline 0 '| baseline | 100 | 100, 104, 98 | +0 | measured |' \
   python3 "$PROBE" report "$WORK/results.json"
 check report-delta 0 '| mcp-off | 60 | 60 | -40 | measured |' python3 "$PROBE" report "$WORK/results.json"
