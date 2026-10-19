@@ -298,6 +298,11 @@ jobs:
       - name: Sandbox secrets+console launcher selftest (#9793)
         run: bash scripts/sandbox_secrets_console_selftest.sh
 
+      # #8998: the PM starting-context probe's stream readout and lever argv;
+      # fixture streams only, no claude and no build.
+      - name: PM context probe selftest (#8998)
+        run: bash scripts/pm_context_probe_selftest.sh
+
       # #9224: the installed tagent wrapper must not export `.env.local` under
       # TRUSTY_SANDBOX=1. Its selftest drives a stub tagent, so it needs no build.
       - name: tagent wrapper selftest (#9224)
