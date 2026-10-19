@@ -208,11 +208,12 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # `console_resumes_from_its_last_event_id_after_a_restart`,
 # `a_refused_resume_resyncs_from_zero_without_repeating_events`,
 # `a_gap_the_bus_reports_reaches_the_relay` and
-# `the_client_rides_out_a_daemon_restart_mid_stream`. They stay unselected:
-# each runs the trusty-events binary, which ADR-0065 condition 1 forbids
-# console to link, so it must be built in the same cargo run
-# (`cargo test -p trusty-events -p trusty-console --test events_uds_live
-# --test daemon_wire -- --include-ignored`). 136 + 4 -> 140.
+# `the_client_rides_out_a_daemon_restart_mid_stream`, each
+# `#[ignore = "spawns the built trusty-events binary; not linkable per
+# ADR-0065"]`. They stay unselected: the binary must be built in the same
+# cargo run (`cargo test -p trusty-events -p trusty-console --test
+# events_uds_live --test daemon_wire -- --include-ignored`).
+# 136 + 4 -> 140 (Architect-approved, df-D7d).
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
 # UNSELECTED-BASELINE: 140

@@ -942,6 +942,69 @@ async fn read_route_refuses_cross_origin() {
     );
 }
 
+/// Why: #9076 review — the events status route is served on every TCP
+/// listener, so it must face the same Host/Origin check as its
+/// `/api/console` siblings, not a weaker one.
+/// What: through the loopback serve wiring, a cross-origin `GET` of the
+/// status route and of a sibling (`/api/console/sessions`) are both refused
+/// with 403 and no CORS header; the same request from the listener's own
+/// origin reaches the status handler (503 here: the client never ran).
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_refuses_cross_origin_like_its_siblings() {
+    for uri in ["/api/console/sessions", "/api/console/events/status"] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", "127.0.0.1:7788")
+            .header("origin", "http://evil.example.com")
+            .body(Body::empty())
+            .expect("request");
+        let resp = loopback_served_router()
+            .oneshot(req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
+        assert!(
+            !resp.headers().contains_key("access-control-allow-origin"),
+            "{uri}"
+        );
+    }
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/console/events/status")
+        .header("host", "127.0.0.1:7788")
+        .header("origin", "http://127.0.0.1:7788")
+        .body(Body::empty())
+        .expect("request");
+    let resp = loopback_served_router()
+        .oneshot(req)
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Why: #9076 — the status route's 200 is the "can see the bus" answer, so
+/// it must follow the client's state, not be fixed at 503.
+/// What: marks the state's relay connected and reads the route: 200, state
+/// `connected`, and no `socket` field (no absolute path is served).
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_answers_200_when_connected() {
+    let state = make_test_state();
+    state.events().note_connected();
+    let req = Request::builder()
+        .uri("/api/console/events/status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = build_router(state).oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&get_bytes(resp).await).expect("parse json");
+    assert_eq!(body["state"], "connected", "{body}");
+    assert!(body.get("socket").is_none(), "no path is served: {body}");
+}
+
 // ── router-wide guard coverage on the reverse-proxy routes (#3268) ────────
 
 /// Why: #3268 regression guard — the write-origin guard previously only

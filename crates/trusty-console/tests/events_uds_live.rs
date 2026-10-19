@@ -290,7 +290,7 @@ async fn logged(root: &Path, n: usize) {
 /// A console restarted with the SSE `Last-Event-ID` it last sent resumes
 /// after exactly that event: no repeat, no gap.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs the trusty-events binary; cargo build -p trusty-events first"]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
 async fn console_resumes_from_its_last_event_id_after_a_restart() {
     let tmp = TempDir::new().expect("tempdir");
     let daemon = start(tmp.path(), "daemon", &[]).await;
@@ -316,7 +316,7 @@ async fn console_resumes_from_its_last_event_id_after_a_restart() {
 /// console holds is gone: the resume is refused, the console replays from 0,
 /// and what it already relayed is not relayed again.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs the trusty-events binary; cargo build -p trusty-events first"]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
 async fn a_refused_resume_resyncs_from_zero_without_repeating_events() {
     let tmp = TempDir::new().expect("tempdir");
     let mut first = start(tmp.path(), "first", &[]).await;
@@ -356,7 +356,7 @@ async fn a_refused_resume_resyncs_from_zero_without_repeating_events() {
 /// Events the ring evicted and the log no longer holds reach the relay as a
 /// gap of the right size, before the events that follow it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs the trusty-events binary; cargo build -p trusty-events first"]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
 async fn a_gap_the_bus_reports_reaches_the_relay() {
     let tmp = TempDir::new().expect("tempdir");
     let daemon = start(tmp.path(), "daemon", &["--ring-capacity", "2"]).await;
@@ -380,7 +380,7 @@ async fn a_gap_the_bus_reports_reaches_the_relay() {
 /// The daemon stops mid-stream and comes back: the console shows it is
 /// reconnecting while it is down, then resumes after the last event it held.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs the trusty-events binary; cargo build -p trusty-events first"]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
 async fn the_client_rides_out_a_daemon_restart_mid_stream() {
     let tmp = TempDir::new().expect("tempdir");
     let mut first = start(tmp.path(), "first", &[]).await;

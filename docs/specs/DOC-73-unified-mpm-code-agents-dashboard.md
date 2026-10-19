@@ -634,8 +634,8 @@ scope, and this spec still has no answer for one (§10 Q3).
   route (§4.4) — read this. Overflow is reported, never silent: a ring overrun
   produces the same `Lag { skipped }`-shaped notice §3.1's envelope already
   carries, and the dashboard renders it as a visible gap marker in both views.
-- **The log.** A durable NDJSON file per day, written by console as each frame
-  is accepted, rotated and retained per #3157's original "durable JSONL
+- **The log.** A durable NDJSON file per day, written by `trusty-events` as
+  each frame is accepted (#9075), rotated and retained per #3157's original "durable JSONL
   logging, rotation, retention, and replay" requirement — the requirement
   survives the epic's closure even though its bus placement did not. A viewer
   that opens mid-session reads the log to build the tree it missed, then
@@ -659,8 +659,8 @@ make telemetry able to break the work it observes.
 2. Producers push independently of any reader, so a browser that stops reading
    lags only console's own SSE buffer (§8.2) — never the ring, and never a
    producer.
-3. The log is written by console as frames arrive, so a lagged SSE reader
-   loses nothing permanently — it re-reads from the log via `since_seq` and
+3. The log is written by `trusty-events` as frames arrive (#9075), so a
+   lagged SSE reader loses nothing permanently — it re-reads from the log via `since_seq` and
    `since_id` (§4.4).
 
 ### 4.4 Fan-out to viewers
@@ -687,11 +687,21 @@ the bus refuses a resume unless it also names the event held at that seq
 therefore sends `id: <seq>:<uuid>` on each event and splits it back into
 `since_seq` and `since_id` on reconnect. When the bus refuses the resume (a
 restart reassigned the seq, or retention dropped it), console resubscribes with
-`since_seq: 0` and drops events it already relayed by `EventId` (#9076). A gap
-carries no `id:`, so it does not move the reader's `Last-Event-ID`. Console's
-own connection state is served at `GET /api/console/events/status` (`200`
-connected, `503` otherwise), so a page can tell "no events" from "cannot see
-the bus" (§8.5). A WebSocket buys a return
+`since_seq: 0` and drops events it already relayed by `EventId` (#9076). The
+dedupe remembers the last 65,536 relayed ids; after a resync, an older event is
+relayed again. An event console cannot decode (a newer daemon's payload, §3.3)
+is relayed as a one-event gap and the cursor moves past it. A gap carries no
+`id:`, so it does not move the reader's `Last-Event-ID`.
+
+Console's own connection to the bus is served read-only at
+`GET /api/console/events/status`: `200` when connected, `503` otherwise, with a
+failure category (`not_running`, `refused`, `hung_up`, `decode`, …) rather
+than error text, and no filesystem path. It sits behind the same per-listener
+Host/Origin guard as every other `/api/console` route (#9792), so a
+cross-origin read is refused with `403`. A page can use it to tell "no events"
+from "the bus is down or unreachable" (§8.5). It does not yet detect a daemon
+that hangs with the connection open: that reads as a quiet bus until a
+liveness signal is added to the protocol (#9076 follow-up). A WebSocket buys a return
 channel this spec has no use for. The existing `console_metrics` polling loop
 (`crates/trusty-console/src/metrics_poller.rs`) is unchanged and keeps serving
 the gauge routes.
