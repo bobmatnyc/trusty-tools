@@ -754,6 +754,24 @@ fn uds_socket_for_matches_the_shared_entry_point() {
     }
 }
 
+/// Why (#10042, ADR-0065 decision 2): the bus socket is named after the bus and
+/// resolved through one `control_bus` helper. A `tctl` probe that spelled the
+/// path itself would read a serving bus as down — the #4246 class.
+/// What: `uds_socket_for("trusty-events")` is exactly `events_socket_path()`,
+/// and the member resolves no TCP port.
+/// Test: This is the test.
+#[test]
+fn uds_socket_for_resolves_the_events_bus_socket() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        uds_socket_for("trusty-events"),
+        trusty_common::control_bus::events_socket_path().ok(),
+        "tctl must dial exactly the socket trusty-events binds"
+    );
+    assert!(uds_socket_for("trusty-events").is_some());
+    assert_eq!(fixed_port_for("trusty-events"), None, "the bus binds no TCP");
+}
+
 /// Why (#6277): a socket carries no HTTP status code, so `classify_response`'s
 /// non-2xx arm has no analogue and an error frame needs its own verdict. What
 /// must NOT happen is the error being read as evidence the daemon is dead: it

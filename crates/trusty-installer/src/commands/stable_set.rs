@@ -549,11 +549,39 @@ mod tests {
                 "trusty-analyze",
                 "trusty-review",
                 "tga",
+                // #10042: the event bus, before its reader (the console).
+                "trusty-events",
                 "trusty-console",
                 "trusty-mpm",
                 "trusty-installer",
             ]
         );
+    }
+
+    /// Why (#10042, ADR-0065 decision 4): no daemon may need the bus to do its
+    /// own job, so `tctl` installs trusty-events as a SOFT member. A hard
+    /// `requires` edge would make `tctl install trusty-mpm` fail on a host where
+    /// trusty-events cannot be installed.
+    /// What: trusty-events is OPTIONAL, and no other member's transitive
+    /// install set pulls it in.
+    /// Test: This is the test.
+    #[test]
+    fn a_missing_trusty_events_cannot_fail_another_members_install() {
+        let set = stable_set();
+        let events = set
+            .iter()
+            .find(|m| m.crate_name == "trusty-events")
+            .expect("trusty-events is a stable-set member");
+        assert!(!events.required, "trusty-events must be OPTIONAL");
+        assert!(events.daemon, "trusty-events is a supervised daemon");
+        for m in set.iter().filter(|m| m.crate_name != "trusty-events") {
+            let sel = select_members_transitive(std::slice::from_ref(&m.crate_name));
+            assert!(
+                sel.members.iter().all(|s| s.crate_name != "trusty-events"),
+                "`tctl install {}` must not pull in trusty-events: {sel:?}",
+                m.crate_name
+            );
+        }
     }
 
     /// Why (#5805): the whole point — `tctl install trusty-installer` used to
@@ -850,6 +878,8 @@ mod tests {
                 "trusty-memory",
                 "trusty-analyze",
                 "trusty-review",
+                // #10042: a supervised daemon, so every daemon surface sees it.
+                "trusty-events",
                 "trusty-console",
                 "trusty-mpm",
             ]
@@ -911,7 +941,13 @@ mod tests {
     fn daemons_use_launchd() {
         let set = stable_set();
         let manage = |b: &str| set.iter().find(|m| m.binary == b).expect("present").manage;
-        for b in ["trusty-search", "trusty-memory", "trusty-console"] {
+        // #10042: trusty-events is launchd-supervised like the console.
+        for b in [
+            "trusty-search",
+            "trusty-memory",
+            "trusty-events",
+            "trusty-console",
+        ] {
             assert_eq!(manage(b), ManageStrategy::Launchd, "{b}");
         }
         // #6290, #6350: `daemon: true` keeps each member in the install pass
@@ -1037,6 +1073,8 @@ mod tests {
         }
         for c in [
             "trusty-analyze",
+            // #10042: a soft member — ADR-0065 decision 4.
+            "trusty-events",
             "trusty-console",
             "tga",
             // #5805: a bulk install runs FROM a working installer, so failing
@@ -1067,6 +1105,7 @@ mod tests {
         assert!(daemon("trusty-analyze"));
         assert!(daemon("trusty-review"));
         assert!(daemon("trusty-console"));
+        assert!(daemon("trusty-events"));
         assert!(!daemon("tga"));
     }
 

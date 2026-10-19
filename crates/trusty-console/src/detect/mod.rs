@@ -131,16 +131,18 @@ mod tests {
     /// What: calls all_connectors() and checks IDs.
     /// Test: this test itself.
     #[test]
-    fn test_all_connectors_returns_seven() {
+    fn test_all_connectors_returns_eight() {
         let cs = all_connectors();
-        assert_eq!(cs.len(), 7);
+        assert_eq!(cs.len(), 8);
         assert_eq!(cs[0].id(), "trusty-search");
         assert_eq!(cs[1].id(), "trusty-memory");
         assert_eq!(cs[2].id(), "trusty-analyze");
         assert_eq!(cs[3].id(), "trusty-review");
         assert_eq!(cs[4].id(), "trusty-mpm");
         assert_eq!(cs[5].id(), "trusty-agents");
-        assert_eq!(cs[6].id(), "trusty-console");
+        // #10042: the event bus daemon's socket state.
+        assert_eq!(cs[6].id(), "trusty-events");
+        assert_eq!(cs[7].id(), "trusty-console");
     }
 
     /// REGRESSION (#6416): the de-daemonized members must be exactly
@@ -177,6 +179,7 @@ mod tests {
                 "trusty-memory",
                 "trusty-mpm",
                 "trusty-agents",
+                "trusty-events",
                 "trusty-console"
             ]
         );

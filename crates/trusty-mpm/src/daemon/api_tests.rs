@@ -1400,6 +1400,8 @@ async fn doctor_endpoint_returns_report() {
         "search_project_duplicate_index",
         "search_project_two_checkouts",
         "search_project_map_unreadable",
+        // #10042: the trusty-events bus socket — serving, absent or stale.
+        "events",
         "worktrees",
         "worktree_disk",
         // #7497: the mount that store sits on, against `disk.max_usage_pct`.
