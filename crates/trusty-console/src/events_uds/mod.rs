@@ -9,7 +9,8 @@
 //! - [`client`]: the reconnecting subscription. It resumes with `since_seq`
 //!   and `since_id`, resubscribes from 0 and drops duplicates by `EventId`
 //!   when a resume is refused, passes gaps on, backs off between attempts,
-//!   and does not time out a quiet subscription.
+//!   and does not time out a quiet subscription. It asks the bus for
+//!   heartbeats and reports one that sends no frame as hung (#10071).
 //! - [`token`]: the `<seq>:<uuid>` resume token an SSE `id:` carries.
 //! - [`relay`]: the status the client publishes, its route, and the
 //!   in-process fan-out the event routes (#6850, #6851) will read.

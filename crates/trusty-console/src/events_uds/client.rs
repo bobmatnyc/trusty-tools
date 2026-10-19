@@ -6,23 +6,31 @@
 //! state and lead to a bounded retry, never a stream that is silently empty
 //! (DOC-73 §8.5). And a quiet bus must not read as a dead one.
 //! What: [`run`] loops over attempts. Each attempt opens one subscription
-//! under [`OPEN_TIMEOUT`] and reads it with a day-long per-frame budget, so a
-//! quiet stream is not cut; while it waits, every [`LIVENESS_INTERVAL`] it
-//! checks that the socket is still served. A dead daemon closes the
-//! connection, which is a hang-up. Every relayed event moves the cursor
+//! under [`OPEN_TIMEOUT`], asking for a heartbeat every
+//! [`HEARTBEAT_INTERVAL`] (#10071). The client is connected once the bus
+//! sends its first frame, not when the socket accepts. No frame of any kind
+//! within [`hung_bound`] is a hang (`FailureKind::Hung`), so a daemon that is
+//! stopped or wedged with its socket open is not read as a quiet one. A
+//! heartbeat moves no cursor and is not relayed. While it waits, every
+//! [`LIVENESS_INTERVAL`] the client checks that the socket is still served.
+//! A dead daemon closes the connection, which is a hang-up. Every relayed
+//! event moves the cursor
 //! (`seq` + `EventId`), and a later attempt resumes from it with
 //! `since_seq` and `since_id`. When the bus refuses a resume
 //! (`invalid_params`), the next attempt starts at once from `since_seq: 0`,
-//! and events already relayed are dropped by `EventId`. An event this build
+//! and events already relayed are dropped by `EventId`. A refusal that names
+//! `heartbeat_ms` comes from a daemon too old for it; it is a plain refusal,
+//! not a refused resume point (#10071: lockstep, no fallback). An event this build
 //! cannot decode is stepped over as a one-event gap (`super::decode`). Any
-//! other end — a failed dial, a hang-up, a server error, a malformed frame, a
-//! clean end, a socket that is no longer served — is recorded on the relay as
-//! a `FailureKind` (the text goes to the log) and retried after a doubling,
-//! capped backoff.
+//! other end — a failed dial, a hang-up, a hang, a server error, a malformed
+//! frame, a clean end, a socket that is no longer served — is recorded on the
+//! relay as a `FailureKind` (the text goes to the log) and retried after a
+//! doubling, capped backoff.
 //! Limits: before the first event there is no cursor, so a `Live` client that
 //! reconnects resumes live. Dedupe remembers [`DEDUPE_WINDOW`] ids; after a
-//! resync, an event older than that is relayed again. A daemon that hangs
-//! without closing the connection looks quiet, not dead.
+//! resync, an event older than that is relayed again. A daemon held off the
+//! CPU for longer than the hung bound is reported hung, and the resume after
+//! it is lossless.
 //! Test: `super::tests` (one test per arm), `tests/events_uds_live.rs`.
 
 use std::collections::{HashSet, VecDeque};
@@ -54,8 +62,9 @@ pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Why: #9075 review — `FramedStream` applies its timeout per frame, and a
 /// bus with nothing to say says nothing. A short budget would cut a healthy
-/// quiet subscription. Liveness is [`LIVENESS_INTERVAL`]'s job instead. Not
-/// `Duration::MAX`, which overflows tokio's timer.
+/// quiet subscription. Liveness is the heartbeat's job instead ([`hung_bound`],
+/// #10071), so this budget is only a backstop. Not `Duration::MAX`, which
+/// overflows tokio's timer.
 /// Test: `super::tests::a_quiet_subscription_is_not_dropped`.
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -252,7 +261,9 @@ impl Session {
             since_seq,
             since_id,
             filters: self.config.filters.clone(),
-            heartbeat_ms: None,
+            heartbeat_ms: Some(
+                u64::try_from(self.config.heartbeat.as_millis()).unwrap_or(u64::MAX),
+            ),
         }
     }
 
@@ -266,7 +277,12 @@ impl Session {
         // retains and drop what was already relayed; no backoff, because
         // `since_seq: 0` has no resume point to refuse. A refusal of a
         // request that was not a resume backs off like any other failure.
-        if failure.kind == FailureKind::Refused && resuming {
+        // #10071: so does a refusal of `heartbeat_ms` by a daemon too old to
+        // know it; resyncing would only drop the cursor.
+        if failure.kind == FailureKind::Refused
+            && resuming
+            && !failure.detail.contains("heartbeat_ms")
+        {
             tracing::warn!(detail = %failure.detail, "event bus refused the resume point; resyncing from 0");
             self.cursor = None;
             self.resync = true;
@@ -319,7 +335,9 @@ impl Session {
                 );
             }
         };
-        self.relay.note_connected();
+        // #10071: the kernel accepts for a stopped daemon too; only a frame
+        // shows the bus answered, so `connected` waits for the first one.
+        let mut answered = false;
         loop {
             let next = match self.next_while_live(&mut stream).await {
                 Ok(next) => next,
@@ -327,6 +345,10 @@ impl Session {
             };
             match next {
                 Some(Ok(value)) => {
+                    if !answered {
+                        answered = true;
+                        self.relay.note_connected();
+                    }
                     if let Err(detail) = self.accept(value) {
                         return Failure::new(FailureKind::Decode, detail);
                     }
@@ -339,20 +361,35 @@ impl Session {
 
     /// The next frame, or why the connection is no longer worth reading.
     ///
-    /// The read is never cancelled while the socket is served: `FramedStream`
-    /// drops a partly read line when its future is dropped, so the liveness
-    /// check runs beside the pending read, not in place of it.
+    /// The read is never cancelled while the socket is served and the bus
+    /// answers: `FramedStream` drops a partly read line when its future is
+    /// dropped, so the liveness check runs beside the pending read, not in
+    /// place of it. #10071: no frame within [`hung_bound`] ends the attempt as
+    /// [`FailureKind::Hung`]; the connection is abandoned then anyway.
     async fn next_while_live(
         &mut self,
         stream: &mut FramedStream<Value>,
     ) -> Result<Option<Result<Value, UdsRpcError>>, Failure> {
         let read = stream.next_frame();
         tokio::pin!(read);
+        let bound = hung_bound(self.config.heartbeat);
+        let hung = tokio::time::sleep(bound);
+        tokio::pin!(hung);
         let every = self.config.liveness_interval;
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         loop {
             tokio::select! {
                 next = &mut read => return Ok(next),
+                () = &mut hung => {
+                    return Err(Failure::new(
+                        FailureKind::Hung,
+                        format!(
+                            "no frame from {} in {bound:?}: the bus accepts but does not \
+                             answer, so it is stopped or wedged",
+                            self.config.socket.display()
+                        ),
+                    ));
+                }
                 _ = tick.tick() => {
                     let verdict = probe_socket_verdict(&self.config.socket, LIVENESS_PROBE_TIMEOUT).await;
                     if verdict == SocketVerdict::NotServing {
@@ -365,10 +402,8 @@ impl Session {
                             ),
                         ));
                     }
-                    // A connection that outlives an interval is healthy:
-                    // the next failure starts the backoff over.
-                    self.failures = 0;
-                    self.relay.note_progress();
+                    // #10071: a served socket no longer counts as progress;
+                    // a stopped daemon's socket is served too. Frames do.
                 }
             }
         }
@@ -390,6 +425,9 @@ impl Session {
                     SubscribeItem::Gap { skipped } => {
                         self.relay.publish_gap(skipped, self.cursor);
                     }
+                    // #10071: proof of life only. It moves no cursor and is
+                    // not relayed, so an SSE reader never sees it.
+                    SubscribeItem::Heartbeat { .. } => self.relay.note_progress(),
                     // `decode` reports a kind this build lacks as `Unknown`.
                     _ => self.relay.note_unknown_item(),
                 }

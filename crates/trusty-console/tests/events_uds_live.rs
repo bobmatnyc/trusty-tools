@@ -84,9 +84,12 @@ struct Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         // A test that stopped the daemon may have failed before resuming it.
-        let _ = Command::new("kill")
-            .args(["-CONT", &self.child.id().to_string()])
-            .status();
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = Command::new("kill")
+                .args(["-CONT", &self.child.id().to_string()])
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

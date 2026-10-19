@@ -273,8 +273,10 @@ async fn a_quiet_subscription_is_not_dropped() {
     let mut items = relay.subscribe();
 
     let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
-    // Many liveness intervals, and longer than any per-request timeout here.
+    // Many liveness intervals, and longer than any per-request timeout here,
+    // inside one hung bound of `fast`'s production heartbeat.
     stub.no_conn_within(Duration::from_millis(1500)).await;
     assert_eq!(
         relay.status().state,
@@ -310,12 +312,13 @@ async fn a_hangup_resumes_with_seq_and_id() {
         status.last_error == Some(FailureKind::HungUp),
         "the hang-up is named: {status:?}"
     );
-    let conn = stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
     assert_eq!(
         conn.since(),
         (Some(3), Some(held[2].id)),
         "resume names seq and id"
     );
+    conn.heartbeat(3).await;
     status_until(&relay, "connected again", |s| {
         s.state == BusState::Connected
     })
@@ -517,7 +520,8 @@ async fn a_missing_socket_is_reported_and_retried_with_backoff() {
     assert!(b <= 400, "the delay is capped at backoff_max: {b}");
 
     let mut stub = bind_stub(&socket);
-    stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     let status = status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
     assert_eq!(status.retry_in_ms, None);
 }
@@ -528,7 +532,8 @@ async fn a_socket_that_vanishes_under_a_quiet_subscription_is_detected() {
     let mut stub = stub_in(tmp.path());
     let (relay, _client) = run(fast(&stub.socket));
 
-    let _conn = stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
     std::fs::remove_file(&stub.socket).expect("remove the socket file");
 
@@ -662,11 +667,12 @@ impl States {
         let task = tokio::spawn(async move {
             loop {
                 let state = watch.borrow_and_update().state;
-                let mut seen = out.lock().expect("states lock");
-                if seen.last() != Some(&state) {
-                    seen.push(state);
+                {
+                    let mut seen = out.lock().expect("states lock");
+                    if seen.last() != Some(&state) {
+                        seen.push(state);
+                    }
                 }
-                drop(seen);
                 if watch.changed().await.is_err() {
                     return;
                 }
@@ -699,6 +705,11 @@ async fn a_daemon_that_accepts_and_goes_silent_is_reported_hung() {
     let elapsed = opened.elapsed();
     assert_eq!(status.last_error, Some(FailureKind::Hung), "{status:?}");
     assert_eq!(status.state, BusState::Reconnecting, "{status:?}");
+    assert_eq!(
+        serde_json::to_value(FailureKind::Hung).expect("encode"),
+        "hung",
+        "the status route's category"
+    );
     assert!(
         elapsed < bound + Duration::from_secs(1),
         "hung reported after {elapsed:?}, bound {bound:?}"
