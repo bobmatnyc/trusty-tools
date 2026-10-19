@@ -69,17 +69,110 @@ cargo build -p trusty-mpm --bin tm          # main at dfe7ab34d3
 
 ### Not measured
 
-- **The real trusty-tools PM start.** The probe runs in a throwaway project, so
-  it does not load the trusty-tools `CLAUDE.md`, its project-tier
-  `.claude/` agents and skills, or the checkout's dev-override content. The
-  10-01 runs put the real PM 15k-18k above the scratch PM; this probe does not
-  re-measure that gap.
+- **A live trusty-tools PM.** The "Real trusty-tools PM" section measures the
+  real project in a disposable checkout, not a running PM session.
 - **Interactive mode.** The probe uses `claude -p`; an interactive pane's
   first turn is not measured.
 - **Leftovers outside the temp tree.** Claude Code records each throwaway cwd
   in `CLAUDE_CONFIG_DIR/.claude.json`. The probe does not edit that file,
   because it holds the login state. The probe's `tm hook` events also reach
   the tm daemon, because the user tier's hooks run as they do in a real PM.
+
+## Real trusty-tools PM — 2026-10-19
+
+Closes the second #8998 condition: the same probe, pointed at this repo
+(`--project-dir`), so the trusty-tools `CLAUDE.md`, its project-tier
+`.claude/skills` and the tm-composed prompt for the checkout are loaded.
+
+| Lever | First-turn input tokens (median) | Runs | Delta vs real baseline | Status |
+|---|---|---|---|---|
+| baseline | 55,731 | 55,731, 55,731, 55,731 | +0 | measured |
+| no-prompt | 44,601 | 44,601, 44,601 | -11,130 | measured |
+| mcp-off | 43,157 | 43,157, 43,157 | -12,574 | measured |
+| connectors-off | 54,074 | 54,074, 54,074 | -1,657 | measured |
+| skills-off (user tier) | 51,980 | 51,980, 51,980 | -3,751 | measured |
+| agents-off (user tier) | 51,773 | 51,773, 51,773 | -3,958 | measured |
+| skills-agents-off | 48,022 | 48,022, 48,022 | -7,709 | measured |
+| all-trims | 35,448 | 35,448, 35,448 | -20,283 | measured |
+| claude-md-off (project `CLAUDE.md`) | 50,568 | 50,568, 50,568 | -5,163 | measured |
+| project-skills-off (`.claude/skills`, 2 skills) | 55,449 | 55,449, 55,449 | -282 | measured |
+| project-files-off (both above) | 50,286 | 50,286, 50,286 | -5,445 | measured |
+| project `.claude/agents` off | 55,731 | - | +0 | inferred: the directory does not exist |
+| project `.mcp.json` off | 55,731 | - | +0 | inferred: the file does not exist |
+| catchup run, first turn | 55,869 | 55,869, 55,869 | +138 | measured |
+| post-`session_context_catchup` (disposable checkout) | 65,684 | 65,702, 65,667 | +9,953 | measured |
+| catchup payload (post minus first turn, same run) | 9,816 | - | - | inferred |
+
+Every lever gave the same number on every run. The agents and `.mcp.json` rows
+are inferred from the probe's recorded inventory of the checkout
+(`meta.project_tier`: one `CLAUDE.md`, skills `cargo-commands` and
+`cargo-publish`, no agents, no MCP servers), not run.
+
+### Gap to the empty-project baseline
+
+Real baseline 55,731 minus empty baseline 49,972 = **5,759 tokens** (+11.5%).
+The user tier is identical in both runs: mcp-off, connectors-off, skills-off,
+agents-off, skills-agents-off and all-trims give the same deltas in both
+tables, so none of the gap sits in user-tier content.
+
+| Source | Tokens | How attributed | Status |
+|---|---|---|---|
+| Project `CLAUDE.md` (12,767 bytes) | +5,163 | real baseline minus claude-md-off; the empty project has none | measured |
+| Composed PM prompt for this checkout (28,366 bytes vs 27,658) | +256 | real no-prompt delta (11,130) minus empty no-prompt delta (10,874) | measured |
+| Project-tier skills (`cargo-commands`, `cargo-publish`) | +282 | real baseline minus project-skills-off | measured |
+| Project `.claude/agents` | 0 | directory absent | inferred |
+| Project `.mcp.json` | 0 | file absent | inferred |
+| **Sum of attributed sources** | **+5,701** | | |
+| Unattributed remainder | +58 | gap minus sum | unattributable by these levers |
+
+`project-files-off` (-5,445) equals `claude-md-off` plus `project-skills-off`
+(-5,163 and -282) exactly, so the two project levers are additive. The 58-token
+remainder is whatever else differs between a git checkout with history and an
+empty `git init`: the git-status block, the working-directory path and
+`.trusty-mpm.toml`. No lever isolates those; the probe does not try.
+
+### Against 10-01
+
+The 10-01 real PM ran 15k-18k above its scratch PM. Today's gap is 5.8k, and
+the first-turn total is 55.7k, below the 70k target. The 10-01 method is lost
+(see History), so the 10-01 excess cannot be attributed to a source after the
+fact.
+
+### How it was run
+
+```
+git worktree add --detach <scratch>/real-checkout origin/main   # 6e5b9cb02e, clean
+./scripts/pm_context_probe.py run --runs 3 --lever-runs 2 \
+    --tm "$CARGO_TARGET_DIR/debug/tm" --project-dir <scratch>/real-checkout
+```
+
+- The project was a scratch worktree at `origin/main` (`6e5b9cb02e`), never the
+  main checkout and never a live PM's directory. The probe refuses a dirty tree
+  and re-checked it clean afterwards (`meta.project_clean_after: true`). A
+  scratch path has no ancestor `CLAUDE.md`, as with the main checkout.
+- tm 1.9.0 debug build, Claude Code 2.1.303, model `claude-opus-5-5`, the same
+  `CLAUDE_CONFIG_DIR` as the empty-project baseline. No stray processes remained.
+- The catchup lever ran against that disposable checkout only (the
+  `--project-dir` default), so it wrote no state in any real checkout.
+- **claude-md-off** passes `claudeMdExcludes` with the project's `CLAUDE.md`
+  path; **project-skills-off** passes `skillOverrides` for the project-tier
+  skill names. The -5,163 and -282 moves show Claude Code 2.1.303 honours both.
+
+### Catchup is not comparable to the main-checkout number
+
+The post-catchup row above (65,684, payload 9,816) is lower than the
+empty-project table's 75,272 (payload 25,222). That earlier call read the
+trusty-tools main checkout; this one read a fresh worktree with no session
+history. The ~15k difference is attributed to the main checkout's accumulated
+session state. That is inferred from the two payloads, not measured: reproducing
+it needs `--catchup-project` on the live checkout, and that handler can write
+the session cache. The 10-01 real-PM catchup growth (+14.5k) stays unreproduced.
+
+### Not measured here
+
+- A running PM pane or interactive mode, and an owner-file `--settings` policy
+  (the probe's baseline carries none).
+- The git-status block and path contribution (inside the 58-token remainder).
 
 ## History — 10-01 (method and scripts lost)
 
