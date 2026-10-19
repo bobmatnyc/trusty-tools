@@ -123,6 +123,11 @@ async fn a_drain_timeout_on_sigterm_exits_non_zero() {
     let mut daemon = start(tmp.path(), &[]).await;
     let fifo = stall_the_writer(tmp.path());
     push(&daemon.socket, vec![event("queued")]).await;
+    // Read the event back first, so it is ingested and queued for the stalled
+    // writer before SIGTERM arrives.
+    let mut seen = subscribe(&daemon.socket, Some(0), SubscribeFilter::default()).await;
+    assert_eq!(common::next_event(&mut seen).await.0, 1);
+    drop(seen);
 
     daemon.sigterm();
     let status = daemon.wait_exit(BOUND).await;
