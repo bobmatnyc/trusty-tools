@@ -352,7 +352,8 @@ mod tests {
     /// Why: Picking trusty-mpm alone in the picker must pull in its runtime
     /// deps, same as the non-interactive `tctl install trusty-mpm` path.
     /// What: Chooses only the trusty-mpm `StableMember`; asserts the expanded
-    /// result also contains trusty-memory and trusty-search, in stable-set order.
+    /// result also contains trusty-memory and trusty-search, in stable-set order,
+    /// and trusty-events as a soft member (#10042).
     /// Test: This is the test.
     #[test]
     fn expand_with_dependencies_pulls_in_mpm_deps() {
@@ -362,7 +363,16 @@ mod tests {
             .expect("trusty-mpm in stable set");
         let expanded = expand_with_dependencies(vec![mpm]);
         let names: Vec<String> = expanded.into_iter().map(|m| m.crate_name).collect();
-        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        // #10042: plus the bus, softly (ADR-0065 decision 4).
+        assert_eq!(
+            names,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-events",
+                "trusty-mpm"
+            ]
+        );
     }
 
     /// Why: An empty picker choice ("none"/empty input) means "install

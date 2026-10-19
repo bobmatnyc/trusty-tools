@@ -629,6 +629,7 @@ async fn install_all(
                     shadow_ok,
                     shadow_detail,
                     required: m.required,
+                    soft: m.soft,
                     // This member installed and health-gated, so its artifact
                     // passed verification by construction.
                     integrity_ok: true,
@@ -677,6 +678,7 @@ async fn install_all(
                     shadow_ok: true,
                     shadow_detail: String::new(),
                     required: m.required,
+                    soft: m.soft,
                     integrity_ok,
                 });
             }

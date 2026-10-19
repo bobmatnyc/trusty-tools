@@ -97,6 +97,13 @@ pub struct StableMember {
     /// group doc above). `false` means OPTIONAL: install/verify failures for
     /// this member degrade gracefully instead of failing the overall run.
     pub required: bool,
+    /// #10042: selected only through a SOFT edge (ADR-0065 decision 4) — an
+    /// event producer's bus. Such a member never gates a run, even in a
+    /// selection with no REQUIRED member; see [`gating_split_with_soft`].
+    /// `false` for every member [`stable_set`] lists and for every member
+    /// named explicitly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
 }
 
 impl StableMember {
@@ -124,6 +131,7 @@ impl StableMember {
             daemon,
             manage: manage_strategy_for(binary, daemon),
             required,
+            soft: false,
         }
     }
 
@@ -233,7 +241,23 @@ pub(super) fn required_gate<T>(
     required: impl Fn(&T) -> bool,
     ok: impl Fn(&T) -> bool,
 ) -> bool {
-    gating_split(rows, required).gating.into_iter().all(ok)
+    required_gate_with_soft(rows, required, |_| false, ok)
+}
+
+/// [`required_gate`] with SOFT rows held out of the verdict (#10042).
+///
+/// Why / What / Test: see [`gating_split_with_soft`], whose gating set this
+/// folds `ok` over.
+pub(super) fn required_gate_with_soft<T>(
+    rows: &[T],
+    required: impl Fn(&T) -> bool,
+    soft: impl Fn(&T) -> bool,
+    ok: impl Fn(&T) -> bool,
+) -> bool {
+    gating_split_with_soft(rows, required, soft)
+        .gating
+        .into_iter()
+        .all(ok)
 }
 
 /// Which rows [`required_gate`] folds over, and which it excludes.
@@ -264,8 +288,28 @@ pub(super) struct GatingSplit<'a, T> {
 /// gating rule; [`required_gate`] and the `tctl install` human summary both
 /// read it rather than writing their own.
 pub(super) fn gating_split<T>(rows: &[T], required: impl Fn(&T) -> bool) -> GatingSplit<'_, T> {
-    let any_required = rows.iter().any(&required);
-    let (gating, non_gating) = rows.iter().partition(|r| required(r) || !any_required);
+    gating_split_with_soft(rows, required, |_| false)
+}
+
+/// [`gating_split`], with SOFT rows never gating (#10042).
+///
+/// Why: ADR-0065 decision 4 adds trusty-events to a producer's install as a
+/// soft member. Under the plain rule a selection with no REQUIRED member
+/// gates on every row, so `tctl install trusty-analyze` would fail when only
+/// the bus it softly pulled in failed. A soft row is the producer's
+/// optional extra, never the operator's request.
+/// What: soft rows go to `non_gating` and do not count towards
+/// `any_required`; the remaining rows follow [`gating_split`]'s rule.
+/// Test: `tests::a_soft_row_never_gates`.
+pub(super) fn gating_split_with_soft<T>(
+    rows: &[T],
+    required: impl Fn(&T) -> bool,
+    soft: impl Fn(&T) -> bool,
+) -> GatingSplit<'_, T> {
+    let any_required = rows.iter().any(|r| !soft(r) && required(r));
+    let (gating, non_gating) = rows
+        .iter()
+        .partition(|r| !soft(r) && (required(r) || !any_required));
     GatingSplit {
         gating,
         non_gating,
@@ -364,8 +408,10 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// on every member instead of vacuously passing.
 ///
 /// #10042 — trusty-events is a SOFT member (ADR-0065 decision 4): OPTIONAL,
-/// and no `dependency_graph` edge names it, so a host that cannot install the
-/// bus still installs every other member. It sorts before trusty-console,
+/// and no HARD `dependency_graph` edge names it. A SOFT edge from each event
+/// producer selects it with that producer ([`select_members_transitive`]),
+/// and a soft row never gates a run, so a host that cannot install the bus
+/// still installs every other member. It sorts before trusty-console,
 /// which reads it, so the console finds the bus already running.
 ///
 /// NOTE for future editors: a separate lane may add `trusty-agents` to this
@@ -489,13 +535,17 @@ pub struct TransitiveSelection {
 /// already a valid topological order because every dependency edge points to a
 /// crate earlier in [`stable_set`]'s list (see
 /// `dependency_graph::tests::edges_precede_dependent_in_stable_set_order`).
+/// #10042: then adds every member a closure member softly uses
+/// ([`super::dependency_graph::soft_additions`]) with `soft: true` and
+/// `required: false`, and reports it in `added` as soft.
 /// `unknown` short-circuits: when any name is unrecognised, `members`/`added`
 /// are left empty (mirrors [`select_members`]'s existing "unknown wins"
 /// caller contract used by `install.rs`).
 ///
 /// Test: `tests::select_transitive_expands_mpm`,
 /// `tests::select_transitive_reports_unknown`,
-/// `tests::select_transitive_preserves_order_with_explicit_deps`.
+/// `tests::select_transitive_preserves_order_with_explicit_deps`,
+/// `tests::selecting_a_producer_softly_selects_trusty_events`.
 pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
     let all = stable_set();
     if names.is_empty() {
@@ -529,11 +579,23 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
     }
 
     let closure = super::dependency_graph::transitive_closure(&explicit);
+    // #10042: a producer's bus joins as a SOFT, optional member.
+    let soft = super::dependency_graph::soft_additions(&closure);
     let members: Vec<StableMember> = all
         .into_iter()
-        .filter(|m| closure.contains(&m.crate_name))
+        .filter(|m| closure.contains(&m.crate_name) || soft.contains(&m.crate_name))
+        .map(|mut m| {
+            if soft.contains(&m.crate_name) {
+                m.soft = true;
+                m.required = false;
+            }
+            m
+        })
         .collect();
-    let added = super::dependency_graph::added_members(&explicit, &closure);
+    let mut added = super::dependency_graph::added_members(&explicit, &closure);
+    added.extend(super::dependency_graph::soft_added_members(
+        &explicit, &closure, &soft,
+    ));
 
     TransitiveSelection {
         members,
@@ -590,7 +652,18 @@ mod tests {
                 });
             assert!(!events.required, "a soft member is never REQUIRED");
             assert!(events.daemon, "trusty-events is a supervised daemon");
+            assert!(events.soft, "selected through a soft edge");
+            assert!(
+                sel.added
+                    .iter()
+                    .any(|a| a.crate_name == "trusty-events" && a.soft),
+                "the bus is reported as a soft addition: {sel:?}"
+            );
         }
+        // Named explicitly, the bus is the operator's request, not soft.
+        let named =
+            select_members_transitive(&["trusty-mpm".to_owned(), "trusty-events".to_owned()]);
+        assert!(named.members.iter().all(|m| !m.soft), "{named:?}");
         let tga = select_members_transitive(&["tga".to_owned()]);
         assert!(
             tga.members.iter().all(|m| m.crate_name != "trusty-events"),
@@ -700,6 +773,46 @@ mod tests {
             req,
             ok
         ));
+    }
+
+    /// Why (#10042): a producer's soft bus must never gate its install, even
+    /// when the producer itself is OPTIONAL and the plain rule would gate on
+    /// every row.
+    /// What: rows are `(required, soft, ok)`; a failed soft row is excluded in
+    /// both selection shapes, and a failed non-soft optional row still gates
+    /// when nothing is required.
+    /// Test: This is the test.
+    #[test]
+    fn a_soft_row_never_gates() {
+        let req = |r: &(bool, bool, bool)| r.0;
+        let soft = |r: &(bool, bool, bool)| r.1;
+        let ok = |r: &(bool, bool, bool)| r.2;
+        // trusty-mpm (required, ok) + soft bus (failed).
+        assert!(required_gate_with_soft(
+            &[(true, false, true), (false, true, false)],
+            req,
+            soft,
+            ok
+        ));
+        // trusty-analyze (optional, ok) + soft bus (failed).
+        assert!(required_gate_with_soft(
+            &[(false, false, true), (false, true, false)],
+            req,
+            soft,
+            ok
+        ));
+        // The optional producer itself failing still gates.
+        assert!(!required_gate_with_soft(
+            &[(false, false, false), (false, true, true)],
+            req,
+            soft,
+            ok
+        ));
+        let rows = [(false, false, true), (false, true, false)];
+        let split = gating_split_with_soft(&rows, req, soft);
+        assert_eq!(split.gating.len(), 1);
+        assert_eq!(split.non_gating.len(), 1);
+        assert!(!split.any_required);
     }
 
     /// Why (#5806): the two callers disagree about what "no rows" means, so the
@@ -1169,11 +1282,23 @@ mod tests {
     fn select_transitive_expands_mpm() {
         let sel = select_members_transitive(&["trusty-mpm".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
-        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        // #10042: plus the bus, softly.
+        assert_eq!(
+            names,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-events",
+                "trusty-mpm"
+            ]
+        );
         assert!(sel.unknown.is_empty());
         let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
         added_names.sort();
-        assert_eq!(added_names, vec!["trusty-memory", "trusty-search"]);
+        assert_eq!(
+            added_names,
+            vec!["trusty-events", "trusty-memory", "trusty-search"]
+        );
         for a in &sel.added {
             assert_eq!(a.required_by, vec!["trusty-mpm".to_owned()]);
         }
@@ -1190,13 +1315,22 @@ mod tests {
     fn select_transitive_expands_review() {
         let sel = select_members_transitive(&["trusty-review".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        // #10042: trusty-analyze is a producer, so the bus joins softly.
         assert_eq!(
             names,
-            vec!["trusty-search", "trusty-analyze", "trusty-review"]
+            vec![
+                "trusty-search",
+                "trusty-analyze",
+                "trusty-review",
+                "trusty-events"
+            ]
         );
         let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
         added_names.sort();
-        assert_eq!(added_names, vec!["trusty-analyze", "trusty-search"]);
+        assert_eq!(
+            added_names,
+            vec!["trusty-analyze", "trusty-events", "trusty-search"]
+        );
     }
 
     /// Why: A leaf crate (no dependents) must not pull in anything extra.
@@ -1222,9 +1356,18 @@ mod tests {
     fn select_transitive_preserves_order_with_explicit_deps() {
         let sel = select_members_transitive(&["trusty-mpm".to_owned(), "trusty-memory".to_owned()]);
         let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
-        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        assert_eq!(
+            names,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-events",
+                "trusty-mpm"
+            ]
+        );
         let added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
-        assert_eq!(added_names, vec!["trusty-search"]);
+        // #10042: hard additions first, then the soft bus.
+        assert_eq!(added_names, vec!["trusty-search", "trusty-events"]);
     }
 
     /// Why: Unknown names must still be surfaced (not silently dropped) even

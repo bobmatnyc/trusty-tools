@@ -143,6 +143,10 @@ pub struct VerifyRow {
     pub kickstarted: bool,
     /// Whether this member is REQUIRED for the overall `verified` verdict.
     pub required: bool,
+    /// #10042: selected only through a soft edge (an event producer's bus,
+    /// `StableMember::soft`). Never gates the verdict.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
     /// Whether the AGGREGATE poll budget ([`AGGREGATE_POLL_BUDGET`]) was
     /// already exhausted by the time this member needed a poll wait, so it
     /// was skipped (#3836).
@@ -225,9 +229,11 @@ impl VerifyTailReport {
     /// `tests::all_optional_daemon_selection_does_not_fail_open`,
     /// `tests::no_daemon_rows_still_defers_to_ensure_ok`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
-        let health_ok = crate::commands::stable_set::required_gate(
+        // #10042: a producer's soft bus never gates verification.
+        let health_ok = crate::commands::stable_set::required_gate_with_soft(
             &members,
             |m| m.required,
+            |m| m.soft,
             |m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED,
         );
         Self {
@@ -707,6 +713,7 @@ fn verify_one_with(
         health,
         kickstarted,
         required: m.required,
+        soft: m.soft,
         budget_exhausted,
         down_state,
         verify_bootstrapped,
