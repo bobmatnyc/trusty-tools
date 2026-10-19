@@ -168,6 +168,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Whether the trusty-search daemon can read its `project-map.toml` (issue #9169). Fail when `search.project.map` answers the fail-closed internal error — every resolve by project name, owner/repo or path fails until `trusty-search project rebuild-map --yes` moves the file aside and migrates again. Ok when the map is readable. Warn \"not checked\" when the daemon does not answer, predates the map (older than trusty-search 0.60.0), or answers without a map. Read-only; tm never writes the map.",
     ),
     (
+        "events",
+        "Whether the trusty-events bus daemon serves its Unix socket, `<data dir>/trusty-events/trusty-events.sock`, resolved through `trusty_common::control_bus::events_socket_path` as every producer and reader resolves it (ADR-0065, issue #10042). One connect, closed at once — never TCP, no request sent, no stream opened. `Ok` only when the connect completes, and the detail states that liveness beyond the accept is not checked (#10071). FAILS when no socket exists (not running; remedy `tctl install trusty-events` or `tctl start trusty-events`), when the socket is stale (the file exists, the connect is refused; launchd restarts `com.trusty.events` within 10 s), when the path is not a socket, or when the path cannot be read or the socket path cannot be resolved. WARNS when the connect neither completes nor is refused. Read-only.",
+    ),
+    (
         "worktrees",
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
     ),
