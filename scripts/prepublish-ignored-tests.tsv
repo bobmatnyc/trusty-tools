@@ -219,7 +219,7 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # `a_quiet_healthy_daemon_stays_connected` and
 # `a_stopped_daemon_is_reported_hung_and_recovers_after_sigcont`, with the same
 # `#[ignore]` reason and the same reason to stay unselected (the binary must be
-# built in the same cargo run). 140 + 2 -> 142 (PENDING approval).
+# built in the same cargo run). 140 + 2 -> 142 (Architect-approved 2026-10-19, #10071).
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
 # UNSELECTED-BASELINE: 142
