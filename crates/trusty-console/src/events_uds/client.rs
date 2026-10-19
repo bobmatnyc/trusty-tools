@@ -73,7 +73,8 @@ pub const FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Why: a daemon that exits closes the connection, which the read sees. A
 /// socket file that is removed or replaced under a live connection does not
 /// close it; only a fresh connect to the path shows that nothing serves it.
-/// Test: `super::tests::a_socket_that_vanishes_under_a_quiet_subscription_is_detected`.
+/// Test: `super::tests::a_socket_that_vanishes_under_a_quiet_subscription_is_detected`,
+/// `super::tests::a_socket_that_vanishes_under_a_beating_subscription_is_detected`.
 pub const LIVENESS_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The heartbeat interval the client asks the bus for (#10071).
@@ -338,8 +339,13 @@ impl Session {
         // #10071: the kernel accepts for a stopped daemon too; only a frame
         // shows the bus answered, so `connected` waits for the first one.
         let mut answered = false;
+        // #10071 review: one schedule for the whole subscription. Rebuilt per
+        // frame, a 5 s heartbeat would reset a 15 s check before it fired.
+        let every = self.config.liveness_interval;
+        let mut liveness = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let next = match self.next_while_live(&mut stream).await {
+            let next = match self.next_while_live(&mut stream, &mut liveness).await {
                 Ok(next) => next,
                 Err(failure) => return failure,
             };
@@ -365,18 +371,19 @@ impl Session {
     /// answers: `FramedStream` drops a partly read line when its future is
     /// dropped, so the liveness check runs beside the pending read, not in
     /// place of it. #10071: no frame within [`hung_bound`] ends the attempt as
-    /// [`FailureKind::Hung`]; the connection is abandoned then anyway.
+    /// [`FailureKind::Hung`]; the connection is abandoned then anyway. The
+    /// hung timer restarts per frame; `liveness` is the subscription's own
+    /// schedule, so the socket check fires however often frames arrive.
     async fn next_while_live(
         &mut self,
         stream: &mut FramedStream<Value>,
+        liveness: &mut tokio::time::Interval,
     ) -> Result<Option<Result<Value, UdsRpcError>>, Failure> {
         let read = stream.next_frame();
         tokio::pin!(read);
         let bound = hung_bound(self.config.heartbeat);
         let hung = tokio::time::sleep(bound);
         tokio::pin!(hung);
-        let every = self.config.liveness_interval;
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         loop {
             tokio::select! {
                 next = &mut read => return Ok(next),
@@ -390,7 +397,7 @@ impl Session {
                         ),
                     ));
                 }
-                _ = tick.tick() => {
+                _ = liveness.tick() => {
                     let verdict = probe_socket_verdict(&self.config.socket, LIVENESS_PROBE_TIMEOUT).await;
                     if verdict == SocketVerdict::NotServing {
                         return Err(Failure::new(
