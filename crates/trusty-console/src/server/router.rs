@@ -139,6 +139,11 @@ fn build_router_inner(
             "/api/console/architect-dashboard",
             get(crate::routes::architect::dashboard_link_handler),
         )
+        // #9076: the trusty-events client's state; 503 unless connected.
+        .route(
+            "/api/console/events/status",
+            get(crate::events_uds::status_handler),
+        )
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
         // every handler calls a trusty-mpm MCP tool via the stdio bridge — never

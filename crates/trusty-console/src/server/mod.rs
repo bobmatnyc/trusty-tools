@@ -165,6 +165,9 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
     pub(crate) analyze_socket: Option<Arc<PathBuf>>,
+    /// #9076: what console's `trusty-events` client has seen — its state and
+    /// the events it relays. `Starting` until `run_serve` starts the client.
+    events: Arc<crate::events_uds::EventsRelay>,
     /// The trusty-secrets bridge (#9066); disabled until `run_serve` builds one.
     #[cfg(unix)]
     pub(crate) secrets: Arc<crate::secrets_uds::SecretsBridge>,
@@ -283,6 +286,7 @@ impl AppState {
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
+            events: Arc::new(crate::events_uds::EventsRelay::new()),
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
             started_at: Instant::now(),
@@ -388,6 +392,11 @@ impl AppState {
     /// Test: `machine_status_route_cold_cache_returns_503`.
     pub fn host_metrics_cache(&self) -> &crate::host_status::HostMetricsCache {
         &self.host_metrics_cache
+    }
+
+    /// The `trusty-events` client's relay: its status and its events (#9076).
+    pub fn events(&self) -> Arc<crate::events_uds::EventsRelay> {
+        Arc::clone(&self.events)
     }
 
     /// Access the bounded machine-status history (#6641).

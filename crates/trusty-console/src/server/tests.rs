@@ -226,6 +226,38 @@ async fn test_health_route() {
     );
 }
 
+/// Why: #9076, DOC-73 §8.5 — a console that has not reached the bus must say
+/// "cannot see", not answer like a healthy empty stream, and must keep serving
+/// `/health` (ruling 2a, condition 4).
+/// What: a fresh state whose client never ran: the status route answers 503
+/// with state `starting`, and `/health` is still 200.
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_reports_a_bus_that_was_never_reached() {
+    let router = build_router(make_test_state());
+    let req = Request::builder()
+        .uri("/api/console/events/status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.clone().oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_slice(&get_bytes(resp).await).expect("parse json");
+    assert_eq!(body["state"], "starting", "{body}");
+    assert_eq!(body["delivered"], 0, "{body}");
+
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the bus is not console's health"
+    );
+}
+
 /// Why: the details pane renders "how long has the console been up", so a
 /// constant or a value that resets per request would be a lie the operator
 /// cannot detect. The field must count forward from when the state was built.
