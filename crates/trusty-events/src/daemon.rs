@@ -39,6 +39,8 @@ const DRAIN_BOUND: Duration = Duration::from_secs(5);
 /// What: built by [`DaemonConfig::new`]; the counts default to
 /// [`DEFAULT_LOG_RETAIN_DAYS`] and [`DEFAULT_RING_CAPACITY`] and can be set
 /// afterwards.
+/// Test: `a_subscriber_that_falls_behind_the_ring_gets_a_gap` (sets
+/// `ring_capacity` through `--ring-capacity`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DaemonConfig {
