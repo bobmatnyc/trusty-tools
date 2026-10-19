@@ -67,6 +67,22 @@ pub const FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Test: `super::tests::a_socket_that_vanishes_under_a_quiet_subscription_is_detected`.
 pub const LIVENESS_INTERVAL: Duration = Duration::from_secs(15);
 
+/// The heartbeat interval the client asks the bus for (#10071).
+///
+/// Why: a daemon that is stopped or wedged keeps its socket and accepts
+/// connections from the kernel's backlog, so only a frame proves it answers.
+/// Test: `super::tests::a_daemon_that_accepts_and_goes_silent_is_reported_hung`.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long the client waits for any frame before it reports the bus hung:
+/// two and a half heartbeats, so one lost beat plus scheduler jitter is not a
+/// hang (#10071). 12.5 s for [`HEARTBEAT_INTERVAL`].
+///
+/// Test: `super::tests::a_daemon_that_accepts_and_goes_silent_is_reported_hung`.
+pub fn hung_bound(heartbeat: Duration) -> Duration {
+    heartbeat.saturating_mul(5) / 2
+}
+
 /// How long one liveness connect may take before it counts as inconclusive.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -114,6 +130,8 @@ pub struct ClientConfig {
     pub frame_timeout: Duration,
     /// See [`LIVENESS_INTERVAL`].
     pub liveness_interval: Duration,
+    /// See [`HEARTBEAT_INTERVAL`] and [`hung_bound`].
+    pub heartbeat: Duration,
     /// See [`BACKOFF_INITIAL`].
     pub backoff_initial: Duration,
     /// See [`BACKOFF_MAX`].
@@ -132,6 +150,7 @@ impl ClientConfig {
             open_timeout: OPEN_TIMEOUT,
             frame_timeout: FRAME_TIMEOUT,
             liveness_interval: LIVENESS_INTERVAL,
+            heartbeat: HEARTBEAT_INTERVAL,
             backoff_initial: BACKOFF_INITIAL,
             backoff_max: BACKOFF_MAX,
             dedupe_window: DEDUPE_WINDOW,

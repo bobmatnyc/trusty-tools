@@ -5,8 +5,10 @@ mod common;
 
 use std::collections::HashSet;
 
-use common::{event, large_event, next_event, next_item, push, start, subscribe};
-use trusty_common::control_bus::{SubscribeFilter, SubscribeItem};
+use common::{event, large_event, next_event, next_frame, next_item, open, push, start, subscribe};
+use trusty_common::control_bus::{SubscribeFilter, SubscribeItem, SubscribeParams};
+use trusty_common::uds::UdsRpcError;
+use trusty_common::uds::server::CODE_INVALID_PARAMS;
 
 fn session(s: &str) -> SubscribeFilter {
     SubscribeFilter {
@@ -186,5 +188,74 @@ async fn seq_continues_after_a_restart() {
         assert!(seen.insert(seq));
         let want = if expected <= 3 { "a" } else { "b" };
         assert_eq!(sess, want);
+    }
+}
+
+// ─── #10071: opt-in heartbeats over the real socket ──────────────────────────
+
+/// Two live subscriptions on one daemon: the one that set `heartbeat_ms`
+/// gets a heartbeat at once and then on its interval; the one that did not
+/// gets exactly the events, as before #10071.
+#[tokio::test(flavor = "multi_thread")]
+async fn heartbeats_reach_only_the_subscription_that_asked() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let asked = SubscribeParams {
+        heartbeat_ms: Some(100),
+        ..SubscribeParams::default()
+    };
+    let mut beating = open(&daemon.socket, asked).await;
+    assert_eq!(
+        next_item(&mut beating).await,
+        SubscribeItem::Heartbeat { head: 0 }
+    );
+    let mut plain = subscribe(&daemon.socket, None, SubscribeFilter::default()).await;
+
+    // Several intervals pass with nothing to say.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    push(&daemon.socket, vec![event("s1")]).await;
+    let (seq, ..) = next_event(&mut plain).await;
+    assert_eq!(seq, 1, "the first frame without heartbeat_ms is the event");
+
+    let mut beats = 0;
+    loop {
+        match next_item(&mut beating).await {
+            SubscribeItem::Heartbeat { head } => {
+                assert_eq!(head, 0, "the heartbeat before the event");
+                beats += 1;
+            }
+            SubscribeItem::Event { event, .. } => {
+                assert_eq!(event.seq, 1);
+                break;
+            }
+            other => panic!("unexpected item {other:?}"),
+        }
+    }
+    assert!(
+        beats >= 2,
+        "a heartbeat per interval, got {beats} in 500 ms"
+    );
+    assert_eq!(
+        next_item(&mut beating).await,
+        SubscribeItem::Heartbeat { head: 1 }
+    );
+}
+
+/// The daemon refuses an out-of-range `heartbeat_ms` with `invalid_params`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_refuses_a_zero_heartbeat_ms() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let zero = SubscribeParams {
+        heartbeat_ms: Some(0),
+        ..SubscribeParams::default()
+    };
+    let mut stream = open(&daemon.socket, zero).await;
+    match next_frame(&mut stream).await {
+        Some(Err(UdsRpcError::Stream { error, .. })) => {
+            assert_eq!(error.code, CODE_INVALID_PARAMS, "{error}");
+            assert!(error.message.contains("heartbeat_ms"), "{error}");
+        }
+        other => panic!("expected an invalid_params refusal, got {other:?}"),
     }
 }

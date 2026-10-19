@@ -353,3 +353,140 @@ async fn a_resume_from_a_seq_no_tier_holds_is_refused() {
     let message = error_message(&mut stream).await;
     assert!(message.contains("since_id"), "got {message:?}");
 }
+
+// ─── #10071: opt-in heartbeats ───────────────────────────────────────────────
+
+/// Live-only params that ask for a heartbeat every `ms`.
+fn beating(ms: u64) -> SubscribeParams {
+    SubscribeParams {
+        heartbeat_ms: Some(ms),
+        ..SubscribeParams::default()
+    }
+}
+
+/// The next item that is not a heartbeat.
+async fn next_non_heartbeat(reader: &mut BufReader<UnixStream>) -> SubscribeItem {
+    loop {
+        match item(reader).await {
+            SubscribeItem::Heartbeat { .. } => {}
+            other => return other,
+        }
+    }
+}
+
+/// A subscription that asks gets a heartbeat before anything else, even
+/// before its replay, then one per interval; `head` is the bus's last seq.
+#[tokio::test]
+async fn a_subscription_that_asks_gets_a_heartbeat_first_then_on_its_interval() {
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    bus.ingest(event());
+    bus.ingest(event());
+    let shared = Arc::new(Connection::new(Arc::clone(&bus), limits(4, 3)));
+    let params = SubscribeParams {
+        since_seq: Some(0),
+        heartbeat_ms: Some(100),
+        ..SubscribeParams::default()
+    };
+    let mut stream = subscribe(&shared, params).await;
+    assert_eq!(
+        item(&mut stream).await,
+        SubscribeItem::Heartbeat { head: 2 }
+    );
+    for want in 1..=2 {
+        match item(&mut stream).await {
+            SubscribeItem::Event { event, .. } => assert_eq!(event.seq, want),
+            other => panic!("expected seq {want}, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        item(&mut stream).await,
+        SubscribeItem::Heartbeat { head: 2 }
+    );
+    bus.ingest(event());
+    match next_non_heartbeat(&mut stream).await {
+        SubscribeItem::Event { event, .. } => assert_eq!(event.seq, 3),
+        other => panic!("expected seq 3, got {other:?}"),
+    }
+    assert_eq!(
+        item(&mut stream).await,
+        SubscribeItem::Heartbeat { head: 3 }
+    );
+}
+
+/// A subscription that does not ask is sent exactly what it was before
+/// #10071: no heartbeat, however long it waits, and the event first.
+#[tokio::test]
+async fn a_subscription_that_does_not_ask_gets_no_heartbeat() {
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let shared = Arc::new(Connection::new(Arc::clone(&bus), limits(4, 3)));
+    let mut stream = subscribe(&shared, SubscribeParams::default()).await;
+    // Several of the shortest interval a subscription could ask for.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    bus.ingest(event());
+    match item(&mut stream).await {
+        SubscribeItem::Event { event, .. } => assert_eq!(event.seq, 1),
+        other => panic!("a subscription that did not ask got {other:?}"),
+    }
+}
+
+/// `heartbeat_ms` outside its bounds is refused with `invalid_params`, before
+/// any item; the bounds themselves and a probe's 500 ms are accepted.
+#[tokio::test]
+async fn a_heartbeat_ms_outside_its_bounds_is_refused() {
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let shared = Arc::new(Connection::new(bus, limits(16, 3)));
+    for refused in [0, 99, 3_600_001, u64::MAX] {
+        let mut stream = subscribe(&shared, beating(refused)).await;
+        let frame = frame(&mut stream).await;
+        assert_eq!(frame["stream"], "error", "{refused}: {frame}");
+        assert_eq!(
+            frame["error"]["code"],
+            trusty_common::uds::server::CODE_INVALID_PARAMS,
+            "{refused}: {frame}"
+        );
+        let message = frame["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("heartbeat_ms"), "{refused}: {message:?}");
+    }
+    for accepted in [100, 500, 3_600_000] {
+        let mut stream = subscribe(&shared, beating(accepted)).await;
+        assert_eq!(
+            item(&mut stream).await,
+            SubscribeItem::Heartbeat { head: 0 },
+            "{accepted}"
+        );
+    }
+}
+
+/// A subscriber that stops reading fills its own buffer; ingest goes on and
+/// another subscriber keeps getting its events and its heartbeats.
+#[tokio::test]
+async fn a_reader_that_stops_reading_does_not_stop_ingest_or_other_heartbeats() {
+    const EVENTS: u64 = 2_000;
+    let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let shared = Arc::new(Connection::new(Arc::clone(&bus), limits(4, 3)));
+    let _stalled = subscribe(&shared, beating(100)).await;
+    let mut reading = subscribe(&shared, beating(100)).await;
+    assert_eq!(
+        item(&mut reading).await,
+        SubscribeItem::Heartbeat { head: 0 }
+    );
+    for _ in 0..EVENTS {
+        bus.ingest(event());
+    }
+    assert_eq!(
+        bus.metrics().ingested,
+        EVENTS,
+        "ingest never waits on a reader"
+    );
+    let mut last = 0;
+    while last < EVENTS {
+        match next_non_heartbeat(&mut reading).await {
+            SubscribeItem::Event { event, .. } => last = event.seq,
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        item(&mut reading).await,
+        SubscribeItem::Heartbeat { head: EVENTS }
+    );
+}

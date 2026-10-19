@@ -27,7 +27,8 @@ use trusty_common::control_bus::{
 };
 use trusty_common::uds::{SocketVerdict, probe_socket_verdict};
 use trusty_console::events_uds::{
-    BusState, BusStatus, ClientConfig, EventsRelay, RelayItem, ResumeToken, Start, spawn,
+    BusState, BusStatus, ClientConfig, EventsRelay, FailureKind, RelayItem, ResumeToken, Start,
+    hung_bound, spawn,
 };
 
 /// How long any one step may take.
@@ -82,6 +83,10 @@ struct Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        // A test that stopped the daemon may have failed before resuming it.
+        let _ = Command::new("kill")
+            .args(["-CONT", &self.child.id().to_string()])
+            .status();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -139,6 +144,16 @@ async fn start(root: &Path, name: &str, extra: &[&str]) -> Daemon {
 }
 
 impl Daemon {
+    /// Send `signal` (`STOP`, `CONT`, ...) to the daemon.
+    fn signal(&self, signal: &str) {
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill")
+            .args([&format!("-{signal}"), &pid])
+            .status()
+            .expect("run kill");
+        assert!(sent.success(), "kill -{signal} {pid}");
+    }
+
     /// SIGTERM, as launchd stops it, and wait for the exit.
     async fn stop(&mut self) {
         let pid = self.child.id().to_string();
@@ -195,8 +210,18 @@ impl Drop for Console {
 }
 
 fn console(socket: &Path, start: Start) -> Console {
+    console_with(
+        socket,
+        start,
+        ClientConfig::new(socket.to_path_buf()).heartbeat,
+    )
+}
+
+/// [`console`] asking the bus for a heartbeat every `heartbeat` (#10071).
+fn console_with(socket: &Path, start: Start, heartbeat: Duration) -> Console {
     let mut config = ClientConfig::new(socket.to_path_buf());
     config.start = start;
+    config.heartbeat = heartbeat;
     config.liveness_interval = Duration::from_millis(200);
     config.backoff_initial = Duration::from_millis(20);
     config.backoff_max = Duration::from_millis(200);
@@ -405,4 +430,81 @@ async fn the_client_rides_out_a_daemon_restart_mid_stream() {
     console.nothing_within(Duration::from_millis(300)).await;
     let status = console.relay.status();
     assert_eq!((status.resyncs, status.duplicates), (0, 0), "{status:?}");
+}
+
+// ─── #10071: hung-daemon detection against the real daemon ───────────────────
+
+/// The heartbeat these tests ask for: the bus's minimum, so a bound is short.
+const BEAT: Duration = Duration::from_millis(100);
+
+/// A healthy daemon with nothing to say keeps the console connected for four
+/// hung bounds: its heartbeats, not events, are what keep the client calm.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
+async fn a_quiet_healthy_daemon_stays_connected() {
+    let tmp = TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), "daemon", &[]).await;
+    let console = console_with(&daemon.socket, Start::Live, BEAT);
+    console
+        .status_until("connected", |s| s.state == BusState::Connected)
+        .await;
+
+    let mut watch = console.relay.watch();
+    let quiet = tokio::time::timeout(
+        hung_bound(BEAT) * 4,
+        watch.wait_for(|s| s.state != BusState::Connected),
+    )
+    .await;
+    let status = console.relay.status();
+    assert!(quiet.is_err(), "a quiet daemon left connected: {status:?}");
+    assert_eq!(
+        (
+            status.last_error,
+            status.failures,
+            status.delivered,
+            status.undecodable
+        ),
+        (None, 0, 0, 0),
+        "{status:?}"
+    );
+    drop(daemon);
+}
+
+/// A daemon that is stopped (SIGSTOP) keeps its socket and the kernel keeps
+/// accepting, so only the missing heartbeat shows it. The console reports
+/// `hung` within the bound and is connected again after SIGCONT, with no
+/// event lost.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns the built trusty-events binary; not linkable per ADR-0065"]
+async fn a_stopped_daemon_is_reported_hung_and_recovers_after_sigcont() {
+    let tmp = TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), "daemon", &[]).await;
+    let mut console = console_with(&daemon.socket, Start::Beginning, BEAT);
+    push(&daemon.socket, &["e1"]).await;
+    assert_eq!(console.sessions(1).await, ["e1"]);
+
+    daemon.signal("STOP");
+    let stopped = tokio::time::Instant::now();
+    let status = console
+        .status_until("hung", |s| s.last_error == Some(FailureKind::Hung))
+        .await;
+    let elapsed = stopped.elapsed();
+    assert_eq!(status.state, BusState::Reconnecting, "{status:?}");
+    assert!(
+        elapsed < hung_bound(BEAT) + Duration::from_secs(1),
+        "hung reported after {elapsed:?}"
+    );
+
+    daemon.signal("CONT");
+    console
+        .status_until("connected", |s| s.state == BusState::Connected)
+        .await;
+    push(&daemon.socket, &["e2"]).await;
+    assert_eq!(console.sessions(1).await, ["e2"]);
+    let status = console.relay.status();
+    assert_eq!(
+        (status.duplicates, status.gaps, status.resyncs),
+        (0, 0, 0),
+        "{status:?}"
+    );
 }

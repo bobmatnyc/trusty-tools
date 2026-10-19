@@ -102,6 +102,9 @@ pub enum FailureKind {
     Timeout,
     /// The bus closed the connection mid-stream.
     HungUp,
+    /// #10071: the bus accepted the subscription but sent no frame, not even
+    /// a heartbeat, within the hung bound: it is stopped or wedged.
+    Hung,
     /// The bus refused the resume point.
     Refused,
     /// The bus ended the stream with an error other than a refusal.

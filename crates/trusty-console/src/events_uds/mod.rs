@@ -29,7 +29,7 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use client::{ClientConfig, Start, spawn};
+pub use client::{ClientConfig, HEARTBEAT_INTERVAL, Start, hung_bound, spawn};
 pub use relay::{BusState, BusStatus, EventsRelay, FailureKind, RelayItem, status_handler};
 pub use token::{ResumeToken, ResumeTokenError};
 
