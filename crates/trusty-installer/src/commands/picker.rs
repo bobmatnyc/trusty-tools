@@ -167,6 +167,17 @@ fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
     resolved.members
 }
 
+/// The names `tctl install` re-resolves from a picker selection.
+///
+/// Why: `install::run` hands the picker's expanded list back to
+/// [`select_members_transitive`] as names, so this list decides which members
+/// the resolver treats as explicitly asked for.
+/// What: the crate name of every member in `chosen`.
+/// Test: `install::tests::the_picker_round_trip_keeps_the_bus_soft`.
+pub fn override_names(chosen: &[StableMember]) -> Vec<String> {
+    chosen.iter().map(|m| m.crate_name.clone()).collect()
+}
+
 /// Print the numbered component menu to stderr.
 ///
 /// Why: Separated from the readline loop so the table format can be reviewed and

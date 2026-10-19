@@ -123,7 +123,7 @@ pub fn run(
                     eprintln!("tctl install: no components selected — nothing to do.");
                     return 0;
                 }
-                members_override = chosen.iter().map(|m| m.crate_name.clone()).collect();
+                members_override = super::picker::override_names(&chosen);
                 &members_override
             }
             Err(e) => {
