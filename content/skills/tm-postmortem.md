@@ -51,7 +51,9 @@ from your loaded list does not mean these tools are unavailable.
 The PM never calls `report_bug` with `confirm: true` without having shown the
 user the `preview_bug_report` output first and gotten an explicit "yes, file
 it" — this is the same "ask before creating" discipline as ticket creation
-(see `tm-ticketing`).
+(see `tm-ticketing`). A filed issue then goes to `ticketing` for its milestone,
+relationships and state — `tm-ticketing`, "Every issue: milestone,
+relationships, state".
 
 ## Coalesce the Fast Loop's Hypotheses (#6937)
 
