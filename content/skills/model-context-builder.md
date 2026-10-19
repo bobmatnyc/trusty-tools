@@ -3,7 +3,7 @@ name: model-context-builder
 description: "MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing"
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: agent-reference
 effort: medium
 ---
@@ -35,6 +35,18 @@ This document provides guidance on creating comprehensive evaluations for MCP se
 ```
 
 ---
+
+## Where Each Task Lives
+
+This file holds what every MCP evaluation task needs. Everything else sits in one
+file per task under `references/`, beside this file. Read the file your task
+needs, and only that file. A pointer elsewhere that names a section of
+`model-context-builder` resolves here: find the section name in the middle column.
+
+| Task | Sections | File |
+|---|---|---|
+| Compare a draft question with good and poor examples | "Evaluation Examples" | [references/evaluation-examples.md](references/evaluation-examples.md) |
+| Install the harness, write the evaluation file, run it over stdio, SSE or HTTP, read the report, troubleshoot a run | "Setup", "Evaluation File Format", "Running Evaluations", "Command-Line Options", "Output", "Complete Example Workflow", "Troubleshooting" | [references/running-evaluations.md](references/running-evaluations.md) |
 
 ## Purpose of Evaluations
 
@@ -251,115 +263,6 @@ Each QA pair consists of a question and an answer. The output should be an XML f
 </evaluation>
 ```
 
-## Evaluation Examples
-
-### Good Questions
-
-**Example 1: Multi-hop question requiring deep exploration (GitHub MCP)**
-```xml
-<qa_pair>
-   <question>Find the repository that was archived in Q3 2023 and had previously been the most forked project in the organization. What was the primary programming language used in that repository?</question>
-   <answer>Python</answer>
-</qa_pair>
-```
-
-This question is good because:
-- Requires multiple searches to find archived repositories
-- Needs to identify which had the most forks before archival
-- Requires examining repository details for the language
-- Answer is a simple, verifiable value
-- Based on historical (closed) data that won't change
-
-**Example 2: Requires understanding context without keyword matching (Project Management MCP)**
-```xml
-<qa_pair>
-   <question>Locate the initiative focused on improving customer onboarding that was completed in late 2023. The project lead created a retrospective document after completion. What was the lead's role title at that time?</question>
-   <answer>Product Manager</answer>
-</qa_pair>
-```
-
-This question is good because:
-- Doesn't use specific project name ("initiative focused on improving customer onboarding")
-- Requires finding completed projects from specific timeframe
-- Needs to identify the project lead and their role
-- Requires understanding context from retrospective documents
-- Answer is human-readable and stable
-- Based on completed work (won't change)
-
-**Example 3: Complex aggregation requiring multiple steps (Issue Tracker MCP)**
-```xml
-<qa_pair>
-   <question>Among all bugs reported in January 2024 that were marked as critical priority, which assignee resolved the highest percentage of their assigned bugs within 48 hours? Provide the assignee's username.</question>
-   <answer>alex_eng</answer>
-</qa_pair>
-```
-
-This question is good because:
-- Requires filtering bugs by date, priority, and status
-- Needs to group by assignee and calculate resolution rates
-- Requires understanding timestamps to determine 48-hour windows
-- Tests pagination (potentially many bugs to process)
-- Answer is a single username
-- Based on historical data from specific time period
-
-**Example 4: Requires synthesis across multiple data types (CRM MCP)**
-```xml
-<qa_pair>
-   <question>Find the account that upgraded from the Starter to Enterprise plan in Q4 2023 and had the highest annual contract value. What industry does this account operate in?</question>
-   <answer>Healthcare</answer>
-</qa_pair>
-```
-
-This question is good because:
-- Requires understanding subscription tier changes
-- Needs to identify upgrade events in specific timeframe
-- Requires comparing contract values
-- Must access account industry information
-- Answer is simple and verifiable
-- Based on completed historical transactions
-
-### Poor Questions
-
-**Example 1: Answer changes over time**
-```xml
-<qa_pair>
-   <question>How many open issues are currently assigned to the engineering team?</question>
-   <answer>47</answer>
-</qa_pair>
-```
-
-This question is poor because:
-- The answer will change as issues are created, closed, or reassigned
-- Not based on stable/stationary data
-- Relies on "current state" which is dynamic
-
-**Example 2: Too easy with keyword search**
-```xml
-<qa_pair>
-   <question>Find the pull request with title "Add authentication feature" and tell me who created it.</question>
-   <answer>developer123</answer>
-</qa_pair>
-```
-
-This question is poor because:
-- Can be solved with a straightforward keyword search for exact title
-- Doesn't require deep exploration or understanding
-- No synthesis or analysis needed
-
-**Example 3: Ambiguous answer format**
-```xml
-<qa_pair>
-   <question>List all the repositories that have Python as their primary language.</question>
-   <answer>repo1, repo2, repo3, data-pipeline, ml-tools</answer>
-</qa_pair>
-```
-
-This question is poor because:
-- Answer is a list that could be returned in any order
-- Difficult to verify with direct string comparison
-- LLM might format differently (JSON array, comma-separated, newline-separated)
-- Better to ask for a specific aggregate (count) or superlative (most stars)
-
 ## Verification Process
 
 After creating evaluations:
@@ -383,206 +286,6 @@ Remember to parallelize solving tasks to avoid running out of context, then accu
 7. **Iterate and Refine** based on what you learn during the process
 
 ---
-
-# Running Evaluations
-
-After creating the evaluation file, use the provided evaluation harness to test the MCP server.
-
-## Setup
-
-1. **Install Dependencies**
-
-   ```bash
-   pip install -r scripts/requirements.txt
-   ```
-
-   Or install manually:
-   ```bash
-   pip install anthropic mcp
-   ```
-
-2. **Set API Key**
-
-   ```bash
-   export ANTHROPIC_API_KEY=your_api_key_here
-   ```
-
-## Evaluation File Format
-
-Evaluation files use XML format with `<qa_pair>` elements:
-
-```xml
-<evaluation>
-   <qa_pair>
-      <question>Find the project created in Q2 2024 with the highest number of completed tasks. What is the project name?</question>
-      <answer>Website Redesign</answer>
-   </qa_pair>
-   <qa_pair>
-      <question>Search for issues labeled as "bug" that were closed in March 2024. Which user closed the most issues? Provide their username.</question>
-      <answer>sarah_dev</answer>
-   </qa_pair>
-</evaluation>
-```
-
-## Running Evaluations
-
-The evaluation script (`scripts/evaluation.py`) supports three transport types:
-
-**Important:**
-- **stdio transport**: The evaluation script automatically launches and manages the MCP server process for you. Do not run the server manually.
-- **sse/http transports**: You must start the MCP server separately before running the evaluation. The script connects to the already-running server at the specified URL.
-
-### 1. Local STDIO Server
-
-For locally-run MCP servers (script launches the server automatically):
-
-```bash
-python scripts/evaluation.py \
-  -t stdio \
-  -c python \
-  -a my_mcp_server.py \
-  evaluation.xml
-```
-
-With environment variables:
-```bash
-python scripts/evaluation.py \
-  -t stdio \
-  -c python \
-  -a my_mcp_server.py \
-  -e API_KEY=abc123 \
-  -e DEBUG=true \
-  evaluation.xml
-```
-
-### 2. Server-Sent Events (SSE)
-
-For SSE-based MCP servers (start the server first):
-
-```bash
-python scripts/evaluation.py \
-  -t sse \
-  -u https://example.com/mcp \
-  -H "Authorization: Bearer token123" \
-  -H "X-Custom-Header: value" \
-  evaluation.xml
-```
-
-### 3. HTTP (Streamable HTTP)
-
-For HTTP-based MCP servers (start the server first):
-
-```bash
-python scripts/evaluation.py \
-  -t http \
-  -u https://example.com/mcp \
-  -H "Authorization: Bearer token123" \
-  evaluation.xml
-```
-
-## Command-Line Options
-
-```
-usage: evaluation.py [-h] [-t {stdio,sse,http}] [-m MODEL] [-c COMMAND]
-                     [-a ARGS [ARGS ...]] [-e ENV [ENV ...]] [-u URL]
-                     [-H HEADERS [HEADERS ...]] [-o OUTPUT]
-                     eval_file
-
-positional arguments:
-  eval_file             Path to evaluation XML file
-
-optional arguments:
-  -h, --help            Show help message
-  -t, --transport       Transport type: stdio, sse, or http (default: stdio)
-  -m, --model           Claude model to use (default: claude-3-7-sonnet-20250219)
-  -o, --output          Output file for report (default: print to stdout)
-
-stdio options:
-  -c, --command         Command to run MCP server (e.g., python, node)
-  -a, --args            Arguments for the command (e.g., server.py)
-  -e, --env             Environment variables in KEY=VALUE format
-
-sse/http options:
-  -u, --url             MCP server URL
-  -H, --header          HTTP headers in 'Key: Value' format
-```
-
-## Output
-
-The evaluation script generates a detailed report including:
-
-- **Summary Statistics**:
-  - Accuracy (correct/total)
-  - Average task duration
-  - Average tool calls per task
-  - Total tool calls
-
-- **Per-Task Results**:
-  - Prompt and expected response
-  - Actual response from the agent
-  - Whether the answer was correct (✅/❌)
-  - Duration and tool call details
-  - Agent's summary of its approach
-  - Agent's feedback on the tools
-
-### Save Report to File
-
-```bash
-python scripts/evaluation.py \
-  -t stdio \
-  -c python \
-  -a my_server.py \
-  -o evaluation_report.md \
-  evaluation.xml
-```
-
-## Complete Example Workflow
-
-Here's a complete example of creating and running an evaluation:
-
-1. **Create your evaluation file** (`my_evaluation.xml`):
-
-```xml
-<evaluation>
-   <qa_pair>
-      <question>Find the user who created the most issues in January 2024. What is their username?</question>
-      <answer>alice_developer</answer>
-   </qa_pair>
-   <qa_pair>
-      <question>Among all pull requests merged in Q1 2024, which repository had the highest number? Provide the repository name.</question>
-      <answer>backend-api</answer>
-   </qa_pair>
-   <qa_pair>
-      <question>Find the project that was completed in December 2023 and had the longest duration from start to finish. How many days did it take?</question>
-      <answer>127</answer>
-   </qa_pair>
-</evaluation>
-```
-
-2. **Install dependencies**:
-
-```bash
-pip install -r scripts/requirements.txt
-export ANTHROPIC_API_KEY=your_api_key
-```
-
-3. **Run evaluation**:
-
-```bash
-python scripts/evaluation.py \
-  -t stdio \
-  -c python \
-  -a github_mcp_server.py \
-  -e GITHUB_TOKEN=ghp_xxx \
-  -o github_eval_report.md \
-  my_evaluation.xml
-```
-
-4. **Review the report** in `github_eval_report.md` to:
-   - See which questions passed/failed
-   - Read the agent's feedback on your tools
-   - Identify areas for improvement
-   - Iterate on your MCP server design
 
 ## Local MCP Server Conventions (mcp-* Repos)
 
@@ -616,28 +319,3 @@ Operational notes:
 - Expose a health endpoint when running HTTP/SSE variants.
 - Allow dynamic port allocation for browser integrations (mcp-browser uses a port range).
 
-## Troubleshooting
-
-### Connection Errors
-
-When connection errors occur:
-- **STDIO**: Verify the command and arguments are correct
-- **SSE/HTTP**: Check the URL is accessible and headers are correct
-- Ensure any required API keys are set in environment variables or headers
-
-### Low Accuracy
-
-If many evaluations fail:
-- Review the agent's feedback for each task
-- Check if tool descriptions are clear and comprehensive
-- Verify input parameters are well-documented
-- Consider whether tools return too much or too little data
-- Ensure error messages are actionable
-
-### Timeout Issues
-
-If tasks are timing out:
-- Use a more capable model (e.g., `claude-3-7-sonnet-20250219`)
-- Check if tools are returning too much data
-- Verify pagination is working correctly
-- Consider simplifying complex questions
