@@ -175,3 +175,34 @@ pub async fn serve_until_shutdown(
     }
     drop(listener);
 }
+
+/// Wait for the serve task, and fail when it ended without a shutdown request.
+///
+/// Why (#6288 S3a, the Fail-Open Check): with the TCP listener gone the socket
+/// is the daemon's only door. Before S3a a panicked serve task was a `warn!`
+/// while axum kept the process alive, which is a daemon that runs and answers
+/// nobody. A loop that dies, or returns while `drain` is still uncancelled, must
+/// end the daemon with an error so `run_daemon` removes its lock and the process
+/// exits non-zero for its supervisor to restart.
+/// What: `Ok` only when the task returned AND `drain` was cancelled first;
+/// a panic, a cancelled task, or an unrequested return is an `Err` naming why.
+///
+/// # Errors
+///
+/// As above.
+///
+/// Test: `join_serve_task_errors_when_the_accept_loop_panics`,
+/// `join_serve_task_errors_when_the_loop_ends_without_a_shutdown`,
+/// `join_serve_task_is_ok_after_a_requested_shutdown`.
+pub async fn join_serve_task(
+    task: tokio::task::JoinHandle<()>,
+    drain: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    match task.await {
+        Err(join) => Err(anyhow::anyhow!("the rpc accept loop died: {join}")),
+        Ok(()) if !drain.is_cancelled() => Err(anyhow::anyhow!(
+            "the rpc accept loop ended without a shutdown signal"
+        )),
+        Ok(()) => Ok(()),
+    }
+}

@@ -23,30 +23,14 @@ use std::path::{Path, PathBuf};
 
 use crate::core::paths::FRAMEWORK_DIR_NAME;
 
-/// Canonical loopback bind address the daemon listens on by default.
+/// The URL a pre-#6288 daemon recorded in its lock file by default.
 ///
-/// Why (issue #1268): the daemon's `--addr` default, the thin CLI's `--url`
-/// default, and [`DEFAULT_DAEMON_URL`] previously each hard-coded the
-/// `127.0.0.1:7880` literal independently. Any one of them drifting (or an
-/// operator carrying a stale `TRUSTY_MPM_URL=…:7881` in their environment)
-/// produced "daemon: unreachable" because the client probed a port the daemon
-/// never bound. Hoisting the port into a single constant — and deriving every
-/// other default address string from it — makes the bind side and the client
-/// side provably agree from one source of truth.
-/// What: the literal `"127.0.0.1:7880"`, parsed into a `SocketAddr` by
-/// [`default_daemon_addr`] and embedded into [`DEFAULT_DAEMON_URL`].
-/// Test: `default_url_matches_addr`, `default_addr_parses`.
-pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7880";
-
-/// Default daemon URL when no override and no lock file is found.
-///
-/// Why: derived from [`DEFAULT_DAEMON_ADDR`] so the client default and the
-/// daemon bind default can never drift (issue #1268).
-/// What: `"http://127.0.0.1:7880"` — the `http://` scheme prepended to
-/// [`DEFAULT_DAEMON_ADDR`]. Kept as a `&'static str` literal (rather than a
-/// runtime `format!`) so it remains usable in `const`/`default_value` contexts;
-/// the `default_url_matches_addr` test guarantees the two stay in lockstep.
-/// Test: `default_url_matches_addr`.
+/// Why: since #6288 S3a the daemon binds no TCP port and writes an empty lock
+/// `addr`, but a lock written by an older daemon still names this URL, and
+/// [`lock_is_hosts`] reads it as the host daemon's. The bind-side
+/// `DEFAULT_DAEMON_ADDR` and `default_daemon_addr` were removed with the bind.
+/// What: the literal `"http://127.0.0.1:7880"`.
+/// Test: `host_lock_is_judged_by_address_and_home`.
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7880";
 
 /// Default trusty-console HTTP address (host:port) used when the console's
@@ -58,21 +42,6 @@ pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7880";
 /// What: the literal `"127.0.0.1:7788"`, matching `trusty_console::DEFAULT_HTTP`.
 /// Test: `console_addr_from_falls_back_when_absent_or_blank`.
 pub const DEFAULT_CONSOLE_ADDR: &str = "127.0.0.1:7788";
-
-/// Parse [`DEFAULT_DAEMON_ADDR`] into a `SocketAddr`.
-///
-/// Why: the daemon's clap `--addr` argument is typed as `SocketAddr`; this
-/// helper lets that default be derived from the shared [`DEFAULT_DAEMON_ADDR`]
-/// constant instead of repeating the literal (issue #1268).
-/// What: parses the constant; the parse is infallible for a well-formed
-/// literal, so a malformed constant is a programmer error caught by
-/// `default_addr_parses` at test time.
-/// Test: `default_addr_parses`.
-pub fn default_daemon_addr() -> std::net::SocketAddr {
-    DEFAULT_DAEMON_ADDR
-        .parse()
-        .expect("DEFAULT_DAEMON_ADDR is a valid SocketAddr literal")
-}
 
 /// Path to the daemon lock file.
 ///
@@ -544,32 +513,19 @@ pub fn console_base_url() -> String {
 /// live in [`crate::core::daemon_identity`] — this hand-rolled a second copy of
 /// them, and trusted any TOML at the path with an `addr` line.
 fn read_lock_file_url() -> Option<String> {
-    super::daemon_identity::read_lock().map(|lock| lock.addr)
+    let lock = super::daemon_identity::read_lock()?;
+    // #6288 S3a: a socket-only daemon writes an empty `addr`; its socket
+    // locator is the address a reader of the lock can use.
+    if lock.addr.is_empty() {
+        return (!lock.socket_path.is_empty())
+            .then(|| socket_locator(Path::new(&lock.socket_path)));
+    }
+    Some(lock.addr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_url_matches_addr() {
-        // Why (issue #1268): the client default URL and the daemon bind default
-        // must agree. `DEFAULT_DAEMON_URL` is `http://` + `DEFAULT_DAEMON_ADDR`.
-        assert_eq!(
-            DEFAULT_DAEMON_URL,
-            format!("http://{DEFAULT_DAEMON_ADDR}"),
-            "client default URL and daemon bind addr drifted (issue #1268)"
-        );
-    }
-
-    #[test]
-    fn default_addr_parses() {
-        // The shared bind constant must parse into a SocketAddr so the daemon's
-        // clap `--addr` default can be derived from it.
-        let addr = default_daemon_addr();
-        assert_eq!(addr.to_string(), DEFAULT_DAEMON_ADDR);
-        assert_eq!(addr.port(), 7880);
-    }
 
     #[test]
     fn lock_file_path_is_under_framework_root() {
@@ -722,7 +678,7 @@ mod tests {
         let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
         let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
         // A live lock naming the HTTP default must not be what resolves.
-        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+        write_pre_s3a_lock();
         let socket = home.path().join("App Support").join("trusty-mpm.sock");
         let _socket = EnvVarGuard::set(trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV, &socket);
 
@@ -846,7 +802,7 @@ mod tests {
         let _home = EnvVarGuard::set("HOME", home.path());
         let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
         let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
-        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+        write_pre_s3a_lock();
 
         assert_eq!(client_lock_url(), None, "a host lock is not this sandbox's");
     }
@@ -861,13 +817,48 @@ mod tests {
         let _home = EnvVarGuard::set("HOME", home.path());
         let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
         let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
-        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+        write_pre_s3a_lock();
 
         assert_eq!(client_lock_url().as_deref(), Some(DEFAULT_DAEMON_URL));
         assert_eq!(
             client_lock_url(),
             crate::core::daemon_identity::read_lock().map(|lock| lock.addr)
         );
+    }
+
+    /// A live lock as a pre-#6288-S3a daemon wrote it: the TCP default in
+    /// `addr`, this process's pid, no socket.
+    fn write_pre_s3a_lock() {
+        let path = lock_file_path();
+        std::fs::create_dir_all(path.parent().expect("lock dir")).expect("create lock dir");
+        let lock = crate::core::daemon_identity::DaemonLock {
+            product: crate::core::daemon_identity::LOCK_PRODUCT.to_string(),
+            pid: std::process::id(),
+            addr: DEFAULT_DAEMON_URL.to_string(),
+            started_at: String::new(),
+            socket_path: String::new(),
+        };
+        std::fs::write(&path, crate::core::daemon_identity::render_lock(&lock))
+            .expect("write the lock");
+    }
+
+    /// #6288 S3a: a socket-only daemon writes an empty `addr`, and the lock's
+    /// URL is then its socket locator, never an empty string.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn client_lock_url_is_the_socket_locator_for_a_socket_only_lock() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let socket = home.path().join("trusty-mpm.sock");
+        crate::core::daemon_identity::write_lock_at(
+            &lock_file_path(),
+            &socket.display().to_string(),
+        );
+
+        assert_eq!(client_lock_url(), Some(socket_locator(&socket)));
     }
 
     /// Why (#9556 critic): the host-lock rule must reject both the default

@@ -11,9 +11,10 @@
 #   and arguments it received, from a caller environment (built with `env -i`,
 #   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the six pinned names (HOME, PATH,
-#                   TMUX_TMPDIR, TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR,
-#                   TRUSTY_SANDBOX) plus the forwarded names the caller set
+#     allowlist     the stub sees exactly the five pinned names (HOME, PATH,
+#                   TMUX_TMPDIR, TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_SANDBOX;
+#                   #6288 S3a dropped TRUSTY_MPM_ADDR, and the `--port` this
+#                   case passes is ignored) plus the forwarded names the caller set
 #                   (LANG, RUST_LOG), never the fake secrets or `LC_API_KEY`
 #                   (plus the names /bin/sh adds itself), `daemon --sandbox`,
 #                   and TMUX_TMPDIR=<dir>/data/tmux (#9557)
@@ -139,7 +140,7 @@ elif [ ! -f "$DIR1/home/stub-env-names" ]; then
 else
   # /bin/sh exports PWD, SHLVL, OLDPWD and _ on its own; they are not inherited.
   GOT="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR1/home/stub-env-names" | tr '\n' ' ')"
-  WANT="HOME LANG PATH RUST_LOG TMUX_TMPDIR TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX "
+  WANT="HOME LANG PATH RUST_LOG TMUX_TMPDIR TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX "
   if [ "$GOT" != "$WANT" ]; then
     fail allowlist "stub saw [$GOT], want [$WANT]"
   elif [ "$(tr '\n' ' ' < "$DIR1/home/stub-args")" != "daemon --sandbox " ]; then
@@ -193,7 +194,7 @@ if [ "$STATUS2" -ne 0 ]; then
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
 elif ! printf '%s' "$OUT2" \
-    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG"; then
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG"; then
   fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in

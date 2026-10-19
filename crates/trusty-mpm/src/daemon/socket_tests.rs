@@ -398,3 +398,52 @@ async fn mcp_dispatch_is_registered_on_the_daemon_socket() {
     let _ = stop.send(());
     handle.await.expect("the serve task must not panic");
 }
+
+/// #6288 S3a Fail-Open Check: a serve task that panics ends the daemon.
+///
+/// Why: before S3a the caller logged a panicked serve task at `warn` and kept
+/// running on its TCP listener. With the socket as the only listener that is a
+/// live daemon nobody can reach, so the join must be an error.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_errors_when_the_accept_loop_panics() {
+    let drain = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(async { panic!("the accept loop died") });
+    let err = super::join_serve_task(task, &drain)
+        .await
+        .expect_err("a panicked accept loop must not read as a clean stop");
+    assert!(
+        format!("{err:#}").contains("rpc accept loop died"),
+        "the error names the dead loop: {err:#}"
+    );
+}
+
+/// #6288 S3a Fail-Open Check: a loop that returns while no shutdown was asked
+/// for is an error, not a stop.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_errors_when_the_loop_ends_without_a_shutdown() {
+    let drain = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(async {});
+    let err = super::join_serve_task(task, &drain)
+        .await
+        .expect_err("an unrequested return must not read as a clean stop");
+    assert!(
+        format!("{err:#}").contains("without a shutdown signal"),
+        "the error says no shutdown was requested: {err:#}"
+    );
+}
+
+/// The ordinary stop: the drain was cancelled, then the loop returned.
+///
+/// Why: proves the two error arms above are not an always-`Err` join.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_is_ok_after_a_requested_shutdown() {
+    let drain = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(drain.clone().cancelled_owned());
+    drain.cancel();
+    super::join_serve_task(task, &drain)
+        .await
+        .expect("a requested shutdown is a clean stop");
+}

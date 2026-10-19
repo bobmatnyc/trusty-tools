@@ -1,0 +1,2 @@
+Changed
+- `tm daemon --addr` and `TRUSTY_MPM_ADDR` are deprecated and ignored: the value is accepted (any string), feeds no bind, and is named in one deprecation log line. A launchd plist that still passes `--addr 127.0.0.1:7880` keeps starting the daemon instead of crash-looping it. The flag is removed in 2.0.0. `tm daemon --sandbox` no longer admits `TRUSTY_MPM_ADDR` in its environment allowlist (#6288).

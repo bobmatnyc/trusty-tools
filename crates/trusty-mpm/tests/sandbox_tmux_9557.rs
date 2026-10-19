@@ -67,7 +67,6 @@ fn a_sandbox_daemon_reaches_only_its_own_tmux_server() {
             format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin_dir.display()),
         )
         .env("TRUSTY_DATA_DIR_OVERRIDE", &data)
-        .env("TRUSTY_MPM_ADDR", "127.0.0.1:0")
         .env("TRUSTY_SANDBOX", "1")
         .env("TMUX_TMPDIR", &tmux_dir)
         .args(["daemon", "--sandbox"])
@@ -137,7 +136,6 @@ fn a_sandbox_daemon_without_its_socket_dir_spawns_no_tmux() {
             format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin_dir.display()),
         )
         .env("TRUSTY_DATA_DIR_OVERRIDE", root.path().join("data"))
-        .env("TRUSTY_MPM_ADDR", "127.0.0.1:0")
         .env("TRUSTY_SANDBOX", "1")
         .args(["daemon", "--sandbox"])
         .stdin(Stdio::null())

@@ -7,7 +7,8 @@
 //! read.
 //! What: builds a one-worktree git fleet inside a scratch `$HOME`, starts a
 //! real `tm daemon` confined to that home with `TRUSTY_MPM_WORKSPACE_ROOT`
-//! pointed at the fleet, and POSTs `tools/call disk_survey` to its `/rpc` —
+//! pointed at the fleet, and sends `tools/call disk_survey` as
+//! `mpm.mcp.dispatch` over its socket (#6288 S3a; formerly `POST /rpc`) —
 //! the endpoint `tm serve --stdio` forwards every MCP request to — once with
 //! a budget and once without. Only the CHILD's environment is set, so this
 //! module leaves the process environment alone.
@@ -75,56 +76,60 @@ impl Drop for Daemon {
     }
 }
 
-/// Whether `GET /health` on `port` answers 200.
-fn healthy(port: u16) -> bool {
-    use std::io::{Read, Write};
-    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    let mut reply = String::new();
-    stream.write_all(request.as_bytes()).is_ok()
-        && stream.read_to_string(&mut reply).is_ok()
-        && reply.starts_with("HTTP/1.1 200")
+/// Send one JSON-RPC frame to the daemon socket and read the one-line answer.
+fn socket_call(socket: &Path, method: &str, params: Value) -> Option<Value> {
+    use std::io::{BufRead as _, Write as _};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let frame = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    stream.write_all(format!("{frame}\n").as_bytes()).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(stream).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
 }
 
-/// A real `tm daemon` on `port`, confined to `home`, surveying `repos_root`.
+/// A real `tm daemon`, confined to `home`, surveying `repos_root`, serving the
+/// socket it returns.
 ///
 /// What: `common::daemon_command` — a cleared environment, so no operator
-/// secret reaches the daemon (#9121).
-fn spawn_daemon(home: &Path, repos_root: &Path, port: u16) -> Daemon {
+/// secret reaches the daemon (#9121) — plus a data-dir override under `home`,
+/// so the socket path is known. #6288 S3a: the daemon has no TCP port; it is
+/// reached on its socket only.
+fn spawn_daemon(home: &Path, repos_root: &Path) -> (Daemon, PathBuf) {
+    let data = home.join("data");
     let child = common::daemon_command(home, repos_root)
-        .arg("--addr")
-        .arg(format!("127.0.0.1:{port}"))
+        .env("TRUSTY_DATA_DIR_OVERRIDE", &data)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn a daemon");
     let daemon = Daemon(child);
+    let socket = data.join("trusty-mpm").join("trusty-mpm.sock");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !healthy(port) {
-        assert!(Instant::now() < deadline, "no daemon answered on {port}");
+    while socket_call(&socket, "mpm.health", json!({})).is_none_or(|r| r.get("result").is_none()) {
+        assert!(
+            Instant::now() < deadline,
+            "no daemon answered on {}",
+            socket.display()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    daemon
+    (daemon, socket)
 }
 
 /// `tools/call disk_survey` with `arguments`, decoded from the MCP envelope.
-fn call_disk_survey(client: &reqwest::blocking::Client, url: &str, arguments: Value) -> Value {
+///
+/// #6288 S3a: sent as `mpm.mcp.dispatch` over the socket, the method that
+/// replaced `POST /rpc` for `tm serve --stdio`.
+fn call_disk_survey(socket: &Path, arguments: Value) -> Value {
     let envelope = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
         "params": { "name": "disk_survey", "arguments": arguments },
     });
-    let reply: Value = client
-        .post(format!("{url}/rpc"))
-        .json(&envelope)
-        .send()
-        .expect("POST /rpc")
-        .json()
-        .expect("a JSON reply");
+    let frame = socket_call(socket, "mpm.mcp.dispatch", envelope).expect("mpm.mcp.dispatch");
+    let reply = &frame["result"];
     let result = &reply["result"];
     assert_eq!(result["isError"], false, "{reply}");
     let text = result["content"][0]["text"]
@@ -163,22 +168,13 @@ fn the_built_daemon_answers_disk_survey_with_the_freshness_fields() {
     // git records resolved paths; `/tmp` is a symlink on macOS.
     let home_path = std::fs::canonicalize(home.path()).expect("canonical home");
     let repos_root = fleet(&home_path);
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("a free port")
-        .port();
-    let _daemon = spawn_daemon(&home_path, &repos_root, port);
-    let url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .expect("an HTTP client");
+    let (_daemon, socket) = spawn_daemon(&home_path, &repos_root);
 
-    let budgeted = call_disk_survey(&client, &url, json!({ "budget_seconds": 30 }));
+    let budgeted = call_disk_survey(&socket, json!({ "budget_seconds": 30 }));
     println!("budgeted disk_survey: {budgeted}");
     assert_freshness_fields(&budgeted);
 
-    let unbudgeted = call_disk_survey(&client, &url, json!({}));
+    let unbudgeted = call_disk_survey(&socket, json!({}));
     println!("unbudgeted disk_survey: {unbudgeted}");
     assert_freshness_fields(&unbudgeted);
     assert_eq!(unbudgeted["freshness"], "live", "{unbudgeted}");

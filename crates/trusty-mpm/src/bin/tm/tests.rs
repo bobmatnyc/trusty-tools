@@ -1748,7 +1748,8 @@ fn cli_parses_daemon_defaults() {
             force,
             sandbox,
         } => {
-            assert_eq!(addr.to_string(), "127.0.0.1:7880");
+            // #6288 S3a: no bind default; the deprecated flag is unset.
+            assert_eq!(addr, None);
             assert!(!tailscale);
             assert!(!mcp);
             assert!(!force);

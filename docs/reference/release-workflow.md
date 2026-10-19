@@ -980,7 +980,12 @@ nothing. Run this first:
 ```bash
 launchctl print gui/$(id -u)/<label> | grep -E 'state|pid'   # does launchd own a live PID?
 lsof -nP -iTCP:<port> -sTCP:LISTEN                           # who actually holds the port?
+lsof -nP -U | grep -F "<socket dir>/" | awk '{print $2}' | sort -u   # socket-only daemon (trusty-mpm since #6288 S3a): who holds the socket?
 ```
+
+For trusty-mpm, `<socket dir>` is `~/Library/Application Support/trusty-mpm`
+on macOS. Filter on the directory: the daemon binds a temporary name there and
+renames it, and `lsof` reports the bound name.
 
 If the listener's PID differs from launchd's PID, establish its ownership and
 active-request state before stopping anything. An unknown listener is not
@@ -999,7 +1004,9 @@ the wrong `cwd`. Verify launchd actually owns the new process with one of:
 
 ```bash
 launchctl print gui/$(id -u)/<label>                        # launchd's own view
-curl -s http://127.0.0.1:<port>/health | jq '.supervised'   # trusty-mpm only; must print true
+printf '{"jsonrpc":"2.0","id":1,"method":"mpm.health","params":{}}\n' \
+  | nc -U "$HOME/Library/Application Support/trusty-mpm/trusty-mpm.sock" \
+  | jq '.result.supervised'                                 # trusty-mpm only (socket, #6288 S3a); must print true
 tm doctor                                                   # trusty-mpm only; `daemon_orphan` must be OK
 ```
 

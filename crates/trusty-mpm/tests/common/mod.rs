@@ -241,7 +241,7 @@ pub fn apply_daemon_env<'a>(
 /// `tm daemon --force`, run in `home` with only [`apply_daemon_env`]'s variables.
 ///
 /// `--force` because no launchd supervises a test daemon. The caller appends
-/// `--addr` and any further flags.
+/// any further flags (#6288 S3a: no `--addr`; the daemon binds no TCP port).
 pub fn daemon_command(home: &Path, workspace_root: &Path) -> Command {
     let mut cmd = Command::new(tm_bin());
     apply_daemon_env(&mut cmd, home, workspace_root)

@@ -31,7 +31,7 @@ use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
 /// - `PATH`: the daemon spawns `tmux`, `git` and `claude` by name.
 /// - `TRUSTY_DATA_DIR_OVERRIDE`: required; keeps data and sockets out of the
 ///   real OS data directory, which `$HOME` does not redirect on macOS.
-/// - `TRUSTY_MPM_ADDR`: the sandbox's own listen address.
+/// - (#6288 S3a: `TRUSTY_MPM_ADDR` left the list with the TCP bind.)
 /// - `TMPDIR`: the per-user temp directory on macOS.
 /// - `TERM`, `LANG`, [`LOCALE_CATEGORIES`]: terminal type and locale for the
 ///   tmux panes and git output the daemon reads back.
@@ -49,7 +49,6 @@ const ENV_ALLOWLIST: &[&str] = &[
     "HOME",
     "PATH",
     DATA_DIR_OVERRIDE_ENV,
-    "TRUSTY_MPM_ADDR",
     "TMPDIR",
     "TERM",
     "LANG",

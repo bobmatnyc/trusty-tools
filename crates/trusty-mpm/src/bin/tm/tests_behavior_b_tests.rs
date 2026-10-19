@@ -284,12 +284,17 @@ fn cli_parses_sm_serve_stdio() {
     }
 }
 
+/// #6288 S3a (owner ruling Q1): `--addr` still parses — any value, never a
+/// parse error that would crash-loop a launchd plist passing it — and is only
+/// carried to `run_daemon`'s deprecation line.
 #[test]
 fn cli_parses_daemon_custom_addr() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--addr", "0.0.0.0:9000"]).unwrap();
-    match cli.command.unwrap() {
-        Command::Daemon { addr, .. } => assert_eq!(addr.to_string(), "0.0.0.0:9000"),
-        other => panic!("expected Daemon, got {other:?}"),
+    for value in ["127.0.0.1:7880", "not-an-address"] {
+        let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--addr", value]).unwrap();
+        match cli.command.unwrap() {
+            Command::Daemon { addr, .. } => assert_eq!(addr.as_deref(), Some(value)),
+            other => panic!("expected Daemon, got {other:?}"),
+        }
     }
 }
 
