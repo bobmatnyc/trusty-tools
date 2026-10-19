@@ -234,6 +234,17 @@ pub const CODE_NOT_FOUND: i64 = -32004;
 /// trusty-review's `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
 pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
 
+/// JSON-RPC code for a refusal from the language-server capability (#9078).
+///
+/// Why: DOC-72 §2 forbids failing open, and a caller must tell "disabled",
+/// "stale", "hung" and "not installed" apart without parsing prose.
+/// What: `-32006`, the next code in the implementation-defined band. The
+/// error's `data.kind` carries `LspError::code` (`lsp_disabled`, `lsp_stale`,
+/// …) beside the fields that kind needs.
+/// Test: `a_version_other_than_the_current_one_is_stale`,
+/// `disabled_flag_is_lsp_disabled_for_every_method`.
+pub const CODE_LSP_ERROR: i64 = -32006;
+
 /// What kind of failure a handler is reporting.
 ///
 /// Why (#6287): this was an `axum::http::StatusCode`, which described how the

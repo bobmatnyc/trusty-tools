@@ -24,6 +24,7 @@ pub mod documents;
 pub mod framing;
 pub(crate) mod group;
 pub mod manager;
+pub mod snapshot;
 
 pub use child::LspChild;
 pub use client::{LspClient, PublishedDiagnostics};
@@ -79,6 +80,18 @@ pub enum LspError {
     /// The caller named a document version the server is not at (DOC-72 §3).
     #[error("stale document version: requested {requested}, server is at {current}")]
     Stale { requested: i64, current: i64 },
+    /// The named file does not exist (#9078, L3).
+    #[error("{path}: no such file")]
+    FileNotFound { path: String },
+    /// The file is under no workspace root: no index root, no git work tree.
+    #[error("{path}: not under any workspace root (no enclosing git work tree)")]
+    OutsideWorkspace { path: String },
+    /// No language server is configured for this file's language.
+    #[error("{path}: no language server for this file type (1.9.0 serves Rust only)")]
+    UnsupportedLanguage { path: String },
+    /// The `<git head>+<dirty hash>` stamp could not be computed (DOC-72 §3).
+    #[error("workspace snapshot of {root}: {reason}")]
+    Snapshot { root: String, reason: String },
 }
 
 impl LspError {
@@ -99,6 +112,10 @@ impl LspError {
             Self::Write(_) => "lsp_write_failed",
             Self::Document { .. } => "lsp_document",
             Self::Stale { .. } => "lsp_stale",
+            Self::FileNotFound { .. } => "lsp_file_not_found",
+            Self::OutsideWorkspace { .. } => "lsp_outside_workspace",
+            Self::UnsupportedLanguage { .. } => "lsp_unsupported_language",
+            Self::Snapshot { .. } => "lsp_snapshot_failed",
         }
     }
 }

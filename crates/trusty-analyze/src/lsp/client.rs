@@ -63,6 +63,9 @@ pub struct PublishedDiagnostics {
     pub version: Option<i64>,
     /// The raw LSP `Diagnostic` objects.
     pub diagnostics: Vec<Value>,
+    /// The client's publication counter after this one arrived; a later
+    /// publication always carries a larger number (#9078, L3).
+    pub seq: u64,
 }
 
 #[derive(Default)]
@@ -316,13 +319,24 @@ impl LspClient {
         min_version: i64,
         timeout: Duration,
     ) -> Result<PublishedDiagnostics, LspError> {
+        self.wait_for_publication(uri, timeout, |d| {
+            d.version.is_some_and(|v| v >= min_version)
+        })
+        .await
+    }
+
+    /// Wait until the latest publication for `uri` satisfies `accept`.
+    async fn wait_for_publication(
+        &self,
+        uri: &str,
+        timeout: Duration,
+        accept: impl Fn(&PublishedDiagnostics) -> bool,
+    ) -> Result<PublishedDiagnostics, LspError> {
         let mut changes = self.shared.changes.subscribe();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         loop {
-            if let Some(d) = self.diagnostics(uri) {
-                if d.version.is_some_and(|v| v >= min_version) {
-                    return Ok(d);
-                }
+            if let Some(d) = self.diagnostics(uri).filter(|d| accept(d)) {
+                return Ok(d);
             }
             if let Some(reason) = self.closed_reason() {
                 return Err(reason);
@@ -337,6 +351,48 @@ impl LspClient {
                 }
             }
         }
+    }
+}
+
+impl LspClient {
+    /// The publication counter now; every later publication carries a larger
+    /// [`PublishedDiagnostics::seq`].
+    pub fn publication_seq(&self) -> u64 {
+        *self.shared.changes.borrow()
+    }
+
+    /// Every document's latest diagnostics, keyed by URI.
+    pub fn all_diagnostics(&self) -> Vec<(String, PublishedDiagnostics)> {
+        lock(&self.shared.diagnostics)
+            .iter()
+            .map(|(uri, d)| (uri.clone(), d.clone()))
+            .collect()
+    }
+
+    /// Wait for diagnostics that describe `uri` as last synced: published at
+    /// `version` or later, or published with no version after `synced_at`.
+    ///
+    /// Why: rust-analyzer's cargo-check pass publishes without a version
+    /// (#9078, architect default (b)). Such a publication is accepted, but only
+    /// if it arrived after the text it could describe was sent.
+    ///
+    /// # Errors
+    /// [`LspError::Timeout`] past `timeout`, or the close reason.
+    ///
+    /// Test: `unversioned_diagnostics_are_accepted_and_never_stale`,
+    /// `lsp_diagnostics_for_a_file_are_versioned_and_stamped`.
+    pub async fn wait_for_fresh_diagnostics(
+        &self,
+        uri: &str,
+        version: i64,
+        synced_at: u64,
+        timeout: Duration,
+    ) -> Result<PublishedDiagnostics, LspError> {
+        self.wait_for_publication(uri, timeout, |d| match d.version {
+            Some(v) => v >= version,
+            None => d.seq > synced_at,
+        })
+        .await
     }
 }
 
@@ -466,6 +522,11 @@ fn route(msg: Value, shared: &Shared, outbox: &Outbox) {
                 tracing::warn!("publishDiagnostics without a uri; dropped");
                 return;
             };
+            let mut seq = 0;
+            shared.changes.send_modify(|n| {
+                *n += 1;
+                seq = *n;
+            });
             let published = PublishedDiagnostics {
                 version: params.get("version").and_then(Value::as_i64),
                 diagnostics: params
@@ -473,8 +534,10 @@ fn route(msg: Value, shared: &Shared, outbox: &Outbox) {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default(),
+                seq,
             };
             lock(&shared.diagnostics).insert(uri.to_string(), published);
+            // #9078: wake waiters only once the entry is readable.
             shared.changes.send_modify(|n| *n += 1);
         }
         (Some(method), None) => tracing::trace!(method, "lsp notification ignored"),

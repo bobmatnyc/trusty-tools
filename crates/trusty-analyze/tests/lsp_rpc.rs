@@ -446,9 +446,12 @@ fn check_golden(name: &str, actual: &Value) {
     }
     let expected = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{}: {e}; run with UPDATE_GOLDEN=1", path.display()));
+    // Compared as JSON values: key order depends on serde_json's features in
+    // a given build and is not part of the wire contract.
+    let expected: Value = serde_json::from_str(&expected).expect("golden is JSON");
     assert_eq!(
-        rendered, expected,
-        "{name} drifted; rerun with UPDATE_GOLDEN=1 if intended"
+        actual, &expected,
+        "{name} drifted; rerun with UPDATE_GOLDEN=1 if intended\nactual:\n{rendered}"
     );
 }
 

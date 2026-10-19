@@ -626,8 +626,64 @@ fn workspace_root_prefers_the_index_root_then_the_git_toplevel() {
     std::fs::write(&loose, "").unwrap();
     assert!(matches!(
         resolve_workspace_root(&loose, None),
-        Err(LspError::Document { .. })
+        Err(LspError::OutsideWorkspace { .. })
     ));
+    // #9078: an unknown file is its own refusal.
+    assert!(matches!(
+        resolve_workspace_root(&repo.join("missing.rs"), None),
+        Err(LspError::FileNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn snapshot_moves_with_the_dirty_bytes_and_only_with_them() {
+    use super::snapshot::workspace_snapshot;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    // No commit yet: a typed refusal, never an unstamped answer.
+    git(&["init", "-q"]);
+    assert!(matches!(
+        workspace_snapshot(root).await,
+        Err(LspError::Snapshot { .. })
+    ));
+    std::fs::write(root.join("a.rs"), "one").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    let clean = workspace_snapshot(root).await.unwrap();
+    assert_eq!(workspace_snapshot(root).await.unwrap(), clean, "stable");
+    std::fs::write(root.join("a.rs"), "two").unwrap();
+    let dirty = workspace_snapshot(root).await.unwrap();
+    assert_ne!(dirty, clean);
+    assert_eq!(
+        dirty.split('+').next(),
+        clean.split('+').next(),
+        "same head"
+    );
+    // Same status line, different bytes: the digest still moves.
+    std::fs::write(root.join("a.rs"), "three").unwrap();
+    assert_ne!(workspace_snapshot(root).await.unwrap(), dirty);
+    std::fs::write(root.join("a.rs"), "one").unwrap();
+    assert_eq!(workspace_snapshot(root).await.unwrap(), clean, "restored");
 }
 
 // ---- process group ---------------------------------------------------------

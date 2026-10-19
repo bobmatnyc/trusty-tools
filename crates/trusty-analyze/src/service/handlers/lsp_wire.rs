@@ -1,0 +1,290 @@
+//! Wire types for the `analyze.lsp_*` methods, and the LSP-to-wire mapping
+//! (#9078, L3).
+//!
+//! Why: DOC-72 §5 fixes the parameters and §3 the stamps every answer
+//! carries; keeping the shapes apart from the handlers keeps both files small
+//! and lets the goldens in `tests/lsp_rpc.rs` pin one place.
+//! What: request and response structs, LSP `Location`/`Diagnostic` conversion
+//! into `path` plus zero-based `line`/`column`, and [`lsp_rpc_error`], which
+//! puts every [`LspError`] on the wire as [`CODE_LSP_ERROR`] with a `data`
+//! object whose `kind` is the error's stable code.
+//! Test: `lsp_references_response_matches_its_golden`,
+//! `lsp_diagnostics_response_matches_its_golden`,
+//! `a_version_other_than_the_current_one_is_stale`.
+//!
+//! # Spec References
+//! - [`SPEC-ANALYZELSP-05~draft`](docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-05~draft)
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use trusty_common::control_bus::EventId;
+use trusty_common::uds::server::RpcError;
+
+use crate::lsp::{LspError, PublishedDiagnostics};
+use crate::service::events::CODE_LSP_ERROR;
+
+/// Which diagnostics `analyze.lsp_diagnostics` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsScope {
+    /// The one file `path` names.
+    File,
+    /// Every file the server has published diagnostics for under the root.
+    Workspace,
+}
+
+/// `analyze.lsp_diagnostics` params: `{scope, path?, version?, parent_event_id?}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LspDiagnosticsRequest {
+    /// `file` or `workspace`.
+    pub scope: DiagnosticsScope,
+    /// Absolute. Required in practice: the file (`file`), or any file or
+    /// directory inside the workspace (`workspace`); see the handler.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Refused as `lsp_stale` unless it is the file's current version.
+    #[serde(default)]
+    pub version: Option<i64>,
+    /// Causal parent for the L4 events (DOC-72 §4.3); validated, not used yet.
+    #[serde(default)]
+    pub parent_event_id: Option<EventId>,
+}
+
+/// `analyze.lsp_references` params: `{path, line, column, version?, parent_event_id?}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LspReferencesRequest {
+    /// Absolute path of the file holding the position.
+    pub path: PathBuf,
+    /// Zero-based line, as in LSP.
+    pub line: u32,
+    /// Zero-based column (LSP `character`).
+    pub column: u32,
+    /// Refused as `lsp_stale` unless it is the file's current version.
+    #[serde(default)]
+    pub version: Option<i64>,
+    /// Causal parent for the L4 events (DOC-72 §4.3); validated, not used yet.
+    #[serde(default)]
+    pub parent_event_id: Option<EventId>,
+}
+
+/// `analyze.lsp_analysed_at` params: `{path, version, timeout_ms, parent_event_id?}`.
+///
+/// `path` is not in DOC-72 §5's row; a document version is per file, so the
+/// barrier needs to know which file (recorded in the PR body).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LspAnalysedAtRequest {
+    /// Absolute path of the file whose version is awaited.
+    pub path: PathBuf,
+    /// The version to wait for; any other current version is `lsp_stale`.
+    pub version: i64,
+    /// The server-side deadline, at most [`MAX_BARRIER_MS`].
+    pub timeout_ms: u64,
+    /// Causal parent for the L4 events (DOC-72 §4.3); validated, not used yet.
+    #[serde(default)]
+    pub parent_event_id: Option<EventId>,
+}
+
+/// The longest barrier a caller may ask for (10 minutes).
+pub const MAX_BARRIER_MS: u64 = 600_000;
+
+/// A zero-based position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Position {
+    pub line: u64,
+    pub column: u64,
+}
+
+/// One resolved reference site.
+#[derive(Debug, Clone, Serialize)]
+pub struct Location {
+    /// The file, when the URI is a `file://` one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub uri: String,
+    pub start: Position,
+    pub end: Position,
+}
+
+/// What `analyze.lsp_references` answers with.
+#[derive(Debug, Clone, Serialize)]
+pub struct LspReferencesResponse {
+    pub path: PathBuf,
+    pub line: u32,
+    pub column: u32,
+    /// The version of `path` the answer was computed against.
+    pub document_version: i64,
+    /// `<git head>+<dirty hash>` of the workspace.
+    pub snapshot: String,
+    pub references: Vec<Location>,
+}
+
+/// One diagnostic. The message travels in the RPC answer only (DOC-72 §4.4).
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnostic {
+    pub start: Position,
+    pub end: Position,
+    pub severity: Option<u64>,
+    pub code: Option<Value>,
+    pub source: Option<String>,
+    pub message: String,
+}
+
+/// The latest diagnostics the server published for one file.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub uri: String,
+    /// The document version the server stamped, if it stamped one.
+    pub version: Option<i64>,
+    /// True when the server sent no version (architect default (b)); such a
+    /// publication is accepted and never refused as stale.
+    pub unversioned: bool,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// What `analyze.lsp_diagnostics` answers with.
+#[derive(Debug, Clone, Serialize)]
+pub struct LspDiagnosticsResponse {
+    pub scope: DiagnosticsScope,
+    pub path: PathBuf,
+    /// The version of `path`; `null` when `path` is a directory.
+    pub document_version: Option<i64>,
+    pub snapshot: String,
+    pub files: Vec<FileDiagnostics>,
+}
+
+/// The barrier's answer (DOC-72 §3): it never reports a partial state.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BarrierState {
+    /// The server has published diagnostics at the requested version.
+    Ready,
+    /// The deadline passed; `version_seen` is the newest stamped publication.
+    TimedOut { version_seen: Option<i64> },
+}
+
+/// What `analyze.lsp_analysed_at` answers with.
+#[derive(Debug, Clone, Serialize)]
+pub struct LspAnalysedAtResponse {
+    #[serde(flatten)]
+    pub state: BarrierState,
+    pub path: PathBuf,
+    pub document_version: i64,
+    pub snapshot: String,
+}
+
+fn protocol(what: &str, v: &Value) -> LspError {
+    LspError::Protocol(format!("malformed {what} from the server: {v}"))
+}
+
+fn position(v: &Value) -> Option<Position> {
+    Some(Position {
+        line: v.get("line")?.as_u64()?,
+        column: v.get("character")?.as_u64()?,
+    })
+}
+
+fn range(v: &Value) -> Option<(Position, Position)> {
+    let r = v.get("range")?;
+    Some((position(r.get("start")?)?, position(r.get("end")?)?))
+}
+
+fn uri_path(uri: &str) -> Option<String> {
+    let url = reqwest::Url::parse(uri).ok()?;
+    let path = url.to_file_path().ok()?;
+    Some(path.display().to_string())
+}
+
+/// Convert a `textDocument/references` result (`Location[] | null`).
+///
+/// # Errors
+/// [`LspError::Protocol`] for anything else; nothing is dropped silently.
+pub fn locations(result: &Value) -> Result<Vec<Location>, LspError> {
+    let items = match result {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(items) => items,
+        other => return Err(protocol("references result", other)),
+    };
+    items
+        .iter()
+        .map(|item| {
+            let uri = item.get("uri").and_then(Value::as_str);
+            match (uri, range(item)) {
+                (Some(uri), Some((start, end))) => Ok(Location {
+                    path: uri_path(uri),
+                    uri: uri.to_string(),
+                    start,
+                    end,
+                }),
+                _ => Err(protocol("location", item)),
+            }
+        })
+        .collect()
+}
+
+/// Convert one publication for `uri`.
+///
+/// # Errors
+/// [`LspError::Protocol`] for a diagnostic without a range or a message.
+pub fn file_diagnostics(uri: &str, p: &PublishedDiagnostics) -> Result<FileDiagnostics, LspError> {
+    let diagnostics = p
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let message = d.get("message").and_then(Value::as_str);
+            match (range(d), message) {
+                (Some((start, end)), Some(message)) => Ok(Diagnostic {
+                    start,
+                    end,
+                    severity: d.get("severity").and_then(Value::as_u64),
+                    code: d.get("code").cloned(),
+                    source: d.get("source").and_then(Value::as_str).map(str::to_string),
+                    message: message.to_string(),
+                }),
+                _ => Err(protocol("diagnostic", d)),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(FileDiagnostics {
+        path: uri_path(uri),
+        uri: uri.to_string(),
+        version: p.version,
+        unversioned: p.version.is_none(),
+        diagnostics,
+    })
+}
+
+/// Put an [`LspError`] on the wire: [`CODE_LSP_ERROR`], the error's text, and
+/// `data = {kind, ...}` with the fields a caller branches on.
+///
+/// Test: `a_version_other_than_the_current_one_is_stale`,
+/// `a_hung_server_is_reported_through_the_methods`,
+/// `disabled_flag_is_lsp_disabled_for_every_method`.
+pub fn lsp_rpc_error(e: LspError) -> RpcError {
+    let mut data = json!({"kind": e.code()});
+    let extra = match &e {
+        LspError::Stale { requested, current } => {
+            json!({"requested": requested, "current": current})
+        }
+        LspError::Timeout { method, timeout_ms } => {
+            json!({"method": method, "timeout_ms": timeout_ms})
+        }
+        LspError::Hung { consecutive } => json!({"consecutive": consecutive}),
+        LspError::ServerError { code, .. } => json!({"server_code": code}),
+        LspError::NotInstalled { program } | LspError::SpawnFailed { program, .. } => {
+            json!({"program": program})
+        }
+        LspError::FileNotFound { path }
+        | LspError::OutsideWorkspace { path }
+        | LspError::UnsupportedLanguage { path }
+        | LspError::Document { path, .. } => json!({"path": path}),
+        _ => json!({}),
+    };
+    if let (Some(d), Value::Object(extra)) = (data.as_object_mut(), extra) {
+        d.extend(extra);
+    }
+    RpcError::new(CODE_LSP_ERROR, e.to_string()).with_data(data)
+}
