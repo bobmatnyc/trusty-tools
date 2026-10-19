@@ -714,6 +714,46 @@ fn committed_repo() -> tempfile::TempDir {
     dir
 }
 
+#[tokio::test]
+async fn snapshot_budget_bounds_files_bytes_and_time() {
+    use super::snapshot::{snapshot_within, SnapshotBudget};
+    let dir = committed_repo();
+    std::fs::write(dir.path().join("a.rs"), "four").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "five!").unwrap();
+    let roomy = SnapshotBudget::default();
+    assert!(snapshot_within(dir.path(), roomy).await.is_ok());
+    for (budget, says) in [
+        (
+            SnapshotBudget {
+                max_files: 1,
+                ..roomy
+            },
+            "file budget",
+        ),
+        (
+            SnapshotBudget {
+                max_bytes: 6,
+                ..roomy
+            },
+            "byte budget",
+        ),
+        (
+            SnapshotBudget {
+                deadline: Duration::from_nanos(1),
+                ..roomy
+            },
+            "time budget",
+        ),
+    ] {
+        match snapshot_within(dir.path(), budget).await {
+            Err(LspError::Snapshot { reason, .. }) => {
+                assert!(reason.contains(says), "{says}: {reason}")
+            }
+            other => panic!("{says}: an over-budget tree was stamped: {other:?}"),
+        }
+    }
+}
+
 /// #9078: an untracked file larger than the byte budget is never read whole;
 /// the snapshot fails closed instead.
 #[tokio::test]

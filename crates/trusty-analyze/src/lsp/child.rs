@@ -176,7 +176,10 @@ impl LspChild {
                     "references": {"dynamicRegistration": false}
                 },
                 "workspace": {"workspaceFolders": true, "configuration": false},
-                "window": {"workDoneProgress": false}
+                "window": {"workDoneProgress": false},
+                // #9078: rust-analyzer then reports `experimental/serverStatus`;
+                // reads wait for `quiescent`, since a loading server answers `[]`.
+                "experimental": {"serverStatusNotification": true}
             }
         });
         let result = self.client.request("initialize", params, timeout).await?;

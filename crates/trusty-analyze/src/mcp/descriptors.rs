@@ -273,7 +273,7 @@ pub fn base_tool_descriptors() -> Value {
                 "required": ["scope", "path"],
                 "properties": {
                     "scope":           { "type": "string", "enum": ["file", "workspace"] },
-                    "path":            { "type": "string", "description": "Absolute path: the file (scope=file), or a file or directory in the workspace (scope=workspace)" },
+                    "path":            { "type": "string", "description": "Absolute file path. scope=workspace lists what the server has published so far (complete: false); a directory is refused" },
                     "version":         { "type": "integer", "description": "Refused as lsp_stale unless it is the file's current document version" },
                     "parent_event_id": { "type": "string", "description": "Causal parent event id (UUID)" }
                 }
@@ -303,7 +303,7 @@ pub fn base_tool_descriptors() -> Value {
                 "properties": {
                     "path":            { "type": "string", "description": "Absolute file path" },
                     "version":         { "type": "integer", "description": "Document version to wait for" },
-                    "timeout_ms":      { "type": "integer", "description": "Server-side deadline, at most 600000" },
+                    "timeout_ms":      { "type": "integer", "description": "Server-side deadline in ms, at most the MCP client timeout minus 30 s (240000 by default)" },
                     "parent_event_id": { "type": "string", "description": "Causal parent event id (UUID)" }
                 }
             }

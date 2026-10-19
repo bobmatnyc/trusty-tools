@@ -136,11 +136,10 @@ impl AnalyzerMcpServer {
             .await;
 
         if let Some(error) = response.error {
-            return Err(DispatchError::Transport(format!(
-                "{method} over {}: {} ({})",
-                self.socket.display(),
-                error.message,
-                error.code
+            return Err(DispatchError::Transport(describe_error(
+                method,
+                &self.socket,
+                &error,
             )));
         }
 
@@ -152,10 +151,46 @@ impl AnalyzerMcpServer {
     }
 }
 
+/// The text an MCP caller reads for a daemon error: message, code, and the
+/// `data.kind` an `analyze.lsp_*` refusal carries (#9078), so the caller can
+/// tell `lsp_not_ready` from `lsp_disabled` without the socket.
+///
+/// Test: `describe_error_keeps_the_lsp_kind`.
+fn describe_error(
+    method: &str,
+    socket: &std::path::Path,
+    error: &trusty_mcp::JsonRpcError,
+) -> String {
+    let kind = error
+        .data
+        .as_ref()
+        .and_then(|d| d.get("kind"))
+        .and_then(Value::as_str)
+        .map(|k| format!(" [{k}]"))
+        .unwrap_or_default();
+    format!(
+        "{method} over {}: {} ({}){kind}",
+        socket.display(),
+        error.message,
+        error.code
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mcp::{error_codes, Request, Response};
+
+    #[test]
+    fn describe_error_keeps_the_lsp_kind() {
+        let error = trusty_mcp::JsonRpcError {
+            code: -32006,
+            message: "still loading".into(),
+            data: Some(serde_json::json!({"kind": "lsp_not_ready", "waited_ms": 5})),
+        };
+        let text = describe_error("analyze.lsp_references", std::path::Path::new("/s"), &error);
+        assert!(text.ends_with("(-32006) [lsp_not_ready]"), "{text}");
+    }
 
     /// Why (#6316 fail-open check): `ensure_daemon_running` can report a live
     /// daemon that is gone by the time a tool call reaches the wire — an

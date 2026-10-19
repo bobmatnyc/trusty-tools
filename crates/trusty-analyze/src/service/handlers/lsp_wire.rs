@@ -16,6 +16,7 @@
 //! - [`SPEC-ANALYZELSP-05~draft`](docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-05~draft)
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -79,15 +80,25 @@ pub struct LspAnalysedAtRequest {
     pub path: PathBuf,
     /// The version to wait for; any other current version is `lsp_stale`.
     pub version: i64,
-    /// The server-side deadline, at most [`MAX_BARRIER_MS`].
+    /// The server-side deadline, at most [`max_barrier_ms`].
     pub timeout_ms: u64,
     /// Causal parent for the L4 events (DOC-72 §4.3); validated, not used yet.
     #[serde(default)]
     pub parent_event_id: Option<EventId>,
 }
 
-/// The longest barrier a caller may ask for (10 minutes).
-pub const MAX_BARRIER_MS: u64 = 600_000;
+/// Headroom between the longest barrier and the MCP client's own timeout.
+const BARRIER_MARGIN: Duration = Duration::from_secs(30);
+
+/// The longest barrier a caller may ask for: the MCP client timeout
+/// (`core::deadlines::mcp_client_timeout`, 270 s by default) minus 30 s, so an
+/// MCP caller always reads the barrier's answer rather than its own timeout.
+///
+/// Test: `malformed_params_are_invalid_params`.
+pub fn max_barrier_ms() -> u64 {
+    let cap = crate::core::deadlines::mcp_client_timeout().saturating_sub(BARRIER_MARGIN);
+    u64::try_from(cap.as_millis()).unwrap_or(u64::MAX)
+}
 
 /// A zero-based position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -150,9 +161,13 @@ pub struct FileDiagnostics {
 pub struct LspDiagnosticsResponse {
     pub scope: DiagnosticsScope,
     pub path: PathBuf,
-    /// The version of `path`; `null` when `path` is a directory.
-    pub document_version: Option<i64>,
+    /// The version of `path`.
+    pub document_version: i64,
     pub snapshot: String,
+    /// True for `scope: file`. False for `scope: workspace`, which lists only
+    /// the files the server has published for so far; 1.9.0 runs no full
+    /// workspace pass (#9078).
+    pub complete: bool,
     pub files: Vec<FileDiagnostics>,
 }
 
@@ -176,8 +191,12 @@ pub struct LspAnalysedAtResponse {
     pub snapshot: String,
 }
 
-fn protocol(what: &str, v: &Value) -> LspError {
-    LspError::Protocol(format!("malformed {what} from the server: {v}"))
+/// A malformed answer, described by its expected shape; the value itself may
+/// hold source text and is never echoed (DOC-72 §4.4).
+fn protocol(what: &str, expected: &str) -> LspError {
+    LspError::Protocol(format!(
+        "malformed {what} from the server: expected {expected}"
+    ))
 }
 
 fn position(v: &Value) -> Option<Position> {
@@ -206,7 +225,7 @@ pub fn locations(result: &Value) -> Result<Vec<Location>, LspError> {
     let items = match result {
         Value::Null => return Ok(Vec::new()),
         Value::Array(items) => items,
-        other => return Err(protocol("references result", other)),
+        _ => return Err(protocol("references result", "Location[] or null")),
     };
     items
         .iter()
@@ -219,7 +238,7 @@ pub fn locations(result: &Value) -> Result<Vec<Location>, LspError> {
                     start,
                     end,
                 }),
-                _ => Err(protocol("location", item)),
+                _ => Err(protocol("location", "{uri, range}")),
             }
         })
         .collect()
@@ -244,7 +263,7 @@ pub fn file_diagnostics(uri: &str, p: &PublishedDiagnostics) -> Result<FileDiagn
                     source: d.get("source").and_then(Value::as_str).map(str::to_string),
                     message: message.to_string(),
                 }),
-                _ => Err(protocol("diagnostic", d)),
+                _ => Err(protocol("diagnostic", "{range, message}")),
             }
         })
         .collect::<Result<_, _>>()?;
@@ -273,6 +292,7 @@ pub fn lsp_rpc_error(e: LspError) -> RpcError {
             json!({"method": method, "timeout_ms": timeout_ms})
         }
         LspError::Hung { consecutive } => json!({"consecutive": consecutive}),
+        LspError::NotReady { waited_ms } => json!({"waited_ms": waited_ms}),
         LspError::ServerError { code, .. } => json!({"server_code": code}),
         LspError::NotInstalled { program } | LspError::SpawnFailed { program, .. } => {
             json!({"program": program})

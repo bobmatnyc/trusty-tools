@@ -89,6 +89,10 @@ pub enum LspError {
     /// No language server is configured for this file's language.
     #[error("{path}: no language server for this file type (1.9.0 serves Rust only)")]
     UnsupportedLanguage { path: String },
+    /// The server did not report itself quiescent in time: it is still
+    /// loading, and its answers would be empty rather than true (#9078).
+    #[error("language server still loading after {waited_ms} ms; ask again later")]
+    NotReady { waited_ms: u64 },
     /// The `<git head>+<dirty hash>` stamp could not be computed (DOC-72 §3).
     #[error("workspace snapshot of {root}: {reason}")]
     Snapshot { root: String, reason: String },
@@ -115,6 +119,7 @@ impl LspError {
             Self::FileNotFound { .. } => "lsp_file_not_found",
             Self::OutsideWorkspace { .. } => "lsp_outside_workspace",
             Self::UnsupportedLanguage { .. } => "lsp_unsupported_language",
+            Self::NotReady { .. } => "lsp_not_ready",
             Self::Snapshot { .. } => "lsp_snapshot_failed",
         }
     }

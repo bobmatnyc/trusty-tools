@@ -75,9 +75,19 @@ struct Table {
     closed: Option<LspError>,
 }
 
+/// The server's last `experimental/serverStatus` (#9078).
+#[derive(Debug, Default, Clone, Copy)]
+struct Readiness {
+    quiescent: bool,
+    /// The publication counter when `quiescent` last became true. Diagnostics
+    /// published before it describe a loading server and do not count.
+    since: u64,
+}
+
 struct Shared {
     table: Mutex<Table>,
     diagnostics: Mutex<HashMap<String, PublishedDiagnostics>>,
+    readiness: Mutex<Readiness>,
     /// Bumped on every publication and on close, to wake diagnostic waiters.
     changes: watch::Sender<u64>,
     consecutive_timeouts: AtomicU32,
@@ -143,6 +153,7 @@ impl LspClient {
                 ..Table::default()
             }),
             diagnostics: Mutex::new(HashMap::new()),
+            readiness: Mutex::new(Readiness::default()),
             changes,
             consecutive_timeouts: AtomicU32::new(0),
         });
@@ -369,18 +380,72 @@ impl LspClient {
             .collect()
     }
 
-    /// Wait for diagnostics that describe `uri` as last synced: published at
-    /// `version` or later, or published with no version after `synced_at`.
+    /// Wait until the server reports itself quiescent
+    /// (`experimental/serverStatus`).
     ///
-    /// Why: rust-analyzer's cargo-check pass publishes without a version
-    /// (#9078, architect default (b)). Such a publication is accepted, but only
-    /// if it arrived after the text it could describe was sent.
+    /// Why: while rust-analyzer loads a workspace it answers `[]` and publishes
+    /// empty diagnostics; returning those as a stamped success is failing open
+    /// (#9078, DOC-72 §2). A server that never reports status never counts as
+    /// ready: 1.9.0 serves rust-analyzer only, which does.
+    ///
+    /// # Errors
+    /// [`LspError::NotReady`] past `timeout`, or the close reason.
+    ///
+    /// Test: `references_wait_for_the_server_to_finish_loading`,
+    /// `a_server_that_never_finishes_loading_is_not_ready`.
+    pub async fn wait_until_quiescent(&self, timeout: Duration) -> Result<(), LspError> {
+        let mut changes = self.shared.changes.subscribe();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if lock(&self.shared.readiness).quiescent {
+                return Ok(());
+            }
+            if let Some(reason) = self.closed_reason() {
+                return Err(reason);
+            }
+            if !matches!(
+                tokio::time::timeout_at(deadline, changes.changed()).await,
+                Ok(Ok(()))
+            ) {
+                return Err(LspError::NotReady {
+                    waited_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                });
+            }
+        }
+    }
+
+    /// Whether `d` describes `uri` as last synced (`version`, `synced_at`) on a
+    /// loaded server: published after the server last became quiescent, and
+    /// either stamped `version` or later, or unversioned and published after
+    /// the sync (architect default (b)).
+    fn is_fresh(&self, d: &PublishedDiagnostics, version: i64, synced_at: u64) -> bool {
+        let ready = *lock(&self.shared.readiness);
+        ready.quiescent
+            && d.seq > ready.since
+            && match d.version {
+                Some(v) => v >= version,
+                None => d.seq > synced_at,
+            }
+    }
+
+    /// The version stamped on `uri`'s latest publication, if it was published
+    /// on a loaded server; what the barrier reports as `version_seen`.
+    pub fn version_seen(&self, uri: &str) -> Option<i64> {
+        let d = self.diagnostics(uri)?;
+        let ready = *lock(&self.shared.readiness);
+        (ready.quiescent && d.seq > ready.since)
+            .then_some(d.version)
+            .flatten()
+    }
+
+    /// Wait for diagnostics that pass [`Self::is_fresh`] for `uri`.
     ///
     /// # Errors
     /// [`LspError::Timeout`] past `timeout`, or the close reason.
     ///
     /// Test: `unversioned_diagnostics_are_accepted_and_never_stale`,
-    /// `lsp_diagnostics_for_a_file_are_versioned_and_stamped`.
+    /// `an_unversioned_publication_from_before_the_change_is_not_fresh`,
+    /// `diagnostics_wait_for_the_server_to_finish_loading`.
     pub async fn wait_for_fresh_diagnostics(
         &self,
         uri: &str,
@@ -388,11 +453,8 @@ impl LspClient {
         synced_at: u64,
         timeout: Duration,
     ) -> Result<PublishedDiagnostics, LspError> {
-        self.wait_for_publication(uri, timeout, |d| match d.version {
-            Some(v) => v >= version,
-            None => d.seq > synced_at,
-        })
-        .await
+        self.wait_for_publication(uri, timeout, |d| self.is_fresh(d, version, synced_at))
+            .await
     }
 }
 
@@ -538,6 +600,22 @@ fn route(msg: Value, shared: &Shared, outbox: &Outbox) {
             };
             lock(&shared.diagnostics).insert(uri.to_string(), published);
             // #9078: wake waiters only once the entry is readable.
+            shared.changes.send_modify(|n| *n += 1);
+        }
+        (Some("experimental/serverStatus"), None) => {
+            let quiescent = msg["params"]["quiescent"].as_bool().unwrap_or(false);
+            let mut seq = 0;
+            shared.changes.send_modify(|n| {
+                *n += 1;
+                seq = *n;
+            });
+            {
+                let mut r = lock(&shared.readiness);
+                if quiescent && !r.quiescent {
+                    r.since = seq;
+                }
+                r.quiescent = quiescent;
+            }
             shared.changes.send_modify(|n| *n += 1);
         }
         (Some(method), None) => tracing::trace!(method, "lsp notification ignored"),
