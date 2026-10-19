@@ -9,7 +9,7 @@ spec_refs:
 
 **Status:** Draft. Amended 2026-10-19 (#9078, L0): §4 now specifies the
 `trusty-events` producer path, and §12 fixes the 1.9.0 slice. Decisions D1-D10
-(§10) carry the plan's recommended defaults and are **pending owner ruling Da1**;
+(§10) carry the plan's recommended defaults and are **accepted, owner ruling Da1 (2026-10-19)**;
 the spec stays Draft until Bob rules.
 **Spec ID:** `SPEC-ANALYZELSP-01~draft` … `SPEC-ANALYZELSP-12~draft`
 **Subsystem:** `trusty-analyze` — the language-server supervisor, the versioned
@@ -184,14 +184,14 @@ One language-server process per workspace per language.
   the supervisor. Plan L2 of #9078 carries the build.
 - **Spawn only.** Analyze owns the child it spawns. It never attaches to an
   editor's existing server: attach has no discovery mechanism and breaks the "one
-  supervised process per workspace" model. *(Default D3, pending owner ruling Da1.)*
+  supervised process per workspace" model. *(Default D3, accepted, owner ruling Da1 (2026-10-19).)*
 - **Workspace root.** The `initialize` root is the index root trusty-search
   reports for the path, else the git toplevel of the `path` argument.
 - **Flag, default off.** The capability is behind a config flag, default off,
   enabled by `ANALYZE_LSP=1` or the YAML key. With it off nothing is spawned, the
   daemon starts as it does today, and the `analyze.lsp_*` methods return a typed
   `lsp_disabled` error, not `method_not_found`, so the feature stays visible in
-  the method list. *(Default D10, pending owner ruling Da1.)*
+  the method list. *(Default D10, accepted, owner ruling Da1 (2026-10-19).)*
 - **Idle timeout.** A language server exits after its own idle window, default
   10 minutes, configurable per language. Its window must be shorter than or
   equal to the analyze daemon's, so the daemon never idles out holding a live
@@ -354,7 +354,7 @@ notifications are therefore separate.
   `Code` only; emitting as `Mpm` would mislabel the producer and defeat the
   `source` filter axis. Skew: a reader built before the variant exists rejects an
   `"analyze"` frame, so the variant ships in `trusty-common` before the producer
-  does (§12). *(Default D7, pending owner ruling Da1.)*
+  does (§12). *(Default D7, accepted, owner ruling Da1 (2026-10-19).)*
 
 ### 4.2 Event shape
 
@@ -387,7 +387,7 @@ Every `analyze.lsp_*` method accepts an optional `parent_event_id` (an `EventId`
 string). When present it becomes the Started event's `parent_id`. When absent the
 event is a root. Analyze does not invent a session root: the caller, usually an
 agent harness, owns the call graph, and a synthetic parent would fabricate a
-causality edge. *(Default D6, pending owner ruling Da1.)*
+causality edge. *(Default D6, accepted, owner ruling Da1 (2026-10-19).)*
 
 ### 4.4 What an event may carry
 
@@ -396,7 +396,7 @@ snapshot, counts, durations, outcome. **No source text and no diagnostic message
 bodies.** The bus keeps a seven-day on-disk NDJSON log that the dashboard reads;
 code and compiler messages are not telemetry. The only place an answer travels is
 the RPC response to the caller who asked. A test asserts on the raw bytes of the
-pushed frames. *(Default D8, pending owner ruling Da1.)*
+pushed frames. *(Default D8, accepted, owner ruling Da1 (2026-10-19).)*
 
 ### 4.5 Failure policy: fire-and-forget
 
@@ -406,7 +406,7 @@ call still returns its answer, the producer logs a warning, and analyze still
 starts. This matches the non-blocking invariant of 2026-09-05 (observability must
 not block functionality) and ADR-0065. Events dropped while the bus is down are
 not retried across a restart, because the buffer is in memory. *(Default D9,
-pending owner ruling Da1.)*
+accepted, owner ruling Da1 (2026-10-19).)*
 
 **Flush.** `send` only buffers. Analyze runs a flush task on a one-second interval
 and a final flush on shutdown, bounded by the daemon's shutdown flush timeout.
@@ -454,7 +454,7 @@ tool carries events.
 so the wire shape of "the symbol" is `path` plus `line` plus `column`: an LSP
 `Position` in the file as it is on disk. A name that needs resolving goes through
 `trusty-search` first; this spec describes no second resolver. `line` and `column`
-are zero-based, as in LSP. *(Default D5, pending owner ruling Da1.)* The earlier
+are zero-based, as in LSP. *(Default D5, accepted, owner ruling Da1 (2026-10-19).)* The earlier
 `symbol` parameter is withdrawn.
 
 - Every response carries `document_version` and `snapshot` (§3).
@@ -602,8 +602,7 @@ workspace starve an unrelated Python one, and would make the failure depend on
 what else happened to be running.
 
 **1.9.0: the cap is specified here and not enforced.** The 1.9.0 slice ships no
-RSS sampling, kill, cool-off or `CapacityExceeded` (§12; default D4, pending owner
-ruling Da1). rust-analyzer peaked at 1683 MB on this repository, so one call on
+RSS sampling, kill, cool-off or `CapacityExceeded` (§12; default D4, accepted, owner ruling Da1 (2026-10-19)). rust-analyzer peaked at 1683 MB on this repository, so one call on
 the 21-crate workspace can hold about 1.7 GB resident until the child idles out.
 The mitigations are the default-off flag (§2, D10) and the shortened idle window
 (§2). The enforcement PR is tracked in §11 item 10.
@@ -776,13 +775,12 @@ result; neither cancels the spec.
 build the call site now means phase 1 does not wait for phase 0's verdict. A
 separate agent runs the measurement while the build proceeds. The measurement
 decides which `lsp_*` tools survive, not whether the producer exists: events work
-whichever tools remain. *(Default D1, pending owner ruling Da1.)*
+whichever tools remain. *(Default D1, accepted, owner ruling Da1 (2026-10-19).)*
 
 ### Phase 1 — `rust-analyzer`
 
 **Not time-boxed** (owner ruling, §10 Q3). Phase 0 supplies the intent; phase 1
-builds against it. **1.9.0 ships `rust-analyzer` only** (default D2, pending owner
-ruling Da1). It is the repository's language, this spec's own phase order, and
+builds against it. **1.9.0 ships `rust-analyzer` only** (default D2, accepted, owner ruling Da1 (2026-10-19)). It is the repository's language, this spec's own phase order, and
 installed on the development machine. The client is language-generic, so `pyright`
 and `typescript-language-server` are later configuration rows (phases 3 and 4).
 
@@ -923,21 +921,21 @@ ruling adds a deadline and, with ADR-0065, replaces Q4's transport (§4). It lea
 Q1-Q3 and Q5-Q7 unchanged.
 
 The ten decisions below shape the 1.9.0 slice. **Each is a recommended default
-from the #9078 plan, not a ruling. Every row stays pending owner ruling Da1.** A
+from the #9078 plan, not a ruling. Every row stays accepted, owner ruling Da1 (2026-10-19).** A
 reader must not treat a row as decided until Da1 records the answer here.
 
 | # | Decision | Default | Status | Applied in |
 |---|---|---|---|---|
-| D1 | Phase 0 against the 1.9.0 build | Phase 0 runs in parallel by a separate agent; the build does not wait | pending owner ruling Da1 | §9 |
-| D2 | Servers in 1.9.0 | `rust-analyzer` only | pending owner ruling Da1 | §9 |
-| D3 | Spawn or attach | Spawn only | pending owner ruling Da1 | §2 |
-| D4 | Slice shipped | Client plus `lsp_diagnostics` and `lsp_references`, version stamps and `Stale`, no RSS cap | pending owner ruling Da1 | §3, §7, §12 |
-| D5 | Wire shape of "symbol" | `path` plus `line` plus `column` | pending owner ruling Da1 | §5 |
-| D6 | Source of `parent_id` | Optional `parent_event_id` parameter; absent means a root event | pending owner ruling Da1 | §4.3 |
-| D7 | `HarnessSource` for analyze | Add `HarnessSource::Analyze` and make the enum `#[non_exhaustive]` | pending owner ruling Da1 | §4.1 |
-| D8 | Privacy of events | Metadata only; no source text, no diagnostic message bodies | pending owner ruling Da1 | §4.4 |
-| D9 | Bus down | Fire-and-forget; an LSP call never waits on the bus | pending owner ruling Da1 | §4.5 |
-| D10 | Who may enable it | Config flag, default off | pending owner ruling Da1 | §2 |
+| D1 | Phase 0 against the 1.9.0 build | Phase 0 runs in parallel by a separate agent; the build does not wait | accepted, owner ruling Da1 (2026-10-19) | §9 |
+| D2 | Servers in 1.9.0 | `rust-analyzer` only | accepted, owner ruling Da1 (2026-10-19) | §9 |
+| D3 | Spawn or attach | Spawn only | accepted, owner ruling Da1 (2026-10-19) | §2 |
+| D4 | Slice shipped | Client plus `lsp_diagnostics` and `lsp_references`, version stamps and `Stale`, no RSS cap | accepted, owner ruling Da1 (2026-10-19) | §3, §7, §12 |
+| D5 | Wire shape of "symbol" | `path` plus `line` plus `column` | accepted, owner ruling Da1 (2026-10-19) | §5 |
+| D6 | Source of `parent_id` | Optional `parent_event_id` parameter; absent means a root event | accepted, owner ruling Da1 (2026-10-19) | §4.3 |
+| D7 | `HarnessSource` for analyze | Add `HarnessSource::Analyze` and make the enum `#[non_exhaustive]` | accepted, owner ruling Da1 (2026-10-19) | §4.1 |
+| D8 | Privacy of events | Metadata only; no source text, no diagnostic message bodies | accepted, owner ruling Da1 (2026-10-19) | §4.4 |
+| D9 | Bus down | Fire-and-forget; an LSP call never waits on the bus | accepted, owner ruling Da1 (2026-10-19) | §4.5 |
+| D10 | Who may enable it | Config flag, default off | accepted, owner ruling Da1 (2026-10-19) | §2 |
 
 D4 is the plan's option (b) without (c): stamps, `Stale` and the
 `lsp_analysed_at` barrier ship; the RSS cap does not. Option (a) would drop the
@@ -1017,7 +1015,7 @@ files an umbrella issue in milestone 1.9.0 plus one child per pull request, each
 ## {#SPEC-ANALYZELSP-12~draft} 12. The 1.9.0 slice
 
 Scope of the build the 2026-10-19 ruling asks for (§10 addendum). Everything here
-is subject to the defaults of D1-D10, **pending owner ruling Da1**.
+is subject to the defaults of D1-D10, **accepted, owner ruling Da1 (2026-10-19)**.
 
 **In the slice, in dependency order.**
 
