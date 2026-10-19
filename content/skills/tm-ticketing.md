@@ -615,7 +615,7 @@ that has none. Pick it by the rule in "Choosing the Milestone and the Project
 
 **No usable milestone set.** When the repository has no open milestone that
 rule can pick, propose a set to the PM: each milestone's name and the scope it
-holds. Never skip the milestone. File the issue without one, post
+holds. Never leave the milestone unset without a proposal: file the issue, post
 `no-milestone: proposed <names> to the PM` on it, and put the proposal in your
 report. Create the milestones only when the PM says to.
 

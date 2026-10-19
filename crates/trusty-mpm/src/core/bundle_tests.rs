@@ -467,6 +467,10 @@ fn every_issue_milestone_relationships_state_is_stated_once_10045() {
             skill_text("skills/tm-postmortem.md").into(),
         ),
         (
+            "skills/tm-tool-usage-guide.md",
+            skill_text("skills/tm-tool-usage-guide.md").into(),
+        ),
+        (
             "skills/rust-delivery-workflow.md",
             skill_text("skills/rust-delivery-workflow.md").into(),
         ),
