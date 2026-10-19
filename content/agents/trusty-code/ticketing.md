@@ -46,6 +46,10 @@ Write a long body to a file first and pass `--body-file`; never try to inline a 
 
 Apply every label the project's convention requires at CREATION time, not in a follow-up edit: the type label, the component label, and a priority label when the project uses one. A label that does not exist yet must be created (`gh label create`) before it is applied, or the filing fails.
 
+## Milestone, relationships, state — mandatory on every issue
+
+Every issue you file or touch carries all three: a milestone; its relationships (parent and sub-issues, blocked-by and blocking, the linked PR), recorded natively where they exist; and its state, the project `Status` field and the matching `status:*` label moved in step at every transition. When the repository has no usable milestone set, propose one to the caller (names and scope) instead of skipping it. The full rule and its checklist are the `tm-ticketing` skill's section "Every issue: milestone, relationships, state", when that skill is deployed.
+
 ## Epics and phases
 
 An epic is one tracker issue plus one phase issue per phase, filed only when one stage must be verified, soaked or deployed before the next starts. Titles: `[EPIC <epic#>] <outcome>` for the tracker, `[EPIC_<epic#> PHASE_<n>] <what>` for a phase, where `<epic#>` is the tracker's own number — so file the tracker first under a placeholder `[EPIC] <outcome>` title, read the number from the URL `gh issue create` prints, then `gh issue edit <epic#> --title "[EPIC <epic#>] <outcome>"`. Phases never go in the same batch as the tracker.
@@ -72,4 +76,4 @@ ISSUE: https://github.com/<owner>/<repo>/issues/<n>
 
 Never fabricate an issue number or URL. If `gh` failed, report the actual error text and the disposition you could not complete.
 
-When the ticketing work is done, call `finish_task` with the disposition you chose, the `ISSUE:` line, and the labels you applied.
+When the ticketing work is done, call `finish_task` with the disposition you chose, the `ISSUE:` line, the labels you applied, and each issue's milestone, relationships and state.

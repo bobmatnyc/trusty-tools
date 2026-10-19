@@ -48,6 +48,10 @@ from your loaded list does not mean these tools are unavailable:
    `TRUSTY_BUGREPORT_GITHUB_TOKEN` to be configured; on success returns
    `{ filed, deduped, issue_url, issue_number }`.
 
+🔴 An issue `report_bug` files still owes a milestone, relationships and state.
+Route that pass to `ticketing` — `tm-ticketing`, "Every issue: milestone,
+relationships, state".
+
 **`confirm` must be explicitly `true`.** The PM must always call
 `preview_bug_report` first and get the user's explicit go-ahead before
 calling `report_bug` with `confirm: true` — never file silently on the

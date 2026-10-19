@@ -383,6 +383,119 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     );
 }
 
+/// The section that states the milestone/relationships/state rule (#10045).
+const EVERY_ISSUE_SECTION: &str = "Every issue: milestone, relationships, state";
+
+/// The rule sentence, whitespace-collapsed so a rewrap does not hide a copy.
+const EVERY_ISSUE_RULE: &str = "Every issue you file or touch carries three things: a milestone, its \
+     relationships, and its current state.";
+
+/// `text` with every whitespace run collapsed to one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Why: owner rule 2026-10-19 (#10045) — every issue carries a milestone,
+/// relationships and state, stated once in `tm-ticketing` and pointed at
+/// from the ticketing agents and every skill that files, moves or closes an
+/// issue.
+/// What: `tm-ticketing` holds the section, the rule sentence, the
+/// propose-a-milestone rule and the checklist; no other skill or agent holds
+/// the sentence; each pointer file names the section and `tm-ticketing`; the
+/// ticketing agent calls the three mandatory and reports them.
+/// Test: this test.
+#[test]
+fn every_issue_milestone_relationships_state_is_stated_once_10045() {
+    let canonical = one_line(skill_text("skills/tm-ticketing.md"));
+    for needle in [
+        format!("## {EVERY_ISSUE_SECTION}"),
+        EVERY_ISSUE_RULE.to_string(),
+        "propose a set to the PM".to_string(),
+        "Project Status and `status:*` label name the same stage".to_string(),
+    ] {
+        assert!(
+            canonical.contains(&needle),
+            "`tm-ticketing.md` must state `{needle}` (#10045)"
+        );
+    }
+
+    let restated: Vec<&str> = rc()
+        .skills()
+        .chain([
+            ("agents/ticketing.md", agent("ticketing.md")),
+            ("agents/version-control.md", agent("version-control.md")),
+        ])
+        .filter(|(rel, body)| {
+            *rel != "skills/tm-ticketing.md" && one_line(body).contains(EVERY_ISSUE_RULE)
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(
+        restated.is_empty(),
+        "the rule sentence belongs to `tm-ticketing.md` alone: {restated:?}"
+    );
+
+    let tcode_ticketing =
+        std::fs::read_to_string(agent_assets_dir().join("trusty-code/ticketing.md"))
+            .expect("content/agents/trusty-code/ticketing.md");
+    let pointers = [
+        ("agents/ticketing.md", agent("ticketing.md").to_string()),
+        ("agents/trusty-code/ticketing.md", tcode_ticketing),
+        ("skills/tm-epic.md", skill_text("skills/tm-epic.md").into()),
+        (
+            "skills/tm-epic/references/manual-procedure.md",
+            skill_text("skills/tm-epic/references/manual-procedure.md").into(),
+        ),
+        (
+            "skills/tm-issues-prune.md",
+            skill_text("skills/tm-issues-prune.md").into(),
+        ),
+        (
+            "skills/tm-workflow.md",
+            skill_text("skills/tm-workflow.md").into(),
+        ),
+        (
+            "skills/tm-bug-reporting.md",
+            skill_text("skills/tm-bug-reporting.md").into(),
+        ),
+        (
+            "skills/tm-delegation-patterns.md",
+            skill_text("skills/tm-delegation-patterns.md").into(),
+        ),
+        (
+            "skills/tm-postmortem.md",
+            skill_text("skills/tm-postmortem.md").into(),
+        ),
+        (
+            "skills/tm-tool-usage-guide.md",
+            skill_text("skills/tm-tool-usage-guide.md").into(),
+        ),
+        (
+            "skills/rust-delivery-workflow.md",
+            skill_text("skills/rust-delivery-workflow.md").into(),
+        ),
+    ];
+    for (file, body) in &pointers {
+        let body = one_line(body);
+        assert!(
+            body.contains(EVERY_ISSUE_SECTION) && body.contains("tm-ticketing"),
+            "`{file}` must point at `tm-ticketing`, section `{EVERY_ISSUE_SECTION}`"
+        );
+    }
+
+    let ticketing = one_line(agent("ticketing.md"));
+    for needle in [
+        "Milestone, Relationships, State — Mandatory on Every Issue",
+        "propose one to the PM",
+        "state its milestone, its relationships and its state",
+    ] {
+        assert!(
+            ticketing.contains(needle),
+            "`ticketing.md` must carry `{needle}` (#10045)"
+        );
+    }
+}
+
 /// Why: #9747 — gh 2.98 rejects `gh repo view --json autoMergeAllowed`, and
 /// the shipped instruction to run it failed 61 times in 72 h.
 /// What: the two files carrying the #8640 auto-merge read name the REST field

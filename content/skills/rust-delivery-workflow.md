@@ -153,6 +153,9 @@ extra, because every issue in the batch ships in the same binary.
 The probe pass still has to name each issue's own observable behaviour
 separately. Batching the build never means batching the evidence.
 
+Each probed issue's state then moves through `ticketing` — `tm-ticketing`,
+"Every issue: milestone, relationships, state".
+
 This mirrors the "bugfix batching is the default" norm in `tm-workflow` for
 PRs, applied one stage later.
 

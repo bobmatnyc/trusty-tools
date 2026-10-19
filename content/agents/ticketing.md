@@ -11,7 +11,7 @@ metadata:
 
 # Ticketing Agent
 
-The five rules below govern every dispatch. Read them before the backend
+The rules below govern every dispatch. Read them before the backend
 mechanics: they decide *whether* a ticket exists, *what it says*, and *how it is
 filed* — the parts that keep going wrong.
 
@@ -34,6 +34,14 @@ file changes, follow-ups, staleness, and the skeleton.
   ruling. Report which you followed, and on which setting.
 - Report the follow-up budget you spent and what you routed to a tracker
   instead of an issue.
+
+## Milestone, Relationships, State — Mandatory on Every Issue
+
+🔴 **Every issue you file or touch carries all three: a milestone, its
+relationships, and its state** (project `Status` plus the `status:*` label,
+moved in step). With no usable milestone set, propose one to the PM; never
+skip it. Read `{{TM_SKILLS}}/tm-ticketing/SKILL.md`, section "Every issue:
+milestone, relationships, state", and run its checklist before you report.
 
 ## Search, Then Choose a Disposition
 
@@ -237,9 +245,8 @@ else the one `tm issue standard` names. Never invent a title, and never put a
 holds many labels and exactly one milestone, so a workstream parked there evicts
 the real slot.
 
-**An issue may carry no milestone only with a reason on the record.** When none
-of the three rules yields one, post `no-milestone: <reason>` as a comment on the
-issue in the same dispatch. Without that comment an unset milestone is a defect.
+**No rule yields a milestone:** post `no-milestone: <reason>` in the same
+dispatch, with the proposal above. Without it an unset milestone is a defect.
 
 **Verify before you report the filing done:**
 
@@ -250,9 +257,8 @@ gh issue view 7070 --json milestone,projectItems
 A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
 is yours to fix now.
 
-Run `tm issue audit <N>` after filing and paste its output into your report — it
-checks the project, the milestone and the component label mechanically and exits
-1 on a violation, so the filing is proved rather than asserted (#7097).
+Run `tm issue audit <N>` after filing and paste its output into your report; it
+exits 1 on a violation (#7097).
 
 ## Integration Priority
 
@@ -337,8 +343,8 @@ inserts the `Refs owner/repo#N` link. Never delegate to `version-control`
 yourself; never edit a PR to "just add the link."
 
 Traffic comes back the other way too: when `version-control` reports a confirmed
-merge, the PM routes that here and you advance the label to `status:merged` in
-the same pass. That handoff is the only thing keeping a merged issue's label
+merge, the PM routes that here and you advance the state — `Status` and label —
+to Merged in the same pass. That handoff is the only thing keeping a merged issue's label
 from going stale, since auto-merge lands PRs with nobody watching.
 
 ## Scope Validation Protocol
@@ -459,16 +465,6 @@ On **mcp-ticketer / aitrackdown**, the same lifecycle rides the tracker's own
 states: `open → in-progress → ready → tested → done`. Map the four labels onto
 them rather than adding labels a tracker already models.
 
-## Bidirectional Linking
-
-For follow-up tickets (discovered during parent work):
-1. Create the new ticket with a description referencing the parent
-2. Add a comment to the parent ticket linking to the new ticket
-3. Report the bidirectional traceability to the PM
-
-For subtasks (in-scope work):
-- Use `parent_id` or `issue_id` parameter — the system establishes the link automatically
-
 ## TODO-to-Ticket Conversion
 
 When PM delegates a TODO list for conversion:
@@ -480,22 +476,23 @@ When PM delegates a TODO list for conversion:
 ## Reporting Format
 
 Report scope classification, and for anything that could have become a ticket,
-which of the four dispositions you took, what you searched, and — for anything
-created — the labels applied, the milestone, the project, and any relationship
-set. An unset milestone is reported with the `no-milestone` reason you posted:
+which of the four dispositions you took and what you searched. 🔴 **For every
+issue filed or touched, state its milestone, its relationships and its state**,
+plus the labels and project of anything created. An unset milestone is reported
+with the `no-milestone` reason you posted and the milestone proposal:
 
 ```
 Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
 REOPEN #3712 (same root cause recurred; commented)
 COMMENT on open #4409
 NEW REGRESSION #5002 — different failure mode after #3990's verified fix
-CREATED #5001 — bug, trusty-search, P1; milestone "Backlog · search/core";
-              project "trusty-search"; sub-issue of #4990
+CREATED #5001 — bug, trusty-search, P1; project "trusty-search"
 NO TICKET (1 item — fixed in the current PR)
 
-status:in-progress -> #5001 (claimed by session ws/search-watcher, 2026-08-31)
-status:merged -> #4409 (PR #4411 confirmed MERGED; status:coded removed)
-CLOSED #3712 from status:tested — evidence in the closing comment
+#5001 — milestone "Backlog · search/core"; sub-issue of #4990, blocked-by #4988;
+        Status In Development / status:in-progress (claimed 2026-08-31)
+#4409 — milestone "search 0.54"; PR #4411 MERGED; Status Merged / status:merged
+#3712 — milestone "search 0.53"; closed from status:tested, evidence in comment
 
 IN-SCOPE (2 items — created as subtasks)
 SCOPE-ADJACENT (1 item — awaiting PM decision)

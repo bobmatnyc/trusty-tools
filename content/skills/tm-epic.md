@@ -110,6 +110,9 @@ takes a type label from the same six-value set (`bug`, `enhancement`,
 phase does; there is no seventh `phase` type. A phase takes its parent's
 milestone.
 
+🔴 The tracker and every phase carry a milestone, relationships and state —
+`tm-ticketing`, "Every issue: milestone, relationships, state".
+
 ## The plan document
 
 An epic's plan lives under `docs/research/<effort>/`, one directory per epic.

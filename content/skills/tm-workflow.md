@@ -57,6 +57,9 @@ two agents was the defect this replaced.
    that flag to `ticketing` is the only thing that keeps the label from going
    stale, since auto-merge lands PRs with nobody watching.
 
+🔴 At every step, each issue carries a milestone, relationships and state —
+`tm-ticketing`, "Every issue: milestone, relationships, state".
+
 **Neither specialist delegates to the other.** The PM carries context between
 them. A `ticketing` dispatch that ends "…then have version-control open the PR"
 is a routing error.
