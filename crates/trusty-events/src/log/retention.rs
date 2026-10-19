@@ -1,9 +1,9 @@
 //! Deleting day files older than the retention window.
 //!
 //! Why: DOC-73 §4.3 calls for a "day-rotated NDJSON log, rotated and
-//! retained" — without a bound, an idle console accumulates one file per day
+//! retained" — without a bound, an idle bus accumulates one file per day
 //! forever. This module is the bound: applied once at [`super::DurableLog::
-//! open`] (in case files piled up while console was down) and again on every
+//! open`] (in case files piled up while the bus was down) and again on every
 //! rotation.
 //! What: [`files_to_delete`] is the pure decision (testable without a
 //! filesystem): given the retained day files and today's date, which ones

@@ -11454,6 +11454,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+]
+
+[[package]]
 name = "trusty-gworkspace"
 version = "0.3.0"
 dependencies = [
