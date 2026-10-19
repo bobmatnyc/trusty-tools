@@ -26,6 +26,9 @@
 #                            reaped, the leader is not reported leaked
 #     catchup-default-throwaway  the catchup lever reads the throwaway project
 #                            unless --catchup-project opts in to a checkout
+#     project-dir-*          --project-dir runs in that checkout (cwd, tm --dir),
+#                            leaves it intact and clean, refuses a dirty one, and
+#                            a project lever without it exits 2
 #     signal-TERM/HUP        the probe killed mid-run exits 128+signal with no
 #                            stub process and no temp tree left behind
 # Usage: ./scripts/pm_context_probe_selftest.sh
@@ -207,6 +210,25 @@ expect("settings body", body, {"disableClaudeAiConnectors": True,
        "permissions": {"deny": ["Agent(ex-agent)", "Task(ex-agent)"]}})
 expect("no parts, no body", p.settings_body((), skills, agents), {})
 
+# --project-dir levers (#8998 condition 2): CLAUDE.md and project-tier skills.
+proj = work / "proj"
+(proj / ".claude" / "skills" / "ps").mkdir(parents=True)
+(proj / ".claude" / "skills" / "ps" / "SKILL.md").write_text("---\nname: proj-skill\n---\n")
+(proj / "CLAUDE.md").write_text("x\n")
+(proj / "AGENTS.md").write_text("not read by claude\n")
+info = p.project_tier(proj)
+expect("project tier", info, {"claude_md": [str(proj / "CLAUDE.md")], "skills": ["proj-skill"],
+       "agents": [], "mcp_servers": []})
+expect("claude-md-off body", p.settings_body(("claude-md",), [], [], info),
+       {"claudeMdExcludes": [str(proj / "CLAUDE.md")]})
+expect("project-skills-off body", p.settings_body(("project-skills",), ["u"], [], info),
+       {"skillOverrides": {"proj-skill": "off"}})
+expect("skills + project-skills merge", p.settings_body(("skills", "project-skills"), ["u"], [], info),
+       {"skillOverrides": {"u": "off", "proj-skill": "off"}})
+expect("project levers are flagged", sorted(p.PROJECT_LEVERS),
+       ["claude-md-off", "project-files-off", "project-skills-off"])
+expect("every project lever exists", all(lv in p.LEVERS for lv in p.PROJECT_LEVERS), True)
+
 for name in ("Documents", "Desktop"):
     try:
         p.check_root(Path.home() / name / "x")
@@ -240,6 +262,7 @@ make_stubs() {
 #!/usr/bin/env bash
 [ "\${1:-}" = "--version" ] && { echo "stub-claude 0"; exit 0; }
 printf '%s\n' "\$@" >"$dir/argv"
+pwd -P >"$dir/cwd"
 sleep 300 &
 echo \$! >"$dir/sleep.pid"
 echo \$\$ >"$dir/claude.pid"
@@ -247,6 +270,7 @@ wait
 EOF
   cat >"$dir/bin/tm" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$@" >>"$(dirname "$0")/../tm.args"
 case "$*" in *--version*) echo "stub-tm 0" ;; *instructions*) echo "STUB PM PROMPT" ;; *) exit 2 ;; esac
 EOF
   chmod +x "$dir/bin/claude" "$dir/bin/tm"
@@ -296,6 +320,35 @@ else
   echo "  FAIL: catchup-default-throwaway: the catchup prompt was:"
   grep -F "project_dir" "$WORK/stub-catchup/argv" | sed 's/^/        /'
 fi
+
+# project-dir-*: --project-dir runs in that checkout, never initialises or
+# removes it, and refuses a dirty one; a project lever needs it (#8998).
+PROJ="$WORK/real-proj"
+mkdir -p "$PROJ" && git init -q "$PROJ" && printf 'x\n' >"$PROJ/CLAUDE.md"
+git -C "$PROJ" add CLAUDE.md && git -C "$PROJ" -c user.name=t -c user.email=t@t commit -qm init
+PROJ="$(cd "$PROJ" && pwd -P)"
+make_stubs "$WORK/stub-proj"
+PATH="$WORK/stub-proj/bin:$PATH" TMPDIR="$WORK/stub-proj/tmp" python3 "$PROBE" run --runs 1 \
+  --levers baseline --project-dir "$PROJ" --tm "$WORK/stub-proj/bin/tm" --config-dir "$WORK/cfg" \
+  --timeout 2 >/dev/null 2>&1
+CASES=$((CASES + 1))
+if [ "$(cat "$WORK/stub-proj/cwd" 2>/dev/null)" = "$PROJ" ] && [ -f "$PROJ/CLAUDE.md" ] &&
+  grep -qxF "$PROJ" "$WORK/stub-proj/tm.args" && [ -z "$(git -C "$PROJ" status --porcelain)" ] &&
+  [ -z "$(ls -A "$WORK/stub-proj/tmp")" ]; then
+  printf '  ok   %-28s -> ran in the checkout\n' "project-dir-used"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "  FAIL: project-dir-used: cwd=$(cat "$WORK/stub-proj/cwd" 2>/dev/null) tm args:"
+  sed 's/^/        /' "$WORK/stub-proj/tm.args" 2>/dev/null
+fi
+printf 'dirty\n' >"$PROJ/untracked.txt"
+check project-dir-dirty 2 'not clean' \
+  env PATH="$WORK/stub-proj/bin:$PATH" TMPDIR="$WORK/stub-proj/tmp" python3 "$PROBE" run --runs 1 \
+  --levers baseline --project-dir "$PROJ" --tm "$WORK/stub-proj/bin/tm" --config-dir "$WORK/cfg"
+rm -f "$PROJ/untracked.txt"
+check project-lever-needs-dir 2 'needs --project-dir' \
+  env PATH="$WORK/stub-proj/bin:$PATH" TMPDIR="$WORK/stub-proj/tmp" python3 "$PROBE" run --runs 1 \
+  --levers claude-md-off --tm "$WORK/stub-proj/bin/tm" --config-dir "$WORK/cfg"
 
 # signal-<SIG>: the probe killed mid-run reaps the group, removes its temp
 # tree and exits 128+signal.

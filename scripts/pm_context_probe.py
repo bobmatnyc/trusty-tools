@@ -25,6 +25,15 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
                        refs and write the session cache when it is given a
                        session id (crates/trusty-mpm/src/daemon/mcp_context.rs,
                        mcp_context_session_refs.rs).
+    claude-md-off      --project-dir only: claudeMdExcludes for the project's CLAUDE.md files
+    project-skills-off --project-dir only: skillOverrides "off" for the project-tier skills
+    project-files-off  --project-dir only: claude-md-off + project-skills-off together
+  --project-dir DIR runs every lever in that existing checkout instead of a
+  fresh throwaway project, so the real project's CLAUDE.md, .claude/ and the
+  tm-composed prompt for it are loaded. It must be a CLEAN git checkout the
+  caller can discard (never a live PM's directory): the probe refuses a dirty
+  tree, never initialises, edits or removes it, and re-checks it is still clean
+  afterwards. The catchup lever then defaults to DIR itself.
   The --settings levers use the same subtractive keys the #8988/#8992 owner
   policy writes (crates/trusty-mpm/src/core/launch_policy/carrier.rs).
   `parse` reads one saved stream-json file; `report` renders a results JSON as
@@ -46,7 +55,8 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
 
 Usage:
   scripts/pm_context_probe.py run [--runs 3] [--lever-runs 1] [--levers a,b]
-      [--tm PATH] [--model M] [--catchup-project DIR] [--out results.json]
+      [--tm PATH] [--model M] [--project-dir DIR] [--catchup-project DIR]
+      [--out results.json]
   scripts/pm_context_probe.py parse <stream.jsonl>
   scripts/pm_context_probe.py report <results.json>
 Exit: 0 on success; 1 when a run or a parse fails (the raw error is printed);
@@ -121,7 +131,12 @@ LEVERS = {
     "skills-agents-off": (False, False, ("skills", "agents"), False),
     "all-trims": (False, True, ("connectors", "skills", "agents"), False),
     "catchup": (False, False, (), True),
+    # Project-tier levers (#8998 condition 2); they need --project-dir.
+    "claude-md-off": (False, False, ("claude-md",), False),
+    "project-skills-off": (False, False, ("project-skills",), False),
+    "project-files-off": (False, False, ("claude-md", "project-skills"), False),
 }
+PROJECT_LEVERS = ("claude-md-off", "project-skills-off", "project-files-off")
 
 
 class ProbeError(Exception):
@@ -197,13 +212,36 @@ def tier_names(config_dir: Path) -> tuple[list[str], list[str]]:
     return sorted(skills), sorted(agents)
 
 
-def settings_body(parts: tuple[str, ...], skills: list[str], agents: list[str]) -> dict:
+def project_tier(project: Path) -> dict:
+    """What a real project adds to a PM's context: the files each project lever switches off.
+
+    What: absolute paths of the project's CLAUDE.md files, project-tier skill
+    and agent names (`.claude/skills`, `.claude/agents`) and `.mcp.json` server
+    names. Names only; nothing is read beyond frontmatter and the `.mcp.json` keys.
+    """
+    skills, agents = tier_names(project / ".claude")
+    mdfiles = [project / "CLAUDE.md", project / "CLAUDE.local.md", project / ".claude" / "CLAUDE.md"]
+    servers: list[str] = []
+    try:
+        servers = sorted((json.loads((project / ".mcp.json").read_text()).get("mcpServers") or {}))
+    except (OSError, ValueError):
+        pass
+    return {"claude_md": [str(f) for f in mdfiles if f.is_file()], "skills": skills,
+            "agents": agents, "mcp_servers": servers}
+
+
+def settings_body(parts: tuple[str, ...], skills: list[str], agents: list[str],
+                  project: dict | None = None) -> dict:
     """The --settings JSON for a lever's parts (subtractive keys only)."""
     body: dict = {}
+    if project is not None and "claude-md" in parts:
+        body["claudeMdExcludes"] = list(project["claude_md"])
+    if project is not None and "project-skills" in parts:
+        body.setdefault("skillOverrides", {}).update({name: "off" for name in project["skills"]})
     if "connectors" in parts:
         body["disableClaudeAiConnectors"] = True
     if "skills" in parts:
-        body["skillOverrides"] = {name: "off" for name in skills}
+        body.setdefault("skillOverrides", {}).update({name: "off" for name in skills})
     if "agents" in parts:
         # The subagent tool is `Task` in some Claude Code builds, `Agent` in others.
         body["permissions"] = {"deny": [f"{tool}({name})" for name in agents for tool in ("Agent", "Task")]}
@@ -359,7 +397,7 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
     settings_file = None
     if parts:
         settings_file = root / f"settings-{lever}.json"
-        settings_file.write_text(json.dumps(settings_body(parts, *names), indent=1))
+        settings_file.write_text(json.dumps(settings_body(parts, *names, project=args.project_info), indent=1))
     catchup = LEVERS[lever][3]
     prompt = (CATCHUP_PROMPT.format(tool=CATCHUP_TOOL, project=args.catchup_project)
               if catchup else FIRST_TURN_PROMPT)
@@ -368,7 +406,7 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
     stream, errlog = root / f"{lever}-{index}.jsonl", root / f"{lever}-{index}.err"
     record = {"lever": lever, "run": index}
     with open(stream, "w") as out, open(errlog, "w") as err:
-        child = subprocess.Popen(argv, cwd=root / "project", env=env, stdin=subprocess.DEVNULL,
+        child = subprocess.Popen(argv, cwd=args.project, env=env, stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=err, start_new_session=True)
         try:
             child.wait(timeout=args.timeout)
@@ -390,10 +428,11 @@ def one_run(lever: str, args, env: dict, root: Path, prompt_file: Path, mcp_file
 
 
 def prepare(root: Path, args, env: dict) -> tuple[Path, Path]:
-    """The throwaway project (git repo + tm-composed PM prompt) and the builtin MCP file."""
-    proj = root / "project"
-    proj.mkdir()
-    subprocess.run(["git", "init", "-q", str(proj)], check=True, env=env)
+    """The project (throwaway git repo, or --project-dir as given), the tm-composed PM prompt and the builtin MCP file."""
+    proj = args.project
+    if not args.project_dir:
+        proj.mkdir()
+        subprocess.run(["git", "init", "-q", str(proj)], check=True, env=env)
     prompt = subprocess.run([args.tm, "session", "instructions", "--dir", str(proj)], cwd=proj, env=env,
                             stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if prompt.returncode != 0 or not prompt.stdout.strip():
@@ -407,6 +446,14 @@ def prepare(root: Path, args, env: dict) -> tuple[Path, Path]:
     return prompt_file, mcp_file
 
 
+def porcelain(project: Path) -> str:
+    """`git status --porcelain` of `project`; raises ProbeError when it is not a git checkout."""
+    out = subprocess.run(["git", "-C", str(project), "status", "--porcelain"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise ProbeError(f"{project} is not a git checkout: {out.stderr.strip()[:200]}")
+    return out.stdout.strip()
+
+
 def stray_processes(root: Path) -> list[str]:
     """Live processes whose command line names `root` (each run's claude does)."""
     out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
@@ -417,6 +464,10 @@ def cmd_run(args) -> int:
     config_dir = Path(args.config_dir)
     levers = args.levers.split(",")
     unknown = [lv for lv in levers if lv not in LEVERS]
+    needs_dir = [lv for lv in levers if lv in PROJECT_LEVERS]
+    if needs_dir and not args.project_dir:
+        print(f"pm_context_probe: lever(s) {needs_dir} needs --project-dir", file=sys.stderr)
+        return 2
     if unknown or not config_dir.is_dir():
         print(f"pm_context_probe: unknown lever(s) {unknown} (known: {list(LEVERS)}) "
               f"or no CLAUDE_CONFIG_DIR at {config_dir}", file=sys.stderr)
@@ -425,21 +476,35 @@ def cmd_run(args) -> int:
         env = child_env(dict(os.environ), config_dir)
         root = Path(tempfile.mkdtemp(prefix="pm-context-probe-"))
         check_root(root)
+        args.project = Path(args.project_dir).resolve() if args.project_dir else root / "project"
+        if args.project_dir:
+            check_root(args.project)
+            dirty = porcelain(args.project)
+            if dirty:
+                raise ProbeError(f"--project-dir {args.project} is not clean; the probe needs a "
+                                 f"disposable checkout:\n{dirty[:400]}")
     except ProbeError as exc:
+        shutil.rmtree(root, ignore_errors=True)
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 2
     records, failed = [], False
     # #8998 review: catchup reads a throwaway project unless the caller opts in.
-    args.catchup_project = args.catchup_project or str(root / "project")
+    args.catchup_project = args.catchup_project or str(args.project)
+    slug_dir = config_dir / "projects" / project_slug(args.project)
+    slug_existed = slug_dir.exists()
     try:
         prompt_file, mcp_file = prepare(root, args, env)
         names = tier_names(config_dir)
+        args.project_info = project_tier(args.project) if args.project_dir else None
         meta = {"tm": subprocess.run([args.tm, "--version"], capture_output=True, text=True, env=env).stdout.strip(),
                 "claude": subprocess.run(["claude", "--version"], capture_output=True, text=True, env=env).stdout.strip(),
                 "prompt_bytes": prompt_file.stat().st_size,
                 "user_tier_skills": len(names[0]), "user_tier_agents": len(names[1]),
                 "date_utc": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
-                "catchup_project": args.catchup_project, "launch": LAUNCH}
+                "catchup_project": args.catchup_project, "launch": LAUNCH,
+                "project_dir": args.project_dir and str(args.project), "project_tier": args.project_info,
+                "project_head": args.project_dir and subprocess.run(
+                    ["git", "-C", str(args.project), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()}
         for lever in levers:
             for i in range(args.runs if lever == "baseline" else args.lever_runs):
                 rec = one_run(lever, args, env, root, prompt_file, mcp_file, names, i + 1)
@@ -451,12 +516,16 @@ def cmd_run(args) -> int:
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 1
     finally:
-        shutil.rmtree(config_dir / "projects" / project_slug(root / "project"), ignore_errors=True)
+        if not slug_existed:  # never remove transcripts that predate this run
+            shutil.rmtree(slug_dir, ignore_errors=True)
         meta_stray = stray_processes(root)
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
     meta["stray_processes"] = meta_stray
     failed |= bool(meta_stray)
+    if args.project_dir:
+        meta["project_clean_after"] = not porcelain(args.project)
+        failed |= not meta["project_clean_after"]
     results = {"meta": meta, "runs": records}
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=1) + "\n")
@@ -503,7 +572,10 @@ def main(argv: list[str]) -> int:
     run = sub.add_parser("run")
     run.add_argument("--runs", type=int, default=3, help="baseline runs")
     run.add_argument("--lever-runs", type=int, default=1, help="runs per other lever")
-    run.add_argument("--levers", default=",".join(LEVERS))
+    run.add_argument("--levers", default=None,
+                     help="comma list (default: every lever; the project levers only with --project-dir)")
+    run.add_argument("--project-dir", default=None,
+                     help="run in this CLEAN, disposable git checkout instead of a throwaway project")
     run.add_argument("--tm", default="tm", help="tm binary composing the PM prompt")
     run.add_argument("--model", default=None)
     run.add_argument("--config-dir", default=os.environ.get("PM_PROBE_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))
@@ -519,6 +591,8 @@ def main(argv: list[str]) -> int:
     penv = sub.add_parser("print-env")
     penv.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR))
     args = ap.parse_args(argv)
+    if args.cmd == "run" and args.levers is None:
+        args.levers = ",".join(lv for lv in LEVERS if args.project_dir or lv not in PROJECT_LEVERS)
     # #8998 review: TERM/HUP raise into cmd_run's and one_run's `finally`, which
     # reap the process group and remove the temp tree.
     for sig in (signal.SIGTERM, signal.SIGHUP):
