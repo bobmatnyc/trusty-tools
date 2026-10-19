@@ -14,8 +14,8 @@
 //! `tests/lsp_child.rs` (spawn, crash, hang, idle reap, leaks).
 //!
 //! # Spec References
-//! - [`SPEC-ANALYZELSP-02~draft`](../../../../docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-02~draft)
-//! - [`SPEC-ANALYZELSP-03~draft`](../../../../docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-03~draft)
+//! - [`SPEC-ANALYZELSP-02~draft`](docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-02~draft)
+//! - [`SPEC-ANALYZELSP-03~draft`](docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-03~draft)
 
 pub mod child;
 pub mod client;
