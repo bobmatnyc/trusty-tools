@@ -25,7 +25,7 @@
 //! path: by construction the write is still in flight (or was just dropped
 //! under backpressure) at the moment of fan-out, since I/O happens
 //! asynchronously on the writer task, off this hot path. A [`BusFrame`] built
-//! from [`super::log::ReplayItem::Event`] (a later slice's SSE/backfill route)
+//! from [`super::log::ReplayItem::Event`] (`events.subscribe` replay, #9075)
 //! is `persisted: true` instead — read from the log, it already is. Ingest
 //! never blocks on a slow subscriber — `broadcast::Sender::send` is
 //! synchronous and a subscriber that falls behind gets `Lagged` on its own
@@ -137,8 +137,8 @@ pub(crate) enum IngestOutcome {
 /// "read back from the log, already durable" — see the module docs' full
 /// contract. Kept local to this crate rather than added to
 /// `trusty_common::control_bus::HarnessEvent` because no other crate needs to
-/// agree on it: only this bus's own subscribers (the SSE route a later slice
-/// adds) ever see a `BusFrame`.
+/// agree on it: only this crate's `events.subscribe` pump (#9075) sees a
+/// `BusFrame`; readers get a `control_bus::SubscribeItem`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BusFrame {
     pub event: HarnessEvent,
@@ -169,6 +169,9 @@ pub(crate) struct Attach {
     pub backlog: Vec<HarnessEvent>,
     /// The last `seq` assigned at attach time; `0` before the first event.
     pub head: u64,
+    /// The id of the ring's event at `since`, when the ring still holds it
+    /// (#9075: what a resume's `since_id` is checked against first).
+    pub anchor: Option<EventId>,
     /// Every event ingested after `head`.
     pub receiver: broadcast::Receiver<BusFrame>,
 }
@@ -250,7 +253,7 @@ impl EventBus {
     /// but never blocks or fails ingest itself (DOC-73 §4.1's non-blocking
     /// invariant). A bus with zero subscribers returns a `SendError` from
     /// `broadcast::Sender::send`, which is discarded — no subscriber is not a
-    /// failure, it is the common case before any SSE route (#6851) attaches.
+    /// failure, it is the common case when no reader is subscribed.
     /// Test: `super::tests::a_subscriber_receives_ingested_events`,
     /// `super::tests::duplicate_id_is_deduped`,
     /// `super::tests::eviction_at_capacity_drops_the_oldest`,
@@ -262,7 +265,7 @@ impl EventBus {
         let mut ring = self.lock_ring();
         // #9075: after `close`, a seq handed out here would never reach the
         // log, and the next start would hand it out again.
-        if ring.closed {
+        if ring.closed || self.log_failure().is_some() {
             return IngestOutcome::Closed;
         }
         if !ring.ids.insert(id) {
@@ -299,9 +302,8 @@ impl EventBus {
             );
         }
 
-        // Best-effort: no subscriber yet is the common case (#6851 is a later
-        // slice), not a failure to report. Always `persisted: false` — see
-        // the module docs' contract.
+        // Best-effort: no subscriber is the common case, not a failure to
+        // report. Always `persisted: false` — see the module docs' contract.
         let _ = self.sender.send(BusFrame {
             event,
             persisted: false,
@@ -310,8 +312,7 @@ impl EventBus {
         IngestOutcome::Ingested
     }
 
-    /// Subscribe to every future ingested event (DOC-73 §4.2's fan-out seam
-    /// for the SSE route #6851 adds).
+    /// Subscribe to every future ingested event (DOC-73 §4.2's fan-out seam).
     ///
     /// A subscriber that stops reading falls behind the bounded channel and
     /// receives `Lagged` on its next `recv` rather than stalling ingest —
@@ -335,6 +336,12 @@ impl EventBus {
         let ring = self.lock_ring();
         let receiver = self.sender.subscribe();
         let head = self.next_seq.load(Ordering::Relaxed).saturating_sub(1);
+        // The ring is contiguous in seq, so `since` is at a fixed offset.
+        let anchor = since
+            .zip(ring.events.front())
+            .and_then(|(since, first)| since.checked_sub(first.seq))
+            .and_then(|offset| ring.events.get(usize::try_from(offset).ok()?))
+            .map(|event| event.id);
         let backlog = match since {
             Some(since) => ring
                 .events
@@ -348,8 +355,50 @@ impl EventBus {
         Attach {
             backlog,
             head,
+            anchor,
             receiver,
         }
+    }
+
+    /// Why the log writer stopped, if it failed (#9075). A bus whose writer
+    /// failed refuses new events, as a closed one does.
+    ///
+    /// Test: `tests/daemon_exit.rs::a_log_write_failure_exits_non_zero`.
+    pub(crate) fn log_failure(&self) -> Option<String> {
+        self.log.as_ref().and_then(DurableLog::failure)
+    }
+
+    /// Resolve with the reason once the log writer fails; never resolves when
+    /// there is no log or it does not fail (#9075).
+    pub(crate) fn log_failed(&self) -> impl std::future::Future<Output = String> + Send + 'static {
+        let failed = self.log.as_ref().map(DurableLog::failed);
+        async move {
+            match failed {
+                Some(failed) => failed.await,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// The id the durable log holds for `seq`: `None` without a log,
+    /// `Some(Ok(None))` when no retained day file holds `seq` (#9075).
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err(_))` when a day file could not be listed or read.
+    ///
+    /// Test: `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
+    pub(crate) async fn logged_id(
+        &self,
+        seq: u64,
+    ) -> Option<Result<Option<EventId>, super::log::LogError>> {
+        let replayed = self.replay_since(seq.saturating_sub(1)).await?;
+        Some(replayed.map(|items| {
+            items.into_iter().find_map(|item| match item {
+                super::log::ReplayItem::Event(event) if event.seq == seq => Some(event.id),
+                _ => None,
+            })
+        }))
     }
 
     /// Stop assigning `seq` and release the durable log's writer (#9075).
@@ -405,7 +454,7 @@ impl EventBus {
 
     /// How many events the ring currently holds. Test-only introspection —
     /// no production caller needs the count without also needing the events
-    /// themselves, which [`EventBus::subscribe`] serves instead.
+    /// themselves, which [`EventBus::attach`] serves instead.
     ///
     /// Test: `super::tests::eviction_at_capacity_drops_the_oldest`.
     #[cfg(test)]

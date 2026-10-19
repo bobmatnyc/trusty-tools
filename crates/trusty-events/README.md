@@ -42,7 +42,10 @@ The first line of a connection decides what it is:
   `since_seq` set, the bus replays every retained event after it, from the
   log and then the ring, and then streams live events. A missed event is never
   skipped silently: the stream carries `Gap { skipped }` instead. Resubscribe
-  with `since_seq` set to the last `seq` you hold to recover from the log.
+  with `since_seq` set to the last `seq` you hold and `since_id` set to that
+  event's id to recover from the log. A non-zero `since_seq` without
+  `since_id`, or with an id the bus does not hold at that `seq` (a crash can
+  make it hand a `seq` out twice), is refused; resubscribe with `since_seq: 0`.
 
 The wire contract lives in `trusty_common::control_bus`. This crate's Rust API
 is internal to trusty-* and carries no stability promise; no other workspace
@@ -52,7 +55,8 @@ crate links it.
 
 The bus assigns one `seq` to each event it accepts and appends the event to a
 day-rotated NDJSON file under `<data dir>/trusty-events/event_log/`, keeping 7
-days. On start it reads the newest file and continues `seq` from there. The
+days, and never deletes the newest file that holds an event. On start it
+reads that file and continues `seq` from there. The
 console's old `trusty-console/event_log/` directory is not read.
 
 ## Exit status
@@ -60,7 +64,7 @@ console's old `trusty-console/event_log/` directory is not read.
 | Exit | When |
 |---|---|
 | 0 | SIGTERM or SIGINT: stops assigning `seq`, lets the log writer drain (up to 5 s), removes the socket |
-| 1 | Another process serves the socket; the socket cannot be bound; the log directory cannot be opened; accept failed 64 times in a row (about a minute) |
+| 1 | Another process serves the socket; the socket cannot be bound; the log directory cannot be opened; a log write or rotate failed; the log writer did not drain within 5 s at shutdown; accept failed 64 times in a row (about a minute) |
 | 2 | Usage error |
 
 ### Under launchd

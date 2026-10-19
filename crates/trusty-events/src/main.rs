@@ -73,7 +73,11 @@ fn main() -> ExitCode {
         }
     };
     let Command::Serve(args) = cli.command;
-    match runtime.block_on(serve(args)) {
+    let result = runtime.block_on(serve(args));
+    // #9075: a log writer stuck in a blocking file call must not hold the exit
+    // open; the drain bound has already decided the outcome.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("trusty-events: {e:#}");

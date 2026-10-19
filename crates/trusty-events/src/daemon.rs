@@ -3,15 +3,16 @@
 //!
 //! Why: the daemon's whole job is the bus, so every failure that would leave
 //! it running without one — a socket another process owns, a log it cannot
-//! open, an accept loop that only fails — ends the process with an error
-//! instead. launchd restarts it, and `tm doctor` (#10042) sees the gap. A
+//! open, an accept loop that only fails, a log write that fails, a writer
+//! that does not drain at shutdown — ends the process with an error instead. launchd restarts it, and `tm doctor` (#10042) sees the gap. A
 //! producer never waits on any of this: `PushClient` buffers (ADR-0065
 //! decision 4).
 //! What: [`run`] binds the socket first — the singleton bind is what proves
 //! no other instance is appending to the same log — then opens the log,
-//! resuming `seq`, then serves until `shutdown`. On the way out it stops `seq`
-//! assignment, waits up to [`DRAIN_BOUND`] for the log writer to write what it
-//! holds, and unlinks the socket while still bound.
+//! resuming `seq`, then serves until `shutdown` or a log writer failure. On
+//! the way out it stops `seq` assignment, waits up to [`DRAIN_BOUND`] for the
+//! log writer to write what it holds, and unlinks the socket while still
+//! bound.
 //! Test: `tests/daemon_exit.rs`, `tests/daemon_wire.rs`.
 
 use std::future::Future;
@@ -80,7 +81,8 @@ pub fn default_log_dir() -> Result<PathBuf, LogError> {
 /// Why: the binary exits non-zero on every arm and prints the chain; each arm
 /// names a different thing for an operator to fix.
 /// What: `Serve` for the socket (bind refused, accept loop exhausted), `Log`
-/// for the durable log.
+/// for opening the durable log, `LogWriter` for a log write that failed while
+/// serving, `DrainTimeout` for a writer that did not finish at shutdown.
 /// Test: `tests/daemon_exit.rs`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -91,6 +93,20 @@ pub enum DaemonError {
     /// The durable log could not be opened.
     #[error("open the trusty-events log: {0}")]
     Log(#[from] LogError),
+    /// The log writer failed while serving (#9075).
+    #[error("the trusty-events log writer failed: {reason}")]
+    LogWriter {
+        /// What the writer reported.
+        reason: String,
+    },
+    /// The log writer did not drain within the bound at shutdown (#9075).
+    #[error(
+        "the trusty-events log writer did not drain within {bound:?}; queued events were not written"
+    )]
+    DrainTimeout {
+        /// How long shutdown waited.
+        bound: Duration,
+    },
 }
 
 /// Serve the bus until `shutdown` resolves.
@@ -136,26 +152,60 @@ pub async fn run(
         Some(log),
         recovered.next_seq,
     ));
-    let served = serve::serve_with(
-        &listener,
-        Arc::clone(&bus),
-        ServeLimits::default(),
-        shutdown,
-    )
-    .await;
+    // #9075: a failed log writer stops serving just as a signal does; the
+    // exit below then reports it.
+    let writer_failed = bus.log_failed();
+    let stop = async move {
+        tokio::select! {
+            () = shutdown => {}
+            reason = writer_failed => {
+                tracing::error!(error = %reason, "trusty-events: log writer failed; stopping");
+            }
+        }
+    };
+    let served = serve::serve_with(&listener, Arc::clone(&bus), ServeLimits::default(), stop).await;
 
     // #9075: stop handing out seq, then let the writer drain what it holds,
     // so every seq already handed out is on disk for the next start.
-    if let Some(writer) = bus.close()
-        && tokio::time::timeout(DRAIN_BOUND, writer).await.is_err()
-    {
-        tracing::warn!(bound = ?DRAIN_BOUND, "trusty-events: log writer did not drain in time");
-    }
+    let drained = drain(bus.close(), DRAIN_BOUND).await;
     // Unlink while still bound, so no instance that binds after us loses its
     // socket file to this cleanup.
     unlink_socket(&config.socket);
     drop(listener);
-    served.map_err(DaemonError::from)
+    served?;
+    if let Some(reason) = bus.log_failure() {
+        return Err(DaemonError::LogWriter { reason });
+    }
+    drained
+}
+
+/// Wait up to `bound` for the closed log's writer to finish.
+///
+/// Why: a writer still holding events at exit means `seq` values were handed
+/// out that the log never records (#9075); that is an error exit, not a
+/// warning.
+/// What: `Ok` when there is no writer or it finished in time.
+///
+/// # Errors
+///
+/// [`DaemonError::DrainTimeout`] after `bound`; [`DaemonError::LogWriter`] when
+/// the writer task panicked.
+///
+/// Test: `tests/daemon_exit.rs::a_drain_timeout_on_sigterm_exits_non_zero`.
+async fn drain(
+    writer: Option<tokio::task::JoinHandle<()>>,
+    bound: Duration,
+) -> Result<(), DaemonError> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    match tokio::time::timeout(bound, writer).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(DaemonError::LogWriter {
+            reason: format!("the log writer task ended: {e}"),
+        }),
+        Err(_) => Err(DaemonError::DrainTimeout { bound }),
+    }
 }
 
 /// Remove the socket file this process bound; a missing file is fine.

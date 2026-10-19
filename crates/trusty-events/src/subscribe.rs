@@ -18,14 +18,19 @@
 //! the missing ones matched. Filtered-out events advance the cursor without a
 //! gap. A failed log replay ends the stream with an error frame. A `since_seq`
 //! past the bus's last `seq` is refused: the bus restarted on a fresh log, or
-//! the reader is confused, and serving it would skip events silently.
-//! Test: `super::serve_tests`, `tests/daemon_wire.rs`.
+//! the reader is confused, and serving it would skip events silently. #9075:
+//! so is a resume from `since_seq > 0` without `since_id`, or whose
+//! `since_id` is not the event the ring or the log holds at that seq. A crash
+//! can lose a `seq` the bus already handed out, and the next start hands it
+//! out again; the id is what tells the two events apart.
+//! Test: `super::serve_tests`, `tests/daemon_wire.rs`,
+//! `tests/daemon_resume.rs::a_resume_after_a_kill_with_an_undrained_log_is_refused_not_skipped`.
 
 use std::sync::Arc;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
 use trusty_common::control_bus::{
-    HarnessEvent, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter, SubscribeItem, SubscribeParams,
+    EventId, HarnessEvent, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter, SubscribeItem, SubscribeParams,
 };
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcStreamItems};
 
@@ -53,12 +58,16 @@ pub(crate) fn router(bus: Arc<EventBus>, max_subscribers: usize) -> RpcRouter {
 ///
 /// # Errors
 ///
-/// An [`RpcError`] when every subscriber slot is in use, or when `since_seq`
-/// is past the bus's last assigned `seq`. Either becomes the stream's terminal
+/// An [`RpcError`] when every subscriber slot is in use, when `since_seq`
+/// is past the bus's last assigned `seq`, or when a non-zero `since_seq` comes
+/// without a `since_id` or with one the ring holds for another event. Either becomes the stream's terminal
 /// error frame, with no item before it.
 ///
 /// Test: `super::serve_tests::a_subscriber_beyond_the_limit_is_refused`,
-/// `super::serve_tests::a_since_seq_ahead_of_the_bus_is_refused`.
+/// `super::serve_tests::a_since_seq_ahead_of_the_bus_is_refused`,
+/// `super::serve_tests::a_resume_without_since_id_is_refused`,
+/// `super::serve_tests::a_resume_whose_since_id_names_another_event_is_refused`,
+/// `super::serve_tests::a_resume_from_a_seq_no_tier_holds_is_refused`.
 fn open(
     bus: Arc<EventBus>,
     slots: &Arc<Semaphore>,
@@ -77,14 +86,64 @@ fn open(
             attach.head
         )));
     }
+    // #9075: a resume names the event it holds. The ring answers now; an
+    // event that left the ring is checked against the log in the pump.
+    let check = match params.since_seq {
+        Some(since) if since > 0 => {
+            let Some(id) = params.since_id else {
+                return Err(RpcError::invalid_params(format!(
+                    "since_seq {since} needs since_id, the id of the event held at that seq; \
+                     resubscribe with since_seq 0 to replay what is retained"
+                )));
+            };
+            match attach.anchor {
+                Some(found) if found == id => None,
+                Some(_) => return Err(id_mismatch(since)),
+                None => Some((since, id)),
+            }
+        }
+        _ => None,
+    };
     let (tx, items) = mpsc::channel(ITEM_BUFFER);
     let cursor = Cursor {
         tx,
         filter: params.filters,
         last: params.since_seq.unwrap_or(attach.head),
     };
-    tokio::spawn(pump(bus, attach, params.since_seq, cursor, slot));
+    tokio::spawn(pump(bus, attach, params.since_seq, check, cursor, slot));
     Ok(items)
+}
+
+/// The refusal for a resume whose `since_id` is not the event the bus holds
+/// at `since`: the bus restarted and assigned that seq again, or the reader is
+/// confused. Serving it could skip events the reader never saw.
+fn id_mismatch(since: u64) -> RpcError {
+    RpcError::invalid_params(format!(
+        "since_id is not the event at since_seq {since}: the bus assigned that seq to \
+         another event after a restart; resubscribe with since_seq 0 to replay what is \
+         retained"
+    ))
+}
+
+/// The refusal for a resume from a seq neither the ring nor the log holds.
+fn id_unverifiable(since: u64) -> RpcError {
+    RpcError::invalid_params(format!(
+        "since_id cannot be checked: no event at since_seq {since} is retained; resubscribe \
+         with since_seq 0 to replay what is retained"
+    ))
+}
+
+/// Check a resume's `since_id` against the durable log. `false` when the
+/// stream has ended with a refusal.
+async fn check_against_log(bus: &EventBus, since: u64, id: EventId, cursor: &Cursor) -> bool {
+    let refusal = match bus.logged_id(since).await {
+        Some(Ok(Some(found))) if found == id => return true,
+        Some(Ok(Some(_))) => id_mismatch(since),
+        Some(Ok(None)) | None => id_unverifiable(since),
+        Some(Err(e)) => RpcError::internal(format!("read the event log: {e}")),
+    };
+    cursor.fail(refusal).await;
+    false
 }
 
 /// Where a subscription stands: the last `seq` it passed and where it sends.
@@ -148,6 +207,7 @@ async fn pump(
     bus: Arc<EventBus>,
     attach: Attach,
     since: Option<u64>,
+    check: Option<(u64, EventId)>,
     mut cursor: Cursor,
     _slot: OwnedSemaphorePermit,
 ) {
@@ -155,7 +215,13 @@ async fn pump(
         backlog,
         head,
         mut receiver,
+        ..
     } = attach;
+    if let Some((seq, id)) = check
+        && !check_against_log(&bus, seq, id, &cursor).await
+    {
+        return;
+    }
     if let Some(since) = since
         && !replay(&bus, since, head, backlog, &mut cursor).await
     {
