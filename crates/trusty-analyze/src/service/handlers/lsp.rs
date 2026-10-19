@@ -188,7 +188,8 @@ pub async fn lsp_references(
 /// once the server is loaded and merges the `cargo check` push held for the
 /// same version (#9078): rust-analyzer's pull omits check findings, and it
 /// pushes a set only when it changes. Without that push the answer is
-/// `complete: false, reason: "check_pending"`. `scope: workspace` builds the
+/// `complete: false, reason: "check_not_run"`; a check push counts only for
+/// the opening version (v1), the only text `cargo check` reads. `scope: workspace` builds the
 /// same merged entry for `path`, then lists every other file the server has
 /// pushed for under the root, answering `complete: false`: 1.9.0 runs no full
 /// workspace pass, so a directory `path` is refused.
@@ -233,7 +234,7 @@ pub async fn lsp_diagnostics(
         o.ready().await?;
         let (own, checked) = o.answer(o.lease.request_timeout()).await?;
         let (files, reason) = match req.scope {
-            DiagnosticsScope::File => (vec![own], (!checked).then_some("check_pending")),
+            DiagnosticsScope::File => (vec![own], (!checked).then_some("check_not_run")),
             DiagnosticsScope::Workspace => {
                 // #9078: `own` already merges this file's push; the raw push
                 // entry it replaces is a subset of it.
@@ -246,7 +247,7 @@ pub async fn lsp_diagnostics(
                 let why = if checked {
                     "published_files_only"
                 } else {
-                    "check_pending"
+                    "check_not_run"
                 };
                 (files, Some(why))
             }

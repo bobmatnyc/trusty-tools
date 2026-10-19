@@ -422,7 +422,7 @@ rust-analyzer answers `[]`); past the request timeout it refuses with
 refused as `lsp_workspace_failed`. A file's diagnostics and the barrier come
 from a pull (`textDocument/diagnostic`), never from waiting on a push; the
 pull is merged with the `cargo check` push for the same version, and without
-that push the answer is `complete: false, reason: "check_pending"`. `scope: workspace` takes a file `path` and answers
+that push the answer is `complete: false, reason: "check_not_run"`. A check push counts only for the opening version (v1): `cargo check` runs only at startup. `scope: workspace` takes a file `path` and answers
 `complete: false`; a directory is refused. The barrier's `timeout_ms` is capped
 at the MCP client timeout minus 30 s.
 

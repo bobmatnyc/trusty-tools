@@ -169,8 +169,9 @@ pub struct LspDiagnosticsResponse {
     /// only the files the server has published for so far; 1.9.0 runs no full
     /// workspace pass.
     pub complete: bool,
-    /// Why `complete` is false: `check_pending` (no `cargo check` push for
-    /// this version yet) or `published_files_only` (workspace scope).
+    /// Why `complete` is false: `check_not_run` (no `cargo check` push for
+    /// covers this version: one runs only on the opening version) or
+    /// `published_files_only` (workspace scope).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
     pub files: Vec<FileDiagnostics>,
@@ -298,6 +299,7 @@ pub fn file_diagnostics(uri: &str, p: &PublishedDiagnostics) -> Result<FileDiagn
 ///
 /// Test: `file_scope_merges_the_pull_with_the_check_push`,
 /// `with_no_check_push_yet_the_answer_is_incomplete`,
+/// `a_late_check_stamped_with_a_newer_version_is_not_counted`,
 /// `a_changed_file_is_pulled_at_its_new_version`.
 pub fn merged(
     uri: &str,
@@ -310,14 +312,19 @@ pub fn merged(
         (Some("full"), Some(Value::Array(items))) => items.clone(),
         _ => return Err(protocol("diagnostic report", "{kind: full, items}")),
     };
-    // #9078: a push describes `version` when it is stamped with exactly that
-    // version, or, when unstamped (flycheck may omit the version), only if it
-    // arrived after `version`'s text was sent (`seq > synced_at`). Any other
-    // push may describe other text and is left out, so the answer is
-    // incomplete rather than wrong.
-    let check = push.filter(|p| match p.version {
-        Some(v) => v == version,
-        None => p.seq > synced_at,
+    // #9078: a check push counts only for the OPENING version. rust-analyzer
+    // stamps a push with the version current at PUBLISH time, and `cargo
+    // check` runs only at startup (the daemon sends no didSave), so a check
+    // that read v1 can land stamped v2; only v1 text is ever checked. So a
+    // push counts when `version` is 1 and it is stamped 1, or unstamped and
+    // arrived after v1's text was sent (`seq > synced_at`). Any other push may
+    // describe other text and is left out: the answer is incomplete, not wrong.
+    let check = push.filter(|p| {
+        version == 1
+            && match p.version {
+                Some(v) => v == 1,
+                None => p.seq > synced_at,
+            }
     });
     if let Some(p) = check {
         for d in &p.diagnostics {
