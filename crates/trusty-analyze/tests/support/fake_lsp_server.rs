@@ -3,6 +3,7 @@
 //! Why: CI has no `rust-analyzer`, and a real server's indexing makes timing
 //! nondeterministic. This fake speaks just enough LSP, deterministically, and can
 //! be told to stall, crash, fail its start-up, cut a frame short, ignore `exit`,
+//! stop reading its stdin (`no_read`),
 //! or leave a grandchild behind.
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
@@ -61,6 +62,12 @@ fn serve(mode: &str) -> i32 {
                         "serverInfo": {"name": "fake-lsp"}
                     }),
                 );
+                if mode == "no_read" {
+                    // #9078: answer the handshake, then never read stdin again,
+                    // so the client's next large write fills the pipe.
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                    return 0;
+                }
             }
             ("shutdown", Some(id)) => reply(&mut out, id, Value::Null),
             ("exit", None) if mode == "ignore_exit" => {}

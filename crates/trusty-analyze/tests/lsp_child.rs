@@ -262,6 +262,67 @@ async fn stalled_requests_time_out_then_the_hung_child_is_reaped() {
     assert!(manager.live_pids().await.is_empty());
 }
 
+/// Params large enough to fill any pipe buffer (64 KiB on Linux and macOS).
+fn pipe_filling_params() -> serde_json::Value {
+    json!({"pad": "z".repeat(1 << 20)})
+}
+
+/// #9078 round 2: a server that stops reading its stdin wedges the write; the
+/// request must still end inside its deadline, the server is killed as hung,
+/// and `shutdown_all` returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_stops_reading_is_killed_as_hung() {
+    let fx = Fixture::new();
+    let manager = LspManager::new(LspConfig {
+        request_timeout: Duration::from_millis(300),
+        ..fx.config("no_read")
+    });
+    let lease = manager.session(&fx.root(), RUST).await.expect("session");
+    let pid = lease.pid();
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        lease.request("x/big", pipe_filling_params()),
+    )
+    .await
+    .expect("a wedged write must not hang the request");
+    assert!(
+        matches!(res, Err(LspError::Hung { .. } | LspError::Timeout { .. })),
+        "{res:?}"
+    );
+    assert!(gone_within(pid, GONE).await, "the hung child is killed");
+    drop(lease);
+    tokio::time::timeout(Duration::from_secs(5), manager.shutdown_all())
+        .await
+        .expect("shutdown_all returns");
+}
+
+/// #9078 round 2: `shutdown_all` must return, and kill the child, while
+/// another task's write is wedged in the pipe.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_all_returns_while_a_write_is_wedged() {
+    let fx = Fixture::new();
+    let manager = Arc::new(LspManager::new(LspConfig {
+        request_timeout: Duration::from_secs(30),
+        shutdown_grace: Duration::from_millis(300),
+        ..fx.config("no_read")
+    }));
+    let lease = manager.session(&fx.root(), RUST).await.expect("session");
+    let pid = lease.pid();
+    let writer = tokio::spawn(async move { lease.request("x/big", pipe_filling_params()).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!writer.is_finished(), "the write is wedged in the pipe");
+
+    tokio::time::timeout(Duration::from_secs(5), manager.shutdown_all())
+        .await
+        .expect("shutdown_all must not wait on a wedged write");
+    assert!(!alive(pid), "shutdown_all killed the child");
+    let res = tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .expect("the wedged request ends once the child is gone")
+        .expect("join");
+    assert!(res.is_err(), "{res:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_child_is_reaped_and_the_next_call_respawns() {
     let fx = Fixture::new();

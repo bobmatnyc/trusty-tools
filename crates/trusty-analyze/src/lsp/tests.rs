@@ -326,6 +326,87 @@ async fn write_to_a_dead_peer_is_an_error() {
     assert!(matches!(note, Err(LspError::Write(_))), "{note:?}");
 }
 
+/// #9078 round 2: a peer that never reads its stdin must not wedge the writer.
+/// The request's own deadline covers the write, and a write that cannot finish
+/// closes the client.
+#[tokio::test]
+async fn a_peer_that_never_reads_cannot_wedge_a_request() {
+    let (client_io, _unread) = tokio::io::duplex(64);
+    let (rd, wr) = tokio::io::split(client_io);
+    let client = LspClient::new(rd, wr);
+    let pad = "x".repeat(64 * 1024);
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request("m", json!({"pad": pad}), Duration::from_millis(200)),
+    )
+    .await
+    .expect("the write must be bounded by the request timeout");
+    assert!(matches!(res, Err(LspError::Timeout { .. })), "{res:?}");
+    assert_eq!(client.consecutive_timeouts(), 1);
+    assert!(
+        client.is_closed(),
+        "a write that timed out closes the client"
+    );
+    let note = tokio::time::timeout(Duration::from_secs(5), client.notify("n", json!({})))
+        .await
+        .expect("a notification after a wedged write is bounded too");
+    assert!(note.is_err(), "{note:?}");
+}
+
+/// #9078 round 2: cancelling a request mid-write must never leave half a frame
+/// on the wire for the next message to follow.
+#[tokio::test]
+async fn a_cancelled_request_never_leaves_a_partial_frame() {
+    let (client_io, server_io) = tokio::io::duplex(64);
+    let (rd, wr) = tokio::io::split(client_io);
+    let client = LspClient::new(rd, wr);
+    let pad = "y".repeat(16 * 1024);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(20),
+        client.request("big", json!({"pad": pad}), Duration::from_secs(30)),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the caller gave up mid-write");
+    let mut peer = Peer {
+        io: server_io,
+        decoder: FrameDecoder::default(),
+    };
+    let next = client.request("small", json!({}), Duration::from_secs(5));
+    let serve = async {
+        let first = tokio::time::timeout(Duration::from_secs(5), peer.next())
+            .await
+            .expect("frame");
+        let second = tokio::time::timeout(Duration::from_secs(5), peer.next())
+            .await
+            .expect("frame");
+        peer.send(&json!({"jsonrpc": "2.0", "id": second["id"], "result": "ok"}))
+            .await;
+        (first, second)
+    };
+    let (answer, (first, second)) = tokio::join!(next, serve);
+    assert_eq!(first["method"], "big", "the cancelled frame arrives whole");
+    assert_eq!(
+        first["params"]["pad"].as_str().map(str::len),
+        Some(16 * 1024)
+    );
+    assert_eq!(second["method"], "small");
+    assert_eq!(answer, Ok(json!("ok")));
+}
+
+/// #9078 round 2 Fail-Open Check: a response with neither `result` nor `error`
+/// is a protocol error, never a null success.
+#[tokio::test]
+async fn a_response_without_result_or_error_is_a_protocol_error() {
+    let (client, mut peer) = pair();
+    let call = client.request("m", json!({}), Duration::from_secs(5));
+    let serve = async {
+        let r = peer.next().await;
+        peer.send(&json!({"jsonrpc": "2.0", "id": r["id"]})).await;
+    };
+    let (res, ()) = tokio::join!(call, serve);
+    assert!(matches!(res, Err(LspError::Protocol(_))), "{res:?}");
+}
+
 #[tokio::test]
 async fn server_initiated_requests_are_answered() {
     let (client, mut peer) = pair();
