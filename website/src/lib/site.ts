@@ -189,13 +189,15 @@ export const INSTALL_OPTIONS: InstallOption[] = [
 	}
 ];
 
-/** The eight crates `tctl install` manages, in `stable_set.rs` order. */
+/** The nine crates `tctl install` manages, in `stable_set.rs` order. */
 export const STABLE_SET = [
 	'trusty-search',
 	'trusty-memory',
 	'trusty-analyze',
 	'trusty-review',
 	'tga',
+	// #10042: the optional event-bus daemon (ADR-0065), installed softly with producers.
+	'trusty-events',
 	'trusty-console',
 	'trusty-mpm',
 	// #5805: the control plane installs itself, and is last in the Rust order.

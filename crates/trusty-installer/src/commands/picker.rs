@@ -37,6 +37,7 @@ pub fn member_description(crate_name: &str) -> &'static str {
         "trusty-analyze" => "code quality and complexity analysis daemon",
         "trusty-review" => "automated code-review MCP server",
         "tga" => "git analytics CLI (blame, churn, contributor heatmaps)",
+        "trusty-events" => "event bus daemon the trusty-* tools publish to",
         "trusty-console" => "web console proxying the trusty-* daemon suite",
         "trusty-mpm" => "multi-session process manager and agent orchestrator",
         "trusty-installer" => "the tctl control plane itself (installs/upgrades the stack)",
@@ -164,6 +165,26 @@ fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
         eprintln!("  {line}");
     }
     resolved.members
+}
+
+/// The names `tctl install` re-resolves from a picker selection.
+///
+/// Why: `install::run` hands the picker's expanded list back to
+/// [`select_members_transitive`] as names, so this list decides which members
+/// the resolver treats as explicitly asked for.
+/// What: the crate name of every member in `chosen` except a SOFT one.
+/// #10042: a soft member (a producer's bus) was added by the resolver, not
+/// picked; passing it back by name made it explicit and `soft: false`, so a
+/// failed bus gated an optional producer's run. Left out, the resolver adds it
+/// again, softly. A bus the operator picked is `soft: false` and stays.
+/// Test: `install::tests::the_picker_round_trip_keeps_the_bus_soft`,
+/// `install::tests::a_picked_bus_stays_explicit_through_the_round_trip`.
+pub fn override_names(chosen: &[StableMember]) -> Vec<String> {
+    chosen
+        .iter()
+        .filter(|m| !m.soft)
+        .map(|m| m.crate_name.clone())
+        .collect()
 }
 
 /// Print the numbered component menu to stderr.
@@ -351,7 +372,8 @@ mod tests {
     /// Why: Picking trusty-mpm alone in the picker must pull in its runtime
     /// deps, same as the non-interactive `tctl install trusty-mpm` path.
     /// What: Chooses only the trusty-mpm `StableMember`; asserts the expanded
-    /// result also contains trusty-memory and trusty-search, in stable-set order.
+    /// result also contains trusty-memory and trusty-search, in stable-set order,
+    /// and trusty-events as a soft member (#10042).
     /// Test: This is the test.
     #[test]
     fn expand_with_dependencies_pulls_in_mpm_deps() {
@@ -361,7 +383,16 @@ mod tests {
             .expect("trusty-mpm in stable set");
         let expanded = expand_with_dependencies(vec![mpm]);
         let names: Vec<String> = expanded.into_iter().map(|m| m.crate_name).collect();
-        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        // #10042: plus the bus, softly (ADR-0065 decision 4).
+        assert_eq!(
+            names,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-events",
+                "trusty-mpm"
+            ]
+        );
     }
 
     /// Why: An empty picker choice ("none"/empty input) means "install

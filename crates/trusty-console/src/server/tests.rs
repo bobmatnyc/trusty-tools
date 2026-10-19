@@ -119,8 +119,8 @@ async fn test_services_route_returns_json() {
 /// Against `origin/main` there is no `trusty-console` entry at all and the
 /// `find` below returns `None`.
 ///
-/// Why nothing here is asserted about CPU, RSS or the other six rows: this
-/// state has no sampler running, and the six real connectors probe a machine
+/// Why nothing here is asserted about CPU, RSS or the other rows: this
+/// state has no sampler running, and the other real connectors probe a machine
 /// whose daemons this test does not control. The console row is the one whose
 /// every asserted field is decided by this process.
 /// What: builds the router over `detect::all_connectors()`, issues the request,

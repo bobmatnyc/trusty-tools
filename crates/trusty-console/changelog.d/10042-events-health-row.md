@@ -1,0 +1,2 @@
+Added
+- The console's services roster has a Trusty Events row for the trusty-events bus daemon (#10042). It reports `running` only when the bus's Unix socket accepts a connection, and `available` with a hint when the socket is missing, stale, not a socket or unreadable. The probe is one connect over the socket, never TCP, and reads no version because the bus has no health method. It reads the socket directly, not `/api/console/events/status` (#10072).

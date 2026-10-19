@@ -28,6 +28,17 @@
 /// Update this ONLY together with the guard wiring — see the failure message.
 const ALLOWLISTED_BOOTSTRAP_SITES: &[(&str, usize, &str)] = &[
     (
+        "commands/events_plist.rs",
+        1,
+        "#10042: `install_events_plist_for`'s `target.launchctl.bootstrap(...)` for \
+         the trusty-events bus. Reached only through \
+         `service_bootstrap::RealServiceEnv::run_service_install`, whose two callers \
+         — `bootstrap_one`'s fresh-install branch and `lifecycle::launchd_control`'s \
+         Start — both run `port_guard::guard_bootstrap` first. The bus binds no port \
+         (`probe_http::uds_socket_for` resolves its socket, so \
+         `resolve_guard_ports` is empty) and the guard passes vacuously",
+    ),
+    (
         "commands/plist_bootstrap.rs",
         2,
         "the trusty-mpm supervisor: `RealLaunchctl::bootstrap`'s `launchctl` argv, and \

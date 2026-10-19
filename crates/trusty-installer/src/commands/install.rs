@@ -123,7 +123,7 @@ pub fn run(
                     eprintln!("tctl install: no components selected — nothing to do.");
                     return 0;
                 }
-                members_override = chosen.iter().map(|m| m.crate_name.clone()).collect();
+                members_override = super::picker::override_names(&chosen);
                 &members_override
             }
             Err(e) => {
@@ -629,6 +629,7 @@ async fn install_all(
                     shadow_ok,
                     shadow_detail,
                     required: m.required,
+                    soft: m.soft,
                     // This member installed and health-gated, so its artifact
                     // passed verification by construction.
                     integrity_ok: true,
@@ -677,6 +678,7 @@ async fn install_all(
                     shadow_ok: true,
                     shadow_detail: String::new(),
                     required: m.required,
+                    soft: m.soft,
                     integrity_ok,
                 });
             }

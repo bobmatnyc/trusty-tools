@@ -472,7 +472,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_five_checks`,
+/// Test: `run_doctor_produces_seventy_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -630,6 +630,8 @@ pub(crate) async fn run_doctor_with_claims(
     // #9169: the project map — this project's index, live duplicates, second
     // checkouts, and whether the daemon can read the map at all.
     checks.extend(check_search_project(project_dir).await);
+    // #10042: the trusty-events bus socket — one UDS connect, never TCP.
+    checks.push(super::doctor_events::check_events().await);
     checks.push(check_worktrees(repos_root, worktree_counts).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
@@ -890,7 +892,7 @@ pub async fn run_doctor_for_manager(
 /// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_five_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_six_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

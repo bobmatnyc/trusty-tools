@@ -1,0 +1,2 @@
+Added
+- `tm doctor` has an `events` row for the trusty-events bus daemon (#10042). It connects once to the bus's Unix socket and closes the connection; it never uses TCP and sends no request. It is `ok` only when the connect completes, and then says that liveness beyond the accept is not checked (#10071). It fails when the socket is missing (not running), stale (the file exists but the connect is refused), not a socket, or unreadable, and warns when the connect neither completes nor is refused.

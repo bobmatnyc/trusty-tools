@@ -398,7 +398,8 @@ pub fn bootstrap_one(
     if member_has_retired_service(binary) {
         return evict_retired_unit(env, binary);
     }
-    if !member_has_service_install(binary) {
+    // #10042: trusty-events has no `service install`; tctl writes its plist.
+    if !member_has_service_install(binary) && !super::events_plist::installer_owns_plist(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
     }
     if env.plist_present(binary) {
@@ -623,6 +624,11 @@ impl ServiceEnv for RealServiceEnv {
         exe_path: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
         let target = service_install_target(binary, exe_path)?;
+        // #10042: the bus ships no `service` subcommand, so tctl writes and
+        // bootstraps its plist from `events_plist`'s template instead.
+        if super::events_plist::installer_owns_plist(binary) {
+            return super::events_plist::install_events_plist(&target);
+        }
         let mut cmd = std::process::Command::new(&target);
         cmd.args(["service", "install"]);
         run_captured(cmd, &format!("`{} service install`", target.display())).map_err(|e| {

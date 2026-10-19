@@ -281,6 +281,7 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
         daemon: manage != ManageStrategy::None,
         manage,
         required: true,
+        soft: false,
     };
     apply_to_member(Verb::Restart, &m)
 }
@@ -489,6 +490,7 @@ mod tests {
             daemon: manage != ManageStrategy::None,
             manage,
             required: true,
+            soft: false,
         }
     }
 

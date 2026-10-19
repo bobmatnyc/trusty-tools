@@ -460,6 +460,31 @@ fn bootstrap_one_installs_when_absent() {
     assert_eq!(env.installed.borrow().as_slice(), ["trusty-memory"]);
 }
 
+/// Why (#10042): trusty-events ships no `service install`, so the
+/// `member_has_service_install` gate alone skipped it — `tctl install` reported
+/// "skipped" and the bus had no plist for `tctl start` or launchd to load.
+/// What: with no plist, the bus reaches the install step (tctl writes its plist
+/// there) and reports `Installed`; with a plist present but not loaded it is
+/// force-loaded like every other daemon.
+/// Test: this is the test.
+#[test]
+fn bootstrap_one_installs_the_events_plist_instead_of_skipping() {
+    let env = FakeServiceEnv::new(false, false);
+    let action = bootstrap_one(&env, "trusty-events", None);
+    assert_eq!(action, BootstrapAction::Installed);
+    assert_eq!(env.installed.borrow().as_slice(), ["trusty-events"]);
+
+    let present = FakeServiceEnv::new(true, false).not_loaded();
+    assert_eq!(
+        bootstrap_one(&present, "trusty-events", None),
+        BootstrapAction::LoadedByFallback
+    );
+    assert!(
+        present.installed.borrow().is_empty(),
+        "never rewrite a plist"
+    );
+}
+
 /// Why: a `service install` failure must be fail-soft — surfaced as
 /// `Failed`, not a panic or an aborted install.
 /// What: with the fake set to fail, asserts a `Failed` carrying the error.

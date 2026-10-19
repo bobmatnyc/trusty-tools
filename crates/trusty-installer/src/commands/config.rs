@@ -323,6 +323,7 @@ mod tests {
                 "trusty-analyze",
                 "trusty-review",
                 "tga",
+                "trusty-events",
                 "trusty-console",
                 "trusty-mpm",
             ],

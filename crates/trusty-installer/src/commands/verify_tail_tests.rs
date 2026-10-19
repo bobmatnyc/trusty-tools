@@ -20,6 +20,7 @@ fn row(member: &str, health: &str) -> VerifyRow {
         health: health.to_owned(),
         kickstarted: false,
         required: true,
+        soft: false,
         budget_exhausted: false,
         down_state: None,
         verify_bootstrapped: false,
@@ -48,6 +49,7 @@ fn launchd_member(binary: &str) -> StableMember {
         daemon: true,
         manage: ManageStrategy::Launchd,
         required: true,
+        soft: false,
     }
 }
 
@@ -328,6 +330,36 @@ fn required_mpm_reporting_down_fails_verification() {
         ],
     );
     assert!(live_mpm.verified);
+}
+
+/// Why (#10042): the verify tail gates on the same rule as the install report,
+/// so a producer's soft bus being down must not fail an OPTIONAL producer's
+/// verification either.
+/// What: an optional producer healthy plus a soft bus down is verified; the
+/// same bus down without the soft mark fails, as the all-optional rule says.
+/// Test: This is the test.
+#[test]
+fn a_down_soft_bus_never_fails_verification() {
+    let soft_bus = VerifyRow {
+        soft: true,
+        ..optional_row("trusty-events", health_str::DOWN)
+    };
+    let report = VerifyTailReport::build(
+        true,
+        vec![
+            optional_row("trusty-analyze", health_str::HEALTHY),
+            soft_bus,
+        ],
+    );
+    assert!(report.verified, "a soft member never gates verification");
+    let named = VerifyTailReport::build(
+        true,
+        vec![
+            optional_row("trusty-analyze", health_str::HEALTHY),
+            optional_row("trusty-events", health_str::DOWN),
+        ],
+    );
+    assert!(!named.verified, "a non-soft optional row still gates");
 }
 
 /// Why: THE demo-critical fix — an OPTIONAL daemon member (e.g.

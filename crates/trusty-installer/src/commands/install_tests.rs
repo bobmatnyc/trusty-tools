@@ -35,6 +35,7 @@ fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        soft: false,
         integrity_ok: true,
     }
 }
@@ -131,6 +132,62 @@ fn report_serialises() {
 fn report_all_ok() {
     let report = InstallReport::build(vec![outcome("a", true, ""), outcome("b", false, "boom")]);
     assert!(!report.all_ok);
+}
+
+/// Why (#10042, ADR-0065 decision 4): a producer's install pulls in the bus
+/// as a SOFT member, and the bus failing must not fail the producer's run —
+/// not even an OPTIONAL producer's, where the plain rule gates on every row.
+/// What: with the soft bus failed, the trusty-mpm selection and the
+/// trusty-analyze selection both stay `all_ok`, every other member reads
+/// installed, the footer has no error line and lists the bus as skipped; the
+/// bus named explicitly on its own still fails the run.
+/// Test: This is the test.
+#[test]
+fn a_failed_soft_bus_install_leaves_the_run_all_ok() {
+    let bus = || InstallOutcome {
+        soft: true,
+        ..optional_outcome("trusty-events", false, "no prebuilt for this platform")
+    };
+    let mpm = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        outcome("trusty-memory", true, "installed"),
+        bus(),
+        outcome("trusty-mpm", true, "installed"),
+    ]);
+    assert!(
+        mpm.all_ok,
+        "the soft bus must not fail `tctl install trusty-mpm`"
+    );
+    assert!(
+        mpm.members
+            .iter()
+            .filter(|m| m.member != "trusty-events")
+            .all(|m| m.ok),
+        "every other member installed"
+    );
+    let lines = install_report::summary_lines(&mpm);
+    assert!(lines.errors.is_empty(), "{lines:?}");
+    assert!(
+        lines.skipped.iter().any(|l| l.starts_with("trusty-events")),
+        "{lines:?}"
+    );
+
+    let analyze = InstallReport::build(vec![
+        optional_outcome("trusty-analyze", true, "installed"),
+        bus(),
+    ]);
+    assert!(
+        analyze.all_ok,
+        "an OPTIONAL producer's soft bus must not gate either"
+    );
+    assert!(install_report::summary_lines(&analyze).errors.is_empty());
+
+    let named = InstallReport::build(vec![optional_outcome(
+        "trusty-events",
+        false,
+        "no prebuilt for this platform",
+    )]);
+    assert!(!named.all_ok, "the bus asked for by name still gates");
 }
 
 /// Why: THE demo-critical fix — an OPTIONAL member (e.g. `trusty-analyze` on
@@ -509,6 +566,7 @@ fn report_all_ok_reflects_service_failure() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        soft: false,
         integrity_ok: true,
     }]);
     assert!(
@@ -526,6 +584,7 @@ fn report_all_ok_reflects_service_failure() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        soft: false,
         integrity_ok: true,
     }]);
     assert!(
@@ -555,6 +614,7 @@ fn report_all_ok_reflects_shadow_failure() {
                          the shell resolves `tm` to /x/.cargo/bin/tm (0.19.26)"
             .to_owned(),
         required: true,
+        soft: false,
         integrity_ok: true,
     }]);
     assert!(
@@ -1002,6 +1062,7 @@ fn stable_member_for_test(crate_name: &str, binary: &str, manage: ManageStrategy
         daemon: manage == ManageStrategy::Launchd,
         manage,
         required: true,
+        soft: false,
     }
 }
 
@@ -1062,6 +1123,7 @@ fn refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        soft: false,
         integrity_ok: true,
     }]);
 
@@ -1173,8 +1235,17 @@ fn bundle_agents_resolves_transitively_in_topological_order() {
             "trusty-memory",
             "trusty-analyze",
             "trusty-review",
+            // #10042: mpm and analyze are producers, so the bus joins softly.
+            "trusty-events",
             "trusty-mpm",
         ]
+    );
+    assert!(
+        resolved
+            .members
+            .iter()
+            .any(|m| m.crate_name == "trusty-events" && m.soft && !m.required),
+        "the bus joins the agents bundle as a soft, optional member"
     );
     assert!(
         resolved
@@ -1236,6 +1307,7 @@ fn failed_supervisor_bootstrap_fails_the_install_report() {
             shadow_ok: true,
             shadow_detail: String::new(),
             required: true,
+            soft: false,
             integrity_ok: true,
         }])
     };
@@ -1346,4 +1418,68 @@ fn dry_run_reports_the_content_step_without_running_it() {
         build_dry_run_report(&without, true, dir).content_update,
         None
     );
+}
+
+/// Resolve a picker selection the way `install::run` does: the picker's
+/// expansion (`select_members_transitive` over the chosen names), flattened by
+/// `picker::override_names`, resolved again.
+fn picker_round_trip(chosen: &[&str]) -> Vec<StableMember> {
+    let names: Vec<String> = chosen.iter().map(|n| (*n).to_owned()).collect();
+    let expanded = select_members_transitive(&names).members;
+    let override_names = crate::commands::picker::override_names(&expanded);
+    select_members_transitive(&override_names).members
+}
+
+/// Why (#10042): `install::run` flattened the picker's expanded list to names
+/// and resolved it again, so the soft bus came back as an explicitly named
+/// member, `soft: false`. Picking only trusty-analyze (no REQUIRED member)
+/// then made a failed bus gate the run and exit 2.
+/// What: after the round trip from `[trusty-analyze]` the bus is still
+/// `soft: true, required: false`, and an install report over that selection
+/// with the bus failed is `all_ok`.
+/// Test: This is the test.
+#[test]
+fn the_picker_round_trip_keeps_the_bus_soft() {
+    let members = picker_round_trip(&["trusty-analyze"]);
+    let bus = members
+        .iter()
+        .find(|m| m.crate_name == "trusty-events")
+        .expect("the bus joins a producer's selection");
+    assert!(
+        bus.soft,
+        "the round trip must keep the bus soft: {members:?}"
+    );
+    assert!(!bus.required);
+
+    let report = InstallReport::build(
+        members
+            .iter()
+            .map(|m| InstallOutcome {
+                required: m.required,
+                soft: m.soft,
+                ..outcome(
+                    &m.crate_name,
+                    m.crate_name != "trusty-events",
+                    "no prebuilt for this platform",
+                )
+            })
+            .collect(),
+    );
+    assert!(report.all_ok, "a failed soft bus must not fail the run");
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// Why (#10042): naming the bus in the picker is the operator's request, so
+/// it must gate like any other named member.
+/// What: picking trusty-analyze and trusty-events keeps the bus `soft: false`
+/// through the round trip.
+/// Test: This is the test.
+#[test]
+fn a_picked_bus_stays_explicit_through_the_round_trip() {
+    let members = picker_round_trip(&["trusty-analyze", "trusty-events"]);
+    let bus = members
+        .iter()
+        .find(|m| m.crate_name == "trusty-events")
+        .expect("the picked bus is selected");
+    assert!(!bus.soft, "a picked bus is explicit: {members:?}");
 }

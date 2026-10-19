@@ -42,7 +42,7 @@ relevant `references/*.md` file here when you need an exact answer.
 | "What MCP tools exist and what parameters do they take?" | `references/mcp-tools.md` (38 tools, plus sibling-daemon pointers) |
 | "What agents can I delegate to, and what do they declare?" | `references/agents.md` (38 concrete agents) |
 | "What skills exist, and are they user-invocable?" | `references/skills.md` (59 bundled skills) |
-| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (75 checks) |
+| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (76 checks) |
 | "Where do agents/skills/instructions actually live, and which tier wins?" | `references/framework.md` (install layout, tier precedence, doc index) |
 | "How do the pieces fit into an end-to-end flow?" | `references/workflows.md` (hand-authored, not generated) |
 

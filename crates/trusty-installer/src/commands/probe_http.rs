@@ -122,6 +122,23 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
     }
 }
 
+/// Whether a member is started on demand rather than kept resident (#6350).
+///
+/// Why this exists as its own predicate: `uds_socket_for` answers "which
+/// transport", and this answers "who owns the lifetime" — two different
+/// questions that happen to have overlapping answers today. A member listed
+/// here has no launchd unit, so a socket that is not answering means nothing is
+/// using it, not that anything is broken.
+///
+/// Kept as a literal for the reason `uds_health_method` records: `tctl` has no
+/// Cargo edge on any daemon, and adding one to share a `&str` would pull an
+/// analysis engine into its build.
+///
+/// Test: `tests::on_demand_members_are_a_subset_of_the_uds_members`.
+pub fn on_demand_member(binary: &str) -> bool {
+    binary == trusty_common::uds::ANALYZE_SERVICE
+}
+
 /// The Unix socket a member serves, for the daemons that no longer serve TCP.
 ///
 /// Why (#6277, ADR-0032): trusty-review was the first member to move its own
@@ -145,24 +162,8 @@ pub fn fixed_port_for(binary: &str) -> Option<u16> {
 ///
 /// Test: `tests::uds_members_have_no_fixed_port`,
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
-/// `tests::uds_socket_for_matches_the_shared_entry_point`.
-/// Whether a member is started on demand rather than kept resident (#6350).
-///
-/// Why this exists as its own predicate: `uds_socket_for` answers "which
-/// transport", and this answers "who owns the lifetime" — two different
-/// questions that happen to have overlapping answers today. A member listed
-/// here has no launchd unit, so a socket that is not answering means nothing is
-/// using it, not that anything is broken.
-///
-/// Kept as a literal for the reason `uds_health_method` records: `tctl` has no
-/// Cargo edge on any daemon, and adding one to share a `&str` would pull an
-/// analysis engine into its build.
-///
-/// Test: `tests::on_demand_members_are_a_subset_of_the_uds_members`.
-pub fn on_demand_member(binary: &str) -> bool {
-    binary == trusty_common::uds::ANALYZE_SERVICE
-}
-
+/// `tests::uds_socket_for_matches_the_shared_entry_point`,
+/// `tests::uds_socket_for_resolves_the_events_bus_socket`.
 pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
     match binary {
         // #6290: NO trusty-review row. It has no daemon and no socket — see
@@ -178,7 +179,55 @@ pub fn uds_socket_for(binary: &str) -> Option<std::path::PathBuf> {
         // or the `TRUSTY_MPM_SOCKET` pin the tm CLI honours too. `mpm_socket`
         // fails open to a path nothing serves, which probes as `Refused`.
         "trusty-mpm" => Some(trusty_common::mpm_rpc::mpm_socket()),
+        // #10042: ADR-0065 decision 2 — the bus socket resolves through the
+        // one `control_bus` helper every producer and reader uses.
+        "trusty-events" => trusty_common::control_bus::events_socket_path().ok(),
         _ => None,
+    }
+}
+
+/// Whether a UDS member is probed by a bare connect rather than a health call.
+///
+/// Why (#10042): trusty-events registers one JSON-RPC method,
+/// `events.subscribe`, and no health method, so the only thing `tctl` can ask
+/// it without opening a stream is whether its socket accepts a connection. A
+/// connect-and-close is what its serve loop already treats as a liveness probe
+/// (it logs nothing for it). Liveness beyond "the socket accepts" is #10071.
+/// What: `true` for `trusty-events` only.
+/// Test: `tests::events_is_probed_by_accept_not_by_a_health_method`.
+fn accept_only_member(binary: &str) -> bool {
+    binary == trusty_common::control_bus::EVENTS_SERVICE
+}
+
+/// Probe an [`accept_only_member`]'s socket with one connect.
+///
+/// Why: a health method that does not exist would answer `method_not_found`,
+/// which [`classify_rpc_response`] reads as a daemon answering badly; a bare
+/// connect asks the one question the daemon can answer.
+/// What: [`trusty_common::uds::probe::probe_socket_verdict`] bounded by
+/// [`CONNECT_TIMEOUT`]. A completed connect is `Serving` with status `ok` and
+/// no version; a missing socket file or a refused connect (a stale socket) is
+/// [`ProbeOutcome::Refused`]; anything else (a timeout, a permission error) is
+/// [`ProbeOutcome::ProbeFailed`], which renders `down` and never authorises a
+/// kickstart.
+/// Test: `tests::events_is_probed_by_accept_not_by_a_health_method`,
+/// `tests::accept_probe_reports_a_stale_socket_as_refused`,
+/// `tests::accept_probe_reports_a_missing_socket_as_refused`.
+async fn probe_accept_only(socket: &std::path::Path) -> ProbeOutcome {
+    use trusty_common::uds::probe::{probe_socket_verdict, SocketVerdict};
+    match probe_socket_verdict(socket, CONNECT_TIMEOUT).await {
+        SocketVerdict::Serving => ProbeOutcome::Serving {
+            status: "ok".to_owned(),
+            version: None,
+        },
+        SocketVerdict::NotServing => ProbeOutcome::Refused,
+        _ => ProbeOutcome::ProbeFailed {
+            detail: format!(
+                "{} neither accepted nor refused a connect within {}s",
+                socket.display(),
+                CONNECT_TIMEOUT.as_secs()
+            ),
+        },
     }
 }
 
@@ -937,7 +986,8 @@ pub async fn probe_bases(
 /// `tests::probe_no_address_when_nothing_resolves`,
 /// `tests::probe_uds_reads_the_health_envelope_off_a_result_frame`,
 /// `tests::search_is_probed_over_its_socket`,
-/// `tests::search_never_dials_a_recorded_http_addr`.
+/// `tests::search_never_dials_a_recorded_http_addr`,
+/// `tests::events_is_probed_by_accept_not_by_a_health_method`.
 pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
     // #6290: checked FIRST. A per-invocation member has neither a socket nor an
     // address, so falling through would reach `NoAddress` — which renders
@@ -946,6 +996,11 @@ pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
         return probe_presence(binary);
     }
     if let Some(socket) = uds_socket_for(binary) {
+        // #10042: the bus names no health method; its socket accepting is
+        // the whole probe.
+        if accept_only_member(binary) {
+            return probe_accept_only(&socket).await;
+        }
         // #6287: the method is per-binary. `uds_socket_for` and
         // `uds_health_method` cover the same set, which
         // `every_uds_member_has_a_health_method` is what enforces — so this

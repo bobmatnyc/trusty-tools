@@ -61,7 +61,7 @@ describe('install commands are grounded in the repository', () => {
 		const body = source.match(/pub fn stable_set\(\) -> Vec<StableMember> \{([\s\S]*?)\n\}/);
 		expect(body, 'stable_set() not found in stable_set.rs').not.toBeNull();
 		const declared = [...body![1].matchAll(/StableMember::new\("([^"]+)"/g)].map((m) => m[1]);
-		expect(declared.length).toBe(8);
+		expect(declared.length).toBe(9);
 		expect(STABLE_SET).toEqual(declared);
 	});
 
