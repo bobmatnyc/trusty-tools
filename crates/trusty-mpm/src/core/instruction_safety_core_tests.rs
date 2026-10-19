@@ -18,8 +18,8 @@ fn docs() -> [(&'static str, &'static str); 2] {
     [
         (
             "tm-workflow.md",
-            rc().skill("skills/tm-workflow.md")
-                .expect("tm-workflow skill"),
+            // #10055: entry plus references, so a split moves the table freely.
+            crate::core::framework_content::tests::skill_with_references("skills/tm-workflow.md"),
         ),
         (
             "sections/README.md",

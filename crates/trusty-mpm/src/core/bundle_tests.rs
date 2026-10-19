@@ -8,6 +8,7 @@
 //! Test: this file is the test coverage; run with `cargo test -p trusty-mpm bundle`.
 use super::*;
 use crate::core::content_source::test_support::rc;
+use crate::core::framework_content::tests::skill_with_references;
 
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
@@ -22,16 +23,19 @@ fn instruction_text(path: &str) -> &'static str {
         .unwrap_or_else(|| panic!("instructions/{path} must be in the content tree"))
 }
 
+/// The bundled docs `tm install` writes beside the skills (#9012).
+const BUNDLED_DOCS: [&str; 2] = [
+    "docs/WHAT-IS-TRUSTY-MPM.md",
+    "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+];
+
 /// Every artifact `tm install` writes: the compiled-in hook policies, then the
 /// content's skills and bundled docs (#9012: runtime content), in the shape the
 /// pre-#9012 `ALL` table had so the registration tests keep their meaning.
 fn deployed() -> Vec<BundledArtifact> {
-    let docs = [
-        "docs/WHAT-IS-TRUSTY-MPM.md",
-        "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
-    ]
-    .into_iter()
-    .map(|rel| (rel, instruction_text(rel)));
+    let docs = BUNDLED_DOCS
+        .into_iter()
+        .map(|rel| (rel, instruction_text(rel)));
     ALL.iter()
         .copied()
         .chain(
@@ -338,6 +342,8 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     // that carry the mechanics. A second statement of the rule is the drift
     // this consolidation removed — #6939 and #7073 hand-edited two copies in
     // step, which worked only for as long as someone remembered to.
+    // #10055: the canonical section is resident in the tm-ticketing entry;
+    // tm-workflow's pointer may sit in its references.
     assert!(
         skill_text("skills/tm-ticketing.md").contains(STANDARD_HEADING),
         "`tm-ticketing.md` must hold the section `{STANDARD_HEADING}`"
@@ -346,7 +352,10 @@ fn the_labels_project_milestone_standard_is_stated_once() {
         ("tm-ticketing.md", skill_text("skills/tm-ticketing.md")),
         ("ticketing.md", agent("ticketing.md")),
         ("version-control.md", agent("version-control.md")),
-        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
+        (
+            "tm-workflow.md",
+            skill_with_references("skills/tm-workflow.md"),
+        ),
     ]
     .into_iter()
     .filter(|(_, body)| body.contains(STANDARD_RULE))
@@ -364,7 +373,10 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     for (file, body) in [
         ("ticketing.md", agent("ticketing.md")),
         ("version-control.md", agent("version-control.md")),
-        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
+        (
+            "tm-workflow.md",
+            skill_with_references("skills/tm-workflow.md"),
+        ),
     ] {
         assert!(
             body.contains(name),
@@ -406,6 +418,8 @@ fn one_line(text: &str) -> String {
 /// Test: this test.
 #[test]
 fn every_issue_milestone_relationships_state_is_stated_once_10045() {
+    // #10055: entry files only — the rule and its pointers are resident text
+    // that must load on invoke, never only from references/.
     let canonical = one_line(skill_text("skills/tm-ticketing.md"));
     for needle in [
         format!("## {EVERY_ISSUE_SECTION}"),
@@ -506,7 +520,10 @@ fn auto_merge_read_uses_a_field_gh_accepts_9747() {
     const READ: &str = "--jq .allow_auto_merge";
     for (file, body) in [
         ("version-control.md", agent("version-control.md")),
-        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
+        (
+            "tm-workflow.md",
+            skill_with_references("skills/tm-workflow.md"),
+        ),
     ] {
         assert!(
             body.contains(READ),
@@ -764,134 +781,131 @@ fn optimizer_toml_is_parseable() {
     assert!(parsed.get("default").is_some());
 }
 
+/// Every regular file under `dir`, as `<prefix>/<relative path>`, skipping
+/// dot-entries — a walk of the content tree on disk that shares no code with
+/// the content loader, so a loader that drops or doubles a file disagrees
+/// with it (#10055).
+fn content_files_on_disk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in entries {
+        let entry = entry.expect("a directory entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let key = format!("{prefix}/{name}");
+        let kind = entry.file_type().expect("a file type");
+        if kind.is_dir() {
+            content_files_on_disk(&entry.path(), &key, out);
+        } else if kind.is_file() {
+            out.push(key);
+        }
+    }
+}
+
+/// Every way `produced` differs from `expected` read as a set of paths each
+/// produced once: a path missing, a path nobody expected, a path produced
+/// more than once.
+fn inventory_gaps(expected: &[String], produced: &[&str]) -> Vec<String> {
+    let mut seen: std::collections::BTreeMap<&str, usize> = Default::default();
+    for path in produced {
+        *seen.entry(path).or_default() += 1;
+    }
+    let mut gaps: Vec<String> = expected
+        .iter()
+        .filter(|path| !seen.contains_key(path.as_str()))
+        .map(|path| format!("missing {path}"))
+        .collect();
+    for (path, times) in seen {
+        if !expected.iter().any(|e| e == path) {
+            gaps.push(format!("unexpected {path}"));
+        }
+        if times > 1 {
+            gaps.push(format!("{path} produced {times} times"));
+        }
+    }
+    gaps
+}
+
+/// Why: #10055 — a hard-coded artifact count turned every skill split into a
+/// Rust change; owner rule: "content is not in code".
+/// What: [`deployed`] is, path for path and once each, [`ALL`] plus an
+/// independent walk of `content/skills` plus [`BUNDLED_DOCS`]; every
+/// artifact has a non-empty path and body. Mutation: dropping one produced
+/// reference file, or producing one path twice, is reported.
+/// Test: this test; `inventory_gaps_reports_a_dropped_or_doubled_file_10055`.
 #[test]
 fn bundle_table_is_complete() {
-    // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 37 concrete agents +
-    // 2 code-critic bundled skills (#2890) + 21 /tm- skills + 1 DOC-28
-    // self-description doc + 1 issue #2034 bundled architecture doc = 71
-    // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
-    // removed — it shipped to every user with no real content. A3: the
-    // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
-    // mpm-* guidance skills were removed entirely, superseded by the /tm-
-    // portfolio below.)
-    // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
-    //   version-control, ticketing, code-analyzer
-    // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
-    //   rust-engineer, java-engineer, php-engineer, ruby-engineer,
-    //   react-engineer, nextjs-engineer, svelte-engineer, web-qa, api-qa
-    // Plus engineer.md (core engineer agent)
-    // Increment 3 (14): javascript-engineer, phoenix-engineer, dart-engineer,
-    //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
-    //   code-critic, gcp-ops, vercel-ops, local-ops,
-    //   memory-manager, mpm-agent-manager, mpm-skills-manager
-    // Increment 4 (1): dotnet-engineer (#2831 — C#/.NET 8+ with VB.NET awareness)
-    // Issue #2890 (2): code-review-standards, contract-driven-testing — the
-    //   `skills:` dependencies code-critic declares in its frontmatter (DOC-42).
-    //   Registration here (not just the asset file existing) is what makes
-    //   `deploy_all_skill_tiers` actually ship them — the historical
-    //   orphaned-tm-doctor.md bug this mirrors is documented in
-    //   `bundle_tm_skills.rs`'s module doc.
-    // /tm- portfolio (tm-skills-portfolio epic + issues #2185/#2321) (21): tm-doctor,
-    //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
-    //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
-    //   tm-postmortem, tm-bug-reporting, tm-teaching-templates, tm-ticketing,
-    //   tm-delegation-patterns, tm-session-management,
-    //   tm-session-pause, tm-session-resume, tm-init, tm (overview),
-    //   tm-issues-prune (#2185: gh issue backlog prune/prioritize),
-    //   tm-cli-operations (#2321: tm CLI operation incl. MCP setup/management)
-    // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
-    // Issue #2903 (93, skill-port batch 1, epic #2902): 25 upstream
-    //   universal/ skills (entry SKILL.md files) plus 68 references/*.md
-    //   files carried alongside multi-file skills — systematic-debugging,
-    //   verification-before-completion, git-workflow, test-driven-development,
-    //   requesting-code-review, writing-plans, json-data-handling,
-    //   root-cause-tracing, internal-comms, brainstorming, software-patterns,
-    //   security-scanning, api-design-patterns, database-migration,
-    //   env-manager, web-performance-optimization, artifacts-builder,
-    //   condition-based-waiting, model-context-builder, test-quality-inspector,
-    //   testing-anti-patterns, webapp-testing, api-documentation, xlsx,
-    //   code-production-process. 71 + 93 = 164.
-    // Issue #2911 (7): documentation-style bundled skill — entry SKILL.md plus
-    //   6 references/*.md files (spec, readme, file-level, class,
-    //   method-function, block-inline). 164 + 7 = 171.
-    // Issue #2913 (7): tm-capabilities auto-generated harness capability
-    //   catalog — entry `skills/tm-capabilities.md` plus five generated
-    //   `references/{cli,mcp-tools,agents,skills,doctor}.md` files plus one
-    //   hand-authored `references/workflows.md`. 171 + 7 = 178.
-    // rust-build-performance (1, per Bob directive 2026-07-17): a single
-    //   flat-file bundled skill (no references/ — small enough to not need
-    //   one), declared by rust-engineer and tauri-engineer. 178 + 1 = 179.
-    // Issue #3374: the dead `instructions/CLAUDE.md` SeedOnce stub artifact
-    //   was removed — it was never read back by any consumer; the project
-    //   `CLAUDE.md` actually delivered to users is `CLAUDE_MD_STUB` in
-    //   `instruction_pipeline.rs`, a separate string not part of this table.
-    //   179 - 1 = 178.
-    // Issue #4447 (1): tm-slack-canvas-delivery — a single flat-file bundled
-    //   skill (no references/), the same shape as rust-build-performance.
-    //   178 + 1 = 179.
-    // Issue #4286 split A (-1): the `instructions/INSTRUCTIONS.md` bundled
-    //   stub artifact was removed — `tm install`/`tm launch` always overwrite
-    //   that same on-disk path with the assembled system prompt in the same
-    //   call, so the stub's content never reached a live session; the
-    //   `FRAMEWORK_INSTRUCTIONS` constant it backed is gone too. 179 - 1 = 178.
-    // Issue #4761 (+/-0): tm-slack-canvas-delivery's entry (#4447) is swapped
-    //   1-for-1 for tm-slack — same flat-file shape, general Slack delivery
-    //   coverage replacing canvas-only scope. Count unchanged at 178.
-    // Issue #4760 (+/-0): `agents/ops.md` is DELETED (deprecated in delegation
-    //   prose since long before it had any code-level effect, superseded by
-    //   `local-ops`), and `agents/elixir-engineer.md` is ADDED (Phoenix's
-    //   `mix.exs` gate narrowed to Phoenix-only, which would otherwise leave
-    //   plain Elixir with no engineer). -1 +1, count unchanged at 178.
-    // Issue #4946 (+1): tm-capabilities gains a sixth generated reference,
-    //   `references/framework.md` — the harness's own install layout and tier
-    //   precedence, rendered from the path constants and tier resolvers the
-    //   runtime uses. 178 + 1 = 179.
-    // Issue #5202 (-1): `skills/tm-pr-workflow.md` is RETIRED — its live policy
-    //   was consolidated into `tm-workflow`, leaving one workflow skill rather
-    //   than an alias or a second editable source. 179 - 1 = 178.
-    // Issue #7423 (+1): `skills/tm-prose-style.md` is NEW — it carries the
-    //   worked example and observed-instance inventories the output style and
-    //   BASE-AGENT.md used to state inline. 178 + 1 = 179.
-    // Issue #7527 (epic #7517) (+1): `skills/tm-secrets.md` is NEW — the
-    //   operator/PM reference for `tm secrets` (1Password/Keeper/Keychain
-    //   behind trusty-common), bundled ahead of the CLI itself (#7521/#7525)
-    //   per the DOC-74 design. 179 + 1 = 180.
-    // Issue #7526 (epic #7517) (+1): `agents/secrets-manager.md` is NEW — the
-    //   bundled framework agent that operates `tm secrets` on behalf of the PM
-    //   and other agents (DOC-74). 180 + 1 = 181.
-    // Issue #7723 (+1): `skills/self-improvement-loop.md` is NEW — the
-    //   self-analysis/fast-loop content moved out of the resident
-    //   `BASE-AGENT.md`, on-demand only. 181 + 1 = 182.
-    // Issue #7727 (+2): `tm-ticketing` and `tm-workflow` gain a
-    //   `references/README.md` each — the folders no-`Skill` agents reach by a
-    //   `{{TM_SKILLS}}` Read path. 182 + 2 = 184.
-    // Issue #8192 (+1): `skills/rust-delivery-workflow.md` is NEW — the Rust
-    //   DELIVERY-PROCESS half split out from `rust-build-performance`'s
-    //   build-speed scope, declared by `rust-engineer`. 184 + 1 = 185.
-    // Issue #8376 (+5): `skills/tm-epic.md` is NEW — tracker + phase-issue
-    //   authoring — plus four `references/*.md` files (tracker-template,
-    //   phase-template, manual-procedure, anti-patterns). 185 + 5 = 190.
-    // Issue #8436 (+1): `skills/tm-architect-setup.md` is NEW — the
-    //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
-    // Issue #9011 (-43): the 43 `agents/*.md` rows left the table — the agent
-    //   roster is runtime content (`content/agents`). 191 - 43 = 148.
-    // Issue #9296 (+1): `skills/rust-runtime-performance.md` is NEW — the
-    //   runtime half of the Rust guidance, loaded on demand. 148 + 1 = 149.
-    // Issue #8625 (+1): `skills/tm-memory-import.md` is NEW — the kuzu import
-    //   runbook with the masked refused-row review. 149 + 1 = 150.
-    // Issue #10051 (+11): `tm-ticketing` turns progressive — eleven sections
-    //   move to `tm-ticketing/references/*.md`. 150 + 11 = 161.
-    assert_eq!(deployed().len(), 161);
-    let mut paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
-    paths.sort_unstable();
-    paths.dedup();
-    assert_eq!(paths.len(), 161, "artifact paths must be unique");
-    for artifact in deployed() {
+    let mut expected: Vec<String> = ALL.iter().map(|a| a.rel_path.to_owned()).collect();
+    let floor = expected.len();
+    let skills_dir = crate::core::content_source::test_support::repo_root().join("content/skills");
+    content_files_on_disk(&skills_dir, "skills", &mut expected);
+    assert!(expected.len() > floor, "the walk found no skill file");
+    expected.extend(BUNDLED_DOCS.iter().map(|doc| (*doc).to_owned()));
+
+    let artifacts = deployed();
+    let produced: Vec<&str> = artifacts.iter().map(|a| a.rel_path).collect();
+    let gaps = inventory_gaps(&expected, &produced);
+    assert!(
+        gaps.is_empty(),
+        "deployed artifacts != content tree: {gaps:#?}"
+    );
+    for artifact in &artifacts {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
     }
+
+    let reference = produced
+        .iter()
+        .position(|path| path.contains("/references/"))
+        .expect("a references file");
+    let mut dropped = produced.clone();
+    let lost = dropped.remove(reference);
+    assert_eq!(
+        inventory_gaps(&expected, &dropped),
+        vec![format!("missing {lost}")],
+        "a dropped file must be reported"
+    );
+    let mut doubled = produced.clone();
+    doubled.push(lost);
+    assert_eq!(
+        inventory_gaps(&expected, &doubled),
+        vec![format!("{lost} produced 2 times")],
+        "a doubled file must be reported"
+    );
+}
+
+/// Why: #10055 — the count test's on-disk side must see a file the loader
+/// missed, and must not count a dot-file the loader skips.
+/// What: a temp tree of an entry, a reference and a dot-file walks to two
+/// paths; a produced list missing the reference is red.
+/// Test: this test.
+#[test]
+fn inventory_gaps_reports_a_dropped_or_doubled_file_10055() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let refs = tmp.path().join("probe/references");
+    std::fs::create_dir_all(&refs).expect("references dir");
+    std::fs::write(tmp.path().join("probe.md"), "entry").expect("entry");
+    std::fs::write(refs.join("one.md"), "reference").expect("reference");
+    std::fs::write(refs.join(".DS_Store"), "noise").expect("dot-file");
+    let mut on_disk = Vec::new();
+    content_files_on_disk(tmp.path(), "skills", &mut on_disk);
+    on_disk.sort();
+    assert_eq!(
+        on_disk,
+        ["skills/probe.md", "skills/probe/references/one.md"]
+    );
+    assert!(
+        inventory_gaps(
+            &on_disk,
+            &["skills/probe.md", "skills/probe/references/one.md"]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        inventory_gaps(&on_disk, &["skills/probe.md"]),
+        ["missing skills/probe/references/one.md"]
+    );
 }
 
 #[test]
@@ -1525,7 +1539,9 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
 
     // …and the mechanics must actually BE in the skill, or the pointer above is
     // a dangling reference. Asserted against the real bundled asset.
-    let skill = skill_text("skills/tm-delegation-patterns.md");
+    // #10055: the mechanics may live in references/; the description below is
+    // frontmatter, so it reads the entry file alone.
+    let skill = skill_with_references("skills/tm-delegation-patterns.md");
     assert!(
         skill.contains("30-second blind poll") && skill.contains("counter-failure"),
         "tm-delegation-patterns must carry the PM-side anti-spam-monitoring \
@@ -1539,8 +1555,9 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // The skill has to be REACHABLE by relevance too: its description is what a
     // relevance match sees, and "delegation matrices" alone never fires at the
     // moment an agent hands back with pending CI.
+    let entry = skill_text("skills/tm-delegation-patterns.md");
     assert!(
-        skill.contains("CI pending") && skill.contains("re-engagement"),
+        entry.contains("CI pending") && entry.contains("re-engagement"),
         "tm-delegation-patterns' frontmatter description must mention the \
          CI-wait / re-engagement trigger, or it cannot fire on its own (#4792)"
     );
@@ -1566,7 +1583,10 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
         "A worktree agent's tree must still exist first",
     ] {
         assert!(
-            contains_prose_anchor(skill_text("skills/tm-delegation-patterns.md"), needle),
+            contains_prose_anchor(
+                skill_with_references("skills/tm-delegation-patterns.md"),
+                needle
+            ),
             "tm-delegation-patterns' PM Re-Engagement section is missing the \
              #8004 worktree-survival check: {needle:?}"
         );
@@ -2717,9 +2737,52 @@ fn resident_size_counts_preload_entries_and_never_references_10051() {
     );
 }
 
-/// The progressive `tm-ticketing` entry file and its references (#10051).
-const TM_TICKETING_ENTRY: &str = "skills/tm-ticketing.md";
-const TM_TICKETING_REFERENCES: &str = "skills/tm-ticketing/references/";
+/// Every skill with a `references/` directory as `(entry bundle path,
+/// references prefix)`, derived from the loaded content (#10055): a skill
+/// joins the link and leak checks by gaining the directory, with no Rust
+/// change. Asserted equal to the `references/` directories on disk.
+fn progressive_skills() -> Vec<(String, String)> {
+    let stems: std::collections::BTreeSet<&str> = rc()
+        .skills()
+        .filter_map(|(rel, _)| rel.strip_prefix("skills/")?.split_once("/references/"))
+        .map(|(stem, _)| stem)
+        .collect();
+    let mut on_disk: Vec<String> = Vec::new();
+    let skills_dir = crate::core::content_source::test_support::repo_root().join("content/skills");
+    for entry in std::fs::read_dir(&skills_dir).expect("content/skills") {
+        let path = entry.expect("a directory entry").path();
+        if path.join("references").is_dir() {
+            on_disk.push(
+                path.file_name()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    on_disk.sort();
+    assert_eq!(
+        stems.iter().copied().collect::<Vec<_>>(),
+        on_disk,
+        "the loaded skills with references/ must match content/skills on disk"
+    );
+    stems
+        .into_iter()
+        .map(|stem| {
+            (
+                format!("skills/{stem}.md"),
+                format!("skills/{stem}/references/"),
+            )
+        })
+        .collect()
+}
+
+/// The `(file name, body)` of every loaded skill file under `prefix`.
+fn references_under(prefix: &str) -> Vec<(&'static str, &'static str)> {
+    rc().skills()
+        .filter_map(|(rel, body)| rel.strip_prefix(prefix).map(|file| (file, body)))
+        .collect()
+}
 
 /// The heading of the entry file's task-to-file table.
 const TASK_TABLE_HEADING: &str = "## Where Each Task Lives";
@@ -2787,51 +2850,146 @@ fn task_table_gaps(entry: &str, references: &[(&str, &str)]) -> Vec<String> {
     gaps
 }
 
-/// Why: #10051 — `tm-ticketing` is progressive: SKILL.md loads on invoke and
-/// the references load only when read, so a reference file the task table does
-/// not link is text no reader reaches, and a pointer naming a moved section
-/// resolves only through that table.
-/// What: the entry file is under 500 lines; every `references/*.md` file is
-/// linked from the table, every `## ` section in it is named in its row, and
-/// every row link resolves. Dropping one row must produce a gap.
+/// Gaps [`reference_reach_gaps`] found when #10055 widened the check from
+/// tm-ticketing to every skill with `references/`, each `(entry bundle path,
+/// gap)`. Content fixes belong to a content PR, so they are pinned here
+/// shrink-only: a gap not listed fails, and a listed gap that no longer
+/// occurs fails as stale until its entry is dropped.
+const KNOWN_REFERENCE_REACH_GAPS: &[(&str, &str)] = &[
+    (
+        "skills/api-design-patterns.md",
+        "the entry is not under 500 lines",
+    ),
+    ("skills/env-manager.md", "the entry is not under 500 lines"),
+    (
+        "skills/test-driven-development.md",
+        "references/anti-patterns.md is not reached from the entry",
+    ),
+    (
+        "skills/test-driven-development.md",
+        "references/examples.md is not reached from the entry",
+    ),
+    (
+        "skills/test-driven-development.md",
+        "references/integration.md is not reached from the entry",
+    ),
+    (
+        "skills/test-driven-development.md",
+        "references/philosophy.md is not reached from the entry",
+    ),
+    (
+        "skills/test-driven-development.md",
+        "references/workflow.md is not reached from the entry",
+    ),
+    (
+        "skills/test-quality-inspector.md",
+        "references/assertion-quality.md is not reached from the entry",
+    ),
+    (
+        "skills/test-quality-inspector.md",
+        "references/inspection-checklist.md is not reached from the entry",
+    ),
+    (
+        "skills/test-quality-inspector.md",
+        "references/red-flags.md is not reached from the entry",
+    ),
+];
+
+/// Every way `entry` fails to reach `references` (`(file name, body)`): the
+/// entry is at or over [`SKILL_ENTRY_LINE_LIMIT`]; a file the entry never
+/// names as `references/<file>`; an entry link into `references/` that names
+/// no file; and, when the entry has a [`TASK_TABLE_HEADING`] table, every
+/// [`task_table_gaps`] gap.
+fn reference_reach_gaps(entry: &str, references: &[(&str, &str)]) -> Vec<String> {
+    let mut gaps = Vec::new();
+    // The count stays out of the text, so editing an over-limit entry is not
+    // a Rust change.
+    if entry.lines().count() >= SKILL_ENTRY_LINE_LIMIT {
+        gaps.push(format!(
+            "the entry is not under {SKILL_ENTRY_LINE_LIMIT} lines"
+        ));
+    }
+    for (file, _) in references {
+        if !entry.contains(&format!("references/{file}")) {
+            gaps.push(format!("references/{file} is not reached from the entry"));
+        }
+    }
+    for target in entry.split("](references/").skip(1) {
+        let file = target.split([')', '#']).next().unwrap_or_default();
+        if !file.is_empty() && !references.iter().any(|(name, _)| *name == file) {
+            gaps.push(format!(
+                "the entry links references/{file}, which does not exist"
+            ));
+        }
+    }
+    if entry.lines().any(|line| line == TASK_TABLE_HEADING) {
+        gaps.extend(task_table_gaps(entry, references));
+    }
+    gaps
+}
+
+/// Why: #10051, #10055 — a skill's entry file loads on invoke and its
+/// references only when read, so a reference file the entry never names is
+/// text no reader reaches, and a pointer naming a moved section resolves
+/// only through the task table.
+/// What: for every skill with `references/` ([`progressive_skills`]),
+/// [`reference_reach_gaps`] equals [`KNOWN_REFERENCE_REACH_GAPS`]. Mutation,
+/// per skill: an entry that stops naming one reached file is reported, and
+/// for a task-table skill so is dropping that file's row.
 /// Test: this test.
 #[test]
-fn tm_ticketing_task_table_links_every_reference_file_10051() {
-    let entry = skill_text(TM_TICKETING_ENTRY);
-    let lines = entry.lines().count();
-    assert!(
-        lines < SKILL_ENTRY_LINE_LIMIT,
-        "`{TM_TICKETING_ENTRY}` is {lines} lines; the entry must stay under \
-         {SKILL_ENTRY_LINE_LIMIT} — move the section to references/ (#10051)"
-    );
-    let references: Vec<(&str, &str)> = rc()
-        .skills()
-        .filter_map(|(rel, body)| {
-            rel.strip_prefix(TM_TICKETING_REFERENCES)
-                .map(|file| (file, body))
-        })
-        .collect();
-    assert!(
-        references.len() > 1,
-        "tm-ticketing references must load: {references:?}"
-    );
+fn every_references_skill_entry_reaches_every_reference_file_10055() {
+    let mut found: Vec<(String, String)> = Vec::new();
+    for (entry_path, prefix) in progressive_skills() {
+        let entry = skill_text(&entry_path);
+        let references = references_under(&prefix);
+        assert!(!references.is_empty(), "{prefix} references must load");
+        found.extend(
+            reference_reach_gaps(entry, &references)
+                .into_iter()
+                .map(|gap| (entry_path.clone(), gap)),
+        );
 
-    let gaps = task_table_gaps(entry, &references);
-    assert!(
-        gaps.is_empty(),
-        "tm-ticketing task table gaps (#10051): {gaps:#?}"
-    );
-
-    let dropped_row = task_table_rows(entry)
-        .into_iter()
-        .find(|row| row.contains("](references/labels.md)"))
-        .expect("the labels row");
-    let mutated = entry.replace(dropped_row, "");
-    assert!(
-        task_table_gaps(&mutated, &references)
+        let Some((file, _)) = references
             .iter()
-            .any(|gap| gap.contains("references/labels.md is not linked")),
-        "dropping a row must leave its reference file unlinked"
+            .find(|(file, _)| entry.contains(&format!("references/{file}")))
+        else {
+            continue;
+        };
+        let renamed = entry.replace(&format!("references/{file}"), "references/MUTATED");
+        assert!(
+            reference_reach_gaps(&renamed, &references)
+                .contains(&format!("references/{file} is not reached from the entry")),
+            "`{entry_path}`: an entry that stops naming references/{file} must be reported"
+        );
+        let link = format!("](references/{file})");
+        if let Some(row) = task_table_rows(entry)
+            .into_iter()
+            .find(|row| row.contains(&link))
+        {
+            assert!(
+                task_table_gaps(&entry.replace(row, ""), &references)
+                    .iter()
+                    .any(|gap| gap.contains(&format!("references/{file} is not linked"))),
+                "`{entry_path}`: dropping a task-table row must leave references/{file} unlinked"
+            );
+        }
+    }
+
+    let known: Vec<(String, String)> = KNOWN_REFERENCE_REACH_GAPS
+        .iter()
+        .map(|(entry, gap)| ((*entry).to_owned(), (*gap).to_owned()))
+        .collect();
+    let new: Vec<_> = found.iter().filter(|gap| !known.contains(gap)).collect();
+    let stale: Vec<_> = known.iter().filter(|gap| !found.contains(gap)).collect();
+    assert!(
+        new.is_empty(),
+        "an entry file no longer reaches its references — link the file from \
+         the entry (and its task-table row, if it has one) (#10055): {new:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "a known gap closed — drop it from KNOWN_REFERENCE_REACH_GAPS (#10055): {stale:#?}"
     );
 }
 
@@ -2936,8 +3094,9 @@ fn leak_violations(leaks: &[(&str, String)]) -> (Vec<String>, Vec<String>) {
 /// subagent's system prompt) is resident after all, and paid on every turn.
 /// What: no `references/*.md` line of any bundled skill appears in any
 /// deployed agent's composed body, beyond the pinned
-/// [`KNOWN_REFERENCE_OVERLAPS`]. Mutation: one more `tm-ticketing` references
-/// line appended to a composed body must be reported.
+/// [`KNOWN_REFERENCE_OVERLAPS`]. Mutation (#10055): for every skill with
+/// `references/` ([`progressive_skills`]), one more of its lines appended to
+/// a composed body must be reported against its file.
 /// Test: this test.
 #[test]
 fn references_text_never_reaches_dispatch_text_10051() {
@@ -2954,12 +3113,6 @@ fn references_text_never_reaches_dispatch_text_10051() {
         .skills()
         .filter(|(rel, _)| rel.contains("/references/"))
         .collect();
-    assert!(
-        references
-            .iter()
-            .any(|(rel, _)| rel.starts_with(TM_TICKETING_REFERENCES)),
-        "tm-ticketing references must be in the scanned set"
-    );
 
     let leaks = reference_leaks(&dispatch, &references);
     let (over, stale) = leak_violations(&leaks);
@@ -2974,22 +3127,35 @@ fn references_text_never_reaches_dispatch_text_10051() {
          entries (#10051): {stale:#?}"
     );
 
-    const LABELS: &str = "skills/tm-ticketing/references/labels.md";
-    let injected = skill_text(LABELS)
-        .lines()
-        .filter(|line| line.split_whitespace().count() >= LEAK_WINDOW_WORDS)
-        .find(|line| {
-            let line = one_line(line);
-            !line.starts_with('|') && !leaks.iter().any(|(_, leaked)| *leaked == line)
-        })
-        .expect("a prose line in labels.md no agent carries");
+    let mut injected: Vec<(&str, &str)> = Vec::new();
+    for (_, prefix) in progressive_skills() {
+        let line = references
+            .iter()
+            .filter(|(rel, _)| rel.starts_with(&prefix))
+            .find_map(|(rel, body)| {
+                body.lines()
+                    .find(|line| {
+                        let text = one_line(line);
+                        text.split(' ').count() >= LEAK_WINDOW_WORDS
+                            && !text.starts_with(['#', '`', '|'])
+                            && !leaks.iter().any(|(_, leaked)| *leaked == text)
+                    })
+                    .map(|line| (*rel, line))
+            })
+            .unwrap_or_else(|| panic!("a prose line under {prefix} no agent carries"));
+        injected.push(line);
+    }
     let mut mutated = dispatch.clone();
-    mutated[0] = format!("{}\n{injected}\n", mutated[0]);
+    for (_, line) in &injected {
+        mutated[0] = format!("{}\n{line}\n", mutated[0]);
+    }
     let (caught, _) = leak_violations(&reference_leaks(&mutated, &references));
-    assert!(
-        caught.iter().any(|v| v.starts_with(LABELS)),
-        "an injected references line must be reported: {caught:#?}"
-    );
+    for (path, line) in injected {
+        assert!(
+            caught.iter().any(|v| v.starts_with(path)),
+            "an injected {path} line must be reported: {line:?} not in {caught:#?}"
+        );
+    }
 }
 
 /// #8992 (ruling D07): the listing-description cap every bundled agent shares.
@@ -3197,24 +3363,25 @@ fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
 /// (another session's uncommitted work). The untracked-path collision is a
 /// second cause of the same command failing, so the refresh instructions must
 /// point at the check rather than leaving the reader to improvise — a
-/// cross-reference, not a second copy of the block.
+/// cross-reference, not a second copy of the block. #10055: read across the
+/// entry and its references, so a split moves the text without a Rust change.
 #[test]
 fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
+    let workflow = skill_with_references("skills/tm-workflow.md");
     for needle in [
         "untracked path the incoming commits also add",
         "Pulling After a Merge — Check Untracked Collisions First",
         "#7558",
     ] {
         assert!(
-            skill_text("skills/tm-workflow.md").contains(needle),
+            workflow.contains(needle),
             "tm-workflow is missing the #7558 cross-reference to the pre-pull \
              untracked-collision check: {needle:?}"
         );
     }
     // A pointer, not a duplicate: the procedure itself stays in one place.
     assert!(
-        !skill_text("skills/tm-workflow.md")
-            .contains("git show origin/<base>:<path> | diff - <path>"),
+        !workflow.contains("git show origin/<base>:<path> | diff - <path>"),
         "tm-workflow must cross-reference the check, not restate its commands (#7558)"
     );
 }
@@ -3236,7 +3403,7 @@ fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
         "The one exception is `137`",
     ] {
         assert!(
-            skill_text("skills/verification-before-completion.md").contains(needle),
+            skill_with_references("skills/verification-before-completion.md").contains(needle),
             "verification-before-completion skill is missing the #7561 \
              signal-exit reading: {needle:?}"
         );
@@ -3255,9 +3422,9 @@ fn version_control_gate_requires_a_clean_tree_before_push_7739() {
             && agent("version-control.md").contains("#7739"),
         "version-control.md is missing the #7739 clean-tree-before-gate rule"
     );
+    let workflow = skill_with_references("skills/tm-workflow.md");
     assert!(
-        skill_text("skills/tm-workflow.md").contains("git status --porcelain")
-            && skill_text("skills/tm-workflow.md").contains("#7739"),
+        workflow.contains("git status --porcelain") && workflow.contains("#7739"),
         "tm-workflow.md is missing the #7739 clean-tree-before-gate rule"
     );
 }
