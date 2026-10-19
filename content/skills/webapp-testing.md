@@ -3,7 +3,7 @@ name: webapp-testing
 description: "Comprehensive web application testing patterns with Playwright selectors, wait strategies, and best practices"
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: agent-reference
 effort: low
 ---
@@ -18,10 +18,21 @@ Complete guide to Playwright automation patterns, selectors, and best practices.
 - [Element Interactions](#element-interactions)
 - [Assertions](#assertions)
 - [Test Organization](#test-organization)
-- [Network Interception](#network-interception)
+- [Network Interception](references/network-debugging-parallel.md#network-interception)
 - [Screenshots and Videos](#screenshots-and-videos)
-- [Debugging](#debugging)
-- [Parallel Execution](#parallel-execution)
+- [Debugging](references/network-debugging-parallel.md#debugging)
+- [Parallel Execution](references/network-debugging-parallel.md#parallel-execution)
+
+## Where Each Task Lives
+
+This file holds what every Playwright task needs. Everything else sits in one
+file per task under `references/`, beside this file. Read the file your task
+needs, and only that file. A pointer elsewhere that names a section of
+`webapp-testing` resolves here: find the section name in the middle column.
+
+| Task | Sections | File |
+|---|---|---|
+| Mock, block or await network requests; debug a failing test; run tests in parallel | "Network Interception", "Debugging", "Parallel Execution" | [references/network-debugging-parallel.md](references/network-debugging-parallel.md) |
 
 ## Selectors
 
@@ -378,37 +389,6 @@ def setup_and_teardown(page):
     page.evaluate('localStorage.clear()')
 ```
 
-## Network Interception
-
-### Mock API Responses
-```python
-# Intercept and mock API response
-def handle_route(route):
-    route.fulfill(
-        status=200,
-        body='{"success": true, "data": "mocked"}',
-        headers={'Content-Type': 'application/json'}
-    )
-
-page.route('**/api/data', handle_route)
-page.goto('http://localhost:3000')
-```
-
-### Block Resources
-```python
-# Block images and stylesheets for faster tests
-page.route('**/*.{png,jpg,jpeg,gif,svg,css}', lambda route: route.abort())
-```
-
-### Wait for Network Responses
-```python
-# Wait for specific API call
-with page.expect_response('**/api/users') as response_info:
-    page.click('button.load-users')
-response = response_info.value
-assert response.status == 200
-```
-
 ## Screenshots and Videos
 
 ### Screenshots
@@ -458,54 +438,3 @@ page = context.new_page()
 context.close()  # Video saved on close
 ```
 
-## Debugging
-
-### Pause Execution
-```python
-page.pause()  # Opens Playwright Inspector
-```
-
-### Console Logs
-```python
-def handle_console(msg):
-    print(f"[{msg.type}] {msg.text}")
-
-page.on("console", handle_console)
-```
-
-### Slow Motion
-```python
-browser = p.chromium.launch(headless=False, slow_mo=1000)  # 1 second delay
-```
-
-### Verbose Logging
-```python
-# Set DEBUG environment variable
-# DEBUG=pw:api python test.py
-```
-
-## Parallel Execution
-
-### Pytest Parallel
-```bash
-# Install pytest-xdist
-pip install pytest-xdist
-
-# Run tests in parallel
-pytest -n auto  # Auto-detect CPU cores
-pytest -n 4     # Run with 4 workers
-```
-
-### Browser Context Isolation
-```python
-# Each test gets isolated context (cookies, localStorage, etc.)
-@pytest.fixture
-def context(browser):
-    context = browser.new_context()
-    yield context
-    context.close()
-
-@pytest.fixture
-def page(context):
-    return context.new_page()
-```

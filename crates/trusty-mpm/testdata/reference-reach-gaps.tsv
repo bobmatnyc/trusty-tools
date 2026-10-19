@@ -4,8 +4,6 @@
 # test, and a listed gap that no longer occurs fails as stale — the content PR
 # that closes a gap deletes its line here. Never shipped: testdata, not content.
 # Format: <entry bundle path><TAB><gap text>. `#` lines and blank lines skip.
-skills/api-design-patterns.md	the entry is not under 500 lines
-skills/env-manager.md	the entry is not under 500 lines
 skills/test-driven-development.md	references/anti-patterns.md is not reached from the entry
 skills/test-driven-development.md	references/examples.md is not reached from the entry
 skills/test-driven-development.md	references/integration.md is not reached from the entry
