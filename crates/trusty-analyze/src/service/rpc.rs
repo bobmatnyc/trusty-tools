@@ -537,6 +537,9 @@ pub async fn serve_with_shutdown(
 /// it polls the socket for the full 20 s `spawn_probe` budget and reports a
 /// spawn timeout.
 ///
+/// Every language-server child is stopped on both exits too, before the
+/// stores are released (#9078).
+///
 /// # Errors
 ///
 /// As [`serve`].
@@ -544,6 +547,7 @@ pub async fn serve_with_shutdown(
 /// Test: `rpc_unlinks_its_socket_on_shutdown`,
 /// `rpc_accepts_a_request_larger_than_the_shared_default`,
 /// `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`,
+/// `daemon_idle_exit_kills_the_child`,
 /// `tests/on_demand.rs`' `serve_exits_on_its_own_idle_window` and
 /// `an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket`.
 pub async fn serve_with_idle(
@@ -564,6 +568,8 @@ pub async fn serve_with_idle(
         .await
         .with_context(|| format!("bind trusty-analyze socket at {}", socket.display()))?;
 
+    // #9078: keep a handle on the language servers; the router consumes state.
+    let lsp = Arc::clone(&state.lsp);
     let router = Arc::new(build_router(state));
     info!(socket = %socket.display(), methods = router.method_names().count(), idle = ?idle, "trusty-analyze serving");
     match idle {
@@ -590,6 +596,9 @@ pub async fn serve_with_idle(
         info!(socket = %socket.display(), "trusty-analyze idle; exiting");
         eprintln!("trusty-analyze: idle; exiting");
     }
+
+    // #9078: no language server outlives the daemon, on either exit.
+    lsp.shutdown_all().await;
 
     // #6595: close the redb stores before the unlink advertises this server as
     // gone, so a successor never opens facts.redb against a lock this process
