@@ -99,7 +99,7 @@ pub struct StableMember {
     pub required: bool,
     /// #10042: selected only through a SOFT edge (ADR-0065 decision 4) — an
     /// event producer's bus. Such a member never gates a run, even in a
-    /// selection with no REQUIRED member; see [`gating_split_with_soft`].
+    /// selection with no REQUIRED member; see [`gating_split`].
     /// `false` for every member [`stable_set`] lists and for every member
     /// named explicitly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -229,32 +229,22 @@ impl StableMember {
 /// # Postconditions
 /// - With any required row, only required rows gate.
 /// - With no required row, every row gates.
+/// - #10042: a `soft` row never gates and never counts as required.
 /// - An empty `rows` returns `true`. The two callers disagree about what no
 ///   rows MEANS — for `install` it is "nothing was installed", for the verify
 ///   tail it is "this selection contains no daemon to probe" — so emptiness is
 ///   each caller's to judge, not this fold's.
 ///
 /// Test: `tests::required_gate_truth_table`,
-/// `tests::required_gate_over_no_rows_is_the_callers_problem`.
+/// `tests::required_gate_over_no_rows_is_the_callers_problem`,
+/// `tests::a_soft_row_never_gates`.
 pub(super) fn required_gate<T>(
-    rows: &[T],
-    required: impl Fn(&T) -> bool,
-    ok: impl Fn(&T) -> bool,
-) -> bool {
-    required_gate_with_soft(rows, required, |_| false, ok)
-}
-
-/// [`required_gate`] with SOFT rows held out of the verdict (#10042).
-///
-/// Why / What / Test: see [`gating_split_with_soft`], whose gating set this
-/// folds `ok` over.
-pub(super) fn required_gate_with_soft<T>(
     rows: &[T],
     required: impl Fn(&T) -> bool,
     soft: impl Fn(&T) -> bool,
     ok: impl Fn(&T) -> bool,
 ) -> bool {
-    gating_split_with_soft(rows, required, soft)
+    gating_split(rows, required, soft)
         .gating
         .into_iter()
         .all(ok)
@@ -268,7 +258,8 @@ pub(super) fn required_gate_with_soft<T>(
 /// came to disagree — the exact drift `required_gate` was extracted to stop.
 ///
 /// What: `gating` decides the verdict; `non_gating` holds the rows excluded
-/// from it, and is empty unless the selection has a required core;
+/// from it, and is empty unless the selection has a required core or a soft
+/// row (#10042);
 /// `any_required` says which of the two rules applied, because a caller words
 /// "required component(s)" and "selected component(s)" differently.
 ///
@@ -287,21 +278,17 @@ pub(super) struct GatingSplit<'a, T> {
 /// Why / What / Test: see [`GatingSplit`]. This is the single expression of the
 /// gating rule; [`required_gate`] and the `tctl install` human summary both
 /// read it rather than writing their own.
-pub(super) fn gating_split<T>(rows: &[T], required: impl Fn(&T) -> bool) -> GatingSplit<'_, T> {
-    gating_split_with_soft(rows, required, |_| false)
-}
-
-/// [`gating_split`], with SOFT rows never gating (#10042).
 ///
-/// Why: ADR-0065 decision 4 adds trusty-events to a producer's install as a
-/// soft member. Under the plain rule a selection with no REQUIRED member
-/// gates on every row, so `tctl install trusty-analyze` would fail when only
-/// the bus it softly pulled in failed. A soft row is the producer's
-/// optional extra, never the operator's request.
-/// What: soft rows go to `non_gating` and do not count towards
-/// `any_required`; the remaining rows follow [`gating_split`]'s rule.
-/// Test: `tests::a_soft_row_never_gates`.
-pub(super) fn gating_split_with_soft<T>(
+/// #10042 — `soft` rows never gate. ADR-0065 decision 4 adds trusty-events to
+/// a producer's install as a soft member. Under the plain rule a selection
+/// with no REQUIRED member gates on every row, so `tctl install
+/// trusty-analyze` would fail when only the bus it softly pulled in failed. A
+/// soft row is the producer's optional extra, never the operator's request: it
+/// goes to `non_gating` and does not count towards `any_required`. A caller
+/// with no soft rows passes `|_| false`.
+/// Test: `tests::gating_split_is_the_partition_required_gate_folds_over`,
+/// `tests::a_soft_row_never_gates`.
+pub(super) fn gating_split<T>(
     rows: &[T],
     required: impl Fn(&T) -> bool,
     soft: impl Fn(&T) -> bool,
@@ -754,11 +741,12 @@ mod tests {
         let ok = |r: &(bool, bool)| r.1;
 
         // No required row: every row gates, so a failed optional fails the run.
-        assert!(!required_gate(&rows(&[(false, false)]), req, ok));
-        assert!(required_gate(&rows(&[(false, true)]), req, ok));
+        assert!(!required_gate(&rows(&[(false, false)]), req, |_| false, ok));
+        assert!(required_gate(&rows(&[(false, true)]), req, |_| false, ok));
         assert!(!required_gate(
             &rows(&[(false, true), (false, false)]),
             req,
+            |_| false,
             ok
         ));
 
@@ -766,11 +754,13 @@ mod tests {
         assert!(required_gate(
             &rows(&[(true, true), (false, false)]),
             req,
+            |_| false,
             ok
         ));
         assert!(!required_gate(
             &rows(&[(true, false), (false, true)]),
             req,
+            |_| false,
             ok
         ));
     }
@@ -788,28 +778,28 @@ mod tests {
         let soft = |r: &(bool, bool, bool)| r.1;
         let ok = |r: &(bool, bool, bool)| r.2;
         // trusty-mpm (required, ok) + soft bus (failed).
-        assert!(required_gate_with_soft(
+        assert!(required_gate(
             &[(true, false, true), (false, true, false)],
             req,
             soft,
             ok
         ));
         // trusty-analyze (optional, ok) + soft bus (failed).
-        assert!(required_gate_with_soft(
+        assert!(required_gate(
             &[(false, false, true), (false, true, false)],
             req,
             soft,
             ok
         ));
         // The optional producer itself failing still gates.
-        assert!(!required_gate_with_soft(
+        assert!(!required_gate(
             &[(false, false, false), (false, true, true)],
             req,
             soft,
             ok
         ));
         let rows = [(false, false, true), (false, true, false)];
-        let split = gating_split_with_soft(&rows, req, soft);
+        let split = gating_split(&rows, req, soft);
         assert_eq!(split.gating.len(), 1);
         assert_eq!(split.non_gating.len(), 1);
         assert!(!split.any_required);
@@ -825,7 +815,7 @@ mod tests {
     #[test]
     fn required_gate_over_no_rows_is_the_callers_problem() {
         let empty: Vec<(bool, bool)> = Vec::new();
-        assert!(required_gate(&empty, |r| r.0, |r| r.1));
+        assert!(required_gate(&empty, |r| r.0, |_| false, |r| r.1));
     }
 
     /// Why (#5806): `required_gate` returns a verdict, but the human summary
@@ -842,13 +832,13 @@ mod tests {
         let req = |r: &(bool, bool)| r.0;
 
         let optional_only = vec![(false, true), (false, false)];
-        let split = gating_split(&optional_only, req);
+        let split = gating_split(&optional_only, req, |_| false);
         assert!(!split.any_required);
         assert_eq!(split.gating.len(), 2, "no required core: every row gates");
         assert!(split.non_gating.is_empty());
 
         let mixed = vec![(true, true), (false, false), (false, true)];
-        let split = gating_split(&mixed, req);
+        let split = gating_split(&mixed, req, |_| false);
         assert!(split.any_required);
         assert_eq!(split.gating, vec![&(true, true)]);
         assert_eq!(split.non_gating, vec![&(false, false), &(false, true)]);
@@ -859,7 +849,7 @@ mod tests {
         );
 
         let empty: Vec<(bool, bool)> = Vec::new();
-        let split = gating_split(&empty, req);
+        let split = gating_split(&empty, req, |_| false);
         assert!(!split.any_required);
         assert!(split.gating.is_empty() && split.non_gating.is_empty());
     }

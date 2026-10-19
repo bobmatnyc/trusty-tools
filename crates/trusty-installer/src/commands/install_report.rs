@@ -184,7 +184,7 @@ impl InstallReport {
     pub(super) fn build(members: Vec<InstallOutcome>) -> Self {
         let all_ok = !members.is_empty()
             // #10042: a producer's soft bus never gates the run.
-            && crate::commands::stable_set::required_gate_with_soft(
+            && crate::commands::stable_set::required_gate(
                 &members,
                 |m| m.required,
                 |m| m.soft,
@@ -507,11 +507,8 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
     // #5806: read the partition, never re-derive it — `build` above folds
     // `required_gate` over the same split, and the two channels drifting apart
     // is the defect this whole change exists to close.
-    let split = crate::commands::stable_set::gating_split_with_soft(
-        &report.members,
-        |m| m.required,
-        |m| m.soft,
-    );
+    let split =
+        crate::commands::stable_set::gating_split(&report.members, |m| m.required, |m| m.soft);
     let gating = &split.gating;
     let gating_ok = gating.iter().filter(|m| m.ok).count();
     let noun = if split.any_required {

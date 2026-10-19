@@ -230,7 +230,7 @@ impl VerifyTailReport {
     /// `tests::no_daemon_rows_still_defers_to_ensure_ok`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
         // #10042: a producer's soft bus never gates verification.
-        let health_ok = crate::commands::stable_set::required_gate_with_soft(
+        let health_ok = crate::commands::stable_set::required_gate(
             &members,
             |m| m.required,
             |m| m.soft,
