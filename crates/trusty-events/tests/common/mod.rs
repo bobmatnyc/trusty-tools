@@ -76,8 +76,11 @@ pub async fn start(root: &Path, extra: &[&str]) -> Daemon {
     let mut daemon = spawn(root, "daemon", extra);
     let deadline = tokio::time::Instant::now() + BOUND;
     loop {
-        if probe_socket_verdict(&daemon.socket, Duration::from_millis(200)).await
-            == SocketVerdict::Serving
+        // The socket answers from the bind, before the log is open; the
+        // "serving" line is logged once the log is open too.
+        if daemon.stderr_text().contains("trusty-events serving")
+            && probe_socket_verdict(&daemon.socket, Duration::from_millis(200)).await
+                == SocketVerdict::Serving
         {
             return daemon;
         }
