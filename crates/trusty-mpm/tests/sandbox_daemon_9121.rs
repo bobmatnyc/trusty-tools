@@ -37,7 +37,6 @@ fn sandbox_command(home: &Path, vars: &[(&str, &str)]) -> Command {
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("TRUSTY_DATA_DIR_OVERRIDE", home.join("data"))
-        .env("TRUSTY_MPM_ADDR", "127.0.0.1:0")
         // #9178: required, as `scripts/sandbox_daemon.sh` passes it.
         .env("TRUSTY_SANDBOX", "1")
         .args(["daemon", "--sandbox"])

@@ -462,11 +462,11 @@ pub mod worktree_removal_facts;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{
-    DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_ADDR, DEFAULT_DAEMON_URL, DaemonUrlError,
-    EXIT_DAEMON_URL_UNREACHABLE, ISOLATED_NO_DAEMON_URL, REFUSED_DAEMON_URL, SOCKET_LOCATOR_PREFIX,
-    client_lock_url, console_addr_to_probe, default_daemon_addr, explicit_url_from_env,
-    explicit_url_notice, is_loopback_url, isolated_environment, lock_file_path, refusal_url,
-    refuse_daemon_spawn_when_isolated, refuse_isolated_no_daemon, resolve_daemon_url,
-    resolve_daemon_url_for_dispatch, socket_from_locator, socket_locator, try_resolve_daemon_url,
+    DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_URL, DaemonUrlError, EXIT_DAEMON_URL_UNREACHABLE,
+    ISOLATED_NO_DAEMON_URL, REFUSED_DAEMON_URL, SOCKET_LOCATOR_PREFIX, client_lock_url,
+    console_addr_to_probe, explicit_url_from_env, explicit_url_notice, is_loopback_url,
+    isolated_environment, lock_file_path, refusal_url, refuse_daemon_spawn_when_isolated,
+    refuse_isolated_no_daemon, resolve_daemon_url, resolve_daemon_url_for_dispatch,
+    socket_from_locator, socket_locator, try_resolve_daemon_url,
 };
 pub use error::{Error, Result};

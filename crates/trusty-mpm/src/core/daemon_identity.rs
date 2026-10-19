@@ -35,13 +35,13 @@ pub const LOCK_PRODUCT: &str = "trusty-mpm";
 
 /// The daemon's on-disk identity record.
 ///
-/// Why: clients discover the daemon's actual bound address from this file —
-/// the daemon falls back to an ephemeral port when 7880 is busy, so the
-/// compiled-in default is not always right.
+/// Why: clients learn from this file which process is the daemon and which
+/// socket it serves.
 /// What: serialised as TOML at [`lock_file_path`]. `product` is the
 /// [`LOCK_PRODUCT`] magic; `pid` identifies the writing process so removal can
-/// be ownership-checked; `addr` is the base URL clients connect to;
-/// `socket_path` is the Unix socket the same daemon serves (#6288).
+/// be ownership-checked; `addr` is the TCP base URL a pre-#6288-S3a daemon
+/// bound, written empty since S3a; `socket_path` is the Unix socket the daemon
+/// serves (#6288).
 /// Test: `parse_lock_round_trips`, `parse_lock_reads_a_pre_6288_record`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonLock {
@@ -49,12 +49,18 @@ pub struct DaemonLock {
     pub product: String,
     /// PID of the daemon process that wrote this file.
     pub pid: u32,
-    /// Base URL the daemon bound, e.g. `http://127.0.0.1:7880`.
+    /// Base URL a pre-#6288-S3a daemon bound, e.g. `http://127.0.0.1:7880`.
+    ///
+    /// #6288 S3a (owner ruling Q6): the daemon binds no TCP port and writes
+    /// this empty. The key is still written so an older `tm`, whose struct
+    /// requires it, parses a new lock; `#[serde(default)]` lets a later
+    /// release drop it. Removal is due in 2.0.0.
+    #[serde(default)]
     pub addr: String,
     /// RFC-3339 timestamp of the write, for operator diagnostics only.
     #[serde(default)]
     pub started_at: String,
-    /// Unix socket the daemon serves alongside `addr` (#6288, ADR-0032).
+    /// Unix socket the daemon serves (#6288, ADR-0032).
     ///
     /// Why record a path that [`crate::daemon::socket::socket_path`] derives
     /// anyway: a consumer reading this file learns whether the daemon that
@@ -174,20 +180,23 @@ pub fn read_lock() -> Option<DaemonLock> {
     read_lock_at(&lock_file_path())
 }
 
-/// Write the lock file naming `addr`, `socket`, and the current process.
+/// Write the lock file naming `socket` and the current process.
 ///
 /// What: creates parent directories, then writes the TOML record. Best-effort:
 /// a failure is logged, never fatal — the daemon still serves. `socket` is the
-/// Unix socket path this daemon serves alongside `addr` (#6288).
-/// Test: `read_lock_returns_written_record`.
-pub fn write_lock_at(path: &std::path::Path, addr: &str, socket: &str) {
+/// Unix socket path this daemon serves (#6288). #6288 S3a: `addr` is written
+/// empty, since the daemon binds no TCP port (owner ruling Q6).
+/// Test: `read_lock_returns_written_record`,
+/// `a_socket_only_lock_keeps_an_empty_addr_key`.
+pub fn write_lock_at(path: &std::path::Path, socket: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let lock = DaemonLock {
         product: LOCK_PRODUCT.to_string(),
         pid: std::process::id(),
-        addr: addr.to_string(),
+        // #6288 S3a: kept, empty, so an older `tm` still parses the record.
+        addr: String::new(),
         started_at: chrono::Utc::now().to_rfc3339(),
         // #6288: recorded so a reader can tell a socket-serving daemon from a
         // pre-#6288 one without dialling a path it guessed.
@@ -200,8 +209,8 @@ pub fn write_lock_at(path: &std::path::Path, addr: &str, socket: &str) {
 }
 
 /// [`write_lock_at`] against the real `~/.trusty-mpm/daemon.lock`.
-pub fn write_lock(addr: &str, socket: &str) {
-    write_lock_at(&lock_file_path(), addr, socket);
+pub fn write_lock(socket: &str) {
+    write_lock_at(&lock_file_path(), socket);
 }
 
 /// Remove the lock file only when it names one of `owners`.
@@ -323,30 +332,33 @@ mod tests {
         );
     }
 
-    /// #6288, the forward half: a record this daemon writes stays readable by
-    /// the parsers that predate the new field.
+    /// #6288 S3a, the forward half (owner ruling Q6): the record a socket-only
+    /// daemon writes stays readable by a `tm` built before S3a.
     ///
-    /// Why: `trusty-console` (`detect/mpm.rs`) and the `tm` welcome panel read
-    /// `addr` out of this file. A new key must not displace or shadow it.
-    /// What: renders a record carrying a socket path, then asserts the TOML
-    /// still carries `addr` on its own line with the URL intact, and that a
-    /// reader keyed on the exact `addr` key finds it.
+    /// Why: an older `tm`'s `DaemonLock` has no `#[serde(default)]` on `addr`,
+    /// so a record without the key fails its `toml::from_str` and the live
+    /// daemon reads as absent.
+    /// What: writes a record through [`write_lock_at`], asserts the TOML still
+    /// carries an `addr = ""` line beside `socket_path`, and that a record with
+    /// no `addr` key at all also parses here.
     /// Test: this function IS the test.
     #[test]
-    fn render_lock_keeps_addr_readable_alongside_socket_path() {
-        let body = render_lock(&sample());
-        let addr_line = body
-            .lines()
-            .find(|l| l.starts_with("addr ="))
-            .expect("addr must still be a top-level key");
+    fn a_socket_only_lock_keeps_an_empty_addr_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("daemon.lock");
+        write_lock_at(&path, "/tmp/trusty-mpm/trusty-mpm.sock");
+        let body = std::fs::read_to_string(&path).expect("read the lock");
         assert!(
-            addr_line.contains("http://127.0.0.1:7880"),
-            "addr line lost its value: {addr_line}"
+            body.lines().any(|l| l == r#"addr = """#),
+            "addr must stay a top-level key, written empty: {body}"
         );
         assert!(
             body.lines().any(|l| l.starts_with("socket_path =")),
             "socket_path must be recorded: {body}"
         );
+        let no_addr = "product = \"trusty-mpm\"\npid = 84890\nsocket_path = \"/s.sock\"\n";
+        let lock = parse_lock(no_addr).expect("a record without addr parses");
+        assert_eq!(lock.addr, "");
     }
 
     #[test]
@@ -409,17 +421,13 @@ mod tests {
     fn read_lock_returns_written_record() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("daemon.lock");
-        write_lock_at(
-            &path,
-            "http://127.0.0.1:7880",
-            "/tmp/trusty-mpm/trusty-mpm.sock",
-        );
+        write_lock_at(&path, "/tmp/trusty-mpm/trusty-mpm.sock");
         let lock = read_lock_at(&path).expect("own lock file must be readable");
         assert_eq!(lock.product, LOCK_PRODUCT);
         assert_eq!(lock.pid, std::process::id());
-        assert_eq!(lock.addr, "http://127.0.0.1:7880");
+        // #6288 S3a: no TCP address is advertised; the socket is.
+        assert_eq!(lock.addr, "");
         assert!(!lock.started_at.is_empty());
-        // #6288: `addr` is unchanged and `socket_path` rides alongside it.
         assert_eq!(lock.socket_path, "/tmp/trusty-mpm/trusty-mpm.sock");
     }
 
@@ -453,11 +461,7 @@ mod tests {
     fn remove_lock_owned_by_removes_own_record() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("daemon.lock");
-        write_lock_at(
-            &path,
-            "http://127.0.0.1:7880",
-            "/tmp/trusty-mpm/trusty-mpm.sock",
-        );
+        write_lock_at(&path, "/tmp/trusty-mpm/trusty-mpm.sock");
         remove_lock_owned_by_at(&path, &[std::process::id()]);
         assert!(!path.exists());
     }
@@ -469,11 +473,7 @@ mod tests {
     fn remove_lock_owned_by_keeps_newer_daemons_record() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("daemon.lock");
-        write_lock_at(
-            &path,
-            "http://127.0.0.1:7880",
-            "/tmp/trusty-mpm/trusty-mpm.sock",
-        );
+        write_lock_at(&path, "/tmp/trusty-mpm/trusty-mpm.sock");
         let outgoing = std::process::id() + 1;
         remove_lock_owned_by_at(&path, &[outgoing]);
         assert!(path.exists(), "the incoming daemon's record must survive");

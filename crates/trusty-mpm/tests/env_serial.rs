@@ -20,7 +20,7 @@
 mod common;
 
 mod auth_cost;
-mod daemon_dual_serve;
+mod daemon_serve_drain;
 // #9121: a test daemon's environment carries no inherited secret.
 mod architect_floor_host;
 mod daemon_env_isolation;
