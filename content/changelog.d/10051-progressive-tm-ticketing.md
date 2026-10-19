@@ -1,0 +1,2 @@
+Changed
+- `skills/tm-ticketing.md` is now a progressive skill: the entry file drops from 1,035 to under 220 lines and holds the entry rules, the "Every issue: milestone, relationships, state" section unchanged, the Labels/Project/Milestone standard, and a "Where Each Task Lives" table. Every other section moved, unchanged apart from cross-references, to eleven files under `skills/tm-ticketing/references/` that load only when read. A pointer naming a `tm-ticketing` section resolves through the table (#10051).
