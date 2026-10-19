@@ -1,7 +1,8 @@
-//! Tests for the console event-bus core (issue #6848).
+//! Tests for the event-bus core (issue #6848), moved from trusty-console by
+//! #9075.
 //!
 //! `bus_*` tests drive [`super::bus::EventBus`] directly; `ingest_*` and
-//! `malformed_*`/`oversized_*` tests drive [`super::ingest`] over a real
+//! `malformed_*`/`oversized_*` tests drive [`super::serve`] over a real
 //! Unix socket in a tempdir, matching this workspace's convention for UDS
 //! listener tests (see `search_uds`, `memory_uds`, `webhook`).
 
@@ -15,7 +16,7 @@ use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessS
 use trusty_common::uds::{SocketVerdict, connect_hardened, probe_socket_verdict};
 
 use super::bus::{EventBus, EventBusConfig, IngestOutcome};
-use super::ingest::{bind_ingest, serve_ingest};
+use super::serve::{Connection, ServeLimits, bind, serve_with};
 
 /// Build a minimal `HarnessEvent` fixture. `id` defaults to a fresh
 /// [`EventId`] when `None`, so tests that need a specific duplicate id can
@@ -227,12 +228,18 @@ async fn concurrent_producers_write_the_durable_log_in_seq_order() {
 /// Bind a fresh ingest listener under `tmp` and start serving it in the
 /// background. Returns the socket path and the bus it feeds.
 async fn spawn_test_listener(tmp: &std::path::Path) -> (std::path::PathBuf, Arc<EventBus>) {
-    let socket = tmp.join("sockets").join("trusty-console.sock");
-    let listener = bind_ingest(&socket).await.expect("bind ingest socket");
+    let socket = tmp.join("sockets").join("trusty-events.sock");
+    let listener = bind(&socket).await.expect("bind ingest socket");
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let served_bus = Arc::clone(&bus);
     tokio::spawn(async move {
-        serve_ingest(listener, served_bus, std::future::pending()).await;
+        let _ = serve_with(
+            &listener,
+            served_bus,
+            ServeLimits::default(),
+            std::future::pending(),
+        )
+        .await;
     });
     (socket, bus)
 }
@@ -394,16 +401,16 @@ async fn unterminated_line_never_grows_past_the_line_cap() {
 
 #[tokio::test]
 async fn stale_socket_file_is_reclaimed_on_bind() {
-    // Why: `bind_ingest` now binds through `bind_singleton_hardened` (#6848
+    // Why: `serve::bind` (`bind_ingest` before #9075) binds through `bind_singleton_hardened` (#6848
     // fix round, HIGH finding) specifically so a console that exits
     // uncleanly (SIGKILL, crash) does not wedge every future bind on the
     // corpse it left behind — `bind_hardened` alone refuses an occupied path
     // forever. See `trusty_common::uds::tests::bind_singleton_takes_over_a_stale_socket_file`
     // for the same contract proven at the trusty-common layer.
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let socket = tmp.path().join("sockets").join("trusty-console.sock");
+    let socket = tmp.path().join("sockets").join("trusty-events.sock");
 
-    let dead = bind_ingest(&socket).await.expect("first bind");
+    let dead = bind(&socket).await.expect("first bind");
     drop(dead); // tokio does not unlink on drop, so the file survives.
     assert!(socket.exists(), "the corpse must still be on disk");
 
@@ -423,7 +430,7 @@ async fn stale_socket_file_is_reclaimed_on_bind() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let listener = bind_ingest(&socket)
+    let listener = bind(&socket)
         .await
         .expect("a stale socket file must be reclaimed, not refused forever");
     drop(listener);
@@ -439,11 +446,16 @@ async fn idle_connection_is_dropped_after_the_read_timeout() {
     let (writer, reader) = UnixStream::pair().expect("create a connected pair");
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
-    let handle = tokio::spawn(super::ingest::handle_connection_with_timeout(
-        reader,
+    let shared = Connection::new(
         Arc::clone(&bus),
-        Duration::from_millis(50),
-    ));
+        ServeLimits {
+            idle_timeout: Duration::from_millis(50),
+            ..ServeLimits::default()
+        },
+    );
+    let handle = tokio::spawn(async move {
+        super::serve::handle_connection(reader, &shared).await;
+    });
 
     // Send nothing at all. The task must return on its own once the idle
     // timeout elapses — awaited here with a generous outer bound, not slept
@@ -465,16 +477,15 @@ async fn idle_connection_is_dropped_after_the_read_timeout() {
 async fn connections_beyond_the_limit_wait_for_a_free_slot() {
     // #6848 fix round, security finding: bound concurrent connections so a
     // burst cannot hand out an unbounded number of tasks and `BufReader`s.
-    // `serve_ingest_with_limit` takes the cap explicitly so this test can
+    // `serve_with` takes the cap in `ServeLimits` so this test can
     // prove the gate at a limit of 1 instead of opening 257 real sockets.
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let socket = tmp.path().join("sockets").join("trusty-console.sock");
-    let listener = bind_ingest(&socket).await.expect("bind ingest socket");
+    let socket = tmp.path().join("sockets").join("trusty-events.sock");
+    let listener = bind(&socket).await.expect("bind ingest socket");
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let served_bus = Arc::clone(&bus);
     tokio::spawn(async move {
-        super::ingest::serve_ingest_with_limit(listener, served_bus, 1, std::future::pending())
-            .await;
+        let _ = serve_with(&listener, served_bus, one_slot(), std::future::pending()).await;
     });
 
     // Occupy the only slot: connect and never send a line, so this
@@ -503,8 +514,8 @@ async fn connections_beyond_the_limit_wait_for_a_free_slot() {
 
 #[tokio::test]
 async fn shutdown_is_observed_while_the_connection_pool_is_saturated() {
-    // #6848 fix round 2, HIGH finding: the permit acquire in
-    // `serve_ingest_with_limit` used to sit *outside* the `tokio::select!`
+    // #6848 fix round 2, HIGH finding: the permit acquire in the
+    // serve loop (`serve_ingest_with_limit`, now `serve_with`) used to sit *outside* the `tokio::select!`
     // that races `shutdown` against `accept_sized`, as a plain
     // `.acquire_owned().await` after the select returned. With every permit
     // held, that acquire never resolves, so the loop never got back around to
@@ -514,17 +525,17 @@ async fn shutdown_is_observed_while_the_connection_pool_is_saturated() {
     // so a second connection is stuck on the acquire, then fire a real
     // shutdown and prove the loop still returns.
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let socket = tmp.path().join("sockets").join("trusty-console.sock");
-    let listener = bind_ingest(&socket).await.expect("bind ingest socket");
+    let socket = tmp.path().join("sockets").join("trusty-events.sock");
+    let listener = bind(&socket).await.expect("bind ingest socket");
     let bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let served_bus = Arc::clone(&bus);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
     let serve_handle = tokio::spawn(async move {
-        super::ingest::serve_ingest_with_limit(listener, served_bus, 1, async move {
+        serve_with(&listener, served_bus, one_slot(), async move {
             let _ = shutdown_rx.await;
         })
-        .await;
+        .await
     });
 
     // Occupy the only slot: connect and never send a line, so its handler
@@ -552,12 +563,21 @@ async fn shutdown_is_observed_while_the_connection_pool_is_saturated() {
     tokio::time::timeout(Duration::from_secs(2), serve_handle)
         .await
         .expect(
-            "serve_ingest_with_limit must return once shutdown resolves, even with \
+            "serve_with must return once shutdown resolves, even with \
              every permit held and a connection stuck on acquire",
         )
-        .expect("the serve task must not panic");
+        .expect("the serve task must not panic")
+        .expect("shutdown is a clean return");
 
     drop(occupant);
+}
+
+/// Serve limits with one connection slot.
+fn one_slot() -> ServeLimits {
+    ServeLimits {
+        max_connections: 1,
+        ..ServeLimits::default()
+    }
 }
 
 /// Poll `predicate` until it is true or `budget` elapses.
@@ -594,4 +614,68 @@ async fn assert_stays_false(budget: Duration, mut predicate: impl FnMut() -> boo
         assert!(!predicate(), "condition became true within {budget:?}");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+// ─── #9075: the subscription cut and the shutdown close ────────────────────
+
+#[tokio::test]
+async fn attach_takes_the_backlog_and_live_events_without_a_seam() {
+    let bus = EventBus::new(EventBusConfig { capacity: 8 });
+    for _ in 0..3 {
+        bus.ingest(make_event(None));
+    }
+    let mut attach = bus.attach(Some(1));
+    assert_eq!(attach.head, 3, "head is the last seq assigned");
+    let backlog: Vec<u64> = attach.backlog.iter().map(|e| e.seq).collect();
+    assert_eq!(backlog, vec![2, 3], "backlog is the ring after since_seq");
+
+    bus.ingest(make_event(None));
+    let live = attach.receiver.recv().await.expect("live event");
+    assert_eq!(live.event.seq, 4, "the receiver starts right after head");
+
+    let live_only = bus.attach(None);
+    assert!(live_only.backlog.is_empty(), "no since_seq, no backlog");
+    assert_eq!(live_only.head, 4);
+}
+
+#[tokio::test]
+async fn ingest_after_close_is_refused_and_assigns_no_seq() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (log, recovered) = super::log::DurableLog::open(super::log::LogConfig {
+        dir: tmp.path().join("event_log"),
+        retain_days: 7,
+    })
+    .await
+    .expect("open log");
+    let bus = EventBus::with_log(EventBusConfig::default(), Some(log), recovered.next_seq);
+    assert_eq!(bus.ingest(make_event(None)), IngestOutcome::Ingested);
+
+    let writer = bus.close().expect("a bus with a log hands back its writer");
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .expect("the writer drains and exits once closed")
+        .expect("the writer task does not panic");
+
+    assert_eq!(
+        bus.ingest(make_event(None)),
+        IngestOutcome::Closed,
+        "a closed bus refuses the frame"
+    );
+    assert_eq!(bus.metrics().ingested, 1, "the refused frame took no seq");
+    assert_eq!(
+        bus.attach(None).head,
+        1,
+        "seq stopped at the last durable event"
+    );
+
+    let replayed = bus
+        .replay_since(0)
+        .await
+        .expect("log wired")
+        .expect("replay");
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the event accepted before close is on disk"
+    );
 }

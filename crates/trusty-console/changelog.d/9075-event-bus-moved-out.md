@@ -1,0 +1,2 @@
+Removed
+- Console no longer hosts the event bus. The ingest socket it bound at `<data dir>/trusty-console/trusty-console.sock`, the event ring and the `event_log/` writer moved to the new `trusty-events` daemon (ADR-0065). No producer pushed to that socket and no route read the ring, so no events are lost; console's old `event_log/` directory is no longer written and is not migrated. The `chrono` dependency went with it (#9075).

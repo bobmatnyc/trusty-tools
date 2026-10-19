@@ -1,8 +1,8 @@
 //! Startup recovery: list day files, and find the seq high-water mark.
 //!
-//! Why: `HarnessEvent.seq` is console-assigned and must never repeat across a
-//! restart (DOC-73 §4.3 — "seq is now minted once, by console"). The only
-//! source of truth for "what was the last seq console handed out" is the log
+//! Why: `HarnessEvent.seq` is bus-assigned and must never repeat across a
+//! restart (DOC-73 §4.3 — "seq is now minted once, by `trusty-events`"). The
+//! only source of truth for "what was the last seq the bus handed out" is the log
 //! itself, since the in-memory ring is empty on every fresh process. This
 //! module is what [`super::DurableLog::open`] calls before it starts accepting
 //! new events.

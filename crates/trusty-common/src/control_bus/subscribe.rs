@@ -18,8 +18,8 @@
 //!       without breaking an older client (DOC-73 §3.3, additive rule).
 //! Test: `super::subscribe_tests`.
 
-// #9075: new module. PR1 of epic #9074, before the bus moves out of
-// trusty-console; nothing in the workspace calls it yet.
+// #9075: new module, PR1 of epic #9074. The `trusty-events` daemon serves it
+// from PR2; console's client follows in #9076.
 
 use std::path::PathBuf;
 
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use super::action::{ActionEvent, Actor};
 use super::envelope::{HarnessEvent, HarnessPayload};
+use super::event_id::EventId;
 use super::filter::Filter;
 use super::lifecycle::HarnessSource;
 
@@ -68,10 +69,15 @@ pub fn events_socket_path() -> anyhow::Result<PathBuf> {
 /// hang-up or a [`SubscribeItem::Gap`].
 /// What: `since_seq: None` streams live events only. `Some(n)` first replays
 /// every retained event with `seq > n`, in `seq` order, then streams live;
-/// `Some(0)` replays everything retained. `filters` is applied server-side and
-/// defaults to match-all, so `{}` is a valid request. Unknown fields are
-/// rejected.
+/// `Some(0)` replays everything retained. `since_id` is the id of the event
+/// the reader holds at `since_seq`; the bus refuses a resume with `n > 0`
+/// whose `since_id` is absent or names a different event, because a `seq` it
+/// handed out but never logged can be assigned again after a crash, and
+/// resuming past the new event would skip it silently (#9075). `filters` is
+/// applied server-side and defaults to match-all, so `{}` is a valid request.
+/// Unknown fields are rejected.
 /// Test: `subscribe_params_golden_roundtrip`,
+/// `subscribe_params_since_id_golden_roundtrip`,
 /// `subscribe_params_empty_object_is_live_and_match_all`,
 /// `subscribe_params_rejects_an_unknown_field`,
 /// `subscribe_params_rejects_a_mistyped_field`.
@@ -81,6 +87,10 @@ pub struct SubscribeParams {
     /// Replay events after this bus `seq` before streaming live ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_seq: Option<u64>,
+    /// The id of the event at `since_seq`, which the bus checks before it
+    /// resumes (#9075: additive, 0.64.0 is unpublished).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_id: Option<EventId>,
     /// Which events to deliver. Defaults to every event.
     #[serde(default)]
     pub filters: SubscribeFilter,

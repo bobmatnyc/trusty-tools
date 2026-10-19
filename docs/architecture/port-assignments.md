@@ -54,9 +54,9 @@ else's guard test too).
 Socket-only daemons hold no row above. `trusty-events` (the event bus,
 [ADR-0065](../adr/0065-trusty-events-process-placement.md)) is one: it binds no
 TCP port and listens on `trusty_common::daemon_socket_path("trusty-events")`,
-`<data dir>/trusty-events/trusty-events.sock`. It is launchd-supervised
-(`com.trusty.events`). Until #9075 lands the same ingest still binds
-`trusty-console.sock`. The `trusty-mpm` daemon is another: since #6288 S3a it
+`<data dir>/trusty-events/trusty-events.sock`. Its launchd job
+(`com.trusty.events`) ships with #10042. Console no longer binds an ingest
+socket (#9075). The `trusty-mpm` daemon is another: since #6288 S3a it
 serves `<data dir>/trusty-mpm/trusty-mpm.sock` only and binds no TCP port.
 
 ## Next Free Port
