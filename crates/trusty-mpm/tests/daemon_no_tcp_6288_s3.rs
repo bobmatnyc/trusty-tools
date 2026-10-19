@@ -149,6 +149,13 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
         .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"])
         .output()
         .expect("lsof must run on macOS");
+    // A failing lsof prints nothing on stdout too; only an empty stderr makes
+    // an empty listing evidence of no listener.
+    assert!(
+        out.stderr.is_empty(),
+        "lsof failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .skip(1) // the header

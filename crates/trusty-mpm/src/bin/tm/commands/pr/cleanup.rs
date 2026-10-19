@@ -243,8 +243,16 @@ pub(crate) fn record_merge_scope(
     // would hide the downgrade. The merge still proceeds: this call records
     // the scope, and a later downgrade only restores the pre-#8301 behaviour.
     if registry.rewritten_by_older_writer() {
+        // #6288 S3a: a socket-only daemon writes an empty `addr`; name its socket.
         let daemon = trusty_mpm::core::daemon_identity::read_lock()
-            .map(|l| format!("the running daemon (pid {} at {})", l.pid, l.addr))
+            .map(|l| {
+                let at = if l.addr.is_empty() {
+                    &l.socket_path
+                } else {
+                    &l.addr
+                };
+                format!("the running daemon (pid {} at {at})", l.pid)
+            })
             .unwrap_or_else(|| "a daemon or tm older than this one".to_string());
         warnings.push(format!(
             "tm pr merge: {path} was rewritten by {daemon}, which predates recorded cleanup \
