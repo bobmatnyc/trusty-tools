@@ -8,7 +8,13 @@
 //! also publish diagnostics with no version (`unversioned`) and answer
 //! `textDocument/references` with LSP error -32801 "content modified", either
 //! twice and then normally (`content_modified`) or every time
-//! (`content_modified_forever`).
+//! (`content_modified_forever`). Every mode reports rust-analyzer's
+//! `experimental/serverStatus` after `initialized`: quiescent at once, or, in
+//! `loading`, not quiescent for [`LOADING_MS`] (answering `[]` and publishing
+//! empty diagnostics meanwhile, as rust-analyzer does) and then quiescent with a
+//! fresh publication; `never_ready` never becomes quiescent.
+//! `unversioned_open_only` publishes an unversioned set on `didOpen` and
+//! nothing on `didChange`.
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
 //! `<exe> --exact fake_lsp_server_entry --nocapture 3>&1 1>&2`, with the mode in
@@ -23,8 +29,33 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
+
+/// How long `loading` mode stays not quiescent after `initialized`.
+pub const LOADING_MS: u64 = 400;
+
+/// The fake's stdout, shared with the `loading` timer thread; each frame is
+/// written whole under the lock.
+#[derive(Clone)]
+struct Out(Arc<Mutex<std::fs::File>>);
+
+impl Write for Out {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("out").write(buf)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.0.lock().expect("out").write_all(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().expect("out").flush()
+    }
+}
+
+/// The last document opened or changed: `(uri, version)`.
+type OpenDoc = Arc<Mutex<Option<(Value, Value)>>>;
 
 /// The mode variable; its presence turns the entry test into the server.
 pub const MODE_ENV: &str = "TRUSTY_ANALYZE_FAKE_LSP";
@@ -74,9 +105,11 @@ fn serve(mode: &str) -> i32 {
         eprintln!("{FAIL_INIT_STDERR}");
         return 1;
     }
-    let mut out = lsp_stdout();
+    let mut out = Out(Arc::new(Mutex::new(lsp_stdout())));
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut references_seen = 0u32;
+    let ready = Arc::new(AtomicBool::new(false));
+    let open_doc: OpenDoc = Arc::new(Mutex::new(None));
     while let Some(msg) = read_frame(&mut input) {
         let method = msg["method"].as_str().unwrap_or_default().to_string();
         let id = msg.get("id").cloned();
@@ -108,31 +141,25 @@ fn serve(mode: &str) -> i32 {
             ("shutdown", Some(id)) => reply(&mut out, id, Value::Null),
             ("exit", None) if mode == "ignore_exit" => {}
             ("exit", None) => return 0,
+            ("initialized", None) => on_initialized(mode, &out, &ready, &open_doc),
             ("textDocument/didOpen" | "textDocument/didChange", None) => {
                 let doc = &msg["params"]["textDocument"];
-                let mut params = json!({"uri": doc["uri"], "version": doc["version"], "diagnostics": [{
-                    "range": {"start": {"line": 0, "character": 0},
-                              "end": {"line": 0, "character": 1}},
-                    "severity": 1,
-                    "code": "E0001",
-                    "source": "fake-lsp",
-                    "message": "canned diagnostic"
-                }]});
-                if mode == "unversioned" {
-                    // rust-analyzer's cargo-check pass publishes with no version.
-                    if let Some(p) = params.as_object_mut() {
-                        p.remove("version");
-                    }
+                // Held across the publish so the `loading` timer cannot flip
+                // readiness between the check and the frame.
+                let mut last = open_doc.lock().expect("open_doc");
+                *last = Some((doc["uri"].clone(), doc["version"].clone()));
+                if !(mode == "unversioned_open_only" && method == "textDocument/didChange") {
+                    let loaded = ready.load(Ordering::SeqCst);
+                    publish(&mut out, mode, &doc["uri"], &doc["version"], loaded);
                 }
-                send(
-                    &mut out,
-                    &json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
-                            "params": params}),
-                );
             }
             (_, None) => {}
             (_, Some(_)) if mode == "crash" => return 3,
             (_, Some(_)) if mode == "stall" => {}
+            // Still loading: rust-analyzer answers an empty list.
+            ("textDocument/references", Some(id)) if !ready.load(Ordering::SeqCst) => {
+                reply(&mut out, id, json!([]));
+            }
             ("textDocument/references", Some(id))
                 if mode == "content_modified_forever"
                     || (mode == "content_modified"
@@ -163,6 +190,68 @@ fn serve(mode: &str) -> i32 {
         }
     }
     0
+}
+
+/// Report readiness after `initialized`; `loading` flips to quiescent on a timer
+/// and re-publishes the open document, as rust-analyzer does after a load.
+fn on_initialized(mode: &str, out: &Out, ready: &Arc<AtomicBool>, open_doc: &OpenDoc) {
+    let mut out = out.clone();
+    if mode != "loading" && mode != "never_ready" {
+        ready.store(true, Ordering::SeqCst);
+        server_status(&mut out, true);
+        return;
+    }
+    server_status(&mut out, false);
+    if mode == "never_ready" {
+        return;
+    }
+    let (ready, open_doc, mode) = (Arc::clone(ready), Arc::clone(open_doc), mode.to_string());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(LOADING_MS));
+        let last = open_doc.lock().expect("open_doc");
+        ready.store(true, Ordering::SeqCst);
+        server_status(&mut out, true);
+        if let Some((uri, version)) = last.as_ref() {
+            publish(&mut out, &mode, uri, version, true);
+        }
+    });
+}
+
+fn server_status(out: &mut Out, quiescent: bool) {
+    send(
+        out,
+        &json!({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+                "params": {"health": "ok", "quiescent": quiescent}}),
+    );
+}
+
+/// Publish diagnostics for one document: the canned one once loaded, an
+/// empty set while loading; no version in the `unversioned*` modes.
+fn publish(out: &mut impl Write, mode: &str, uri: &Value, version: &Value, loaded: bool) {
+    let diagnostics = if loaded {
+        json!([{
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 1}},
+            "severity": 1,
+            "code": "E0001",
+            "source": "fake-lsp",
+            "message": "canned diagnostic"
+        }])
+    } else {
+        json!([])
+    };
+    let mut params = json!({"uri": uri, "version": version, "diagnostics": diagnostics});
+    if mode.starts_with("unversioned") {
+        // rust-analyzer's cargo-check pass publishes with no version.
+        if let Some(p) = params.as_object_mut() {
+            p.remove("version");
+        }
+    }
+    send(
+        out,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                "params": params}),
+    );
 }
 
 /// fd 3 is the child's real stdout (see the module doc). It is marked
@@ -221,9 +310,12 @@ fn reply(out: &mut impl Write, id: Value, result: Value) {
     send(out, &json!({"jsonrpc": "2.0", "id": id, "result": result}));
 }
 
+/// Write one whole frame in a single `write_all`, so a frame from the
+/// `loading` timer thread never interleaves with one from the main loop.
 fn send(out: &mut impl Write, msg: &Value) {
     let body = serde_json::to_vec(msg).expect("encode");
-    let _ = write!(out, "Content-Length: {}\r\n\r\n", body.len());
-    let _ = out.write_all(&body);
+    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    frame.extend_from_slice(&body);
+    let _ = out.write_all(&frame);
     let _ = out.flush();
 }

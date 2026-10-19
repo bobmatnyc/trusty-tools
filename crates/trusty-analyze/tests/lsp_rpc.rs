@@ -174,6 +174,7 @@ async fn lsp_diagnostics_for_a_file_are_versioned_and_stamped() {
     let rig = Rig::new("normal");
     let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
     assert_eq!(v["document_version"], 1);
+    assert_eq!(v["complete"], true, "file scope covers the whole file");
     assert_snapshot(&v);
     let file = &v["files"][0];
     assert_eq!(file["path"], json!(rig.file()));
@@ -212,7 +213,7 @@ async fn unversioned_diagnostics_are_accepted_and_never_stale() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_scope_returns_every_published_file_under_the_root() {
+async fn workspace_scope_returns_published_files_marked_incomplete() {
     let rig = Rig::new("normal");
     let v = rig
         .ok(
@@ -221,8 +222,86 @@ async fn workspace_scope_returns_every_published_file_under_the_root() {
         )
         .await;
     assert_eq!(v["scope"], "workspace");
+    // Only what the server has published so far; never a full pass.
+    assert_eq!(v["complete"], false, "{v}");
     assert_eq!(v["files"].as_array().map(Vec::len), Some(1));
     assert_eq!(v["files"][0]["path"], json!(rig.file()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_workspace_scope_is_refused() {
+    let rig = Rig::new("normal");
+    let r = rig
+        .call(
+            "analyze.lsp_diagnostics",
+            json!({"scope": "workspace", "path": rig.root()}),
+        )
+        .await;
+    let err = r
+        .error
+        .unwrap_or_else(|| panic!("a directory pass succeeded: {:?}", r.result));
+    assert_eq!(err.code, CODE_INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message
+            .contains("workspace pass not supported in 1.9.0"),
+        "{err:?}"
+    );
+    assert!(rig.manager.live_pids().await.is_empty(), "nothing spawned");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unversioned_publication_from_before_the_change_is_not_fresh() {
+    let rig = Rig::with("unversioned_open_only", |c| {
+        c.request_timeout = Duration::from_millis(500);
+    });
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(v["files"][0]["unversioned"], true);
+    // didChange publishes nothing; the didOpen set describes older text.
+    std::fs::write(rig.file(), "pub fn answer() -> u32 { 43 }\n").unwrap();
+    let data = rig
+        .refusal("analyze.lsp_diagnostics", rig.diag_params())
+        .await;
+    assert_eq!(data["kind"], "lsp_timeout", "{data}");
+}
+
+// ---- readiness -------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn references_wait_for_the_server_to_finish_loading() {
+    let rig = Rig::new("loading");
+    let v = rig.ok("analyze.lsp_references", rig.refs_params()).await;
+    // While loading the fake answers `[]`; that must never be the answer.
+    assert_eq!(
+        v["references"].as_array().map(Vec::len),
+        Some(1),
+        "an empty list from a loading server became a success: {v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_wait_for_the_server_to_finish_loading() {
+    let rig = Rig::new("loading");
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(
+        v["files"][0]["diagnostics"][0]["message"], "canned diagnostic",
+        "the loading-time empty set became a success: {v}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_never_finishes_loading_is_not_ready() {
+    let rig = Rig::with("never_ready", |c| {
+        c.request_timeout = Duration::from_millis(500);
+    });
+    for (method, params) in [
+        ("analyze.lsp_references", rig.refs_params()),
+        ("analyze.lsp_diagnostics", rig.diag_params()),
+    ] {
+        let data = rig.refusal(method, params).await;
+        assert_eq!(data["kind"], "lsp_not_ready", "{method}: {data}");
+    }
+    // Not ready is not hung: the server stays up.
+    assert_eq!(rig.manager.live_pids().await.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -305,15 +384,29 @@ async fn analysed_at_is_ready_once_the_version_is_published() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn analysed_at_times_out_with_the_version_seen() {
-    let rig = Rig::new("unversioned");
+    // The loading-time empty set at version 1 does not count.
+    let rig = Rig::new("never_ready");
     let v = rig
         .ok(
             "analyze.lsp_analysed_at",
-            json!({"path": rig.file(), "version": 1, "timeout_ms": 200}),
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 300}),
         )
         .await;
     assert_eq!(v["state"], "timed_out", "{v}");
     assert_eq!(v["version_seen"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn analysed_at_accepts_an_unversioned_publication_after_the_sync() {
+    // The barrier uses the diagnostics rule: unversioned, published after sync.
+    let rig = Rig::new("unversioned");
+    let v = rig
+        .ok(
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 5000}),
+        )
+        .await;
+    assert_eq!(v["state"], "ready", "{v}");
 }
 
 // ---- refusals --------------------------------------------------------------
@@ -376,6 +469,11 @@ async fn malformed_params_are_invalid_params() {
         (
             "analyze.lsp_references",
             json!({"path": rig.file(), "line": 0, "column": 0, "parent_event_id": "nope"}),
+        ),
+        // Past the MCP client's timeout minus its margin (240 s by default).
+        (
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 300_000}),
         ),
     ] {
         let r = rig.call(method, params.clone()).await;

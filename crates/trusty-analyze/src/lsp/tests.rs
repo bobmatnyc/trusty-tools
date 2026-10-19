@@ -686,6 +686,50 @@ async fn snapshot_moves_with_the_dirty_bytes_and_only_with_them() {
     assert_eq!(workspace_snapshot(root).await.unwrap(), clean, "restored");
 }
 
+/// A git work tree with one commit, for the snapshot budget tests.
+fn committed_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "seed"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    dir
+}
+
+/// #9078: an untracked file larger than the byte budget is never read whole;
+/// the snapshot fails closed instead.
+#[tokio::test]
+async fn snapshot_over_its_byte_budget_fails_closed() {
+    use super::snapshot::workspace_snapshot;
+    let dir = committed_repo();
+    // Sparse: 65 MiB on paper, nothing on disk.
+    let big = std::fs::File::create(dir.path().join("big.bin")).unwrap();
+    big.set_len(65 * 1024 * 1024).unwrap();
+    let res = workspace_snapshot(dir.path()).await;
+    match res {
+        Err(LspError::Snapshot { reason, .. }) => assert!(reason.contains("budget"), "{reason}"),
+        other => panic!("an over-budget tree was stamped: {other:?}"),
+    }
+}
+
 // ---- process group ---------------------------------------------------------
 
 #[cfg(unix)]
