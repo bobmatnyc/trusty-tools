@@ -18,8 +18,8 @@
 //!       without breaking an older client (DOC-73 §3.3, additive rule).
 //! Test: `super::subscribe_tests`.
 
-// #9075: new module. PR1 of epic #9074, before the bus moves out of
-// trusty-console; nothing in the workspace calls it yet.
+// #9075: new module, PR1 of epic #9074. The `trusty-events` daemon serves it
+// from PR2; console's client follows in #9076.
 
 use std::path::PathBuf;
 
