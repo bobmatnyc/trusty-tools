@@ -233,6 +233,7 @@ impl Session {
             since_seq,
             since_id,
             filters: self.config.filters.clone(),
+            heartbeat_ms: None,
         }
     }
 
