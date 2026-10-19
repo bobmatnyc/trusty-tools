@@ -76,6 +76,8 @@
 pub mod core;
 pub mod embedder;
 pub mod lang;
+// #9078 (DOC-72 §2): the stdio language-server client and child manager.
+pub mod lsp;
 pub mod mcp;
 // Why (issue #249): the `service` module is the axum HTTP daemon surface and
 // only compiles when the `http-server` feature is enabled. Gating it keeps

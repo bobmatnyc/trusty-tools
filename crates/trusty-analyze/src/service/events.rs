@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
+use crate::lsp::{LspConfig, LspManager};
 use crate::types::SmellThresholds;
 use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
@@ -84,6 +85,14 @@ pub struct AnalyzerAppState {
     /// What: defaults to `openai/gpt-4o-mini` when not configured.
     /// Test: covered transitively by `AnalyzerAppState::new`.
     pub llm_model: String,
+    /// The on-demand language-server children (#9078, DOC-72 §2).
+    ///
+    /// Why: the daemon owns every child it spawns, so its exit path can kill
+    /// them. What: built from `LspConfig::from_env()`, off unless
+    /// `ANALYZE_LSP=1`; constructing it spawns nothing. `serve_with_idle` calls
+    /// `shutdown_all` on both exits.
+    /// Test: `daemon_idle_exit_kills_the_child`.
+    pub lsp: Arc<LspManager>,
 }
 
 impl AnalyzerAppState {
@@ -111,6 +120,7 @@ impl AnalyzerAppState {
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
+            lsp: Arc::new(LspManager::new(LspConfig::from_env())),
         }
     }
 
@@ -132,6 +142,7 @@ impl AnalyzerAppState {
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
+            lsp: Arc::new(LspManager::new(LspConfig::from_env())),
         }
     }
 
@@ -170,6 +181,14 @@ impl AnalyzerAppState {
     /// Test: covered transitively by the binary wiring tests.
     pub fn with_llm_model(mut self, model: impl Into<String>) -> Self {
         self.llm_model = model.into();
+        self
+    }
+
+    /// Replace the language-server manager (#9078).
+    ///
+    /// Test: `daemon_idle_exit_kills_the_child`.
+    pub fn with_lsp(mut self, lsp: Arc<LspManager>) -> Self {
+        self.lsp = lsp;
         self
     }
 

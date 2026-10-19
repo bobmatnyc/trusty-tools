@@ -7,10 +7,10 @@ spec_refs:
 
 # DOC-72 — trusty-analyze On-Demand Language-Server Capability
 
-**Status:** Draft. Amended 2026-10-19 (#9078, L0): §4 now specifies the
-`trusty-events` producer path, and §12 fixes the 1.9.0 slice. Decisions D1-D10
-(§10) carry the plan's recommended defaults and are **accepted, owner ruling Da1 (2026-10-19)**;
-the spec stays Draft until Bob rules.
+**Status:** Accepted (owner ruling Da1, Bob, 2026-10-19). Amended 2026-10-19
+(#9078, L0): §4 now specifies the `trusty-events` producer path, and §12 fixes
+the 1.9.0 slice. Decisions D1-D10 (§10) are the plan's recommended defaults; owner
+ruling Da1 (2026-10-19) accepted all ten.
 **Spec ID:** `SPEC-ANALYZELSP-01~draft` … `SPEC-ANALYZELSP-12~draft`
 **Subsystem:** `trusty-analyze` — the language-server supervisor, the versioned
 result store, and the new socket/MCP methods (`src/service/rpc.rs`,
@@ -920,9 +920,9 @@ closes only on a real producer. Milestone: trusty-mpm 1.9.0, due 2026-11-20. The
 ruling adds a deadline and, with ADR-0065, replaces Q4's transport (§4). It leaves
 Q1-Q3 and Q5-Q7 unchanged.
 
-The ten decisions below shape the 1.9.0 slice. **Each is a recommended default
-from the #9078 plan, not a ruling. Every row stays accepted, owner ruling Da1 (2026-10-19).** A
-reader must not treat a row as decided until Da1 records the answer here.
+The ten decisions below shape the 1.9.0 slice. **Each row began as a recommended
+default from the #9078 plan; owner ruling Da1 (Bob, 2026-10-19) accepted all ten.**
+The Status column records that ruling.
 
 | # | Decision | Default | Status | Applied in |
 |---|---|---|---|---|
