@@ -494,7 +494,8 @@ async fn a_reader_that_stops_reading_does_not_stop_ingest_or_other_heartbeats() 
 // ─── #10071 review: a slow log read neither silences nor outlives its reader ─
 
 /// A day file that is a FIFO: reading it blocks until a writer opens it.
-/// Released on drop, so no blocking read outlives the test's runtime.
+/// Released synchronously on drop, before the tempdir unlinks it, so a read
+/// blocked on it ends and the runtime's drop does not wait on it.
 struct Fifo(std::path::PathBuf);
 
 impl Fifo {
@@ -508,11 +509,13 @@ impl Fifo {
     }
 
     /// Let a reader blocked on this FIFO through: it reads an empty file.
+    /// An `O_RDWR` open of a FIFO does not block; it wakes a blocked reader,
+    /// and closing it at once gives that reader EOF.
     fn release(&self) {
-        let path = self.0.clone();
-        std::thread::spawn(move || {
-            let _ = std::fs::OpenOptions::new().write(true).open(path);
-        });
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.0);
     }
 
     /// Set the returned flag once anything opens this FIFO to read it.
