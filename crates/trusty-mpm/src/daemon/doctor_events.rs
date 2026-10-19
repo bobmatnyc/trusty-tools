@@ -115,8 +115,8 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
             CheckStatus::Fail,
             format!(
                 "stale trusty-events socket at {at}: the file exists but nothing accepts \
-                 on it, so the daemon exited without removing it. launchd restarts it \
-                 under `com.trusty.events` within 10 s; if this persists, run `tctl start \
+                 on it, so the daemon exited without removing it. launchd restarts its \
+                 LaunchAgent within 10 s; if this persists, run `tctl start \
                  trusty-events` and read `~/.trusty-events/logs/stderr.log`."
             ),
         ),
