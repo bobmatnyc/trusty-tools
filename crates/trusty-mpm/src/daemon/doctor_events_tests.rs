@@ -53,6 +53,37 @@ async fn a_missing_socket_is_absent() {
     );
 }
 
+/// Why (#10042): the row's remedy must actually bring the bus back. `tctl
+/// start` bootstraps an unloaded job and answers a loaded one with "already
+/// loaded"; that is only a working remedy because the LaunchAgent restarts the
+/// bus after ANY exit (`KeepAlive` `<true/>`, pinned on the installer side by
+/// `events_plist_restarts_the_bus_after_any_exit`). With `SuccessfulExit:
+/// false` a stray exit 0 left a loaded, stopped job that `tctl start` skipped.
+/// What: the not-running remedy names `tctl start trusty-events` and
+/// `tctl install trusty-events`; the stale remedy says launchd restarts it.
+/// Test: This is the test.
+#[test]
+fn the_not_running_remedy_is_tctl_start() {
+    let p = Path::new("/x/trusty-events.sock");
+    let absent = grade(p, &SocketState::Absent);
+    assert!(
+        absent.message.contains("`tctl start trusty-events`"),
+        "{}",
+        absent.message
+    );
+    assert!(
+        absent.message.contains("`tctl install trusty-events`"),
+        "{}",
+        absent.message
+    );
+    let stale = grade(p, &SocketState::Stale);
+    assert!(
+        stale.message.contains("launchd restarts"),
+        "{}",
+        stale.message
+    );
+}
+
 /// Why: the one healthy verdict, and the one place the #10071 limit is stated.
 /// What: a bound socket observes `Serving` and grades `Ok` naming #10071.
 /// Test: This is the test.

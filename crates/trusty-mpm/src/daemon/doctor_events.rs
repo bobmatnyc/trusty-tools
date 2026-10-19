@@ -90,9 +90,11 @@ pub(crate) async fn observe_socket(path: &Path, timeout: Duration) -> SocketStat
 ///
 /// Why: a pure function, so every verdict is testable without a daemon.
 /// What: `Serving` is `Ok`, naming the #10071 limit; `Undetermined` is `Warn`;
-/// every other state is `Fail` with its remedy.
+/// every other state is `Fail` with its remedy. #10042: the not-running
+/// remedy `tctl start trusty-events` works because the LaunchAgent restarts
+/// the bus after any exit, so a loaded job is never left stopped.
 /// Test: `serving_is_ok_and_names_the_liveness_limit`,
-/// `every_non_serving_state_is_never_ok`.
+/// `every_non_serving_state_is_never_ok`, `the_not_running_remedy_is_tctl_start`.
 pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
     let at = socket.display();
     let (status, message) = match state {
