@@ -32,6 +32,13 @@ use super::{lock, LspError};
 
 type Key = (PathBuf, LspLanguage);
 
+/// LSP `ContentModified`: the server's state moved under the request.
+pub const CONTENT_MODIFIED: i64 = -32801;
+/// First wait before retrying a "content modified" answer; it doubles.
+const RETRY_FIRST_BACKOFF: Duration = Duration::from_millis(50);
+/// The longest single wait between "content modified" retries.
+const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
+
 enum Slot {
     Live(Arc<Session>),
     Failed { error: LspError, at: Instant },
@@ -98,19 +105,78 @@ impl LspLease {
         self.session.child.pid()
     }
 
+    /// The per-request deadline this lease applies.
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
     /// Send a request under the configured per-request timeout.
     ///
+    /// A server still loading its workspace answers LSP error -32801 "content
+    /// modified"; that answer is retried with a doubling backoff until the
+    /// same timeout runs out (#9078, architect default (a)).
+    ///
     /// # Errors
-    /// As [`LspClient::request`]; once `max_consecutive_timeouts` requests in a
-    /// row have timed out, or a timeout left a write unfinished (the server
+    /// As [`LspClient::request`]; [`LspError::Timeout`] when "content
+    /// modified" outlasts the timeout (the server answered throughout, so it is
+    /// not counted towards a hang). Once `max_consecutive_timeouts` requests in
+    /// a row have timed out, or a timeout left a write unfinished (the server
     /// stopped reading), the server is killed and this returns
     /// [`LspError::Hung`].
     ///
     /// Test: `stalled_requests_time_out_then_the_hung_child_is_reaped`,
-    /// `a_server_that_stops_reading_is_killed_as_hung`.
+    /// `a_server_that_stops_reading_is_killed_as_hung`,
+    /// `content_modified_is_retried_then_answers`,
+    /// `content_modified_that_never_clears_is_a_timeout`.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, LspError> {
+        self.request_within(method, params, self.request_timeout)
+            .await
+    }
+
+    /// [`LspLease::request`] bounded by `timeout` instead of the configured
+    /// request timeout; the barrier's pull runs inside the caller's deadline
+    /// (#9078).
+    ///
+    /// # Errors
+    /// As [`LspLease::request`].
+    ///
+    /// Test: `a_clean_file_opened_during_loading_is_answered_after_quiescence`.
+    pub async fn request_within(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, LspError> {
+        let deadline = Instant::now() + timeout;
+        let mut backoff = RETRY_FIRST_BACKOFF;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.request_once(method, params.clone(), left).await {
+                Err(LspError::ServerError { code, .. }) if code == CONTENT_MODIFIED => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left <= backoff {
+                        return Err(LspError::Timeout {
+                            method: method.to_string(),
+                            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                        });
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RETRY_MAX_BACKOFF);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// One attempt of [`LspLease::request`], bounded by `timeout`.
+    async fn request_once(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, LspError> {
         let client = self.client();
-        let res = client.request(method, params, self.request_timeout).await;
+        let res = client.request(method, params, timeout).await;
         if matches!(res, Err(LspError::Timeout { .. })) {
             let consecutive = client.consecutive_timeouts();
             // #9078: a wedged write closes the client; that server is hung.
@@ -362,16 +428,24 @@ async fn sweep(inner: Weak<Inner>) {
 /// contains `path`, else the nearest ancestor holding `.git`.
 ///
 /// # Errors
-/// [`LspError::Document`] when `path` does not exist or no root contains it;
-/// there is no guessed fallback.
+/// [`LspError::FileNotFound`] when `path` does not exist,
+/// [`LspError::Document`] when it cannot be resolved otherwise, and
+/// [`LspError::OutsideWorkspace`] when no root contains it; there is no guessed
+/// fallback.
 ///
 /// Test: `workspace_root_prefers_the_index_root_then_the_git_toplevel`.
 pub fn resolve_workspace_root(path: &Path, index_root: Option<&Path>) -> Result<PathBuf, LspError> {
-    let doc = |reason: String| LspError::Document {
-        path: path.display().to_string(),
-        reason,
-    };
-    let path = std::fs::canonicalize(path).map_err(|e| doc(e.to_string()))?;
+    let shown = path.display().to_string();
+    let path = std::fs::canonicalize(path).map_err(|e| match e.kind() {
+        // #9078: an unknown file is its own refusal, not a generic one.
+        std::io::ErrorKind::NotFound => LspError::FileNotFound {
+            path: shown.clone(),
+        },
+        _ => LspError::Document {
+            path: shown.clone(),
+            reason: e.to_string(),
+        },
+    })?;
     if let Some(index_root) = index_root.and_then(|r| std::fs::canonicalize(r).ok()) {
         if path.starts_with(&index_root) {
             return Ok(index_root);
@@ -380,5 +454,5 @@ pub fn resolve_workspace_root(path: &Path, index_root: Option<&Path>) -> Result<
     path.ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)
-        .ok_or_else(|| doc("no workspace root: not under the index root or a git work tree".into()))
+        .ok_or(LspError::OutsideWorkspace { path: shown })
 }

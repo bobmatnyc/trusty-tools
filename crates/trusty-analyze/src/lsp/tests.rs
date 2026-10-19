@@ -626,8 +626,166 @@ fn workspace_root_prefers_the_index_root_then_the_git_toplevel() {
     std::fs::write(&loose, "").unwrap();
     assert!(matches!(
         resolve_workspace_root(&loose, None),
-        Err(LspError::Document { .. })
+        Err(LspError::OutsideWorkspace { .. })
     ));
+    // #9078: an unknown file is its own refusal.
+    assert!(matches!(
+        resolve_workspace_root(&repo.join("missing.rs"), None),
+        Err(LspError::FileNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn snapshot_moves_with_the_dirty_bytes_and_only_with_them() {
+    use super::snapshot::workspace_snapshot;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    // No commit yet: a typed refusal, never an unstamped answer.
+    git(&["init", "-q"]);
+    assert!(matches!(
+        workspace_snapshot(root).await,
+        Err(LspError::Snapshot { .. })
+    ));
+    std::fs::write(root.join("a.rs"), "one").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    let clean = workspace_snapshot(root).await.unwrap();
+    assert_eq!(workspace_snapshot(root).await.unwrap(), clean, "stable");
+    std::fs::write(root.join("a.rs"), "two").unwrap();
+    let dirty = workspace_snapshot(root).await.unwrap();
+    assert_ne!(dirty, clean);
+    assert_eq!(
+        dirty.split('+').next(),
+        clean.split('+').next(),
+        "same head"
+    );
+    // Same status line, different bytes: the digest still moves.
+    std::fs::write(root.join("a.rs"), "three").unwrap();
+    assert_ne!(workspace_snapshot(root).await.unwrap(), dirty);
+    std::fs::write(root.join("a.rs"), "one").unwrap();
+    assert_eq!(workspace_snapshot(root).await.unwrap(), clean, "restored");
+}
+
+/// A git work tree with one commit, for the snapshot budget tests.
+fn committed_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "seed"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    dir
+}
+
+/// #9078: a file inside a NEW untracked directory is part of the stamp; git's
+/// `normal` mode collapses the directory to one name and would miss the edit.
+#[tokio::test]
+async fn snapshot_sees_an_edit_inside_a_new_untracked_directory() {
+    use super::snapshot::workspace_snapshot;
+    let dir = committed_repo();
+    let newmod = dir.path().join("newmod");
+    std::fs::create_dir_all(&newmod).unwrap();
+    std::fs::write(newmod.join("mod.rs"), "pub fn a() {}\n").unwrap();
+    let before = workspace_snapshot(dir.path()).await.unwrap();
+    std::fs::write(newmod.join("mod.rs"), "pub fn b() {}\n").unwrap();
+    let after = workspace_snapshot(dir.path()).await.unwrap();
+    assert_ne!(
+        before, after,
+        "an edit in an untracked directory moved nothing"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_budget_bounds_files_bytes_and_time() {
+    use super::snapshot::{snapshot_within, SnapshotBudget};
+    let dir = committed_repo();
+    std::fs::write(dir.path().join("a.rs"), "four").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "five!").unwrap();
+    let roomy = SnapshotBudget::default();
+    assert!(snapshot_within(dir.path(), roomy).await.is_ok());
+    for (budget, says) in [
+        (
+            SnapshotBudget {
+                max_files: 1,
+                ..roomy
+            },
+            "file budget",
+        ),
+        (
+            SnapshotBudget {
+                max_bytes: 6,
+                ..roomy
+            },
+            "byte budget",
+        ),
+        (
+            SnapshotBudget {
+                deadline: Duration::from_nanos(1),
+                ..roomy
+            },
+            "time budget",
+        ),
+    ] {
+        match snapshot_within(dir.path(), budget).await {
+            Err(LspError::Snapshot { reason, .. }) => {
+                assert!(reason.contains(says), "{says}: {reason}")
+            }
+            other => panic!("{says}: an over-budget tree was stamped: {other:?}"),
+        }
+    }
+}
+
+/// #9078: an untracked file larger than the byte budget is never read whole;
+/// the snapshot fails closed instead.
+#[tokio::test]
+async fn snapshot_over_its_byte_budget_fails_closed() {
+    use super::snapshot::workspace_snapshot;
+    let dir = committed_repo();
+    // Sparse: 65 MiB on paper, nothing on disk.
+    let big = std::fs::File::create(dir.path().join("big.bin")).unwrap();
+    big.set_len(65 * 1024 * 1024).unwrap();
+    let res = workspace_snapshot(dir.path()).await;
+    match res {
+        Err(LspError::Snapshot { reason, .. }) => assert!(reason.contains("budget"), "{reason}"),
+        other => panic!("an over-budget tree was stamped: {other:?}"),
+    }
 }
 
 // ---- process group ---------------------------------------------------------

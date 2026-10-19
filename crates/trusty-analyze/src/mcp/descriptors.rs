@@ -262,6 +262,51 @@ pub fn base_tool_descriptors() -> Value {
                     "language": { "type": "string" }
                 }
             }
+        },
+        // #9078: DOC-72 §5's language-server tools. Off unless the daemon runs
+        // with ANALYZE_LSP=1; a refusal names its `kind` (lsp_disabled, …).
+        {
+            "name": "lsp_diagnostics",
+            "description": "Type-checked diagnostics from the language server (rust-analyzer), stamped with the document version and workspace snapshot they describe. Requires ANALYZE_LSP=1 on the daemon.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["scope", "path"],
+                "properties": {
+                    "scope":           { "type": "string", "enum": ["file", "workspace"] },
+                    "path":            { "type": "string", "description": "Absolute file path. scope=workspace lists what the server has published so far (complete: false); a directory is refused" },
+                    "version":         { "type": "integer", "description": "Refused as lsp_stale unless it is the file's current document version" },
+                    "parent_event_id": { "type": "string", "description": "Causal parent event id (UUID)" }
+                }
+            }
+        },
+        {
+            "name": "lsp_references",
+            "description": "Resolved reference sites of the symbol at a zero-based position, from the language server, stamped with document version and snapshot. Requires ANALYZE_LSP=1 on the daemon.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "line", "column"],
+                "properties": {
+                    "path":            { "type": "string", "description": "Absolute file path" },
+                    "line":            { "type": "integer", "description": "Zero-based line" },
+                    "column":          { "type": "integer", "description": "Zero-based column" },
+                    "version":         { "type": "integer", "description": "Refused as lsp_stale unless it is the file's current document version" },
+                    "parent_event_id": { "type": "string", "description": "Causal parent event id (UUID)" }
+                }
+            }
+        },
+        {
+            "name": "lsp_analysed_at",
+            "description": "Block until the language server has published diagnostics for a file at a document version, or the deadline passes: answers ready or timed_out with version_seen. Requires ANALYZE_LSP=1 on the daemon.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "version", "timeout_ms"],
+                "properties": {
+                    "path":            { "type": "string", "description": "Absolute file path" },
+                    "version":         { "type": "integer", "description": "Document version to wait for" },
+                    "timeout_ms":      { "type": "integer", "description": "Server-side deadline in ms, at most the MCP client timeout minus 30 s (240000 by default)" },
+                    "parent_event_id": { "type": "string", "description": "Causal parent event id (UUID)" }
+                }
+            }
         }
     ])
 }

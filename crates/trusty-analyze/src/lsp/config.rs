@@ -33,6 +33,17 @@ impl LspLanguage {
             Self::Rust => "rust",
         }
     }
+
+    /// The language that serves `path`, by extension; `None` when no server
+    /// is configured for it.
+    ///
+    /// Test: `bad_paths_are_typed_refusals`.
+    pub fn for_path(path: &std::path::Path) -> Option<Self> {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("rs") => Some(Self::Rust),
+            _ => None,
+        }
+    }
 }
 
 /// A server command line: program plus arguments, spawned with stdio piped.

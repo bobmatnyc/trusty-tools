@@ -8,7 +8,7 @@
 //!
 //! What: Thin coordinator module. Declares the submodules and re-exports the
 //! public surface so callers import from `service` rather than the internal
-//! submodules. The served surface is twenty JSON-RPC methods over a hardened
+//! submodules. The served surface is the JSON-RPC methods over a hardened
 //! Unix socket — see [`rpc::METHODS`], which is the list, rather than a copy of
 //! it here that would go stale.
 //!
