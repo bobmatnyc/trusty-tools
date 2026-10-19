@@ -26,15 +26,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::BufReader;
+use serde::Deserialize;
+use serde::de::IgnoredAny;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
+use trusty_common::uds::server::{RpcOutcome, RpcRouter, write_stream};
 use trusty_common::uds::{
-    UdsSecurityError, accept_sized, bind_singleton_hardened, ensure_peer_is_self,
+    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_singleton_hardened, encode_frame,
+    ensure_peer_is_self,
 };
 
 use crate::bus::EventBus;
 use crate::ingest::{self, LineRead, READ_IDLE_TIMEOUT};
+use crate::subscribe;
 
 /// Largest number of connections, producers and readers together, served at
 /// once.
@@ -63,6 +68,9 @@ pub(crate) const MAX_SUBSCRIBERS: usize = 64;
 /// hands recovery to launchd.
 /// Test: `super::serve_tests::the_accept_loop_gives_up_after_its_error_budget`.
 pub(crate) const ACCEPT_ERROR_BUDGET: u32 = 64;
+
+/// Longest pause between two accept attempts after a failure.
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 
 /// The serve loop's limits, grouped so a test can shrink any of them.
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +161,7 @@ impl Accept for UnixListener {
 /// What every connection task shares.
 pub(crate) struct Connection {
     bus: Arc<EventBus>,
+    router: RpcRouter,
     idle_timeout: Duration,
 }
 
@@ -160,6 +169,7 @@ impl Connection {
     /// The shared state for connections on `bus` under `limits`.
     pub(crate) fn new(bus: Arc<EventBus>, limits: ServeLimits) -> Self {
         Self {
+            router: subscribe::router(Arc::clone(&bus), limits.max_subscribers),
             bus,
             idle_timeout: limits.idle_timeout,
         }
@@ -206,9 +216,21 @@ pub(crate) async fn serve_with<A: Accept>(
                 stream
             }
             Err(source) => {
-                // PRE-FIX (console behaviour): log and keep accepting forever.
-                let _ = (budget, &mut failures);
-                tracing::warn!(error = %source, "event-bus accept failed");
+                // #9075: bounded, so a listener that only fails ends the
+                // process instead of spinning while connects queue unread.
+                failures += 1;
+                if failures >= budget {
+                    return Err(ServeError::AcceptFailed {
+                        consecutive: failures,
+                        source,
+                    });
+                }
+                tracing::warn!(error = %source, failures, budget, "event-bus accept failed");
+                tokio::select! {
+                    biased;
+                    () = &mut shutdown => return Ok(()),
+                    () = tokio::time::sleep(accept_backoff(failures)) => {}
+                }
                 continue;
             }
         };
@@ -225,6 +247,12 @@ pub(crate) async fn serve_with<A: Accept>(
             drop(permit);
         });
     }
+}
+
+/// The pause before the next accept after `failures` failures in a row:
+/// 20 ms doubling, capped at [`ACCEPT_BACKOFF_MAX`].
+fn accept_backoff(failures: u32) -> Duration {
+    Duration::from_millis(10u64 << failures.min(7)).min(ACCEPT_BACKOFF_MAX)
 }
 
 /// Serve one accepted connection: verify the peer, read the first line, and
@@ -253,6 +281,53 @@ pub(crate) async fn handle_connection(stream: UnixStream, shared: &Connection) {
             return;
         }
     }
-    // PRE-FIX (console behaviour): every connection is a producer.
-    ingest::ingest_lines(&mut reader, first, &shared.bus, shared.idle_timeout).await;
+    if is_rpc_request(&first) {
+        // A reader sends one request line, so nothing buffered past it is lost.
+        serve_rpc(reader.into_inner(), &first, &shared.router).await;
+    } else {
+        ingest::ingest_lines(&mut reader, first, &shared.bus, shared.idle_timeout).await;
+    }
+}
+
+/// The fields of a first line that decide its kind.
+#[derive(Deserialize)]
+struct FirstLine {
+    #[serde(default)]
+    jsonrpc: Option<IgnoredAny>,
+}
+
+/// Whether `line` is a JSON-RPC request rather than a `HarnessEvent` frame.
+///
+/// A line that is not JSON at all is not a request; ingest logs it as a
+/// malformed frame.
+fn is_rpc_request(line: &[u8]) -> bool {
+    serde_json::from_slice::<FirstLine>(line).is_ok_and(|first| first.jsonrpc.is_some())
+}
+
+/// Answer one JSON-RPC request: a single response frame, or a stream drained
+/// until its terminal frame or the reader's departure.
+async fn serve_rpc(mut stream: UnixStream, frame: &[u8], router: &RpcRouter) {
+    let written = match router.dispatch_streaming(frame).await {
+        RpcOutcome::Single(response) => match encode_frame(&response) {
+            Ok(bytes) => match stream.write_all(&bytes).await {
+                Ok(()) => stream.flush().await,
+                Err(e) => Err(e),
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "event-bus: could not encode a response");
+                return;
+            }
+        },
+        RpcOutcome::Stream { id, items } => write_stream(&mut stream, id, items, MAX_FRAME_BYTES)
+            .await
+            .map(|_| ()),
+        other => {
+            tracing::warn!(outcome = ?other, "event-bus: unsupported RPC outcome; closing");
+            return;
+        }
+    };
+    if let Err(e) = written {
+        // A reader that hangs up ends its stream this way; not a fault.
+        tracing::debug!(error = %e, "event-bus: RPC connection closed");
+    }
 }

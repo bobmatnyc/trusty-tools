@@ -30,6 +30,7 @@ pub mod daemon;
 mod ingest;
 mod log;
 mod serve;
+mod subscribe;
 
 #[cfg(test)]
 mod serve_tests;

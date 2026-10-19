@@ -364,8 +364,10 @@ impl EventBus {
     /// Test: `super::tests::ingest_after_close_is_refused_and_assigns_no_seq`,
     /// `tests/daemon_wire.rs::seq_continues_after_a_restart`.
     pub(crate) fn close(&self) -> Option<tokio::task::JoinHandle<()>> {
-        // PRE-FIX (console behaviour): console never closed its bus.
-        None
+        let mut ring = self.lock_ring();
+        ring.closed = true;
+        drop(ring);
+        self.log.as_ref().and_then(DurableLog::close)
     }
 
     /// Replay everything the durable log has persisted after `since_seq`, in

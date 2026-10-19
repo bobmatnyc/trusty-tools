@@ -108,40 +108,31 @@ pub async fn run(
     config: DaemonConfig,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), DaemonError> {
-    // PRE-FIX (console behaviour): a failed bind is a warning, and the
-    // process runs on without the bus.
-    let listener = match serve::bind(&config.socket).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not bind the event-bus socket");
-            shutdown.await;
-            return Ok(());
-        }
-    };
+    let listener = serve::bind(&config.socket).await?;
     let log_config = LogConfig {
         dir: config.log_dir.clone(),
         retain_days: config.retain_days,
     };
-    // PRE-FIX (console behaviour): a log that cannot open degrades to none.
     let (log, recovered) = match DurableLog::open(log_config).await {
-        Ok((log, recovered)) => (Some(log), recovered.next_seq),
+        Ok(opened) => opened,
         Err(e) => {
-            tracing::warn!(error = %e, "could not open the event log");
-            (None, 1)
+            // #9075: no log means `seq` would restart at 1; refuse to serve.
+            unlink_socket(&config.socket);
+            return Err(e.into());
         }
     };
     tracing::info!(
         socket = %config.socket.display(),
         log_dir = %config.log_dir.display(),
-        next_seq = recovered,
+        next_seq = recovered.next_seq,
         "trusty-events serving"
     );
     let bus = Arc::new(EventBus::with_log(
         EventBusConfig {
             capacity: config.ring_capacity,
         },
-        log,
-        recovered,
+        Some(log),
+        recovered.next_seq,
     ));
     let served = serve::serve_with(
         &listener,
