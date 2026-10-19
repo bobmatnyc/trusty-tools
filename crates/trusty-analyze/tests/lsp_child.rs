@@ -369,7 +369,7 @@ async fn daemon_idle_exit_kills_the_child() {
     std::fs::create_dir_all(&data).unwrap();
     let manager = Arc::new(fx.manager("grandchild"));
     let state = AnalyzerAppState::new(
-        TrustySearchClient::new(&data.join("absent-search.sock")),
+        TrustySearchClient::new(data.join("absent-search.sock")),
         FactStore::open(&data.join("facts.redb")).unwrap(),
         ScipOverlayStore::open(&data.join("scip.redb")).unwrap(),
     )
