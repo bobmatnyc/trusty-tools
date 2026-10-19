@@ -116,75 +116,42 @@ pub mod search_rpc;
 pub mod services;
 pub(crate) mod session_record_kind;
 pub mod sm_stdio;
-/// The hardened Unix-socket listener served alongside HTTP (#6288, ADR-0032).
+/// The hardened Unix-socket listener, the daemon's only one (#6288, ADR-0032).
 pub mod socket;
 pub(crate) mod spawn_command;
 pub mod state;
 pub mod tmux;
 pub mod watcher;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tracing::info;
 
 pub use state::DaemonState;
 
-/// Run the resident HTTP daemon: API, hook relay, dashboard feed.
+/// Run the daemon's background tasks and serve its RPC socket on an
+/// already-bound listener.
 ///
-/// Why: the HTTP boot sequence is shared by both the standalone `trusty-mpmd`
-/// shim and the unified `trusty-mpm daemon` subcommand; living in the library
-/// keeps a single source of truth.
-/// What: binds both listeners — the TCP port and the RPC socket (#6288) — then
-/// hands them to [`serve_http`].
-///
-/// # Errors
-///
-/// When either listener cannot be bound, or as [`serve_http`].
-///
-/// Test: `cargo run -p trusty-mpm-cli -- daemon` logs "trusty-mpm daemon
-/// starting" and `curl localhost:7880/health` returns `ok`; the dual-serve and
-/// drain behaviour is covered by `tests/daemon_dual_serve.rs`.
-pub async fn run_http(state: Arc<DaemonState>, addr: SocketAddr) -> anyhow::Result<()> {
-    info!("trusty-mpm daemon starting on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    // #6288: both binds complete before anything is served, for the same reason
-    // `run_daemon` publishes nothing until both succeed — a half-bound daemon
-    // must not exist.
-    let rpc = socket::bind(&socket::socket_path()?).await?;
-    serve_http(state, listener, rpc).await
-}
-
-/// Run the daemon's background tasks, HTTP API, and RPC socket on already-bound
-/// listeners.
-///
-/// Why both listeners arrive pre-bound: the CLI performs auto port selection
-/// (binding an ephemeral port when the configured one is busy) and needs the
-/// daemon to serve on that exact listener. The socket is pre-bound for a
-/// stronger reason (#6288) — `run_daemon` writes a lock file naming this
-/// daemon, and a lock must never name a daemon that then fails to start. Both
-/// binds happen in the caller, before anything is published, so a UDS bind
-/// failure aborts before the lock is written rather than leaving a record with
-/// no cleanup path.
+/// Why the socket arrives pre-bound (#6288): `run_daemon` writes a lock file
+/// naming this daemon, and a lock must never name a daemon that then fails to
+/// start. The bind happens in the caller, before anything is published, so a
+/// bind failure aborts before the lock is written. #6288 S3a: the socket is the
+/// daemon's only listener; the TCP port and the `run_http` entry point are gone
+/// (ADR-0032).
 ///
 /// What: discovers the trusty sidecars, spawns the file watcher and the
-/// dead-session reaper, then serves the axum router on `listener` AND the RPC
-/// router on `rpc` until both drain on SIGTERM/SIGINT.
+/// dead-session reaper, then serves the RPC router on `rpc` until SIGTERM/SIGINT.
 ///
 /// # Errors
 ///
-/// When the HTTP server exits with one.
+/// As [`serve_with_shutdown`]: when the socket's accept loop ends without a
+/// shutdown signal.
 ///
-/// Test: `serve_http_drains_both_listeners_on_shutdown` in
-/// `tests/daemon_dual_serve.rs` drives this body through
-/// [`serve_with_shutdown`]; the socket half in isolation is covered by
-/// `socket_tests.rs`.
-pub async fn serve_http(
-    state: Arc<DaemonState>,
-    listener: tokio::net::TcpListener,
-    rpc: socket::BoundSocket,
-) -> anyhow::Result<()> {
-    serve_with_shutdown(state, listener, rpc, trusty_common::shutdown_signal()).await
+/// Test: `serve_drains_the_socket_and_stops_sessions_on_shutdown` in
+/// `tests/daemon_serve_drain.rs` drives this body through
+/// [`serve_with_shutdown`].
+pub async fn serve(state: Arc<DaemonState>, rpc: socket::BoundSocket) -> anyhow::Result<()> {
+    serve_with_shutdown(state, rpc, trusty_common::shutdown_signal()).await
 }
 
 /// This daemon's host-state refusal, read against the root it actually runs on.
@@ -210,23 +177,26 @@ fn host_state_refusal(state: &DaemonState) -> Option<String> {
     crate::core::host_state_gate::host_state_access_for_root(state.framework_root()).skip_reason()
 }
 
-/// [`serve_http`]'s body, with the shutdown future supplied by the caller.
+/// [`serve`]'s body, with the shutdown future supplied by the caller.
 ///
-/// Why: [`serve_http`] waits on SIGTERM/SIGINT, which a test cannot deliver to
-/// its own process without affecting the whole test binary. Taking the future
-/// as a parameter is what lets `serve_http_drains_both_listeners_on_shutdown`
-/// drive the REAL drain — the same fan-out, the same unlink — rather than
-/// re-implementing the loop, which would pass whether or not the fan-out below
-/// exists.
+/// Why: [`serve`] waits on SIGTERM/SIGINT, which a test cannot deliver to its
+/// own process without affecting the whole test binary. Taking the future as a
+/// parameter is what lets `serve_drains_the_socket_and_stops_sessions_on_shutdown`
+/// drive the REAL drain — the same session stop, the same unlink — rather than
+/// re-implementing it.
 ///
 /// # Errors
 ///
-/// As [`serve_http`].
+/// When the socket's accept loop dies or returns while no shutdown was
+/// requested (#6288 S3a Fail-Open Check): the socket is the daemon's only
+/// listener, so a daemon whose loop is gone serves nothing and must exit rather
+/// than keep running. See [`socket::join_serve_task`].
 ///
-/// Test: `serve_http_drains_both_listeners_on_shutdown`.
+/// Test: `serve_drains_the_socket_and_stops_sessions_on_shutdown`;
+/// the error arm by `join_serve_task_errors_when_the_accept_loop_panics` and
+/// `join_serve_task_errors_when_the_loop_ends_without_a_shutdown`.
 pub async fn serve_with_shutdown(
     state: Arc<DaemonState>,
-    listener: tokio::net::TcpListener,
     rpc: socket::BoundSocket,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
@@ -262,8 +232,8 @@ pub async fn serve_with_shutdown(
     }
 
     // Create a cancellation token so background loops exit cleanly on shutdown.
-    // Each spawned loop receives a child token; the parent is cancelled inside
-    // `with_graceful_shutdown` AFTER axum drains in-flight requests.
+    // Each spawned loop receives a child token; the parent is cancelled after
+    // the socket drains its in-flight requests (#6288 S3a).
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Spawn the multi-session file watcher as a background task.
@@ -357,14 +327,6 @@ pub async fn serve_with_shutdown(
     // bound lives next to the sweep it governs.
     managed_routes::inproject_hygiene_sweep::spawn_if_enabled(Arc::clone(&state));
 
-    // #3304 + ADR-0011 loopback-only doctrine (#3330): the daemon binds
-    // loopback ONLY — there is no secondary (Tailscale) listener anymore, so
-    // the router-wide guard always trusts just the loopback default.
-    // Non-loopback ingress is exclusively trusty-console's job.
-    let app = api::origin_guard::guard_router(
-        api::router(Arc::clone(&state)),
-        trusty_common::server::SelfOrigins::default(),
-    );
     // Issue #2332: the startup banner carries the build version + PID so a
     // `~/Library/Logs/trusty-mpm/stderr.log` timeline can be correlated
     // against `cargo install` / restart events without guessing which
@@ -374,24 +336,9 @@ pub async fn serve_with_shutdown(
         env!("CARGO_PKG_VERSION"),
         std::process::id()
     );
-    // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
-    // to handlers via `ConnectInfo` — the loopback-only `POST /rpc` gate (#1221)
-    // depends on it. Without connect-info the `ConnectInfo` extractor would 500.
-    //
-    // `with_graceful_shutdown` lets the daemon reap every live tmux session it
-    // owns before the process exits (#1455). Without it the `reap_loop` /
-    // `orphan_gc_loop` tasks are simply abandoned on SIGTERM and the sessions
-    // they track leak. The shutdown future: waits for signal, cancels all
-    // background actor loops (so they exit cleanly rather than being dropped
-    // mid-sweep), then walks BOTH registries and kills each live session,
-    // fail-open per session. Also calls `manager.shutdown()` to graceful-stop
-    // all live managed sessions via SIGTERM-before-kill.
-    //
-    // #6288: `shutdown` is awaited ONCE, by the task below, and fanned out to
-    // both listeners through a token. Awaiting a signal separately in each would
-    // work on SIGTERM and fail on Ctrl-C, where `tokio::signal` delivers to
-    // whichever waiter is registered — one listener would drain and the other
-    // would keep accepting.
+
+    // #6288: `shutdown` is awaited ONCE, by the task below, and turned into a
+    // token the serve task and the join below both read.
     let drain = tokio_util::sync::CancellationToken::new();
     let signal_watcher = drain.clone();
     tokio::spawn(async move {
@@ -400,53 +347,37 @@ pub async fn serve_with_shutdown(
     });
 
     let rpc_drain = drain.clone();
-    // #6288 slice 2: the socket serves the SAME state the axum router was built
-    // with, so the two transports are two doors onto one daemon, not two.
     let rpc_state = Arc::clone(&state);
     let rpc_task = tokio::spawn(async move {
         socket::serve_until_shutdown(rpc, rpc_state, rpc_drain.cancelled_owned()).await;
     });
+    // #6288 S3a: the socket is the only listener, so its loop ending is the
+    // daemon ending. An end nobody asked for is an error, never a warning.
+    let served = socket::join_serve_task(rpc_task, &drain).await;
 
-    let http_drain = drain.clone();
-    let reaper_state = Arc::clone(&state);
-    let http_result = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        http_drain.cancelled_owned().await;
-        // Signal all background loops to stop before we walk the session list.
-        cancel.cancel();
-        // Graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
-        // This is the single authority for SM-tracked sessions, and #9101 it
-        // stops only the ones it proves it owns. The legacy-registry pass
-        // that follows (`reap_all_live_sessions`) kills nothing: a legacy
-        // entry is a bare tmux name, which proves no ownership.
-        let mgr = reaper_state.session_manager().await;
-        mgr.shutdown().await;
-        // Report the legacy-registry sessions, left running.
-        reap_all_live_sessions(reaper_state).await;
-    })
-    .await;
-
-    // #6288: cancel unconditionally, so the socket is unlinked even when axum
-    // exits for a reason that was never a shutdown signal. Cancelling a token
-    // the signal watcher already cancelled is a no-op, so the ordinary drain is
-    // unaffected. The `?` waits until AFTER the join for the same reason —
-    // returning early would leave a socket file no successor bound.
-    drain.cancel();
-    if let Err(e) = rpc_task.await {
-        tracing::warn!(error = %e, "the rpc serve task did not exit cleanly");
+    // Signal all background loops to stop before we walk the session list.
+    cancel.cancel();
+    if let Err(e) = served {
+        // #6288 S3a: a dead accept loop is a crash, not a stop; the managed
+        // sessions are left running as a SIGKILLed daemon leaves them.
+        tracing::error!("trusty-mpm socket stopped serving: {e:#}");
+        return Err(e);
     }
-    http_result?;
+    // #1455 (moved out of axum's `with_graceful_shutdown` by #6288 S3a):
+    // graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
+    // This is the single authority for SM-tracked sessions, and #9101 it stops
+    // only the ones it proves it owns. The legacy-registry pass that follows
+    // (`reap_all_live_sessions`) kills nothing: a legacy entry is a bare tmux
+    // name, which proves no ownership.
+    let mgr = state.session_manager().await;
+    mgr.shutdown().await;
+    reap_all_live_sessions(state).await;
     Ok(())
 }
 
 // #6288: the private `shutdown_signal` that used to live here was a
-// line-for-line copy of `trusty_common::shutdown_signal` — same SIGTERM stream,
-// same Ctrl-C race, same fallback when the handler fails to register. The
-// signal is now awaited once, through the shared entry point, and fanned out to
-// both listeners; see `serve_http`'s drain token.
+// line-for-line copy of `trusty_common::shutdown_signal`. The signal is awaited
+// once, through the shared entry point; see `serve_with_shutdown`'s drain token.
 
 /// Report the LEGACY DaemonState registry's sessions on shutdown, killing none.
 ///

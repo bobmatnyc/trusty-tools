@@ -82,8 +82,7 @@ commands:
     flags:
       - name: addr
         type_hint: ADDR
-        default: 127.0.0.1:7880
-        description: Address the daemon HTTP API binds to
+        description: DEPRECATED and ignored — the daemon binds no TCP port and serves its Unix socket only (#6288); removed in 2.0.0
       - name: tailscale
         description: DEPRECATED — daemon binds loopback only (ADR-0011, #3330); use trusty-console --tailscale instead
       - name: mcp
