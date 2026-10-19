@@ -420,7 +420,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/api-design-patterns.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/api-documentation.md"
@@ -460,11 +460,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/env-manager.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/git-workflow.md"
-version = "1.0.1"
+version = "1.1.0"
 
 [[member]]
 path = "skills/internal-comms.md"
@@ -476,7 +476,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/model-context-builder.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/requesting-code-review.md"
@@ -552,7 +552,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-cli-operations.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/tm-delegation-patterns.md"
@@ -644,7 +644,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/webapp-testing.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/writing-plans.md"
