@@ -133,6 +133,13 @@ impl Conn {
         self.item(&SubscribeItem::Heartbeat { head }).await;
     }
 
+    /// A heartbeat, or `false` once the client has closed the connection.
+    async fn try_heartbeat(&mut self) -> bool {
+        let value = serde_json::to_value(SubscribeItem::Heartbeat { head: 0 }).expect("encode");
+        let bytes = encode_frame(&RpcStreamFrame::item(json!(1), value)).expect("encode a frame");
+        self.stream.write_all(&bytes).await.is_ok() && self.stream.flush().await.is_ok()
+    }
+
     fn since(&self) -> (Option<u64>, Option<EventId>) {
         (self.request.params.since_seq, self.request.params.since_id)
     }
@@ -751,13 +758,16 @@ async fn heartbeats_keep_a_quiet_subscription_connected() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut stub = stub_in(tmp.path());
     let mut config = fast(&stub.socket);
-    config.heartbeat = Duration::from_millis(50);
+    // #10071 review: a 500 ms bound, so a current-thread runtime's jitter
+    // against the 25 ms beats below cannot read as a hang.
+    config.heartbeat = Duration::from_millis(200);
     let bound = client::hung_bound(config.heartbeat);
     let (relay, _client) = run(config);
 
     let mut conn = stub.next_conn().await;
+    // 2.5 s of beats: longer than the four bounds watched below.
     let beats = tokio::spawn(async move {
-        for _ in 0..40 {
+        for _ in 0..100 {
             conn.heartbeat(0).await;
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -863,4 +873,30 @@ async fn a_bus_that_refuses_heartbeat_ms_is_refused_not_resynced() {
         "the cursor is kept"
     );
     assert_eq!(again.request.params.heartbeat_ms, Some(5_000));
+}
+
+/// #10071 review: frames arriving faster than the liveness interval must not
+/// starve the socket check. Heartbeats every 20 ms against `fast`'s 50 ms
+/// interval; the removed socket file is still reported as `socket_lost`.
+#[tokio::test]
+async fn a_socket_that_vanishes_under_a_beating_subscription_is_detected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let (relay, _client) = run(fast(&stub.socket));
+
+    let mut conn = stub.next_conn().await;
+    let beats = tokio::spawn(async move {
+        while conn.try_heartbeat().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
+    std::fs::remove_file(&stub.socket).expect("remove the socket file");
+
+    let status = status_until(&relay, "socket_lost", |s| {
+        s.last_error == Some(FailureKind::SocketLost)
+    })
+    .await;
+    assert_eq!(status.state, BusState::Reconnecting, "{status:?}");
+    beats.abort();
 }

@@ -221,7 +221,8 @@ async fn heartbeats_reach_only_the_subscription_that_asked() {
     loop {
         match next_item(&mut beating).await {
             SubscribeItem::Heartbeat { head } => {
-                assert_eq!(head, 0, "the heartbeat before the event");
+                // A beat due just after the push may already carry seq 1.
+                assert!(head <= 1, "a heartbeat before the event: head {head}");
                 beats += 1;
             }
             SubscribeItem::Event { event, .. } => {
