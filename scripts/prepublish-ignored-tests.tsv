@@ -200,9 +200,9 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # baseline. Architect ruling 12:58Z (option A); #9663 adds the three above.
 #
 # #9078 (L2) adds one: trusty-analyze `real_rust_analyzer_answers_references`
-# (tests/lsp_rust_analyzer.rs), `#[ignore = "needs rust-analyzer on PATH; CI
-# has no language server (DOC-72 §12)"]`. The runner image ships no
-# rust-analyzer component, so a row would fail at spawn. 135 + 1 -> 136.
+# (tests/lsp_rust_analyzer.rs), `#[ignore = "needs a rust-analyzer binary; CI
+# runners have none"]`. The runner image ships no rust-analyzer component, so
+# a row would fail at spawn. 135 + 1 -> 136 (Architect-approved).
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
 # UNSELECTED-BASELINE: 136

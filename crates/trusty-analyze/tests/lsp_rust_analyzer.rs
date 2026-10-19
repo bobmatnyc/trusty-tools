@@ -17,7 +17,7 @@ use serde_json::json;
 use trusty_analyze::lsp::{LspConfig, LspError, LspLanguage, LspManager};
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs rust-analyzer on PATH; CI has no language server (DOC-72 §12)"]
+#[ignore = "needs a rust-analyzer binary; CI runners have none"]
 async fn real_rust_analyzer_answers_references() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("ws");
