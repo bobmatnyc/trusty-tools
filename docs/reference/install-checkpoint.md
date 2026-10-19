@@ -41,7 +41,15 @@ applies. Keep a notes file for the run:
 cd "$HOME"
 CKPT="$HOME/install-checkpoint-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$CKPT"
+SOCK="$HOME/Library/Application Support/trusty-mpm/trusty-mpm.sock"
+health() { printf '{"jsonrpc":"2.0","id":1,"method":"mpm.health","params":{}}\n' | nc -U "$SOCK" | jq '.result'; }
 ```
+
+`SOCK` is the daemon's Unix socket on macOS (`<data dir>/trusty-mpm/trusty-mpm.sock`,
+or `$TRUSTY_DATA_DIR_OVERRIDE/trusty-mpm/trusty-mpm.sock` when that is set).
+`health` sends one `mpm.health` frame to it and prints the same fields
+`GET /health` returned. The daemon binds no TCP port since #6288 S3a, so there
+is no `127.0.0.1:7880` to `curl`.
 
 ## 1. Pick and verify the rev
 
@@ -65,8 +73,7 @@ git -C <main-checkout> merge-base --is-ancestor <merge-commit> <rev> && echo con
 ```bash
 tm --version                                    | tee    "$CKPT/old-tm-version.txt"
 cargo install --list | grep -A2 '^trusty-mpm'   | tee    "$CKPT/old-cargo-install.txt"
-curl -s http://127.0.0.1:7880/health | jq '{version,build_id,pid,supervised}' \
-                                                | tee    "$CKPT/old-health.json"
+health | jq '{version,build_id,pid,supervised}' | tee    "$CKPT/old-health.json"
 tm status 2>&1 | head -3                        | tee    "$CKPT/old-status.txt"
 launchctl print gui/$(id -u)/com.trusty.mpm | grep -E 'state|pid' \
                                                 | tee    "$CKPT/old-launchd.txt"
@@ -78,11 +85,11 @@ cp ~/.trusty-mpm/session-manager/sessions.json "$CKPT/sessions-before.json"
 - The old rev is in the `cargo install --list` line, for example
   `trusty-mpm v1.7.10 (https://github.com/bobmatnyc/trusty-tools?rev=<sha>#<sha8>)`.
   A registry install shows no URL. This line is your rollback target.
-- `/health` carries `version`, `build_id` and `pid`. The `curl` reads the
-  daemon's TCP bind on 7880, which only this check still uses: every `tm`
-  client reaches the daemon over its unix socket, and `TRUSTY_MPM_URL` no
-  longer selects a daemon (#6288). The bind is retired by #6288 PR 2. `tm
-  status` prints `daemon: reachable (pid N, version V)` over the socket.
+- `mpm.health` carries `version`, `build_id` and `pid`. It reads the daemon's
+  Unix socket, which an old daemon serves too (since #6288 slice 2), so the
+  same command works before and after the install. `tm status` prints
+  `daemon: reachable (pid N, version V)` over the same socket.
+  `TRUSTY_MPM_URL` no longer selects a daemon (#6288).
 - The `cp` copies a data file. The ban on `cp` applies to binaries.
 
 ## 3. Pre-install checkpoint: pause every live session
@@ -172,10 +179,15 @@ Do not use `kickstart -k`: it SIGKILLs the daemon and skips the session drain.
 
 ```bash
 launchctl print gui/$(id -u)/com.trusty.mpm | grep -E 'state|pid'   # launchd's pid
-lsof -nP -iTCP:7880 -sTCP:LISTEN                                    # who holds the port
+lsof -nP -U | grep -F "$(dirname "$SOCK")/" | awk '{print $2}' | sort -u   # who holds the socket
 ```
 
-If the two pids differ, an orphan holds the port. Stop here and apply
+The `lsof` filters on the socket's directory, not its file name: the daemon
+binds a temporary name in that directory and renames it, and `lsof` reports
+the bound name (for example `.fn2gphtf2lm0`). A client connection shows no
+path, so every pid printed is a listener.
+
+If a pid other than launchd's appears, an orphan holds the socket. Stop here and apply
 [the orphan-listener rule](release-workflow.md#one-time-fda-grant-after-first-signed-install)
 before you continue.
 
@@ -186,14 +198,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist
 
 ## 6. Health checks and new pid and version
 
-A 200 from `/health` alone proves nothing: a client racing the restart can
+An `ok` from `mpm.health` alone proves nothing: a client racing the restart can
 spawn an orphan daemon
 ([release-workflow.md](release-workflow.md#one-time-fda-grant-after-first-signed-install)).
 Check launchd's own view too.
 
 ```bash
-curl -s http://127.0.0.1:7880/health | jq '{status,version,build_id,pid,supervised,degraded}' \
-  | tee "$CKPT/new-health.json"
+health | jq '{status,version,build_id,pid,supervised,degraded}' | tee "$CKPT/new-health.json"
 launchctl print gui/$(id -u)/com.trusty.mpm | grep -E 'state|pid' | tee "$CKPT/new-launchd.txt"
 tm status 2>&1 | head -3
 tm doctor
