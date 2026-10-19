@@ -647,6 +647,16 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     // regardless of the `#[cfg(all(unix, feature = "uds"))]` gate on its `mod`
     // declaration, so this scan covers it even in a build with `uds` off.
     ("control_bus/push_client.rs", include_str!("push_client.rs")),
+    // #9075: the subscribe contract is held to the same types-only boundary.
+    ("control_bus/subscribe.rs", include_str!("subscribe.rs")),
+    (
+        "control_bus/subscribe_frame.rs",
+        include_str!("subscribe_frame.rs"),
+    ),
+    (
+        "control_bus/subscribe_tests.rs",
+        include_str!("subscribe_tests.rs"),
+    ),
     ("control_bus/tests.rs", include_str!("tests.rs")),
 ];
 
