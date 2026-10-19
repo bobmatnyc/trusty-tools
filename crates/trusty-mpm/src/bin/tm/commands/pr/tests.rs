@@ -349,6 +349,17 @@ fn body_reports_empty_section() {
 /// failed `tm pr open` and burned a turn on `--help` to find the headings).
 #[test]
 fn body_headings_are_named_verbatim_in_the_assets() {
+    // #10055: tm-workflow's entry plus its references, so a skill split moves
+    // the headings without a Rust change.
+    let content = crate::commands::install::test_content_ref();
+    let workflow: String = content
+        .skills()
+        .filter(|(rel, _)| {
+            *rel == "skills/tm-workflow.md" || rel.starts_with("skills/tm-workflow/references/")
+        })
+        .map(|(_, body)| body)
+        .collect::<Vec<_>>()
+        .join("\n");
     for f in FIELDS {
         let heading = format!("## {}", f.heading());
         assert!(
@@ -359,7 +370,7 @@ fn body_headings_are_named_verbatim_in_the_assets() {
             "version-control.md is missing {heading:?}"
         );
         assert!(
-            crate::commands::install::test_skill("skills/tm-workflow.md").contains(&heading),
+            workflow.contains(&heading),
             "tm-workflow.md is missing {heading:?}"
         );
     }

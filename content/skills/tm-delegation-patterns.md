@@ -3,7 +3,7 @@ name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
 metadata:
-  version: "1.1.1"
+  version: "1.2.0"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -17,63 +17,23 @@ for which shape of work. Every agent named below is a real, currently
 bundled trusty-mpm agent (verified against `bundle_all.rs`'s `ALL` table);
 do not invent agent names not in this list.
 
-## Full-Stack Feature
+## Where Each Task Lives
 
-**Chain**: Research → Code Analysis → (`react-engineer` / `web-ui-engineer`) +
-language Engineer → Ops (deploy) → Ops (verify) → `web-qa` + `api-qa` →
-Documentation.
+This file holds the rules every delegation needs. Everything else sits in one
+file per task under `references/`, beside this file. Read the file your task
+needs, and only that file. A pointer elsewhere that names a section of
+`tm-delegation-patterns` resolves here: find the section name in the middle
+column.
 
-**Example**: "Add a user dashboard with analytics" → Research investigates
-frameworks → Code Analysis reviews the approach → `react-engineer` builds
-the UI, `rust-engineer`/`python-engineer` (per stack) builds the analytics
-endpoint → `local-ops` deploys to staging and verifies (health check, logs)
-→ `api-qa` tests the endpoints, `web-qa` tests the dashboard → Documentation
-updates the API docs and user guide.
-
-## API-Only Development
-
-**Chain**: Research → Code Analysis → language Engineer → Ops (deploy, if
-needed) → Ops (verify) → `api-qa` → Documentation.
-
-## Web UI Only
-
-**Chain**: Research → Code Analysis → `react-engineer` / `svelte-engineer` /
-`web-ui-engineer` (per stack) → Ops (deploy) → Ops (verify) → `web-qa` →
-Documentation.
-
-## Local Development / Infra
-
-**Chain**: Research → Code Analysis → Engineer → `local-ops` (start/PM2/Docker)
-→ `local-ops` (verify: logs + health check) → `qa` → Documentation.
-
-**A brief that changes local Terraform names who applies it (#8660).** The
-state and `terraform.tfvars` of a local root live only in the main checkout,
-and pm-guard refuses any command that names them. The engineer writes the
-config in its worktree; the apply runs from the main checkout, by the operator
-or by `local-ops` dispatched there, where `terraform apply` reads
-`./terraform.tfvars` itself. A worktree agent may run
-`terraform plan|apply -state=<main checkout state>` and names no vars file.
-
-## Bug Fix
-
-**Chain**: Research (reproduce/investigate) → Code Analysis → Engineer (fix)
-→ Ops (deploy, if applicable) → Ops (verify) → `web-qa`/`api-qa` (regression)
-→ **Version Control** (PR).
-
-## Platform-Specific Deploy
-
-| Platform | Ops Agent |
-|---|---|
-| Vercel | `vercel-ops` |
-| Google Cloud | `gcp-ops` |
-| Local (PM2/Docker/localhost) | `local-ops` |
-
-`vercel-ops` and `gcp-ops` are platform-gated, so a project without the
-matching marker never receives them. Which agents exist at all is declared in
-`framework-manifest.toml` (rendered in `tm-capabilities`'s
-`references/agents.md`) — check there, or the project's generated roster,
-before routing. When no dedicated ops agent exists for a platform, use
-`local-ops` or tell the user.
+| Task | Sections | File |
+|---|---|---|
+| Map a shape of work to an agent chain; pick the deploy agent for a platform | "Full-Stack Feature", "API-Only Development", "Web UI Only", "Local Development / Infra", "Bug Fix", "Platform-Specific Deploy" | [references/workflow-chains.md](references/workflow-chains.md) |
+| Size a task as one delegation or several; collapse split delegations; batch bug fixes | "Task Complexity: One Delegation or Several", "Batching: the Anti-Patterns" | [references/sizing-and-batching.md](references/sizing-and-batching.md) |
+| Keep the mechanism out of a brief; relay a reviewer's fix; write criteria a wrong implementation fails; surface agent suggestions | "What a Brief Carries — and What It Must Not", "Acceptance Criteria a Wrong Implementation Fails", "Architecture Suggestions From Agents", "Delegation Best Practices" | [references/briefs-and-criteria.md](references/briefs-and-criteria.md) |
+| Choose the model for a dispatch; set per-agent defaults | "Per-Agent Model Overrides and the Cost Model" | [references/models.md](references/models.md) |
+| Decide whether a change earns a `code-critic` round; brief the critic | "code-critic Dispatch Standard" | [references/code-critic.md](references/code-critic.md) |
+| Declare `isolation: "worktree"`; salvage a dead agent's tree; write a claim drawer; declare file ownership for concurrent dispatches | "Worktree Isolation on a Dispatch", "Salvaging a Dead Agent's Worktree", "Cross-Workstream Coordination (memory claim drawers, DOC-53)", "Concurrent Dispatch: Declare File Ownership" | [references/worktree-isolation.md](references/worktree-isolation.md) |
+| Check what the PM may do directly; decide when the PM may stop and ask | "The PM Allowlist, in Full", "Autonomous Execution — When the PM May Stop and Ask" | [references/pm-allowlist-and-autonomy.md](references/pm-allowlist-and-autonomy.md) |
 
 ## The Full Routing Table
 
@@ -91,7 +51,7 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `research` | codebase understanding, investigating approaches, analyzing files, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet | Grep, Glob, multi-file Read, WebSearch |
 | `engineer` (or `rust-engineer`, `python-engineer`, `typescript-engineer`, … per language) | code changes, implementation, refactor | opus | Prefer the language-specific engineer whenever one exists |
 | `code-analyzer` | reviewing a proposed solution BEFORE implementation; static analysis, correctness, architectural health | sonnet | The phase-2 "Code Analysis" agent; verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
-| `code-critic` | adversarial review of code that already exists and passes its tests; APPROVE/WARN/BLOCK verdict | opus | Dispatch-gated by test-ladder rung — see "code-critic Dispatch Standard" below. NOT design critique, NOT every engineer dispatch |
+| `code-critic` | adversarial review of code that already exists and passes its tests; APPROVE/WARN/BLOCK verdict | opus | Dispatch-gated by test-ladder rung — see "code-critic Dispatch Standard" in `references/code-critic.md`. NOT design critique, NOT every engineer dispatch |
 | `local-ops` | localhost, PM2, npm, docker / docker-compose, ports, processes; every `make` and `mise run` target; build, dist, clean, install, setup; version, bump, release, publish, deploy (`pyproject.toml`, `package.json`) | sonnet | Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
 | `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
 | `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
@@ -125,47 +85,6 @@ in the **Deploys When** column of `tm-capabilities`'s `references/agents.md` —
 read it there rather than from a prose copy. The launch prompt's **Detected
 Project Stack** section already states this project's answer. When the stack is
 unknown, Research is mandatory (never default to a guess).
-
-## Task Complexity: One Delegation or Several
-
-Size the task before choosing a shape. The signals:
-
-| Signal | Simple (1 delegation) | Complex (multi-phase) |
-|--------|----------------------|----------------------|
-| Scope | <200 lines, 1 file type | >500 lines, multi-service |
-| External deps | None or 1 framework | DB + APIs + Docker + scheduler |
-| Endpoints | ≤6 | >6 with auth, roles, events |
-| Time estimate | <30 min | >1 hour |
-
-**Simple → ONE engineer delegation carrying the full scope:** "Build this, write
-tests, create README, run linters, verify all tests pass, commit." The engineer
-handles everything; the Research, Code Analysis, QA and Documentation phases are
-skipped under the skip conditions in the instruction package's phase table.
-
-**Complex → the normal multi-phase workflow.**
-
-## Batching: the Anti-Patterns
-
-The instruction package states the target (5-7 delegations per session, ~95K of
-context reloaded by each). These are the specific splits to collapse:
-
-| Anti-pattern | Fix |
-|---|---|
-| Research then implement (2 delegations) | `engineer` can research + implement (1) |
-| Implement then fix lint (2) | Include "fix lint" in the impl task (1) |
-| Implement then commit (2) | Include "commit when done" in the task (1) |
-| Sequential fixes to the same agent (N) | One delegation with full scope (1) |
-| A separate docs agent for a per-task README | Include the README in the engineer delegation |
-| One PR per issue for same-module bugs | Group by crate: one dispatch/PR per crate cluster (≤~5 issues), one worktree, one gate run; each issue keeps its own regression test and `Refs #N` line |
-
-Bug fixes and small changes are grouped by crate into one engineer dispatch
-per crate cluster, up to about five issues per cluster, with one worktree and
-one gate run after every fix in the batch lands. A per-issue dispatch is the
-exception: reserve it for issues that collide on the same file, or for a
-High-risk fix that needs its own `code-critic` round. Each fix inside a batch
-still carries its own regression test and `Refs #N` line. A fix that turns
-out to need a different crate, or a cross-crate contract change, is reported
-back rather than absorbed into the batch (owner ruling 2026-09-16).
 
 ## Retry Protocol (delegated work came back failing)
 
@@ -240,236 +159,6 @@ Inline per command, because an agent's shell environment does not persist
 between Bash calls — a single `export` at the top of the task protects
 nothing. The rule itself lives in the `rust-delivery-workflow` skill; the
 brief carries the number, which is machine-local.
-
-## What a Brief Carries — and What It Must Not
-
-The resident rule is in the instruction package: a brief carries findings,
-evidence and constraints, not the implementation mechanism. This is the evidence
-behind it.
-
-In one session on 2026-08-15 a PM prescribed mechanisms in five briefs while
-reasoning from DESCRIPTIONS of code rather than the code. An agent that opened
-the source corrected it every time, and every correction was right. Read the
-table as a dated record of five wrong prescriptions, never as a statement of how
-any of this code behaves today.
-
-| # | What the PM prescribed | Why the agent was right to overrule it |
-|---|---|---|
-| 1 | Relayed a critic's fix verbatim — "POST the rewritten input to the shared-tree-dispatch route, or upsert via `observe`" | Both were no-ops on that code. The route re-derived eligibility for itself, which an isolated input made false, and the observe path returned early on an id it already held |
-| 2 | "Classify every commit segment" to close a compound-command bypass | Insufficient. `git add -A && git commit -m docs` has exactly one commit segment and the same hole. The engineer's rule — every segment must be a `cd` or THE one commit — was strictly stronger |
-| 3 | "Both arrival orders converge" as the acceptance criterion for a new mutex | The test passed sequentially on one thread. Deleting the mutex left it passing |
-| 4 | Told an agent a hygiene routine did a hard reset | The PM had read a comment that no longer matched its function. The agent opened the file and found a different operation |
-| 5 | Detect a scratch daemon by comparing its data dir to the default | Cannot work. A scratch daemon used the DEFAULT FORMULA (`$HOME/.trusty-mpm`); only the `$HOME` it resolved against changed |
-
-Cases 1, 2 and 5 were not answerable from any description — the answer was in
-control flow. Case 4 is the argument against copying code behaviour into a brief
-at all: the PM was wrong BECAUSE it trusted a written description.
-
-The same five briefs were valuable everywhere they carried findings, evidence
-and constraints — an ADR's own "it would matter if the grant were ever made
-conditional", a prior false-deny incident, the Fail-Open Check. Those helped
-every time. Only the prescriptions cost rounds.
-
-**Relaying a reviewer's fix.** A `code-analyzer` or `code-critic` finding names a
-real problem and usually names a remedy too. Relay the problem as a finding to
-close; relay the remedy as a suggestion to VERIFY. Case 1 was a critic reasoning
-from source and still wrong about the fix.
-
-## Acceptance Criteria a Wrong Implementation Fails
-
-Before stating a criterion, ask: what implementation would pass this and still be
-wrong? Name one and the criterion does not test what you think it tests.
-
-Case 3 is the worked example. "Both arrival orders converge" is satisfied by two
-sequential calls, so it could not detect the missing mutex it existed to prove.
-The criterion that worked: two threads, same `tool_use_id`, N rounds, exactly one
-record each round.
-
-| Weak criterion | What passes it while wrong | Stronger |
-|---|---|---|
-| "Both arrival orders converge" | Sequential calls on one thread, no mutex | Two threads, same key, N rounds, exactly one record per round |
-| "The bypass is closed" | A guard that closes only the command you named | Name the class: every segment must be a `cd` or THE one commit |
-| "Tests pass" | A change that added no test able to fail | One regression test that provably FAILED against the pre-fix commit |
-| "23 criteria pass" on a `count` gate flipping 0 → 1 | Nobody reads the first plan's computed attribute values; a duplicated resource name ships because the count was never 1 before | Read the first plan's computed attribute values — names in particular — for any first-time-created resource, not only the count (#8130) |
-
-Row three is the Fail-Open Check the instruction package already puts in
-`code-analyzer` / `code-critic` briefs, applied to your own criteria.
-
-## Per-Agent Model Overrides and the Cost Model
-
-This is the default routing (moved here from the instruction package by #7423,
-which keeps the one-line mapping). An explicit `model=` in an Agent call always
-wins; omitting it is not a fallback to opus — `resolve_agent_model`
-(`core/config.rs`) ranks a per-agent `~/.trusty-mpm/config.toml` entry next,
-then the agent's own frontmatter default (what the roster's `Model:` line
-reports), then the built-in `sonnet` fallback.
-
-| Task Type | Model to pass | Examples |
-|-----------|--------------|---------|
-| Simple/routine | `model: "haiku"` | Commit, format, read config, docs, lint |
-| General work | `model: "sonnet"` | Research, ops, QA, analysis, general tasks |
-| Coding/engineering | `model: "opus"` | Implement, refactor, debug, test writing |
-| Complex planning | Route to `research` (`model: "sonnet"`) | Architecture, system design, RFC drafting, roadmaps, trade-off analysis |
-
-Standing per-agent defaults are
-set in `~/.trusty-mpm/config.toml`, taking priority over built-in defaults and
-agent frontmatter but not over an explicit `model=`:
-
-```toml
-[models.agents]
-engineer = "opus"
-research = "sonnet"
-```
-
-The tier aliases `haiku` / `sonnet` / `opus` are resolved to concrete models at
-dispatch by `expand_model_alias`, reading `[models.tiers]` from that same file
-and falling back to the built-in defaults in `core/config.rs`. Configuration is
-the source of truth for what each tier means — never a model id memorized from a
-prompt (#4594).
-
-Cost rises steeply haiku → sonnet → opus. Coding tasks pay for opus because
-quality dominates there; routing everything else down-tier is where the savings
-come from. Read current per-token pricing from the provider rather than a ratio
-pinned in a prompt.
-
-## code-critic Dispatch Standard
-
-The critic tier keys off the project's test-ladder rung (this repo's Rust Test
-Ladder in `CLAUDE.md`) — never a parallel risk axis invented for the decision.
-
-| Rung | Change class | Dispatch code-critic? |
-|---|---|---|
-| 1–2 | Docs, comments, changelog, test-only stabilization | Never |
-| 3 | Localized behavior inside one crate | No — the PM reviews the diff |
-| 4 | Cross-crate, public API, shared library | Only if a contract changes. Mechanical propagation does not qualify |
-| 5–6 | Cross-crate contract, persistence, security, process lifecycle, release tooling, UI/API surface | Required |
-
-Enum changes and spelling fixes are rung 1–3. No critic.
-
-**Escalate to required regardless of rung:** the change can start, refuse, or
-gate a session; it touches a trust boundary or an injection defense; or it
-rewrites history or force-pushes.
-
-**A critic round counts against the round limit.** After the first review, a PR
-gets at most one fix round and one delta review. A blocking finding left after
-that goes to the Architect, never to another critic round. Only findings in the
-fix bar's blocking classes earn the fix round (`tm-workflow`, "Completion
-Standard").
-
-**A code-critic brief states the PR and the gates (#8584).** It carries
-`PR: <n>|none`; with `none` the critic posts nothing and looks up no PR. It also
-says the gates are read-only for the critic: it cites the engineer's reported
-gate output and does not re-run one.
-
-**Not a reason to dispatch:** a design question (send it to the owner, or the PM
-decides), the PM wanting a second opinion, or confirming green CI.
-
-## Worktree Isolation on a Dispatch
-
-**From a main checkout, this is automatic, not a PM choice (ADR-0048).** `tm
-hook --pm-guard` grants `isolation: "worktree"` to any dispatched agent that
-may write, single or parallel, the moment the session is standing in a main
-checkout — the write boundary above denies that agent a source edit there
-anyway.
-
-🔴 **Declare `isolation: "worktree"` explicitly on every writer dispatch from a
-main checkout anyway — the automatic grant is not reliable enough to skip the
-declaration.** The guard denied a read-only-looking `qa` dispatch from a main
-checkout with no explicit isolation, because `qa` authors tests and so counts
-as a writer the guard didn't grant for. This tightens, not contradicts, the
-automatic-grant behavior above: declaring it costs nothing when the guard
-would grant it anyway, and covers the case where it doesn't.
-
-🔴 **Do not declare `isolation` on a `version-control` dispatch (ADR-0056) —
-except when the dispatch itself commits source.** For merge, push/rebase, PR
-lifecycle, and worktree reclamation, `version-control` needs the checkout it
-is given: a worktree removes the tree that work needs, and the isolation
-fences have hidden a branch ref badly enough to force a push by SHA. The
-guard leaves it where it is, single or parallel, and declaring isolation
-yourself overrides that. Every other writer is unchanged: an engineer
-dispatched into the same directory beside it is still denied.
-
-🔴 **A `version-control` dispatch asked to commit a source change declares
-`isolation: "worktree"` (#8156).** ADR-0044, amended by ADR-0049, forbids a
-source commit in a main checkout outright; `tm hook --pm-guard` denies it
-regardless of who dispatched the agent or why. Dispatching `version-control`
-without `isolation` to commit source that is sitting as uncommitted edits in
-the main checkout (e.g. handed back from an engineer dispatch that itself ran
-without `isolation`) reaches that denial every time — the source-commit rule
-above has no carve-out for it. Prefer routing the diff through the engineer's
-own worktree branch so no diff goes back to the main checkout at all; when
-`version-control` must make the commit itself, dispatch it with
-`isolation: "worktree"` for that commit.
-
-**From inside a worktree, pass it yourself for concurrency.** Pass
-`isolation: "worktree"` on Agent tool calls when spawning 2+ parallel agents
-that modify files on the SAME checkout — the case the guard cannot see,
-because there is no main-checkout grant to fall back on. Not needed for
-sequential agents, read-only research, or separate file trees. Use
-`run_in_background: true` for fire-and-forget parallel work.
-
-🔴 **`isolation: "worktree"` is the only sanctioned mechanism, and the PM never
-tells a dispatched agent to hand-roll one — not a literal `git worktree add`,
-and not prose like "work in a worktree of your own" (#5649).**
-`tm hook --pm-guard` reads the declared parameter and never the prompt, so a
-hand-rolled worktree leaves the agent counted against the shared HEAD and gets
-the next file-mutating dispatch denied for a collision that does not exist. The
-prose form recurred on 2026-09-09 in a different project after the literal-command
-form was fixed here — the guard cannot see either phrasing, so both are banned,
-regardless of wording.
-
-**When `isolation` is unavailable, serialize** — one file-mutating agent at a
-time, each waited for before the next. Serializing always works. Hand-rolling to
-parallelize anyway is what this forbids.
-
-**Concurrent cargo invocations in one checkout also contend, silently.** Two
-agents running `cargo test`/`cargo build` in the same checkout serialize on
-cargo's own `target/` build lock with no signal to either agent — one run
-measured ~10 minutes for a command that normally finishes in seconds (#7895).
-`isolation: "worktree"` avoids it: each worktree gets its own `target/`.
-
-## Salvaging a Dead Agent's Worktree
-
-A dispatch that names an existing worktree left behind by a stopped or dead
-agent cannot be followed directly — `tm hook --pm-guard` refuses cross-tree
-git from a differently-pinned worktree. Reach for `tm session
-adopt-worktree <tree> --as <session>` FIRST, before hand-porting files or
-rebuilding the branch from scratch: it is the documented verb for exactly
-this case (#6497, live-verified 2026-09-02). The refusal text to search on:
-`already used by worktree at .../<agent-dir>`, or a guard denial naming a
-tree pinned to a different, gone session. `tm session adopt-worktree` is
-distinct from `git worktree remove` (#5791, cleanup of an already-merged
-tree) — adoption is for a tree still holding unmerged work.
-
-Porting content FROM another worktree (a fix brief, a changelog fragment)
-without adopting it — `git -C <other worktree>` is refused (ADR-0048). Read
-its committed state with `git show <that worktree's HEAD sha>:<path>` from
-your own worktree instead; see [worktree-discipline.md "Reading Another
-Worktree's State"](../../../../../docs/reference/worktree-discipline.md#reading-another-worktrees-state)
-for the full substitute, including uncommitted files (#7656).
-
-Declaring `isolation: "worktree"` on a dispatch always mints a FRESH tree;
-there is no parameter that says "adopt this existing one instead." A PM that
-knows the target tree is a live, un-reclaimed worktree from an earlier round
-still has to let the dispatched agent land in the guard refusal and run
-`adopt-worktree` itself — there is no way to wire adoption in up front.
-
-## Cross-Workstream Coordination (memory claim drawers, DOC-53)
-
-Memory is awareness only — never a lock, never a message channel. git/GitHub
-branch/PR/label state is the authoritative claim; the event bus (#3168 BUS-7) is
-the real-time channel. Before dispatching multi-agent work on an area:
-
-1. `memory_list(tag: "ws-claim")`, then verify any hit against live git state —
-   a claim whose branch/PR is gone is void.
-2. Write a claim drawer when dispatching: title `WS-CLAIM <workstream>: <area>`,
-   tags `ws-claim`, `ws:<name>`, `area:<slug>`; body = scope, branch, PR/issue
-   refs, expected-land condition.
-3. Supersede (or `memory_forget`) the claim once the work lands or is abandoned.
-
-A claim drawer covers the work area, never the merge queue. Who may merge on a
-shared repository is its own claim: `Skill(skill="tm-workflow")`,
-"Merge-Queue Ownership".
 
 ## Long-Wait Delegation (issues #2833, #4792, #5843)
 
@@ -593,66 +282,6 @@ well under the 10-minute tool ceiling, so agents rarely re-issue at all. For an
 agent's own file/process condition, name `tm wait` in the brief so it never
 reaches for `sleep`.
 
-## Concurrent Dispatch: Declare File Ownership
-
-🔴 Before dispatching concurrent work, name in each brief the files owned by
-every other in-flight branch, and instruct the agent to STOP and report rather
-than edit one. **We stack, we do not race.**
-
-Paste a block shaped like this into every concurrent brief:
-
-```
-🔴 Files owned by other in-flight branches — do not touch
-- feat/<branch-a>: core/agent_cost.rs, bin/tm/commands/pm_guard*.rs
-- fix/<branch-b>: core/agent_source*.rs, core/managed_config.rs
-Stop and report if you need one.
-```
-
-The doctrine is that no two in-flight PRs share a module, and that coupled
-changes stack rather than race. The ownership block is the mechanism that
-enforces it: an agent cannot see the other branches, so unless the brief names
-their files it will edit across the line and only git finds out.
-
-Measured on 2026-08-03: five concurrent PRs across five branches, every brief
-carrying the block — zero merge conflicts, zero rebases.
-
-## The PM Allowlist, in Full
-
-Moved out of the instruction package by #7423, which keeps the summary line.
-These actions are unbudgeted; everything not listed is budgeted or delegated.
-
-| Action | Limit |
-|--------|-------|
-| Git ops | `git status/add/commit/log/diff/pull/stash` |
-| Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
-| Grep/Glob | 3-5 orientation searches |
-| TodoWrite | Progress tracking |
-| Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file. `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
-| Report | Results to user |
-| **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
-| Watch own agents (#8258) — the ONLY tmux/Bash carve-out | `tmux capture-pane -t <own session> -p -S -80 \| grep -E '^  ◯ .*tokens'` — your own pane only, read-only, filtered at source. Every other tmux verb, pane, and non-git Bash command stays P10-forbidden |
-
-## Autonomous Execution — When the PM May Stop and Ask
-
-Moved out of the instruction package by #7423, which keeps only the headline.
-
-Run the full pipeline without stopping while the direction is clear. Never ask
-"should I proceed / test / commit?". Forbidden: nanny coding, permission seeking
-on an obvious next step, partial completion.
-
-Stop and ask on one of these four **observable conditions** (#8361 — a
-confidence level is not one of them):
-
-- the request has materially different readings that the code, the tracker and
-  the palace cannot settle;
-- a credential, access, or approval you lack;
-- a not-cheaply-reversible architecture choice the user has not made;
-- a destructive or irreversible step the user did not request.
-
-A project tightens or loosens this in the `AUTONOMOUS-EXECUTION` marker section
-of its root `CLAUDE.md` — that section, not this skill, is where "pause after a
-resume" or "never pause" is set.
-
 ## The Mandatory Closing Instruction on an Engineer Delegation
 
 Moved out of the instruction package by #7423. Every engineer delegation ends
@@ -684,34 +313,9 @@ Not covered by this rule: re-engaging a parked agent with the outcome of work it
 already owns (`SendMessage` after CI settles — Long-Wait Delegation item 4
 above). That closes existing scope; it does not add new scope.
 
-## Architecture Suggestions From Agents
-
-Agents surface improvement opportunities as part of their normal reporting. Cap
-what reaches the user at **1-2 per session**, keep each specific rather than
-vague, and ask before implementing any of them:
-
-```
-[Agent] found [issue]. Consider: [fix] -- [benefit]. Effort: [S/M/L]. Implement?
-```
-
-## Delegation Best Practices
-
-1. **Provide context** — the findings, evidence and constraints the agent needs,
-   not just the task, and not a chosen implementation mechanism (see "What a
-   Brief Carries" above).
-2. **Clear acceptance criteria** — how the agent knows it's done, each one
-   written so a wrong implementation fails it (see "Acceptance Criteria a Wrong
-   Implementation Fails" above).
-3. **Wait for completion** — don't interrupt an in-flight delegation.
-4. **Collect evidence** — get specific artifacts back (see
-   `tm-verification-protocols`).
-5. **Track files immediately** — right after the agent returns (see
-   `tm-git-file-tracking`).
-6. **Chain verification** — QA after implementation, always (CB#8).
-
 ## Related Skills
 
 - `tm-circuit-breaker` — the enforcement layer behind these patterns
 - `tm-workflow` — the phase/gate model these chains slot into
 - `tm-verification-protocols`, `tm-git-file-tracking` — the evidence and
-  tracking steps every chain above assumes
+  tracking steps every chain in `references/workflow-chains.md` assumes

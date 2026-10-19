@@ -5,7 +5,35 @@ use std::path::Path;
 use trusty_agents_common::agent_content::checkout_content;
 
 use super::*;
-use crate::core::content_source::test_support::{repo_content, repo_root};
+use crate::core::content_source::test_support::{rc, repo_content, repo_root};
+
+/// Why: #10055 — splitting a skill moves text from its entry file into
+/// `references/`; a pin reading the entry alone made every content split a
+/// Rust change ("content is not in code").
+/// What: the entry file `entry` (`skills/tm-workflow.md`), then every
+/// `skills/<stem>/references/*` file in bundle-path order, joined by
+/// newlines; built once per test binary. Panics on an unknown entry.
+/// Test: `tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558`.
+pub(crate) fn skill_with_references(entry: &str) -> &'static str {
+    static TEXT: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    let text = TEXT.get_or_init(|| {
+        rc().skills()
+            .filter(|(rel, _)| rel.matches('/').count() == 1)
+            .map(|(rel, body)| {
+                let prefix = format!("{}/references/", rel.trim_end_matches(".md"));
+                let mut joined = body.to_owned();
+                for (_, reference) in rc().skills().filter(|(p, _)| p.starts_with(&prefix)) {
+                    joined.push('\n');
+                    joined.push_str(reference);
+                }
+                (rel.to_owned(), joined)
+            })
+            .collect()
+    });
+    text.get(entry)
+        .map(String::as_str)
+        .unwrap_or_else(|| panic!("{entry} must be a skill entry file in the content tree"))
+}
 
 /// Builds a trusted checkout at `root` from `files` (`(repo-relative path,
 /// body)`), with every dev class directory present.

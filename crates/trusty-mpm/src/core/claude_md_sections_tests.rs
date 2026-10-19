@@ -1531,11 +1531,10 @@ const FOLDED_ROUTING_MAPPINGS_SKILL: &[(&str, &str)] = &[
     ("| haiku |", "the per-agent default-model column"),
 ];
 
-/// The bundled `tm-delegation-patterns` skill body, as shipped (#9012: read
-/// from the checkout's content).
+/// The bundled `tm-delegation-patterns` skill, entry plus references, as
+/// shipped (#9012: read from the checkout's content; #10055: references).
 fn delegation_patterns_skill() -> &'static str {
-    rc().skill("skills/tm-delegation-patterns.md")
-        .expect("tm-delegation-patterns skill")
+    crate::core::framework_content::tests::skill_with_references("skills/tm-delegation-patterns.md")
 }
 
 #[test]
