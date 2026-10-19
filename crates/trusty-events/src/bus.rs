@@ -360,6 +360,16 @@ impl EventBus {
         }
     }
 
+    /// The last `seq` assigned; `0` before the first event (#10071).
+    ///
+    /// Why: a heartbeat carries it, and reading it under the ring lock means a
+    /// bus whose lock is wedged sends no heartbeat, so readers see it hung.
+    /// Test: `super::serve_tests::a_subscription_that_asks_gets_a_heartbeat_first_then_on_its_interval`.
+    pub(crate) fn head(&self) -> u64 {
+        let _ring = self.lock_ring();
+        self.next_seq.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
     /// Why the log writer stopped, if it failed (#9075). A bus whose writer
     /// failed refuses new events, as a closed one does.
     ///

@@ -23,14 +23,26 @@
 //! `since_id` is not the event the ring or the log holds at that seq. A crash
 //! can lose a `seq` the bus already handed out, and the next start hands it
 //! out again; the id is what tells the two events apart.
+//! #10071: a subscription that sets `heartbeat_ms` is sent a `Heartbeat
+//! { head }` once it is accepted, before any replay, and then once per
+//! interval while it follows. A heartbeat is a `try_send`: one that finds the
+//! reader's buffer full is dropped, since that reader has frames to read. It
+//! is not filtered, never moves the cursor and never reports a gap. A
+//! subscription without `heartbeat_ms` gets no heartbeat, so a reader that
+//! does not know the item never sees one. `heartbeat_ms` outside
+//! `HEARTBEAT_MS_MIN..=HEARTBEAT_MS_MAX` is refused.
 //! Test: `super::serve_tests`, `tests/daemon_wire.rs`,
 //! `tests/daemon_resume.rs::a_resume_after_a_kill_with_an_undrained_log_is_refused_not_skipped`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
+use tokio::time::{Interval, MissedTickBehavior};
 use trusty_common::control_bus::{
-    EventId, HarnessEvent, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter, SubscribeItem, SubscribeParams,
+    EventId, HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, HarnessEvent, METHOD_EVENTS_SUBSCRIBE,
+    SubscribeFilter, SubscribeItem, SubscribeParams,
 };
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcStreamItems};
 
@@ -58,12 +70,14 @@ pub(crate) fn router(bus: Arc<EventBus>, max_subscribers: usize) -> RpcRouter {
 ///
 /// # Errors
 ///
-/// An [`RpcError`] when every subscriber slot is in use, when `since_seq`
-/// is past the bus's last assigned `seq`, or when a non-zero `since_seq` comes
-/// without a `since_id` or with one the ring holds for another event. Either becomes the stream's terminal
-/// error frame, with no item before it.
+/// An [`RpcError`] when `heartbeat_ms` is out of bounds, when every
+/// subscriber slot is in use, when `since_seq` is past the bus's last
+/// assigned `seq`, or when a non-zero `since_seq` comes without a `since_id`
+/// or with one the ring holds for another event. Either becomes the stream's
+/// terminal error frame, with no item before it.
 ///
-/// Test: `super::serve_tests::a_subscriber_beyond_the_limit_is_refused`,
+/// Test: `super::serve_tests::a_heartbeat_ms_outside_its_bounds_is_refused`,
+/// `super::serve_tests::a_subscriber_beyond_the_limit_is_refused`,
 /// `super::serve_tests::a_since_seq_ahead_of_the_bus_is_refused`,
 /// `super::serve_tests::a_resume_without_since_id_is_refused`,
 /// `super::serve_tests::a_resume_whose_since_id_names_another_event_is_refused`,
@@ -73,6 +87,7 @@ fn open(
     slots: &Arc<Semaphore>,
     params: SubscribeParams,
 ) -> Result<RpcStreamItems, RpcError> {
+    let heartbeat = heartbeat_interval(params.heartbeat_ms)?;
     let slot = Arc::clone(slots).try_acquire_owned().map_err(|_| {
         RpcError::internal("events.subscribe: every subscriber slot is in use; retry later")
     })?;
@@ -110,8 +125,35 @@ fn open(
         filter: params.filters,
         last: params.since_seq.unwrap_or(attach.head),
     };
-    tokio::spawn(pump(bus, attach, params.since_seq, check, cursor, slot));
+    tokio::spawn(pump(
+        bus,
+        attach,
+        params.since_seq,
+        check,
+        cursor,
+        slot,
+        heartbeat,
+    ));
     Ok(items)
+}
+
+/// The heartbeat interval a subscription asked for, if any (#10071).
+///
+/// # Errors
+///
+/// `invalid_params` when `heartbeat_ms` is outside
+/// `HEARTBEAT_MS_MIN..=HEARTBEAT_MS_MAX`: `0` would busy-loop.
+fn heartbeat_interval(heartbeat_ms: Option<u64>) -> Result<Option<Duration>, RpcError> {
+    match heartbeat_ms {
+        None => Ok(None),
+        Some(ms) if (HEARTBEAT_MS_MIN..=HEARTBEAT_MS_MAX).contains(&ms) => {
+            Ok(Some(Duration::from_millis(ms)))
+        }
+        Some(ms) => Err(RpcError::invalid_params(format!(
+            "heartbeat_ms {ms} is outside {HEARTBEAT_MS_MIN}..={HEARTBEAT_MS_MAX}; omit it for \
+             no heartbeat"
+        ))),
+    }
 }
 
 /// The refusal for a resume whose `since_id` is not the event the bus holds
@@ -195,6 +237,17 @@ impl Cursor {
         }
     }
 
+    /// Send a heartbeat carrying `head` without waiting (#10071). A full
+    /// buffer drops it: that reader has frames to read. `false` once the
+    /// reader has gone.
+    fn beat(&self, head: u64) -> bool {
+        let Ok(value) = serde_json::to_value(SubscribeItem::Heartbeat { head }) else {
+            // A two-field item always encodes; skipping a beat is harmless.
+            return true;
+        };
+        !matches!(self.tx.try_send(Ok(value)), Err(TrySendError::Closed(_)))
+    }
+
     /// End the stream with `error` as its terminal frame.
     async fn fail(&self, error: RpcError) {
         let _ = self.tx.send(Err(error)).await;
@@ -210,6 +263,7 @@ async fn pump(
     check: Option<(u64, EventId)>,
     mut cursor: Cursor,
     _slot: OwnedSemaphorePermit,
+    heartbeat: Option<Duration>,
 ) {
     let Attach {
         backlog,
@@ -222,12 +276,16 @@ async fn pump(
     {
         return;
     }
+    // #10071: "alive" before the replay, so a long replay does not delay it.
+    if heartbeat.is_some() && !cursor.beat(bus.head()) {
+        return;
+    }
     if let Some(since) = since
         && !replay(&bus, since, head, backlog, &mut cursor).await
     {
         return;
     }
-    follow(&mut receiver, &mut cursor).await;
+    follow(&bus, &mut receiver, &mut cursor, heartbeat).await;
 }
 
 /// Send the log's events up to the ring, then the ring backlog. `false` when
@@ -277,12 +335,29 @@ async fn replay(
     true
 }
 
-/// Send live events until the reader leaves or the bus closes its channel.
-async fn follow(receiver: &mut broadcast::Receiver<BusFrame>, cursor: &mut Cursor) {
+/// Send live events, and a heartbeat per interval when one was asked for,
+/// until the reader leaves or the bus closes its channel.
+async fn follow(
+    bus: &EventBus,
+    receiver: &mut broadcast::Receiver<BusFrame>,
+    cursor: &mut Cursor,
+    heartbeat: Option<Duration>,
+) {
+    let mut beats = heartbeat.map(|every| {
+        let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        beats.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        beats
+    });
     loop {
         let next = tokio::select! {
             frame = receiver.recv() => frame,
             () = cursor.tx.closed() => return,
+            () = next_beat(&mut beats) => {
+                if !cursor.beat(bus.head()) {
+                    return;
+                }
+                continue;
+            }
         };
         match next {
             Ok(frame) => {
@@ -295,5 +370,15 @@ async fn follow(receiver: &mut broadcast::Receiver<BusFrame>, cursor: &mut Curso
             Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+/// The next heartbeat tick; never, for a subscription that did not ask.
+async fn next_beat(beats: &mut Option<Interval>) {
+    match beats {
+        Some(beats) => {
+            beats.tick().await;
+        }
+        None => std::future::pending().await,
     }
 }

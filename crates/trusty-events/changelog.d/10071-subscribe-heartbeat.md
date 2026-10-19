@@ -1,0 +1,2 @@
+Added
+- `events.subscribe` with `heartbeat_ms` set sends a `heartbeat { head }` item as soon as the subscription is accepted, before any replay, and then every `heartbeat_ms` while it follows; `head` is the bus's last `seq`, read under its ring lock. A subscription without `heartbeat_ms` gets exactly the frames it got before. `heartbeat_ms` outside 100..=3,600,000 is refused with `invalid_params`. A heartbeat never blocks: one that finds the reader's buffer full is dropped (#10071).
