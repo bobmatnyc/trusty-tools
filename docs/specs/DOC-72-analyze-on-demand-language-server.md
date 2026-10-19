@@ -1,11 +1,17 @@
 ---
-spec_refs: []
+spec_refs:
+  - id: SPEC-UNIDASH-04~draft
+    path: docs/specs/DOC-73-unified-mpm-code-agents-dashboard.md
+    anchor: SPEC-UNIDASH-04~draft
 ---
 
 # DOC-72 — trusty-analyze On-Demand Language-Server Capability
 
-**Status:** Draft. Design record only — no code in this PR.
-**Spec ID:** `SPEC-ANALYZELSP-01~draft` … `SPEC-ANALYZELSP-11~draft`
+**Status:** Draft. Amended 2026-10-19 (#9078, L0): §4 now specifies the
+`trusty-events` producer path, and §12 fixes the 1.9.0 slice. Decisions D1-D10
+(§10) carry the plan's recommended defaults and are **accepted, owner ruling Da1 (2026-10-19)**;
+the spec stays Draft until Bob rules.
+**Spec ID:** `SPEC-ANALYZELSP-01~draft` … `SPEC-ANALYZELSP-12~draft`
 **Subsystem:** `trusty-analyze` — the language-server supervisor, the versioned
 result store, and the new socket/MCP methods (`src/service/rpc.rs`,
 `src/core/tool_registry.rs`, `src/lang/`); `trusty-common` — the on-demand entry
@@ -15,7 +21,7 @@ point clients start the daemon through (`src/uds/on_demand.rs`);
 (`src/assets/agents/BASE-ENGINEER.md`); `trusty-review` — the audit path's only
 client of trusty-analyze (`src/report/analyze_adapter.rs`).
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-09-01
+**Last-updated:** 2026-10-19
 **DOC-N claim:** `DOC-72`, scan-before-claim per DOC-38 §4.1.
 `docs/specs/README.md`'s catalog note names DOC-72 as the next free number after
 DOC-71; a repo-wide grep for `DOC-72` returned only that note;
@@ -31,7 +37,12 @@ on-demand/idle-exit process model landed by
 (no sibling daemon owns an HTTP surface; UDS is the inter-service transport),
 which supersedes [ADR-0018](../adr/0018-loopback-only-doctrine.md);
 [ADR-0005](../adr/0005-harness-event-bus.md) and
-[ADR-0019](../adr/0019-unified-ipc-messaging-on-event-bus.md) for the control bus.
+[ADR-0019](../adr/0019-unified-ipc-messaging-on-event-bus.md) for the control bus;
+[ADR-0065](../adr/0065-trusty-events-process-placement.md) and
+[DOC-73](./DOC-73-unified-mpm-code-agents-dashboard.md) §4.4 for the event
+transport (they supersede the relay design this spec first recorded);
+the owner ruling of 2026-10-19 on
+[#9078](https://github.com/bobmatnyc/trusty-tools/issues/9078) (§10 addendum).
 **Cross-ref:** issues
 [#6606](https://github.com/bobmatnyc/trusty-tools/issues/6606) (this spec),
 [#6589](https://github.com/bobmatnyc/trusty-tools/issues/6589) (the A/B trials),
@@ -159,13 +170,39 @@ One language-server process per workspace per language.
   started by `trusty_common::uds::OnDemandAnalyze::ensure_running`, and exits on
   its own idle window through `serve_with_idle`. The language server nests
   inside that: it is supervised by the analyze daemon, not by a client.
-- The supervisor is `trusty_common::uds::supervisor::UdsServiceSupervisor`, keyed
-  by `(workspace_root, language)`. Reuse the existing supervisor; do not write a
-  second process manager (root `CLAUDE.md`, common-entry-point rule).
+- **The child manager is a stdio manager, not `UdsServiceSupervisor`.** An
+  earlier draft said to reuse `trusty_common::uds::supervisor::UdsServiceSupervisor`.
+  That cannot work. The supervisor spawns a child that must bind a Unix socket and
+  then probes the socket (`ensure_running(key, socket_path, spec)`). A language
+  server speaks LSP over stdio and binds nothing. Analyze therefore owns a small
+  child manager in `crates/trusty-analyze/src/lsp/`, keyed by
+  `(workspace_root, language)`: spawn with `tokio::process::Command`,
+  `kill_on_drop(true)`, its own process group, `killpg` on shutdown (the pattern
+  `run_command_with_timeout` already uses for one-shot linters), `Content-Length`
+  framing, a request-id counter, a per-request timeout, and stderr drained to the
+  log with its tail kept for `InitializeFailed{stderr_tail}`. It does not extend
+  the supervisor. Plan L2 of #9078 carries the build.
+- **Spawn only.** Analyze owns the child it spawns. It never attaches to an
+  editor's existing server: attach has no discovery mechanism and breaks the "one
+  supervised process per workspace" model. *(Default D3, accepted, owner ruling Da1 (2026-10-19).)*
+- **Workspace root.** The `initialize` root is the index root trusty-search
+  reports for the path, else the git toplevel of the `path` argument.
+- **Flag, default off.** The capability is behind a config flag, default off,
+  enabled by `ANALYZE_LSP=1` or the YAML key. With it off nothing is spawned, the
+  daemon starts as it does today, and the `analyze.lsp_*` methods return a typed
+  `lsp_disabled` error, not `method_not_found`, so the feature stays visible in
+  the method list. *(Default D10, accepted, owner ruling Da1 (2026-10-19).)*
 - **Idle timeout.** A language server exits after its own idle window, default
   10 minutes, configurable per language. Its window must be shorter than or
   equal to the analyze daemon's, so the daemon never idles out holding a live
-  child.
+  child. For the 1.9.0 rollout the default is shortened (2 minutes) because the
+  RSS cap is not enforced (§12).
+- **What holds the daemon's idle window open.** An in-flight LSP call holds an
+  idle guard, and an `analyze.lsp_*` call re-arms the window like any ordinary
+  method. A warm child with no calls does not: the carve-out that keeps
+  `analyze.health` from re-arming the window stays, and no LSP method joins it.
+  The child is killed before the daemon exits, on the idle-exit path and on
+  SIGTERM.
 - **Never auto-started by session provisioning.** No `tm` session launch, no
   Claude session start, and no agent dispatch spawns a language server. Only a
   call from §6's trigger list does. This is the direct expression of the owner
@@ -237,7 +274,22 @@ Every result carries the exact state it was computed against.
   a stable digest of the working tree's modified and untracked file set. Two
   calls that return the same snapshot saw the same bytes.
 
-Both stamps ride on every response and on every published event (§4).
+Both stamps ride on every response and on every published event (§4). Events
+carry the stamps as metadata only (§4.4).
+
+**The document-version model.** Analyze is the only party that sends file text to
+the server.
+
+- Text comes from **disk at call time**, not from an editor buffer. Analyze has no
+  view of unsaved buffers, and a result describes the saved file.
+- The first call naming a file sends `textDocument/didOpen` with version 1.
+- Analyze hashes the file bytes on each call. When the hash differs from the one
+  last sent, it sends `textDocument/didChange` with the version incremented by
+  one. An unchanged hash sends nothing and keeps the version.
+- A caller's `version` is compared with the server-side version. A request naming
+  an older one gets `Stale` (below). Diagnostics are the
+  `textDocument/publishDiagnostics` notifications collected after the open or
+  change.
 
 **The barrier.** `analysed_at(version)` is a **blocking call with a deadline**
 (the PM recommendation, adopted by the owner — §10 Q5). It returns exactly one of:
@@ -261,58 +313,116 @@ never-fail-open: a wrong answer that looks right is worse than a refusal.
 
 ---
 
-## {#SPEC-ANALYZELSP-04~draft} 4. Asynchrony
+## {#SPEC-ANALYZELSP-04~draft} 4. Asynchrony and events
 
 Diagnostics arrive when the server finishes, not when the caller asks. Reads and
 notifications are therefore separate.
 
-- **Publication.** The daemon publishes results as control-bus events. The
-  envelope is ADR-0005's `HarnessEvent` — `{source, session, seq, at, payload}` —
-  and the payload adds `{language, workspace, uri, document_version, snapshot,
-  kind, items}`. `kind` is `diagnostics` or `references`. ADR-0019 governs the
-  bus; ADR-0005 supplies this envelope, because these are telemetry events with
-  no per-recipient acknowledgment, not addressed messages.
-- **Consumers read latest-at-version.** A subscriber keeps the newest result for
-  each `(uri, document_version)` and discards anything older. Nothing replays a
-  superseded diagnostic set.
 - **Reads stay synchronous.** §5's methods answer from the versioned store. A
-  caller that cannot subscribe polls the barrier and then reads.
+  caller that cannot subscribe calls the barrier (§3) and then reads.
+- **Notification is a pushed event.** Each LSP call emits `HarnessEvent`s onto
+  the event bus. The event says that an answer exists and what it cost. It does
+  not carry the answer (§4.4).
 
-**Transport: relay through `trusty-console`** (owner ruling, §10 Q4).
-`trusty-analyze` takes **no Cargo edge on `trusty-agents-common`**, so
-`HarnessEvent` is a shape this daemon mirrors by field name, never a type it
-imports. The relay reuses the console↔service seam that already exists rather
-than reviving the `/sse` route #6287 removed.
+> **Retired (2026-10-19, [#9078](https://github.com/bobmatnyc/trusty-tools/issues/9078)).**
+> This section originally specified a relay through `trusty-console`: a
+> per-`(workspace, language)` ring in analyze, a cursor method named
+> `analyze.lsp_events`, and two console republish routes under
+> `/api/console/events/analyze/lsp`. [ADR-0065](../adr/0065-trusty-events-process-placement.md)
+> and [DOC-73](./DOC-73-unified-mpm-code-agents-dashboard.md) §4.4 retired that
+> design when the bus became the `trusty-events` daemon. The ring, the cursor
+> method and the two routes are not built, and no console route has an analyze
+> feeder. The text below is the replacement. It supersedes owner ruling Q4
+> ("Relay", §10) as to transport only.
 
-**Analyze side — a bounded ring, read by cursor.** Published events land in an
-in-memory ring buffer per `(workspace, language)`, each stamped with a
-process-monotonic `seq`. One new socket method drains it:
+### 4.1 Transport: `PushClient` to `trusty-events`
 
-```
-analyze.lsp_events  { since_seq, max }
-  -> { events: [ … ], next_seq, dropped }
-```
+`trusty-analyze` is a producer on the bus, beside `trusty-mpm`, `trusty-code` and
+`trusty-agents` (DOC-73 §4.4).
 
-`dropped` reports ring overflow, so a slow reader sees a gap marker instead of
-silently missing events — the same contract as ADR-0005's `Lag`. The ring is
-memory only. A restart loses undrained events, and that is correct: §5's read
-methods are the durable answer, and the events are a notification that an answer
-changed.
+- It builds a `trusty_common::control_bus::PushClient` aimed at
+  `control_bus::events_socket_path()`. `control_bus` is an always-compiled module
+  of `trusty-common`, which analyze already depends on. The producer adds no
+  Cargo dependency.
+- It takes **no** Cargo edge on `trusty-agents-common` and **no** edge on
+  `trusty-events`. The wire contract lives in `trusty-common`.
+- It owns no ring, no cursor method and no HTTP route. ADR-0032 stays intact:
+  analyze binds no socket but its own UDS one.
+- **Source value.** `HarnessEvent.source` is `analyze`. This needs a new
+  `HarnessSource::Analyze` variant in `trusty-common`, and the enum becomes
+  `#[non_exhaustive]` in the same change. Today the enum has `Agents`, `Mpm` and
+  `Code` only; emitting as `Mpm` would mislabel the producer and defeat the
+  `source` filter axis. Skew: a reader built before the variant exists rejects an
+  `"analyze"` frame, so the variant ships in `trusty-common` before the producer
+  does (§12). *(Default D7, accepted, owner ruling Da1 (2026-10-19).)*
 
-**Console side — poll, cache, republish.** `trusty-console` polls
-`analyze.lsp_events` over UDS, holding the cursor, in the poller that already
-polls this daemon's `console_metrics`
-(`crates/trusty-console/src/metrics_poller.rs`, which backs
-`GET /api/console/metrics/analyze`). It republishes on two routes:
+### 4.2 Event shape
 
-| Route | Shape |
+One LSP call yields two events with one `call_id`:
+
+| Event | `ActionEvent` | When |
+|---|---|---|
+| Started | `Tool { phase: Started, tool: "lsp.<method>", call_id }` | before the request goes to the server |
+| Finished or Errored | `Tool { phase: Finished\|Errored, tool: "lsp.<method>", call_id }` | after the server answers, times out or dies |
+
+A call never ends without a terminal event.
+
+Field map from the superseded payload (`{language, workspace, uri,
+document_version, snapshot, kind, items}`) onto the envelope:
+
+| Old field | Now |
 |---|---|
-| `GET /api/console/events/analyze/lsp?since_seq=<n>` | JSON: `{events, next_seq, dropped}` — the cursor form, for a programmatic consumer |
-| `GET /api/console/events/analyze/lsp/stream` | SSE: one event per element, for the dashboard |
+| `kind` | `tool`, as `lsp.<method>` with the bare LSP method name, for example `lsp.textDocument/references` or `lsp.publishDiagnostics` |
+| `uri` | a `PathRef` in the event's `objects`. `ObjectRef` and `PathRef` carry references, not bodies (DOC-73 §3.2) |
+| `language`, `workspace`, `document_version`, `snapshot` | extension fields the action metadata allows, with the position (`line`, `column`) |
+| `items` | dropped (§4.4). The answer stays in the RPC response. The event carries `result_count`, `duration_ms` and `outcome` |
 
-This keeps ADR-0032 intact — analyze binds no socket but its own UDS one, and
-console remains the only HTTP surface — and matches ADR-0035's direction, where
-console aggregates over UDS and clients read console.
+`actor` is analyze. `EventId` is minted per event. `call_id` is one UUID per
+call, shared by its Started and terminal events. These are builder-settled
+details; the producer's PR records them.
+
+### 4.3 Causality: `parent_event_id`
+
+Every `analyze.lsp_*` method accepts an optional `parent_event_id` (an `EventId`
+string). When present it becomes the Started event's `parent_id`. When absent the
+event is a root. Analyze does not invent a session root: the caller, usually an
+agent harness, owns the call graph, and a synthetic parent would fabricate a
+causality edge. *(Default D6, accepted, owner ruling Da1 (2026-10-19).)*
+
+### 4.4 What an event may carry
+
+Metadata only: method, workspace path, file path, position, document version,
+snapshot, counts, durations, outcome. **No source text and no diagnostic message
+bodies.** The bus keeps a seven-day on-disk NDJSON log that the dashboard reads;
+code and compiler messages are not telemetry. The only place an answer travels is
+the RPC response to the caller who asked. A test asserts on the raw bytes of the
+pushed frames. *(Default D8, accepted, owner ruling Da1 (2026-10-19).)*
+
+### 4.5 Failure policy: fire-and-forget
+
+LSP calls never wait on the bus. `PushClient::send` buffers in memory and counts
+what it drops; delivery happens on a flush. If `trusty-events` is not running, the
+call still returns its answer, the producer logs a warning, and analyze still
+starts. This matches the non-blocking invariant of 2026-09-05 (observability must
+not block functionality) and ADR-0065. Events dropped while the bus is down are
+not retried across a restart, because the buffer is in memory. *(Default D9,
+accepted, owner ruling Da1 (2026-10-19).)*
+
+**Flush.** `send` only buffers. Analyze runs a flush task on a one-second interval
+and a final flush on shutdown, bounded by the daemon's shutdown flush timeout.
+Analyze exits on its idle window, so the final flush runs on the idle-exit path
+and on SIGTERM. Between flushes the producer holds no open connection, so it does
+not keep the daemon from idling out.
+
+### 4.6 Consumers
+
+Subscribers read the unified stream through `events.subscribe` with a `source =
+analyze` filter, and console relays it (DOC-73 §4.4). Consumers keep the newest
+result they care about per `(path, document_version)`. Nothing replays a
+superseded event. DOC-73 §4.4's sentence that `/api/console/events/analyze/lsp`
+"stays as a service-specific route" no longer has a feeder; whether it survives as
+a filter over the unified stream is a DOC-73 matter and is not decided here (open,
+§12).
 
 ---
 
@@ -328,18 +438,29 @@ names are bare snake_case, matching `complexity_hotspots` and `find_smells`.
 
 | Socket method | MCP tool | Parameters | Returns |
 |---|---|---|---|
-| `analyze.lsp_diagnostics` | `lsp_diagnostics` | `{scope: file\|workspace, path?, version}` | type-checked diagnostics at `version` |
-| `analyze.lsp_references` | `lsp_references` | `{symbol, version}` | resolved reference sites |
-| `analyze.lsp_definition` | `lsp_definition` | `{symbol, version}` | the resolved definition site |
-| `analyze.lsp_call_hierarchy` | `lsp_call_hierarchy` | `{symbol, direction: incoming\|outgoing, depth, version}` | the resolved call tree |
-| `analyze.lsp_implementations` | `lsp_implementations` | `{symbol, version}` | concrete implementations of a trait, interface, or abstract method |
-| `analyze.lsp_type_at` | `lsp_type_at` | `{path, line, column, version}` | the inferred type at a position |
-| `analyze.lsp_impact` | `lsp_impact` | `{symbol, new_signature, version}` | every call site the signature change breaks |
+| `analyze.lsp_diagnostics` | `lsp_diagnostics` | `{scope: file\|workspace, path?, version?, parent_event_id?}` | type-checked diagnostics at `version` |
+| `analyze.lsp_references` | `lsp_references` | `{path, line, column, version?, parent_event_id?}` | resolved reference sites |
+| `analyze.lsp_definition` | `lsp_definition` | `{path, line, column, version?, parent_event_id?}` | the resolved definition site |
+| `analyze.lsp_call_hierarchy` | `lsp_call_hierarchy` | `{path, line, column, direction: incoming\|outgoing, depth, version?, parent_event_id?}` | the resolved call tree |
+| `analyze.lsp_implementations` | `lsp_implementations` | `{path, line, column, version?, parent_event_id?}` | concrete implementations of a trait, interface, or abstract method |
+| `analyze.lsp_type_at` | `lsp_type_at` | `{path, line, column, version?, parent_event_id?}` | the inferred type at a position |
+| `analyze.lsp_impact` | `lsp_impact` | `{path, line, column, new_signature, version?, parent_event_id?}` | every call site the signature change breaks |
 | `analyze.lsp_analysed_at` | `lsp_analysed_at` | `{version, timeout_ms}` | `Ready` or `TimedOut{version_seen}` — the blocking barrier of §3 |
-| `analyze.lsp_events` | — | `{since_seq, max}` | the event cursor of §4; console polls it, agents do not |
+
+`analyze.lsp_events` and its cursor are retired (§4). No socket method or MCP
+tool carries events.
+
+**Positions, not symbols.** A language server answers by position, not by name,
+so the wire shape of "the symbol" is `path` plus `line` plus `column`: an LSP
+`Position` in the file as it is on disk. A name that needs resolving goes through
+`trusty-search` first; this spec describes no second resolver. `line` and `column`
+are zero-based, as in LSP. *(Default D5, accepted, owner ruling Da1 (2026-10-19).)* The earlier
+`symbol` parameter is withdrawn.
 
 - Every response carries `document_version` and `snapshot` (§3).
-- Every method takes `version` and refuses a stale one (§3).
+- A `version` that is present is refused when stale (§3). Absent means "the
+  current version".
+- `parent_event_id` is optional on every method (§4.3).
 - `lsp_impact` is the refactoring primitive: it is `references` plus the type
   check that says which of those sites stop compiling.
 
@@ -347,7 +468,8 @@ names are bare snake_case, matching `complexity_hotspots` and `find_smells`.
 
 `trusty-analyze` owns the language-server lifecycle (§2) and answers every call.
 Nothing else supervises a server, and no second implementation of these methods
-exists. Two paths reach it.
+exists. Two paths reach it. **In the 1.9.0 slice only the RPC and its MCP
+descriptors ship; the CLI subcommand and the `search_lsp_*` fronts are out (§12).**
 
 **(a) Direct.** A `trusty-analyze lsp <tool> …` CLI subcommand, plus the
 `analyze.lsp_*` RPC above over the daemon's socket. The subcommand is a thin
@@ -357,7 +479,7 @@ operator, a script, and the merge-chain gate.
 
 ```
 trusty-analyze lsp diagnostics --scope workspace --version <n>
-trusty-analyze lsp impact --symbol <sym> --new-signature <sig> --version <n>
+trusty-analyze lsp impact --path <file> --line <n> --column <n> --new-signature <sig>
 trusty-analyze lsp analysed-at --version <n> --timeout-ms <ms>
 ```
 
@@ -479,6 +601,12 @@ language and leaves the others working; a shared budget would let a heavy Rust
 workspace starve an unrelated Python one, and would make the failure depend on
 what else happened to be running.
 
+**1.9.0: the cap is specified here and not enforced.** The 1.9.0 slice ships no
+RSS sampling, kill, cool-off or `CapacityExceeded` (§12; default D4, accepted, owner ruling Da1 (2026-10-19)). rust-analyzer peaked at 1683 MB on this repository, so one call on
+the 21-crate workspace can hold about 1.7 GB resident until the child idles out.
+The mitigations are the default-off flag (§2, D10) and the shortened idle window
+(§2). The enforcement PR is tracked in §11 item 10.
+
 **What happens when a cap is exceeded: refuse, never swap.** The daemon kills the
 offending server, marks that one `(workspace, language)` pair unavailable for a
 cool-off window, and returns a typed `CapacityExceeded` error to callers of that
@@ -495,7 +623,7 @@ Five deliverables. The tools alone are not the capability; nothing calls them
 unless the skill, the instructions, and the consuming pipelines say when to.
 
 **(a) The tools.** §5's eight methods on `trusty-analyze`'s socket, mirrored as
-MCP tools, with the lifecycle of §2, the stamps of §3, and the events of §4 —
+MCP tools, with the lifecycle of §2, the stamps of §3, and the pushed events of §4 —
 reachable both ways §5.1 fixes: the `trusty-analyze lsp` CLI subcommand and the
 `search_lsp_*` tools `trusty-search` fronts.
 
@@ -643,10 +771,18 @@ adequately, and the capability narrows to type-checked diagnostics only — §1'
 first bullet — dropping the navigation-adjacent tools. Either outcome is a
 result; neither cancels the spec.
 
+**Phase 0 and the 1.9.0 build run in parallel (2026-10-19).** The owner ruling to
+build the call site now means phase 1 does not wait for phase 0's verdict. A
+separate agent runs the measurement while the build proceeds. The measurement
+decides which `lsp_*` tools survive, not whether the producer exists: events work
+whichever tools remain. *(Default D1, accepted, owner ruling Da1 (2026-10-19).)*
+
 ### Phase 1 — `rust-analyzer`
 
 **Not time-boxed** (owner ruling, §10 Q3). Phase 0 supplies the intent; phase 1
-builds against it.
+builds against it. **1.9.0 ships `rust-analyzer` only** (default D2, accepted, owner ruling Da1 (2026-10-19)). It is the repository's language, this spec's own phase order, and
+installed on the development machine. The client is language-generic, so `pyright`
+and `typescript-language-server` are later configuration rows (phases 3 and 4).
 
 - Ships behind an explicit flag, default off.
 - Carries the mise-shim / pinned-toolchain provisioning caveat of §2 as a
@@ -739,8 +875,13 @@ ADR-0032 leaves it no HTTP surface. Does `trusty-analyze` take a Cargo edge on
 
 > **Ruled 2026-09-01:** "Relay."
 > Events relay through `trusty-console`, and `trusty-analyze` takes **no** Cargo
-> edge on `trusty-agents-common`. §4 fixes the ring buffer, the
-> `analyze.lsp_events` cursor method, and the two console routes.
+> edge on `trusty-agents-common`.
+>
+> **Superseded as to transport, 2026-10-19.** The ring buffer, the
+> `analyze.lsp_events` cursor method and the two console routes this answer
+> originally led to are retired. Events go from analyze to `trusty-events` through
+> `PushClient` (§4, ADR-0065, DOC-73 §4.4). The "no Cargo edge on
+> `trusty-agents-common`" half of the ruling still holds.
 
 **Q5 — Barrier semantics.** *Is `analysed_at` a blocking call with a deadline, or
 a poll the caller loops on? A blocking call is simpler for a gate and holds a
@@ -767,23 +908,56 @@ from running them over one workspace.*
 > A dedicated phase decides it by measurement across three repositories of
 > increasing size. Applied in §8d and as phase 2 of §9.
 
-No question in this spec is open. What remains unsettled is measurement: §7's
-per-server caps are initial values rather than derived ceilings, phase 0's
-decision rule has not been run, and phase 2's per-tool table is empty.
+Q1-Q7 are closed. What remains unsettled is measurement: §7's per-server caps are
+initial values rather than derived ceilings, phase 0's decision rule has not been
+run, and phase 2's per-tool table is empty. The addendum below opens ten new
+decisions.
+
+### Addendum, 2026-10-19: the 1.9.0 call site (#9078)
+
+Owner ruling, Bob, Da0, 2026-10-19: "Build the LSP call site in 1.9.0 now." #9078
+closes only on a real producer. Milestone: trusty-mpm 1.9.0, due 2026-11-20. The
+ruling adds a deadline and, with ADR-0065, replaces Q4's transport (§4). It leaves
+Q1-Q3 and Q5-Q7 unchanged.
+
+The ten decisions below shape the 1.9.0 slice. **Each is a recommended default
+from the #9078 plan, not a ruling. Every row stays accepted, owner ruling Da1 (2026-10-19).** A
+reader must not treat a row as decided until Da1 records the answer here.
+
+| # | Decision | Default | Status | Applied in |
+|---|---|---|---|---|
+| D1 | Phase 0 against the 1.9.0 build | Phase 0 runs in parallel by a separate agent; the build does not wait | accepted, owner ruling Da1 (2026-10-19) | §9 |
+| D2 | Servers in 1.9.0 | `rust-analyzer` only | accepted, owner ruling Da1 (2026-10-19) | §9 |
+| D3 | Spawn or attach | Spawn only | accepted, owner ruling Da1 (2026-10-19) | §2 |
+| D4 | Slice shipped | Client plus `lsp_diagnostics` and `lsp_references`, version stamps and `Stale`, no RSS cap | accepted, owner ruling Da1 (2026-10-19) | §3, §7, §12 |
+| D5 | Wire shape of "symbol" | `path` plus `line` plus `column` | accepted, owner ruling Da1 (2026-10-19) | §5 |
+| D6 | Source of `parent_id` | Optional `parent_event_id` parameter; absent means a root event | accepted, owner ruling Da1 (2026-10-19) | §4.3 |
+| D7 | `HarnessSource` for analyze | Add `HarnessSource::Analyze` and make the enum `#[non_exhaustive]` | accepted, owner ruling Da1 (2026-10-19) | §4.1 |
+| D8 | Privacy of events | Metadata only; no source text, no diagnostic message bodies | accepted, owner ruling Da1 (2026-10-19) | §4.4 |
+| D9 | Bus down | Fire-and-forget; an LSP call never waits on the bus | accepted, owner ruling Da1 (2026-10-19) | §4.5 |
+| D10 | Who may enable it | Config flag, default off | accepted, owner ruling Da1 (2026-10-19) | §2 |
+
+D4 is the plan's option (b) without (c): stamps, `Stale` and the
+`lsp_analysed_at` barrier ship; the RSS cap does not. Option (a) would drop the
+barrier, `Stale` and the stamps, and return unstamped answers.
 
 ---
 
 ## {#SPEC-ANALYZELSP-11~draft} 11. Implementation issues to cut
 
 To be filed by `ticketing` once the owner accepts this spec. One line each; each
-references #6606.
+references #6606. As of 2026-10-19 none of the 20 exists. The 1.9.0 slice (§12)
+files an umbrella issue in milestone 1.9.0 plus one child per pull request, each
+`Refs #9078` and `#6606`. Items 8 and 9 below are retired and map to no work;
+#9078 maps to item 8a.
 
 1. **Phase 0 — intentional analysis (§9).** Run the four queries against the
    three coding-agent task shapes, record invocations, correctness delta, wall
    time, and RSS, and apply the decision rule. Blocks nothing structurally, but
    its outcome sets phase 1's target. First issue to cut.
-2. `trusty-analyze`: language-server supervisor keyed by `(workspace, language)`,
-   reusing `UdsServiceSupervisor`, with per-language idle exit (§2).
+2. `trusty-analyze`: stdio language-server client and child manager keyed by
+   `(workspace, language)`, with per-language idle exit (§2). It does not reuse
+   `UdsServiceSupervisor`, which needs a child that binds a socket.
 3. `trusty-analyze`: versioned result store — document version plus
    `<git head>+<dirty hash>` snapshot on every result (§3).
 4. `trusty-analyze`: `analyze.lsp_analysed_at` as a blocking barrier returning
@@ -797,12 +971,17 @@ references #6606.
    analyze over the socket via the `analyze_adapter` pattern. No language-server
    process, no cache, no added semantics; transport follows ADR-0032, adding no
    new listener (§5.1b).
-8. `trusty-analyze`: the §4 event ring buffer and the `analyze.lsp_events` cursor
-   method, with `dropped` on overflow.
-9. `trusty-console`: poll `analyze.lsp_events` in `metrics_poller.rs` and
-   republish on `GET /api/console/events/analyze/lsp` (cursor JSON) and
-   `…/lsp/stream` (SSE) (§4). No Cargo edge from analyze to
-   `trusty-agents-common`.
+8. **Retired (2026-10-19).** Was: the event ring buffer and the
+   `analyze.lsp_events` cursor method. Replaced by 8a.
+   - 8a. `trusty-analyze`: the producer. Push `lsp.<method>` Started and
+     Finished/Errored events through `PushClient` to `trusty-events` (§4). It
+     depends on item 8b. **Closes #9078** on a live check against a running
+     `trusty-events`.
+   - 8b. `trusty-common`: `HarnessSource::Analyze` and `#[non_exhaustive]` on the
+     enum (§4.1).
+9. **Retired (2026-10-19).** Was: `trusty-console` polling `analyze.lsp_events`
+   and republishing on `/api/console/events/analyze/lsp`. Not built. Console
+   reads the unified stream from `trusty-events` (#9076).
 10. `trusty-analyze`: per-server RSS cap, kill, cool-off, and the
     `CapacityExceeded` error (§7).
 11. `trusty-installer`: add the analysis tools to the `PREREQS` table behind
@@ -830,3 +1009,67 @@ references #6606.
     and record the A/B against the batch checker.
 20. Phase 3 (`pyright`) and phase 4 (`typescript-language-server`), one issue
     each, gated on phase 1's acceptance (§9).
+
+---
+
+## {#SPEC-ANALYZELSP-12~draft} 12. The 1.9.0 slice
+
+Scope of the build the 2026-10-19 ruling asks for (§10 addendum). Everything here
+is subject to the defaults of D1-D10, **accepted, owner ruling Da1 (2026-10-19)**.
+
+**In the slice, in dependency order.**
+
+1. `trusty-common`: `HarnessSource::Analyze` and `#[non_exhaustive]` (§4.1). It
+   merges before the producer. Skew: a reader built before it rejects an
+   `"analyze"` frame, so the new `trusty-events` and console builds carry the
+   variant first.
+2. `trusty-analyze`: the stdio client and child manager (§2) with framing,
+   per-request timeout, typed errors (`NotInstalled`, `SpawnFailed`,
+   `InitializeFailed{stderr_tail}`, `Timeout`, `Stale`), and a scripted fake server
+   for tests. `rust-analyzer` only, default-off flag.
+3. `trusty-analyze`: `analyze.lsp_diagnostics` and `analyze.lsp_references` (and
+   the barrier `analyze.lsp_analysed_at`) with positions (§5), document versions
+   and snapshot stamps and `Stale` (§3), and MCP descriptors.
+4. `trusty-analyze`: the producer (§4): Started and terminal events, flush task and
+   final flush. Its automated tests use a stub events socket. Closing #9078 needs a
+   live check: one real `rust-analyzer` call, with a running `trusty-events`,
+   leaves events readable through `events.subscribe`. It depends on the
+   `trusty-events` daemon landing.
+
+`trusty-analyze` gains no dependency on `trusty-events` and no new Cargo
+dependency. A `trusty-analyze` version bump (0.12.7 to 0.13.0) covers the new
+public methods.
+
+**Not in the slice: the other `analyze.lsp_*` methods.** `lsp_definition`,
+`lsp_call_hierarchy`, `lsp_implementations`, `lsp_type_at` and `lsp_impact` are
+specified in §5 and ship after phase 0's result says which survive (D1).
+
+## Out of the 1.9.0 slice
+
+These stay open under the umbrella issue, so closing #9078 does not read as
+"DOC-72 done".
+
+| Item | Where specified | §11 item |
+|---|---|---|
+| Installer provisioning: `PREREQS` rows for the servers and linters, the JavaScript-runtime step, the `analysis_tools.install` option | §2 | 11, 12 |
+| The `trusty-analyze lsp <tool>` CLI subcommand | §5.1a | 6 |
+| The `search_lsp_*` fronts in `trusty-search` | §5.1b | 7 |
+| The bundled `analyze` skill, and the `BASE-ENGINEER.md` section | §8b, §8c | 13, 14 |
+| The audit and review adapters in `trusty-review` | §8d, §8e | 15, 16, 17 |
+| Per-server RSS cap, kill, cool-off, `CapacityExceeded` | §7 | 10 |
+| `pyright` and `typescript-language-server` | §9 phases 3, 4 | 20 |
+| The audit tool-selection experiment | §9 phase 2 | 18 |
+
+On the development machine the three servers are already installed, so nothing
+here blocks the slice.
+
+**Open sections.**
+
+- **Console route for analyze.** DOC-73 §4.4 still says
+  `/api/console/events/analyze/lsp` "stays as a service-specific route". It has no
+  feeder now. Whether it becomes a `source=analyze` filter over the unified stream
+  is for DOC-73 and #9076. This spec decides nothing there.
+- **Stale-child sweep.** A pidfile sweep of children orphaned by a SIGKILL of
+  analyze is a builder decision, kept if the leak test shows orphans.
+- **CI.** Tests use the scripted fake server. Any test needing a real
+  `rust-analyzer` is ignored and run by hand.
