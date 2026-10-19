@@ -21,8 +21,10 @@
 //! `unversioned_open_only` publishes an unversioned set on `didOpen` and
 //! nothing on `didChange`. Like rust-analyzer's `cargo check` (flycheck),
 //! `check` and `check_unversioned` push a check-only set (an E0382) that the
-//! pull never returns, with and without a version; `check_pending` pushes
-//! nothing; `slow_pull` holds each pull for [`SLOW_PULL_MS`].
+//! pull never returns, with and without a version; `no_check` pushes
+//! nothing; `check_late` pushes nothing on `didOpen` and then, after a
+//! `didChange`, a check set stamped with the new version (a v1 check landing
+//! late); `slow_pull` holds each pull for [`SLOW_PULL_MS`].
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
 //! `<exe> --exact fake_lsp_server_entry --nocapture 3>&1 1>&2`, with the mode in
@@ -163,8 +165,12 @@ fn serve(mode: &str) -> i32 {
                 // readiness between the check and the frame.
                 let mut last = open_doc.lock().expect("open_doc");
                 *last = Some((doc["uri"].clone(), doc["version"].clone()));
-                let silent = mode == "check_pending"
-                    || (mode == "unversioned_open_only" && method == "textDocument/didChange");
+                // `check_late`: the startup check of v1 lands only after a
+                // didChange, stamped with the then-current v2 (rust-analyzer
+                // stamps a push with the version current at publish time).
+                let silent = mode == "no_check"
+                    || (mode == "unversioned_open_only" && method == "textDocument/didChange")
+                    || (mode == "check_late" && method == "textDocument/didOpen");
                 if !silent {
                     let loaded = ready.load(Ordering::SeqCst);
                     publish(&mut out, mode, &doc["uri"], &doc["version"], loaded);

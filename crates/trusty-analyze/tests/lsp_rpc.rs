@@ -262,9 +262,9 @@ async fn a_changed_file_is_pulled_at_its_new_version() {
     assert_eq!(v["document_version"], 2, "{v}");
     assert_eq!(v["files"][0]["version"], 2, "{v}");
     // The only push is the unversioned one sent before the v2 sync, so it
-    // cannot describe v2: the check half is still pending.
+    // cannot describe v2: no check covers this version.
     assert_eq!(v["complete"], false, "{v}");
-    assert_eq!(v["reason"], "check_pending", "{v}");
+    assert_eq!(v["reason"], "check_not_run", "{v}");
 }
 
 // ---- pull + push merge ------------------------------------------------------
@@ -298,11 +298,30 @@ async fn file_scope_merges_the_pull_with_the_check_push() {
 #[tokio::test(flavor = "multi_thread")]
 async fn with_no_check_push_yet_the_answer_is_incomplete() {
     // (b) the pull alone is never a complete answer.
-    let rig = Rig::new("check_pending");
+    let rig = Rig::new("no_check");
     let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
     assert_eq!(v["complete"], false, "{v}");
-    assert_eq!(v["reason"], "check_pending", "{v}");
+    assert_eq!(v["reason"], "check_not_run", "{v}");
     assert_eq!(codes(&v["files"][0]), vec!["\"E0001\""], "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_check_stamped_with_a_newer_version_is_not_counted() {
+    // rust-analyzer stamps a push with the version current at PUBLISH time and
+    // runs `cargo check` only at startup (no didSave is sent), so a check that
+    // read v1 can land stamped v2. It must not complete the v2 answer.
+    let rig = Rig::with("check_late", |c| {
+        c.request_timeout = Duration::from_millis(500);
+    });
+    rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    std::fs::write(rig.file(), "pub fn answer() -> u32 { 43 }\n").unwrap();
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(v["document_version"], 2, "{v}");
+    assert_eq!(
+        v["complete"], false,
+        "a v1 check stamped v2 completed the v2 answer: {v}"
+    );
+    assert_eq!(v["reason"], "check_not_run", "{v}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
