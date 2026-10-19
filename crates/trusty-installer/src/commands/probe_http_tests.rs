@@ -769,7 +769,64 @@ fn uds_socket_for_resolves_the_events_bus_socket() {
         "tctl must dial exactly the socket trusty-events binds"
     );
     assert!(uds_socket_for("trusty-events").is_some());
-    assert_eq!(fixed_port_for("trusty-events"), None, "the bus binds no TCP");
+    assert_eq!(
+        fixed_port_for("trusty-events"),
+        None,
+        "the bus binds no TCP"
+    );
+}
+
+/// Why (#10042): trusty-events names no health method. Asking it one would
+/// answer `method_not_found`, which reads as a daemon answering badly, so its
+/// probe is the one question it can answer: does the socket accept?
+/// What: the bus is an accept-only member with no health method, and a bound
+/// socket probes `Serving` with status `ok`.
+/// Test: This is the test.
+#[tokio::test]
+async fn events_is_probed_by_accept_not_by_a_health_method() {
+    assert!(super::accept_only_member("trusty-events"));
+    assert!(!super::accept_only_member("trusty-memory"));
+    assert_eq!(super::uds_health_method("trusty-events"), None);
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("trusty-events.sock");
+    let _listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    match super::probe_accept_only(&socket).await {
+        ProbeOutcome::Serving { status, version } => {
+            assert_eq!(status, "ok");
+            assert_eq!(version, None, "a connect learns no version");
+        }
+        other => panic!("a bound socket must probe Serving, got {other:?}"),
+    }
+}
+
+/// Why (#10042, fail-open check): a socket file left by a crashed daemon still
+/// exists, so a probe that only looked for the file would call a dead bus
+/// healthy.
+/// What: a socket whose listener is gone probes `Refused`, renders `down`, and
+/// is confirmed down.
+/// Test: This is the test.
+#[tokio::test]
+async fn accept_probe_reports_a_stale_socket_as_refused() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("trusty-events.sock");
+    drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind"));
+    assert!(socket.exists(), "the stale socket file must remain");
+    let outcome = super::probe_accept_only(&socket).await;
+    assert_eq!(outcome, ProbeOutcome::Refused);
+    assert_eq!(outcome.health_string(), "down");
+    assert!(outcome.is_confirmed_down());
+}
+
+/// Why (#10042, fail-open check): no socket at all is the not-running case.
+/// What: a missing socket probes `Refused` and renders `down`.
+/// Test: This is the test.
+#[tokio::test]
+async fn accept_probe_reports_a_missing_socket_as_refused() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let outcome = super::probe_accept_only(&tmp.path().join("absent.sock")).await;
+    assert_eq!(outcome, ProbeOutcome::Refused);
+    assert_eq!(outcome.health_string(), "down");
 }
 
 /// Why (#6277): a socket carries no HTTP status code, so `classify_response`'s

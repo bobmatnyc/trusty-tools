@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trusty.events</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tester/.cargo/bin/trusty-events</string>
+    <string>serve</string>
+  </array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/tester/.trusty-events/logs/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tester/.trusty-events/logs/stderr.log</string>
+</dict>
+</plist>

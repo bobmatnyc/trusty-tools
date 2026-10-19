@@ -37,6 +37,7 @@ pub fn member_description(crate_name: &str) -> &'static str {
         "trusty-analyze" => "code quality and complexity analysis daemon",
         "trusty-review" => "automated code-review MCP server",
         "tga" => "git analytics CLI (blame, churn, contributor heatmaps)",
+        "trusty-events" => "event bus daemon the trusty-* tools publish to",
         "trusty-console" => "web console proxying the trusty-* daemon suite",
         "trusty-mpm" => "multi-session process manager and agent orchestrator",
         "trusty-installer" => "the tctl control plane itself (installs/upgrades the stack)",

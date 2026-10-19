@@ -11,7 +11,8 @@
 //! What: Defines [`StableMember`] (crate name + binary name + whether it is a
 //! supervised daemon) and [`stable_set`] — the ordered member list:
 //! trusty-search, trusty-memory, trusty-analyze, trusty-review, tga,
-//! trusty-console, trusty-mpm, and trusty-installer itself (#5805). Library
+//! trusty-events (#10042), trusty-console, trusty-mpm, and trusty-installer
+//! itself (#5805). Library
 //! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
 //! cargo dependencies of these binaries, so they are intentionally *not*
 //! listed here. `tga` is an EXTERNAL member: it builds and releases from
@@ -328,7 +329,8 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 ///
 /// What: Returns the member list in install/topological order — trusty-search,
 /// trusty-memory, trusty-analyze, trusty-review, tga (binary `tga`,
-/// non-daemon), trusty-console (daemon), trusty-mpm (the orchestrator,
+/// non-daemon), trusty-events (the event bus daemon, #10042),
+/// trusty-console (daemon), trusty-mpm (the orchestrator,
 /// process-managed via its own `start`/`stop` verbs), and trusty-installer
 /// itself, LAST. Library crates resolve as cargo dependencies and are not
 /// listed.
@@ -350,8 +352,9 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// REQUIRED vs OPTIONAL (graceful-degrade policy, demo-critical fix): REQUIRED
 /// = trusty-mpm + its runtime deps trusty-search + trusty-memory +
 /// trusty-review — a from-scratch install on a Tier-1 platform must always be
-/// able to bring these up. OPTIONAL = trusty-analyze, trusty-console, tga,
-/// trusty-installer — members that may lack a prebuilt for a given platform on
+/// able to bring these up. OPTIONAL = trusty-analyze, trusty-events,
+/// trusty-console, tga, trusty-installer — members that may lack a prebuilt
+/// for a given platform on
 /// a host with no Rust toolchain to fall back to; their absence must not fail
 /// the run or print a scary FAILED/exit-2 verdict. trusty-installer is
 /// OPTIONAL for a second reason: a bulk `tctl install` runs FROM a working
@@ -360,6 +363,11 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// `all_ok` derivation handles it — a selection with no REQUIRED member gates
 /// on every member instead of vacuously passing.
 ///
+/// #10042 — trusty-events is a SOFT member (ADR-0065 decision 4): OPTIONAL,
+/// and no `dependency_graph` edge names it, so a host that cannot install the
+/// bus still installs every other member. It sorts before trusty-console,
+/// which reads it, so the console finds the bus already running.
+///
 /// NOTE for future editors: a separate lane may add `trusty-agents` to this
 /// set as REQUIRED — insert it with `required: true` in topological position;
 /// no other code needs to change (`install`/`verify_tail`'s all_ok/verified
@@ -367,7 +375,8 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 ///
 /// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
 /// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`,
-/// `tests::required_vs_optional_classification`.
+/// `tests::required_vs_optional_classification`,
+/// `tests::a_missing_trusty_events_cannot_fail_another_members_install`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
         StableMember::new("trusty-search", "trusty-search", true, true),
@@ -375,6 +384,8 @@ pub fn stable_set() -> Vec<StableMember> {
         StableMember::new("trusty-analyze", "trusty-analyze", true, false),
         StableMember::new("trusty-review", "trusty-review", true, true),
         StableMember::new("tga", "tga", false, false),
+        // #10042: the event bus — a launchd daemon, OPTIONAL, no hard edge.
+        StableMember::new("trusty-events", "trusty-events", true, false),
         StableMember::new("trusty-console", "trusty-console", true, false),
         StableMember::new("trusty-mpm", "trusty-mpm", true, true),
         // #5805: the control plane installs itself. Last, non-daemon, OPTIONAL
@@ -741,7 +752,8 @@ mod tests {
     /// `tctl stack health`, and vmtest-harness enumerate. Adding a member to
     /// `stable_set` must not silently enrol the installer as a daemon those
     /// surfaces then probe for an HTTP `/health` it does not serve.
-    /// What: asserts the daemon set still holds exactly the six daemons.
+    /// What: asserts the daemon set holds exactly the seven daemons (#10042
+    /// added trusty-events).
     /// Test: This is the test.
     #[test]
     fn installer_is_absent_from_the_daemon_set() {
@@ -750,7 +762,7 @@ mod tests {
             !names.contains(&"trusty-installer".to_owned()),
             "the installer must never reach a daemon-shaped surface: {names:?}"
         );
-        assert_eq!(names.len(), 6, "daemon set unchanged by #5805: {names:?}");
+        assert_eq!(names.len(), 7, "daemon set unchanged by #5805: {names:?}");
     }
 
     /// Why (#5805): the crate ships TWO binaries, and `tctl` is the one
@@ -865,8 +877,9 @@ mod tests {
     /// same reasoning as `required_vs_optional_classification`. Asserting the
     /// filter expression back at itself would be a tautology and would catch
     /// nothing.
-    /// What: asserts the daemon set is exactly these six crate names, in
-    /// stable-set order — the seven members minus `tga`, the one non-daemon.
+    /// What: asserts the daemon set is exactly these seven crate names, in
+    /// stable-set order — the stable set minus its two non-daemons, `tga`
+    /// and trusty-installer.
     /// Test: This is the test.
     #[test]
     fn daemon_members_is_pinned() {
