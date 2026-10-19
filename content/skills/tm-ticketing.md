@@ -93,7 +93,7 @@ and where this skill specifies it in full.
 | Milestone | parent's milestone → owning crate's `Backlog · <crate>` → the one `tm issue standard` names; else a `no-milestone: <reason>` comment | "Choosing the Milestone and the Project" |
 | Project | by crate/topic fit from the live list, or `default_project`; attached with `gh project item-add <number> --owner <owner>` | "Projects" |
 | Relationships | native sub-issue and blocked-by only; `Refs #N` is fix linkage, never an issue-to-issue link | "Relationships (native, never prose)" |
-| Lifecycle states | `open → status:in-progress → status:coded → status:merged → status:tested → closed`, mutually exclusive | "Lifecycle" |
+| Lifecycle states | `open → status:in-progress → status:coded → status:merged → status:tested → closed`, mutually exclusive, moved in step with the project's `Status` field | "Lifecycle", "Every issue: milestone, relationships, state" |
 | Dedupe disposition | `COMMENT` / `REOPEN` / `NEW REGRESSION` / `NO TICKET`, one per finding, reported by name | "Search first, then choose a disposition" |
 | Epic title | `[EPIC <epic#>] <the outcome, in plain words>`, created as `[EPIC]` and renamed once the number is known | "Trackers and phase issues" |
 | Phase title | `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, a native sub-issue of the tracker | "Trackers and phase issues" |
@@ -602,6 +602,59 @@ markdown link, never a bare number, in every artifact you author.
   short SHA is acceptable only inside a table of many.
 - Tickets in another tracker: link to that tracker's issue URL.
 
+## Every issue: milestone, relationships, state
+
+🔴 **Every issue you file or touch carries three things: a milestone, its
+relationships, and its current state.** This section is the one statement of
+the rule (owner rule 2026-10-19, #10045). Other skills and agents point here
+and never restate it.
+
+**Milestone.** Set one on every issue you file, and on every issue you touch
+that has none. Pick it by the rule in "Choosing the Milestone and the Project
+(issues)".
+
+**No usable milestone set.** When the repository has no open milestone that
+rule can pick, propose a set to the PM: each milestone's name and the scope it
+holds. Never skip the milestone. File the issue without one, post
+`no-milestone: proposed <names> to the PM` on it, and put the proposal in your
+report. Create the milestones only when the PM says to.
+
+**Relationships.** Record each one that exists, natively, as "Relationships
+(native, never prose)" describes:
+
+- parent and sub-issues;
+- blocked-by and blocking;
+- the linked PR — its `Refs #N`, which `version-control` writes, and the PR
+  link in your In PR transition comment.
+
+A standalone issue has none. Set no link and post no comment saying so.
+
+**State.** State is two values, moved in step: the `Status` field on the
+tracking project (Project #45 in trusty-tools — `TICKETING.md` names the
+project and maps each Status to its label) and the matching `status:*` label.
+Move both in the same pass at every transition: filing, claim, PR open, merge,
+verification, close. A Status with no label in that map (Backlog, Ready for
+Development, Published) carries no `status:*` label. A repository with no
+project Status field tracks state by the label alone.
+
+```bash
+tm issue transition N status:coded                     # the label
+gh project item-edit <project#> --owner <owner> \
+  --url <issue-url> --field Status --value "In PR"     # the field (gh 2.98+)
+gh issue view N --json milestone,projectItems,labels   # read both back
+```
+
+**Before you report, run this checklist on every issue you filed or touched:**
+
+```
+□ Milestone set — or `no-milestone:` posted and a proposal in the report
+□ Parent, sub-issues, blocked-by, blocking and linked PR recorded natively, where they exist
+□ Project Status and `status:*` label name the same stage
+□ `tm issue audit <N>` run, its output pasted
+□ Report states the issue's milestone, relationships and state, one line each issue:
+  #5001 — milestone "Backlog · search/core"; sub-issue of #4990, blocked-by #4988; Status In Development / status:in-progress
+```
+
 ## The Labels, Project, Milestone Standard
 
 🔴 **Every issue and every pull request carries the same four things: the
@@ -748,7 +801,9 @@ exactly one project and attached first try on every observed case.
 
 Never invent a title. If none of the three yields a milestone, file with none
 and post a `no-milestone: <reason>` comment on the issue in the same dispatch.
-That comment is the only thing that makes an unset milestone legitimate.
+That comment is the only thing that makes an unset milestone legitimate. When
+the repository has no usable milestone set, the comment carries a proposal —
+"Every issue: milestone, relationships, state".
 
 An issue holds many labels and exactly one milestone, so a workstream or a theme
 parked there evicts the real slot. `ws/<session-name>` is always a label.

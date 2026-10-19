@@ -173,7 +173,8 @@ tm issue audit "$EPIC"
 `subIssuesSummary` reports `total`/`completed`; it must equal the number of
 phases filed. `tm issue audit` checks the project, milestone and component
 label mechanically and exits 1 on a violation. Repeat the audit for each
-phase number.
+phase number, then run the checklist in `tm-ticketing`, "Every issue:
+milestone, relationships, state", on the tracker and each phase.
 
 Report: the tracker number and URL on its own `ISSUE:` line, then one line per
 phase (`PHASE_<n> → #<number>`), then the plan permalink.
