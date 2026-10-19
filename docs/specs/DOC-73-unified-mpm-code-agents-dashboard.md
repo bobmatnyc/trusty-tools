@@ -428,6 +428,14 @@ payload rather than the envelope. Three rules make it survivable.
 `HarnessPayload`'s existing `domain` tag is untouched, so this versioning applies
 only inside the new `Action` arm.
 
+**The subscribe stream is additive for fields, not for item kinds (#10071).**
+An `events.subscribe` item (§4.4) may gain a field, and an older reader skips
+it. It may not gain a `type` that an older reader is sent unasked:
+`SubscribeItem` rejects an unknown `type` by design, so a typed reader would
+fail on it. A new item kind is therefore sent only to a client that opts in
+through a request field. The first such kind is `heartbeat`, sent only when the
+request sets `heartbeat_ms`.
+
 ### 3.4 What already fits, and what needs an adapter
 
 **Fits with a mechanical mapping.**
@@ -693,15 +701,31 @@ relayed again. An event console cannot decode (a newer daemon's payload, §3.3)
 is relayed as a one-event gap and the cursor moves past it. A gap carries no
 `id:`, so it does not move the reader's `Last-Event-ID`.
 
+**Liveness is opt-in (#10071).** A subscriber that sets `heartbeat_ms` is sent
+`{"type":"heartbeat","head":<last seq>}` as soon as the bus accepts the
+subscription, before any replay, and then once per interval. `head` is read
+under the ring lock, so a bus whose lock is wedged sends none. A heartbeat is
+not an event: it is never filtered, never moves a reader's resume point, and is
+never relayed to SSE. The bus refuses `heartbeat_ms` outside 100 ms to one hour
+with `invalid_params`. A subscriber that does not set it is sent exactly the
+frames it was sent before. Console asks for 5 s and reports the bus `hung` when
+no frame of any kind arrives for 12.5 s (two and a half intervals, so one lost
+beat is not a hang), then reconnects with its usual backoff and resumes without
+loss. The daemon and console ship in lockstep: an older daemon refuses
+`heartbeat_ms`, which console reports as `refused` without dropping its resume
+point.
+
 Console's own connection to the bus is served read-only at
 `GET /api/console/events/status`: `200` when connected, `503` otherwise, with a
-failure category (`not_running`, `refused`, `hung_up`, `decode`, …) rather
-than error text, and no filesystem path. It sits behind the same per-listener
+failure category (`not_running`, `refused`, `hung_up`, `hung`, `decode`, …)
+rather than error text, and no filesystem path. `connected` means the bus has
+sent a frame on the open subscription, a heartbeat or an event; a socket that
+only accepts is not connected, because the kernel accepts for a stopped daemon
+too. `hung` means the bus accepted but sent nothing within the bound; `hung_up`
+means it closed the connection. It sits behind the same per-listener
 Host/Origin guard as every other `/api/console` route (#9792), so a
 cross-origin read is refused with `403`. A page can use it to tell "no events"
-from "the bus is down or unreachable" (§8.5). It does not yet detect a daemon
-that hangs with the connection open: that reads as a quiet bus until a
-liveness signal is added to the protocol (#9076 follow-up). A WebSocket buys a return
+from "the bus is down, hung or unreachable" (§8.5). A WebSocket buys a return
 channel this spec has no use for. The existing `console_metrics` polling loop
 (`crates/trusty-console/src/metrics_poller.rs`) is unchanged and keeps serving
 the gauge routes.
@@ -1073,7 +1097,9 @@ a machine at rest are all normal.
   pointed at a stale session id is diagnosable from across the room.
 - **Distinguish empty from disconnected.** No events and a healthy SSE
   connection is "nothing is happening". No events and a dead connection is
-  "cannot see". They render differently, and the second names the daemon.
+  "cannot see". They render differently, and the second names the daemon. A
+  hung bus (§4.4: it accepts but sends no heartbeat) is "cannot see" too, never
+  "nothing is happening".
 
 ---
 

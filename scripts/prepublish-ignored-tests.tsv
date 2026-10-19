@@ -215,5 +215,11 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # events_uds_live --test daemon_wire -- --include-ignored`).
 # 136 + 4 -> 140 (Architect-approved, df-D7d).
 #
+# #10071 adds two more trusty-console tests in `tests/events_uds_live.rs`:
+# `a_quiet_healthy_daemon_stays_connected` and
+# `a_stopped_daemon_is_reported_hung_and_recovers_after_sigcont`, with the same
+# `#[ignore]` reason and the same reason to stay unselected (the binary must be
+# built in the same cargo run). 140 + 2 -> 142 (PENDING approval).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 140
+# UNSELECTED-BASELINE: 142
