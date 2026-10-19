@@ -714,6 +714,24 @@ fn committed_repo() -> tempfile::TempDir {
     dir
 }
 
+/// #9078: a file inside a NEW untracked directory is part of the stamp; git's
+/// `normal` mode collapses the directory to one name and would miss the edit.
+#[tokio::test]
+async fn snapshot_sees_an_edit_inside_a_new_untracked_directory() {
+    use super::snapshot::workspace_snapshot;
+    let dir = committed_repo();
+    let newmod = dir.path().join("newmod");
+    std::fs::create_dir_all(&newmod).unwrap();
+    std::fs::write(newmod.join("mod.rs"), "pub fn a() {}\n").unwrap();
+    let before = workspace_snapshot(dir.path()).await.unwrap();
+    std::fs::write(newmod.join("mod.rs"), "pub fn b() {}\n").unwrap();
+    let after = workspace_snapshot(dir.path()).await.unwrap();
+    assert_ne!(
+        before, after,
+        "an edit in an untracked directory moved nothing"
+    );
+}
+
 #[tokio::test]
 async fn snapshot_budget_bounds_files_bytes_and_time() {
     use super::snapshot::{snapshot_within, SnapshotBudget};

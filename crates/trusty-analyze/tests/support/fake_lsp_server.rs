@@ -11,8 +11,13 @@
 //! (`content_modified_forever`). Every mode reports rust-analyzer's
 //! `experimental/serverStatus` after `initialized`: quiescent at once, or, in
 //! `loading`, not quiescent for [`LOADING_MS`] (answering `[]` and publishing
-//! empty diagnostics meanwhile, as rust-analyzer does) and then quiescent with a
-//! fresh publication; `never_ready` never becomes quiescent.
+//! empty diagnostics meanwhile, as rust-analyzer does) and then quiescent with
+//! NO re-publication of an unchanged set, as rust-analyzer 1.98 behaves
+//! (`loading_clean` is the same for a file with no diagnostics);
+//! `never_ready` never becomes quiescent; `load_failed` reports
+//! `health: "error"` with `quiescent: true` and answers `[]`, as rust-analyzer
+//! does on a broken `Cargo.toml`. It advertises `diagnosticProvider` and
+//! answers `textDocument/diagnostic` (pull) with the canned set once loaded.
 //! `unversioned_open_only` publishes an unversioned set on `didOpen` and
 //! nothing on `didChange`.
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
@@ -127,7 +132,9 @@ fn serve(mode: &str) -> i32 {
                     &mut out,
                     id,
                     json!({
-                        "capabilities": {"referencesProvider": true, "textDocumentSync": 1},
+                        "capabilities": {"referencesProvider": true, "textDocumentSync": 1,
+                            "diagnosticProvider": {"interFileDependencies": true,
+                                                   "workspaceDiagnostics": false}},
                         "serverInfo": {"name": "fake-lsp"}
                     }),
                 );
@@ -159,6 +166,15 @@ fn serve(mode: &str) -> i32 {
             // Still loading: rust-analyzer answers an empty list.
             ("textDocument/references", Some(id)) if !ready.load(Ordering::SeqCst) => {
                 reply(&mut out, id, json!([]));
+            }
+            ("textDocument/diagnostic", Some(id)) => {
+                let loaded = ready.load(Ordering::SeqCst) && mode != "loading_clean";
+                let items = if loaded { canned() } else { json!([]) };
+                reply(
+                    &mut out,
+                    id,
+                    json!({"kind": "full", "resultId": "fake", "items": items}),
+                );
             }
             ("textDocument/references", Some(id))
                 if mode == "content_modified_forever"
@@ -192,54 +208,63 @@ fn serve(mode: &str) -> i32 {
     0
 }
 
-/// Report readiness after `initialized`; `loading` flips to quiescent on a timer
-/// and re-publishes the open document, as rust-analyzer does after a load.
+/// What `load_failed` puts in its status message; it must never reach a caller.
+pub const LOAD_FAILED_MESSAGE: &str = "Failed to load workspaces: SERVER-SECRET-TEXT";
+
+/// Report readiness after `initialized`. `loading*` flips to quiescent on a
+/// timer and, like rust-analyzer, does not re-publish an unchanged set.
 fn on_initialized(mode: &str, out: &Out, ready: &Arc<AtomicBool>, open_doc: &OpenDoc) {
     let mut out = out.clone();
-    if mode != "loading" && mode != "never_ready" {
-        ready.store(true, Ordering::SeqCst);
-        server_status(&mut out, true);
+    if mode == "load_failed" {
+        server_status(&mut out, "error", false);
+        server_status(&mut out, "error", true);
         return;
     }
-    server_status(&mut out, false);
+    if !mode.starts_with("loading") && mode != "never_ready" {
+        ready.store(true, Ordering::SeqCst);
+        server_status(&mut out, "ok", true);
+        return;
+    }
+    server_status(&mut out, "ok", false);
     if mode == "never_ready" {
         return;
     }
-    let (ready, open_doc, mode) = (Arc::clone(ready), Arc::clone(open_doc), mode.to_string());
+    let (ready, open_doc) = (Arc::clone(ready), Arc::clone(open_doc));
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(LOADING_MS));
-        let last = open_doc.lock().expect("open_doc");
+        let _last = open_doc.lock().expect("open_doc");
         ready.store(true, Ordering::SeqCst);
-        server_status(&mut out, true);
-        if let Some((uri, version)) = last.as_ref() {
-            publish(&mut out, &mode, uri, version, true);
-        }
+        server_status(&mut out, "ok", true);
     });
 }
 
-fn server_status(out: &mut Out, quiescent: bool) {
+fn server_status(out: &mut Out, health: &str, quiescent: bool) {
+    let mut params = json!({"health": health, "quiescent": quiescent});
+    if health == "error" {
+        params["message"] = json!(LOAD_FAILED_MESSAGE);
+    }
     send(
         out,
-        &json!({"jsonrpc": "2.0", "method": "experimental/serverStatus",
-                "params": {"health": "ok", "quiescent": quiescent}}),
+        &json!({"jsonrpc": "2.0", "method": "experimental/serverStatus", "params": params}),
     );
+}
+
+/// The one canned diagnostic, pushed or pulled.
+fn canned() -> Value {
+    json!([{
+        "range": {"start": {"line": 0, "character": 0},
+                  "end": {"line": 0, "character": 1}},
+        "severity": 1,
+        "code": "E0001",
+        "source": "fake-lsp",
+        "message": "canned diagnostic"
+    }])
 }
 
 /// Publish diagnostics for one document: the canned one once loaded, an
 /// empty set while loading; no version in the `unversioned*` modes.
 fn publish(out: &mut impl Write, mode: &str, uri: &Value, version: &Value, loaded: bool) {
-    let diagnostics = if loaded {
-        json!([{
-            "range": {"start": {"line": 0, "character": 0},
-                      "end": {"line": 0, "character": 1}},
-            "severity": 1,
-            "code": "E0001",
-            "source": "fake-lsp",
-            "message": "canned diagnostic"
-        }])
-    } else {
-        json!([])
-    };
+    let diagnostics = if loaded { canned() } else { json!([]) };
     let mut params = json!({"uri": uri, "version": version, "diagnostics": diagnostics});
     if mode.starts_with("unversioned") {
         // rust-analyzer's cargo-check pass publishes with no version.

@@ -197,7 +197,8 @@ async fn lsp_diagnostics_for_a_file_are_versioned_and_stamped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unversioned_diagnostics_are_accepted_and_never_stale() {
+async fn file_diagnostics_are_pulled_even_when_pushes_are_unversioned() {
+    // The file's own answer is the pull result, stamped with the synced version.
     let rig = Rig::new("unversioned");
     let v = rig
         .ok(
@@ -207,8 +208,8 @@ async fn unversioned_diagnostics_are_accepted_and_never_stale() {
         .await;
     assert_eq!(v["document_version"], 1);
     let file = &v["files"][0];
-    assert_eq!(file["version"], Value::Null);
-    assert_eq!(file["unversioned"], true);
+    assert_eq!(file["version"], 1);
+    assert_eq!(file["unversioned"], false);
     assert_eq!(file["diagnostics"][0]["message"], "canned diagnostic");
 }
 
@@ -250,18 +251,67 @@ async fn a_directory_workspace_scope_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unversioned_publication_from_before_the_change_is_not_fresh() {
+async fn a_changed_file_is_pulled_at_its_new_version() {
     let rig = Rig::with("unversioned_open_only", |c| {
         c.request_timeout = Duration::from_millis(500);
     });
-    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
-    assert_eq!(v["files"][0]["unversioned"], true);
-    // didChange publishes nothing; the didOpen set describes older text.
+    rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    // didChange publishes nothing; the answer comes from the pull, at v2.
     std::fs::write(rig.file(), "pub fn answer() -> u32 { 43 }\n").unwrap();
-    let data = rig
-        .refusal("analyze.lsp_diagnostics", rig.diag_params())
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(v["document_version"], 2, "{v}");
+    assert_eq!(v["files"][0]["version"], 2, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_file_opened_during_loading_is_answered_after_quiescence() {
+    // rust-analyzer publishes an empty set while loading and never re-publishes
+    // it unchanged; only a pull can answer for this file.
+    let rig = Rig::with("loading_clean", |c| {
+        c.request_timeout = Duration::from_secs(3);
+    });
+    let v = rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+    assert_eq!(v["document_version"], 1, "{v}");
+    assert_eq!(v["files"][0]["diagnostics"], json!([]), "{v}");
+    let b = rig
+        .ok(
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 3000}),
+        )
         .await;
-    assert_eq!(data["kind"], "lsp_timeout", "{data}");
+    assert_eq!(b["state"], "ready", "{b}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_that_failed_to_load_is_refused() {
+    // rust-analyzer on a broken Cargo.toml: health error, quiescent, `[]`.
+    let rig = Rig::with("load_failed", |c| {
+        c.request_timeout = Duration::from_secs(2);
+    });
+    for (method, params) in [
+        ("analyze.lsp_references", rig.refs_params()),
+        ("analyze.lsp_diagnostics", rig.diag_params()),
+        (
+            "analyze.lsp_diagnostics",
+            json!({"scope": "workspace", "path": rig.file()}),
+        ),
+        (
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 2000}),
+        ),
+    ] {
+        let r = rig.call(method, params.clone()).await;
+        let err = r
+            .error
+            .unwrap_or_else(|| panic!("{method} {params} succeeded: {:?}", r.result));
+        let data = err.data.clone().unwrap_or_default();
+        assert_eq!(data["kind"], "lsp_workspace_failed", "{method}: {err:?}");
+        let shown = format!("{} {}", err.message, data);
+        assert!(
+            !shown.contains("SERVER-SECRET-TEXT"),
+            "the server's message text leaked: {shown}"
+        );
+    }
 }
 
 // ---- readiness -------------------------------------------------------------
@@ -398,7 +448,7 @@ async fn analysed_at_times_out_with_the_version_seen() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn analysed_at_accepts_an_unversioned_publication_after_the_sync() {
-    // The barrier uses the diagnostics rule: unversioned, published after sync.
+    // The barrier pulls, as diagnostics do; unversioned pushes do not matter.
     let rig = Rig::new("unversioned");
     let v = rig
         .ok(
