@@ -778,7 +778,7 @@ fn control_bus_declares_no_transport() {
             assert!(
                 !src.contains(needle),
                 "{name} contains `{needle}`: control_bus holds event TYPES only \
-                 — the bus lives in trusty-console (#6846)"
+                 — the bus lives in trusty-events (#6846, #9075)"
             );
         }
 

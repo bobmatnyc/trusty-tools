@@ -1,7 +1,8 @@
 //! Shared event types for the control bus — types only, no transport.
 //!
-//! Why: Owner ruling 2026-09-05 (superseding DOC-73 §4.1 Option C) makes
-//!      trusty-console the one and only event bus. Every harness —
+//! Why: Owner ruling 2026-09-05 (superseding DOC-73 §4.1 Option C) made one
+//!      event bus for the workspace; ADR-0065 runs it as the `trusty-events`
+//!      daemon (#9075; trusty-console hosted it before). Every harness —
 //!      trusty-agents, trusty-mpm, trusty-code — is a producer that pushes to
 //!      it. Producers and that consumer must agree on the envelope, so the
 //!      envelope cannot live inside any one producer: before this module,
@@ -15,7 +16,7 @@
 //!       supporting types (`ActionMeta`, `Actor`, `ObjectRef`, `ObjectType`,
 //!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), and
 //!       — behind the `uds` feature, unix only — `PushClient` (the buffered
-//!       producer-side transport to console's ingest socket, DOC-73 §4).
+//!       producer-side transport to the trusty-events socket, DOC-73 §4).
 //!       The `events.subscribe` contract (#9075, ADR-0065 decision 3) adds
 //!       `EVENTS_SERVICE`, `METHOD_EVENTS_SUBSCRIBE`, `events_socket_path`,
 //!       `SubscribeParams`, `SubscribeFilter` and `SubscribeItem`, plus — behind
@@ -25,7 +26,7 @@
 //!       stamps `seq`, `at`, and `id` itself and hands the envelope to
 //!       `PushClient`, which buffers and dials out; the bus that assigns
 //!       `seq` on arrival, orders, retains, and fans events back out is
-//!       trusty-console's alone.
+//!       the `trusty-events` daemon's alone (#9075).
 //! Test: `tests` below covers serde round-trips and the filter matrix, and
 //!       `tests::control_bus_declares_no_transport` reads this module's own
 //!       sources to keep the types-only boundary from eroding — `PushClient`

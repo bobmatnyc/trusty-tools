@@ -69,6 +69,7 @@ default-members = [
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
+    "crates/trusty-events",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
     "crates/trusty-kb",

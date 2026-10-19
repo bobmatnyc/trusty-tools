@@ -20,19 +20,24 @@
 //! which a producer controls and could set to any value), re-applies
 //! retention on every rotation, and re-derives `earliest_retained_seq` from
 //! whatever survives so [`super::replay::replay_since`] always compares
-//! against the truth.
+//! against the truth. #9075: a rotate, write or final-sync error stops the
+//! writer and is published through [`DurableLog::failure`] and
+//! [`DurableLog::failed`]; the bus then refuses new events and the daemon
+//! exits 1.
 //! Test: `super::tests::open_recovers_next_seq_from_an_existing_log`,
+//! `tests/daemon_exit.rs::a_log_write_failure_exits_non_zero`,
 //! `super::tests::backpressure_drops_are_counted_and_do_not_block_enqueue`,
 //! `super::tests::events_written_are_readable_back_in_order`,
 //! `super::tests::rotation_opens_a_new_file_and_keeps_seq_continuity`,
 //! `super::tests::rotation_fsyncs_the_outgoing_file_before_opening_the_next_one`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{NaiveDate, Utc};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use trusty_common::control_bus::HarnessEvent;
 
 use super::config::{LogConfig, WRITE_CHANNEL_CAPACITY, day_file_name};
@@ -56,7 +61,12 @@ pub(crate) struct RecoveredState {
 /// task this was opened with.
 pub(crate) struct DurableLog {
     dir: PathBuf,
-    tx: mpsc::Sender<HarnessEvent>,
+    // #9075: `None` once `close` ran, so the writer sees its channel end and
+    // drains what is queued.
+    tx: Mutex<Option<mpsc::Sender<HarnessEvent>>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
+    // #9075: `Some(reason)` once the writer has failed.
+    failure: watch::Receiver<Option<String>>,
     // Read today only by `written()`, `#[cfg(test)]`-gated below; a later
     // slice's metrics route (#6850) is the production reader.
     #[allow(dead_code)]
@@ -75,10 +85,9 @@ impl DurableLog {
     ///
     /// [`LogError::PrepareDir`] if the directory cannot be hardened to
     /// `0700`; [`LogError::Io`] if an existing file cannot be listed, read,
-    /// or an expired one deleted. A caller that gets `Err` here should still
-    /// start the bus without durability (`EventBus::new`) rather than fail
-    /// console startup — DOC-73 §4.1's non-blocking invariant covers the log
-    /// exactly as it covers the ingest socket.
+    /// or an expired one deleted. #9075: the daemon treats `Err` here as
+    /// fatal and exits non-zero. A bus without its log would restart `seq` at
+    /// 1, and a reader resuming with an older `since_seq` could not tell.
     pub(crate) async fn open(config: LogConfig) -> Result<(Self, RecoveredState), LogError> {
         Self::open_with_capacity(config, WRITE_CHANNEL_CAPACITY).await
     }
@@ -108,17 +117,23 @@ impl DurableLog {
         let written = Arc::new(AtomicU64::new(0));
         let earliest_retained_seq = Arc::new(AtomicU64::new(earliest.unwrap_or(0)));
 
-        tokio::spawn(run_writer(
-            config.clone(),
-            rx,
-            Arc::clone(&written),
-            Arc::clone(&earliest_retained_seq),
+        let (failure_tx, failure) = watch::channel(None);
+        let writer = tokio::spawn(supervise_writer(
+            run_writer(
+                config.clone(),
+                rx,
+                Arc::clone(&written),
+                Arc::clone(&earliest_retained_seq),
+            ),
+            failure_tx,
         ));
 
         Ok((
             Self {
                 dir: config.dir,
-                tx,
+                tx: Mutex::new(Some(tx)),
+                writer: Mutex::new(Some(writer)),
+                failure,
                 written,
                 earliest_retained_seq,
             },
@@ -131,7 +146,47 @@ impl DurableLog {
     /// the module docs' persisted-flag contract); `false` means the queue was
     /// full and this event will never reach the log.
     pub(crate) fn enqueue(&self, event: HarnessEvent) -> bool {
-        self.tx.try_send(event).is_ok()
+        lock(&self.tx)
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(event).is_ok())
+    }
+
+    /// Why the writer stopped, if it failed (#9075).
+    ///
+    /// Test: `tests/daemon_exit.rs::a_log_write_failure_exits_non_zero`.
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.failure.borrow().clone()
+    }
+
+    /// Resolve with the reason once the writer fails; never resolves if it
+    /// does not (#9075).
+    ///
+    /// Test: `tests/daemon_exit.rs::a_log_write_failure_exits_non_zero`.
+    pub(crate) fn failed(&self) -> impl std::future::Future<Output = String> + Send + 'static {
+        let mut failure = self.failure.clone();
+        async move {
+            let reason = match failure.wait_for(Option::is_some).await {
+                Ok(reason) => reason.clone(),
+                Err(_) => None,
+            };
+            match reason {
+                Some(reason) => reason,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Close the writer's queue and hand back the writer task (#9075).
+    ///
+    /// Why: a clean shutdown must not lose events already queued, because
+    /// their `seq` was already handed out.
+    /// What: drops the only sender, so the writer drains its queue, syncs and
+    /// exits; awaiting the returned handle waits for that. `None` on a second
+    /// call. Later [`DurableLog::enqueue`] calls return `false`.
+    /// Test: `super::super::tests::ingest_after_close_is_refused_and_assigns_no_seq`.
+    pub(crate) fn close(&self) -> Option<JoinHandle<()>> {
+        drop(lock(&self.tx).take());
+        lock(&self.writer).take()
     }
 
     /// How many events the writer has durably written (write + flush
@@ -160,57 +215,70 @@ impl DurableLog {
     }
 }
 
+/// Lock a field mutex, recovering from poisoning: each guarded value is a
+/// single `Option` swap, so no invariant can be left half-updated.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The writer task body: owns the one open file, rotates at a UTC day
-/// boundary, and exits (after a best-effort final sync) once every
-/// [`DurableLog`] clone's sender has dropped and the channel drains.
+/// boundary, and exits after a final sync once the sender has dropped and the
+/// channel drains. #9075: returns the first rotate, write or sync error
+/// instead of logging it and going on.
 async fn run_writer(
     config: LogConfig,
     mut rx: mpsc::Receiver<HarnessEvent>,
     written: Arc<AtomicU64>,
     earliest_retained_seq: Arc<AtomicU64>,
-) {
+) -> Result<(), LogError> {
     let mut open_day: Option<NaiveDate> = None;
-    let mut file: Option<tokio::fs::File> = None;
-    let mut current_path: Option<PathBuf> = None;
+    let mut file: Option<(tokio::fs::File, PathBuf)> = None;
 
+    // #9075: a failed rotate or write ends the writer with the error. Going on
+    // would leave a `seq` the bus already handed out missing from the log,
+    // and the next start would hand it out again.
     while let Some(event) = rx.recv().await {
         let today = Utc::now().date_naive();
         if open_day != Some(today) {
-            match rotate(&config, today, &earliest_retained_seq, file.as_mut()).await {
-                Ok((f, path)) => {
-                    file = Some(f);
-                    current_path = Some(path);
-                    open_day = Some(today);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "event log: could not rotate to today's file; this event \
-                         will not be persisted"
-                    );
-                    continue;
-                }
-            }
+            let previous = file.as_mut().map(|(f, _)| f);
+            file = Some(rotate(&config, today, &earliest_retained_seq, previous).await?);
+            open_day = Some(today);
         }
+        if let Some((f, path)) = file.as_mut() {
+            write_line(f, path, &event).await?;
+            written.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
-        let (Some(f), Some(path)) = (file.as_mut(), current_path.as_deref()) else {
-            continue;
+    // The channel closed: shutdown. A sync failure here means the drained
+    // tail may not be durable, so it is a failure too.
+    if let Some((f, path)) = file.as_mut() {
+        let sync = async {
+            tokio::io::AsyncWriteExt::flush(f).await?;
+            f.sync_data().await
         };
-        if let Err(e) = write_line(f, path, &event).await {
-            tracing::error!(
-                error = %e,
-                seq = event.seq,
-                "event log: write failed; this event will not be persisted"
-            );
-            continue;
-        }
-        written.fetch_add(1, Ordering::Relaxed);
+        sync.await.map_err(|source| LogError::Io {
+            op: "sync",
+            path: path.clone(),
+            source,
+        })?;
     }
+    Ok(())
+}
 
-    if let Some(f) = file.as_mut() {
-        let _ = tokio::io::AsyncWriteExt::flush(f).await;
-        let _ = f.sync_data().await;
-    }
+/// Run [`run_writer`] and publish how it ended: a failure or a panic sets
+/// `failure`, which [`DurableLog::failed`] waits on.
+async fn supervise_writer(
+    writer: impl std::future::Future<Output = Result<(), LogError>> + Send + 'static,
+    failure: watch::Sender<Option<String>>,
+) {
+    let reason = match tokio::spawn(writer).await {
+        Ok(Ok(())) => return,
+        Ok(Err(e)) => e.to_string(),
+        Err(e) => format!("the log writer task ended: {e}"),
+    };
+    tracing::error!(error = %reason, "event log: writer failed; the bus stops");
+    let _ = failure.send(Some(reason));
 }
 
 /// Open (create/append) `today`'s file, apply retention, and refresh

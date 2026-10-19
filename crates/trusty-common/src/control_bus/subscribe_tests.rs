@@ -175,6 +175,28 @@ fn subscribe_params_golden_roundtrip() {
     assert_serializes_to(&params, &golden);
 }
 
+// #9075: the resume check's id travels beside `since_seq`, and is omitted
+// when absent so an older frame stays byte-identical.
+#[test]
+fn subscribe_params_since_id_golden_roundtrip() {
+    let id = EventId::new();
+    let golden = json!({ "since_seq": 9, "since_id": id, "filters": {} });
+    let params: SubscribeParams = serde_json::from_value(golden.clone()).expect("decode golden");
+    assert_eq!(params.since_id, Some(id));
+    assert_serializes_to(&params, &golden);
+
+    let without: SubscribeParams =
+        serde_json::from_value(json!({ "since_seq": 9 })).expect("decode without since_id");
+    assert_eq!(without.since_id, None);
+    assert!(
+        serde_json::to_value(&without)
+            .expect("encode")
+            .get("since_id")
+            .is_none(),
+        "an absent since_id is not written"
+    );
+}
+
 /// `{}` is "live only, everything": no replay, a match-all filter.
 #[test]
 fn subscribe_params_empty_object_is_live_and_match_all() {
@@ -390,6 +412,7 @@ mod frame {
     fn subscribe_request_golden_roundtrip() {
         let params = SubscribeParams {
             since_seq: Some(41),
+            since_id: None,
             filters: SubscribeFilter {
                 session: Some("s-1".into()),
                 ..SubscribeFilter::default()

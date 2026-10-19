@@ -11357,7 +11357,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "chrono",
  "clap",
  "dirs 5.0.1",
  "futures-util",
@@ -11451,6 +11450,23 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "which 6.0.3",
+]
+
+[[package]]
+name = "trusty-events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
 ]
 
 [[package]]

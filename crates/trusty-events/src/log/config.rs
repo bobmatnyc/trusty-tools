@@ -4,8 +4,8 @@
 //! `log/` submodule needs and none of them should decide on its own — keeping
 //! both here is what lets [`super::writer`], [`super::recovery`] and
 //! [`super::replay`] agree without importing each other.
-//! What: [`LogConfig`] is the console's private event-log directory
-//! (`<data dir>/trusty-console/event_log/`, resolved through
+//! What: [`LogConfig`] is the bus's private event-log directory
+//! (`<data dir>/trusty-events/event_log/`, resolved through
 //! [`trusty_common::resolve_data_dir`], never a raw `create_dir_all`) plus
 //! `retain_days`. [`day_file_name`]/[`parse_day_file_name`] are the one
 //! filename format every submodule reads and writes
@@ -20,7 +20,8 @@ use chrono::NaiveDate;
 
 use super::error::LogError;
 
-/// Subdirectory of the console data directory the durable log lives under.
+/// Subdirectory of the `trusty-events` data directory the durable log lives
+/// under.
 pub(crate) const LOG_SUBDIR: &str = "event_log";
 
 /// Extension every day file carries.
@@ -29,7 +30,7 @@ pub(crate) const LOG_FILE_EXT: &str = "ndjson";
 /// How many calendar days of day files are kept by default (DOC-73 §4.3's
 /// "rotated and retained" requirement; no fixed number is specified there, so
 /// a week is the simplest sane default — long enough that a viewer reattaching
-/// after a weekend still gets replay, short enough that an idle console does
+/// after a weekend still gets replay, short enough that an idle bus does
 /// not accumulate files forever).
 pub(crate) const DEFAULT_RETAIN_DAYS: u32 = 7;
 
@@ -52,17 +53,19 @@ pub(crate) struct LogConfig {
 }
 
 impl LogConfig {
-    /// The default configuration: `<console data dir>/event_log/`,
+    /// The default configuration: `<trusty-events data dir>/event_log/`,
     /// [`DEFAULT_RETAIN_DAYS`] days retained.
     ///
     /// # Errors
     ///
-    /// [`LogError::ResolveDir`] when the console data directory itself
+    /// [`LogError::ResolveDir`] when the `trusty-events` data directory itself
     /// cannot be resolved (a degenerate `HOME`/`XDG_DATA_HOME`, unwritable
     /// filesystem, etc. — see [`trusty_common::resolve_data_dir`]).
     pub(crate) fn resolve_default() -> Result<Self, LogError> {
-        let base =
-            trusty_common::resolve_data_dir("trusty-console").map_err(LogError::ResolveDir)?;
+        // #9075: the bus's own data dir (ADR-0065); console's `event_log/` is
+        // retired, not migrated.
+        let base = trusty_common::resolve_data_dir(trusty_common::control_bus::EVENTS_SERVICE)
+            .map_err(LogError::ResolveDir)?;
         Ok(Self {
             dir: base.join(LOG_SUBDIR),
             retain_days: DEFAULT_RETAIN_DAYS,
