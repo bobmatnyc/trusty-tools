@@ -83,6 +83,10 @@ pub struct InstallOutcome {
     /// tampered download, and a run that exits 0 after seeing one has not
     /// reported it.
     pub integrity_ok: bool,
+    /// #10042: selected only through a soft edge (an event producer's bus,
+    /// `StableMember::soft`). Never gates the verdict.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
 }
 
 impl InstallOutcome {
@@ -179,9 +183,11 @@ impl InstallReport {
     /// `tests::report_all_ok_reflects_an_optional_members_checksum_mismatch`.
     pub(super) fn build(members: Vec<InstallOutcome>) -> Self {
         let all_ok = !members.is_empty()
+            // #10042: a producer's soft bus never gates the run.
             && crate::commands::stable_set::required_gate(
                 &members,
                 |m| m.required,
+                |m| m.soft,
                 |m| m.ok && m.service_ok && m.shadow_ok,
             )
             && members.iter().all(|m| m.integrity_ok);
@@ -501,7 +507,8 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
     // #5806: read the partition, never re-derive it — `build` above folds
     // `required_gate` over the same split, and the two channels drifting apart
     // is the defect this whole change exists to close.
-    let split = crate::commands::stable_set::gating_split(&report.members, |m| m.required);
+    let split =
+        crate::commands::stable_set::gating_split(&report.members, |m| m.required, |m| m.soft);
     let gating = &split.gating;
     let gating_ok = gating.iter().filter(|m| m.ok).count();
     let noun = if split.any_required {
@@ -567,7 +574,15 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .non_gating
             .iter()
             .filter(|m| !m.ok && m.integrity_ok)
-            .map(|m| format!("{}: skipped (no prebuilt for this platform)", m.member))
+            .map(|m| {
+                // #10042: a soft member was never asked for.
+                let why = if m.soft {
+                    "optional, used by a selected member"
+                } else {
+                    "no prebuilt for this platform"
+                };
+                format!("{}: skipped ({why})", m.member)
+            })
             .collect(),
     }
 }

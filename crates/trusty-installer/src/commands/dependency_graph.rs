@@ -41,6 +41,13 @@
 //! relationship, not a process-level one — also not encoded. `tga` has no
 //! references to any other stable-set member's runtime surface.
 //!
+//! #10042 adds a second, weaker kind of edge: a SOFT edge (`SOFT_EDGES`) from
+//! an event producer to trusty-events (ADR-0065 decision 4). Selecting the
+//! producer selects the bus too, but as an optional member whose failure
+//! never gates the run: the producer works without the bus, it just has
+//! nowhere to publish. [`soft_additions`] and [`soft_added_members`] are
+//! that half; [`transitive_closure`] still follows hard edges only.
+//!
 //! Test: `tests` covers closure computation (multi-hop, no-op for a leaf,
 //! idempotence when a dependency is named explicitly), the `added_members`
 //! grouping, and an invariant test that every edge target appears strictly
@@ -69,6 +76,22 @@ const DEPENDENCY_EDGES: &[(&str, &[&str])] = &[
     ("trusty-review", &["trusty-search", "trusty-analyze"]),
 ];
 
+/// Soft edges: `(producer, [members it uses when present])` (#10042).
+///
+/// Why: ADR-0065 decision 4 — `tctl` installs trusty-events with any producer
+/// as a soft member, never through a hard `requires` edge, because no daemon
+/// may need the bus to do its own job.
+/// What: the members that push `HarnessEvent`s to the bus today or in this
+/// epic — trusty-mpm and trusty-analyze (#9078) — each softly use
+/// trusty-events. The target sorts after trusty-analyze in `stable_set()`,
+/// which is fine: a soft edge carries no start-order requirement.
+/// Test: `tests::producers_softly_use_the_bus`,
+/// `tests::soft_additions_never_repeat_the_closure`.
+const SOFT_EDGES: &[(&str, &[&str])] = &[
+    ("trusty-mpm", &["trusty-events"]),
+    ("trusty-analyze", &["trusty-events"]),
+];
+
 /// One member added to a selection because an explicitly-requested member
 /// (transitively) requires it.
 ///
@@ -86,6 +109,8 @@ pub struct AddedMember {
     pub crate_name: String,
     /// Explicitly-requested crate names that (transitively) require it.
     pub required_by: Vec<String>,
+    /// #10042: pulled in by a SOFT edge — optional, never gates the run.
+    pub soft: bool,
 }
 
 /// The direct (one-hop) runtime dependencies of `crate_name`.
@@ -185,9 +210,67 @@ pub fn added_members(explicit: &[String], closure: &BTreeSet<String>) -> Vec<Add
         added.push(AddedMember {
             crate_name: crate_name.clone(),
             required_by,
+            soft: false,
         });
     }
     added
+}
+
+/// The members `crate_name` softly uses (#10042), or `&[]`.
+///
+/// Test: `tests::producers_softly_use_the_bus`.
+pub fn soft_uses(crate_name: &str) -> &'static [&'static str] {
+    SOFT_EDGES
+        .iter()
+        .find(|(c, _)| *c == crate_name)
+        .map_or(&[], |(_, uses)| *uses)
+}
+
+/// Members a hard `closure` softly uses that it does not already contain
+/// (#10042).
+///
+/// Why: a soft member joins the selection without joining the hard closure,
+/// so the caller can mark it optional and keep it out of the gating set.
+/// What: the union of [`soft_uses`] over `closure`, minus `closure`.
+/// Test: `tests::soft_additions_never_repeat_the_closure`.
+pub fn soft_additions(closure: &BTreeSet<String>) -> BTreeSet<String> {
+    closure
+        .iter()
+        .flat_map(|c| soft_uses(c).iter().map(|u| (*u).to_owned()))
+        .filter(|u| !closure.contains(u))
+        .collect()
+}
+
+/// Describe each soft addition and the explicit names that brought it in.
+///
+/// What: for every name in `soft`, the explicit names whose hard closure
+/// holds a producer that softly uses it; `soft: true`.
+/// Test: `tests::soft_added_members_names_the_producer`.
+pub fn soft_added_members(
+    explicit: &[String],
+    closure: &BTreeSet<String>,
+    soft: &BTreeSet<String>,
+) -> Vec<AddedMember> {
+    soft.iter()
+        .map(|member| {
+            let mut required_by: Vec<String> = explicit
+                .iter()
+                .filter(|e| {
+                    closure
+                        .iter()
+                        .any(|p| reaches(e, p) && soft_uses(p).contains(&member.as_str()))
+                })
+                .cloned()
+                .collect();
+            required_by.sort();
+            required_by.dedup();
+            AddedMember {
+                crate_name: member.clone(),
+                required_by,
+                soft: true,
+            }
+        })
+        .collect()
 }
 
 /// Render `added` as human-readable lines, grouped by identical requester sets.
@@ -198,28 +281,31 @@ pub fn added_members(explicit: &[String], closure: &BTreeSet<String>) -> Vec<Add
 ///
 /// What: Groups `added` by `required_by`, joins each group's crate names with
 /// `", "`, and formats `"adding {crates} (required by {requesters})"` per
-/// group. Groups are ordered by their sorted requester key for determinism.
+/// group — `(optional, used by …)` for a soft group (#10042). Groups are
+/// ordered by their sorted requester key for determinism.
 ///
 /// Test: `tests::describe_added_groups_by_requester`,
 /// `tests::describe_added_empty_is_empty`.
 pub fn describe_added(added: &[AddedMember]) -> Vec<String> {
     use std::collections::BTreeMap;
 
-    let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    // #10042: a soft addition is optional, so it never reads "required by".
+    let mut groups: BTreeMap<(bool, Vec<String>), Vec<String>> = BTreeMap::new();
     for a in added {
         groups
-            .entry(a.required_by.clone())
+            .entry((a.soft, a.required_by.clone()))
             .or_default()
             .push(a.crate_name.clone());
     }
     groups
         .into_iter()
-        .map(|(required_by, crates)| {
-            format!(
-                "adding {} (required by {})",
-                crates.join(", "),
-                required_by.join(", ")
-            )
+        .map(|((soft, by), crates)| {
+            let how = if soft {
+                "optional, used by"
+            } else {
+                "required by"
+            };
+            format!("adding {} ({how} {})", crates.join(", "), by.join(", "))
         })
         .collect()
 }
@@ -378,10 +464,12 @@ mod tests {
                 AddedMember {
                     crate_name: "trusty-memory".to_owned(),
                     required_by: vec!["trusty-mpm".to_owned()],
+                    soft: false,
                 },
                 AddedMember {
                     crate_name: "trusty-search".to_owned(),
                     required_by: vec!["trusty-mpm".to_owned()],
+                    soft: false,
                 },
             ]
         );
@@ -432,6 +520,73 @@ mod tests {
         assert_eq!(
             lines,
             vec!["adding trusty-memory, trusty-search (required by trusty-mpm)".to_owned()]
+        );
+    }
+
+    /// Why (#10042): the bus is an optional addition; announcing it as
+    /// "required by" would contradict ADR-0065 decision 4.
+    /// What: a soft addition renders as `(optional, used by …)` on its own line.
+    /// Test: This is the test.
+    #[test]
+    fn describe_added_words_a_soft_addition_as_optional() {
+        let lines = describe_added(&[AddedMember {
+            crate_name: "trusty-events".to_owned(),
+            required_by: vec!["trusty-mpm".to_owned()],
+            soft: true,
+        }]);
+        assert_eq!(
+            lines,
+            vec!["adding trusty-events (optional, used by trusty-mpm)".to_owned()]
+        );
+    }
+
+    /// Why (#10042): the soft edges are the producer list; pin it.
+    /// What: mpm and analyze softly use trusty-events and nothing requires it.
+    /// Test: This is the test.
+    #[test]
+    fn producers_softly_use_the_bus() {
+        assert_eq!(soft_uses("trusty-mpm"), &["trusty-events"]);
+        assert_eq!(soft_uses("trusty-analyze"), &["trusty-events"]);
+        assert!(soft_uses("tga").is_empty());
+        for (dependent, deps) in DEPENDENCY_EDGES {
+            assert!(
+                !deps.contains(&"trusty-events"),
+                "{dependent} must not HARD-require the bus (ADR-0065 decision 4)"
+            );
+        }
+    }
+
+    /// Why: a member already in the hard closure (named explicitly, or hard-
+    /// required) must not also be reported as a soft addition.
+    /// What: the review closure gains the bus through trusty-analyze; a
+    /// closure that already holds the bus gains nothing.
+    /// Test: This is the test.
+    #[test]
+    fn soft_additions_never_repeat_the_closure() {
+        let review = transitive_closure(&["trusty-review".to_owned()]);
+        assert_eq!(
+            soft_additions(&review).into_iter().collect::<Vec<_>>(),
+            vec!["trusty-events".to_owned()]
+        );
+        let with_bus = transitive_closure(&["trusty-mpm".to_owned(), "trusty-events".to_owned()]);
+        assert!(soft_additions(&with_bus).is_empty());
+    }
+
+    /// Why: the operator is told which request brought the bus in.
+    /// What: requesting review names review (it reaches analyze), soft.
+    /// Test: This is the test.
+    #[test]
+    fn soft_added_members_names_the_producer() {
+        let explicit = vec!["trusty-review".to_owned(), "tga".to_owned()];
+        let closure = transitive_closure(&explicit);
+        let added = soft_added_members(&explicit, &closure, &soft_additions(&closure));
+        assert_eq!(
+            added,
+            vec![AddedMember {
+                crate_name: "trusty-events".to_owned(),
+                required_by: vec!["trusty-review".to_owned()],
+                soft: true,
+            }]
         );
     }
 
