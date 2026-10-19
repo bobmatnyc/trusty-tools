@@ -85,8 +85,8 @@ fn install_then_deploy_deploys_skills() {
     }
     assert_eq!(
         result.deployed.len(),
-        146,
-        "expected 146 skill files deployed (19 /tm- portfolio + tm-prose-style (#7423) \
+        157,
+        "expected 157 skill files deployed (19 /tm- portfolio + tm-prose-style (#7423) \
          + 2 references/README.md for tm-ticketing and tm-workflow (#7727) \
          + tm-secrets (#7527) + tm-doctor + tm overview + code-review-standards + \
          contract-driven-testing + 93 skill-port batch-1 entries + 7 documentation-style \
@@ -96,7 +96,8 @@ fn install_then_deploy_deploys_skills() {
          + 5 tm-epic entries: SKILL.md + 4 references (#8376) \
          + 1 tm-architect-setup entry (#8436) \
          + 1 rust-runtime-performance entry (#9296) \
-         + 1 tm-memory-import entry (#8625)); got {:?}",
+         + 1 tm-memory-import entry (#8625) \
+         + 11 tm-ticketing references (#10051)); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

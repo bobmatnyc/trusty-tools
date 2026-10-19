@@ -881,11 +881,13 @@ fn bundle_table_is_complete() {
     //   runtime half of the Rust guidance, loaded on demand. 148 + 1 = 149.
     // Issue #8625 (+1): `skills/tm-memory-import.md` is NEW — the kuzu import
     //   runbook with the masked refused-row review. 149 + 1 = 150.
-    assert_eq!(deployed().len(), 150);
+    // Issue #10051 (+11): `tm-ticketing` turns progressive — eleven sections
+    //   move to `tm-ticketing/references/*.md`. 150 + 11 = 161.
+    assert_eq!(deployed().len(), 161);
     let mut paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 150, "artifact paths must be unique");
+    assert_eq!(paths.len(), 161, "artifact paths must be unique");
     for artifact in deployed() {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -2487,19 +2489,121 @@ fn composed_body_ledger_names_every_chain_link_7915() {
     );
 }
 
+/// The allowance for an agent's `skills:` preloads on top of its body budget.
+///
+/// Why: #10051 — Claude Code loads each preloaded skill's entry file with the
+/// agent, so that file is resident on every turn; a skill's `references/*.md`
+/// load only when read, so they are never resident and never budgeted (owner
+/// ruling: "Progressive skills should not be size limited"). 45,000 sits about
+/// 3,800 bytes above the largest preload set measured on 2026-10-19
+/// (rust-engineer's five entry files, 41,218 bytes).
+/// What: an agent's resident total — composed body plus every preload entry
+/// file — must fit its body budget plus this allowance.
+/// Test: `every_deployed_agent_composed_body_stays_within_its_resident_budget`,
+/// `resident_size_counts_preload_entries_and_never_references_10051`.
+const RESIDENT_PRELOAD_ALLOWANCE_BYTES: usize = 45_000;
+
+/// One agent's always-loaded text, in bytes (#10051).
+struct ResidentSize {
+    /// The composed agent body.
+    body: usize,
+    /// `(skill, entry-file bytes)` for each `skills:` preload, chain order.
+    preloads: Vec<(String, usize)>,
+}
+
+impl ResidentSize {
+    /// Body plus every preload entry file.
+    fn total(&self) -> usize {
+        self.body + self.preloads.iter().map(|(_, n)| n).sum::<usize>()
+    }
+
+    /// The body fits `body_budget` and the total fits it plus the allowance.
+    fn fits(&self, body_budget: usize) -> bool {
+        self.body <= body_budget && self.total() <= body_budget + RESIDENT_PRELOAD_ALLOWANCE_BYTES
+    }
+
+    /// The preload half of the ledger, appended to [`composed_body_ledger`].
+    fn preload_ledger(&self, body_budget: usize) -> String {
+        let entries: Vec<String> = self
+            .preloads
+            .iter()
+            .map(|(name, n)| format!("{name} entry = {n} bytes"))
+            .collect();
+        format!(
+            "preloads [{}]; resident = {} bytes (budget {})",
+            entries.join(", "),
+            self.total(),
+            body_budget + RESIDENT_PRELOAD_ALLOWANCE_BYTES
+        )
+    }
+}
+
+/// The checkout's skills directory, `content/skills`.
+fn repo_skills_dir() -> std::path::PathBuf {
+    crate::core::content_source::test_support::repo_root().join("content/skills")
+}
+
+/// The entry file of skill `name`: flat `<name>.md`, else `<name>/SKILL.md`.
+fn skill_entry_path(skills_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    [
+        skills_dir.join(format!("{name}.md")),
+        skills_dir.join(name).join("SKILL.md"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+/// Measures agent `stem`'s always-loaded text: the composed body plus the
+/// entry file of each `skills:` preload. Nothing under a skill's
+/// `references/` is read (#10051).
+fn resident_size(
+    stem: &str,
+    agents_dir: &std::path::Path,
+    skills_dir: &std::path::Path,
+) -> ResidentSize {
+    use crate::core::agent_builder::compose_agent;
+    use trusty_agents_common::agents::metadata::agent_metadata_from_str;
+
+    let composed =
+        compose_agent(stem, agents_dir).unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"));
+    let preloads = agent_metadata_from_str(&composed)
+        .skills
+        .into_iter()
+        .map(|name| {
+            let path = skill_entry_path(skills_dir, &name).unwrap_or_else(|| {
+                panic!(
+                    "{stem} preloads `{name}`, which has no entry file under {}",
+                    skills_dir.display()
+                )
+            });
+            let bytes = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .len();
+            (
+                name,
+                usize::try_from(bytes).expect("entry file size fits usize"),
+            )
+        })
+        .collect();
+    ResidentSize {
+        body: composed.len(),
+        preloads,
+    }
+}
+
 /// 🔴 #7825 REGRESSION: the resident-body budget covered rust-engineer alone,
-/// so four other deployed bodies sat over 42,000 bytes undetected.
+/// so four other deployed bodies sat over 42,000 bytes undetected. #10051: the
+/// resident total adds each `skills:` preload's entry file and never a
+/// `references/` file.
 #[test]
 fn every_deployed_agent_composed_body_stays_within_its_resident_budget() {
-    use crate::core::agent_builder::compose_agent;
-
     let stems = deployed_agent_stems();
+    let skills_dir = repo_skills_dir();
     let mut over: Vec<String> = Vec::new();
     let mut stale: Vec<String> = Vec::new();
 
     for stem in &stems {
-        let composed = compose_agent(stem, agent_assets_dir())
-            .unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"));
+        let size = resident_size(stem, agent_assets_dir(), &skills_dir);
         let baseline = OVER_BUDGET_BODY_BASELINES
             .iter()
             .find(|(name, _, _)| name == stem);
@@ -2507,14 +2611,18 @@ fn every_deployed_agent_composed_body_stays_within_its_resident_budget() {
             Some((_, ceiling, issue)) => (*ceiling, Some(*issue)),
             None => (RESIDENT_BODY_BUDGET_BYTES, None),
         };
-        if composed.len() > budget {
-            let ledger = composed_body_ledger(stem, composed.len(), budget);
+        if !size.fits(budget) {
+            let ledger = format!(
+                "{}; {}",
+                composed_body_ledger(stem, size.body, budget),
+                size.preload_ledger(budget)
+            );
             over.push(match tracker {
                 Some(issue) => format!("{stem} (ratchet, {issue}): {ledger}"),
                 None => format!("{stem}: {ledger}"),
             });
         }
-        if tracker.is_some() && composed.len() <= RESIDENT_BODY_BUDGET_BYTES {
+        if tracker.is_some() && size.body <= RESIDENT_BODY_BUDGET_BYTES {
             stale.push(stem.clone());
         }
     }
@@ -2537,6 +2645,351 @@ fn every_deployed_agent_composed_body_stays_within_its_resident_budget() {
              bundled agent — the entry is stale (#7825)"
         );
     }
+}
+
+/// Why: #10051 — the budget must count a preloaded skill's entry file and
+/// never its `references/`, or a progressive skill is size-limited after all.
+/// What: a fixture agent preloads a copy of the real `tm-ticketing` (entry
+/// plus references). A large file under `references/` leaves the resident
+/// size unchanged and within budget; the same text in the entry file, or in
+/// the agent body, puts it over.
+/// Test: this test.
+#[test]
+fn resident_size_counts_preload_entries_and_never_references_10051() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents = tmp.path().join("agents");
+    let skills = tmp.path().join("skills");
+    let refs = skills.join("tm-ticketing/references");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    std::fs::create_dir_all(&refs).expect("references dir");
+
+    let agent_path = agents.join("probe.md");
+    let agent_body =
+        "---\nname: probe\nrole: probe\nskills: [tm-ticketing]\n---\n\n# Probe\n\nBODY\n";
+    std::fs::write(&agent_path, agent_body).expect("agent");
+    let entry_path = skills.join("tm-ticketing.md");
+    let entry = skill_text("skills/tm-ticketing.md");
+    std::fs::write(&entry_path, entry).expect("entry");
+    let mut large = String::new();
+    for (rel, body) in rc().skills() {
+        if let Some(file) = rel.strip_prefix("skills/tm-ticketing/references/") {
+            std::fs::write(refs.join(file), body).expect("reference");
+            large.push_str(body);
+        }
+    }
+    while large.len() <= RESIDENT_BODY_BUDGET_BYTES + RESIDENT_PRELOAD_ALLOWANCE_BYTES {
+        large = large.repeat(2);
+    }
+
+    let base = resident_size("probe", &agents, &skills);
+    assert_eq!(
+        base.preloads,
+        vec![("tm-ticketing".to_string(), entry.len())],
+        "the preload is counted as its entry file alone"
+    );
+    assert!(base.fits(RESIDENT_BODY_BUDGET_BYTES), "baseline must fit");
+
+    std::fs::write(refs.join("large.md"), &large).expect("large reference");
+    let with_reference = resident_size("probe", &agents, &skills);
+    assert_eq!(
+        with_reference.total(),
+        base.total(),
+        "a references/ file must never enter the resident count"
+    );
+    assert!(with_reference.fits(RESIDENT_BODY_BUDGET_BYTES));
+
+    std::fs::write(&entry_path, format!("{entry}{large}")).expect("grown entry");
+    let with_entry = resident_size("probe", &agents, &skills);
+    assert_eq!(with_entry.total(), base.total() + large.len());
+    assert!(
+        !with_entry.fits(RESIDENT_BODY_BUDGET_BYTES),
+        "the same text in the entry file must go over budget: {}",
+        with_entry.preload_ledger(RESIDENT_BODY_BUDGET_BYTES)
+    );
+
+    std::fs::write(&entry_path, entry).expect("restored entry");
+    std::fs::write(&agent_path, format!("{agent_body}{large}")).expect("grown body");
+    let with_body = resident_size("probe", &agents, &skills);
+    assert!(
+        !with_body.fits(RESIDENT_BODY_BUDGET_BYTES),
+        "the same text in the agent body must go over budget: body {} bytes",
+        with_body.body
+    );
+}
+
+/// The progressive `tm-ticketing` entry file and its references (#10051).
+const TM_TICKETING_ENTRY: &str = "skills/tm-ticketing.md";
+const TM_TICKETING_REFERENCES: &str = "skills/tm-ticketing/references/";
+
+/// The heading of the entry file's task-to-file table.
+const TASK_TABLE_HEADING: &str = "## Where Each Task Lives";
+
+/// Claude Code's guidance for a SKILL.md; references carry no limit.
+const SKILL_ENTRY_LINE_LIMIT: usize = 500;
+
+/// The `|` rows of `entry`'s [`TASK_TABLE_HEADING`] section.
+fn task_table_rows(entry: &str) -> Vec<&str> {
+    entry
+        .lines()
+        .skip_while(|line| *line != TASK_TABLE_HEADING)
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .filter(|line| line.starts_with('|'))
+        .collect()
+}
+
+/// The `## ` heading texts of `body`, skipping fenced code blocks.
+fn h2_headings(body: &str) -> Vec<&str> {
+    let mut fenced = false;
+    let mut headings = Vec::new();
+    for line in body.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced && let Some(text) = line.strip_prefix("## ") {
+            headings.push(text.trim());
+        }
+    }
+    headings
+}
+
+/// Every way `entry`'s task table fails to reach `references`
+/// (`(file name, body)`): a file no row links, a `## ` section the linking
+/// row does not name, or a row link to a file that does not exist.
+fn task_table_gaps(entry: &str, references: &[(&str, &str)]) -> Vec<String> {
+    let rows = task_table_rows(entry);
+    let mut gaps = Vec::new();
+    for (file, body) in references {
+        let link = format!("](references/{file})");
+        let Some(row) = rows.iter().find(|row| row.contains(&link)) else {
+            gaps.push(format!(
+                "references/{file} is not linked from the task table"
+            ));
+            continue;
+        };
+        for heading in h2_headings(body) {
+            if !row.contains(&format!("\"{heading}\"")) {
+                gaps.push(format!(
+                    "references/{file}: section \"{heading}\" is not named in its row"
+                ));
+            }
+        }
+    }
+    for row in &rows {
+        for target in row.split("](references/").skip(1) {
+            let file = target.split(')').next().unwrap_or_default();
+            if !references.iter().any(|(name, _)| *name == file) {
+                gaps.push(format!(
+                    "task table links references/{file}, which does not exist"
+                ));
+            }
+        }
+    }
+    gaps
+}
+
+/// Why: #10051 — `tm-ticketing` is progressive: SKILL.md loads on invoke and
+/// the references load only when read, so a reference file the task table does
+/// not link is text no reader reaches, and a pointer naming a moved section
+/// resolves only through that table.
+/// What: the entry file is under 500 lines; every `references/*.md` file is
+/// linked from the table, every `## ` section in it is named in its row, and
+/// every row link resolves. Dropping one row must produce a gap.
+/// Test: this test.
+#[test]
+fn tm_ticketing_task_table_links_every_reference_file_10051() {
+    let entry = skill_text(TM_TICKETING_ENTRY);
+    let lines = entry.lines().count();
+    assert!(
+        lines < SKILL_ENTRY_LINE_LIMIT,
+        "`{TM_TICKETING_ENTRY}` is {lines} lines; the entry must stay under \
+         {SKILL_ENTRY_LINE_LIMIT} — move the section to references/ (#10051)"
+    );
+    let references: Vec<(&str, &str)> = rc()
+        .skills()
+        .filter_map(|(rel, body)| {
+            rel.strip_prefix(TM_TICKETING_REFERENCES)
+                .map(|file| (file, body))
+        })
+        .collect();
+    assert!(
+        references.len() > 1,
+        "tm-ticketing references must load: {references:?}"
+    );
+
+    let gaps = task_table_gaps(entry, &references);
+    assert!(
+        gaps.is_empty(),
+        "tm-ticketing task table gaps (#10051): {gaps:#?}"
+    );
+
+    let dropped_row = task_table_rows(entry)
+        .into_iter()
+        .find(|row| row.contains("](references/labels.md)"))
+        .expect("the labels row");
+    let mutated = entry.replace(dropped_row, "");
+    assert!(
+        task_table_gaps(&mutated, &references)
+            .iter()
+            .any(|gap| gap.contains("references/labels.md is not linked")),
+        "dropping a row must leave its reference file unlinked"
+    );
+}
+
+/// Words in the window that pre-filters [`reference_leaks`]; a references line
+/// shorter than this is too generic to name its source.
+const LEAK_WINDOW_WORDS: usize = 8;
+
+/// Every references line (`(bundle path, body)`) whose text appears in one of
+/// `dispatch` texts, whitespace-insensitively. Headings, fence lines and table
+/// rules are skipped, as is any line under [`LEAK_WINDOW_WORDS`] words.
+/// Returns `(bundle path, whitespace-collapsed line)`.
+fn reference_leaks<'a>(
+    dispatch: &[String],
+    references: &[(&'a str, &str)],
+) -> Vec<(&'a str, String)> {
+    use std::collections::HashSet;
+
+    let mut windows: HashSet<String> = HashSet::new();
+    for text in dispatch {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        windows.extend(words.windows(LEAK_WINDOW_WORDS).map(|w| w.join(" ")));
+    }
+    let flattened: Vec<String> = dispatch.iter().map(|text| one_line(text)).collect();
+    let mut leaks = Vec::new();
+    for (path, body) in references {
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.starts_with("```") || trimmed.starts_with("|---")
+            {
+                continue;
+            }
+            let words: Vec<&str> = trimmed.split_whitespace().collect();
+            if words.len() < LEAK_WINDOW_WORDS
+                || !words
+                    .windows(LEAK_WINDOW_WORDS)
+                    .all(|w| windows.contains(&w.join(" ")))
+            {
+                continue;
+            }
+            let needle = words.join(" ");
+            if flattened.iter().any(|text| text.contains(&needle)) {
+                leaks.push((*path, needle));
+            }
+        }
+    }
+    leaks
+}
+
+/// References files whose lines a composed agent body already carried when
+/// #10051 added the leak gate, each pinned at a shrink-only ceiling.
+///
+/// Why: the `ticketing` agent body restates tm-ticketing's label, milestone
+/// and lifecycle text (and BASE-AGENT shares one attribution sentence), so the
+/// moved sections matched on day one. Rewriting the agent was out of #10051's
+/// scope; excluding the files would drop the gate. A per-file ceiling keeps
+/// every NEW leak red and lets the overlap only shrink — the
+/// `OVER_BUDGET_BODY_BASELINES` pattern.
+/// What: `(bundle path, leaked-line ceiling, tracking issue)`. A file over its
+/// ceiling, or any other file with a leak, fails; a file under its ceiling
+/// fails as stale, so the entry is lowered or dropped as the agent is trimmed.
+/// Test: `references_text_never_reaches_dispatch_text_10051`.
+const KNOWN_REFERENCE_OVERLAPS: &[(&str, usize, &str)] = &[
+    ("skills/tm-ticketing/references/labels.md", 2, "#7681"),
+    ("skills/tm-ticketing/references/lifecycle.md", 10, "#7681"),
+    (
+        "skills/tm-ticketing/references/milestones-and-projects.md",
+        2,
+        "#7681",
+    ),
+];
+
+/// `leaks` checked against [`KNOWN_REFERENCE_OVERLAPS`]: `(over, stale)`.
+fn leak_violations(leaks: &[(&str, String)]) -> (Vec<String>, Vec<String>) {
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (path, line) in leaks {
+        by_file.entry(path).or_default().push(line);
+    }
+    let ceiling = |path: &str| {
+        KNOWN_REFERENCE_OVERLAPS
+            .iter()
+            .find(|(known, _, _)| *known == path)
+            .map_or(0, |(_, n, _)| *n)
+    };
+    let over = by_file
+        .iter()
+        .filter(|(path, lines)| lines.len() > ceiling(path))
+        .map(|(path, lines)| format!("{path} ({} > {}): {lines:#?}", lines.len(), ceiling(path)))
+        .collect();
+    let stale = KNOWN_REFERENCE_OVERLAPS
+        .iter()
+        .filter(|(path, n, _)| by_file.get(path).map_or(0, Vec::len) < *n)
+        .map(|(path, n, issue)| {
+            let now = by_file.get(path).map_or(0, Vec::len);
+            format!("{path} ({issue}): {now} leaked line(s), ceiling {n}")
+        })
+        .collect();
+    (over, stale)
+}
+
+/// Why: #10051 — a skill's references load only when read. A references line
+/// in the dispatch text (the composed agent body Claude Code sends as the
+/// subagent's system prompt) is resident after all, and paid on every turn.
+/// What: no `references/*.md` line of any bundled skill appears in any
+/// deployed agent's composed body, beyond the pinned
+/// [`KNOWN_REFERENCE_OVERLAPS`]. Mutation: one more `tm-ticketing` references
+/// line appended to a composed body must be reported.
+/// Test: this test.
+#[test]
+fn references_text_never_reaches_dispatch_text_10051() {
+    use crate::core::agent_builder::compose_agent;
+
+    let dispatch: Vec<String> = deployed_agent_stems()
+        .iter()
+        .map(|stem| {
+            compose_agent(stem, agent_assets_dir())
+                .unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"))
+        })
+        .collect();
+    let references: Vec<(&str, &str)> = rc()
+        .skills()
+        .filter(|(rel, _)| rel.contains("/references/"))
+        .collect();
+    assert!(
+        references
+            .iter()
+            .any(|(rel, _)| rel.starts_with(TM_TICKETING_REFERENCES)),
+        "tm-ticketing references must be in the scanned set"
+    );
+
+    let leaks = reference_leaks(&dispatch, &references);
+    let (over, stale) = leak_violations(&leaks);
+    assert!(
+        over.is_empty(),
+        "references text reached dispatch text — keep it in references/ and \
+         point at it instead (#10051): {over:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "the overlap shrank — lower or drop these KNOWN_REFERENCE_OVERLAPS \
+         entries (#10051): {stale:#?}"
+    );
+
+    const LABELS: &str = "skills/tm-ticketing/references/labels.md";
+    let injected = skill_text(LABELS)
+        .lines()
+        .filter(|line| line.split_whitespace().count() >= LEAK_WINDOW_WORDS)
+        .find(|line| {
+            let line = one_line(line);
+            !line.starts_with('|') && !leaks.iter().any(|(_, leaked)| *leaked == line)
+        })
+        .expect("a prose line in labels.md no agent carries");
+    let mut mutated = dispatch.clone();
+    mutated[0] = format!("{}\n{injected}\n", mutated[0]);
+    let (caught, _) = leak_violations(&reference_leaks(&mutated, &references));
+    assert!(
+        caught.iter().any(|v| v.starts_with(LABELS)),
+        "an injected references line must be reported: {caught:#?}"
+    );
 }
 
 /// #8992 (ruling D07): the listing-description cap every bundled agent shares.

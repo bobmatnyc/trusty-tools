@@ -616,7 +616,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-ticketing.md"
-version = "2.1.0"
+version = "2.2.0"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"
