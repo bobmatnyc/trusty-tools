@@ -44,6 +44,8 @@ mod proxy_routes;
 mod push_guard_hook;
 mod relocated_interactive_config_4181;
 mod resume_unresumable_mapping;
+// #6288 S3a: the built daemon serves its socket only and holds no TCP listener.
+mod daemon_no_tcp_6288_s3;
 // #9121: `tm daemon --sandbox` refuses secret-carrying envs, never printing values.
 mod sandbox_daemon_9121;
 // #9557: a sandbox daemon reaches only its own tmux server.
