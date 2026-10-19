@@ -454,8 +454,8 @@ async fn a_missing_socket_is_reported_and_retried_with_backoff() {
         first
             .last_error
             .as_deref()
-            .is_some_and(|e| e.contains("trusty-events.sock")),
-        "the error names the socket: {first:?}"
+            .is_some_and(|e| e.contains("trusty-events.sock") && e.contains("not running")),
+        "the error names the absent socket: {first:?}"
     );
     let later = status_until(&relay, "four failures", |s| s.failures >= 4).await;
     let (a, b) = (

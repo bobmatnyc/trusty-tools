@@ -256,6 +256,14 @@ impl Session {
         .await;
         let mut stream = match opened {
             Ok(Ok(stream)) => stream,
+            // Resolving the path creates its directory 0755, which the dial
+            // then reports as a permission fault; name the absent socket first.
+            Ok(Err(_)) if !socket.exists() => {
+                return Ended::Failed(format!(
+                    "{} does not exist: trusty-events is not running",
+                    socket.display()
+                ));
+            }
             Ok(Err(e)) => return Ended::Failed(format!("cannot subscribe: {e}")),
             Err(_) => {
                 return Ended::Failed(format!(
