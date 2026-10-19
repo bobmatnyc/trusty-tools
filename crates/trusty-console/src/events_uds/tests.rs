@@ -377,6 +377,57 @@ async fn a_refused_resume_resyncs_from_zero_and_drops_duplicates() {
     );
 }
 
+/// An event this build cannot decode (a newer daemon's payload, DOC-73 §3.3)
+/// is passed over as a one-event gap, and the cursor moves past it, so a
+/// replay that carries it again does not stall the client (#9076 review).
+#[tokio::test]
+async fn an_undecodable_event_is_a_gap_and_the_client_moves_past_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let mut config = fast(&stub.socket);
+    config.start = Start::Beginning;
+    let (relay, _client) = run(config);
+    let mut items = relay.subscribe();
+
+    let (one, three) = (event(1), event(3));
+    let future_id = EventId::new();
+    let future = json!({
+        "type": "event",
+        "persisted": true,
+        "event": {
+            "source": "mpm", "seq": 2, "at": "2026-10-19T00:00:00Z",
+            "payload": { "domain": "from_the_future" }, "id": future_id,
+        },
+    });
+    let mut conn = stub.next_conn().await;
+    conn.event(&one).await;
+    conn.frame(RpcStreamFrame::item(json!(1), future.clone()))
+        .await;
+    // An item kind this build does not know is not an event: nothing is lost.
+    conn.frame(RpcStreamFrame::item(
+        json!(1),
+        json!({ "type": "from_the_future" }),
+    ))
+    .await;
+    conn.event(&three).await;
+
+    assert_eq!(next_event(&mut items).await.0, ResumeToken::of(&one));
+    match next_item(&mut items).await {
+        RelayItem::Gap { skipped, after } => {
+            assert_eq!((skipped, after), (1, Some(ResumeToken::of(&one))));
+        }
+        other => panic!("the undecodable event stalled or vanished: {other:?}"),
+    }
+    assert_eq!(next_event(&mut items).await.0, ResumeToken::of(&three));
+    drop(conn);
+
+    // The replay after a hang-up starts past both, not at the bad event.
+    let conn = stub.next_conn().await;
+    assert_eq!(conn.since(), (Some(3), Some(three.id)));
+    let status = relay.status();
+    assert_eq!((status.gaps, status.skipped), (1, 1), "{status:?}");
+}
+
 #[tokio::test]
 async fn a_stream_error_that_is_not_a_refusal_backs_off_and_resumes() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -415,10 +466,10 @@ async fn a_malformed_frame_is_reported_and_the_client_reconnects() {
     let one = event(1);
     conn.event(&one).await;
     next_event(&mut items).await;
-    conn.raw(
-        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"stream\":\"item\",\"result\":{\"type\":\"nonsense\"}}\n",
-    )
-    .await;
+    // Not a frame at all: there is no seq to move past, so the client
+    // reconnects from the last good event. An item that is a frame but holds
+    // an event this build cannot read is the test above.
+    conn.raw(b"this is not a stream frame\n").await;
 
     let status = status_until(&relay, "reconnecting", |s| {
         s.state == BusState::Reconnecting
