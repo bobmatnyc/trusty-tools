@@ -18,8 +18,13 @@ What: `run` launches a throwaway headless PM (`claude -p`) with the CURRENT
     agents-off         --settings permissions.deny: Agent(<name>), Task(<name>) per agent
     skills-agents-off  skills-off + agents-off
     all-trims          mcp-off + connectors-off + skills-off + agents-off
-    catchup            baseline; the PM calls session_context_catchup for
-                       --catchup-project and the call after the result is read
+    catchup            baseline; the PM calls session_context_catchup for the
+                       throwaway project and the call after the result is read.
+                       --catchup-project DIR points it at a real checkout
+                       instead: opt-in, because the handler can fetch session
+                       refs and write the session cache when it is given a
+                       session id (crates/trusty-mpm/src/daemon/mcp_context.rs,
+                       mcp_context_session_refs.rs).
   The --settings levers use the same subtractive keys the #8988/#8992 owner
   policy writes (crates/trusty-mpm/src/core/launch_policy/carrier.rs).
   `parse` reads one saved stream-json file; `report` renders a results JSON as
@@ -424,6 +429,8 @@ def cmd_run(args) -> int:
         print(f"pm_context_probe: {exc}", file=sys.stderr)
         return 2
     records, failed = [], False
+    # #8998 review: catchup reads a throwaway project unless the caller opts in.
+    args.catchup_project = args.catchup_project or str(root / "project")
     try:
         prompt_file, mcp_file = prepare(root, args, env)
         names = tier_names(config_dir)
@@ -490,14 +497,6 @@ def render_report(results: dict) -> str:
     return "\n".join(rows)
 
 
-def main_checkout() -> str:
-    """The main checkout of this repository (a worktree's sessions live there)."""
-    here = Path(__file__).resolve().parent
-    out = subprocess.run(["git", "-C", str(here), "rev-parse", "--path-format=absolute",
-                          "--git-common-dir"], capture_output=True, text=True)
-    return str(Path(out.stdout.strip()).parent) if out.returncode == 0 else str(here.parent)
-
-
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -508,7 +507,8 @@ def main(argv: list[str]) -> int:
     run.add_argument("--tm", default="tm", help="tm binary composing the PM prompt")
     run.add_argument("--model", default=None)
     run.add_argument("--config-dir", default=os.environ.get("PM_PROBE_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))
-    run.add_argument("--catchup-project", default=None, help="default: this repo's main checkout")
+    run.add_argument("--catchup-project", default=None,
+                     help="opt-in real checkout for the catchup lever (default: the throwaway project)")
     run.add_argument("--timeout", type=int, default=300)
     run.add_argument("--out")
     run.add_argument("--keep", action="store_true", help="keep the temp tree for debugging")
@@ -525,7 +525,6 @@ def main(argv: list[str]) -> int:
         signal.signal(sig, raise_interrupted)
     try:
         if args.cmd == "run":
-            args.catchup_project = args.catchup_project or main_checkout()
             return cmd_run(args)
         if args.cmd == "parse":
             with open(args.stream) as fh:

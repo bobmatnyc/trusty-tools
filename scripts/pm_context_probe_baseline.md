@@ -39,7 +39,19 @@ cargo build -p trusty-mpm --bin tm          # main at dfe7ab34d3
 - `CLAUDE_CONFIG_DIR=~/.trusty-tools/trusty-mpm/claude-config`: 59 user-tier
   skills, 44 agents, 9 user-scope MCP servers, 4 tm builtins and 1 claude.ai
   connector (`claude.ai Claude Docs`); 476 tools, of which 446 are MCP tools.
-- Catchup project: the trusty-tools main checkout.
+- Catchup project: the trusty-tools main checkout, the probe's default at
+  `dbc5b743e0`. To reproduce the post-catchup row, pass
+  `--catchup-project <trusty-tools main checkout>`. Since the review round the
+  default is the throwaway project, because the `session_context_catchup`
+  handler can fetch `refs/tm/sessions/**` and write the session cache
+  (`crates/trusty-mpm/src/daemon/mcp_context.rs:222-226`,
+  `crates/trusty-mpm/src/daemon/mcp_context_session_refs.rs:72-84`). That path
+  needs a session id (`mcp_context_session_refs.rs:143`). The baseline's catchup
+  call passed only `project_dir`, so for this run the handler returned at that
+  line without writing.
+- The run did not record claude's exit codes. Every run's result had
+  `is_error: false`, a positive first turn and, for catchup, a post-catchup
+  call, so the fail-closed check added in review leaves every row measured.
 
 ### Reading the rows
 

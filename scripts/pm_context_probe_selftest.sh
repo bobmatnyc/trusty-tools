@@ -24,6 +24,8 @@
 #     functions              argv per lever, settings bodies, tier names, refused roots
 #     timeout-*              a stub `claude` that never answers: the group is
 #                            reaped, the leader is not reported leaked
+#     catchup-default-throwaway  the catchup lever reads the throwaway project
+#                            unless --catchup-project opts in to a checkout
 #     signal-TERM/HUP        the probe killed mid-run exits 128+signal with no
 #                            stub process and no temp tree left behind
 # Usage: ./scripts/pm_context_probe_selftest.sh
@@ -34,7 +36,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROBE="${REPO_ROOT}/scripts/pm_context_probe.py"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/pm-context-probe-selftest.XXXXXX")"
+# Physical path: a TMPDIR ending in `/` would otherwise leave a `//` that the
+# probe's normalised paths never contain.
+WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pm-context-probe-selftest.XXXXXX")" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 
 FAILURES=0
@@ -235,6 +239,7 @@ make_stubs() {
   cat >"$dir/bin/claude" <<EOF
 #!/usr/bin/env bash
 [ "\${1:-}" = "--version" ] && { echo "stub-claude 0"; exit 0; }
+printf '%s\n' "\$@" >"$dir/argv"
 sleep 300 &
 echo \$! >"$dir/sleep.pid"
 echo \$\$ >"$dir/claude.pid"
@@ -274,6 +279,22 @@ if [ -n "$left" ]; then
   echo "  FAIL: timeout-cleans-up: left behind: $left"
 else
   printf '  ok   %-28s -> nothing left\n' "timeout-cleans-up"
+fi
+
+# catchup-default-throwaway: with no --catchup-project the catchup prompt names
+# the probe's own throwaway project, never this checkout (#8998 review).
+make_stubs "$WORK/stub-catchup"
+PATH="$WORK/stub-catchup/bin:$PATH" TMPDIR="$WORK/stub-catchup/tmp" python3 "$PROBE" run \
+  --runs 0 --levers catchup --tm "$WORK/stub-catchup/bin/tm" --config-dir "$WORK/cfg" \
+  --timeout 2 >/dev/null 2>&1
+CASES=$((CASES + 1))
+if grep -q "project_dir set to \"$WORK/stub-catchup/tmp/pm-context-probe-[^/]*/project\"" \
+  "$WORK/stub-catchup/argv" && ! grep -qF "$REPO_ROOT" "$WORK/stub-catchup/argv"; then
+  printf '  ok   %-28s -> throwaway project\n' "catchup-default-throwaway"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "  FAIL: catchup-default-throwaway: the catchup prompt was:"
+  grep -F "project_dir" "$WORK/stub-catchup/argv" | sed 's/^/        /'
 fi
 
 # signal-<SIG>: the probe killed mid-run reaps the group, removes its temp
