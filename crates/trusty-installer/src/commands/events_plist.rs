@@ -10,13 +10,14 @@
 //! plist; [`install_events_plist_for`] writes it under
 //! `~/Library/LaunchAgents/` and bootstraps it through an injected
 //! [`super::plist_bootstrap::LaunchctlPort`], so a test never reaches the
-//! live `gui/<uid>` domain (#3551). The job runs `trusty-events serve`, restarts it only after an
-//! unsuccessful exit (`KeepAlive` → `SuccessfulExit: false`) no sooner than
-//! every 10 s (`ThrottleInterval`), and carries no socket, port or address:
-//! the daemon binds its Unix socket itself and never TCP (ADR-0032). Exit 1 —
-//! another instance holds the socket, a log write failed, the drain timed out,
-//! or accept failed 64 times — is therefore retried; a clean SIGTERM exit 0 is
-//! not.
+//! live `gui/<uid>` domain (#3551). The job runs `trusty-events serve`,
+//! restarts it after ANY exit (`KeepAlive` `<true/>`, as the console's unit
+//! does) no sooner than every 10 s (`ThrottleInterval`), and carries no
+//! socket, port or address: the daemon binds its Unix socket itself and never
+//! TCP (ADR-0032). A loaded job is therefore never left stopped — a stray
+//! SIGTERM exit 0 comes back too — which is what makes `tctl start`, whose
+//! answer to a loaded label is "already loaded", a working remedy for a bus
+//! that is down. `tctl stop` boots the job out, so it does not restart.
 //!
 //! Test: `events_plist_tests.rs` — the golden render, the KeepAlive and
 //! ThrottleInterval keys, the no-TCP rule, and the write-and-bootstrap path
@@ -31,14 +32,13 @@ use super::plist_bootstrap::SupervisorTarget;
 ///
 /// Why: the installer has no workspace at runtime, so the template is embedded.
 /// Its keys and layout follow `trusty_common::launchd::LaunchdConfig::render_plist`,
-/// which writes the console's plist, so the two units read alike; the
-/// differences are the `KeepAlive` form and the absent `PATH` (the bus runs no
-/// child process).
+/// which writes the console's plist, so the two units read alike; the one
+/// difference is the absent `PATH` (the bus runs no child process).
 /// What: the plist XML. `ExitTimeOut` is filled from
 /// `trusty_common::shutdown::TERMINATION_GRACE_SECS`, as the shared renderer
 /// does (#4393).
 /// Test: `events_plist_matches_the_golden_file`,
-/// `events_plist_keeps_alive_only_after_an_unsuccessful_exit`,
+/// `events_plist_restarts_the_bus_after_any_exit`,
 /// `events_plist_carries_no_tcp_endpoint`.
 pub const EVENTS_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,10 +52,7 @@ pub const EVENTS_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?
     <string>serve</string>
   </array>
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>ThrottleInterval</key>

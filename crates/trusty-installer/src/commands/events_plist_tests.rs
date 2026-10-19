@@ -22,23 +22,19 @@ fn events_plist_matches_the_golden_file() {
     assert_eq!(rendered, GOLDEN);
 }
 
-/// Why (#10042): `trusty-events serve` exits 1 when another instance holds the
-/// socket, a log write fails, the drain times out or accept fails 64 times, and
-/// 0 on SIGTERM. Restarting on every exit would fight `tctl stop`; never
-/// restarting would leave a crashed bus down.
-/// What: `KeepAlive` is the `SuccessfulExit: false` dict, never a bare `<true/>`,
-/// and the restart throttle is 10 s.
+/// Why (#10042): with `SuccessfulExit: false`, a stray SIGTERM (exit 0) left
+/// the job loaded but not running, and the doctor row's remedy, `tctl start
+/// trusty-events`, answers a loaded label with "already loaded (skipped
+/// restart)" — so the bus stayed down. `tctl stop` is a `launchctl bootout`,
+/// which unloads the job, so restarting on every exit never fights it.
+/// What: `KeepAlive` is a bare `<true/>`, as the console's unit, never the
+/// `SuccessfulExit` dict, and the restart throttle is 10 s.
 /// Test: This is the test.
 #[test]
-fn events_plist_keeps_alive_only_after_an_unsuccessful_exit() {
+fn events_plist_restarts_the_bus_after_any_exit() {
     let p = fill_events_template("/h", "/b/trusty-events");
-    assert!(
-        p.contains(
-            "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
-        ),
-        "{p}"
-    );
-    assert!(!p.contains("<key>KeepAlive</key>\n  <true/>"), "{p}");
+    assert!(p.contains("<key>KeepAlive</key>\n  <true/>"), "{p}");
+    assert!(!p.contains("SuccessfulExit"), "{p}");
     assert!(
         p.contains("<key>ThrottleInterval</key>\n  <integer>10</integer>"),
         "{p}"

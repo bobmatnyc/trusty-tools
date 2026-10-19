@@ -72,8 +72,9 @@ console's old `trusty-console/event_log/` directory is not read.
 ### Under launchd
 
 The LaunchAgent `tctl` writes (#10042) runs `trusty-events serve` with
-`KeepAlive` set to restart only after a non-zero exit, and a `ThrottleInterval`
-of 10 s. A clean exit 0 after SIGTERM is not restarted. If another
+`KeepAlive` set, so launchd restarts it after any exit, at most every 10 s
+(`ThrottleInterval`). `tctl stop trusty-events` unloads the job, so it stays
+stopped. If another
 `trusty-events` already serves the socket, for example one started by hand,
 the launchd copy exits 1 and launchd starts it again after its throttle
 interval (10 s). Each attempt costs one process start, one connect
