@@ -74,9 +74,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 ///
 /// Why: the trusty-* family reserves a block of fixed local ports so
 /// operators/tooling can find a daemon without a discovery file. The
-/// `trusty-mpm` daemon still binds 7880 until #6288 PR 2, but no client reaches
-/// it there: this crate's project picker dials its socket (#6288 PR 1b,
-/// `fs_browse::mpm_registry`), and trusty-search binds no port (#9214).
+/// `trusty-mpm` daemon binds no TCP port since #6288 S3a — this crate's
+/// project picker dials its socket (#6288 PR 1b, `fs_browse::mpm_registry`) —
+/// and trusty-search binds no port (#9214).
 /// `trusty-review` used to hold 7891 and `trusty-embedderd` 7890; neither does
 /// now — #6277 moved review to a Unix socket and #6289 retired embedderd's
 /// `--http` mode outright (ADR-0032). This constant previously reused `7881`, which turned
@@ -454,12 +454,8 @@ mod tests {
             // it serves a Unix socket (ADR-0032), so 7879 is not reserved by
             // anything and listing it would forbid a future daemon from a free
             // port.
-            // #6288: kept while the daemon still binds 7880; PR 2 retires it.
-            (
-                "trusty-mpm",
-                7880,
-                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
-            ),
+            // #6288 S3a: no trusty-mpm row. The daemon serves a Unix socket
+            // only and binds no TCP port, so 7880 is not reserved by anything.
             // #6288: no trusty-mpm-supervisor row. The collision that motivated
             // this guard (#3364) was against its 7881 listener; the supervisor
             // now publishes to `~/.trusty-mpm/supervisor-metrics.json` and binds

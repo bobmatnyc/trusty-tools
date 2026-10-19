@@ -321,8 +321,8 @@ mod tests {
     /// Cross-crate port-uniqueness contract (#2566, extended by #2573).
     ///
     /// Why: trusty-review's original `DEFAULT_PORT` (7880) silently collided
-    /// with trusty-mpm's live `DEFAULT_DAEMON_ADDR`, crash-looping a launchd
-    /// agent on install. This mirrors that fix's guard for the console's own
+    /// with trusty-mpm's then-live `DEFAULT_DAEMON_ADDR` (removed by #6288
+    /// S3a), crash-looping a launchd agent on install. This mirrors that fix's guard for the console's own
     /// default (`crate::DEFAULT_PORT`), pointer-commented to each sibling's
     /// real source constant, so a future edit here that reintroduces a
     /// collision fails this test instead of shipping a crash-loop. #2573
@@ -341,10 +341,14 @@ mod tests {
         // 7070 and 7878 are not reserved by anything and listing them would
         // forbid a future daemon a free port.
         let known_siblings: &[(&str, u16, &str)] = &[
+            // #6288 S3a (owner ruling Q5): the daemon binds no TCP port and
+            // `DEFAULT_DAEMON_ADDR` is gone. The row stays as collision
+            // history (#2566): pre-S3a launchd plists still pass
+            // `--addr 127.0.0.1:7880`, so the console must not take 7880.
             (
                 "trusty-mpm",
                 7880,
-                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+                "retired trusty-mpm daemon port (#2566, #6288 S3a; docs/architecture/port-assignments.md)",
             ),
             // #6289: no trusty-embedderd row. Its `--http` mode is retired
             // (ADR-0032); it serves stdio and a Unix socket only, so 7890 is
