@@ -409,7 +409,7 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
 /// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`,
 /// `tests::required_vs_optional_classification`,
-/// `tests::a_missing_trusty_events_cannot_fail_another_members_install`.
+/// `tests::selecting_a_producer_softly_selects_trusty_events`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
         StableMember::new("trusty-search", "trusty-search", true, true),
