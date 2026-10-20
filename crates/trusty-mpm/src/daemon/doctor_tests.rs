@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_seventy_six_checks() {
+async fn run_doctor_produces_seventy_seven_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -479,6 +479,7 @@ async fn run_doctor_produces_seventy_six_checks() {
     // #8992 adds agent_orphans (seventy-three → seventy-four).
     // #8988 adds owner_config (seventy-four → seventy-five).
     // #10042 adds events (seventy-five → seventy-six).
+    // #8390 adds content_requires (seventy-six → seventy-seven).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -583,6 +584,8 @@ async fn run_doctor_produces_seventy_six_checks() {
         "bundled_asset_lag",
         // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
         "content",
+        // #8390: assets whose advisory `requires:` this binary does not meet.
+        "content_requires",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #8980: an untrusted `session-claudes.json` seals the registry.
