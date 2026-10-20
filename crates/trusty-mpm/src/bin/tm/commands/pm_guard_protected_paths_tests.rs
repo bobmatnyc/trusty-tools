@@ -377,3 +377,18 @@ fn frontmatter_hook_commands_are_protected() {
         denied(fx.write(target, "x"), &target.display().to_string());
     }
 }
+
+/// #8928 fix round: the fold maps the APFS-equivalent spellings onto ASCII.
+#[test]
+fn case_folding_matches_apfs() {
+    use crate::commands::pm_guard_trust_anchor_paths::{eq_fold, fold_case, starts_with_ci};
+    assert_eq!(fold_case("\u{17f}ettings.JSON"), "settings.json");
+    assert_eq!(fold_case("hoo\u{212a}s"), "hooks");
+    assert_eq!(fold_case("\u{fb06}ate"), "state");
+    assert!(eq_fold(".mcp.j\u{17f}on", ".MCP.json"));
+    assert!(!eq_fold("settings.json", "settings.jsonx"));
+    assert!(starts_with_ci(
+        Path::new("/h/.CLAUDE/\u{17f}kills/x"),
+        Path::new("/h/.claude/skills")
+    ));
+}

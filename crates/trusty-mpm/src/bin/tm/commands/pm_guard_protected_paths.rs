@@ -37,7 +37,9 @@ use trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at;
 
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_protected_hooks::{hook_named_paths, markdown_hook_verdict};
-use crate::commands::pm_guard_trust_anchor_paths::{Resolved, resolve, same_ci, starts_with_ci};
+use crate::commands::pm_guard_trust_anchor_paths::{
+    Resolved, eq_fold, resolve, same_ci, starts_with_ci,
+};
 
 /// The rule name recorded with each deny.
 pub(crate) const PROTECTED_PATH_RULE: &str = "protected-path-write";
@@ -172,7 +174,8 @@ fn protected_class(
     let name = path.file_name()?.to_str()?;
     let parent = path.parent()?;
     let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    // #8928 fix round: Unicode case folding, as APFS compares names.
+    let is = |a: &str, b: &str| eq_fold(a, b);
     if is(parent_name, ".claude") && SETTINGS_NAMES.iter().any(|n| is(n, name)) {
         return Some("a Claude Code project settings file");
     }
@@ -202,15 +205,15 @@ pub(crate) fn is_hookable_markdown(path: &Path, user_dirs: &[PathBuf]) -> bool {
     let md = path
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        .is_some_and(|e| eq_fold(e, "md"));
     if !md {
         return false;
     }
-    let is_kind = |n: &str| n.eq_ignore_ascii_case("skills") || n.eq_ignore_ascii_case("agents");
+    let is_kind = |n: &str| eq_fold(n, "skills") || eq_fold(n, "agents");
     let names = normal_names(path);
     let in_project = names
         .windows(2)
-        .any(|w| w[0].eq_ignore_ascii_case(".claude") && is_kind(&w[1]));
+        .any(|w| eq_fold(&w[0], ".claude") && is_kind(&w[1]));
     let in_user = user_dirs.iter().any(|dir| {
         ["skills", "agents"]
             .iter()
