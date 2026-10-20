@@ -436,6 +436,7 @@ mod tests {
                     parent_id: None,
                     actor: Actor::System,
                     objects: Vec::new(),
+                    attrs: Default::default(),
                     schema_version: 1,
                 },
                 phase: crate::control_bus::SessionPhase::Started,
