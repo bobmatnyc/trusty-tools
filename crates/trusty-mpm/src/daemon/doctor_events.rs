@@ -169,10 +169,12 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// after any exit, so a loaded job is never left stopped. #10071: a hung bus
 /// has not exited, so launchd leaves it alone and `tctl start` answers
 /// "already loaded"; its remedy is `tctl restart`, which boots the job out and
-/// back in.
+/// back in. #10071 review: a wedged bus keeps a backlog slot per connect, so a
+/// full backlog refuses the connect and reads `Stale`; that remedy is
+/// `tctl restart` too.
 /// Test: `serving_is_ok_and_says_the_bus_answered`,
 /// `every_non_serving_state_is_never_ok`, `the_not_running_remedy_is_tctl_start`,
-/// `a_silent_bus_is_hung_within_the_bound`.
+/// `a_silent_bus_is_hung_within_the_bound`, `the_stale_remedy_restarts_a_hung_bus`.
 pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
     let at = socket.display();
     let (status, message) = match state {
@@ -220,10 +222,11 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
         SocketState::Stale => (
             CheckStatus::Fail,
             format!(
-                "stale trusty-events socket at {at}: the file exists but nothing accepts \
-                 on it, so the daemon exited without removing it. launchd restarts its \
-                 LaunchAgent within 10 s; if this persists, run `tctl start \
-                 trusty-events` and read `~/.trusty-events/logs/stderr.log`."
+                "stale trusty-events socket at {at}: the file exists but the connect is \
+                 refused, so the daemon exited without removing it, or is hung with a full \
+                 backlog. launchd restarts an exited LaunchAgent within 10 s; if this \
+                 persists, run `tctl restart trusty-events` and read \
+                 `~/.trusty-events/logs/stderr.log`."
             ),
         ),
         SocketState::NotASocket => (

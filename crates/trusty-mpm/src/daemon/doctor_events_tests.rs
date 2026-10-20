@@ -84,6 +84,34 @@ fn the_not_running_remedy_is_tctl_start() {
     );
 }
 
+/// Why (#10071 review): a wedged bus keeps a backlog slot for every connect,
+/// so once its backlog fills the connect is refused and the row reads `Stale`.
+/// `tctl start` answers "already loaded" for that hung job, so the stale
+/// remedy must be one that boots a loaded job out and back in.
+/// What: the stale text names the full-backlog hang and `tctl restart
+/// trusty-events`, never `tctl start trusty-events`; the grade stays `Fail`.
+/// Test: This is the test.
+#[test]
+fn the_stale_remedy_restarts_a_hung_bus() {
+    let stale = grade(Path::new("/x/trusty-events.sock"), &SocketState::Stale);
+    assert_eq!(stale.status, CheckStatus::Fail, "{}", stale.message);
+    assert!(
+        stale.message.contains("hung with a full backlog"),
+        "{}",
+        stale.message
+    );
+    assert!(
+        stale.message.contains("`tctl restart trusty-events`"),
+        "{}",
+        stale.message
+    );
+    assert!(
+        !stale.message.contains("`tctl start trusty-events`"),
+        "{}",
+        stale.message
+    );
+}
+
 /// Why (#10071): the kernel completes a connect into the listen backlog for a
 /// stopped (SIGSTOP) or wedged daemon, so "the socket accepts" was read as
 /// healthy for a bus that serves nothing.
@@ -229,6 +257,8 @@ enum Stub {
     PreHeartbeat,
     /// Closes the connection without a frame.
     HangUp,
+    /// Refuses the subscription for a reason that is not `heartbeat_ms`.
+    Refuse,
 }
 
 /// The subscribe params a pre-#10071 bus accepted, `deny_unknown_fields` as
@@ -305,6 +335,15 @@ fn spawn_stub(dir: &tempfile::TempDir, stub: Stub) -> StubBus {
                     return;
                 }
                 Stub::HangUp => return,
+                Stub::Refuse => {
+                    let error = RpcError::internal("every subscriber slot is in use");
+                    let _ = trusty_common::uds::write_frame(
+                        &mut conn,
+                        &RpcStreamFrame::error(id, error),
+                    )
+                    .await;
+                    return;
+                }
             }
             let _ = done_rx.await;
             // A write to a socket whose peer closed fails with EPIPE. Polled:
@@ -430,7 +469,11 @@ async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
     let row = grade_resolved(Ok(bus.path.clone())).await;
 
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
-    assert!(row.message.contains("older"), "{}", row.message);
+    assert!(
+        row.message.contains("older than this tm"),
+        "{}",
+        row.message
+    );
     assert!(row.message.contains("heartbeat_ms"), "{}", row.message);
     assert!(
         row.message.contains("`tctl upgrade trusty-events`"),
@@ -449,4 +492,28 @@ async fn a_bus_that_hangs_up_without_a_frame_fails() {
     let bus = spawn_stub(&dir, Stub::HangUp);
     let row = grade_resolved(Ok(bus.path.clone())).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+}
+
+/// Why (#10071 review): only a refusal of `heartbeat_ms` is version skew; any
+/// other refusal from a current bus is a fault, and calling it "older" would
+/// send the operator to upgrade a bus that is already current.
+/// What: a stub refusing with an internal error that does not name
+/// `heartbeat_ms` grades `Fail`, and the text does not call the bus older.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_refusal_not_naming_heartbeat_ms_is_a_fault_not_skew() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bus = spawn_stub(&dir, Stub::Refuse);
+    let row = grade_resolved(Ok(bus.path.clone())).await;
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(
+        !row.message.contains("older than this tm"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.message.contains("every subscriber slot is in use"),
+        "{}",
+        row.message
+    );
 }
