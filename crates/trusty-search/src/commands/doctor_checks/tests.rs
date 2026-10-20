@@ -322,12 +322,6 @@ impl EnvVarGuard {
         std::env::set_var(key, value);
         Self { key, prev }
     }
-
-    fn remove(key: &'static str) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, prev }
-    }
 }
 
 impl Drop for EnvVarGuard {
@@ -353,34 +347,101 @@ fn fake_layout(base: std::path::PathBuf) -> trusty_embedderd_py::VenvLayout {
     }
 }
 
-// `#[serial]` (bare — the crate-wide default lock, matching the convention
-// established elsewhere in this crate, e.g. `start/tests.rs`'s
-// `missing_binary_fails_fast_with_install_hint`): these three tests mutate
-// the process-global `TRUSTY_EMBEDDER` env var, which `doctor_pipeline.rs`'s
-// `PythonEmbedderCheck` tests also mutate — without `#[serial]` here, `cargo
-// test`'s default parallel threads race on the same env var across the two
-// files and can flip a "disabled" assertion into an "enabled" one (or vice
-// versa) depending on scheduling (caught by CI, PR #3560).
-
+/// #9968: `python` selects the sidecar everywhere; unset/`auto` selects the
+/// graceful default on Apple Silicon only; any other value selects nothing.
+/// Pure — the env value and the platform are parameters, so no env mutation.
+///
+/// Mutation caught: dropping the `is_apple_silicon` guard selects the default
+/// on Linux (AC3); reading only `python` misses the Apple Silicon rows (AC1).
 #[test]
-#[serial]
-fn python_embedder_enabled_true_only_for_python_value() {
-    let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
-    assert!(python_embedder_enabled());
+fn python_embedder_selection_for_each_platform_and_value() {
+    use PythonEmbedderSelection::{Explicit, GracefulDefault, NotSelected};
+    let cases = [
+        (Some("python"), true, Explicit),
+        (Some("python"), false, Explicit),
+        (None, true, GracefulDefault),
+        (Some(""), true, GracefulDefault),
+        (Some("auto"), true, GracefulDefault),
+        (None, false, NotSelected),
+        (Some("auto"), false, NotSelected),
+        (Some("stdio"), true, NotSelected),
+        (Some("in-process"), true, NotSelected),
+    ];
+    for (value, apple_silicon, want) in cases {
+        assert_eq!(
+            python_embedder_selection_for(value, apple_silicon),
+            want,
+            "TRUSTY_EMBEDDER={value:?}, apple_silicon={apple_silicon}"
+        );
+    }
 }
 
+/// #9968 AC2: a missing launcher under the graceful default is a Warn that
+/// carries the lookup's own message (the path searched) and the fix command;
+/// under the explicit opt-in it stays an Error.
+///
+/// Mutation caught: an `Error` under the graceful default, a row that drops
+/// the lookup message or the fix, or wording with "not found" — `doctor
+/// --fix` reads a Warn holding "not found" as a missing model cache.
 #[test]
-#[serial]
-fn python_embedder_enabled_false_when_unset() {
-    let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
-    assert!(!python_embedder_enabled());
+fn launcher_check_result_warns_under_the_graceful_default() {
+    let lookup = "could not locate the trusty-embedderd-py launcher: not beside the \
+                  running binary in /opt/homebrew/bin and not on PATH";
+    let graceful = launcher_check_result(
+        Err(anyhow::anyhow!(lookup)),
+        PythonEmbedderSelection::GracefulDefault,
+    );
+    match &graceful {
+        CheckResult::Warn(msg) => assert!(
+            msg.contains(lookup) && msg.contains(LAUNCHER_FIX) && !msg.contains("not found"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Warn, got {other:?}"),
+    }
+
+    let explicit = launcher_check_result(
+        Err(anyhow::anyhow!(lookup)),
+        PythonEmbedderSelection::Explicit,
+    );
+    assert!(
+        matches!(&explicit, CheckResult::Error(msg) if msg.contains(lookup)),
+        "the explicit opt-in keeps the Error: {explicit:?}"
+    );
+
+    let found = launcher_check_result(
+        Ok(std::path::PathBuf::from(
+            "/opt/homebrew/bin/trusty-embedderd-py",
+        )),
+        PythonEmbedderSelection::GracefulDefault,
+    );
+    assert!(matches!(found, CheckResult::Ok(_)), "{found:?}");
 }
 
+/// #9966: no uv installed with the fetch on is a Warn naming the pinned fetch,
+/// not an Error claiming a fetch failed; with the fetch off it stays an Error.
 #[test]
-#[serial]
-fn python_embedder_enabled_false_for_other_values() {
-    let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "stdio");
-    assert!(!python_embedder_enabled());
+fn uv_check_result_warns_when_the_bootstrap_would_fetch() {
+    use trusty_embedderd_py::uv_fetch::UvError;
+    let cache = std::path::PathBuf::from("/data/py-embedder/uv/0.12.23/uv");
+    let warn = uv_check_result(Err(UvError::NotInstalled {
+        cache: cache.clone(),
+    }
+    .into()));
+    match &warn {
+        CheckResult::Warn(msg) => assert!(
+            msg.contains("not installed")
+                && msg.contains("fetches the pinned uv 0.12.23")
+                && msg.contains("TRUSTY_UV_FETCH=0")
+                && !msg.contains("failed"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Warn, got {other:?}"),
+    }
+    let off = uv_check_result(Err(UvError::Disabled { cache }.into()));
+    assert!(
+        matches!(&off, CheckResult::Error(msg) if msg.contains("uv not found")),
+        "the fetch off is fatal: {off:?}"
+    );
 }
 
 /// #9966: no uv installed with the fetch on is a Warn naming the pinned fetch,

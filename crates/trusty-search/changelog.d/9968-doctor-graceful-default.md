@@ -1,0 +1,3 @@
+Fixed
+- On Apple Silicon with `TRUSTY_EMBEDDER` unset or `auto`, `trusty-search doctor` now runs the Python/MPS checks (`uv`, venv, launcher, device) instead of printing "not enabled". A missing `trusty-embedderd-py` launcher is a warning that names the path searched and the fix: `tctl install trusty-search` or `cargo install trusty-search --locked --force`. Linux and `TRUSTY_EMBEDDER=stdio` still print "not enabled" (#9968).
+- `TRUSTY_EMBEDDER=python` now looks up the `trusty-embedderd-py` launcher before it builds the venv. With the launcher missing it builds no venv and downloads no torch, and falls back to ort as before (#9968).
