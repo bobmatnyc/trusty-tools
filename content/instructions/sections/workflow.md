@@ -39,7 +39,7 @@
 - A change that adds or touches one is not reviewed until an error-arm
   regression test FAILS against the pre-fix commit.
 - Name the Fail-Open Check in the brief for `code-analyzer` or `code-critic`;
-  its five checks are in the `code-review-standards` skill.
+  its seven checks are in the `code-review-standards` skill.
 
 ## Layout ADRs Are Defaults, Not Mandates
 

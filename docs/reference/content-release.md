@@ -65,6 +65,15 @@ under the three classes may opt in the same way. A top-level `version:` is
 refused, because it collides with the claude-mpm marker in
 `crates/trusty-agents-common/src/agents/agent_schema.rs`.
 
+**Which bump a content change needs (#8974).** Bump the changed member's
+`metadata.version` by what the change does to its guidance:
+
+| Change | Bump |
+|---|---|
+| Correction: fixes wrong or unclear text, and adds no new guidance | patch |
+| New guidance: adds a rule, check, step or section | minor |
+| Removal: deletes guidance | major |
+
 **The manifest.** `content/manifest.toml` declares the bundle version, the
 bundle `schema_major` (equal to `SCHEMA_MAJOR` in `scripts/package_content.sh`)
 and one `[[member]]` table, `path` and `version`, per versioned file.
