@@ -9,8 +9,9 @@
 //! calls [`ActionEvents::publish`]. Publishing projects the record
 //! ([`projection::Threader`]) and buffers the result in a `PushClient`
 //! (bounded by count and bytes, overflow counted) — no I/O on the hook path.
-//! [`start`] attaches a publisher and its flush task at serve start; [`stop`]
-//! ends the task and runs one final flush within [`FINAL_FLUSH_BUDGET`].
+//! [`start`] attaches a publisher and its flush task at serve start;
+//! [`ActionEvents::shutdown`], called from both exit paths, ends the task and
+//! runs one final flush within [`FINAL_FLUSH_BUDGET`].
 //! Test: `tests.rs` (socket level), `projection_tests.rs` (pure).
 //!
 //! # Spec References
@@ -80,7 +81,25 @@ impl ActionEvents {
     }
 
     /// End the flush task, then run the bounded final flush. Idempotent.
-    pub async fn shutdown(&self) {}
+    ///
+    /// Why: tm's SIGTERM handler exits the process before
+    /// `serve_with_shutdown`'s drain runs (#6288), so both exit paths call
+    /// this; whichever runs first delivers, and two flushes never interleave.
+    /// What: aborts and joins the flush task (an aborted write re-queues its
+    /// frame), then runs [`ActionPublisher::final_flush`]. A second call
+    /// finds no task and an empty or unreachable buffer, so it returns within
+    /// [`FINAL_FLUSH_BUDGET`].
+    /// Test: `shutdown_runs_the_final_flush_once_6849`.
+    pub async fn shutdown(&self) {
+        let task = self.flush_task.lock().take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(publisher) = self.publisher.get() {
+            publisher.final_flush().await;
+        }
+    }
 }
 
 /// One buffered `PushClient` plus the projection state.
@@ -170,7 +189,7 @@ impl ActionPublisher {
     /// The exit-path flush, bounded by [`FINAL_FLUSH_BUDGET`].
     ///
     /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
-    /// `stop_runs_the_final_flush_6849`.
+    /// `shutdown_runs_the_final_flush_once_6849`.
     pub async fn final_flush(&self) {
         match tokio::time::timeout(FINAL_FLUSH_BUDGET, self.client.flush()).await {
             Ok(PushFlushOutcome { error: None, sent }) => {

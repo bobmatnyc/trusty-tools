@@ -160,6 +160,9 @@ pub(crate) async fn run_daemon(
     // only trapped SIGINT the lock file would leak with a dead PID, and the next
     // client's `resolve_daemon_url` would fall back to the default port (often
     // occupied by an unrelated process) and report "daemon unreachable".
+    // #6849: this handler exits before the serve drain, so it flushes the bus
+    // producer itself (bounded at 1 s; a no-op with no bus attached).
+    let action_events_state = std::sync::Arc::clone(&state);
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         // Stop the supervised Telegram bot first so it does not log a spurious
@@ -168,6 +171,7 @@ pub(crate) async fn run_daemon(
             token.cancel();
         }
         trusty_mpm::daemon::lock::remove_lock();
+        action_events_state.action_events().shutdown().await;
         // See #6288: this exit almost certainly wins the race against
         // `serve_with_shutdown`'s graceful drain, so neither the session reap
         // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.
