@@ -5,28 +5,33 @@
 //! paths. The Write and Edit tools are not sandboxed, so a PM or agent could
 //! still use them to turn the sandbox off in `.claude/settings.local.json`, set
 //! a pm-guard bypass in a settings `env` block, or plant a hook that runs
-//! outside the sandbox (spike rows C1 and B12t). Owner ruling 2026-09-30 (Q3)
-//! scopes the check to exact settings and config files plus frontmatter
-//! `hooks:` in skill and agent Markdown; there is no `.claude/**` deny.
+//! outside the sandbox. #8928's owner scope ruling (2026-09-30): the check
+//! covers exact settings and config files plus frontmatter `hooks:` in skill
+//! and agent Markdown; there is no blanket `.claude/**` deny.
 //! What: [`evaluate`] judges one edit-tool call ([`EDIT_TOOLS`]). It denies a
 //! target that is, as spelled or after symlinks: a `.claude/settings.json` or
 //! `.claude/settings.local.json`; a `.mcp.json`; a git `config` or
 //! `config.worktree` under a `.git` directory, or anything under a `.git`
 //! `hooks` directory; the `settings.json`, `settings.local.json` or
 //! `.claude.json` of a user config directory (`CLAUDE_CONFIG_DIR`,
-//! `~/.claude`, tm's managed `claude-config`) or `~/.claude.json`; or an
-//! absolute path a hook or `statusLine` command names. A skill or agent
+//! `~/.claude`, tm's managed `claude-config`) or `~/.claude.json`; anything
+//! under a user config directory's `plugins/` (plugin hook manifests and the
+//! scripts they run); or a path a hook or `statusLine` command runs — in the
+//! settings files or in skill and agent frontmatter `hooks:` — resolved
+//! against `PATH` and the project root (`pm_guard_protected_hooks.rs`).
+//! Names compare with Unicode case folding, as APFS does. A skill or agent
 //! Markdown file is denied when the write leaves its frontmatter with a
 //! `hooks` key it did not have, or a changed one
 //! (`pm_guard_protected_hooks.rs`). It holds for every caller but the
 //! Architect's main thread, which the call site exempts: the Architect runs
-//! unsandboxed (plan step 5, `enabled: false`).
+//! unsandboxed (#8928 step 5, `enabled: false`).
 //! FAIL-CLOSED: a call naming no target, a relative target with no `cwd`, a
 //! target that does not resolve, a settings file that cannot be read or parsed
 //! (so the hook-named paths are unknown), and a Markdown write whose result
 //! cannot be reproduced each deny.
-//! Residual: Bash writes are the sandbox's job, not this rule's; the general
-//! write boundary (plan row C3) is not part of step 7 as #8928 words it.
+//! Residual: Bash writes are the sandbox's job, not this rule's; a general
+//! write boundary (Write/Edit only inside the sandbox's write roots) is not
+//! part of step 7 as #8928 words it.
 //! Test: `pm_guard_protected_paths_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_protected_paths_8928.rs`.
 
@@ -59,6 +64,8 @@ pub(crate) struct ProtectedEnv {
     pub(crate) project_dir: Option<PathBuf>,
     /// `CLAUDE_CONFIG_DIR`, when set and absolute.
     pub(crate) claude_config_dir: Option<PathBuf>,
+    /// `PATH`, which resolves a bare hook program (#8928 fix round).
+    pub(crate) path: Option<std::ffi::OsString>,
 }
 
 impl ProtectedEnv {
@@ -73,6 +80,7 @@ impl ProtectedEnv {
             home: dirs::home_dir().filter(|home| home.is_absolute()),
             project_dir: abs("CLAUDE_PROJECT_DIR"),
             claude_config_dir: abs("CLAUDE_CONFIG_DIR"),
+            path: std::env::var_os("PATH"),
         }
     }
 
@@ -190,6 +198,13 @@ fn protected_class(
         if is(name, "config") || is(name, "config.worktree") {
             return Some("a git config file");
         }
+    }
+    // #8928 fix round: plugin manifests and the scripts their hooks run.
+    if user_dirs
+        .iter()
+        .any(|dir| starts_with_ci(path, &dir.join("plugins")))
+    {
+        return Some("a Claude Code plugin file");
     }
     let user_file = user_dirs
         .iter()

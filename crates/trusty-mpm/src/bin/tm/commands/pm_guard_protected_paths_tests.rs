@@ -36,6 +36,7 @@ impl Fx {
             home: Some(self.home.clone()),
             project_dir: Some(self.project.clone()),
             claude_config_dir: Some(self.root.join("ccd")),
+            path: Some(self.root.join("path-bin").into_os_string()),
         }
     }
 
@@ -391,4 +392,31 @@ fn case_folding_matches_apfs() {
         Path::new("/h/.CLAUDE/\u{17f}kills/x"),
         Path::new("/h/.claude/skills")
     ));
+}
+
+/// #8928 fix round: a bare hook program is the file `PATH` resolves.
+#[test]
+fn a_bare_hook_program_is_resolved_on_path() {
+    let fx = Fx::new();
+    let bin = fx.root.join("path-bin");
+    std::fs::create_dir_all(&bin).expect("mkdir bin");
+    std::fs::write(bin.join("hook-prog"), "#!/bin/sh\n").expect("write prog");
+    std::fs::write(bin.join("wrapped-prog"), "#!/bin/sh\n").expect("write prog");
+    let settings = json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": "hook-prog inbox-check" },
+        { "type": "command", "command": "true && env A=1 wrapped-prog" },
+    ]}]}});
+    std::fs::write(
+        fx.project.join(".claude/settings.json"),
+        settings.to_string(),
+    )
+    .expect("write settings");
+    denied(fx.write(&bin.join("hook-prog"), "x"), "a PATH program");
+    denied(
+        fx.write(&bin.join("wrapped-prog"), "x"),
+        "a program after env",
+    );
+    // An argument is not looked up on PATH.
+    std::fs::write(bin.join("inbox-check"), "x").expect("write arg");
+    assert_eq!(fx.write(&bin.join("inbox-check"), "x"), None);
 }

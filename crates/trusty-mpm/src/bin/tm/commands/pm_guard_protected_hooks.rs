@@ -2,32 +2,35 @@
 //!
 //! Why: a hook runs outside the sandbox, so the files a hook command executes
 //! and the frontmatter `hooks:` of skill and agent Markdown are ways to plant
-//! code that escapes it (spike row B12t). Split from
-//! `pm_guard_protected_paths.rs` to keep both under the SLOC cap.
-//! What: [`hook_named_paths`] lists every absolute path a `hooks` or
-//! `statusLine` command names in the project and user settings files;
-//! [`markdown_hook_verdict`] judges a write to skill or agent Markdown by the
-//! frontmatter `hooks` key its result carries.
+//! code that escapes it. Split from `pm_guard_protected_paths.rs` to keep
+//! both under the SLOC cap.
+//! What: [`hook_named_paths`] lists every path a `hooks` or `statusLine`
+//! command runs, from the project and user settings files and from skill and
+//! agent frontmatter `hooks:`; [`markdown_hook_verdict`] judges a write to
+//! skill or agent Markdown by the frontmatter `hooks` key its result carries.
 //! Test: `pm_guard_protected_paths_tests.rs`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::commands::pm_guard_protected_paths::{ProtectedEnv, normalize};
-use crate::commands::pm_guard_trust_anchor_paths::{Resolved, resolve};
+use crate::commands::pm_guard_trust_anchor_paths::{Resolved, eq_fold, resolve};
 
-/// Every absolute path a hook or `statusLine` command names.
+/// Programs that run the next word as the program (`env FOO=1 prog`).
+const WRAPPERS: [&str; 6] = ["env", "exec", "command", "nohup", "nice", "time"];
+
+/// Every path a hook or `statusLine` command runs.
 ///
 /// What: reads `settings.json` and `settings.local.json` under each project
-/// root's `.claude/` and in each user config directory. A command is split as
-/// a shell would; each word, and the value of a `NAME=value` word, is
-/// expanded for `~`, `$HOME` and `$CLAUDE_PROJECT_DIR`, and kept when
-/// absolute — both as spelled and after symlinks. A missing file names
-/// nothing; `Err(file)` when one cannot be read or is not a JSON object
-/// (#8928 fail-closed).
+/// root's `.claude/` and in each user config directory, and the frontmatter
+/// `hooks:` of skill and agent Markdown there (#8928 fix round). Each command
+/// is located by [`command_paths`]. A missing file names nothing;
+/// `Err(file)` when one cannot be read or does not parse (fail-closed).
 /// Test: `hook_and_status_line_paths_are_listed`,
-/// `every_fail_closed_arm_denies`.
+/// `every_fail_closed_arm_denies`, `relative_hook_paths_resolve_against_the_project`,
+/// `frontmatter_hook_commands_are_protected`, `a_bare_hook_program_is_resolved_on_path`.
 pub(crate) fn hook_named_paths(
     env: &ProtectedEnv,
     cwd: Option<&Path>,
@@ -46,12 +49,29 @@ pub(crate) fn hook_named_paths(
         }
     }
     let mut out = Vec::new();
+    let locate = |command: &str, project: Option<&Path>| {
+        command_paths(command, env.home.as_deref(), project, env.path.as_deref())
+    };
     for (file, project) in files {
         let Some(settings) = read_settings(&file)? else {
             continue;
         };
         for command in commands(&settings) {
-            out.extend(command_paths(command, env.home.as_deref(), project));
+            out.extend(locate(command, project));
+        }
+    }
+    // #8928 fix round: skill and agent frontmatter `hooks:` run commands too.
+    let mut bases: Vec<(PathBuf, Option<&Path>)> = roots
+        .iter()
+        .map(|root| (root.join(".claude"), Some(root.as_path())))
+        .collect();
+    bases.extend(env.user_dirs().into_iter().map(|dir| (dir, project_dir)));
+    for (base, project) in bases {
+        for hooks in frontmatter_hook_values(&base)? {
+            let wrapped = json!({ "hooks": hooks });
+            for command in commands(&wrapped) {
+                out.extend(locate(command, project));
+            }
         }
     }
     Ok(out)
@@ -96,15 +116,41 @@ fn commands(settings: &Value) -> Vec<&str> {
     out
 }
 
-/// The absolute paths one command names, as spelled and resolved.
-fn command_paths(command: &str, home: Option<&Path>, project: Option<&Path>) -> Vec<PathBuf> {
+/// The paths one command runs, as spelled and resolved.
+///
+/// What: the command is split as a shell would. Each word, and the value of a
+/// `NAME=value` word, is located: `~`, `$HOME` and `$CLAUDE_PROJECT_DIR` are
+/// expanded and an absolute path is kept; a relative path with a `/` joins the
+/// project root; a bare word in program position (first, after `&&`, `||`,
+/// `;`, `|`, or after `env`/`exec`-style wrappers) is resolved on `PATH`; any
+/// other bare argument that names a file in the project root is kept (#8928
+/// fix round).
+fn command_paths(
+    command: &str,
+    home: Option<&Path>,
+    project: Option<&Path>,
+    path_env: Option<&OsStr>,
+) -> Vec<PathBuf> {
     let words = shlex::split(command)
         .unwrap_or_else(|| command.split_whitespace().map(str::to_owned).collect());
     let mut out = Vec::new();
+    let mut program = true;
     for word in &words {
+        if matches!(word.as_str(), "&&" | "||" | ";" | "|" | "&") {
+            program = true;
+            continue;
+        }
+        let assignment = word.split_once('=').filter(|(name, _)| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
         let value = word.split_once('=').map(|(_, v)| v);
-        for spelling in std::iter::once(word.as_str()).chain(value) {
-            let Some(path) = expand(spelling, home, project) else {
+        let as_program = program && assignment.is_none();
+        for (spelling, is_word) in [(word.as_str(), true)]
+            .into_iter()
+            .chain(value.map(|v| (v, false)))
+        {
+            let Some(path) = locate(spelling, home, project, path_env, as_program && is_word)
+            else {
                 continue;
             };
             let path = normalize(&path);
@@ -113,8 +159,92 @@ fn command_paths(command: &str, home: Option<&Path>, project: Option<&Path>) -> 
             }
             out.push(path);
         }
+        if assignment.is_none() {
+            let base = word.rsplit('/').next().unwrap_or(word);
+            program = WRAPPERS.iter().any(|w| eq_fold(w, base));
+        }
     }
     out
+}
+
+/// Where one command word points, or `None` (see [`command_paths`]).
+fn locate(
+    word: &str,
+    home: Option<&Path>,
+    project: Option<&Path>,
+    path_env: Option<&OsStr>,
+    program: bool,
+) -> Option<PathBuf> {
+    if let Some(path) = expand(word, home, project) {
+        return Some(path);
+    }
+    if word.is_empty() || word.starts_with('-') {
+        return None;
+    }
+    if word.contains('/') {
+        return project.map(|root| root.join(word));
+    }
+    if program {
+        return std::env::split_paths(path_env?)
+            .map(|dir| dir.join(word))
+            .find(|candidate| candidate.is_file());
+    }
+    project
+        .map(|root| root.join(word))
+        .filter(|candidate| candidate.is_file())
+}
+
+/// The frontmatter `hooks` values of the skill and agent Markdown under
+/// `base` (`skills/` and `agents/`, one directory level deep).
+///
+/// What: a missing directory or file has none; `Err(path)` for one that
+/// cannot be read, or frontmatter that mentions `hooks` and does not parse
+/// (fail-closed, #8928 fix round).
+fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
+    let mut out = Vec::new();
+    for kind in ["skills", "agents"] {
+        for file in markdown_files(&base.join(kind), 1)? {
+            let text = match std::fs::read_to_string(&file) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(file),
+            };
+            if !text.contains("hooks") {
+                continue;
+            }
+            match frontmatter_hooks(&text) {
+                Ok(None) => {}
+                Ok(Some(hooks)) => out.push(serde_json::to_value(hooks).map_err(|_| file.clone())?),
+                Err(()) => return Err(file),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `.md` files in `dir`, and in its subdirectories `depth` levels down.
+fn markdown_files(dir: &Path, depth: u8) -> Result<Vec<PathBuf>, PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(dir.to_path_buf()),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|_| dir.to_path_buf())?.path();
+        if path.is_dir() {
+            if depth > 0 {
+                out.extend(markdown_files(&path, depth - 1)?);
+            }
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| eq_fold(e, "md"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(out)
 }
 
 /// `word` as an absolute path after `~`, `$HOME` and `$CLAUDE_PROJECT_DIR`.
