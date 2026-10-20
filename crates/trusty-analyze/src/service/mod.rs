@@ -25,13 +25,15 @@ mod diagnostics_dispatch;
 
 pub mod events;
 pub(crate) mod handlers;
+// #9078 (L4): the LSP calls' events on the trusty-events bus.
+pub mod lsp_events;
 pub mod rpc;
 
 // Re-export the public API so callers can write `use crate::service::…`
 // without knowing which submodule owns each item.
 pub use events::AnalyzerAppState;
 pub use rpc::{
-    build_router, serve, serve_on_demand, socket_path, METHODS, METHOD_HEALTH,
+    build_router, serve, serve_on_demand, serve_until, socket_path, METHODS, METHOD_HEALTH,
     SHUTDOWN_FLUSH_TIMEOUT,
 };
 

@@ -29,8 +29,11 @@
 // "Required fields on every ActionEvent" table; nothing here is speculative
 // beyond what those two sections already specify.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::event_id::EventId;
 use super::lifecycle::HarnessSource;
@@ -50,8 +53,11 @@ use super::lifecycle::HarnessSource;
 ///       of the same name; `actor` and `objects` are §3.2's own additions.
 ///       `schema_version` is §3.3's versioning field, defaulting to `1` so a
 ///       payload serialized before this field existed still deserializes.
-/// Test: `super::tests::action_meta_schema_version_defaults_to_one`, plus the
-///       round-trip tests, which cover every field through a real variant.
+///       `attrs` is the producer's own metadata (#9078).
+/// Test: `super::tests::action_meta_schema_version_defaults_to_one`,
+///       `super::tests::action_meta_attrs_round_trip_and_are_omitted_when_empty`,
+///       plus the round-trip tests, which cover every field through a real
+///       variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActionMeta {
     /// Same identity the envelope carries; duplicated here so `ActionEvent`
@@ -73,6 +79,15 @@ pub struct ActionMeta {
     /// viewer (DOC-73 §6). Never inlines object content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<ObjectRef>,
+    /// Producer-specific metadata for the row, by name: counts, durations,
+    /// versions, outcome codes (DOC-72 §4.2). Empty is omitted from JSON and
+    /// a payload without it deserializes, so the field is additive (§3.3).
+    ///
+    /// Security: rendered by the view. Metadata only, never object content;
+    /// scrub free text as for [`ObjectRef::label`].
+    // #9078: analyze's LSP events carry outcome, duration_ms and result_count.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, Value>,
     /// The `ActionEvent` schema version (DOC-73 §3.3). Starts at `1`;
     /// defaults to `1` on deserialize so this field's own addition is
     /// itself additive.

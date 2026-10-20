@@ -50,6 +50,7 @@ fn meta(actor: Actor) -> ActionMeta {
         parent_id: None,
         actor,
         objects: Vec::new(),
+        attrs: Default::default(),
         schema_version: 1,
     }
 }

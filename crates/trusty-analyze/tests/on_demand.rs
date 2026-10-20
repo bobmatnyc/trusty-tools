@@ -21,10 +21,21 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "support/fake_lsp_server.rs"]
+mod fake_lsp_server;
 #[path = "support/fake_search.rs"]
 mod fake_search;
+#[path = "support/stub_bus.rs"]
+mod stub_bus;
 
 use fake_search::FakeSearchSocket;
+
+/// The entry point the fake language server runs under (#9078); a no-op in a
+/// normal test run.
+#[test]
+fn fake_lsp_server_entry() {
+    fake_lsp_server::run_if_requested();
+}
 
 /// Spawn `trusty-analyze serve` the way a client would, under a tempdir.
 ///
@@ -619,6 +630,16 @@ impl McpSession {
     /// The `--facts-path` and `--socket` overrides keep the child off the
     /// developer's real data directory, exactly as [`spawn_server`] does.
     fn start(dir: &Path, search: &FakeSearchSocket, idle_secs: u64) -> Self {
+        Self::start_with(dir, search, idle_secs, &[])
+    }
+
+    /// [`McpSession::start`] with extra environment for the child (#9078).
+    fn start_with(
+        dir: &Path,
+        search: &FakeSearchSocket,
+        idle_secs: u64,
+        env: &[(&str, &std::ffi::OsStr)],
+    ) -> Self {
         use tokio::io::AsyncBufReadExt as _;
 
         let socket = dir.join("trusty-analyze.sock");
@@ -631,6 +652,7 @@ impl McpSession {
             .arg(&socket)
             .env("TRUSTY_SEARCH_SOCKET", search.path())
             .env("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", idle_secs.to_string())
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -713,6 +735,152 @@ impl McpSession {
         );
         result
     }
+
+    /// Close stdin, as an MCP client does when it is done, and wait (bounded)
+    /// for the process to exit (#9078).
+    async fn close(self) -> std::process::ExitStatus {
+        let McpSession {
+            _child: mut child,
+            stdin,
+            ..
+        } = self;
+        drop(stdin);
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .expect("serve --mcp exits within 30s of stdin closing")
+            .expect("wait for serve --mcp")
+    }
+}
+
+/// Why (#9078, L4): on stdin EOF the `--mcp` branch used to `abort()` its
+/// daemon task, so the final flush never ran and an LSP call that ended within
+/// one flush tick of exit lost its terminal event (DOC-72 §4.2, §4.5).
+/// What: a `serve --mcp` child with `ANALYZE_LSP=1`, the fake language server
+/// and a stub bus where the child resolves `events_socket_path()`; one
+/// `lsp_references` tool call, then stdin closes at once. The bus must hold the
+/// call's Started AND Finished events once the process has exited.
+/// Test: this is the test.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_mcp_session_flushes_lsp_events_when_stdin_closes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let search = FakeSearchSocket::healthy();
+
+    // The bus, where the child's TRUSTY_DATA_DIR_OVERRIDE puts it.
+    let data = tmp.path().join("d");
+    let bus_dir = data.join("trusty-events");
+    std::fs::create_dir_all(&bus_dir).expect("bus dir");
+    for d in [&data, &bus_dir] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).expect("0700");
+    }
+    let bus = stub_bus::StubBus::bind_at(bus_dir.join("trusty-events.sock"));
+
+    // `ANALYZE_LSP_RUST_ANALYZER` names a program, not a command line, so a
+    // script re-executes this test binary as the fake server.
+    let exe = std::env::current_exe().expect("current_exe");
+    let script = tmp.path().join("fake-ra.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n{}=normal exec \"{}\" --exact fake_lsp_server_entry --nocapture \
+             --test-threads=1 3>&1 1>&2\n",
+            fake_lsp_server::MODE_ENV,
+            exe.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // A committed Rust file for the call to name.
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join("src")).expect("ws");
+    std::fs::write(
+        ws.join("src/lib.rs"),
+        "pub fn answer() -> u32 {\n    42\n}\n",
+    )
+    .expect("lib");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&ws)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .expect("git");
+        assert!(ok.success(), "git {args:?}");
+    }
+    let file = ws.join("src/lib.rs").canonicalize().expect("file");
+
+    let mut session = McpSession::start_with(
+        tmp.path(),
+        &search,
+        600,
+        &[
+            ("ANALYZE_LSP", "1".as_ref()),
+            ("ANALYZE_LSP_RUST_ANALYZER", script.as_os_str()),
+            ("TRUSTY_DATA_DIR_OVERRIDE", data.as_os_str()),
+        ],
+    );
+    let init = session
+        .request(1, "initialize", serde_json::Value::Null)
+        .await;
+    assert!(init.get("result").is_some(), "{init}");
+    assert!(
+        await_serving(&session.socket, Duration::from_secs(30)).await,
+        "the --mcp child never bound"
+    );
+    let answer = session
+        .request(
+            2,
+            "tools/call",
+            serde_json::json!({"name": "lsp_references",
+                "arguments": {"path": file, "line": 0, "column": 7}}),
+        )
+        .await;
+    assert_eq!(
+        answer["result"]["isError"].as_bool(),
+        Some(false),
+        "lsp_references must answer: {answer}"
+    );
+
+    let status = session.close().await;
+    assert!(status.success(), "serve --mcp exited {status}");
+    let frames = bus.wait_for(2).await;
+    let phases: Vec<String> = frames
+        .iter()
+        .map(|f| {
+            let v = serde_json::to_value(&f.payload).expect("payload");
+            format!("{}:{}", v["event"]["tool"], v["event"]["phase"])
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            "\"lsp.textDocument/references\":\"started\"",
+            "\"lsp.textDocument/references\":\"finished\""
+        ],
+        "the stdin-EOF exit must flush the call's events"
+    );
 }
 
 /// Why (#6355): the `--mcp` branch spawns the daemon in a task and then runs the
