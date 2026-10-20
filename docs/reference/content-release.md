@@ -111,7 +111,8 @@ not satisfy, or whose block does not parse. The row is never FAIL. Entries for
 other harnesses are counted and left to that harness.
 
 **Probe, then degrade.** A shared asset that runs a harness command checks the
-command exists first and says what to do without it, before the first use:
+command exists and says what to do without it, in the paragraph of its first
+use or earlier:
 
 > Check `command -v tm` first; if `tm` is absent, poll the same condition in a
 > bounded shell loop instead.
