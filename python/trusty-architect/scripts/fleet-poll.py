@@ -141,6 +141,7 @@ def workspace_servers(directory=None):
     live = []
     for name in sorted(n for n in names if n.startswith(WORKSPACE_PREFIX)):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)  # a wedged server must not stall the cycle
         try:
             s.connect(os.path.join(directory, name))
             live.append(name)
