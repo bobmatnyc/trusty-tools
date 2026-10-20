@@ -1,0 +1,2 @@
+Fixed
+- `tm doctor` memory row no longer stays green while a trusty-memory palace lock is stalled (#8751). A lock `memory.health` reports in `worker.stalled_lock` that has been held past `TRUSTY_DOCTOR_LOCK_STALL_SECS` (default the 60 s write-lock timeout, the setting `trusty-memory doctor` already reads) is a warning naming the lock, palace, age and a remedy; an unreadable `stalled_lock` block is `unknown`.

@@ -68,8 +68,8 @@ impl ExecGrantRequest {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecGrantResponse {
-    /// The token to hand the child, on an inherited pipe whose fd number is
-    /// in [`TOKEN_FD_ENV`] (#9071).
+    /// The token to hand the child, on an inherited fd whose number is in
+    /// [`TOKEN_FD_ENV`] (#9071).
     pub token: String,
     /// Expiry, in seconds since the Unix epoch.
     pub expires_at: u64,

@@ -22,8 +22,9 @@ use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_http_listener, check_lock_file, check_log_rotation,
     check_model_cache, check_python_device_note, check_python_launcher, check_python_uv,
     check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses, health_http_addr,
-    health_version, print_index_breakdown, probe_daemon_health, python_embedder_enabled,
-    summarize_indexes, CheckResult, EmptyIndex,
+    health_version, is_apple_silicon, print_index_breakdown, probe_daemon_health,
+    python_embedder_selection_for, summarize_indexes, CheckResult, EmptyIndex,
+    PythonEmbedderSelection,
 };
 use super::setup::MCP_SERVER_KEY;
 use async_trait::async_trait;
@@ -257,17 +258,29 @@ impl DoctorCheck for LogRotationCheck {
 /// a way to diagnose venv/uv/launcher state without tailing daemon logs —
 /// mirrors the existing `ModelCacheCheck` shape (a synchronous, read-only
 /// probe with no daemon dependency) rather than inventing a new pattern.
-/// What: no-ops with a single informational `Ok` when
-/// `TRUSTY_EMBEDDER=python` is not set; otherwise runs the four pure checks
-/// (`uv`, venv/`.ready`, launcher, device note) from `doctor_checks`.
-/// Test: `check_python_venv_*` and `python_embedder_enabled_*` in
+/// What: no-ops with a single informational `Ok` when the sidecar is not
+/// selected; runs the four read-only checks (`uv`, venv/`.ready`, launcher,
+/// device note) from `doctor_checks` for `TRUSTY_EMBEDDER=python` and, since
+/// #9968, for the Apple Silicon graceful default. `is_apple_silicon` is a
+/// field so tests can drive either platform on any host.
+/// Test: `check_python_venv_*` and `python_embedder_selection_for_*` in
 /// `doctor_checks/tests.rs` cover the pure logic this wrapper composes;
-/// `python_embedder_check_disabled_reports_single_informational_ok` and
-/// `python_embedder_check_enabled_aggregates_all_four_checks_in_order` in
-/// this module's `tests` cover the wrapper's own no-op-vs-aggregation
-/// branching directly (review finding, PR #3560 MEDIUM fix — this doc
-/// comment previously claimed that direct coverage without it existing).
-pub(crate) struct PythonEmbedderCheck;
+/// `python_embedder_check_disabled_reports_single_informational_ok`,
+/// `python_embedder_check_enabled_aggregates_all_four_checks_in_order` and
+/// `python_checks_run_under_graceful_default` in this module's `tests` cover
+/// the wrapper's own no-op-vs-aggregation branching.
+pub(crate) struct PythonEmbedderCheck {
+    pub(crate) is_apple_silicon: bool,
+}
+
+impl PythonEmbedderCheck {
+    /// The check for the platform this binary was built for.
+    pub(crate) fn for_this_host() -> Self {
+        Self {
+            is_apple_silicon: is_apple_silicon(),
+        }
+    }
+}
 
 #[async_trait]
 impl DoctorCheck for PythonEmbedderCheck {
@@ -276,7 +289,12 @@ impl DoctorCheck for PythonEmbedderCheck {
     }
 
     async fn run(&self, _state: &DoctorState) -> Vec<CheckResult> {
-        if !python_embedder_enabled() {
+        // #9968: the graceful default runs these checks too, not only `python`.
+        let selection = python_embedder_selection_for(
+            std::env::var("TRUSTY_EMBEDDER").ok().as_deref(),
+            self.is_apple_silicon,
+        );
+        if selection == PythonEmbedderSelection::NotSelected {
             return vec![CheckResult::Ok(
                 "Python/MPS embedder: not enabled (set TRUSTY_EMBEDDER=python to opt in)".into(),
             )];
@@ -289,7 +307,7 @@ impl DoctorCheck for PythonEmbedderCheck {
                 "Python/MPS embedder: could not resolve venv layout: {e:#}"
             ))),
         }
-        results.push(check_python_launcher());
+        results.push(check_python_launcher(selection));
         results.push(check_python_device_note());
         results
     }
@@ -364,7 +382,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(IndexesCheck),
         Box::new(HttpListenerCheck),
         Box::new(LogRotationCheck),
-        Box::new(PythonEmbedderCheck),
+        Box::new(PythonEmbedderCheck::for_this_host()),
         Box::new(McpRegistrationCheck),
     ]
 }
@@ -428,16 +446,21 @@ mod tests {
     /// are only meaningful once the operator has opted into the Python/MPS
     /// sidecar; running them unconditionally would produce spurious warnings
     /// about a backend nobody selected.
-    /// What: unsets `TRUSTY_EMBEDDER`, runs the check, asserts exactly one
-    /// `CheckResult::Ok` mentioning "not enabled".
-    /// Test: this test.
+    /// What: unsets `TRUSTY_EMBEDDER` off Apple Silicon (the Linux default,
+    /// #9968 AC3), runs the check, asserts exactly one `CheckResult::Ok`
+    /// mentioning "not enabled".
+    /// Test: this test. Mutation caught: selecting the graceful default off
+    /// Apple Silicon returns four rows and fails the length assert.
     #[tokio::test]
     #[serial]
     async fn python_embedder_check_disabled_reports_single_informational_ok() {
         let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
 
         let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
-        let results = PythonEmbedderCheck.run(&state).await;
+        let check = PythonEmbedderCheck {
+            is_apple_silicon: false,
+        };
+        let results = check.run(&state).await;
 
         assert_eq!(
             results.len(),
@@ -505,9 +528,15 @@ mod tests {
     #[serial]
     async fn python_embedder_check_enabled_aggregates_all_four_checks_in_order() {
         let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
+        // #9966: keep the uv/venv lookups off the real data dir, and keep any
+        // uv lookup offline even if it regressed into fetching.
+        let data = tempfile::tempdir().expect("tempdir");
+        let data_path = data.path().to_str().expect("utf-8 tempdir");
+        let _d = EnvVarGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data_path);
+        let _f = EnvVarGuard::set("TRUSTY_UV_FETCH", "0");
 
         let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
-        let results = PythonEmbedderCheck.run(&state).await;
+        let results = PythonEmbedderCheck::for_this_host().run(&state).await;
 
         assert_eq!(
             results.len(),
@@ -534,6 +563,59 @@ mod tests {
                 "unexpected device-note message: {msg}"
             ),
             other => panic!("expected Ok device note, got {other:?}"),
+        }
+    }
+
+    /// #9968 AC1/AC2: on Apple Silicon with `TRUSTY_EMBEDDER` unset or
+    /// `auto`, doctor runs the four python checks, and a missing launcher is
+    /// one Warn naming the path searched and the fix command.
+    ///
+    /// Why: the daemon bootstraps the sidecar under this default, yet doctor
+    /// reported "not enabled" and stayed silent about a missing launcher.
+    /// What: injects `is_apple_silicon: true` (as `resolve_default_embedder_mode_for`
+    /// takes its platform flag), points `TRUSTY_EMBEDDERD_PY_BIN` at a path
+    /// that does not exist so the lookup fails on any host, and runs the check
+    /// for both spellings of the default.
+    /// Test: this test. Mutation caught: a gate that reads only
+    /// `TRUSTY_EMBEDDER == "python"` returns the single "not enabled" row;
+    /// an `Error` for the missing launcher fails the Warn match.
+    #[tokio::test]
+    #[serial]
+    async fn python_checks_run_under_graceful_default() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let data_path = data.path().to_str().expect("utf-8 tempdir");
+        let _d = EnvVarGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data_path);
+        let _f = EnvVarGuard::set("TRUSTY_UV_FETCH", "0");
+        let missing = data.path().join("bin").join("trusty-embedderd-py");
+        let missing_str = missing.to_str().expect("utf-8 path");
+        let _l = EnvVarGuard::set("TRUSTY_EMBEDDERD_PY_BIN", missing_str);
+
+        for value in [None, Some("auto")] {
+            let _e = match value {
+                Some(v) => EnvVarGuard::set("TRUSTY_EMBEDDER", v),
+                None => EnvVarGuard::remove("TRUSTY_EMBEDDER"),
+            };
+            let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
+            let check = PythonEmbedderCheck {
+                is_apple_silicon: true,
+            };
+            let results = check.run(&state).await;
+
+            assert_eq!(
+                results.len(),
+                4,
+                "TRUSTY_EMBEDDER={value:?} on Apple Silicon runs uv, venv, launcher \
+                 and device checks, got: {results:?}"
+            );
+            match &results[2] {
+                CheckResult::Warn(msg) => assert!(
+                    msg.contains(missing_str)
+                        && msg.contains("tctl install trusty-search")
+                        && msg.contains("cargo install trusty-search --locked --force"),
+                    "the launcher Warn names the searched path and the fix: {msg}"
+                ),
+                other => panic!("a missing launcher is a Warn, got {other:?}"),
+            }
         }
     }
 

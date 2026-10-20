@@ -60,6 +60,10 @@ mod tests_9169;
 #[cfg(test)]
 mod tests_9949;
 
+// #9968: the eager python path looks up the launcher before the venv build.
+#[cfg(test)]
+mod tests_9968;
+
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
 // sibling of `tests` rather than folded into it because `tests.rs` is
