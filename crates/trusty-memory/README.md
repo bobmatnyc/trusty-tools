@@ -668,6 +668,37 @@ the newest 0.33.x release:
 trusty-memory 0.36.0, which ships with trusty-mpm 1.9.0, migrates format 0
 directly and adds `trusty-memory palace migrate` (#10094).
 
+### Upgrading
+
+Full guide, with backup, restore and rollback:
+[backup-restore-upgrade.md](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/trusty-memory/backup-restore-upgrade.md).
+
+- **Formats.** 0.32.x and older write format 0, 0.33.x write format 1, and
+  0.35.0 and later write format 2. An upgrade that skips releases needs no
+  intermediate release.
+- **Automatic.** The daemon migrates a palace at its next writer open, behind a
+  verified backup.
+- **By hand.** `trusty-memory palace migrate <palace> --dry-run` previews the
+  plan and writes nothing. `trusty-memory palace migrate <palace>` takes the
+  backup, converts, then checks that the format is current, the markers agree,
+  no `format_migration.json` remains and the counts are unchanged. A failed
+  check exits non-zero and names the backup. `--all` covers every palace and
+  needs `--yes` when more than one would change. It goes through the daemon when
+  one runs and works offline when none does. A daemon started before the
+  upgrade must be restarted on the new release first.
+- **Backups.** `<data_root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
+  with a `MANIFEST`. The two newest per palace are kept. The vector index is
+  not in them.
+- **Rollback.** Stop the daemon. Copy the backup's files (not `MANIFEST`) back
+  into the palace directory. Remove `format_migration.json` if present. Run the
+  release that matches the old format, then re-embed with `palace_reembed`
+  (`dry_run=false`).
+- **Converted by hand?** `trusty-memory palace migrate <palace> --verify` and
+  `trusty-memory doctor` report each marker as present, missing or mismatched.
+  A non-zero exit names the gap.
+- **Session Manager and portfolio palaces** belong to `tm`. Restart its daemon
+  (`tm daemon run`) instead of running the command.
+
 ## Feature Flags
 
 | Flag | Default | Description |

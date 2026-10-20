@@ -9,6 +9,9 @@
   Changed in place: D3 rules 2–4, D4, D6, D7, Reversibility Cost, Consequences,
   Alternatives and Related Decisions;
   see [Amendment 2026-10-15](#amendment-2026-10-15-chained-migration-9918)
+- **Amended:** 2026-10-20 ([#10094](https://github.com/bobmatnyc/trusty-tools/issues/10094)):
+  the explicit `palace migrate` command wraps the chain; see
+  [Amendment 2026-10-20](#amendment-2026-10-20-explicit-palace-migrate-command-10094)
 - **Scope:** crate `trusty-memory` (engine store layer after
   [#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271); today
   `trusty-common` `memory_core::store`), the palace directory layout under
@@ -429,3 +432,13 @@ wrote format 1, and 0.35.0 and later write format 2.
 
 **Later format bumps** append one step and one fixture (D4) and keep every
 older step.
+
+## Amendment 2026-10-20: explicit `palace migrate` command (#10094)
+
+The explicit command `trusty-memory palace migrate [<palace> | --all]
+[--dry-run | --verify] [--yes]` now wraps the chain above. It adds no second
+chain: it runs the same migration as the writer open, behind the same verified
+backup, then checks the result. It goes through the daemon when one runs. D7's
+"no command" line was already marked superseded (2026-10-15, #9918); this
+amendment records that the command now exists. Usage and rollback:
+[backup-restore-upgrade.md](../trusty-memory/backup-restore-upgrade.md).
