@@ -40,6 +40,9 @@ pub mod note;
 pub mod palace;
 // #9282: `palace backup` and `palace restore`.
 pub mod palace_backup;
+// #10094: `palace migrate` — the explicit format migration, and its text.
+pub mod palace_migrate;
+pub(crate) mod palace_migrate_render;
 // #8732: `palace deletions` — read the maintenance deletion journal.
 pub mod palace_deletions;
 pub mod palace_reclaim;

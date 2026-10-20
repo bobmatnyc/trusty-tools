@@ -16,6 +16,12 @@ pub mod format_backup;
 pub(crate) mod format_migration;
 // #9274: one format migration of a palace at a time, in-process and across processes.
 pub(crate) mod format_migration_lock;
+// #10094: `palace migrate` — plan, migrate through the chain above, check.
+#[cfg(feature = "server")]
+pub(crate) mod format_upgrade;
+// #10094: the read-only checks behind `palace migrate --verify`.
+#[cfg(feature = "server")]
+pub(crate) mod format_upgrade_verify;
 // #9274: a format-0 palace written from the old shapes, for consumer tests.
 #[cfg(any(test, feature = "memory-core-test-support"))]
 pub mod format_v0_fixture;

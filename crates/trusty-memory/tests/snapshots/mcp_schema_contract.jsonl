@@ -36,6 +36,7 @@
 {"name":"palace_embed_sweep"}
 {"name":"palace_info","params":{"palace":"string"}}
 {"name":"palace_list"}
+{"name":"palace_migrate","params":{"all":"boolean","mode":"string","palace":"string","yes":"boolean"}}
 {"name":"palace_reembed","required":["palace"],"params":{"dry_run":"boolean","limit":"integer","palace":"string"}}
 {"name":"palace_rename","required":["new_id","palace_id"],"params":{"new_id":"string","palace_id":"string","replace_empty":"boolean"}}
 {"name":"palace_unalias","required":["palace"],"params":{"dry_run":"boolean","palace":"string"}}

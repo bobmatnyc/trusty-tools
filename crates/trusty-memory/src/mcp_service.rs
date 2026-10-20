@@ -87,8 +87,8 @@ mod tests {
         let tools = svc.tools();
         assert_eq!(
             tools.len(),
-            54,
-            "expected 54 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple + #5000 palace_verify_embedded and palace_embed_sweep + #7370 chat_asset_capabilities, chat_asset_put and chat_asset_get + #9544 palace_rename + #9282 palace_backup), got {}",
+            55,
+            "expected 55 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple + #5000 palace_verify_embedded and palace_embed_sweep + #7370 chat_asset_capabilities, chat_asset_put and chat_asset_get + #9544 palace_rename + #9282 palace_backup + #10094 palace_migrate), got {}",
             tools.len()
         );
     }
@@ -112,8 +112,8 @@ mod tests {
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");
         // #7654: #7370 added three chat-asset tools; the count tracks them.
-        // #9544: `palace_rename`; #9282: `palace_backup`.
-        assert_eq!(svc.tools().len(), 54);
+        // #9544: `palace_rename`; #9282: `palace_backup`; #10094: `palace_migrate`.
+        assert_eq!(svc.tools().len(), 55);
         assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
         // #5005: the repair deletes vector keys, so it must classify as a write.
         assert_eq!(svc.scopes_for("palace_unalias"), vec!["memory.write"]);
@@ -123,6 +123,8 @@ mod tests {
         assert_eq!(svc.scopes_for("palace_rename"), vec!["memory.write"]);
         // #9282: a backup writes a directory under the data root.
         assert_eq!(svc.scopes_for("palace_backup"), vec!["memory.write"]);
+        // #10094: a migration rewrites the palace's markers.
+        assert_eq!(svc.scopes_for("palace_migrate"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_list"), vec!["memory.read"]);
     }
 }

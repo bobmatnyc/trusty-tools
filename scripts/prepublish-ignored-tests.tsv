@@ -55,6 +55,7 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 trusty-architect	sigkill_between_append_and_save_reemits_identical_keys	re-runs its own test binary as a child poller and SIGKILLs it (#9171); temp dir only, no tmux, no daemon
 trusty-installer	commands::standalone_launcher::tests::real_cargo_force_install_drops_the_standalone_record	real `cargo install --force` on offline path fixtures in a temp root (#9974); no network, no key
 trusty-memory	engine::store::hnsw_store::op_budget::progress_tests::exactly_cap_group_completes_through_the_real_budget_path	CPU only: a cap-sized HNSW group at 384 dims through the real op budget (52 s debug on EVO, #9728); no model, no daemon
+trusty-memory	write_format_0_fixture_palace_for_the_live_check	#10094 fixture dumper; with no env var it writes a format-0 palace into a temp dir and checks it; no model, no daemon
 trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built trusty-secrets binary (file backend, temp HOME) and a child/grandchild tree (#9071); not under Claude Code; no Keychain, no network
 
 # THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace

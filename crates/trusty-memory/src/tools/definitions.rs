@@ -494,6 +494,11 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         at + 1,
         super::backup_definitions::palace_backup_definition(),
     );
+    // #10094: `palace_migrate` follows `palace_backup`.
+    tools.insert(
+        at + 2,
+        super::migrate_definitions::palace_migrate_definition(),
+    );
     // #9144 `type`, #9390 `verify`: own `json!` calls for the recursion limit.
     super::write_property_definitions::splice(tools);
     tools.extend(task_tool_definitions(has_default));

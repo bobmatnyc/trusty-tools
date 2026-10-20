@@ -263,6 +263,8 @@ const TOOL_METHODS: &[&str] = &[
     "palace_embed_sweep",
     "palace_info",
     "palace_list",
+    // #10094: `trusty-memory palace migrate` calls it by raw name.
+    "palace_migrate",
     "palace_reembed",
     // #9544: `tm memory rename` calls it by raw name.
     "palace_rename",

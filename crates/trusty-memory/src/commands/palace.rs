@@ -42,6 +42,7 @@ use super::maintenance_gate::{open_purging_under_lease, require_lease};
 /// `Reclaim` is a dry run unless `--apply` (a reviewed list, to trash) or
 /// `--purge-trash` (#9140 ruling f0). `Backup` writes only a new backup
 /// directory; `Restore` writes only into an empty palace root (#9282).
+/// `Migrate` writes nothing under `--dry-run` or `--verify` (#10094).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -218,6 +219,46 @@ pub enum PalaceAction {
         #[arg(long, value_name = "ID")]
         palace: Option<String>,
     },
+    /// Migrate a palace to this binary's format: verified backup, convert, check (#10094).
+    ///
+    /// Runs the daemon's own migration chain: a verified backup under
+    /// <data root>/backups/format-migration/<palace>/, then each format step,
+    /// then a check that the format is current, the kg.redb marker and the
+    /// palace.json mirror agree, no format_migration.json remains, and the
+    /// drawer and triple counts are unchanged. A failed check exits non-zero
+    /// and names the backup; nothing is deleted. An interrupted migration
+    /// resumes. A palace already current is left alone. Goes through the
+    /// daemon when one serves this data root.
+    ///
+    /// ROLLBACK, in this order: stop the daemon. Pick the newest directory
+    /// under <data root>/backups/format-migration/<palace>/ that holds
+    /// MANIFEST and whose name starts with `<old format>-to-`. Copy its files
+    /// (not MANIFEST) back into the palace directory. Delete
+    /// format_migration.json if present. Delete index.usearch.redb: the
+    /// backup holds no vector index, and the migrated index has rows an older
+    /// release misreads (ADR-0067 D6). Start the old release's daemon and
+    /// call the MCP tool palace_reembed with dry_run=false until it reports
+    /// missing: 0; recall finds the drawers only after that.
+    Migrate {
+        /// Palace id. Omit with --all.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        name: Option<String>,
+        /// Every palace under the data root. Prints the dry-run table first and
+        /// refuses without --yes when more than one palace would change.
+        #[arg(long)]
+        all: bool,
+        /// Print the found and target format, the planned backup, its size and
+        /// the free space; write nothing.
+        #[arg(long, conflicts_with = "verify")]
+        dry_run: bool,
+        /// Run the post-migration checks only (for a palace converted by hand)
+        /// and report each marker as present, missing or mismatched; write nothing.
+        #[arg(long)]
+        verify: bool,
+        /// Confirm an --all migration that changes more than one palace.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -310,6 +351,28 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
         }
         PalaceAction::Restore { snapshot, palace } => {
             super::palace_backup::handle_restore(snapshot, palace).await
+        }
+        // #10094: the explicit format migration, routed like `palace backup`.
+        PalaceAction::Migrate {
+            name,
+            all,
+            dry_run,
+            verify,
+            yes,
+        } => {
+            use super::palace_migrate::{MigrateMode, MigrateRequest, handle_migrate};
+            let mode = match (dry_run, verify) {
+                (true, _) => MigrateMode::DryRun,
+                (_, true) => MigrateMode::Verify,
+                _ => MigrateMode::Migrate,
+            };
+            handle_migrate(MigrateRequest {
+                palace: name,
+                all,
+                mode,
+                yes,
+            })
+            .await
         }
     }
 }

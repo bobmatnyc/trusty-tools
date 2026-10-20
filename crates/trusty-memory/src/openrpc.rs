@@ -89,6 +89,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_rename"
         // #9282: writes a backup directory under the data root.
         | "palace_backup"
+        // #10094: migrates a palace; dry_run and verify write nothing.
+        | "palace_migrate"
         | "palace_compact"
         // #4906: dry-run is read-only but the repair writes vectors.
         | "palace_reembed"
@@ -191,6 +193,7 @@ mod tests {
         assert_eq!(scopes_for_tool("palace_info"), vec!["memory.read"]);
         assert_eq!(scopes_for_tool("palace_rename"), vec!["memory.write"]);
         assert_eq!(scopes_for_tool("palace_backup"), vec!["memory.write"]);
+        assert_eq!(scopes_for_tool("palace_migrate"), vec!["memory.write"]);
         // #7654: pin the chat-asset split — only the put is a write.
         assert_eq!(
             scopes_for_tool("chat_asset_capabilities"),

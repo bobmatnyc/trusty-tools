@@ -66,12 +66,16 @@ pub enum PalaceStoreError {
     },
     /// #9274 (ADR-0067 D3 rule 2): the palace is behind this binary's format.
     /// #9918: any number of formats behind; the daemon's writer open migrates it.
+    /// #10094: names the explicit command for a trusty-memory palace, and keeps
+    /// the owning-daemon restart, which is the route for a tm-owned palace.
     #[error(
         "FormatNeedsMigration: palace {palace} is at format {found}, older than the format \
-         {supported} this binary reads; restart the daemon that owns the palace (the \
-         trusty-memory daemon, or `tm daemon run` for the Session Manager and portfolio \
-         palaces), which migrates it to format {supported} behind a verified backup, then \
-         retry; `trusty-memory doctor` lists palaces still awaiting migration"
+         {supported} this binary reads; migrate it to format {supported} behind a verified \
+         backup, then retry: for a palace in trusty-memory's data root, run `trusty-memory \
+         palace migrate {palace}` (add `--dry-run` first to preview it); for any palace, \
+         restart the daemon that owns it (the trusty-memory daemon, or `tm daemon run` for the \
+         Session Manager and portfolio palaces), which migrates it at its next open; \
+         `trusty-memory doctor` lists palaces still awaiting migration"
     )]
     #[non_exhaustive]
     FormatNeedsMigration {
@@ -81,10 +85,14 @@ pub enum PalaceStoreError {
     },
     /// #9274 (ADR-0067 D3 rule 2): the palace is older than the oldest format
     /// this binary migrates (#9918: `OLDEST_MIGRATABLE_FORMAT`).
+    /// #10094: the daemon start works on every release; the explicit command
+    /// only on a release that has it.
     #[error(
         "FormatTooOld: palace {palace} is at format {found}, which this binary cannot migrate \
          to format {supported}; install a trusty-memory release that migrates format {found}, \
-         start its daemon once so it migrates the palace, then retry with this release"
+         start its daemon once so it migrates the palace (a release that has `trusty-memory \
+         palace migrate` can run that instead, with `--dry-run` to preview it), then retry \
+         with this release"
     )]
     #[non_exhaustive]
     FormatTooOld {

@@ -147,7 +147,7 @@ export const TOOLS: Tool[] = [
 		facts: [
 			{ label: 'Package', value: 'trusty-memory' },
 			{ label: 'Transport', value: 'Unix socket; dashboard via trusty-console' },
-			{ label: 'MCP tools', value: '51' },
+			{ label: 'MCP tools', value: '52' },
 			{ label: 'Storage', value: 'usearch + redb, on disk' }
 		],
 		install: { via: 'tctl', target: 'trusty-memory' },

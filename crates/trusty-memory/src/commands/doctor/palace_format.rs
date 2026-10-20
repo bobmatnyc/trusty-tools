@@ -8,13 +8,15 @@
 //! What: one pass over the palace root, reading each palace's format state
 //! through `palace_format_status`, which writes nothing. Needs migration, or a
 //! format that could not be verified → `Warn`; a refusal → `Fail`; otherwise
-//! `Pass`.
+//! `Pass`. #10094: the needs-migration line names `trusty-memory palace
+//! migrate` and the backup root.
 //! Test: palace_format_tests.rs —
 //! `palace_format_check_names_a_palace_that_needs_migration`,
 //! `palace_format_check_warns_on_a_palace_it_cannot_verify`.
 
 use std::path::Path;
 
+use crate::engine::store::format_backup::{backup_data_root, backup_root};
 use crate::engine::store::palace_format::{
     PALACE_FORMAT_SUPPORTED, PalaceFormatStatus, palace_format_status,
 };
@@ -48,6 +50,10 @@ pub(super) fn palace_format_verdict(root: &Path) -> CheckResult {
         .collect();
     names.sort();
     let (mut needs, mut unverified, mut refused) = (Vec::new(), Vec::new(), Vec::new());
+    // #10094: where a migration's verified backups go, shown with the command.
+    let backups = names
+        .first()
+        .map(|d| backup_root(&backup_data_root(d), "<palace>"));
     for dir in names {
         let name = dir
             .file_name()
@@ -69,8 +75,12 @@ pub(super) fn palace_format_verdict(root: &Path) -> CheckResult {
     }
     let mut warnings = Vec::new();
     if !needs.is_empty() {
+        // #10094: name the explicit command and where its backups go.
+        let root = backups.map_or_else(String::new, |b| format!(" under {}", b.display()));
         warnings.push(format!(
-            "needs migration by the daemon, at its next open of the palace: {}",
+            "needs migration: {}; run `trusty-memory palace migrate <palace>` (`--dry-run` \
+             previews it, `--all` covers every palace), which takes a verified backup{root} \
+             first; the daemon also migrates a palace at its next open of it",
             needs.join(", ")
         ));
     }
