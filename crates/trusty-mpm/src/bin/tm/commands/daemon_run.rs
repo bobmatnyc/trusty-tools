@@ -161,7 +161,8 @@ pub(crate) async fn run_daemon(
     // client's `resolve_daemon_url` would fall back to the default port (often
     // occupied by an unrelated process) and report "daemon unreachable".
     // #6849: this handler exits before the serve drain, so it flushes the bus
-    // producer itself (bounded at 1 s; a no-op with no bus attached).
+    // producer itself, within `SIGNAL_FLUSH_BUDGET` (200 ms) and before the
+    // lock goes; a no-op with no bus attached.
     let action_events_state = std::sync::Arc::clone(&state);
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;

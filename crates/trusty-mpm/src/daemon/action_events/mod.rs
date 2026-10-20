@@ -35,7 +35,9 @@ pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// The most the exit path waits on the bus.
 pub const FINAL_FLUSH_BUDGET: Duration = Duration::from_secs(1);
 
-/// The most tm's SIGTERM handler waits on the bus before `process::exit`.
+/// The most tm's SIGTERM handler waits on the bus before `process::exit`
+/// (#6849 fix round). Kept small because that wait delays the exit that
+/// races the serve drain's pane shutdown (#6288); see [`before_signal_exit`].
 pub const SIGNAL_FLUSH_BUDGET: Duration = Duration::from_millis(200);
 
 /// At most one "events dropped" warning per this window.
@@ -83,25 +85,39 @@ impl ActionEvents {
         self.publisher.get()
     }
 
-    /// End the flush task, then run the bounded final flush. Idempotent.
+    /// End the flush task, then run the final flush within
+    /// [`FINAL_FLUSH_BUDGET`]. Idempotent; the serve drain's call.
     ///
-    /// Why: tm's SIGTERM handler exits the process before
-    /// `serve_with_shutdown`'s drain runs (#6288), so both exit paths call
-    /// this; whichever runs first delivers, and two flushes never interleave.
-    /// What: aborts and joins the flush task (an aborted write re-queues its
-    /// frame), then runs [`ActionPublisher::final_flush`]. A second call
-    /// finds no task and an empty or unreachable buffer, so it returns within
-    /// [`FINAL_FLUSH_BUDGET`].
     /// Test: `shutdown_runs_the_final_flush_once_6849`.
     pub async fn shutdown(&self) {
+        self.shutdown_within(FINAL_FLUSH_BUDGET).await;
+    }
+
+    /// End the flush task, then run the final flush within `budget`.
+    ///
+    /// Why: tm's SIGTERM handler exits the process before
+    /// `serve_with_shutdown`'s drain runs (#6288), so both exit paths flush;
+    /// whichever runs first delivers. The signal path passes the shorter
+    /// [`SIGNAL_FLUSH_BUDGET`].
+    /// What: aborts and joins the flush task (an aborted write re-queues its
+    /// frame), then runs [`ActionPublisher::final_flush_within`]. The whole
+    /// call is cut off at `budget`. A second call finds no task.
+    /// Test: `shutdown_runs_the_final_flush_once_6849`,
+    /// `the_signal_path_flush_returns_within_its_budget_6849`.
+    pub async fn shutdown_within(&self, budget: Duration) {
         let task = self.flush_task.lock().take();
-        if let Some(task) = task {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(publisher) = self.publisher.get() {
-            publisher.final_flush().await;
-        }
+        let publisher = self.publisher.get();
+        let work = async {
+            if let Some(task) = task {
+                task.abort();
+                let _ = task.await;
+            }
+            if let Some(publisher) = publisher {
+                publisher.final_flush_within(budget).await;
+            }
+        };
+        // `final_flush_within` logs its own cut-off; this bounds the join too.
+        let _ = tokio::time::timeout(budget, work).await;
     }
 }
 
@@ -194,7 +210,12 @@ impl ActionPublisher {
     /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
     /// `shutdown_runs_the_final_flush_once_6849`.
     pub async fn final_flush(&self) {
-        match tokio::time::timeout(FINAL_FLUSH_BUDGET, self.client.flush()).await {
+        self.final_flush_within(FINAL_FLUSH_BUDGET).await;
+    }
+
+    /// The exit-path flush, bounded by `budget`; logs what it left behind.
+    pub async fn final_flush_within(&self, budget: Duration) {
+        match tokio::time::timeout(budget, self.client.flush()).await {
             Ok(PushFlushOutcome { error: None, sent }) => {
                 tracing::debug!(sent, "action events: final flush delivered");
             }
@@ -276,10 +297,23 @@ impl FlushHealth {
     }
 }
 
-/// The signal handler's steps before `process::exit`.
+/// tm's SIGTERM handler steps before `process::exit`, in order.
+///
+/// Why: the handler's exit races the serve drain, whose `mgr.shutdown()`
+/// stops owned panes (#6288); every millisecond spent here widens that race,
+/// so the flush gets [`SIGNAL_FLUSH_BUDGET`], not [`FINAL_FLUSH_BUDGET`]. The
+/// lock file names a live daemon until the flush ends, so a spawner never
+/// sees "no daemon" while this one still serves its socket.
+/// What: [`ActionEvents::shutdown_within`] with [`SIGNAL_FLUSH_BUDGET`], then
+/// `remove_lock`.
+/// Test: `the_signal_path_flush_returns_within_its_budget_6849`,
+/// `the_signal_path_flushes_before_removing_the_lock_6849`.
 pub async fn before_signal_exit(state: &DaemonState, remove_lock: impl FnOnce()) {
+    state
+        .action_events()
+        .shutdown_within(SIGNAL_FLUSH_BUDGET)
+        .await;
     remove_lock();
-    state.action_events().shutdown().await;
 }
 
 /// Whether this daemon may dial a bus at all.

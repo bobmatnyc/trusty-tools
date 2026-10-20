@@ -96,6 +96,7 @@ const SOURCE_DIRS: &[&str] = &["/src/", "/lib/", "/crates/", "/packages/"];
 /// [`SOURCE_DIRS`] component; silently drops everything else.
 /// Test: `is_coding_file_rejects_noise`, `is_coding_file_accepts_source`,
 /// `is_coding_file_accepts_source_dir`.
+// #6849: pub(crate) so the bus projection drops the same noise.
 pub(crate) fn is_coding_file(path: &str) -> bool {
     let lower = path.to_lowercase();
 
