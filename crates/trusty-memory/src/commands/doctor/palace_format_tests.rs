@@ -42,7 +42,7 @@ fn kg_at(dir: &Path, format: Option<u32>) {
 }
 
 /// #9274 AC7, re-pointed by #9275 and #9918: a format-1 or format-0 palace is
-/// its own "needs migration by the daemon" state (`Warn`), distinct from a
+/// its own "needs migration" state (`Warn`), distinct from a
 /// current palace (`Pass`) and a refused newer one (`Fail`); the check writes
 /// nothing.
 #[test]
@@ -58,7 +58,17 @@ fn palace_format_check_names_a_palace_that_needs_migration() {
     let r = palace_format_verdict(root.path());
     assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
     let shown = format!("{r:?}");
-    assert!(shown.contains("needs migration by the daemon"), "{shown}");
+    // #10094: the line names the command, its preview and the backup root.
+    assert!(shown.contains("needs migration"), "{shown}");
+    assert!(
+        shown.contains("run `trusty-memory palace migrate <palace>` (`--dry-run`"),
+        "{shown}"
+    );
+    let backups = crate::engine::store::format_backup::backup_root(
+        &crate::engine::store::format_backup::backup_data_root(&old),
+        "<palace>",
+    );
+    assert!(shown.contains(&backups.display().to_string()), "{shown}");
     assert!(shown.contains("old (format 1)"), "{shown}");
     assert!(!shown.contains("current"), "{shown}");
     assert_eq!(before, std::fs::read(old.join("kg.redb")).expect("reread"));

@@ -141,19 +141,39 @@ pub(crate) fn open_gate_with(
             FormatState::Current { .. } | FormatState::Unverified => Ok(()),
         };
     }
+    writer_gate(data_dir, palace, seams).map(|_| ())
+}
+
+/// The writer half of [`open_gate_with`], reporting the backup a migration
+/// ran behind.
+///
+/// Why: #10094 — `trusty-memory palace migrate` runs this same chain and must
+/// print the backup it took; a second chain would drift from this one.
+/// What: under this process's [`PalaceTurn`], and for a migration also the
+/// cross-process [`MigrationLock`], classifies again once each is held
+/// (#9274, PR3 critic HIGH 1). `Ok(None)` when the palace was current (a lower
+/// mirror is rewritten); `Ok(Some(backup))` after a migration or a resume.
+/// Test: `palace_migrate_takes_a_backup_and_reports_it`,
+/// `an_injected_fault_names_the_backup_and_a_rerun_resumes`.
+pub(crate) fn writer_gate(
+    data_dir: &Path,
+    palace: &str,
+    seams: Seams,
+) -> anyhow::Result<Option<PathBuf>> {
+    let to = PALACE_FORMAT_SUPPORTED;
     // #9274: a second writer gate of this palace waits here, then sees the
     // first one's result.
     let _turn = PalaceTurn::acquire(data_dir);
     let Some(found) = writer_must_migrate(data_dir, palace, to)? else {
-        return Ok(());
+        return Ok(None);
     };
     // #9274: another process may migrate this palace; fail before any write,
     // and classify again in case it finished before the lock was free.
     let _lock = MigrationLock::try_acquire(data_dir, palace, found, to)?;
-    if let Some(found) = writer_must_migrate(data_dir, palace, to)? {
-        migrate(data_dir, palace, found, to, seams)?;
+    match writer_must_migrate(data_dir, palace, to)? {
+        Some(found) => Ok(Some(migrate(data_dir, palace, found, to, seams)?)),
+        None => Ok(None),
     }
-    Ok(())
 }
 
 /// Classify for a writer: the format to migrate from, when it must be.
@@ -213,7 +233,7 @@ fn verify_kg_for_writer(kg_path: &Path, palace: &str, to: u32) -> anyhow::Result
 /// `a_blocked_backup_aborts_before_any_palace_byte_changes`,
 /// `two_writer_opens_in_one_process_migrate_a_palace_once`,
 /// `a_failed_step_does_not_advance_the_stored_format_or_remove_the_record`.
-fn migrate(data_dir: &Path, palace: &str, from: u32, to: u32, seams: Seams) -> Result<()> {
+fn migrate(data_dir: &Path, palace: &str, from: u32, to: u32, seams: Seams) -> Result<PathBuf> {
     let failed = |reason: String| PalaceStoreError::FormatMigrationFailed {
         palace: palace.to_string(),
         from,
@@ -277,7 +297,8 @@ fn migrate(data_dir: &Path, palace: &str, from: u32, to: u32, seams: Seams) -> R
     drop(kg);
     tracing::info!(palace, from, to, backup = %backup.display(),
         "#9274: migrated palace format");
-    Ok(())
+    // #10094: the caller reports the backup the migration ran behind.
+    Ok(backup)
 }
 
 /// `kg.redb`, opened exclusively for the migration.

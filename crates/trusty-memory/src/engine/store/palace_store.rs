@@ -66,12 +66,15 @@ pub enum PalaceStoreError {
     },
     /// #9274 (ADR-0067 D3 rule 2): the palace is behind this binary's format.
     /// #9918: any number of formats behind; the daemon's writer open migrates it.
+    /// #10094: names the explicit command first.
     #[error(
         "FormatNeedsMigration: palace {palace} is at format {found}, older than the format \
-         {supported} this binary reads; restart the daemon that owns the palace (the \
+         {supported} this binary reads; run `trusty-memory palace migrate {palace}` (add \
+         `--dry-run` first to preview it), which migrates it to format {supported} behind a \
+         verified backup, then retry; restarting the daemon that owns the palace (the \
          trusty-memory daemon, or `tm daemon run` for the Session Manager and portfolio \
-         palaces), which migrates it to format {supported} behind a verified backup, then \
-         retry; `trusty-memory doctor` lists palaces still awaiting migration"
+         palaces) also migrates it; `trusty-memory doctor` lists palaces still awaiting \
+         migration"
     )]
     #[non_exhaustive]
     FormatNeedsMigration {
@@ -81,10 +84,12 @@ pub enum PalaceStoreError {
     },
     /// #9274 (ADR-0067 D3 rule 2): the palace is older than the oldest format
     /// this binary migrates (#9918: `OLDEST_MIGRATABLE_FORMAT`).
+    /// #10094: names the explicit command, as `FormatNeedsMigration` does.
     #[error(
         "FormatTooOld: palace {palace} is at format {found}, which this binary cannot migrate \
          to format {supported}; install a trusty-memory release that migrates format {found}, \
-         start its daemon once so it migrates the palace, then retry with this release"
+         run its `trusty-memory palace migrate {palace}` (add `--dry-run` first to preview it), \
+         then retry with this release"
     )]
     #[non_exhaustive]
     FormatTooOld {
