@@ -85,7 +85,8 @@ async fn call(req: &MigrateRequest, daemon: bool) -> Result<Value> {
     if daemon {
         let params = serde_json::to_value(req).context("encode palace_migrate request")?;
         return crate::client::call_with_timeout("palace_migrate", params, MIGRATE_CALL_TIMEOUT)
-            .await;
+            .await
+            .map_err(explain_daemon_error);
     }
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")
         .context("resolve trusty-memory data dir")?;
@@ -96,16 +97,40 @@ async fn call(req: &MigrateRequest, daemon: bool) -> Result<Value> {
         .context("join palace migrate")?
 }
 
+/// A daemon's `-32601 Method not found` for `palace_migrate`, in words.
+///
+/// Why: #10094 (critic MEDIUM 3) — right after `cargo install`, the daemon
+/// still running is the old release, which has no `palace_migrate`; a raw
+/// JSON-RPC code leaves the user with no next step.
+/// What: an error whose text carries `(-32601)` becomes one that says the
+/// running daemon predates `palace migrate` and names both ways on; any other
+/// error is returned unchanged.
+/// Test: `a_daemon_without_palace_migrate_is_explained`.
+fn explain_daemon_error(e: anyhow::Error) -> anyhow::Error {
+    let code = crate::transport::rpc::error_codes::METHOD_NOT_FOUND;
+    if !format!("{e:#}").contains(&format!("({code})")) {
+        return e;
+    }
+    e.context(
+        "the running trusty-memory daemon predates `palace migrate` (it does not know the \
+         palace_migrate call). Either restart it on this release (`trusty-memory stop`, then \
+         `trusty-memory start`), which migrates its palaces at its next writer open behind a \
+         verified backup, or stop it (`trusty-memory stop`) and re-run this command, which \
+         then migrates offline",
+    )
+}
+
 /// Run one request against the palaces under `registry_dir`.
 ///
 /// Why: the one implementation behind the CLI's offline path and the daemon's
 /// `palace_migrate` tool (#10094).
 /// What: resolves the palaces (one by id, or all). `dry_run` → `{plans,
 /// total_needed_bytes, free_bytes}`; `verify` → `{reports}`; `migrate` →
-/// `{results}`, migrating only palaces that would change for `all`, after
-/// refusing without `yes` when more than one would, and refusing when the
-/// total backup space exceeds the free space. A refusal writes nothing. `ok`
-/// is false when any check failed or, for `all`, any palace is refused.
+/// `{results}` (plus `failed` and `not_attempted` for `all`), migrating only
+/// palaces that would change for `all`, after refusing without `yes` when
+/// more than one would, and refusing when the total backup space exceeds the
+/// free space. A refusal writes nothing. `ok` is false when any check or
+/// palace failed or, for `all`, any palace is refused.
 /// Test: `dry_run_all_reports_every_palace_and_writes_nothing`,
 /// `all_without_yes_refuses_and_changes_nothing`,
 /// `all_with_yes_migrates_every_palace_that_needs_it`,
@@ -149,8 +174,14 @@ pub fn run_request(registry_dir: &Path, req: &MigrateRequest) -> Result<Value> {
 
 /// `--all` migration: gate on `--yes` and the total free space, then migrate.
 ///
+/// What: #10094 — continues past a failed palace. The report holds `results`
+/// (each migrated palace's backup and checks), `failed` (each palace whose
+/// migration errored, with the error) and `not_attempted` (current or
+/// refused palaces, with the reason); `ok` is false when any failed, any
+/// check failed, or any palace is refused.
 /// Test: `all_without_yes_refuses_and_changes_nothing`,
-/// `all_with_yes_migrates_every_palace_that_needs_it`.
+/// `all_with_yes_migrates_every_palace_that_needs_it`,
+/// `all_reports_every_palace_when_one_fails`.
 fn migrate_all(palaces: &[(String, std::path::PathBuf)], yes: bool) -> Result<Value> {
     let plans = plans_of(palaces)?;
     let changing: Vec<&PalacePlan> = plans.iter().filter(|p| p.would_change()).collect();
@@ -173,16 +204,39 @@ fn migrate_all(palaces: &[(String, std::path::PathBuf)], yes: bool) -> Result<Va
             changing[0].backup_root.display()
         );
     }
+    // #10094 (critic HIGH 1): CONTINUE after a failure. Each palace migrates
+    // behind its own backup and lock, so one palace's failure says nothing
+    // about the next; every palace's outcome is recorded and reported.
     let mut results: Vec<MigrateReport> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
     for p in &changing {
-        results.push(migrate(&p.dir, &p.palace)?);
+        match migrate(&p.dir, &p.palace) {
+            Ok(report) => results.push(report),
+            Err(e) => failed.push(json!({"palace": p.palace, "error": format!("{e:#}")})),
+        }
     }
-    let refused: Vec<&PalacePlan> = plans
+    let not_attempted: Vec<Value> = plans
         .iter()
-        .filter(|p| p.status == FormatStatus::Refused)
+        .filter(|p| !p.would_change())
+        .map(|p| {
+            let reason = match p.status {
+                FormatStatus::Refused => p.status_detail.clone().unwrap_or_default(),
+                _ => format!("already at format {}", p.target),
+            };
+            json!({"palace": p.palace, "refused": p.status == FormatStatus::Refused,
+                   "reason": reason})
+        })
         .collect();
-    let ok = results.iter().all(|r| r.problems.is_empty()) && refused.is_empty();
-    Ok(json!({"mode": MigrateMode::Migrate, "ok": ok, "results": results, "refused": refused}))
+    let ok = results.iter().all(|r| r.problems.is_empty())
+        && failed.is_empty()
+        && not_attempted.iter().all(|n| n["refused"] != true);
+    Ok(json!({
+        "mode": MigrateMode::Migrate,
+        "ok": ok,
+        "results": results,
+        "failed": failed,
+        "not_attempted": not_attempted,
+    }))
 }
 
 /// The palaces a request names: `(id, directory)`, sorted by id for `all`.
@@ -249,12 +303,22 @@ pub fn outcome(report: &Value) -> Result<()> {
             ));
         }
     }
-    for p in report["refused"].as_array().into_iter().flatten() {
+    // #10094: every `--all` palace that failed or was refused is named.
+    for f in report["failed"].as_array().into_iter().flatten() {
         lines.push(format!(
-            "palace {} refused: {}",
-            p["palace"].as_str().unwrap_or("?"),
-            p["status_detail"].as_str().unwrap_or("?")
+            "palace {} failed: {}",
+            f["palace"].as_str().unwrap_or("?"),
+            f["error"].as_str().unwrap_or("?")
         ));
+    }
+    for n in report["not_attempted"].as_array().into_iter().flatten() {
+        if n["refused"] == true {
+            lines.push(format!(
+                "palace {} refused: {}",
+                n["palace"].as_str().unwrap_or("?"),
+                n["reason"].as_str().unwrap_or("?")
+            ));
+        }
     }
     for p in report["plans"].as_array().into_iter().flatten() {
         if p["status"] == "refused" {

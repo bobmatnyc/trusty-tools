@@ -74,6 +74,10 @@ pub struct MigrateReport {
     pub backup: Option<PathBuf>,
     pub before: Counts,
     pub after: Counts,
+    /// #10094: whether `before` and `after` were compared. Only a run that
+    /// migrated compares them, both read under the migration's exclusive
+    /// hold; otherwise they are reported only.
+    pub counts_compared: bool,
     /// The post-migration checks.
     pub verify: VerifyReport,
     /// Every failed post-migration check; empty means it verified.
@@ -153,17 +157,21 @@ pub(crate) fn migrate(dir: &Path, id: &str) -> Result<MigrateReport> {
 
 /// Migrate the palace `id` at `dir` through the daemon's chain, then check it.
 ///
-/// Why: see the module doc. The counts are taken before the chain so a step
-/// that lost or duplicated a row is caught.
+/// Why: see the module doc. A step that lost or duplicated a row is caught
+/// by the counts the chain reads before its first step and after its last,
+/// under its exclusive hold on `kg.redb`.
 /// What: a refused palace fails before any write. The chain's own error is
 /// returned with the backup its record names and the resume command; the
 /// palace stays at its last committed step. After the chain, `problems`
-/// lists each failed check (status, markers, record, counts); the caller
-/// turns a non-empty list into a non-zero exit. A current palace runs the
-/// gate as a no-op: no backup, `migrated: false`.
+/// lists each failed check (status, markers, record, and — only when this
+/// run migrated — the held counts); the caller turns a non-empty list into a
+/// non-zero exit. A current palace runs the gate as a no-op: no backup,
+/// `migrated: false`, counts reported but not compared (#10094).
 /// Test: `palace_migrate_takes_a_backup_and_reports_it`,
 /// `a_current_palace_is_a_no_op_with_no_backup`,
 /// `an_injected_fault_names_the_backup_and_a_rerun_resumes`,
+/// `a_row_lost_under_the_hold_is_a_problem`,
+/// `a_write_between_the_reads_without_a_migration_is_no_problem`,
 /// `a_failed_check_is_a_non_zero_exit_naming_the_backup`.
 pub(crate) fn migrate_with(dir: &Path, id: &str, seams: UpgradeSeams) -> Result<MigrateReport> {
     let (status, from, detail) = status_of(dir);
@@ -173,32 +181,48 @@ pub(crate) fn migrate_with(dir: &Path, id: &str, seams: UpgradeSeams) -> Result<
             detail.unwrap_or_default()
         );
     }
-    let before = counts(dir)?;
-    let backup = writer_gate(dir, id, seams.chain).map_err(|e| chain_failure(dir, id, e))?;
+    let mut before = counts(dir)?;
+    let outcome = writer_gate(dir, id, seams.chain).map_err(|e| chain_failure(dir, id, e))?;
     (seams.after_chain)(dir);
     let verify = verify(dir, id)?;
-    let after = Counts {
+    let mut after = Counts {
         drawers: verify.drawers,
         triples: verify.triples,
     };
     let mut problems = verify.gaps.clone();
-    if after != before {
-        problems.push(format!(
-            "row counts changed: {} drawers and {} triples before, {} and {} after",
-            before.drawers, before.triples, after.drawers, after.triples
-        ));
+    // #10094: compare only the counts the migration read under its exclusive
+    // hold. Without a migration both reads are unlocked (on the daemon route,
+    // separate copies), so a write landing between them is not a lost row.
+    let held = outcome
+        .as_ref()
+        .and_then(|o| o.rows_before.zip(o.rows_after));
+    if let Some((b, a)) = held {
+        (before, after) = (rows(b), rows(a));
+        if b != a {
+            problems.push(format!(
+                "row counts changed during the migration: {} drawers and {} triples before, \
+                 {} and {} after",
+                b[0], b[1], a[0], a[1]
+            ));
+        }
     }
     Ok(MigrateReport {
         palace: id.to_string(),
         from,
         to: PALACE_FORMAT_SUPPORTED,
-        migrated: backup.is_some(),
-        backup,
+        migrated: outcome.is_some(),
+        backup: outcome.map(|o| o.backup),
         before,
         after,
+        counts_compared: held.is_some(),
         verify,
         problems,
     })
+}
+
+/// `[drawers, triples]` as [`Counts`].
+fn rows([drawers, triples]: [u64; 2]) -> Counts {
+    Counts { drawers, triples }
 }
 
 /// The drawer and triple counts of `dir`'s `kg.redb`; zero with no file.

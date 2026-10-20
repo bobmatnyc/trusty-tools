@@ -241,14 +241,17 @@ fn read_only_open_of_n_minus_1_is_refused_with_migration_hint() {
         "{err}"
     );
     // #9918: the reworded hint; full text in `behind_format_refusals_tell_the_operator_what_to_do`.
-    // #10094: the explicit command comes first; the daemon restart still works.
+    // #10094: the command for a trusty-memory palace, and the owning-daemon
+    // restart for any palace, a tm-owned one included.
     let shown = err.to_string();
     assert!(
-        shown.contains("run `trusty-memory palace migrate behind`"),
+        shown.contains(
+            "for a palace in trusty-memory's data root, run `trusty-memory palace migrate behind`"
+        ),
         "{err}"
     );
     assert!(
-        shown.contains("restarting the daemon that owns the palace"),
+        shown.contains("for any palace, restart the daemon that owns it"),
         "{err}"
     );
 }
@@ -453,19 +456,22 @@ fn behind_format_refusals_tell_the_operator_what_to_do() {
     assert_eq!(
         needs.to_string(),
         "FormatNeedsMigration: palace p is at format 0, older than the format 2 this binary \
-         reads; run `trusty-memory palace migrate p` (add `--dry-run` first to preview it), \
-         which migrates it to format 2 behind a verified backup, then retry; restarting the \
-         daemon that owns the palace (the trusty-memory daemon, or `tm daemon run` for the \
-         Session Manager and portfolio palaces) also migrates it; `trusty-memory doctor` lists \
-         palaces still awaiting migration"
+         reads; migrate it to format 2 behind a verified backup, then retry: for a palace in \
+         trusty-memory's data root, run `trusty-memory palace migrate p` (add `--dry-run` first \
+         to preview it); for any palace, restart the daemon that owns it (the trusty-memory \
+         daemon, or `tm daemon run` for the Session Manager and portfolio palaces), which \
+         migrates it at its next open; `trusty-memory doctor` lists palaces still awaiting \
+         migration"
     );
-    // #10094: both name the explicit command and its preview.
+    // #10094: starting the older release's daemon works on every release; the
+    // explicit command only on one that has it.
     let old = check_format_with("p", 0, 2, 1).expect_err("below the oldest");
     assert_eq!(
         old.to_string(),
         "FormatTooOld: palace p is at format 0, which this binary cannot migrate to format 2; \
-         install a trusty-memory release that migrates format 0, run its `trusty-memory palace \
-         migrate p` (add `--dry-run` first to preview it), then retry with this release"
+         install a trusty-memory release that migrates format 0, start its daemon once so it \
+         migrates the palace (a release that has `trusty-memory palace migrate` can run that \
+         instead, with `--dry-run` to preview it), then retry with this release"
     );
 }
 

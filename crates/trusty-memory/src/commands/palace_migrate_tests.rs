@@ -133,8 +133,8 @@ fn a_request_names_one_existing_palace_or_all() {
 }
 
 /// Drop one drawer row, as a step that lost a row would.
-fn drop_a_drawer(dir: &Path) {
-    let db = trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg");
+/// #10094: on the held `kg.redb`, inside the migration's exclusive hold.
+fn drop_a_drawer(db: &redb::Database) {
     let wtx = db.begin_write().expect("txn");
     wtx.open_table(DRAWERS)
         .expect("drawers")
@@ -150,7 +150,10 @@ fn drop_a_drawer(dir: &Path) {
 fn a_failed_check_is_a_non_zero_exit_naming_the_backup() {
     let (_tmp, root) = two_palaces();
     let seams = UpgradeSeams {
-        after_chain: drop_a_drawer,
+        chain: crate::engine::store::format_migration::Seams {
+            held: drop_a_drawer,
+            ..Default::default()
+        },
         ..UpgradeSeams::default()
     };
     let r = migrate_with(&root.join("a"), "a", seams).expect("the chain itself succeeds");
@@ -173,5 +176,64 @@ fn a_failed_check_is_a_non_zero_exit_naming_the_backup() {
     assert!(
         err.contains("palace b: format status is needs migration"),
         "{err}"
+    );
+}
+
+/// #10094 (critic HIGH 1): `--all` continues past a failed palace and
+/// reports all three — the first's backup and checks, the second's error,
+/// the third's result — and exits non-zero.
+#[test]
+fn all_reports_every_palace_when_one_fails() {
+    let (_tmp, root) = two_palaces();
+    write_format_0_palace(&root.join("c"), "c").expect("c");
+    // `b`'s kg.redb is held, so its migration cannot take the exclusive open.
+    let held = trusty_common::redb_cache::create_palace_db(&root.join("b").join("kg.redb"))
+        .expect("hold b");
+    let v = run_request(&root, &req(None, true, MigrateMode::Migrate, true))
+        .expect("the run reports instead of stopping");
+    drop(held);
+    assert_eq!(v["ok"], false, "{v}");
+    let results = v["results"].as_array().expect("results");
+    let names: Vec<&str> = results
+        .iter()
+        .filter_map(|r| r["palace"].as_str())
+        .collect();
+    assert_eq!(names, ["a", "c"], "{v}");
+    assert!(results[0]["backup"].is_string(), "{v}");
+    assert_eq!(v["failed"][0]["palace"], "b", "{v}");
+
+    let text = render(&v).expect("render");
+    let backup_a = results[0]["backup"].as_str().expect("a's backup");
+    assert!(text.contains("palace a: migrated format 0 -> 2"), "{text}");
+    assert!(text.contains(backup_a), "{text}");
+    assert!(text.contains("checks: format current"), "{text}");
+    assert!(text.contains("palace b: FAILED, not migrated"), "{text}");
+    assert!(text.contains("palace c: migrated format 0 -> 2"), "{text}");
+    let err = format!("{:#}", outcome(&v).expect_err("non-zero exit"));
+    assert!(err.contains("palace b failed:"), "{err}");
+}
+
+/// #10094 (critic MEDIUM 3): an older daemon's `-32601` for `palace_migrate`
+/// becomes a message naming the restart and the offline route; any other
+/// daemon error is passed through.
+#[test]
+fn a_daemon_without_palace_migrate_is_explained() {
+    let raw = anyhow::anyhow!("palace_migrate failed: Method not found: palace_migrate (-32601)");
+    let shown = format!("{:#}", super::explain_daemon_error(raw));
+    assert!(shown.contains("predates `palace migrate`"), "{shown}");
+    assert!(shown.contains("restart it on this release"), "{shown}");
+    assert!(
+        shown.contains("re-run this command, which then migrates offline"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("(-32601)"),
+        "the daemon's own error is kept: {shown}"
+    );
+
+    let other = anyhow::anyhow!("palace_migrate failed: boom (-32603)");
+    assert_eq!(
+        format!("{:#}", super::explain_daemon_error(other)),
+        "palace_migrate failed: boom (-32603)"
     );
 }

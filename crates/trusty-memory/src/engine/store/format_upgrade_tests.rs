@@ -15,7 +15,7 @@ use crate::engine::store::format_v0_fixture::{
     FORMAT_0_DRAWERS, FORMAT_0_TRIPLES, write_format_0_palace,
 };
 use crate::engine::store::format_v1_fixture::write_format_1_palace;
-use crate::engine::store::kg_store::{KG_SCHEMA, KgSchemaMarker, encode_value};
+use crate::engine::store::kg_store::{DRAWERS, KG_SCHEMA, KgSchemaMarker, encode_value};
 use crate::engine::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD};
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -177,6 +177,76 @@ fn an_injected_fault_names_the_backup_and_a_rerun_resumes() {
     assert_eq!(r.backup.as_deref(), Some(Path::new(&backup)));
     assert!(r.problems.is_empty(), "{:?}", r.problems);
     assert_eq!(r.after.drawers, FORMAT_0_DRAWERS.len() as u64);
+}
+
+/// Insert one raw drawer row, as a daemon write landing between two reads.
+fn add_a_drawer(dir: &Path) {
+    let db = trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg");
+    let wtx = db.begin_write().expect("txn");
+    wtx.open_table(DRAWERS)
+        .expect("drawers")
+        .insert(
+            uuid::Uuid::new_v4().as_bytes().as_slice(),
+            b"row".as_slice(),
+        )
+        .expect("insert");
+    wtx.commit().expect("commit");
+}
+
+/// #10094 (critic HIGH 2): with no migration, the counts come from two
+/// unlocked reads, so a write landing between them is reported, never a
+/// problem and never a non-zero exit.
+#[test]
+fn a_write_between_the_reads_without_a_migration_is_no_problem() {
+    let (_tmp, dir) = build("between", write_format_0_palace);
+    migrate(&dir, "between").expect("first run migrates");
+    let seams = UpgradeSeams {
+        after_chain: add_a_drawer,
+        ..UpgradeSeams::default()
+    };
+    let r = migrate_with(&dir, "between", seams).expect("second run");
+    assert!(!r.migrated && !r.counts_compared, "{r:?}");
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    assert_eq!(
+        r.after.drawers,
+        r.before.drawers + 1,
+        "reported, not compared"
+    );
+}
+
+/// Remove one drawer row from the held `kg.redb`, as a step that lost a row.
+fn lose_a_drawer(db: &redb::Database) {
+    let wtx = db.begin_write().expect("txn");
+    wtx.open_table(DRAWERS)
+        .expect("drawers")
+        .pop_first()
+        .expect("pop")
+        .expect("a row");
+    wtx.commit().expect("commit");
+}
+
+/// #10094: a run that migrated compares the counts it read under the hold,
+/// so a row lost during the chain is a problem.
+#[test]
+fn a_row_lost_under_the_hold_is_a_problem() {
+    let (_tmp, dir) = build("lost", write_format_0_palace);
+    let seams = UpgradeSeams {
+        chain: Seams {
+            held: lose_a_drawer,
+            ..Seams::default()
+        },
+        ..UpgradeSeams::default()
+    };
+    let r = migrate_with(&dir, "lost", seams).expect("the chain itself succeeds");
+    assert!(r.migrated && r.counts_compared, "{r:?}");
+    assert_eq!((r.before.drawers, r.after.drawers), (2, 1));
+    assert!(
+        r.problems
+            .iter()
+            .any(|p| p.contains("row counts changed during the migration")),
+        "{:?}",
+        r.problems
+    );
 }
 
 /// A dry run reports the found and target format, the planned backup, the

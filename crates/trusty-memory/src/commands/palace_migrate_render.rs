@@ -34,7 +34,23 @@ pub fn render(report: &Value) -> Result<String> {
         Some("migrate") => {
             let results: Vec<MigrateReport> =
                 serde_json::from_value(field("results")).context("decode results")?;
-            Ok(results.iter().map(render_result).collect())
+            let mut out: String = results.iter().map(render_result).collect();
+            // #10094: `--all` names every palace that failed or was skipped.
+            for f in report["failed"].as_array().into_iter().flatten() {
+                out.push_str(&format!(
+                    "palace {}: FAILED, not migrated\n  error: {}\n",
+                    f["palace"].as_str().unwrap_or("?"),
+                    f["error"].as_str().unwrap_or("?")
+                ));
+            }
+            for n in report["not_attempted"].as_array().into_iter().flatten() {
+                out.push_str(&format!(
+                    "palace {}: not attempted ({})\n",
+                    n["palace"].as_str().unwrap_or("?"),
+                    n["reason"].as_str().unwrap_or("?")
+                ));
+            }
+            Ok(out)
         }
         other => anyhow::bail!("palace migrate: unknown report mode {other:?}"),
     }
@@ -133,14 +149,24 @@ fn render_result(r: &MigrateReport) -> String {
     if let Some(b) = &r.backup {
         out.push_str(&format!("  backup  {}\n", b.display()));
     }
-    out.push_str(&format!(
-        "  drawers {} -> {}  triples {} -> {}\n",
-        r.before.drawers, r.after.drawers, r.before.triples, r.after.triples
-    ));
+    // #10094: counts are compared only when this run migrated.
+    if r.counts_compared {
+        out.push_str(&format!(
+            "  drawers {} -> {}  triples {} -> {}\n",
+            r.before.drawers, r.after.drawers, r.before.triples, r.after.triples
+        ));
+    } else {
+        out.push_str(&format!(
+            "  drawers {}  triples {} (not compared: this run migrated nothing)\n",
+            r.after.drawers, r.after.triples
+        ));
+    }
     if r.problems.is_empty() {
-        out.push_str(
-            "  checks: format current; markers agree; no migration record; counts unchanged\n",
-        );
+        out.push_str(if r.counts_compared {
+            "  checks: format current; markers agree; no migration record; counts unchanged\n"
+        } else {
+            "  checks: format current; markers agree; no migration record\n"
+        });
     } else {
         for p in &r.problems {
             out.push_str(&format!("  FAILED: {p}\n"));
