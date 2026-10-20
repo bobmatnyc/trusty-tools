@@ -383,6 +383,33 @@ fn python_embedder_enabled_false_for_other_values() {
     assert!(!python_embedder_enabled());
 }
 
+/// #9966: no uv installed with the fetch on is a Warn naming the pinned fetch,
+/// not an Error claiming a fetch failed; with the fetch off it stays an Error.
+#[test]
+fn uv_check_result_warns_when_the_bootstrap_would_fetch() {
+    use trusty_embedderd_py::uv_fetch::UvError;
+    let cache = std::path::PathBuf::from("/data/py-embedder/uv/0.12.23/uv");
+    let warn = uv_check_result(Err(UvError::NotInstalled {
+        cache: cache.clone(),
+    }
+    .into()));
+    match &warn {
+        CheckResult::Warn(msg) => assert!(
+            msg.contains("not installed")
+                && msg.contains("fetches the pinned uv 0.12.23")
+                && msg.contains("TRUSTY_UV_FETCH=0")
+                && !msg.contains("failed"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Warn, got {other:?}"),
+    }
+    let off = uv_check_result(Err(UvError::Disabled { cache }.into()));
+    assert!(
+        matches!(&off, CheckResult::Error(msg) if msg.contains("uv not found")),
+        "the fetch off is fatal: {off:?}"
+    );
+}
+
 #[test]
 fn check_python_venv_missing_reports_not_yet_bootstrapped() {
     // Why: a brand-new install (no `.ready`, no venv python) must produce a

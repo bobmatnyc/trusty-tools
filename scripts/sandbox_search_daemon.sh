@@ -22,7 +22,7 @@
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
 #   TRUSTY_EMBEDDERD_BIN.
 #   Embedder knobs (#9828; pass through only when exported with a non-empty
-#   value): TRUSTY_EMBEDDER, TRUSTY_DEVICE, TRUSTY_UV_BIN, and every
+#   value): TRUSTY_EMBEDDER, TRUSTY_DEVICE, TRUSTY_UV_BIN, TRUSTY_UV_FETCH, and every
 #   TRUSTY_EMBEDDERD_PY_* and TRUSTY_EMBEDDERD_RECYCLE_* name except one
 #   holding TOKEN, KEY, SECRET, PASSWORD, CREDENTIAL or AUTH. With
 #   TRUSTY_EMBEDDER=python the daemon finds `uv` through TRUSTY_UV_BIN, else
@@ -356,9 +356,10 @@ for name in $KNOBS; do
 done
 # #9828: the embedder knobs, so a soak can run the Python sidecar. Non-empty
 # values only; a credential-shaped name under the two prefixes is skipped.
+# #9966: TRUSTY_UV_FETCH, so a live check can run with the uv fetch off (=0).
 for name in $EXPORTED; do
   case "$name" in
-    TRUSTY_EMBEDDER|TRUSTY_DEVICE|TRUSTY_UV_BIN|TRUSTY_EMBEDDERD_PY_*|TRUSTY_EMBEDDERD_RECYCLE_*) ;;
+    TRUSTY_EMBEDDER|TRUSTY_DEVICE|TRUSTY_UV_BIN|TRUSTY_UV_FETCH|TRUSTY_EMBEDDERD_PY_*|TRUSTY_EMBEDDERD_RECYCLE_*) ;;
     *) continue ;;
   esac
   case "$name" in *TOKEN*|*KEY*|*SECRET*|*PASSWORD*|*CREDENTIAL*|*AUTH*) continue ;; esac

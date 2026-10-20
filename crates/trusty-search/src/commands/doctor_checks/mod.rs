@@ -438,8 +438,29 @@ pub fn python_embedder_enabled() -> bool {
 }
 
 /// Check `uv` presence + version (required to bootstrap the Python/MPS venv).
+/// `locate_uv` never fetches (#9966), so this stays read-only.
 pub fn check_python_uv() -> CheckResult {
-    match trusty_embedderd_py::bootstrap::locate_uv() {
+    uv_check_result(trusty_embedderd_py::bootstrap::locate_uv())
+}
+
+/// Map a `locate_uv` outcome to a doctor row.
+///
+/// Why (#9966): with no uv installed the bootstrap fetches the pinned uv, so
+/// "not installed" is not fatal unless `TRUSTY_UV_FETCH=0`.
+/// What: `Ok` with the version; `Warn` for `UvError::NotInstalled`; `Error`
+/// for everything else (fetch off, bad `TRUSTY_UV_BIN`, refused cache).
+/// Test: `uv_check_result_warns_when_the_bootstrap_would_fetch`.
+pub(crate) fn uv_check_result(found: anyhow::Result<std::path::PathBuf>) -> CheckResult {
+    use trusty_embedderd_py::uv_fetch::UvError;
+    match found {
+        Err(e)
+            if matches!(
+                e.downcast_ref::<UvError>(),
+                Some(UvError::NotInstalled { .. })
+            ) =>
+        {
+            CheckResult::Warn(format!("uv: {e}"))
+        }
         Ok(path) => {
             let version = std::process::Command::new(&path)
                 .arg("--version")

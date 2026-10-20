@@ -49,6 +49,9 @@ fs4 = { version = "0.8", features = ["sync"] }
 # `uv` discovery on PATH.
 which = { workspace = true }
 
+# #9966: download the pinned uv over HTTPS (blocking client, run on its own
+# thread so a tokio caller never hosts it).
+reqwest = { workspace = true, features = ["blocking"] }
 # #9468: extract the pinned uv archive (gzip + tar) and type its errors.
 flate2 = { workspace = true }
 tar = { workspace = true }
