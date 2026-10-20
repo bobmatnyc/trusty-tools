@@ -24,6 +24,9 @@ use crate::core::session::SessionId;
 
 const RECORDED: &str = include_str!("../../../testdata/hook_session_6849.ndjson");
 
+/// A flush interval no test outlives: the task exists but never drains.
+const NO_TICK: Duration = Duration::from_secs(3600);
+
 fn sock_in(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("bus.sock")
 }
@@ -55,6 +58,14 @@ fn read_one(sock: &Path) -> tokio::task::JoinHandle<Vec<u8>> {
     })
 }
 
+/// What `read_one` collected, bounded so a red run fails rather than hangs.
+async fn received(read: tokio::task::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("nothing reached the bus within 10 s")
+        .expect("join")
+}
+
 fn frames(bytes: &[u8]) -> Vec<HarnessEvent> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -80,7 +91,7 @@ async fn hook_events_reach_the_bus_with_a_parent_chain_6849() {
     let outcome = publisher.flush().await;
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert!(outcome.sent > 0, "nothing was buffered to send");
-    let got = frames(&read.await.expect("join"));
+    let got = frames(&received(read).await);
     assert_eq!(got.len(), 3, "inferred root, started, finished: {got:?}");
     assert_eq!(got[0].parent_id, None);
     assert_eq!(got[1].parent_id, Some(got[0].id));
@@ -170,21 +181,24 @@ async fn a_stalled_bus_never_slows_hook_ingest_6849() {
 #[tokio::test]
 async fn an_unresolvable_bus_still_ingests_hooks_6849() {
     // The control: the same call with a resolvable socket does attach, so
-    // the `None` below is the error arm, not a publisher that never attaches.
+    // the `false` below is the error arm, not a publisher that never attaches.
     let dir = tempfile::tempdir().expect("tempdir");
     let control = DaemonState::new();
-    let attached_task = start_with(&control, true, || Ok(sock_in(&dir)));
-    assert!(attached_task.is_some(), "a resolvable bus attaches");
-    stop(&control, attached_task).await;
+    assert!(
+        start_with(&control, true, NO_TICK, || Ok(sock_in(&dir))),
+        "a resolvable bus attaches"
+    );
+    control.action_events().shutdown().await;
 
     let state = DaemonState::new();
-    let task = start_with(&state, true, || anyhow::bail!("no data directory"));
-    assert!(task.is_none());
+    assert!(!start_with(&state, true, NO_TICK, || anyhow::bail!(
+        "no data directory"
+    )));
     assert!(state.action_events().publisher().is_none());
     let s = SessionId::new();
     state.push_hook_event(pre_tool_use(s, "t"));
     assert_eq!(state.hook_events_for(s).len(), 1);
-    stop(&state, task).await;
+    state.action_events().shutdown().await;
 }
 
 /// A daemon isolated from the host (a scratch root or `$HOME`) whose data dir
@@ -200,29 +214,33 @@ async fn a_scratch_daemon_dials_no_host_bus_6849() {
     assert!(bus_allowed(true, true));
     let state = DaemonState::new();
     let called = AtomicBool::new(false);
-    let task = start_with(&state, false, || {
+    let attached = start_with(&state, false, NO_TICK, || {
         called.store(true, Ordering::SeqCst);
         Ok(PathBuf::from("/nonexistent/bus.sock"))
     });
-    assert!(task.is_none());
+    assert!(!attached);
     assert!(!called.load(Ordering::SeqCst));
 }
 
-/// The exit path delivers what is buffered: `stop` ends the flush task and
-/// runs the final flush.
+/// Every exit path delivers what is buffered: `shutdown` ends the flush task
+/// and runs the final flush, and a second call (the binary's signal handler
+/// and the serve drain both call it) is a prompt no-op.
 #[tokio::test]
-async fn stop_runs_the_final_flush_6849() {
+async fn shutdown_runs_the_final_flush_once_6849() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sock = sock_in(&dir);
     let state = DaemonState::new();
-    let task = start_with(&state, true, || Ok(sock.clone()));
-    assert!(task.is_some(), "an allowed, resolvable bus attaches");
+    // The flush task never ticks here, so only the final flush can deliver.
+    assert!(start_with(&state, true, NO_TICK, || Ok(sock.clone())));
     let s = SessionId::new();
     state.push_hook_event(pre_tool_use(s, "t1"));
     let read = read_one(&sock);
-    stop(&state, task).await;
-    let got = frames(&read.await.expect("join"));
+    state.action_events().shutdown().await;
+    let got = frames(&received(read).await);
     assert_eq!(got.len(), 2, "root and started: {got:?}");
+    let again = Instant::now();
+    state.action_events().shutdown().await;
+    assert!(again.elapsed() < Duration::from_millis(500));
 }
 
 /// The final flush is bounded even when the bus accepts and never reads.
@@ -268,7 +286,7 @@ async fn projected_frames_carry_no_payload_bytes_6849() {
     let outcome = publisher.flush().await;
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert!(outcome.sent > 0, "nothing was buffered to send");
-    let bytes = read.await.expect("join");
+    let bytes = received(read).await;
     assert_eq!(frames(&bytes).len(), 21);
     for needle in [
         "SENTINEL",

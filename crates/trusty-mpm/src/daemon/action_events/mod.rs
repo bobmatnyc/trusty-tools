@@ -40,12 +40,17 @@ const DROP_WARN_EVERY: Duration = Duration::from_secs(60);
 /// The daemon's optional producer: empty until [`start`] attaches one.
 ///
 /// Why: a `DaemonState` built by a test, or by a daemon isolated from the
-/// host, must push nowhere; only the serving daemon dials a bus.
-/// What: a set-once slot. [`Self::publish`] is a no-op while it is empty.
-/// Test: `an_unresolvable_bus_still_ingests_hooks_6849`.
+/// host, must push nowhere; only the serving daemon dials a bus. The flush
+/// task lives here too, so every exit path — the serve drain and the
+/// binary's signal handler, which exits first (#6288) — can end it.
+/// What: a set-once publisher slot and the flush task's handle.
+/// [`Self::publish`] is a no-op while the slot is empty.
+/// Test: `an_unresolvable_bus_still_ingests_hooks_6849`,
+/// `shutdown_runs_the_final_flush_once_6849`.
 #[derive(Default)]
 pub struct ActionEvents {
     publisher: OnceLock<Arc<ActionPublisher>>,
+    flush_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for ActionEvents {
@@ -73,6 +78,9 @@ impl ActionEvents {
     pub fn publisher(&self) -> Option<&Arc<ActionPublisher>> {
         self.publisher.get()
     }
+
+    /// End the flush task, then run the bounded final flush. Idempotent.
+    pub async fn shutdown(&self) {}
 }
 
 /// One buffered `PushClient` plus the projection state.
@@ -103,6 +111,12 @@ impl ActionPublisher {
     /// Show paths outside a session's `cwd` relative to `home`.
     pub fn with_home(self, home: Option<PathBuf>) -> Self {
         *self.threader.lock() = projection::Threader::new(home);
+        self
+    }
+
+    /// Replace the flush task's interval.
+    pub fn with_flush_interval(mut self, every: Duration) -> Self {
+        self.flush_interval = every;
         self
     }
 
@@ -253,7 +267,7 @@ pub fn bus_allowed(data_dir_overridden: bool, real_environment: bool) -> bool {
 }
 
 /// [`start_with`] on this process's environment and `events_socket_path`.
-pub fn start(state: &DaemonState) -> Option<tokio::task::JoinHandle<()>> {
+pub fn start(state: &DaemonState) -> bool {
     let overridden =
         std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
     let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
@@ -261,55 +275,47 @@ pub fn start(state: &DaemonState) -> Option<tokio::task::JoinHandle<()>> {
     start_with(
         state,
         bus_allowed(overridden, real),
+        DEFAULT_FLUSH_INTERVAL,
         trusty_common::control_bus::events_socket_path,
     )
 }
 
 /// Attach a publisher on `resolve`'s socket when `allowed`, and start its
-/// flush task.
+/// flush task, draining every `flush_every`.
 ///
 /// Why: a bus that is disallowed or cannot be resolved is a log line, never
 /// a failed start (DOC-73 §4.1).
-/// What: returns `None`, attaching nothing, when `allowed` is false (without
-/// calling `resolve`) or `resolve` fails; otherwise the flush task's handle.
+/// What: attaches nothing and returns `false` when `allowed` is false
+/// (without calling `resolve`), when `resolve` fails, or when a publisher is
+/// already attached; otherwise attaches one, keeps its flush task on
+/// [`ActionEvents`] for [`ActionEvents::shutdown`], and returns `true`.
 /// Test: `an_unresolvable_bus_still_ingests_hooks_6849`,
-/// `a_scratch_daemon_dials_no_host_bus_6849`, `stop_runs_the_final_flush_6849`.
+/// `a_scratch_daemon_dials_no_host_bus_6849`,
+/// `shutdown_runs_the_final_flush_once_6849`.
 pub fn start_with(
     state: &DaemonState,
     allowed: bool,
+    flush_every: Duration,
     resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> bool {
     if !allowed {
         tracing::debug!("action events: isolated daemon on the host data dir; no bus");
-        return None;
+        return false;
     }
     match resolve() {
         Ok(socket) => {
-            let publisher = Arc::new(ActionPublisher::new(socket));
-            state
-                .action_events()
-                .attach(Arc::clone(&publisher))
-                .then(|| publisher.spawn_flush_task())
+            let publisher = Arc::new(ActionPublisher::new(socket).with_flush_interval(flush_every));
+            let events = state.action_events();
+            if !events.attach(Arc::clone(&publisher)) {
+                return false;
+            }
+            *events.flush_task.lock() = Some(publisher.spawn_flush_task());
+            true
         }
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "action events: no trusty-events socket; events are off for this run");
-            None
+            false
         }
-    }
-}
-
-/// End the flush task, then run the bounded final flush.
-///
-/// Why: every exit path of `serve_with_shutdown` delivers what it can, and
-/// two flushes never interleave on the socket.
-/// Test: `stop_runs_the_final_flush_6849`.
-pub async fn stop(state: &DaemonState, task: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(task) = task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(publisher) = state.action_events().publisher() {
-        publisher.final_flush().await;
     }
 }
 
