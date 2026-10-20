@@ -15,7 +15,8 @@ What: `lint(content_dir)` returns one error per shared asset whose first
   - A probe is a line naming `command -v <bin>`, `<bin> --version` or
     `<bin> --help` in a paragraph (or fenced block) that also says what to do
     without it: "absent", "missing", "unavailable", "not installed",
-    "not available", "not found", "fall back", "otherwise", or a shell `||`.
+    "not available", "not found", "fall back"/"fallback", "otherwise", or a
+    shell `||`. It covers a command in its own paragraph or any later one.
   - A harness's own assets run its commands freely: tm owns the `tm` and
     `tm-*` skills and `instructions/` (minus the trees below); tcode owns
     `agents/trusty-code/` and `instructions/trusty-code/`; tagent owns
@@ -44,7 +45,7 @@ FENCE_RE = re.compile(r"^\s*(```|~~~)")
 FENCED_CMD_RE = re.compile(rf"^\s*(?:\$\s+)?(?:[A-Z_][A-Z0-9_]*=\S+\s+)*({BIN})(?=\s+\S)")
 INLINE_CMD_RE = re.compile(rf"(?i:\b(?:run|use|call|invoke|execute|try|poll with)\s+)`(({BIN}) [a-z][^`]*)`")
 NEGATION_RE = re.compile(r"(?i)\b(never|not|don't|do not|doesn't|cannot)\b|n't\b")
-DEGRADE_RE = re.compile(r"(?i)absent|missing|unavailable|not installed|not available|not found|fall(s)? back|otherwise|\|\|")
+DEGRADE_RE = re.compile(r"(?i)absent|missing|unavailable|not installed|not available|not found|fall(s)? ?back|otherwise|\|\|")
 
 
 def probe_re(binary):
@@ -99,15 +100,15 @@ def blocks(lines):
 
 
 def first_probe(lines, binary):
-    """The line number of the first probe-then-degrade for `binary`, or None."""
+    """The first line of the first block holding a probe-then-degrade for
+    `binary`, or None. A probe in the same paragraph as a command covers it."""
     probe = probe_re(binary)
     for start, block in blocks(lines):
         text = "\n".join(block)
         if not DEGRADE_RE.search(text):
             continue
-        for offset, line in enumerate(block):
-            if probe.search(line):
-                return start + offset
+        if any(probe.search(line) for line in block):
+            return start
     return None
 
 

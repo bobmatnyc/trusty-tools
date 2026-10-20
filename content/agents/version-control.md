@@ -173,14 +173,9 @@ used by worktree at <path>`) though the squash landed.
 `gh` deletes the local branch before the remote one, so a head-held failure
 leaves the remote ref stranded too.
 
-Check `command -v tm` first; if `tm` is absent, use the fallback below, and
-after the merge report each cleanup step to the PM instead of running
-`tm pr cleanup`.
-
 Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
-
-Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
+Fallback when `command -v tm` finds none (no merge gate): (1) once `statusCheckRollup`
 lists a check (or the brief says the repo has no CI) and none failed or running
 that the brief does not waive, `gh pr merge <n> --squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`

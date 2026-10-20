@@ -35,6 +35,7 @@
 #   probe (scripts/check_content.py tree, #8390):
 #     probe-{fenced,inline}-unconditional  FAIL, a shared asset runs `tm` unprobed
 #     probe-after-invocation     FAIL, the probe comes after the first command
+#     probe-same-paragraph-ok    OK, a probe in the command's own paragraph
 #     probe-without-degrade      FAIL, a probe with no fallback
 #     probe-is-per-harness       FAIL, a `tm` probe does not cover `tcode`
 #     probe-then-degrade-ok / probe-shell-guard-ok          OK
@@ -234,6 +235,8 @@ new_repo p-shell-ok && engineer '```bash' 'command -v tm >/dev/null || exit 0' '
 tree probe-shell-guard-ok 0 "OK"
 new_repo p-late && engineer 'Run `tm doctor` after the edit.' '' "$PROBE"
 tree probe-after-invocation 1 "content/agents/engineer.md:6: runs \`tm doctor\`"
+new_repo p-same && engineer 'Run `tm doctor` after the edit.' 'Fallback when `command -v tm` finds none: skip it.'
+tree probe-same-paragraph-ok 0 "OK"
 new_repo p-nodegrade && engineer 'Check `command -v tm` first.' '' 'Run `tm doctor` after the edit.'
 tree probe-without-degrade 1 "content/agents/engineer.md:8: runs \`tm doctor\`"
 new_repo p-other-harness && engineer "$PROBE" '' 'Run `tcode run --agent qa` next.'
