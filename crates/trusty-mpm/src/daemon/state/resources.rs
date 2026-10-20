@@ -239,9 +239,13 @@ impl DaemonState {
     /// What: pushes to the back, evicting the oldest once `HOOK_HISTORY_LIMIT`
     /// is exceeded, then best-effort broadcasts a JSON copy of the record to
     /// `event_tx`. Send errors (no active subscribers) are intentionally
-    /// ignored.
-    /// Test: `hook_history_is_bounded`, `ingest_hook_broadcasts_to_subscribers`.
+    /// ignored. #6849: first buffers the record's projection for the
+    /// trusty-events bus, a no-op with no publisher attached; it never does
+    /// I/O, so the bus cannot slow this call.
+    /// Test: `hook_history_is_bounded`, `ingest_hook_broadcasts_to_subscribers`,
+    /// `hook_events_reach_the_bus_with_a_parent_chain_6849`.
     pub fn push_hook_event(&self, record: HookEventRecord) {
+        self.action_events.publish(&record);
         let value = serde_json::to_value(&record).unwrap_or_default();
         {
             let mut buf = self.hook_history.lock();

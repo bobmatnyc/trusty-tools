@@ -239,6 +239,8 @@ pub async fn serve_with_shutdown(
     // Each spawned loop receives a child token; the parent is cancelled after
     // the socket drains its in-flight requests (#6288 S3a).
     let cancel = tokio_util::sync::CancellationToken::new();
+    // #6849: hook records reach the trusty-events bus; never blocks a hook.
+    let action_flush = action_events::start(&state);
 
     // Spawn the multi-session file watcher as a background task.
     // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.
@@ -361,6 +363,8 @@ pub async fn serve_with_shutdown(
 
     // Signal all background loops to stop before we walk the session list.
     cancel.cancel();
+    // #6849: the bounded final flush runs on both exit arms below.
+    action_events::stop(&state, action_flush).await;
     if let Err(e) = served {
         // #6288 S3a: a dead accept loop is a crash, not a stop; the managed
         // sessions are left running as a SIGKILLed daemon leaves them.
