@@ -713,7 +713,10 @@ no frame of any kind arrives for 12.5 s (two and a half intervals, so one lost
 beat is not a hang), then reconnects with its usual backoff and resumes without
 loss. The daemon and console ship in lockstep: an older daemon refuses
 `heartbeat_ms`, which console reports as `refused` without dropping its resume
-point.
+point. `tm doctor`'s `events` row asks for 500 ms and waits 2 s for the first
+frame, then closes: a frame is `ok`, silence after the connect is `fail`
+(`hung`, remedy `tctl restart trusty-events`), and a refusal of `heartbeat_ms`
+is a version-skew `warn`.
 
 Console's own connection to the bus is served read-only at
 `GET /api/console/events/status`: `200` when connected, `503` otherwise, with a
