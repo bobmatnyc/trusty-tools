@@ -450,6 +450,8 @@ pub struct DaemonState {
     /// [`crate::daemon::state::pending_stops`] for the whole rationale.
     /// Test: `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`.
     pub(super) pending_stops: super::pending_stops::PendingStops,
+    /// #6849: the trusty-events producer every hook record is projected to.
+    pub(super) action_events: crate::daemon::action_events::ActionEvents,
     /// #8433: the channel holds (policy snapshot, question table); see
     /// [`Self::channel_policy`].
     #[cfg(feature = "channels")]
@@ -565,6 +567,7 @@ impl DaemonState {
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
+            action_events: Default::default(),
             #[cfg(feature = "channels")]
             channels: Default::default(),
         }
@@ -652,6 +655,7 @@ impl DaemonState {
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
+            action_events: Default::default(),
             #[cfg(feature = "channels")]
             channels: Default::default(),
         }
