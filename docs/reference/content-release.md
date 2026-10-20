@@ -137,8 +137,9 @@ on any FAIL row. It checks the manifest's `schema_major`, strict frontmatter
 and a readable `requires:` on every asset a strict reader sees as written, that
 JSON and TOML assets parse, that both agent rosters compose through the shared
 deployer, that every skill entry point declares `name` and `description` and
-deploys, and that the instructions load. It is a Rust test, so a content-only
-PR, which CI classes as docs-only, does not run it; the code PR after it does.
+deploys, and that the instructions load. It has a row in
+`scripts/asset-content-tests.tsv`, so `capabilities-drift.yml` runs it on a
+content-only PR as well as on a code PR.
 
 ## Installing a release (`tm content`)
 
