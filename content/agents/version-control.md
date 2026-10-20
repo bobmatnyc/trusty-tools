@@ -7,7 +7,7 @@ extends: base-ops
 skills: [git-workflow]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Version Control Agent
@@ -172,6 +172,10 @@ head branch (#8391), and the flag fails post-merge either way (`... is already
 used by worktree at <path>`) though the squash landed.
 `gh` deletes the local branch before the remote one, so a head-held failure
 leaves the remote ref stranded too.
+
+Check `command -v tm` first; if `tm` is absent, use the fallback below, and
+after the merge report each cleanup step to the PM instead of running
+`tm pr cleanup`.
 
 Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").

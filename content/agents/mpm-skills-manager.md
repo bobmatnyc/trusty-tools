@@ -7,7 +7,7 @@ extends: base-agent
 skills: [tm-capabilities]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # MPM Skills Manager
@@ -185,6 +185,9 @@ A good skill:
 - Is under 300 lines (focused, not encyclopaedic)
 
 ## Improvement Workflow
+
+Step 3 needs `tm`: check `command -v tm` first; if `tm` is absent, skip step 3
+and say in your report that the tier-shadow check did not run.
 
 1. Edit the `.md` file in `src/assets/skills/`
 2. Run `cargo test -p trusty-mpm bundle` to confirm the bundle builds

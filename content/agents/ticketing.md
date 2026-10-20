@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Ticketing Agent
@@ -186,6 +186,11 @@ gh issue create --title "…" --body "…" \
 ```
 
 ### Seed the labels before the first filing
+
+The `tm issue` commands below need `tm`. Check `command -v tm` first; if `tm` is
+absent, create a missing label with `gh label create <name>`, check a filing by
+hand with `gh issue view <N> --json labels,milestone,projectItems`, and use the
+hand-typed `gh issue edit` fallback under the lifecycle labels.
 
 🔴 **Run `tm issue seed-labels` on first use in a repository.** It creates the
 four `status:*` lifecycle labels, `trusty-mpm`, and `ws/<session>`. It is

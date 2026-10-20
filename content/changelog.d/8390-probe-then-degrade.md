@@ -1,0 +1,2 @@
+Changed
+- Seven shared assets that run a `tm` command check `command -v tm` first and say what to do without it: the `local-ops`, `mpm-agent-manager`, `mpm-skills-manager`, `ticketing` and `version-control` agents and the `condition-based-waiting` and `verification-before-completion` skills. `check_content.py tree` now refuses a shared asset that runs `tm`, `tcode` or `tagent` before such a probe (ADR-0064 decision 6, #8390).

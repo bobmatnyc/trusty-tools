@@ -88,7 +88,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/local-ops.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "agents/memory-manager.md"
@@ -96,11 +96,11 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/mpm-agent-manager.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/mpm-skills-manager.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/nextjs-engineer.md"
@@ -164,7 +164,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/ticketing.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/trusty-agents/agents/assistant/persona.md"
@@ -256,7 +256,7 @@ version = "0.1.1"
 
 [[member]]
 path = "agents/version-control.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "agents/web-qa.md"
@@ -444,7 +444,7 @@ version = "1.0.1"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/contract-driven-testing.md"
@@ -636,7 +636,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/verification-before-completion.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/web-performance-optimization.md"

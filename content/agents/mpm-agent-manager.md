@@ -7,7 +7,7 @@ extends: base-agent
 skills: [tm-capabilities]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # MPM Agent Manager
@@ -90,7 +90,9 @@ custom agent.
 
 ## Improvement Workflow
 
-When an agent needs improvement:
+When an agent needs improvement (step 3 needs `tm`: check `command -v tm`
+first; if `tm` is absent, skip step 3 and say in your report that the
+tier-shadow check did not run):
 1. Edit the `.md` file in `crates/trusty-agents-common/src/assets/agents/`
 2. Verify the composed output: `cargo test -p trusty-mpm bundle`
 3. Run `tm doctor` after the edit to confirm no tier-shadow was introduced;

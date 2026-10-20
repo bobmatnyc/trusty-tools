@@ -114,7 +114,7 @@ new_repo() {
   git -C "$REPO" config user.email selftest@example.invalid
   git -C "$REPO" config user.name "content selftest"
   local f
-  for f in check_content.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh architect_leak_patterns.txt; do
+  for f in check_content.py content_probe_lint.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh architect_leak_patterns.txt; do
     [[ -f "$SRC/$f" ]] && cp "$SRC/$f" "$REPO/scripts/"
   done
   cp "$SRC/lib/source_class.sh" "$REPO/scripts/lib/"
