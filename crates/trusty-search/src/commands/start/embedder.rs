@@ -435,11 +435,11 @@ async fn build_embedder_raw() -> Result<(
 /// #3524 slices 2-4) so the exact same eager-blocking logic is reachable both
 /// from the explicit `TRUSTY_EMBEDDER=python` value AND from unset/`auto` +
 /// `TRUSTY_EMBEDDER_PYTHON_EAGER` (PR 3/5) without duplicating it.
-/// What: blocking `ensure_venv_eager` off the async runtime, then
-/// `locate_launcher_binary`, then arms a `LazyEmbedderHandle` exactly like
+/// What: [`prepare_eager_python`] (launcher first, then the blocking
+/// `ensure_venv_eager`), then arms a `LazyEmbedderHandle` exactly like
 /// `build_ort_stdio_sidecar` does for the ort binary.
-/// Test: unaffected by this extraction — same behavior, same call path,
-/// covered by the existing `lazy_adapter_python_reports_mps_provider`.
+/// Test: `eager_python_missing_launcher_builds_no_venv` (order);
+/// `lazy_adapter_python_reports_mps_provider` (the armed adapter).
 async fn build_eager_python_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
@@ -447,61 +447,60 @@ async fn build_eager_python_embedder() -> Result<(
 )> {
     use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
-    // The bootstrap is a blocking, potentially minutes-long one-time
-    // build; run it off the async runtime. `ensure_venv_eager` (not the
-    // plain `ensure_venv` the per-respawn launcher binary uses) pays for
-    // the FULL torch-importing `.ready` recheck — worth it here since
-    // this call happens once per daemon lifetime, not once per respawn.
-    let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv_eager)
-        .await
-        .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"));
-
-    match bootstrap.and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap"))) {
-        Ok(_layout) => match trusty_embedderd_py::locate_launcher_binary() {
-            Ok(launcher) => {
-                let config = resolve_python_supervisor_config();
-                tracing::info!(
-                    "embedder mode: python/MPS sidecar lazy \
-                     (launcher={}, idle_shutdown_secs={})",
-                    launcher.display(),
-                    config.idle_shutdown_secs,
-                );
-                // Slice 5 (epic #3524): the runtime fallback trips on the
-                // supervisor's OWN give-up signal
-                // (`Embedder::supervisor_gave_up`, forwarded from
-                // `LazyEmbedderHandle::supervisor_gave_up` →
-                // `SupervisorHandle::has_given_up`) rather than an
-                // independently-counted request-failure threshold — see
-                // `embedder_fallback.rs`'s module doc (review finding, PR
-                // #3560 HIGH fix) for the full rationale.
-                let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
-                let pid_slot = handle.app_pid_slot();
-                let python_embedder: Arc<dyn crate::core::Embedder> =
-                    Arc::new(LazySlotEmbedderAdapter {
-                        handle: Arc::clone(&handle),
-                        is_python: true,
-                    });
-                let fallback_adapter =
-                    super::embedder_fallback::FallbackEmbedderAdapter::new(python_embedder, || {
-                        build_ort_stdio_sidecar().map(|(embedder, _pid_slot)| embedder)
-                    });
-                Ok((
-                    Arc::new(fallback_adapter),
-                    Some(pid_slot),
-                    BackendKind::Python,
-                ))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "TRUSTY_EMBEDDER=python: could not locate the \
-                     trusty-embedderd-py launcher ({e:#}) — FALLING BACK to the \
-                     Rust ort stdio sidecar. Set TRUSTY_EMBEDDERD_PY_BIN or ensure \
-                     the launcher is on PATH to use the Python/MPS sidecar."
-                );
-                build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
-            }
-        },
-        Err(e) => {
+    // `ensure_venv_eager` (not the plain `ensure_venv` the per-respawn
+    // launcher binary uses) pays for the FULL torch-importing `.ready`
+    // recheck — worth it here since this call happens once per daemon
+    // lifetime, not once per respawn.
+    match prepare_eager_python(
+        trusty_embedderd_py::locate_launcher_binary,
+        trusty_embedderd_py::ensure_venv_eager,
+    )
+    .await
+    {
+        Ok(launcher) => {
+            let config = resolve_python_supervisor_config();
+            tracing::info!(
+                "embedder mode: python/MPS sidecar lazy \
+                 (launcher={}, idle_shutdown_secs={})",
+                launcher.display(),
+                config.idle_shutdown_secs,
+            );
+            // Slice 5 (epic #3524): the runtime fallback trips on the
+            // supervisor's OWN give-up signal
+            // (`Embedder::supervisor_gave_up`, forwarded from
+            // `LazyEmbedderHandle::supervisor_gave_up` →
+            // `SupervisorHandle::has_given_up`) rather than an
+            // independently-counted request-failure threshold — see
+            // `embedder_fallback.rs`'s module doc (review finding, PR
+            // #3560 HIGH fix) for the full rationale.
+            let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
+            let pid_slot = handle.app_pid_slot();
+            let python_embedder: Arc<dyn crate::core::Embedder> =
+                Arc::new(LazySlotEmbedderAdapter {
+                    handle: Arc::clone(&handle),
+                    is_python: true,
+                });
+            let fallback_adapter =
+                super::embedder_fallback::FallbackEmbedderAdapter::new(python_embedder, || {
+                    build_ort_stdio_sidecar().map(|(embedder, _pid_slot)| embedder)
+                });
+            Ok((
+                Arc::new(fallback_adapter),
+                Some(pid_slot),
+                BackendKind::Python,
+            ))
+        }
+        Err(EagerPythonFailure::Launcher(e)) => {
+            tracing::warn!(
+                "TRUSTY_EMBEDDER=python: could not locate the \
+                 trusty-embedderd-py launcher ({e:#}) — FALLING BACK to the \
+                 Rust ort stdio sidecar; no venv was built. Set \
+                 TRUSTY_EMBEDDERD_PY_BIN or ensure the launcher is on PATH to \
+                 use the Python/MPS sidecar."
+            );
+            build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
+        }
+        Err(EagerPythonFailure::Venv(e)) => {
             tracing::warn!(
                 "TRUSTY_EMBEDDER=python: venv bootstrap failed ({e:#}) — FALLING \
                  BACK to the Rust ort stdio sidecar so search does not hard-fail. \
@@ -511,6 +510,41 @@ async fn build_eager_python_embedder() -> Result<(
             build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
         }
     }
+}
+
+/// Which step of the eager python path failed; each gets its own warning.
+#[derive(Debug)]
+pub(super) enum EagerPythonFailure {
+    /// The `trusty-embedderd-py` launcher was not found. No venv work ran.
+    Launcher(anyhow::Error),
+    /// The venv bootstrap failed or its blocking task panicked.
+    Venv(anyhow::Error),
+}
+
+/// Locate the launcher, then build the venv, for the eager python path.
+///
+/// Why: #9968 — the venv build downloads ~3 GB of torch, and without the
+/// launcher the venv is never used. Looking the launcher up first means a
+/// missing launcher costs no download, the same order the graceful path
+/// takes since #9468 PR A.
+/// What: calls `locate`; on error returns [`EagerPythonFailure::Launcher`]
+/// without calling `ensure_venv`. Otherwise runs `ensure_venv` on a blocking
+/// thread (a potentially minutes-long build) and returns the launcher path,
+/// or [`EagerPythonFailure::Venv`].
+/// Test: `eager_python_missing_launcher_builds_no_venv`,
+/// `eager_python_venv_failure_is_reported_after_the_launcher_lookup`.
+pub(super) async fn prepare_eager_python<T: Send + 'static>(
+    locate: impl FnOnce() -> Result<PathBuf>,
+    ensure_venv: impl FnOnce() -> Result<T> + Send + 'static,
+) -> std::result::Result<PathBuf, EagerPythonFailure> {
+    // #9968: launcher before venv, as `graceful_bootstrap::try_bootstrap_once`.
+    let launcher = locate().map_err(EagerPythonFailure::Launcher)?;
+    tokio::task::spawn_blocking(ensure_venv)
+        .await
+        .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"))
+        .and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap")))
+        .map_err(EagerPythonFailure::Venv)?;
+    Ok(launcher)
 }
 
 /// Python-arm-only override of the shared 300s idle-shutdown default (fast-follow,
