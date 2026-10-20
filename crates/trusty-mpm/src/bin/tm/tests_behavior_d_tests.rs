@@ -914,6 +914,34 @@ fn cli_parses_session_catchup_json_page() {
     );
 }
 
+/// Why (#9883 criterion 4): `--full` used to read "force full history
+/// (watermark logic lands in PR2)"; ruling df-D88 made it the one switch for
+/// the full digest, with the lean answer as the default. `--all-projects`
+/// scans digests, so without `--full` it would be silently ignored.
+/// What: `--full`'s help names the full digest and no PR placeholder, and
+/// `--all-projects` is refused without `--full`.
+/// Test: this test.
+#[test]
+fn cli_catchup_full_names_the_full_digest_9883() {
+    let cmd = <Cli as clap::CommandFactory>::command();
+    let catchup = cmd
+        .find_subcommand("sessions")
+        .and_then(|s| s.find_subcommand("catchup"))
+        .expect("`tm sessions catchup` exists");
+    let help = catchup
+        .get_arguments()
+        .find(|a| a.get_id() == "full")
+        .and_then(|a| a.get_help())
+        .map(|h| h.to_string())
+        .expect("--full has help");
+    assert!(help.contains("full digest"), "{help}");
+    assert!(!help.contains("PR2"), "{help}");
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "sessions", "catchup", "--all-projects"]).is_err(),
+        "--all-projects scans the full digest, so it needs --full"
+    );
+}
+
 // ── `tm ls` inline sort/filter grammar (#3483, PM correction) ───────────
 //
 // The repo owner asked for `--sort`/`--filter` to be expressed as bare

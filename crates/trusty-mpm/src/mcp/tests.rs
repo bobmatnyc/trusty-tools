@@ -1011,6 +1011,28 @@ async fn dispatch_session_context_catchup_forwards_tmux_session_created() {
     }
 }
 
+/// Why (#9883 criterion 4): `full` used to mean "ignore the watermark, full
+/// history" while the default returned a watermarked digest. Ruling df-D88
+/// merged that meaning into one flag: `full: true` is the whole digest with no
+/// watermark, and the default is the lean answer.
+/// What: the advertised `full` description names the full digest and the lean
+/// default, and no longer offers "activity since the last catch-up".
+/// Test: this test.
+#[test]
+fn catchup_full_flag_names_the_full_digest_not_the_watermark() {
+    let catalog = tool_catalog();
+    let tool = catalog
+        .iter()
+        .find(|t| t["name"] == "session_context_catchup")
+        .expect("session_context_catchup is advertised");
+    let full = tool["inputSchema"]["properties"]["full"]["description"]
+        .as_str()
+        .expect("`full` has a description");
+    assert!(full.contains("full digest"), "{full}");
+    assert!(full.contains("lean"), "{full}");
+    assert!(!full.contains("since the last catch-up"), "{full}");
+}
+
 /// Why: #5557 — pagination only rescues `full: true` if the offset the response
 /// hands back actually reaches the backend. A parser that dropped it would
 /// leave every caller pinned to page 0 and the rest of the history unreachable,

@@ -3591,6 +3591,33 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
     }
 }
 
+/// Why (#9883 criterion 5): the resume default became the lean answer — the
+/// resolved snapshot plus live `git status` — with the digest behind
+/// `full: true`. A skill still teaching the watermarked digest as the default
+/// would send the PM looking for a `sessions` array that is no longer there.
+/// What: the skill names the lean fields and `full: true` / `--full` as the
+/// digest switch, and no longer calls the default a watermarked digest or
+/// `full` a watermark switch.
+/// Test: this test.
+#[test]
+fn session_resume_skill_matches_the_lean_default_9883() {
+    let text = skill_text("skills/tm-session-resume.md");
+    for needle in [
+        "\"git_status\"",
+        "\"resolved_session\"",
+        "\"digest\": \"lean\"",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?}");
+    }
+    for stale in [
+        "watermarked markdown digest",
+        "true ignores the watermark",
+        "ignore the watermark, full history",
+    ] {
+        assert!(!text.contains(stale), "still says {stale:?}");
+    }
+}
+
 /// Why (#8408): every relaunch recreates the tmux window, so the skill's old
 /// "select the recorded `@id`" step pointed a resumed PM at a window that no
 /// longer existed.
