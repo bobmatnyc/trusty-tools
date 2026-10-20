@@ -1,7 +1,7 @@
 //! End-to-end proof of the #8928 step 7 Write/Edit protected-path check.
 //!
 //! Why: the sandbox protects settings files, `.mcp.json` and hook directories
-//! from Bash, but not from the Write and Edit tools (spike row B12t). A PM or
+//! from Bash, but not from the Write and Edit tools (#8928). A PM or
 //! agent that writes `.claude/settings.local.json` can switch the sandbox off
 //! or plant a hook that runs outside it. Only the built binary proves the
 //! check runs ahead of the subagent exemptions.
@@ -146,7 +146,7 @@ fn an_ordinary_write_and_the_architect_main_thread_are_allowed() {
         ""
     );
     // The Architect runs unsandboxed and may edit its own settings (#8928
-    // plan step 5: Architect `enabled: false`).
+    // step 5: the Architect gets `sandbox.enabled: false`).
     let settings = fx.project.join(".claude/settings.json");
     let out = run_under_claude(&fx, &write(&fx, &settings, "{}", false), true);
     assert_eq!(out.trim(), "", "the Architect main thread is exempt: {out}");

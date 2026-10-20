@@ -1,11 +1,11 @@
 //! The private tmux server of a workspace (#8928 step 4).
 //!
 //! Why: under the Claude Code sandbox a PM reaches tmux only through a socket
-//! its settings allow by resolved path (spike row W8), and that grant covers
-//! every verb on the server, `send-keys` included. On the default server it
-//! would open the Architect's pane, so each workspace gets a server of its own
-//! (owner ruling 2026-09-30: one tmux server per workspace). Every tmux call
-//! goes to the default server today.
+//! its settings allow by resolved path, and that grant covers every verb on
+//! the server, `send-keys` included. On the default server it would open the
+//! Architect's pane, so each workspace gets a server of its own (#8928's owner
+//! ruling of 2026-09-30: one tmux server per workspace). Every tmux call goes
+//! to the default server today.
 //! What: [`workspace_server_name`] names a workspace's server
 //! (`tm-ws-<slug>-<hash>`, stable for the canonical path);
 //! [`socket_dir`] / [`ambient_socket_dir`] resolve tmux's socket directory the

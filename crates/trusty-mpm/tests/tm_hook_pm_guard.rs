@@ -3661,9 +3661,11 @@ fn pm_guard_allows_documents_and_configuration_in_a_main_checkout() {
         "README.md",
         "TASK.md",
         "Cargo.toml",
-        // #8928 step 7 (owner ruling Q3): `.claude/settings.json` is now
-        // denied by the protected-path rule, so `.claude/` is covered here by
-        // an agent file with no frontmatter `hooks:`.
+        // #8928's owner scope ruling (2026-09-30): the Write/Edit check covers
+        // exact settings/config files (`.claude/settings.json`,
+        // `.claude/settings.local.json`, `.mcp.json`) in any workspace, plus
+        // frontmatter `hooks:`; there is no blanket `.claude/**` deny. So
+        // `.claude/` is covered here by an agent file with no `hooks:`.
         ".claude/agents/demo.md",
     ] {
         let target = repo.join(name);
