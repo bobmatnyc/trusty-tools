@@ -29,8 +29,7 @@ impl Requirement {
     /// [`parse_requires`] accepted always parses.
     /// Test: `requirement_matches_by_semver`.
     pub fn satisfied_by(&self, version: &semver::Version) -> bool {
-        let _ = version;
-        true
+        semver::VersionReq::parse(&self.requirement).is_ok_and(|req| req.matches(version))
     }
 }
 
@@ -60,11 +59,68 @@ pub enum RequiresError {
 
 /// The `requires:` entries of `text`, an asset's full source.
 ///
+/// Why: the doctor row and the compatibility matrix must read the block the
+/// same way, so one parser serves both.
+/// What: finds the leading `---` frontmatter block; with no block, or no
+/// top-level `requires:` line in it, the asset declares nothing. Otherwise the
+/// block is parsed as YAML and `requires` must be a map of string harness
+/// names to SemVer requirement strings; a null value declares nothing. Entries
+/// keep declaration order. A YAML error elsewhere in a block without
+/// `requires:` is not this parser's to report.
+///
 /// # Errors
 /// [`RequiresError`] when `requires:` is present but unreadable.
+/// Test: `requires_parses_flow_and_block_forms`,
+/// `an_asset_without_requires_declares_none`, `a_malformed_requires_is_an_error`.
 pub fn parse_requires(text: &str) -> Result<Vec<Requirement>, RequiresError> {
-    let _ = text;
-    Ok(Vec::new())
+    let Some(block) = frontmatter(text) else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!("{REQUIRES_KEY}:");
+    if !block.lines().any(|line| line.starts_with(&prefix)) {
+        return Ok(Vec::new());
+    }
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(block).map_err(|e| RequiresError::Frontmatter(e.to_string()))?;
+    let entries = match doc.get(REQUIRES_KEY) {
+        None | Some(serde_yaml::Value::Null) => return Ok(Vec::new()),
+        Some(serde_yaml::Value::Mapping(map)) => map,
+        Some(_) => return Err(RequiresError::Shape),
+    };
+    entries
+        .iter()
+        .map(|(harness, value)| {
+            let (Some(harness), Some(value)) = (harness.as_str(), value.as_str()) else {
+                return Err(RequiresError::Shape);
+            };
+            semver::VersionReq::parse(value).map_err(|e| RequiresError::BadRequirement {
+                harness: harness.to_owned(),
+                value: value.to_owned(),
+                reason: e.to_string(),
+            })?;
+            Ok(Requirement {
+                harness: harness.to_owned(),
+                requirement: value.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The text between a leading `---` fence and the next `---` line, or `None`
+/// when `text` opens with no terminated block.
+fn frontmatter(text: &str) -> Option<&str> {
+    let rest = text.trim_start_matches('\u{feff}').strip_prefix("---")?;
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))?;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            return Some(&rest[..offset]);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 #[cfg(test)]

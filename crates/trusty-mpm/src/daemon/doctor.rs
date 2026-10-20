@@ -744,6 +744,12 @@ pub(crate) async fn run_doctor_with_claims(
         project_dir,
         trusty_common::content::default_cache_dir().as_deref(),
     ));
+    // #8390: assets whose advisory `requires:` this binary does not satisfy.
+    // WARN at worst — the asset still deploys and runs (ADR-0064).
+    checks.push(super::doctor_content_requires::check_content_requires(
+        project_dir,
+        trusty_common::content::default_cache_dir().as_deref(),
+    ));
     // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
     // every write while `tm ls` keeps serving the daemon's in-memory copy, so
     // without this probe the condition is invisible until someone attempts a
