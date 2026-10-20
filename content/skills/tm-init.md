@@ -3,7 +3,7 @@ name: tm-init
 description: Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes
 user-invocable: true
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: pm-workflow
 tags: [init, setup, scaffolding, claude-md, pm-recommended]
 effort: medium
@@ -107,13 +107,15 @@ recommended next actions. Delegate the heavy analysis to the **research** agent
 Map directly to the real CLI command, consistent with `/tm-session-resume`:
 
 ```bash
-tm session catchup                  # current project only
-tm session catchup --all-projects   # also scan machine-wide registered projects
+tm session catchup                       # this session's snapshot + live git status
+tm session catchup --full                # full work-context digest, no watermark
+tm session catchup --full --all-projects # also scan machine-wide registered projects
 ```
 
-`catchup` renders a unified, newest-first work-context digest for the current
-project — instant, no LLM analysis. After running it, reconcile against
-`git log --oneline -5` / `git status` and present the digest.
+`catchup` prints the snapshot resolved for this session and the live
+`git status` — instant, no LLM analysis (#9883). `--full` renders a unified,
+newest-first work-context digest for the current project instead;
+`--all-projects` needs `--full`. Present what it prints.
 
 ## What Gets Written
 
