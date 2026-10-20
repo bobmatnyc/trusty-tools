@@ -3,7 +3,7 @@ name: tm-session-resume
 description: Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context
 user-invocable: true
 metadata:
-  version: "1.2.0"
+  version: "2.0.0"
 category: pm-workflow
 tags: [session, resume, context, pm-recommended]
 effort: medium
@@ -27,11 +27,17 @@ When invoked, this skill:
 3. **Validates** that the session belongs to the *current* project — snapshots
    whose recorded project path does not match the working directory are skipped,
    so you never accidentally resume another checkout's state.
-4. Reconciles against live git state (`git log --oneline -5`, `git status`) to
-   compute what changed since pause.
-5. Presents the digest — summary, completed work, in-progress items, next
-   steps — restores the todo list, and continues under the Autonomous Execution
-   rule (#8361), which is what decides whether anything is asked here.
+4. Reconciles against live git state — the tool returns the commits landed
+   since the snapshot and a live `git status` — to compute what changed since
+   pause.
+5. Presents the snapshot — summary, in-progress items, next steps — restores
+   the todo list, and continues under the Autonomous Execution rule (#8361),
+   which is what decides whether anything is asked here.
+
+The default answer is **lean** (#9883): the snapshot resolved for you plus live
+git status, nothing else. The full digest — every paused session, recent
+commits, memory titles — is one flag away (`full: true` / `--full`) when you
+need it.
 
 ## Usage
 
@@ -77,9 +83,9 @@ mcp__trusty-mpm__session_context_catchup(
   #             under (#6888). Pass one only to read a specific KNOWN session.
   tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
   tmux_session_created: <your own `tmux display-message -p '#{session_created}'`, an integer>,
-  all_projects: false,   # true also scans machine-wide registered projects
-  full: false,            # true ignores the watermark, returns full history
-  sessions_offset: 0      # which page of the ordered session list to read — yours first, then newest
+  full: false,            # default: the lean answer; true returns the full digest
+  all_projects: false,   # full digest only: also scan machine-wide registered projects
+  sessions_offset: 0      # full digest only: which page of the session list to read
 )
 ```
 
@@ -96,7 +102,42 @@ Every trusty-mpm tmux session is named `tm-<folder>`, so a later session
 reuses the name. Without `tmux_session_created` the session-name route
 resolves nothing (#8408).
 
-The tool returns:
+By default (`full` omitted or `false`) the tool returns the lean answer:
+
+```json
+{
+  "digest": "lean",
+  "resolved_snapshot": "<path or null>",
+  "resolved_via": "session_id" | "tmux_window" | "tmux_session" | null,
+  "resolved_session": { "format", "paused_at", "summary", "in_progress",
+                        "next_steps", "git_context", "tmux_window",
+                        "source_file", "owned" } | null,
+  "resolved_note": "<present only when the tmux-session route was skipped>",
+  "resolved_snapshot_superseded": false,
+  "commits_since_snapshot": [{ "sha", "msg", "author", "ts" }],
+  "commits_since_snapshot_total": 0,
+  "resume_verify": { "status", "checks" } | null,
+  "git_status": {
+    "available": true,
+    "entries": [" M src/lib.rs", "?? notes.md"],
+    "entries_total": 2,
+    "truncated": false,
+    "error": "<unavailable: why, or null>"
+  },
+  "watermark_advanced": false,
+  "session_refs": { "hydrated", "refs_seen", "own_ref_found", "restored", "error" }
+}
+```
+
+`resolved_session.git_context` is the tree at PAUSE time; `git_status` is the
+tree NOW, read with a bounded `git status --porcelain` (at most 40 entries).
+`available: false` means git failed or timed out — the `error` says which —
+never a clean tree.
+
+With `full: true` the tool returns the full digest instead — every paused
+session, recent commits and recent memory over the whole history, with no
+watermark — plus the same resolution fields (no `digest`, `resolved_session`
+or `git_status`):
 
 ```json
 {
@@ -128,15 +169,16 @@ The tool returns:
 }
 ```
 
-Present the digest from these fields directly — summary, completed/in-progress
-work, next steps, repo context — restore the todo state from it, then continue
-under the Autonomous Execution rule: a resume is not itself a reason to stop and
-ask (#8361). Ask exactly one question, and only this one: when `sessions[]`
-lists more than one candidate and `resolved_snapshot` is `null`, ask which to
-resume from. A project that wants a resume to pause anyway sets that in the
-`AUTONOMOUS-EXECUTION` marker section of its root `CLAUDE.md`. Cross-check
-`recent_commits` against your own knowledge of the repo state if anything looks
-stale.
+Present the snapshot from `resolved_session` directly — summary, in-progress
+work, next steps, pause-time git context beside the live `git_status` — restore
+the todo state from it, then continue under the Autonomous Execution rule: a
+resume is not itself a reason to stop and ask (#8361). When `resolved_snapshot`
+is `null`, re-call with `full: true` to list the candidates; ask exactly one
+question, and only this one: when that `sessions[]` lists more than one
+candidate, ask which to resume from. A project that wants a resume to pause
+anyway sets that in the `AUTONOMOUS-EXECUTION` marker section of its root
+`CLAUDE.md`. Read `commits_since_snapshot` before re-planning anything the
+snapshot lists as next.
 
 > **Omit `session_id`; the tool resolves your own pause automatically** — it
 > derives the id your pause was filed under, tries that first, then
@@ -151,22 +193,19 @@ stale.
 > `session_id`, or resumes report "no snapshot resolved" again (#6888).
 > Ownership also gates `sessions[].owned`: an unowned entry keeps only
 > `format`/`paused_at`/`summary` (#5272, #5386) — report it as "another
-> session paused here", or pass its id to read it on purpose.
+> session paused here", or pass its id to read it on purpose. The lean
+> answer lists no other session at all.
 
-> **`sessions` and `resolved_snapshot` answer different questions, and can
-> disagree under a recent watermark:** `sessions` is what paused since your
-> last catch-up; `resolved_snapshot` is what to resume from. Resume from
-> `resolved_snapshot`; treat `sessions` as the digest.
-
-> **`sessions` is a page, not the full history (#5557).** `truncated: true`
-> names what was withheld via `truncation_notice`/`sessions_offset`;
-> `full: true` pages instead of dropping it; `over_budget: true` means one
+> **In a `full: true` answer, `sessions` is a page, not the whole history
+> (#5557).** `truncated: true` names what was withheld via
+> `truncation_notice`/`sessions_offset`; the next page is one
+> `sessions_offset` away, never dropped; `over_budget: true` means one
 > oversized record shipped intact. The offset is positional into a list
 > rebuilt from disk each call — a mid-walk pause can duplicate a record, so
 > de-duplicate on `source_file`/`paused_at`. Page 0 lists your own sessions
 > first, so a normal resume needs only it; `undatable_sessions_dropped`
-> non-zero means that many lacked a timestamp and were withheld — re-call
-> with `full: true`.
+> non-zero means that many lacked a timestamp and were withheld; a full
+> answer applies no watermark, so it is 0 there.
 
 > **`session_refs` says whether the cache was refreshed (ADR-0062, #7830)**
 > from your own git ref `refs/tm/sessions/<user-id>/<session-key>` —
@@ -187,29 +226,31 @@ For scripted / non-MCP callers the CLI still works, and the MCP tool is
 additive rather than a replacement:
 
 ```bash
-tm sessions catchup                  # this project, watermarked markdown digest
-tm sessions catchup --full           # ignore the watermark, full history
-tm sessions catchup --all-projects   # also scan machine-wide registered projects
-tm sessions catchup --json           # the MCP tool's JSON, first page
-tm sessions catchup --json --sessions-offset <n>   # the next page
+tm sessions catchup                  # lean: resolved snapshot + live git status (markdown)
+tm sessions catchup --json           # the same lean answer as the MCP tool's JSON
+tm sessions catchup --full           # the full digest as markdown, no watermark
+tm sessions catchup --full --all-projects   # also scan machine-wide registered projects
+tm sessions catchup --json --full    # the full digest's JSON, first page
+tm sessions catchup --full --json --sessions-offset <n>   # the next page
 ```
 
-**Prefer the MCP tool whenever it is reachable.** Without `--json` the CLI
-prints rendered markdown with no paging, so a project with many paused
-sessions emits one unbounded blob — 163 KB for 23 sessions in the run that
-filed #8017. When the MCP tool is unreachable, use `--json`: it prints the
-same paged payload `session_context_catchup` returns.
+`--all-projects` and `--sessions-offset` select from the full digest, so they
+need `--full`. **Prefer the MCP tool whenever it is reachable.** The
+`--full` markdown has no paging, so a project with many paused sessions emits
+one unbounded blob — 163 KB for 23 sessions in the run that filed #8017. When
+the MCP tool is unreachable and you need the digest, use `--json --full`: it
+prints the same paged payload `session_context_catchup` returns.
 
 | Want | MCP tool | CLI |
 |---|---|---|
-| Typed JSON | the tool's return value (schema above) | `--json` |
-| One page at a time | `sessions_offset: <n>`, then `sessions_next_offset` | `--json --sessions-offset <n>`, then `sessions_next_offset` |
-| Bounded output | default watermark + `truncated` / `truncation_notice` | `--json` (same fields) |
-| Full history | `full: true` | `--full` |
-| Machine-wide scan | `all_projects: true` | `--all-projects` |
+| Lean resume (default) | `full` omitted | no flag; `--json` for JSON |
+| Full digest, no watermark | `full: true` | `--full` |
+| One page at a time | `full: true, sessions_offset: <n>`, then `sessions_next_offset` | `--full --json --sessions-offset <n>`, then `sessions_next_offset` |
+| Bounded output | the lean default; `truncated` / `truncation_notice` in a full answer | `--json` (same fields) |
+| Machine-wide scan | `full: true, all_projects: true` | `--full --all-projects` |
 
-Never load the markdown digest whole into context; page the `--json` form
-instead.
+Never load the `--full` markdown digest whole into context; page the
+`--json --full` form instead.
 
 ## No Tmux Window Re-alignment
 
@@ -264,8 +305,9 @@ current state. Slot rules: `/tm-session-management`.
 
 ## Token Budget
 
-~20–40k tokens (10–20% of context budget) to load the summary, next steps, git
-history, and pending todos so the PM can continue without rediscovering state.
+The lean default costs one snapshot plus a short status — a few thousand
+tokens. A `full: true` page costs ~20–40k tokens (10–20% of context budget);
+read it only when the snapshot did not resolve or you need the history.
 
 ## Related
 
