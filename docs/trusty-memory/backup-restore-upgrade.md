@@ -284,16 +284,26 @@ the old format back. Writes made since the migration are lost.
 
 1. Stop the daemon: `trusty-memory stop`. Close every MCP client first, or it
    restarts the daemon.
-2. Copy every file in the backup directory except `MANIFEST` back into the
-   palace directory. Pick the newest directory that holds `MANIFEST`. Copy from
-   it; never move or edit it.
-3. Remove `format_migration.json` from the palace directory, if it is there.
-4. Run the release that matches the old format: 0.33.x for format 1, 0.32.x or
-   older for format 0. Start its daemon.
+2. Pick the backup. It is the newest directory that holds `MANIFEST` and whose
+   name starts with `<old format>-to-`, for example `1-to-2-<UTC>` to return to
+   format 1. A palace can hold both `0-to-2-*` and `1-to-2-*` directories, so
+   the newest one overall can be the wrong one. Copy from it; never move or
+   edit it.
+3. Copy every file in that directory except `MANIFEST` back into the palace
+   directory.
+4. Remove `format_migration.json` from the palace directory, if it is there.
+5. Delete `index.usearch.redb` from the palace directory. The backup does not
+   hold it, so the migrated index stays behind. It can hold chunk rows
+   (`{uuid}#{n}`) that an older binary misreads, and orphan vectors for drawers
+   written after the migration (ADR-0067 D6).
+6. Run the release that matches the old format: 0.33.x for format 1, 0.32.x or
+   older for format 0. Start its daemon. It creates an empty index.
+7. Call `palace_reembed` with `dry_run=false` until it reports `missing: 0`.
+   Recall finds the drawers only after that.
 
-The backup has no vector index, so a restored palace has none. Re-embed it:
-call `palace_reembed` with `dry_run=false` until it reports `missing: 0`.
-Recall finds the drawers only after that.
+This procedure copies into the existing palace directory, which is why step 5
+is needed. The step-by-step section below restores into a fresh directory, so
+no index exists there.
 
 The detailed form for a format 2 to 1 rollback, with checksum checks, follows.
 

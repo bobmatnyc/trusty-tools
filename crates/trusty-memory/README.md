@@ -689,10 +689,13 @@ Full guide, with backup, restore and rollback:
 - **Backups.** `<data_root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
   with a `MANIFEST`. The two newest per palace are kept. The vector index is
   not in them.
-- **Rollback.** Stop the daemon. Copy the backup's files (not `MANIFEST`) back
-  into the palace directory. Remove `format_migration.json` if present. Run the
-  release that matches the old format, then re-embed with `palace_reembed`
-  (`dry_run=false`).
+- **Rollback.** Stop the daemon. Pick the newest backup that holds `MANIFEST`
+  and whose name starts with `<old format>-to-`. Copy its files (not
+  `MANIFEST`) back into the palace directory. Remove `format_migration.json` if
+  present. Delete `index.usearch.redb`, which the backup does not hold and an
+  older binary can misread (ADR-0067 D6). Run the release that matches the old
+  format, then re-embed with `palace_reembed` (`dry_run=false`) until it
+  reports `missing: 0`.
 - **Converted by hand?** `trusty-memory palace migrate <palace> --verify` and
   `trusty-memory doctor` report each marker as present, missing or mismatched.
   A non-zero exit names the gap.
