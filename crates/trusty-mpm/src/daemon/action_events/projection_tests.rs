@@ -280,3 +280,39 @@ fn threading_state_stays_bounded_6849() {
     assert_eq!(label(&out[0]), "session:started");
     assert_eq!(out[1].parent_id, Some(out[0].id));
 }
+
+/// #6849 fix round: the watcher feeds `FileChanged` without the
+/// `is_coding_file` filter `hook_service` applies, so build, dependency and
+/// VCS writes would flood the 4096-frame buffer and evict real events. They
+/// are not projected; a coding file still is.
+#[test]
+fn build_and_vcs_noise_is_not_projected_6849() {
+    let mut threader = Threader::new(None);
+    let s = SessionId::new();
+    threader.project(&record(s, HookEvent::SessionStart, json!({"cwd": "/w"})));
+    for noise in [
+        "target/debug/foo.o",
+        "node_modules/x.js",
+        ".git/index",
+        "/w/target/debug/build/a.rs",
+        "/w/node_modules/pkg/index.js",
+        "/w/.git/objects/ab/cdef",
+    ] {
+        let out = threader.project(&record(s, HookEvent::FileChanged, json!({"path": noise})));
+        assert!(out.is_empty(), "{noise} was projected: {out:?}");
+    }
+    let out = threader.project(&record(
+        s,
+        HookEvent::FileChanged,
+        json!({"path": "/w/src/lib.rs"}),
+    ));
+    assert_eq!(out.len(), 1);
+    assert_eq!(label(&out[0]), "file:written");
+    // A noise path on an unseen session mints no inferred root either.
+    let fresh = threader.project(&record(
+        SessionId::new(),
+        HookEvent::FileChanged,
+        json!({"path": "/w/target/x.o"}),
+    ));
+    assert!(fresh.is_empty());
+}

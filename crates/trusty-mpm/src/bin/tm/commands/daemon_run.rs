@@ -170,8 +170,11 @@ pub(crate) async fn run_daemon(
         if let Some(token) = bot_shutdown {
             token.cancel();
         }
-        trusty_mpm::daemon::lock::remove_lock();
-        action_events_state.action_events().shutdown().await;
+        trusty_mpm::daemon::action_events::before_signal_exit(
+            &action_events_state,
+            trusty_mpm::daemon::lock::remove_lock,
+        )
+        .await;
         // See #6288: this exit almost certainly wins the race against
         // `serve_with_shutdown`'s graceful drain, so neither the session reap
         // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.

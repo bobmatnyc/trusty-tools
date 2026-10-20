@@ -35,6 +35,9 @@ pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// The most the exit path waits on the bus.
 pub const FINAL_FLUSH_BUDGET: Duration = Duration::from_secs(1);
 
+/// The most tm's SIGTERM handler waits on the bus before `process::exit`.
+pub const SIGNAL_FLUSH_BUDGET: Duration = Duration::from_millis(200);
+
 /// At most one "events dropped" warning per this window.
 const DROP_WARN_EVERY: Duration = Duration::from_secs(60);
 
@@ -271,6 +274,12 @@ impl FlushHealth {
         }
         said
     }
+}
+
+/// The signal handler's steps before `process::exit`.
+pub async fn before_signal_exit(state: &DaemonState, remove_lock: impl FnOnce()) {
+    remove_lock();
+    state.action_events().shutdown().await;
 }
 
 /// Whether this daemon may dial a bus at all.

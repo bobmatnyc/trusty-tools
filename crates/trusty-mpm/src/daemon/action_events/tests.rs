@@ -341,3 +341,57 @@ fn flush_health_warns_once_per_outage_6849() {
         [Notice::Dropped(9)]
     );
 }
+
+/// #6849 fix round: a hung bus holds tm's SIGTERM path for at most
+/// [`SIGNAL_FLUSH_BUDGET`], so `process::exit` still beats the serve drain's
+/// `mgr.shutdown()` (#6288). The peer accepts and never reads, so the flush
+/// stalls mid-write; the budget is what bounds it.
+#[tokio::test]
+async fn the_signal_path_flush_returns_within_its_budget_6849() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    assert!(start_with(&state, true, NO_TICK, || Ok(sock.clone())));
+    let s = SessionId::new();
+    for i in 0..3_000 {
+        state.push_hook_event(pre_tool_use(s, &format!("t{i}")));
+    }
+    let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+    let hold = tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(conn);
+    });
+    let started = Instant::now();
+    before_signal_exit(&state, || {}).await;
+    let took = started.elapsed();
+    hold.abort();
+    assert!(
+        took < SIGNAL_FLUSH_BUDGET + Duration::from_millis(150),
+        "the signal path waited {took:?} on a hung bus"
+    );
+}
+
+/// #6849 fix round: the lock file goes only after the flush, so a spawner
+/// never sees "no daemon" while this one still serves its socket.
+#[tokio::test]
+async fn the_signal_path_flushes_before_removing_the_lock_6849() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = sock_in(&dir);
+    let state = DaemonState::new();
+    assert!(start_with(&state, true, NO_TICK, || Ok(sock.clone())));
+    state.push_hook_event(pre_tool_use(SessionId::new(), "t1"));
+    let read = read_one(&sock);
+    let publisher = Arc::clone(state.action_events().publisher().expect("attached"));
+    let mut buffered_at_removal = None;
+    before_signal_exit(&state, || {
+        buffered_at_removal = Some(publisher.buffered_len());
+    })
+    .await;
+    assert_eq!(
+        buffered_at_removal,
+        Some(0),
+        "the lock went before the flush"
+    );
+    assert_eq!(frames(&received(read).await).len(), 2);
+}
