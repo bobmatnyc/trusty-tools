@@ -262,42 +262,52 @@ pub fn write_sandbox_settings(
     verify_sandbox_settings(role, &inputs.workspace, user_config_dir)
 }
 
-/// Merge `policy` into `settings`: tm owns the `sandbox` keys it names, which
-/// replace what was there; `permissions.deny` gains each entry it lacks, and
-/// every other key and entry is kept.
-/// Test: `writing_preserves_unrelated_keys_and_verifies`.
+/// The list keys the merge unions with the operator's entries instead of
+/// replacing: every deny list, and the credentials `envVars`.
+const UNION_KEYS: [&str; 4] = ["deny", "denyRead", "denyWrite", "envVars"];
+
+/// Merge `policy` into `settings` key by key (#8928 fix round).
+///
+/// What: an object in `policy` is merged into the object at the same key,
+/// recursing, so the operator's other keys survive at every depth. A list
+/// under one of [`UNION_KEYS`] gains each entry it lacks — for `envVars`
+/// matched by `name`, tm's entry replacing the operator's — so an operator
+/// deny is never dropped. Every other value (scalars, allow lists) is tm's
+/// and replaces what was there.
+/// Test: `writing_preserves_unrelated_keys_and_verifies`,
+/// `operator_denies_and_env_vars_survive_a_merge`.
 pub fn merge_policy(settings: &mut Value, policy: &Value) {
-    if !settings.is_object() {
-        *settings = json!({});
-    }
-    if let Some(sandbox) = policy.get("sandbox").and_then(Value::as_object) {
-        let slot = &mut settings["sandbox"];
-        if !slot.is_object() {
-            *slot = json!({});
-        }
-        for (key, value) in sandbox {
-            slot[key] = value.clone();
-        }
-    }
-    let wanted = policy
-        .pointer("/permissions/deny")
-        .and_then(Value::as_array);
-    if let Some(wanted) = wanted {
-        let perms = &mut settings["permissions"];
-        if !perms.is_object() {
-            *perms = json!({});
-        }
-        let deny = &mut perms["deny"];
-        if !deny.is_array() {
-            *deny = json!([]);
-        }
-        if let Some(list) = deny.as_array_mut() {
-            for entry in wanted {
-                if !list.contains(entry) {
-                    list.push(entry.clone());
-                }
+    merge_at(settings, policy, "");
+}
+
+/// [`merge_policy`] for the value at `key`.
+fn merge_at(slot: &mut Value, policy: &Value, key: &str) {
+    match policy {
+        Value::Object(map) => {
+            if !slot.is_object() {
+                *slot = json!({});
+            }
+            for (k, v) in map {
+                merge_at(&mut slot[k.as_str()], v, k);
             }
         }
+        Value::Array(wanted) if UNION_KEYS.contains(&key) => {
+            if !slot.is_array() {
+                *slot = json!([]);
+            }
+            let Some(list) = slot.as_array_mut() else {
+                return;
+            };
+            for entry in wanted {
+                if let Some(name) = entry.get("name").filter(|_| key == "envVars") {
+                    list.retain(|e| e.get("name") != Some(name));
+                } else if list.contains(entry) {
+                    continue;
+                }
+                list.push(entry.clone());
+            }
+        }
+        other => *slot = other.clone(),
     }
 }
 
