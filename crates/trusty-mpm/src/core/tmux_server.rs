@@ -10,7 +10,7 @@
 //! (`tm-ws-<slug>-<hash>`, stable for the canonical path);
 //! [`socket_dir`] / [`ambient_socket_dir`] resolve tmux's socket directory the
 //! way tmux does (`$TMUX_TMPDIR` or `/tmp`, then `tmux-<uid>`), symlinks
-//! followed, so the sandbox entry is `/private/tmp/tmux-502/<name>`;
+//! followed, so the sandbox entry is `/private/tmp/tmux-<uid>/<name>`;
 //! [`server_args`] is the `-L` prefix a call to that server carries; and
 //! [`live_workspace_servers`] lists the workspace servers that answer, which
 //! is how the daemon snapshot and the fleet poller find them. Launching a PM
