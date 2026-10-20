@@ -1,8 +1,10 @@
 //! The read-back half of the #8928 step 5 sandbox settings generator.
 //!
 //! Why: `.claude/settings.local.json` outranks the project file and can turn
-//! `sandbox.enabled` or `allowUnsandboxedCommands` off (spike row C1), and a
-//! merge can lose to a concurrent writer. The plan's step 5 therefore reads
+//! `sandbox.enabled` or `allowUnsandboxedCommands` off, `excludedCommands`
+//! runs the commands it lists outside the sandbox even with
+//! `allowUnsandboxedCommands: false`, and a merge can lose to a concurrent
+//! writer. #8928 step 5 therefore reads
 //! the merged files back and refuses the launch unless they hold the sandbox
 //! the role asked for.
 //! What: [`verify_sandbox_settings`]; split from `sandbox_settings.rs` for the
@@ -19,8 +21,9 @@ use super::sandbox_settings::{SandboxRole, SandboxSettingsError};
 ///
 /// What: for a PM or agent, refuses unless the project file's
 /// `sandbox.enabled` is `true` and `sandbox.allowUnsandboxedCommands` is
-/// `false`, the user file's `sandbox.network.strictAllowlist` is `true`, and
-/// `settings.local.json` sets no `sandbox` key. For the Architect, refuses
+/// `false`, the user file's `sandbox.network.strictAllowlist` is `true`,
+/// neither file sets a non-empty `sandbox.excludedCommands` (#8928 fix
+/// round), and `settings.local.json` sets no `sandbox` key. For the Architect, refuses
 /// unless the project file's `sandbox.enabled` is `false`. FAIL-CLOSED: a
 /// missing project or user file, and any of the three that cannot be read or
 /// is not a JSON object, is an error; only a missing local file is fine.
@@ -31,7 +34,8 @@ use super::sandbox_settings::{SandboxRole, SandboxSettingsError};
 ///
 /// Test: `a_local_override_refuses_the_launch`,
 /// `a_weakened_project_file_refuses_the_launch`,
-/// `unreadable_settings_refuse_the_launch`.
+/// `unreadable_settings_refuse_the_launch`,
+/// `excluded_commands_refuse_the_launch`.
 pub fn verify_sandbox_settings(
     role: SandboxRole,
     workspace: &Path,
@@ -68,13 +72,33 @@ pub fn verify_sandbox_settings(
             "the project settings do not set `sandbox.allowUnsandboxedCommands: false`",
         ));
     }
-    let user = read(&user_config_dir.join("settings.json"), true)?.unwrap_or(Value::Null);
+    let user_file = user_config_dir.join("settings.json");
+    let user = read(&user_file, true)?.unwrap_or(Value::Null);
+    // #8928 fix round: an excluded command runs outside the sandbox.
+    for (settings, file) in [(&project, claude.join("settings.json")), (&user, user_file)] {
+        if let Some(why) = excluded_commands(settings, &file) {
+            return Err(why);
+        }
+    }
     if user.pointer("/sandbox/network/strictAllowlist") != Some(&Value::Bool(true)) {
         return Err(refused(
             "tm's user-level settings do not set `sandbox.network.strictAllowlist: true`",
         ));
     }
     Ok(())
+}
+
+/// The refusal when `settings` sets a non-empty `sandbox.excludedCommands`.
+fn excluded_commands(settings: &Value, file: &Path) -> Option<SandboxSettingsError> {
+    let list = settings.pointer("/sandbox/excludedCommands")?;
+    if list.is_null() || list.as_array().is_some_and(Vec::is_empty) {
+        return None;
+    }
+    Some(refused(&format!(
+        "`{}` sets `sandbox.excludedCommands` to {list}, which runs those commands outside \
+         the sandbox; remove the key or empty the list",
+        file.display()
+    )))
 }
 
 /// `path` as a JSON object; `Ok(None)` when absent and not `required`.
