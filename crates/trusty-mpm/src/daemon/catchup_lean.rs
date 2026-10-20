@@ -207,6 +207,25 @@ mod tests {
         assert!(!status.truncated);
     }
 
+    /// Why (#9883): a `project_dir` below the repo root reports its own tree,
+    /// not the parent repo's — a sibling project's edits are not this resume's.
+    #[test]
+    fn live_git_status_lists_only_paths_under_a_subdirectory_project() {
+        let tmp = checkout();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(tmp.path().join("outside.txt"), b"o").unwrap();
+        std::fs::write(sub.join("inside.txt"), b"i").unwrap();
+        let status = live_git_status(&sub, GIT_STATUS_BUDGET);
+        assert!(status.available, "{status:?}");
+        assert!(
+            !status.entries.iter().any(|e| e.contains("outside.txt")),
+            "{status:?}"
+        );
+        assert_eq!(status.entries_total, 1, "{status:?}");
+        assert!(status.entries[0].starts_with("?? sub/"), "{status:?}");
+    }
+
     /// Why (#9883): a failed probe must say so, never read as a clean tree.
     #[test]
     fn live_git_status_is_unavailable_outside_a_checkout() {
