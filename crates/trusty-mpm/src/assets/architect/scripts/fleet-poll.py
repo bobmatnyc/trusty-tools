@@ -5,7 +5,9 @@ Why: the owner's ruling (2026-09-25) makes the Architect's polling deterministic
 A Claude session woke every 15 minutes and read every pane with inference even
 when nothing needed action. This script decides without any LLM whether
 anything needs the Architect, and wakes the Architect's pane only then.
-What: every --interval seconds it lists the tmux panes, captures each tm-*
+What: every --interval seconds it lists the tmux panes (the default server's
+and, unless TMUX_SOCKET pins one, every live `tm-ws-*` workspace server's,
+#8928), captures each tm-*
 PM pane, classifies it (input box via scripts/input-state.py `classify`,
 dialog, question, idle, ctx, plan-limit, error, exited — see quiet_sessions,
 below, for two exceptions), reads new permission_prompt / agent_needs_input
@@ -26,7 +28,8 @@ ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
 (default <root>/quiet-sessions.txt), TMUX_SOCKET, LOAD_FACTOR, SELF_CTX_DIR,
 CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
-Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py
+Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
+tests/test_fleet_poll_workspace_servers.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
 """
@@ -37,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -51,6 +55,8 @@ ALERTS = os.path.join(INBOX, "alerts.jsonl")
 STATE = os.path.join(INBOX, "poll-state.json")
 LOG = os.path.join(INBOX, "poll.log")
 SOCKET = os.environ.get("TMUX_SOCKET", "")
+# #8928 step 4: the name prefix of a workspace's private tmux server.
+WORKSPACE_PREFIX = "tm-ws-"
 
 # The Architect's own tmux session: the only pane this poller sends keys to.
 ARCHITECT = os.environ.get("ARCHITECT_SESSION") or "tm-architect"
@@ -106,8 +112,10 @@ def log(msg, dry_run=False):
         f.write(line + "\n")
 
 
-def tmux(*args):
-    cmd = ["tmux", *(["-S", SOCKET] if SOCKET else []), *args]
+def tmux(*args, server=None):
+    # #8928: `server` names a workspace's private server (`tmux -L <server>`).
+    where = ["-L", server] if server else (["-S", SOCKET] if SOCKET else [])
+    cmd = ["tmux", *where, *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -117,19 +125,66 @@ def tmux(*args):
     return r.stdout
 
 
+def socket_dir():
+    """tmux's socket directory: $TMUX_TMPDIR (or /tmp), resolved, + tmux-<uid>."""
+    base = os.path.realpath(os.environ.get("TMUX_TMPDIR") or "/tmp")
+    return os.path.join(base, f"tmux-{os.getuid()}")
+
+
+def workspace_servers(directory=None):
+    """#8928: live workspace servers (`tm-ws-*` sockets that answer), sorted."""
+    directory = directory or socket_dir()
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    live = []
+    for name in sorted(n for n in names if n.startswith(WORKSPACE_PREFIX)):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(os.path.join(directory, name))
+            live.append(name)
+        except OSError:
+            pass  # not a socket, or a server that exited
+        finally:
+            s.close()
+    return live
+
+
 def list_panes():
-    out = tmux("list-panes", "-a", "-F",
-               "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}")
+    """Panes of the default server and, unless TMUX_SOCKET pins one server,
+    of every live workspace server; each pane names the server it is on."""
+    fmt = "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}"
+    panes = _rows(tmux("list-panes", "-a", "-F", fmt), None)
+    for server in ([] if SOCKET else workspace_servers()):
+        try:
+            panes += _rows(tmux("list-panes", "-a", "-F", fmt, server=server), server)
+        except TmuxError as e:
+            log(f"{server} list-panes ERROR {e}")
+    return panes
+
+
+def _rows(out, server):
     panes = []
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) == 4:
-            panes.append(dict(zip(("session", "pane", "cmd", "active"), parts)))
+            pane = dict(zip(("session", "pane", "cmd", "active"), parts))
+            if server:
+                pane["server"] = server
+            panes.append(pane)
     return panes
 
 
-def capture(pane):
+def capture(pane, server=None):
+    if server:
+        return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane, server=server)
     return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane)
+
+
+def capture_pane(p):
+    """Capture listed pane `p` on the server it was listed from (#8928)."""
+    return capture(p["pane"], p["server"]) if p.get("server") else capture(p["pane"])
 
 
 def send_to_architect(pane, *keys):
@@ -357,7 +412,7 @@ def cycle(state, dry_run=False, now=None):
                                         f"pane runs {p['cmd']}, not Claude", s, pid, now))
             continue
         try:
-            info = parse_pane(capture(pid))
+            info = parse_pane(capture_pane(p))
         except TmuxError as e:
             log(f"{s} {pid} capture ERROR {e}", dry_run)
             continue

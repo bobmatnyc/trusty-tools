@@ -357,9 +357,11 @@ pub mod savings_sidecar;
 pub mod scaffold_gitignore;
 // #8928 step 3: the sccache unix-socket server for sandboxed builds.
 pub mod sccache_socket;
+// #8928 step 4: a workspace's private tmux server.
 pub mod session;
 pub mod session_assets;
 pub mod session_launch;
+pub mod tmux_server;
 // #7422: default-deny MCP scoping — a session loads the trusty-* builtins, the
 // project's own `.mcp.json`, and only the shared servers the project opts into.
 pub mod session_mcp_scope;
