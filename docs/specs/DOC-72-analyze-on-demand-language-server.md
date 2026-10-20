@@ -373,13 +373,14 @@ document_version, snapshot, kind, items}`) onto the envelope:
 | Old field | Now |
 |---|---|
 | `kind` | `tool`, as `lsp.<method>` with the bare LSP method name, for example `lsp.textDocument/references` or `lsp.publishDiagnostics` |
-| `uri` | a `PathRef` in the event's `objects`. `ObjectRef` and `PathRef` carry references, not bodies (DOC-73 §3.2) |
-| `language`, `workspace`, `document_version`, `snapshot` | extension fields the action metadata allows, with the position (`line`, `column`) |
-| `items` | dropped (§4.4). The answer stays in the RPC response. The event carries `result_count`, `duration_ms` and `outcome` |
+| `uri` | an `ObjectRef` of type `file` in the event's `objects` (`objects` holds `ObjectRef`s, not `PathRef`s): the path, with `$HOME` shown as `~`, and the file name as the label. It carries a reference, not a body (DOC-73 §3.2) |
+| `language`, `workspace`, `document_version`, `snapshot` | `ActionMeta.attrs`, a name-to-value map added to `trusty-common` for this (#9078), with the position (`line`, `column`) |
+| `items` | dropped (§4.4). The answer stays in the RPC response. The terminal event's `attrs` carry `result_count`, `duration_ms` and `outcome` (`ok`, `cancelled`, or the `lsp_*` error code, never the error text) |
 
-`actor` is analyze. `EventId` is minted per event. `call_id` is one UUID per
-call, shared by its Started and terminal events. These are builder-settled
-details; the producer's PR records them.
+`actor` is `System`; the source is `analyze`. `EventId` is minted per event.
+`call_id` is one UUID per call, shared by its Started and terminal events. The
+terminal event's `parent_id` is its Started event. `analyze.lsp_analysed_at`
+uses `tool: "lsp.analysed_at"`.
 
 ### 4.3 Causality: `parent_event_id`
 
