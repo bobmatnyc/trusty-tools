@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::sandbox_settings::{
+use super::{
     DENIED_ENV_VARS, SandboxInputs, SandboxRole, SandboxSettingsError, project_policy, user_policy,
     verify_sandbox_settings, write_sandbox_settings,
 };

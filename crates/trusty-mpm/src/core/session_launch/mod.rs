@@ -71,8 +71,6 @@ pub use sandbox_settings::{
     SandboxInputs, SandboxRole, SandboxSettingsError, project_policy, user_policy,
     verify_sandbox_settings, write_sandbox_settings,
 };
-#[cfg(test)]
-mod sandbox_settings_tests;
 mod search_index;
 mod settings;
 mod skills;

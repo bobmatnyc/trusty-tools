@@ -303,3 +303,7 @@ pub fn merge_policy(settings: &mut Value, policy: &Value) {
 fn paths(list: &[PathBuf]) -> Vec<String> {
     list.iter().map(|p| p.display().to_string()).collect()
 }
+
+#[cfg(test)]
+#[path = "sandbox_settings_tests.rs"]
+mod tests;
