@@ -1,8 +1,8 @@
 //! Coverage for the lean `session_context_catchup` default (#9883).
 //!
 //! Why: owner decision Dba made the default resume answer the resolved
-//! snapshot plus live git status, with the digest behind `full: true`; ruling
-//! df-D88 merged `full`'s old "ignore the watermark" meaning into that flag.
+//! snapshot plus live git status, with the digest behind `full: true`; and
+//! merged `full`'s old "ignore the watermark" meaning into that flag.
 //! What: drives [`session_context_catchup_in`] on an isolated host against a
 //! real temp checkout — one test per #9883 criterion the backend owns.
 //! Test: this file.
@@ -35,6 +35,15 @@ fn isolated_host(tmp: &Path) -> CatchupHost {
     }
 }
 
+/// `git -C <dir>` with no global or system config (#9883): a host's
+/// `commit.gpgsign` or `status.showUntrackedFiles` must not reach a fixture.
+fn fixture_git(dir: &Path) -> std::process::Command {
+    let mut cmd = trusty_common::git::command_in(dir);
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd
+}
+
 /// A one-commit checkout at `<tmp>/repo`.
 fn checkout(tmp: &Path) -> PathBuf {
     let repo = tmp.join("repo");
@@ -43,19 +52,15 @@ fn checkout(tmp: &Path) -> PathBuf {
         vec!["init", "--initial-branch=main"],
         vec!["config", "user.email", "lean@example.invalid"],
         vec!["config", "user.name", "Lean Tester"],
+        // The probe under test runs with host config; a local value wins.
+        vec!["config", "status.showUntrackedFiles", "normal"],
     ] {
-        let out = trusty_common::git::command_in(&repo)
-            .args(&args)
-            .output()
-            .unwrap();
+        let out = fixture_git(&repo).args(&args).output().unwrap();
         assert!(out.status.success(), "fixture `git {args:?}` failed");
     }
     std::fs::write(repo.join("a.txt"), b"a").unwrap();
     for args in [vec!["add", "a.txt"], vec!["commit", "-m", "init"]] {
-        let out = trusty_common::git::command_in(&repo)
-            .args(&args)
-            .output()
-            .unwrap();
+        let out = fixture_git(&repo).args(&args).output().unwrap();
         assert!(out.status.success(), "fixture `git {args:?}` failed");
     }
     repo

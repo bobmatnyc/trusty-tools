@@ -3,7 +3,7 @@
 //! Why: owner decision Dba — "Lean resume by default." A resume needs the
 //! snapshot it resumes from and the checkout's state now. The digest (sessions
 //! page, recent commits, memory titles) cost a page of context on every resume,
-//! so it moved behind `full: true`, which ruling df-D88 merged with the old
+//! so it moved behind `full: true`, which #9883 merged with the old
 //! "ignore the watermark" meaning of that flag.
 //! What: [`live_git_status`], a time-bounded `git status --porcelain` in the
 //! project, and [`lean_payload`], the response body built from the same
@@ -82,15 +82,18 @@ impl LiveGitStatus {
 /// Why: a lean resume shows the live tree beside the pause-time one, and a
 /// catch-up must never hang on a wedged git (an index lock, a slow
 /// filesystem).
-/// What: `git --no-optional-locks status --porcelain` through
-/// [`run_bounded`], so it neither takes nor waits on the index lock and its
-/// process group is killed at `budget`. A spawn failure, timeout or non-zero
-/// exit is [`LiveGitStatus::unavailable`] with the reason.
+/// What: `git --no-optional-locks status --porcelain -- .` through
+/// [`run_bounded`], so it neither takes nor waits on the index lock, lists
+/// only paths under `project_dir`, and its process group is killed at
+/// `budget`. A spawn failure, timeout or non-zero exit is
+/// [`LiveGitStatus::unavailable`] with the reason.
 /// Test: `live_git_status_lists_a_dirty_tree_verbatim`,
+/// `live_git_status_lists_only_paths_under_a_subdirectory_project`,
 /// `live_git_status_is_unavailable_outside_a_checkout`.
 pub(crate) fn live_git_status(project_dir: &Path, budget: Duration) -> LiveGitStatus {
     let mut cmd = trusty_common::git::command_in(project_dir);
-    cmd.args(["--no-optional-locks", "status", "--porcelain"])
+    // #9883: `-- .` scopes a subdirectory project to its own tree.
+    cmd.args(["--no-optional-locks", "status", "--porcelain", "--", "."])
         .stdin(Stdio::null());
     match run_bounded(cmd, budget) {
         Ok(out) if out.status.success() => {
@@ -169,18 +172,26 @@ pub(crate) fn lean_payload(parts: LeanParts) -> Value {
 mod tests {
     use super::*;
 
-    /// A one-commit checkout.
+    /// `git -C <dir>` with no global or system config (#9883): a host's
+    /// `commit.gpgsign` or `status.showUntrackedFiles` must not reach a fixture.
+    fn fixture_git(dir: &Path) -> std::process::Command {
+        let mut cmd = trusty_common::git::command_in(dir);
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd
+    }
+
+    /// An empty checkout whose local config pins what the probe reads.
     fn checkout() -> tempfile::TempDir {
         let tmp = tempfile::TempDir::new().unwrap();
         for args in [
             vec!["init"],
             vec!["config", "user.email", "lean@example.invalid"],
             vec!["config", "user.name", "Lean"],
+            // The probe under test runs with host config; a local value wins.
+            vec!["config", "status.showUntrackedFiles", "normal"],
         ] {
-            let out = trusty_common::git::command_in(tmp.path())
-                .args(&args)
-                .output()
-                .unwrap();
+            let out = fixture_git(tmp.path()).args(&args).output().unwrap();
             assert!(out.status.success(), "fixture `git {args:?}` failed");
         }
         tmp
