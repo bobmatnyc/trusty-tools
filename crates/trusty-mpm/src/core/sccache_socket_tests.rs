@@ -107,7 +107,8 @@ fn ensure_server_starts_and_verifies() {
     script(
         &bin,
         &format!(
-            "echo \"$1 $SCCACHE_SERVER_UDS $SCCACHE_IDLE_TIMEOUT ${{SCCACHE_CLIENT_SIDE:-unset}}\" \
+            "if [ \"$1\" = --version ]; then echo 'sccache 0.17.0'; exit 0; fi\n\
+             echo \"$1 $SCCACHE_SERVER_UDS $SCCACHE_IDLE_TIMEOUT ${{SCCACHE_CLIENT_SIDE:-unset}}\" \
              > '{m}.tmp' && mv '{m}.tmp' '{m}'\n\
              while [ ! -S \"$SCCACHE_SERVER_UDS\" ]; do sleep 0.05; done",
             m = marker.display()
@@ -149,19 +150,26 @@ fn ensure_server_reports_a_server_that_never_listens() {
     let (_dir, root) = scratch();
     let socket = root.join("s.sock");
     let quiet = root.join("quiet-sccache");
-    script(&quiet, "exit 0");
+    script(
+        &quiet,
+        "if [ \"$1\" = --version ]; then echo 'sccache 0.17.0'; fi\nexit 0",
+    );
     let err = ensure_server(&quiet, &socket).expect_err("nothing listens");
     assert!(
         matches!(err, SccacheSocketError::NotListening { .. }),
         "{err}"
     );
     let failing = root.join("failing-sccache");
-    script(&failing, "exit 3");
+    script(
+        &failing,
+        "if [ \"$1\" = --version ]; then echo 'sccache 0.17.0'; exit 0; fi\nexit 3",
+    );
     let err = ensure_server(&failing, &socket).expect_err("start fails");
     assert!(matches!(err, SccacheSocketError::Start { .. }), "{err}");
     let missing = ensure_server(&root.join("absent"), &socket).expect_err("no binary");
+    // #8928 fix round: a binary that cannot run fails the version check first.
     assert!(
-        matches!(missing, SccacheSocketError::Start { .. }),
+        matches!(missing, SccacheSocketError::Version { .. }),
         "{missing}"
     );
 }

@@ -16,19 +16,14 @@
 //! Test: `doctor_sccache_socket_tests.rs`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::sccache_socket::{
-    MIN_UDS_VERSION, SocketState, parse_version, probe_socket, sccache_requested, socket_path_at,
+    MIN_UDS_VERSION, SocketState, probe_socket, read_version, sccache_requested, socket_path_at,
 };
 
 /// Stable check name.
 pub(super) const CHECK_NAME: &str = "sccache_socket";
-
-/// Wall clock `sccache --version` may take.
-const VERSION_BUDGET: Duration = Duration::from_secs(3);
 
 /// What the probe learned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,18 +155,6 @@ pub(super) fn gather(home: &Path) -> SccacheFacts {
         socket,
         bin,
     }
-}
-
-/// `<bin> --version`, bounded and parsed.
-fn read_version(bin: &Path) -> Result<(u32, u32, u32), String> {
-    let mut cmd = Command::new(bin);
-    cmd.arg("--version");
-    let out =
-        crate::core::bounded_proc::run_bounded(cmd, VERSION_BUDGET).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!("it exited with {}", out.status));
-    }
-    parse_version(&out.stdout).ok_or_else(|| format!("unparseable output {:?}", out.stdout.trim()))
 }
 
 #[cfg(test)]

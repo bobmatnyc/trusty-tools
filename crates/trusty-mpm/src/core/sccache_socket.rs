@@ -73,6 +73,23 @@ pub fn parse_version(stdout: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
+/// Wall clock `sccache --version` may take.
+const VERSION_BUDGET: Duration = Duration::from_secs(3);
+
+/// `<bin> --version`, bounded and parsed; `Err(why)` when it cannot run,
+/// fails, or prints no version.
+/// Test: `a_too_old_sccache_is_refused_before_starting`.
+pub fn read_version(bin: &Path) -> Result<(u32, u32, u32), String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--version");
+    let out =
+        crate::core::bounded_proc::run_bounded(cmd, VERSION_BUDGET).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("it exited with {}", out.status));
+    }
+    parse_version(&out.stdout).ok_or_else(|| format!("unparseable output {:?}", out.stdout.trim()))
+}
+
 /// What is at the socket path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -124,6 +141,25 @@ pub enum StartOutcome {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SccacheSocketError {
+    /// `<bin> --version` could not be read, so the start was refused.
+    #[error("cannot read `{bin} --version`: {why}; no sccache server was started")]
+    Version {
+        /// The sccache binary.
+        bin: PathBuf,
+        /// What went wrong.
+        why: String,
+    },
+    /// The installed sccache predates `SCCACHE_SERVER_UDS`.
+    #[error(
+        "`{bin}` is sccache {version}, older than 0.9.0, which first serves \
+         `SCCACHE_SERVER_UDS`; no sccache server was started"
+    )]
+    TooOld {
+        /// The sccache binary.
+        bin: PathBuf,
+        /// The version it reported.
+        version: String,
+    },
     /// The crate config could not be read, so the opt-in is unknown.
     #[error("the sccache opt-in is unknown: {0}")]
     Config(String),
@@ -193,6 +229,7 @@ pub fn ensure_server(bin: &Path, socket: &Path) -> Result<StartOutcome, SccacheS
             });
         }
     }
+    check_version(bin)?;
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent).map_err(|source| SccacheSocketError::Io {
             path: parent.to_path_buf(),
@@ -256,6 +293,24 @@ pub fn sccache_requested(home: &Path) -> Result<bool, String> {
         .and_then(|c| c.build.as_ref())
         .and_then(|b| b.sccache)
         == Some(true))
+}
+
+/// Refuse an sccache older than [`MIN_UDS_VERSION`], or one whose version
+/// cannot be read (#8928 fix round): it would ignore `SCCACHE_SERVER_UDS` and
+/// start a TCP server that never exits.
+fn check_version(bin: &Path) -> Result<(), SccacheSocketError> {
+    let version = read_version(bin).map_err(|why| SccacheSocketError::Version {
+        bin: bin.to_path_buf(),
+        why,
+    })?;
+    if version < MIN_UDS_VERSION {
+        let (major, minor, patch) = version;
+        return Err(SccacheSocketError::TooOld {
+            bin: bin.to_path_buf(),
+            version: format!("{major}.{minor}.{patch}"),
+        });
+    }
+    Ok(())
 }
 
 /// The daemon's entry: start the server when `home`'s config asks for sccache.
