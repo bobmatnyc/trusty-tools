@@ -32,6 +32,14 @@
 #     tree-quoted-top-level-version FAIL, `"version":` is still `version:`
 #     tree-non-ascii-path        FAIL, content/agents/café.md, listed and valid
 #     tree-expect-version-*      the release workflow's version must match
+#   probe (scripts/check_content.py tree, #8390):
+#     probe-{fenced,inline}-unconditional  FAIL, a shared asset runs `tm` unprobed
+#     probe-after-invocation     FAIL, the probe comes after the first command
+#     probe-without-degrade      FAIL, a probe with no fallback
+#     probe-is-per-harness       FAIL, a `tm` probe does not cover `tcode`
+#     probe-then-degrade-ok / probe-shell-guard-ok          OK
+#     probe-negated-mention-ok   OK, "Never run `tm secrets`" runs nothing
+#     probe-harness-owned-ok     OK, tm's own instructions name tm freely
 #   bump (scripts/check_content.py bump):
 #     bump-released-unchanged    FAIL, member changed under a released version
 #     bump-raised                OK
@@ -211,6 +219,30 @@ tree tree-quoted-top-level-version 1 "content/agents/engineer.md: top-level \`ve
 new_repo t-cafe && w content/agents/café.md '---' 'metadata: {version: "1.0.0"}' '---' &&
   w content/manifest.toml "$(cat "$REPO/content/manifest.toml")" '' '[[member]]' 'path = "agents/café.md"' 'version = "1.0.0"'
 tree tree-non-ascii-path 1 "path must match [A-Za-z0-9._/-]+"
+
+# --- probe (#8390) ----------------------------------------------------------
+# engineer <body line>... — the shared engineer agent, valid, with this body.
+engineer() { w content/agents/engineer.md '---' 'name: engineer' 'metadata:' '  version: "1.0.0"' '---' "$@"; }
+PROBE='Check `command -v tm` first; if `tm` is absent, poll with a bounded shell loop instead.'
+new_repo p-fenced && engineer 'Wait on it:' '' '```bash' 'tm wait --for run --pid 1' '```'
+tree probe-fenced-unconditional 1 "content/agents/engineer.md:9: runs \`tm wait --for run --pid 1\` with no probe-then-degrade before it"
+new_repo p-inline && engineer 'Run `tm doctor` after the edit.'
+tree probe-inline-unconditional 1 "content/agents/engineer.md:6: runs \`tm doctor\`"
+new_repo p-ok && engineer "$PROBE" '' 'Run `tm doctor` after the edit.' '' '```bash' 'tm wait --for run --pid 1' '```'
+tree probe-then-degrade-ok 0 "OK"
+new_repo p-shell-ok && engineer '```bash' 'command -v tm >/dev/null || exit 0' 'tm doctor' '```'
+tree probe-shell-guard-ok 0 "OK"
+new_repo p-late && engineer 'Run `tm doctor` after the edit.' '' "$PROBE"
+tree probe-after-invocation 1 "content/agents/engineer.md:6: runs \`tm doctor\`"
+new_repo p-nodegrade && engineer 'Check `command -v tm` first.' '' 'Run `tm doctor` after the edit.'
+tree probe-without-degrade 1 "content/agents/engineer.md:8: runs \`tm doctor\`"
+new_repo p-other-harness && engineer "$PROBE" '' 'Run `tcode run --agent qa` next.'
+tree probe-is-per-harness 1 "content/agents/engineer.md:8: runs \`tcode run --agent qa\`"
+new_repo p-negated && engineer 'Never run `tm secrets` on the live host.'
+tree probe-negated-mention-ok 0 "OK"
+# tm's own instructions are read only by tm, so they name tm commands freely.
+new_repo p-owned && w content/instructions/sections/identity.md '# section' 'Run `tm doctor` now.'
+tree probe-harness-owned-ok 0 "OK"
 
 # --- bump -------------------------------------------------------------------
 # bump_repo <name> — main at bundle 1.1.0 tagged content-v1.1.0, then a branch.
