@@ -644,7 +644,29 @@ This crate has no embedded UI and no HTTP listener
 The guard moved here from trusty-common with the engine (#9271); it lives in
 `engine::store`.
 
-`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 2. A writer-intent `PalaceHandle` open, which the daemon makes for every palace at startup, migrates a palace at any older format (0 or 1) to format 2 (#9918). It runs each step k → k+1 in ascending order, behind one verified backup taken before the first step under `<data_root>/backups/format-migration/<palace>/<from>-to-2-<UTC>/`. Each step commits its `kg.redb` change and the new format marker in one transaction, so an interrupted chain leaves the palace at its last committed step, and the next writer open resumes from there behind the same backup. A read-only or observer open of an older palace is refused until the daemon has migrated it. An upgrade that skips releases needs no intermediate release: trusty-memory 0.32.x and older wrote format 0, 0.33.x wrote format 1, and 0.35.0 and later write format 2. One migration of a palace runs at a time: a second writer open in the process waits for it, and another process fails while it holds the palace directory's lock. `palace_format::palace_format_status` reads a palace's state without writing, and reports `Unverified` when `kg.redb` cannot be read without writing (held by a running daemon, or in need of crash repair). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
+`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 2. From 0.36.0 (unreleased; ships with the trusty-mpm 1.9.0 train), a writer-intent `PalaceHandle` open, which the daemon makes for every palace at startup, migrates a palace at any older format (0 or 1) to format 2 (#9918). It runs each step k → k+1 in ascending order, behind one verified backup taken before the first step under `<data_root>/backups/format-migration/<palace>/<from>-to-2-<UTC>/`. Each step commits its `kg.redb` change and the new format marker in one transaction, so an interrupted chain leaves the palace at its last committed step, and the next writer open resumes from there behind the same backup. A read-only or observer open of an older palace is refused until the daemon has migrated it. From 0.36.0, an upgrade that skips releases needs no intermediate release (0.35.0 does, see below): trusty-memory 0.32.x and older wrote format 0, 0.33.x wrote format 1, and 0.35.0 and later write format 2. One migration of a palace runs at a time: a second writer open in the process waits for it, and another process fails while it holds the palace directory's lock. `palace_format::palace_format_status` reads a palace's state without writing, and reports `Unverified` when `kg.redb` cannot be read without writing (held by a running daemon, or in need of crash repair). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
+
+#### Upgrading from 0.32.x or older to 0.35.0 (FormatTooOld)
+
+The published trusty-memory 0.35.0 migrates only format 1, so it refuses a
+format-0 palace with `FormatTooOld`. Palaces written by 0.32.x or older are at
+format 0, so they need the 0.33.0 step. Upgrade in two steps, through 0.33.0,
+the newest 0.33.x release:
+
+1. Stop the daemon.
+2. Install 0.33.0: `cargo install trusty-memory --version 0.33.0 --locked`.
+3. Start its daemon once: `trusty-memory start`. It opens each palace and
+   migrates format 0 to format 1. Before it migrates, it writes a verified
+   backup under `<data root>/backups/format-migration/<palace>/`.
+4. Stop the daemon, then run `trusty-memory doctor`. The `palace format` check
+   passes with "every palace reads at format 1". It warns if a palace still
+   needs migration. In that case, start the daemon again and let it finish.
+5. Install 0.35.0 (or the current release):
+   `cargo install trusty-memory --version 0.35.0 --locked`.
+6. Start its daemon. It migrates format 1 to format 2.
+
+trusty-memory 0.36.0, which ships with trusty-mpm 1.9.0, migrates format 0
+directly and adds `trusty-memory palace migrate` (#10094).
 
 ## Feature Flags
 
