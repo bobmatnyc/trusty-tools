@@ -1,8 +1,8 @@
 //! Coverage for the lean `session_context_catchup` default (#9883).
 //!
-//! Why: owner decision Dba made the default resume answer the resolved
-//! snapshot plus live git status, with the digest behind `full: true`; and
-//! merged `full`'s old "ignore the watermark" meaning into that flag.
+//! Why: #9883 made the default resume answer the resolved snapshot plus
+//! live git status, with the digest behind `full: true`, and merged
+//! `full`'s old "ignore the watermark" meaning into that flag.
 //! What: drives [`session_context_catchup_in`] on an isolated host against a
 //! real temp checkout — one test per #9883 criterion the backend owns.
 //! Test: this file.

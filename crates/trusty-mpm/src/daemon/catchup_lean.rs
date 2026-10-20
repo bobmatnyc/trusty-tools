@@ -1,6 +1,6 @@
 //! The lean `session_context_catchup` default (#9883).
 //!
-//! Why: owner decision Dba — "Lean resume by default." A resume needs the
+//! Why: #9883 — "Lean resume by default." A resume needs the
 //! snapshot it resumes from and the checkout's state now. The digest (sessions
 //! page, recent commits, memory titles) cost a page of context on every resume,
 //! so it moved behind `full: true`, which #9883 merged with the old
