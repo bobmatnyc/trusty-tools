@@ -147,6 +147,7 @@ impl LspEventPublisher {
                 error = %e,
                 "lsp events: final flush stopped; the rest are lost"
             ),
+            // The cut-off write re-queued its frame, so `undelivered` counts it.
             Err(_) => tracing::warn!(
                 undelivered = self.client.buffered_len(),
                 "lsp events: final flush outlived its budget; the rest are lost"

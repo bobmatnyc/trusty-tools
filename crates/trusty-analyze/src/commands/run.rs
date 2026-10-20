@@ -20,7 +20,12 @@ use trusty_analyze::core::FactStore;
 use trusty_analyze::core::TrustySearchClient;
 use trusty_analyze::core::{overlay_path_beside_facts, ScipOverlayStore};
 use trusty_analyze::mcp::AnalyzerMcpServer;
-use trusty_analyze::service::{serve, serve_on_demand, AnalyzerAppState};
+use trusty_analyze::service::{serve_on_demand, serve_until, AnalyzerAppState};
+
+/// How long the `--mcp` exit waits for its daemon task to finish its exit
+/// path: drain, language-server shutdown (2 s grace), unlink and the 1 s final
+/// event flush (#9078). Past it the process exits anyway.
+const MCP_DAEMON_EXIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Output format for the `review`, `deep`, and `review-pr` subcommands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -60,7 +65,8 @@ pub enum OutputFormat {
 /// Test: run `trusty-analyze serve` without trusty-search running and verify
 /// exit code 1; with it running the daemon binds and answers `analyze.health`.
 /// The `--mcp` branch's lifetime is pinned by `tests/on_demand.rs`'
-/// `an_mcp_session_outlives_the_idle_window`.
+/// `an_mcp_session_outlives_the_idle_window`, and its exit path by
+/// `an_mcp_session_flushes_lsp_events_when_stdin_closes`.
 pub async fn run_serve(
     search: TrustySearchClient,
     facts_path: PathBuf,
@@ -125,24 +131,36 @@ pub async fn run_serve(
         // dispatcher dials the socket this process is about to bind, so it is
         // pointed at the same path rather than at a second transport.
         //
-        // #6355: `serve`, not `serve_on_demand`. The idle window belongs to a
+        // #6355: `serve` (here `serve_until`, #9078), not `serve_on_demand`. The idle window belongs to a
         // server nobody owns — one a client started and walked away from. This
         // process owns its own lifetime: its real job is the stdio loop below,
         // and `mcp::rpc_client::call` dials this socket once per tool call with
         // no respawn. An idle exit would unlink the socket while the stdio loop
         // is still connected to its client over stdin/stdout, and every later
         // tool call would answer `isError` with a transport failure for the rest
-        // of the process's life. `serve` ends on SIGTERM/SIGINT, which is the
-        // lifetime the loop below already has. `serve_with_idle`'s doc comment
+        // of the process's life. It ends on SIGTERM/SIGINT or when the loop
+        // below ends, which is the lifetime the loop already has. `serve_with_idle`'s doc comment
         // in `service/rpc.rs` states the same invariant from the other side.
         let socket_for_daemon = socket.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let daemon = tokio::spawn(async move {
-            if let Err(e) = serve(state, &socket_for_daemon).await {
+            let stopped = async {
+                let _ = stopped.await;
+            };
+            if let Err(e) = serve_until(state, &socket_for_daemon, stopped).await {
                 tracing::error!("trusty-analyze daemon exited: {e:#}");
             }
         });
         let result = trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(socket)).await;
-        daemon.abort();
+        // #9078: stop the daemon through its exit path (final LSP event
+        // flush included), never `abort()`, which skipped it.
+        let _ = stop.send(());
+        if tokio::time::timeout(MCP_DAEMON_EXIT_BUDGET, daemon)
+            .await
+            .is_err()
+        {
+            tracing::warn!("trusty-analyze daemon did not finish its exit path in time");
+        }
         result
     } else {
         serve_on_demand(state, &socket).await

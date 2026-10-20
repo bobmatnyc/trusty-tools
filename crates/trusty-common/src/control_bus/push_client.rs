@@ -165,6 +165,29 @@ impl PushBuffer {
     }
 }
 
+/// A frame popped for a write that has not completed (#9078).
+///
+/// Why: `flush` is a future, and a caller may drop it mid-write — a flush
+/// task aborted at shutdown, or an outer timeout. A frame popped and then
+/// dropped with the future was lost without being counted.
+/// What: dropping this re-queues the frame at the front of the buffer; a
+/// completed write clears `frame` first. A frame cut off mid-write is sent
+/// again whole on the next connection; the cut-off bytes end without a
+/// newline, so they are not a frame.
+/// Test: `tests::a_flush_cancelled_mid_write_requeues_its_frame`.
+struct InFlight<'a> {
+    client: &'a PushClient,
+    frame: Option<QueuedFrame>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            self.client.lock_buffer().push_front(frame);
+        }
+    }
+}
+
 /// Serialized length of `event`'s wire frame, or `0` on a (practically
 /// unreachable) serialization failure — see [`QueuedFrame`].
 fn frame_byte_len(event: &HarnessEvent) -> u64 {
@@ -302,9 +325,12 @@ impl PushClient {
     /// zero frames. `PushFlushOutcome.error` carries the [`UdsRpcError`] from
     /// the dial or from the first frame that failed to send; `sent` still
     /// reports every frame that succeeded before it.
+    /// Cancelling the returned future mid-write also re-queues the frame
+    /// (#9078).
     /// Test: `tests::push_client_flushes_once_the_socket_appears`,
     ///       `tests::push_client_buffers_when_the_socket_is_absent`,
-    ///       `tests::flush_dials_exactly_once_for_the_whole_drain`.
+    ///       `tests::flush_dials_exactly_once_for_the_whole_drain`,
+    ///       `tests::a_flush_cancelled_mid_write_requeues_its_frame`.
     pub async fn flush(&self) -> PushFlushOutcome {
         if self.lock_buffer().is_empty() {
             return PushFlushOutcome {
@@ -345,15 +371,23 @@ impl PushClient {
             let Some(frame) = self.lock_buffer().pop_front() else {
                 break;
             };
-            match tokio::time::timeout(
-                self.timeout,
-                crate::uds::write_frame(&mut stream, &frame.event),
-            )
-            .await
+            // #9078: held across the write, so a failed OR cancelled write
+            // puts the frame back at the front instead of losing it.
+            let mut in_flight = InFlight {
+                client: self,
+                frame: Some(frame),
+            };
+            let Some(event) = in_flight.frame.as_ref().map(|f| &f.event) else {
+                break;
+            };
+            match tokio::time::timeout(self.timeout, crate::uds::write_frame(&mut stream, event))
+                .await
             {
-                Ok(Ok(())) => sent += 1,
+                Ok(Ok(())) => {
+                    in_flight.frame = None;
+                    sent += 1;
+                }
                 Ok(Err(source)) => {
-                    self.lock_buffer().push_front(frame);
                     return PushFlushOutcome {
                         sent,
                         error: Some(UdsRpcError::Write {
@@ -363,7 +397,6 @@ impl PushClient {
                     };
                 }
                 Err(_) => {
-                    self.lock_buffer().push_front(frame);
                     return PushFlushOutcome {
                         sent,
                         error: Some(UdsRpcError::Timeout {

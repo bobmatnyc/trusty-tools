@@ -464,6 +464,27 @@ pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = trusty_common::uds::ANAL
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
 pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
+    serve_until(state, socket, std::future::pending()).await
+}
+
+/// [`serve`], also ending when `stop` resolves (#9078, L4).
+///
+/// Why: the `--mcp` process ends when its stdio loop does. Aborting the daemon
+/// task there skipped the exit path, so the final LSP event flush never ran and
+/// a call ending within one flush tick lost its terminal event (DOC-72 §4.5).
+/// What: [`serve`]'s entry-point work, then [`serve_with_shutdown`] until
+/// SIGTERM/SIGINT or `stop`, whichever comes first.
+///
+/// # Errors
+///
+/// As [`serve`].
+///
+/// Test: `tests/on_demand.rs`' `an_mcp_session_flushes_lsp_events_when_stdin_closes`.
+pub async fn serve_until(
+    state: AnalyzerAppState,
+    socket: &Path,
+    stop: impl std::future::Future<Output = ()> + Send,
+) -> Result<()> {
     // Migration cleanup, deliberately OUTSIDE `serve_with_shutdown`: it resolves
     // the real `$HOME` and the real data directory, so a test that drove it
     // would delete a developer's own files. It also belongs to the process
@@ -473,7 +494,13 @@ pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
 
     // #9078 (L4): the event producer, only while ANALYZE_LSP is on.
     let state = crate::service::lsp_events::attach(state);
-    serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
+    let shutdown = async move {
+        tokio::select! {
+            () = trusty_common::shutdown_signal() => {}
+            () = stop => {}
+        }
+    };
+    serve_with_shutdown(state, socket, shutdown).await
 }
 
 /// [`serve`], with the idle window resolved from the environment (#6350).
@@ -652,6 +679,9 @@ pub async fn serve_with_idle(
     // call has ended by now, so its terminal event is in the buffer.
     if let Some(flusher) = flusher {
         flusher.abort();
+        // Awaited, so a flush cut off mid-write has re-queued its frame
+        // before the final flush drains the buffer.
+        let _ = flusher.await;
     }
     if let Some(events) = events {
         events.final_flush().await;

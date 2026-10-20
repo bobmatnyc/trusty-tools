@@ -33,7 +33,7 @@ pub mod rpc;
 // without knowing which submodule owns each item.
 pub use events::AnalyzerAppState;
 pub use rpc::{
-    build_router, serve, serve_on_demand, socket_path, METHODS, METHOD_HEALTH,
+    build_router, serve, serve_on_demand, serve_until, socket_path, METHODS, METHOD_HEALTH,
     SHUTDOWN_FLUSH_TIMEOUT,
 };
 
