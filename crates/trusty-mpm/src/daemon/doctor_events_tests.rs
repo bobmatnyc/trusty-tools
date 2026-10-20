@@ -1,6 +1,6 @@
 //! Tests for the `events` doctor row (#10042).
 //!
-//! Why: the row is fail-closed — only a completed connect may read `Ok`. Each
+//! Why: the row is fail-closed — only a frame from the bus may read `Ok`. Each
 //! error arm has its own test, observed against a real socket file in a
 //! tempdir wherever the state can be built, so a regression that folds one of
 //! them into healthy fails here.
@@ -164,8 +164,8 @@ async fn an_unreadable_parent_is_unreadable() {
 /// Why (fail-closed): every observation other than `Serving` is a fault or an
 /// unknown, never health — a refactor that defaulted an arm to `Ok` would ship
 /// a green row for a dead bus.
-/// What: each non-serving state grades `Fail`, except `Undetermined`, which is
-/// `Warn`; none is `Ok`.
+/// What: each non-serving state grades `Fail`, except `Undetermined` and `VersionSkew`,
+/// which are `Warn`; none is `Ok`.
 /// Test: This is the test.
 #[test]
 fn every_non_serving_state_is_never_ok() {
@@ -179,6 +179,17 @@ fn every_non_serving_state_is_never_ok() {
             CheckStatus::Fail,
         ),
         (SocketState::Undetermined, CheckStatus::Warn),
+        // #10071: an accept with no frame, an old bus, a subscription that
+        // ended without a frame.
+        (SocketState::Hung, CheckStatus::Fail),
+        (
+            SocketState::VersionSkew("unknown field `heartbeat_ms`".to_owned()),
+            CheckStatus::Warn,
+        ),
+        (
+            SocketState::Unanswered("closed the connection".to_owned()),
+            CheckStatus::Fail,
+        ),
     ] {
         let row = grade(p, &state);
         assert_eq!(row.status, want, "{state:?}: {}", row.message);
