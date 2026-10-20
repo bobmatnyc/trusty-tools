@@ -1,6 +1,6 @@
 //! Tests for the #8928 step 4 workspace tmux server.
 
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixDatagram, UnixListener};
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -9,6 +9,15 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonical");
     (dir, root)
+}
+
+/// A socket file nothing can stream-connect to. A dropped `UnixListener`
+/// is not one under a parallel suite: macOS sets `FD_CLOEXEC` after
+/// `socket()`, so a child another test forks in that window keeps the
+/// listener alive (#10083). A datagram socket refuses a stream connect
+/// whoever holds its fd.
+fn dead_socket(path: &Path) {
+    drop(UnixDatagram::bind(path).expect("bind dead socket"));
 }
 
 #[test]
@@ -83,7 +92,7 @@ fn live_servers_are_listed_and_dead_ones_skipped() {
     );
     let _live_b = UnixListener::bind(root.join("tm-ws-b-2")).expect("bind b");
     let _live_a = UnixListener::bind(root.join("tm-ws-a-1")).expect("bind a");
-    drop(UnixListener::bind(root.join("tm-ws-dead-3")).expect("bind dead"));
+    dead_socket(&root.join("tm-ws-dead-3"));
     std::fs::write(root.join("tm-ws-file-4"), "x").expect("write file");
     let _default = UnixListener::bind(root.join("default")).expect("bind default");
     assert_eq!(

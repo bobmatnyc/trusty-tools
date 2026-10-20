@@ -1,7 +1,7 @@
 //! Tests for the #8928 step 3 sccache unix-socket server.
 
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixDatagram, UnixListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,15 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 fn script(path: &Path, body: &str) {
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// A socket file nothing can stream-connect to. A dropped `UnixListener`
+/// is not one under a parallel suite: macOS sets `FD_CLOEXEC` after
+/// `socket()`, so a child another test forks in that window keeps the
+/// listener alive (#10083). A datagram socket refuses a stream connect
+/// whoever holds its fd.
+fn dead_socket(path: &Path) {
+    drop(UnixDatagram::bind(path).expect("bind dead socket"));
 }
 
 #[test]
@@ -62,7 +71,7 @@ fn a_listening_socket_is_listening() {
 fn a_stale_socket_is_stale() {
     let (_dir, root) = scratch();
     let path = root.join("s.sock");
-    drop(UnixListener::bind(&path).expect("bind"));
+    dead_socket(&path);
     assert!(matches!(probe_socket(&path), SocketState::Stale(_)));
     assert_eq!(
         probe_socket(&root.join("absent.sock")),
@@ -106,7 +115,7 @@ fn ensure_server_starts_and_verifies() {
     );
     // A stale socket file is cleared first.
     std::fs::create_dir_all(socket.parent().expect("parent")).expect("mkdir");
-    drop(UnixListener::bind(&socket).expect("bind stale"));
+    dead_socket(&socket);
     let (bind_at, wait_for) = (socket.clone(), marker.clone());
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
