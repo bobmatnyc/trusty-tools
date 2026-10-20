@@ -113,7 +113,7 @@ fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
 /// — no snapshot, no recorded commit, a commit git no longer resolves — because
 /// a wrong `true` tells a PM to discard state it still needs.
 ///
-/// #9883 (ruling df-D88): everything above about `sessions`, `recent_commits`
+/// #9883: everything above about `sessions`, `recent_commits`
 /// and `recent_memory` is the `full: true` answer, which applies no watermark.
 /// The default is lean — [`crate::daemon::catchup_lean::lean_payload`]: the same
 /// resolution, hydration and verify, plus the resolved snapshot's record and a
@@ -282,7 +282,7 @@ pub(crate) async fn session_context_catchup_in(
 /// `all_projects` is set, each redacted for `caller` before merging.
 ///
 /// Why: #9883 moved the digest behind `full`; split out so the lean default
-/// visibly never reaches it. Ruling df-D88: the full digest applies no
+/// visibly never reaches it. Per #9883 the full digest applies no
 /// watermark, exactly as `full: true` did before.
 /// What: discovers the extra projects (fail-open on an unreadable registry),
 /// runs [`generate_catchup_json`] per project with `full: true` — which never

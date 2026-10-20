@@ -915,7 +915,7 @@ fn cli_parses_session_catchup_json_page() {
 }
 
 /// Why (#9883 criterion 4): `--full` used to read "force full history
-/// (watermark logic lands in PR2)"; ruling df-D88 made it the one switch for
+/// (watermark logic lands in PR2)"; #9883 made it the one switch for
 /// the full digest, with the lean answer as the default. `--all-projects`
 /// scans digests, so without `--full` it would be silently ignored.
 /// What: `--full`'s help names the full digest and no PR placeholder, and

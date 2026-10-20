@@ -1012,7 +1012,7 @@ async fn dispatch_session_context_catchup_forwards_tmux_session_created() {
 }
 
 /// Why (#9883 criterion 4): `full` used to mean "ignore the watermark, full
-/// history" while the default returned a watermarked digest. Ruling df-D88
+/// history" while the default returned a watermarked digest. #9883
 /// merged that meaning into one flag: `full: true` is the whole digest with no
 /// watermark, and the default is the lean answer.
 /// What: the advertised `full` description names the full digest and the lean
