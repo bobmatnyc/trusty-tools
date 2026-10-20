@@ -1085,3 +1085,42 @@ async fn doctor_report_includes_rust_build_env_row() {
         row.message
     );
 }
+
+/// Why (#8751): `tm doctor` read `worker.wedged` but never `worker.stalled_lock`,
+/// so a palace lock held far past `TRUSTY_DOCTOR_LOCK_STALL_SECS` while the
+/// daemon's own wedge line (420 s by default) had not yet tripped left the
+/// memory row green with "workers progressing". `trusty-memory doctor` warns on
+/// the same payload.
+/// What: a healthy-looking body carrying a `stalled_lock` held for a day is not
+/// `Ok`, and the message names the lock kind, the palace and the age.
+/// Test: itself.
+#[tokio::test]
+async fn memory_stalled_palace_lock_is_not_ok() {
+    let body = serde_json::json!({
+        "status": "ok",
+        "daemon_state": "ready",
+        "worker": {
+            "in_flight": 0,
+            "wedged": false,
+            "stall_tracking_ok": true,
+            "stalled_lock": {"palace": "p-held", "lock": "write", "age_secs": 86_400},
+        },
+    });
+    let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
+
+    assert_ne!(
+        check.status,
+        CheckStatus::Ok,
+        "a palace lock held past the stall threshold must not read healthy: {}",
+        check.message
+    );
+    for needle in ["p-held", "write", "86400"] {
+        assert!(
+            check.message.contains(needle),
+            "message must name `{needle}`: {}",
+            check.message
+        );
+    }
+}
