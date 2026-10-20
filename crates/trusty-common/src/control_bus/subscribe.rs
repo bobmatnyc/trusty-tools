@@ -15,7 +15,10 @@
 //!       Request types reject unknown fields, so a filter the server does not
 //!       understand fails instead of silently widening the subscription.
 //!       Response items accept unknown fields, so a newer daemon can add one
-//!       without breaking an older client (DOC-73 §3.3, additive rule).
+//!       without breaking an older client. An unknown item `type` is an
+//!       error, so a new kind is sent only to a client that asked for it,
+//!       as `heartbeat_ms` asks for [`SubscribeItem::Heartbeat`] (#10071,
+//!       DOC-73 §3.3).
 //! Test: `super::subscribe_tests`.
 
 // #9075: new module, PR1 of epic #9074. The `trusty-events` daemon serves it
@@ -75,9 +78,13 @@ pub fn events_socket_path() -> anyhow::Result<PathBuf> {
 /// handed out but never logged can be assigned again after a crash, and
 /// resuming past the new event would skip it silently (#9075). `filters` is
 /// applied server-side and defaults to match-all, so `{}` is a valid request.
-/// Unknown fields are rejected.
+/// `heartbeat_ms: Some(n)` asks the bus to send [`SubscribeItem::Heartbeat`]
+/// at once and then every `n` ms; the bus refuses `n` outside
+/// [`HEARTBEAT_MS_MIN`]`..=`[`HEARTBEAT_MS_MAX`]. Absent, no heartbeat is sent
+/// and the stream is what it was before #10071. Unknown fields are rejected.
 /// Test: `subscribe_params_golden_roundtrip`,
 /// `subscribe_params_since_id_golden_roundtrip`,
+/// `subscribe_params_heartbeat_ms_golden_roundtrip`,
 /// `subscribe_params_empty_object_is_live_and_match_all`,
 /// `subscribe_params_rejects_an_unknown_field`,
 /// `subscribe_params_rejects_a_mistyped_field`.
@@ -94,7 +101,22 @@ pub struct SubscribeParams {
     /// Which events to deliver. Defaults to every event.
     #[serde(default)]
     pub filters: SubscribeFilter,
+    /// Ask for a heartbeat every this many ms (#10071: opt-in liveness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_ms: Option<u64>,
 }
+
+/// The shortest `heartbeat_ms` the bus accepts (#10071).
+///
+/// Why: `0` would turn the heartbeat into a busy loop; 100 ms still leaves
+/// room for a one-shot health probe that asks for 500 ms.
+pub const HEARTBEAT_MS_MIN: u64 = 100;
+
+/// The longest `heartbeat_ms` the bus accepts, one hour (#10071).
+///
+/// Why: a longer interval proves nothing a reader could wait for, and an
+/// absurd value is more likely a unit mistake than a request.
+pub const HEARTBEAT_MS_MAX: u64 = 3_600_000;
 
 /// A conjunctive (AND) filter over `HarnessEvent`s that crosses the socket.
 ///
@@ -219,10 +241,15 @@ impl From<&Filter> for SubscribeFilter {
 /// durable log, `false` on live fan-out. `Gap` says the subscriber fell behind
 /// the ring and `skipped` events were not delivered; the reader resubscribes
 /// with `since_seq` set to the last `seq` it holds to recover them from the
-/// log. Unknown fields are ignored; an unknown `type` or a missing field is an
-/// error. `#[non_exhaustive]` so a later item type is not a Rust-API break.
+/// log. `Heartbeat` is sent only to a subscription that set `heartbeat_ms`:
+/// it says the bus is alive and `head` is its last assigned `seq`; it carries
+/// no event and never moves a reader's resume point (#10071). Unknown fields
+/// are ignored; an unknown `type` or a missing field is an error, which is
+/// why a new kind needs an opt-in. `#[non_exhaustive]` so a later item type
+/// is not a Rust-API break.
 /// Test: `subscribe_item_event_golden_roundtrip`,
 /// `subscribe_item_gap_golden_roundtrip`,
+/// `subscribe_item_heartbeat_golden_roundtrip`,
 /// `subscribe_item_ignores_an_unknown_field`,
 /// `subscribe_item_rejects_a_malformed_item`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,5 +268,10 @@ pub enum SubscribeItem {
     Gap {
         /// How many events were not delivered.
         skipped: u64,
+    },
+    /// The bus is alive (#10071). Sent only when `heartbeat_ms` was set.
+    Heartbeat {
+        /// The bus's last assigned `seq`, read under its ring lock.
+        head: u64,
     },
 }

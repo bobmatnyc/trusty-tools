@@ -197,6 +197,32 @@ fn subscribe_params_since_id_golden_roundtrip() {
     );
 }
 
+// #10071: liveness is opt-in. The field is written only when set, so a
+// request that does not ask is byte-identical to one from before it existed.
+#[test]
+fn subscribe_params_heartbeat_ms_golden_roundtrip() {
+    let golden = json!({ "filters": {}, "heartbeat_ms": 5000 });
+    let params: SubscribeParams = serde_json::from_value(golden.clone()).expect("decode golden");
+    assert_eq!(params.heartbeat_ms, Some(5000));
+    assert_serializes_to(&params, &golden);
+
+    let without: SubscribeParams =
+        serde_json::from_value(json!({ "since_seq": 9 })).expect("decode without heartbeat_ms");
+    assert_eq!(without.heartbeat_ms, None);
+    assert_serializes_to(&without, &json!({ "since_seq": 9, "filters": {} }));
+}
+
+/// The bounds refuse a busy loop and admit the console's 5 s and a one-shot
+/// probe's 500 ms (#10071).
+#[test]
+fn heartbeat_bounds_refuse_zero_and_admit_the_known_callers() {
+    let range = HEARTBEAT_MS_MIN..=HEARTBEAT_MS_MAX;
+    assert!(!range.contains(&0));
+    assert!(range.contains(&500));
+    assert!(range.contains(&5_000));
+    assert!(!range.contains(&4_000_000));
+}
+
 /// `{}` is "live only, everything": no replay, a match-all filter.
 #[test]
 fn subscribe_params_empty_object_is_live_and_match_all() {
@@ -249,6 +275,17 @@ fn subscribe_item_gap_golden_roundtrip() {
     let item: SubscribeItem = serde_json::from_value(golden.clone()).expect("decode gap");
     assert_eq!(item, SubscribeItem::Gap { skipped: 12 });
     assert_serializes_to(&item, &golden);
+}
+
+// #10071: the heartbeat item, sent only to a subscription that asked.
+#[test]
+fn subscribe_item_heartbeat_golden_roundtrip() {
+    let golden = json!({ "type": "heartbeat", "head": 17 });
+    let item: SubscribeItem = serde_json::from_value(golden.clone()).expect("decode heartbeat");
+    assert_eq!(item, SubscribeItem::Heartbeat { head: 17 });
+    assert_serializes_to(&item, &golden);
+    serde_json::from_value::<SubscribeItem>(json!({ "type": "heartbeat" }))
+        .expect_err("a heartbeat without its head must be an error");
 }
 
 /// Server-to-client frames are additive (DOC-73 §3.3): an older client reads a
@@ -417,6 +454,7 @@ mod frame {
                 session: Some("s-1".into()),
                 ..SubscribeFilter::default()
             },
+            heartbeat_ms: None,
         };
         let request = SubscribeRequest::new(7, params.clone());
         assert_eq!(METHOD_EVENTS_SUBSCRIBE, "events.subscribe");

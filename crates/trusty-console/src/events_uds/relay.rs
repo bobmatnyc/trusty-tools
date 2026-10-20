@@ -72,9 +72,10 @@ impl RelayItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BusState {
-    /// No attempt has finished yet.
+    /// The bus has not answered yet.
     Starting,
-    /// A subscription is open.
+    /// The bus answered on an open subscription: it sent a frame, a
+    /// heartbeat or an event (#10071). An accepted socket alone is not this.
     Connected,
     /// The last attempt failed or was refused; another follows.
     Reconnecting,
@@ -89,7 +90,8 @@ pub enum BusState {
 /// and daemon messages (#9076 review). The text goes to the log.
 /// What: one variant per way an attempt ends; serialised `snake_case`.
 /// Test: `super::tests::a_missing_socket_is_reported_and_retried_with_backoff`,
-/// `super::tests::a_malformed_frame_is_reported_and_the_client_reconnects`.
+/// `super::tests::a_malformed_frame_is_reported_and_the_client_reconnects`,
+/// `super::tests::a_daemon_that_accepts_and_goes_silent_is_reported_hung`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -102,6 +104,9 @@ pub enum FailureKind {
     Timeout,
     /// The bus closed the connection mid-stream.
     HungUp,
+    /// #10071: the bus accepted the subscription but sent no frame, not even
+    /// a heartbeat, within the hung bound: it is stopped or wedged.
+    Hung,
     /// The bus refused the resume point.
     Refused,
     /// The bus ended the stream with an error other than a refusal.

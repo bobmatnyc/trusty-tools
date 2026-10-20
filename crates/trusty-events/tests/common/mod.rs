@@ -256,14 +256,21 @@ pub async fn resume(
     since_id: Option<EventId>,
     filters: SubscribeFilter,
 ) -> FramedStream<SubscribeItem> {
-    let request = SubscribeRequest::new(
-        1,
+    open(
+        socket,
         SubscribeParams {
             since_seq,
             since_id,
             filters,
+            heartbeat_ms: None,
         },
-    );
+    )
+    .await
+}
+
+/// Open an `events.subscribe` stream with exactly `params`.
+pub async fn open(socket: &Path, params: SubscribeParams) -> FramedStream<SubscribeItem> {
+    let request = SubscribeRequest::new(1, params);
     send_framed_stream_request(socket, &request, Duration::from_secs(600))
         .await
         .expect("open events.subscribe")
