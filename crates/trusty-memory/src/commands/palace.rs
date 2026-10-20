@@ -230,9 +230,15 @@ pub enum PalaceAction {
     /// resumes. A palace already current is left alone. Goes through the
     /// daemon when one serves this data root.
     ///
-    /// ROLLBACK: stop the daemon, copy the files in the backup directory
-    /// (not MANIFEST) back into the palace directory, delete
-    /// format_migration.json if present, then run the older release.
+    /// ROLLBACK, in this order: stop the daemon. Pick the newest directory
+    /// under <data root>/backups/format-migration/<palace>/ that holds
+    /// MANIFEST and whose name starts with `<old format>-to-`. Copy its files
+    /// (not MANIFEST) back into the palace directory. Delete
+    /// format_migration.json if present. Delete index.usearch.redb: the
+    /// backup holds no vector index, and the migrated index has rows an older
+    /// release misreads (ADR-0067 D6). Start the old release's daemon and
+    /// call the MCP tool palace_reembed with dry_run=false until it reports
+    /// missing: 0; recall finds the drawers only after that.
     Migrate {
         /// Palace id. Omit with --all.
         #[arg(required_unless_present = "all", conflicts_with = "all")]
