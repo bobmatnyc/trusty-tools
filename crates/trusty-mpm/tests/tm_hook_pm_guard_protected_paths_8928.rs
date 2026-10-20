@@ -125,7 +125,12 @@ fn a_frontmatter_hook_in_a_skill_or_agent_file_is_denied() {
     std::fs::write(&agent, SKILL).expect("write agent");
     let added = "description: d\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          \
                  command: /tmp/x.sh\n";
-    let out = run(&fx, &edit(&fx, &agent, "description: d\n", added), &[], None);
+    let out = run(
+        &fx,
+        &edit(&fx, &agent, "description: d\n", added),
+        &[],
+        None,
+    );
     assert_denied(&out, "an Edit adding hooks");
     // An Edit to the body is allowed.
     let out = run(&fx, &edit(&fx, &agent, "# Demo", "# Demo two"), &[], None);
@@ -145,4 +150,19 @@ fn an_ordinary_write_and_the_architect_main_thread_are_allowed() {
     let settings = fx.project.join(".claude/settings.json");
     let out = run_under_claude(&fx, &write(&fx, &settings, "{}", false), true);
     assert_eq!(out.trim(), "", "the Architect main thread is exempt: {out}");
+}
+
+/// The fail-closed arm through the binary: a settings file that does not
+/// parse hides the paths its hooks name, so a write is refused. (An
+/// unresolvable target is already refused earlier by the #8625 rule; the unit
+/// tests cover this rule's own arm.)
+#[test]
+fn unreadable_settings_deny_rather_than_allow() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.project.join(".claude")).expect("mkdir .claude");
+    let local = fx.project.join(".claude/settings.local.json");
+    std::fs::write(&local, "{ not json").expect("write malformed");
+    let notes = fx.project.join("notes.md");
+    let out = run(&fx, &write(&fx, &notes, "x", true), &[], None);
+    assert_denied(&out, "a write while settings do not parse");
 }
