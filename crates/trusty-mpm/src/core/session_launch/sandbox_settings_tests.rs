@@ -154,7 +154,7 @@ fn writing_preserves_unrelated_keys_and_verifies() {
     let existing = json!({
         "hooks": { "Stop": [] },
         "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Read(//x)"] },
-        "sandbox": { "excludedCommands": ["docker"] },
+        "sandbox": { "operatorNote": { "kept": true } },
     });
     std::fs::write(fx.file("settings.json"), existing.to_string()).expect("seed");
     std::fs::create_dir_all(&fx.user).expect("mkdir user");
@@ -165,7 +165,7 @@ fn writing_preserves_unrelated_keys_and_verifies() {
     assert_eq!(project["permissions"]["allow"], json!(["Bash(ls:*)"]));
     let deny = strings(&project, "/permissions/deny");
     assert_eq!(deny[0], "Read(//x)", "operator entries kept first");
-    assert_eq!(project["sandbox"]["excludedCommands"], json!(["docker"]));
+    assert_eq!(project["sandbox"]["operatorNote"], json!({ "kept": true }));
     assert_eq!(project["sandbox"]["enabled"], json!(true));
     let user = read(&fx.user.join("settings.json"));
     assert_eq!(user["model"], json!("opus"));
@@ -255,4 +255,107 @@ fn unreadable_settings_refuse_the_launch() {
             None => std::fs::remove_file(&file).expect("remove"),
         }
     }
+}
+
+/// #8928 fix round: the sccache server runs the compiler a client names,
+/// outside the sandbox, so no sandboxed role may reach its socket, and the
+/// sandboxed env turns the wrapper off.
+#[test]
+fn sandboxed_roles_never_reach_the_sccache_socket() {
+    let fx = Fx::new();
+    for role in [SandboxRole::Pm, SandboxRole::Agent] {
+        let policy = project_policy(role, &fx.inputs);
+        let sockets = strings(&policy, "/sandbox/network/allowUnixSockets");
+        assert!(
+            sockets.iter().all(|s| !s.ends_with("sccache.sock")),
+            "{role:?}: {sockets:?}"
+        );
+        assert_eq!(
+            policy.pointer("/env/RUSTC_WRAPPER"),
+            Some(&json!("")),
+            "{role:?} runs with no rustc wrapper"
+        );
+    }
+}
+
+/// #8928 fix round: the merge unions the deny lists and `envVars` with what
+/// the operator wrote; tm's own scalars still win.
+#[test]
+fn operator_denies_and_env_vars_survive_a_merge() {
+    let fx = Fx::new();
+    let project = json!({ "sandbox": {
+        "enabled": false,
+        "filesystem": { "denyRead": ["/op/secret"], "denyWrite": ["/op/frozen"] },
+        "network": { "operatorKey": 1 },
+    }});
+    std::fs::write(fx.file("settings.json"), project.to_string()).expect("seed project");
+    std::fs::create_dir_all(&fx.user).expect("mkdir user");
+    let user = json!({ "sandbox": { "credentials": { "envVars": [
+        { "name": "OP_TOKEN", "mode": "deny" }
+    ]}}});
+    std::fs::write(fx.user.join("settings.json"), user.to_string()).expect("seed user");
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("write");
+    let project = read(&fx.file("settings.json"));
+    let deny_read = strings(&project, "/sandbox/filesystem/denyRead");
+    assert!(
+        deny_read.contains(&"/op/secret".to_owned()),
+        "{deny_read:?}"
+    );
+    let ssh = fx.inputs.home.join(".ssh").display().to_string();
+    assert!(deny_read.contains(&ssh), "{deny_read:?}");
+    let deny_write = strings(&project, "/sandbox/filesystem/denyWrite");
+    assert!(
+        deny_write.contains(&"/op/frozen".to_owned()),
+        "{deny_write:?}"
+    );
+    assert_eq!(
+        project.pointer("/sandbox/network/operatorKey"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        project.pointer("/sandbox/enabled"),
+        Some(&json!(true)),
+        "tm wins"
+    );
+    let user = read(&fx.user.join("settings.json"));
+    let names: Vec<&str> = user
+        .pointer("/sandbox/credentials/envVars")
+        .and_then(Value::as_array)
+        .expect("envVars")
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert!(names.contains(&"OP_TOKEN"), "{names:?}");
+    assert!(names.contains(&"ANTHROPIC_API_KEY"), "{names:?}");
+}
+
+/// #8928 fix round: `excludedCommands` runs a command outside the sandbox even
+/// with `allowUnsandboxedCommands: false`, so either tier setting it refuses.
+#[test]
+fn excluded_commands_refuse_the_launch() {
+    let fx = Fx::new();
+    let project = json!({ "sandbox": { "excludedCommands": ["docker"] } });
+    std::fs::write(fx.file("settings.json"), project.to_string()).expect("seed project");
+    match write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user) {
+        Err(SandboxSettingsError::Refused(why)) => {
+            assert!(why.contains("excludedCommands"), "{why}");
+            assert!(why.contains("docker"), "{why}");
+        }
+        other => panic!("project excludedCommands must refuse, got {other:?}"),
+    }
+    std::fs::write(fx.file("settings.json"), "{}").expect("reset project");
+    std::fs::create_dir_all(&fx.user).expect("mkdir user");
+    let user = json!({ "sandbox": { "excludedCommands": ["gh *"] } });
+    std::fs::write(fx.user.join("settings.json"), user.to_string()).expect("seed user");
+    refused(
+        write_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user),
+        "user-tier excludedCommands",
+    );
+    // An empty list excludes nothing.
+    std::fs::write(
+        fx.user.join("settings.json"),
+        r#"{"sandbox":{"excludedCommands":[]}}"#,
+    )
+    .expect("empty");
+    write_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user).expect("allowed");
 }

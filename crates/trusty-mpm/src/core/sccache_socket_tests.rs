@@ -200,3 +200,37 @@ fn an_unreadable_config_is_an_error_not_a_skip() {
         "{out:?}"
     );
 }
+
+/// #8928 fix round: an sccache older than 0.9.0 ignores `SCCACHE_SERVER_UDS`
+/// and would start a TCP server that never exits, so the version is checked
+/// first and a too-old binary starts nothing.
+#[test]
+fn a_too_old_sccache_is_refused_before_starting() {
+    let (_dir, root) = scratch();
+    let socket = root.join("s.sock");
+    let started = root.join("started");
+    let bin = root.join("old-sccache");
+    script(
+        &bin,
+        &format!(
+            "if [ \"$1\" = --version ]; then echo 'sccache 0.8.2'; exit 0; fi\n\
+             touch '{}'",
+            started.display()
+        ),
+    );
+    let err = ensure_server(&bin, &socket).expect_err("too old");
+    assert!(err.to_string().contains("0.9.0"), "{err}");
+    assert!(!started.exists(), "no server was started");
+    // A version that cannot be read is refused the same way.
+    let mute = root.join("mute-sccache");
+    script(
+        &mute,
+        &format!(
+            "if [ \"$1\" = --version ]; then exit 0; fi\ntouch '{}'",
+            started.display()
+        ),
+    );
+    let err = ensure_server(&mute, &socket).expect_err("unreadable version");
+    assert!(err.to_string().contains("version"), "{err}");
+    assert!(!started.exists(), "no server was started");
+}

@@ -277,3 +277,103 @@ fn a_markdown_hook_is_judged_by_the_result() {
     assert_eq!(frontmatter_hooks("---\nname: x\n---\n"), Ok(None));
     assert!(frontmatter_hooks("---\nhooks: {}\n---\n").is_ok_and(|h| h.is_some()));
 }
+
+const HOOKED: &str = "---\nname: s\nhooks:\n  Stop: []\n---\n";
+
+/// #8928 fix round: APFS folds `ſ` (U+017F) to `s` and `K` (U+212A) to `k`,
+/// so those spellings open the protected file and must be denied.
+#[test]
+fn unicode_case_folds_cannot_dodge_the_rule() {
+    let fx = Fx::new();
+    let p = &fx.project;
+    for target in [
+        p.join(".claude/\u{17f}ettings.local.json"),
+        p.join(".claude/\u{17f}ettings.json"),
+        p.join(".mcp.j\u{17f}on"),
+        p.join(".git/hoo\u{212a}s/pre-push"),
+        p.join(".git/config"),
+        fx.home.join(".claude/\u{17f}ettings.json"),
+    ] {
+        denied(fx.write(&target, "{}"), &target.display().to_string());
+    }
+    let skill = p.join(".claude/\u{17f}kills/x/SKILL.md");
+    denied(
+        fx.write(&skill, HOOKED),
+        "a hooked skill under .claude/ſkills",
+    );
+}
+
+/// #8928 fix round: plugin manifests and the scripts their hooks run live
+/// under `<user config dir>/plugins/`.
+#[test]
+fn plugin_files_are_protected() {
+    let fx = Fx::new();
+    for target in [
+        fx.root.join("ccd/plugins/p/hooks/hooks.json"),
+        fx.home.join(".claude/plugins/p/scripts/run.sh"),
+        fx.home
+            .join(".trusty-tools/trusty-mpm/claude-config/plugins/cache/x.json"),
+    ] {
+        denied(fx.write(&target, "{}"), &target.display().to_string());
+    }
+}
+
+/// #8928 fix round: a relative path in a hook command resolves against the
+/// project root, and so does a bare argument naming a file there.
+#[test]
+fn relative_hook_paths_resolve_against_the_project() {
+    let fx = Fx::new();
+    std::fs::create_dir_all(fx.project.join("scripts")).expect("mkdir scripts");
+    std::fs::write(fx.project.join("hook-arg.sh"), "#!/bin/sh\n").expect("write arg");
+    let settings = json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": "./scripts/hook.sh --x" },
+        { "type": "command", "command": "bash hook-arg.sh" },
+        { "type": "command", "command": "sh .claude/hooks/rel.sh" },
+    ]}]}});
+    std::fs::write(
+        fx.project.join(".claude/settings.json"),
+        settings.to_string(),
+    )
+    .expect("write settings");
+    for target in [
+        fx.project.join("scripts/hook.sh"),
+        fx.project.join("hook-arg.sh"),
+        fx.project.join(".claude/hooks/rel.sh"),
+    ] {
+        denied(fx.write(&target, "x"), &target.display().to_string());
+    }
+}
+
+/// #8928 fix round: a command named by a skill's or agent's frontmatter
+/// `hooks:` runs outside the sandbox like a settings hook.
+#[test]
+fn frontmatter_hook_commands_are_protected() {
+    let fx = Fx::new();
+    let skill = fx.project.join(".claude/skills/s/SKILL.md");
+    std::fs::create_dir_all(skill.parent().expect("dir")).expect("mkdir skill");
+    let script = fx.root.join("bin/fm-hook.sh");
+    std::fs::write(
+        &skill,
+        format!(
+            "---\nname: s\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - \
+             type: command\n          command: {} --check\n---\nbody\n",
+            script.display()
+        ),
+    )
+    .expect("write skill");
+    let agent = fx.root.join("ccd/agents/a.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agent");
+    let agent_script = fx.root.join("bin/agent-hook.sh");
+    std::fs::write(
+        &agent,
+        format!(
+            "---\nname: a\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          \
+             command: {}\n---\n",
+            agent_script.display()
+        ),
+    )
+    .expect("write agent");
+    for target in [&script, &agent_script] {
+        denied(fx.write(target, "x"), &target.display().to_string());
+    }
+}

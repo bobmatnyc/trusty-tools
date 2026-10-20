@@ -166,3 +166,35 @@ fn unreadable_settings_deny_rather_than_allow() {
     let out = run(&fx, &write(&fx, &notes, "x", true), &[], None);
     assert_denied(&out, "a write while settings do not parse");
 }
+
+/// #8928 fix round: a bare program word in a hook command is the file `PATH`
+/// resolves it to, so that file is protected.
+#[test]
+fn a_bare_hook_program_on_path_is_denied() {
+    let fx = Fixture::new();
+    let bin = fx.home.parent().expect("scratch").join("path-bin");
+    std::fs::create_dir_all(&bin).expect("mkdir bin");
+    let program = bin.join("fake-hook-prog-8928");
+    std::fs::write(&program, "#!/bin/sh\n").expect("write program");
+    let settings = serde_json::json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": "fake-hook-prog-8928 inbox-check" }
+    ]}]}});
+    std::fs::create_dir_all(fx.project.join(".claude")).expect("mkdir .claude");
+    std::fs::write(
+        fx.project.join(".claude/settings.json"),
+        settings.to_string(),
+    )
+    .expect("write settings");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = run(
+        &fx,
+        &write(&fx, &program, "#!/bin/sh\n", true),
+        &[("PATH", path.as_str())],
+        None,
+    );
+    assert_denied(&out, "the PATH-resolved hook program");
+}
