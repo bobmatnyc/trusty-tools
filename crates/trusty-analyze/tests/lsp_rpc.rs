@@ -7,12 +7,16 @@
 //! What: each test builds daemon state whose LSP manager runs the fake server
 //! (`support/fake_lsp_server.rs`) in some mode over a throwaway git work tree,
 //! then calls the methods through the real router. Two goldens pin each
-//! response shape; `UPDATE_GOLDEN=1` rewrites them.
+//! response shape; `UPDATE_GOLDEN=1` rewrites them. The events section (L4)
+//! points the producer at a stub bus (`support/stub_bus.rs`) and asserts on
+//! the frames it receives.
 //! Test: this file is the test.
 #![cfg(unix)]
 
 #[path = "support/fake_lsp_server.rs"]
 mod fake_lsp_server;
+#[path = "support/stub_bus.rs"]
+mod stub_bus;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -720,4 +724,318 @@ async fn lsp_references_response_matches_its_golden() {
     let rig = Rig::new("normal");
     let v = rig.ok("analyze.lsp_references", rig.refs_params()).await;
     check_golden("lsp_references.json", &normalise(&v, &rig.root()));
+}
+
+// ---- events (#9078, L4) ----------------------------------------------------
+
+mod events {
+    use super::*;
+    use stub_bus::StubBus;
+    use trusty_analyze::service::lsp_events::{self, LspEventPublisher};
+    use trusty_common::control_bus::{
+        ActionEvent, ActionMeta, CallPhase, HarnessEvent, HarnessPayload, HarnessSource,
+        ObjectType, SubscribeFilter,
+    };
+
+    const PARENT: &str = "0192f0c8-4b1a-7c3e-9d2f-1a2b3c4d5e6f";
+
+    /// Attach a producer aimed at `socket`, with this rig's tempdir as `$HOME`
+    /// so a frame carrying an absolute path under it is detectable.
+    fn attach(rig: &mut Rig, socket: &Path) -> Arc<LspEventPublisher> {
+        let publisher =
+            Arc::new(LspEventPublisher::new(socket).with_home(Some(rig.dir.path().to_path_buf())));
+        rig.state = rig.state.clone().with_lsp_events(Arc::clone(&publisher));
+        publisher
+    }
+
+    /// The `Tool` action inside `ev`: meta, phase, tool name and call id.
+    fn tool(ev: &HarnessEvent) -> (&ActionMeta, CallPhase, &str, &str) {
+        match &ev.payload {
+            HarnessPayload::Action(ActionEvent::Tool {
+                meta,
+                phase,
+                tool,
+                call_id,
+            }) => (meta, *phase, tool.as_str(), call_id.as_str()),
+            other => panic!("not a Tool action: {other:?}"),
+        }
+    }
+
+    /// Flush, then wait for exactly `n` frames on the stub.
+    async fn pushed(publisher: &LspEventPublisher, bus: &StubBus, n: usize) -> Vec<HarnessEvent> {
+        let outcome = publisher.flush().await;
+        assert!(outcome.error.is_none(), "flush: {:?}", outcome.error);
+        let frames = bus.wait_for(n).await;
+        assert_eq!(frames.len(), n, "{frames:#?}");
+        frames
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lsp_call_pushes_started_and_finished_with_parent_id() {
+        let mut rig = Rig::new("normal");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        let mut params = rig.refs_params();
+        params["parent_event_id"] = json!(PARENT);
+        rig.ok("analyze.lsp_references", params).await;
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        let (start, started_phase, start_tool, start_call) = tool(&frames[0]);
+        let (end, end_phase, end_tool, end_call) = tool(&frames[1]);
+        assert_eq!(started_phase, CallPhase::Started);
+        assert_eq!(end_phase, CallPhase::Finished);
+        assert_eq!(start_tool, "lsp.textDocument/references");
+        assert_eq!(end_tool, start_tool);
+        assert_eq!(start_call, end_call, "one call_id per call");
+        for ev in &frames {
+            assert_eq!(ev.source, HarnessSource::Analyze);
+            assert_eq!(tool(ev).0.source, HarnessSource::Analyze);
+            assert_eq!(tool(ev).0.id, ev.id, "meta mirrors the envelope id");
+            assert_eq!(tool(ev).0.parent_id, ev.parent_id);
+        }
+        // D6: the caller's parent heads the call; the terminal event closes
+        // the Started node.
+        assert_eq!(
+            frames[0].parent_id.map(|p| p.to_string()),
+            Some(PARENT.to_string())
+        );
+        assert_eq!(frames[1].parent_id, Some(frames[0].id));
+
+        let file = &start.objects[0];
+        assert_eq!(file.object_type, ObjectType::File);
+        assert_eq!(file.id, "~/ws/src/lib.rs", "home-relative, never absolute");
+        assert_eq!(file.label, "lib.rs");
+        assert_eq!(start.attrs["language"], "rust");
+        assert_eq!(start.attrs["line"], 0);
+        assert_eq!(start.attrs["column"], 7);
+        assert_eq!(end.attrs["outcome"], "ok");
+        assert_eq!(end.attrs["result_count"], 1);
+        assert_eq!(end.attrs["document_version"], 1);
+        assert_eq!(end.attrs["workspace"], "~/ws");
+        assert_snapshot(&json!(end.attrs));
+        assert!(end.attrs["duration_ms"].is_u64(), "{:?}", end.attrs);
+
+        // A subscriber filtering on the analyze source finds every frame.
+        let mine = SubscribeFilter {
+            source: Some(HarnessSource::Analyze),
+            kind: Some("tool".into()),
+            actor: Some("system".into()),
+            ..SubscribeFilter::default()
+        };
+        let theirs = SubscribeFilter {
+            source: Some(HarnessSource::Mpm),
+            ..SubscribeFilter::default()
+        };
+        assert!(frames.iter().all(|f| mine.matches(f)));
+        assert!(!frames.iter().any(|f| theirs.matches(f)));
+
+        // No parent supplied: a root event.
+        rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+        let frames = pushed(&publisher, &bus, 4).await;
+        assert_eq!(tool(&frames[2]).2, "lsp.publishDiagnostics");
+        assert_eq!(
+            frames[2].parent_id, None,
+            "absent parent_event_id is a root"
+        );
+        assert_eq!(tool(&frames[3]).0.attrs["result_count"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn event_bytes_carry_no_source_text() {
+        let mut rig = Rig::new("check");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+        rig.ok("analyze.lsp_references", rig.refs_params()).await;
+        rig.ok(
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 2000}),
+        )
+        .await;
+        pushed(&publisher, &bus, 6).await;
+
+        let raw = String::from_utf8(bus.raw()).expect("utf8");
+        let home = rig.dir.path().display().to_string();
+        let canonical = rig.root().display().to_string();
+        for needle in [
+            "canned diagnostic",
+            fake_lsp_server::CHECK_MESSAGE,
+            "pub fn answer",
+            SOURCE,
+            home.as_str(),
+            canonical.as_str(),
+        ] {
+            assert!(!raw.contains(needle), "a frame carries `{needle}`:\n{raw}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errored_terminal_event_on_server_crash() {
+        let mut rig = Rig::new("crash");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        let data = rig
+            .refusal("analyze.lsp_references", rig.refs_params())
+            .await;
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        assert_eq!(tool(&frames[0]).1, CallPhase::Started);
+        let (end, phase, _, _) = tool(&frames[1]);
+        assert_eq!(phase, CallPhase::Errored);
+        assert_eq!(end.attrs["outcome"], data["kind"], "{data}");
+        assert_eq!(tool(&frames[0]).3, tool(&frames[1]).3);
+    }
+
+    /// D8 on the failure path: an Errored event names the error's code, never
+    /// its text, which for `InitializeFailed` quotes the server's stderr.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errored_events_carry_no_stderr_or_error_text() {
+        let mut rig = Rig::new("fail_init");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        let r = rig.call("analyze.lsp_references", rig.refs_params()).await;
+        let err = r.error.expect("a server that fails to start is refused");
+        assert!(
+            err.message.contains(fake_lsp_server::FAIL_INIT_STDERR),
+            "the fixture's stderr reaches the caller: {err:?}"
+        );
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        assert_eq!(tool(&frames[1]).1, CallPhase::Errored);
+        assert_eq!(tool(&frames[1]).0.attrs["outcome"], "lsp_initialize_failed");
+        let raw = String::from_utf8(bus.raw()).expect("utf8");
+        for needle in [
+            fake_lsp_server::FAIL_INIT_STDERR,
+            "infinite recursion",
+            err.message.as_str(),
+        ] {
+            assert!(!raw.contains(needle), "a frame carries `{needle}`:\n{raw}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bus_down_does_not_block_the_call() {
+        let mut rig = Rig::new("normal");
+        let absent = StubBus::absent_path(rig.dir.path());
+        let publisher = attach(&mut rig, &absent);
+        let started = std::time::Instant::now();
+        rig.ok("analyze.lsp_references", rig.refs_params()).await;
+        rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the calls took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(publisher.buffered_len(), 4, "events wait in the buffer");
+        let flush = std::time::Instant::now();
+        let outcome = publisher.flush().await;
+        assert!(outcome.error.is_some(), "nothing is listening");
+        assert!(
+            flush.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            flush.elapsed()
+        );
+        assert_eq!(publisher.buffered_len(), 4, "a failed flush keeps them");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flag_off_emits_no_events() {
+        let mut rig = Rig::with("normal", |c| c.enabled = false);
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        for (method, params) in [
+            ("analyze.lsp_diagnostics", rig.diag_params()),
+            ("analyze.lsp_references", rig.refs_params()),
+            (
+                "analyze.lsp_analysed_at",
+                json!({"path": rig.file(), "version": 1, "timeout_ms": 10}),
+            ),
+        ] {
+            assert_eq!(rig.refusal(method, params).await["kind"], "lsp_disabled");
+        }
+        assert_eq!(publisher.buffered_len(), 0);
+        assert_eq!(publisher.flush().await.sent, 0);
+        assert!(bus.raw().is_empty());
+
+        // The daemon resolves no bus socket while the flag is off.
+        let state =
+            lsp_events::attach_with(Rig::with("normal", |c| c.enabled = false).state, || {
+                panic!("the bus socket was resolved with the flag off")
+            });
+        assert!(state.lsp_events.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unresolvable_bus_still_serves() {
+        let rig = Rig::new("normal");
+        let state =
+            lsp_events::attach_with(rig.state.clone(), || Err(anyhow::anyhow!("no data dir")));
+        assert!(
+            state.lsp_events.is_none(),
+            "start-up never fails on the bus"
+        );
+        let path = rig.dir.path().join("b.sock");
+        let state = lsp_events::attach_with(rig.state.clone(), move || Ok(path));
+        assert!(state.lsp_events.is_some());
+    }
+
+    /// Serve until `exit` resolves (or the idle window passes), with a flush
+    /// interval far longer than the run, so only the final flush can deliver.
+    async fn final_flush_on(
+        idle: Option<Duration>,
+        exit: impl std::future::Future<Output = ()> + Send,
+    ) {
+        let mut rig = Rig::new("normal");
+        let bus = StubBus::bind();
+        let publisher = Arc::new(
+            LspEventPublisher::new(bus.path()).with_flush_interval(Duration::from_secs(3600)),
+        );
+        rig.state = rig.state.clone().with_lsp_events(Arc::clone(&publisher));
+        rig.ok("analyze.lsp_references", rig.refs_params()).await;
+        assert_eq!(publisher.buffered_len(), 2);
+        let socket = rig.dir.path().join("a.sock");
+        trusty_analyze::service::rpc::serve_with_idle(rig.state.clone(), &socket, exit, idle)
+            .await
+            .expect("serve exits");
+        assert_eq!(publisher.buffered_len(), 0, "the exit path flushed");
+        assert_eq!(bus.wait_for(2).await.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_flush_runs_on_idle_exit_and_on_shutdown() {
+        final_flush_on(Some(Duration::from_millis(300)), std::future::pending()).await;
+        final_flush_on(None, tokio::time::sleep(Duration::from_millis(300))).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_flush_task_delivers_while_serving() {
+        let mut rig = Rig::new("normal");
+        let bus = StubBus::bind();
+        let publisher = Arc::new(
+            LspEventPublisher::new(bus.path()).with_flush_interval(Duration::from_millis(50)),
+        );
+        rig.state = rig.state.clone().with_lsp_events(Arc::clone(&publisher));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let socket = rig.dir.path().join("a.sock");
+        let state = rig.state.clone();
+        let server = tokio::spawn(async move {
+            trusty_analyze::service::rpc::serve_with_idle(
+                state,
+                &socket,
+                async {
+                    let _ = stopped.await;
+                },
+                None,
+            )
+            .await
+        });
+        rig.ok("analyze.lsp_references", rig.refs_params()).await;
+        assert_eq!(
+            bus.wait_for(2).await.len(),
+            2,
+            "delivered with no explicit flush"
+        );
+        let _ = stop.send(());
+        server.await.expect("join").expect("serve");
+    }
 }

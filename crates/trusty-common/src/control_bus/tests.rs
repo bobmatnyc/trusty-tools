@@ -220,6 +220,7 @@ fn sample_meta() -> ActionMeta {
             id: "s1".into(),
             label: "session s1".into(),
         }],
+        attrs: Default::default(),
         schema_version: 1,
     }
 }
@@ -388,6 +389,35 @@ fn action_meta_schema_version_defaults_to_one() {
     let event: ActionEvent =
         serde_json::from_str(json).expect("deserialize without schema_version");
     assert_eq!(event.meta().schema_version, 1);
+}
+
+// #9078: DOC-72 §4.2 puts an LSP call's metadata in the action metadata.
+#[test]
+fn action_meta_attrs_round_trip_and_are_omitted_when_empty() {
+    let mut meta = sample_meta();
+    meta.attrs.insert("duration_ms".into(), json!(12));
+    meta.attrs.insert("outcome".into(), json!("ok"));
+    let event = ActionEvent::Tool {
+        meta,
+        phase: CallPhase::Finished,
+        tool: "lsp.textDocument/references".into(),
+        call_id: "c-1".into(),
+    };
+    let s = serde_json::to_string(&event).expect("serialize");
+    assert!(
+        s.contains(r#""attrs":{"duration_ms":12,"outcome":"ok"}"#),
+        "{s}"
+    );
+    let back: ActionEvent = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back, event);
+
+    let plain = serde_json::to_string(&sample_action_event()).expect("serialize");
+    assert!(!plain.contains("attrs"), "empty attrs are omitted: {plain}");
+    let old = r#"{"kind": "session", "id": "018f1e0a-0000-7000-8000-000000000000",
+        "at": "2026-01-01T00:00:00Z", "source": "mpm", "actor": {"type": "system"},
+        "phase": "started"}"#;
+    let old: ActionEvent = serde_json::from_str(old).expect("a payload without attrs");
+    assert!(old.meta().attrs.is_empty());
 }
 
 #[test]
