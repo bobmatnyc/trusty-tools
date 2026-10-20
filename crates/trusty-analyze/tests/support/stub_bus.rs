@@ -7,7 +7,8 @@
 //! byte each connection writes, to EOF, to one buffer. [`StubBus::frames`]
 //! parses that buffer back into `HarnessEvent`s; [`StubBus::raw`] keeps the
 //! bytes for the privacy assertions.
-//! Test: used by the `analyze.lsp_*` event tests in `tests/lsp_rpc.rs`.
+//! Test: used by the `analyze.lsp_*` event tests in `tests/lsp_rpc.rs` and by
+//! `an_mcp_session_flushes_lsp_events_when_stdin_closes` in `tests/on_demand.rs`.
 
 #![allow(dead_code)] // each test binary compiles this module and uses a subset
 
@@ -20,7 +21,7 @@ use trusty_common::control_bus::HarnessEvent;
 
 /// One stub bus; its accept loop stops when this is dropped.
 pub struct StubBus {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
     path: PathBuf,
     bytes: Arc<Mutex<Vec<u8>>>,
     task: tokio::task::JoinHandle<()>,
@@ -31,6 +32,14 @@ impl StubBus {
     pub fn bind() -> Self {
         let dir = tempfile::tempdir().expect("tempdir for the stub bus");
         let path = dir.path().join("bus.sock");
+        let mut bus = Self::bind_at(path);
+        bus._dir = Some(dir);
+        bus
+    }
+
+    /// Bind at `path`, whose parent must be a `0700` directory, e.g. where a
+    /// child process resolves `events_socket_path()`.
+    pub fn bind_at(path: PathBuf) -> Self {
         let listener = trusty_common::uds::bind_hardened(&path).expect("bind the stub bus");
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&bytes);
@@ -45,7 +54,7 @@ impl StubBus {
             }
         });
         Self {
-            _dir: dir,
+            _dir: None,
             path,
             bytes,
             task,

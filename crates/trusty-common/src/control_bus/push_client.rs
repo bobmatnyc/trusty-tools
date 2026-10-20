@@ -446,6 +446,42 @@ mod tests {
         }
     }
 
+    /// #9078: a flush cancelled mid-write — a flush task aborted at shutdown,
+    /// or a caller's own timeout — keeps the frame it had popped.
+    #[tokio::test]
+    async fn a_flush_cancelled_mid_write_requeues_its_frame() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("hung.sock");
+        // Bound and listening, never accepted or read: the write blocks once
+        // the socket buffer fills.
+        let _listener: UnixListener = crate::uds::bind_hardened(&sock).expect("bind");
+        let client = Arc::new(PushClient::new(&sock));
+        let mut big = sample_event();
+        if let HarnessPayload::Action(crate::control_bus::ActionEvent::Session { meta, .. }) =
+            &mut big.payload
+        {
+            meta.attrs
+                .insert("pad".into(), serde_json::Value::String("x".repeat(4 << 20)));
+        }
+        client.send(big);
+        client.send(sample_event());
+
+        let c = Arc::clone(&client);
+        let flusher = tokio::spawn(async move { c.flush().await });
+        // Well inside DEFAULT_PUSH_TIMEOUT: the write is blocked, not timed out.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!flusher.is_finished(), "the flush must be stuck mid-write");
+        flusher.abort();
+        let _ = flusher.await;
+
+        assert_eq!(client.dropped(), 0);
+        assert_eq!(
+            client.buffered_len(),
+            2,
+            "the frame popped for the cancelled write is back in the buffer"
+        );
+    }
+
     /// A `send` while nothing is listening buffers the frame rather than
     /// erroring — the non-blocking invariant (DOC-73 §4.1).
     #[tokio::test]

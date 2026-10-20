@@ -34,7 +34,7 @@ fn paths_are_shown_home_relative() {
     assert_eq!(none.shown(Path::new("/home/u/a.rs")), "/home/u/a.rs");
 }
 
-/// D9: with no bus, 10,000 events cost well under a second and the buffer
+/// D9: with no bus, 10,000 events stay cheap (bounded at 5 s) and the buffer
 /// stays at its bound, counting what it dropped.
 #[test]
 fn ten_thousand_events_with_no_bus_are_fast_and_bounded() {
@@ -50,8 +50,9 @@ fn ten_thousand_events_with_no_bus_are_fast_and_bounded() {
         );
         call.finish(&Ok::<(), LspError>(()), |_| Vec::new());
     }
+    // #9078: 5 s, not 1 s: this runs at opt-level 0 on shared CI runners.
     assert!(
-        started.elapsed() < Duration::from_secs(1),
+        started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );

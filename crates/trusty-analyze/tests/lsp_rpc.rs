@@ -886,6 +886,33 @@ mod events {
         assert_eq!(tool(&frames[0]).3, tool(&frames[1]).3);
     }
 
+    /// D8 on the failure path: an Errored event names the error's code, never
+    /// its text, which for `InitializeFailed` quotes the server's stderr.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errored_events_carry_no_stderr_or_error_text() {
+        let mut rig = Rig::new("fail_init");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        let r = rig.call("analyze.lsp_references", rig.refs_params()).await;
+        let err = r.error.expect("a server that fails to start is refused");
+        assert!(
+            err.message.contains(fake_lsp_server::FAIL_INIT_STDERR),
+            "the fixture's stderr reaches the caller: {err:?}"
+        );
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        assert_eq!(tool(&frames[1]).1, CallPhase::Errored);
+        assert_eq!(tool(&frames[1]).0.attrs["outcome"], "lsp_initialize_failed");
+        let raw = String::from_utf8(bus.raw()).expect("utf8");
+        for needle in [
+            fake_lsp_server::FAIL_INIT_STDERR,
+            "infinite recursion",
+            err.message.as_str(),
+        ] {
+            assert!(!raw.contains(needle), "a frame carries `{needle}`:\n{raw}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn bus_down_does_not_block_the_call() {
         let mut rig = Rig::new("normal");
