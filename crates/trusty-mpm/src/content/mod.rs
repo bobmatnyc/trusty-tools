@@ -22,3 +22,7 @@ pub mod requires;
 pub mod status;
 
 pub use catalog_sync::{CatalogError, CatalogSync, CatalogSyncResult, catalog_root_for};
+
+// #8390: the content compatibility matrix (ADR-0064 decision 6).
+#[cfg(test)]
+mod compat_matrix_tests;
