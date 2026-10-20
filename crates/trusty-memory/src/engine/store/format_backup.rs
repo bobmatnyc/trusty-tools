@@ -194,6 +194,60 @@ pub(crate) fn ensure_with(
     Ok(final_dir)
 }
 
+/// The bytes a backup of `palace_dir` copies, and the free bytes it needs.
+///
+/// Why: #10094 — `palace migrate --dry-run` prints the size and the space the
+/// verified backup needs without taking it, by the same rule [`check_space`]
+/// applies (1.1x the primary files).
+/// What: `(total, total + 10%)` over the [`PRIMARY_FILES`] present.
+/// Test: `dry_run_reports_the_plan_and_writes_nothing`.
+#[cfg(feature = "server")]
+pub(crate) fn planned_bytes(palace_dir: &Path) -> Result<(u64, u64)> {
+    let mut total: u64 = 0;
+    for (_, src) in present_sources(palace_dir)? {
+        let len = std::fs::metadata(&src).map_err(|e| failed(&src, e))?.len();
+        total = total.saturating_add(len);
+    }
+    Ok((total, total.saturating_add(total.div_ceil(10))))
+}
+
+/// Free bytes where `path` would be created: the nearest existing ancestor.
+///
+/// Why: #10094 — a dry run must not create the backup root to measure it.
+/// What: `None` when the platform has no probe or no ancestor exists.
+/// Test: `dry_run_reports_the_plan_and_writes_nothing`.
+#[cfg(feature = "server")]
+pub(crate) fn free_bytes_for(path: &Path) -> io::Result<Option<u64>> {
+    match path.ancestors().find(|p| p.is_dir()) {
+        Some(existing) => free_space_at(existing),
+        None => Ok(None),
+    }
+}
+
+/// The newest complete (manifest-bearing) backup under `root`, if any.
+///
+/// Why: #10094 — `palace migrate --verify` reports whether a format-migration
+/// backup exists; it reads, and never prunes or repairs, the directory.
+/// Test: `verify_reports_the_gaps_of_a_hand_shaped_palace`.
+#[cfg(feature = "server")]
+pub(crate) fn newest_complete_backup(root: &Path) -> Result<Option<PathBuf>> {
+    if !root.try_exists().map_err(|e| failed(root, e))? {
+        return Ok(None);
+    }
+    let mut best: Option<(String, PathBuf)> = None;
+    for dir in list_dirs(root)? {
+        let name = file_name(&dir);
+        if name.ends_with(TMP_SUFFIX) || !has_manifest(&dir)? {
+            continue;
+        }
+        let stamp = stamp_of(&name).to_string();
+        if best.as_ref().is_none_or(|(b, _)| stamp > *b) {
+            best = Some((stamp, dir));
+        }
+    }
+    Ok(best.map(|(_, dir)| dir))
+}
+
 /// Re-hash every file a backup's manifest names and compare.
 ///
 /// Why: a backup is trusted only while it still matches what was verified.

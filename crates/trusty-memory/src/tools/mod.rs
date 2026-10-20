@@ -51,17 +51,21 @@ pub mod dream_ops;
 #[cfg(feature = "server")]
 pub mod embed_audit;
 pub mod embed_audit_definitions;
+// #10094: the `palace_migrate` schema; its handler is `palace_migrate`.
 #[cfg(feature = "server")]
 pub mod helpers;
 #[cfg(feature = "server")]
 pub mod kg_ops;
 #[cfg(feature = "server")]
 pub mod memory_ops;
+pub mod migrate_definitions;
 // #6318: the no-palace fallback every palace-scoped READ tool shares.
 #[cfg(feature = "server")]
 pub mod palace_backup;
 #[cfg(feature = "server")]
 pub mod palace_index;
+#[cfg(feature = "server")]
+pub(crate) mod palace_migrate;
 #[cfg(feature = "server")]
 pub mod palace_ops;
 // Owner ruling 2026-09-14: the recall read family, split out of `memory_ops`
@@ -260,6 +264,8 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
         "palace_rename" => handle_palace_rename(state, args).await,
         // #9282: a consistent backup of a live palace.
         "palace_backup" => palace_backup::handle_palace_backup(state, args).await,
+        // #10094: `trusty-memory palace migrate` while the daemon runs.
+        "palace_migrate" => palace_migrate::handle_palace_migrate(state, args).await,
         "kg_assert" => handle_kg_assert(state, args).await,
         // The inverse of `kg_assert`: closes one (subject, predicate, object)
         // and leaves the pair's other objects live.

@@ -108,7 +108,8 @@ async fn tools_list_returns_all_tools() {
     // #7370 adds `chat_asset_capabilities`, `chat_asset_put`, `chat_asset_get`
     // — #7654: the count was left at 49 when they landed.
     // #9544 adds `palace_rename`; #9282 adds `palace_backup`.
-    assert_eq!(tools.len(), 54);
+    // #10094 adds `palace_migrate`.
+    assert_eq!(tools.len(), 55);
 }
 
 #[tokio::test]
