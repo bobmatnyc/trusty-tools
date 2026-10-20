@@ -89,7 +89,8 @@ pub mod mcp_disk;
 pub(crate) mod pause_resume_slot;
 // #9390: the catch-up host, and the resume verify pass it runs over that slot.
 pub(crate) mod catchup_host;
-// #9883: the lean default's coverage, one test per criterion.
+// #9883: the lean catch-up default — resolved snapshot plus live git status.
+pub(crate) mod catchup_lean;
 #[cfg(test)]
 mod catchup_lean_tests;
 pub(crate) mod resume_verify;
