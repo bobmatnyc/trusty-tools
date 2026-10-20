@@ -7,19 +7,21 @@
 //!
 //! Test: itself.
 
-use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use super::*;
 use crate::granted::{self, GrantedClient, GrantedError, RESOLVE_WAIT};
 
-/// A pipe holding `token`, its write end closed; the read end.
+/// A read-only fd on an unlinked file holding `token`: the shape tm's exec
+/// stub hands down (#9071 S10).
 fn token_fd(token: &str) -> OwnedFd {
-    let (reader, mut writer) = std::io::pipe().unwrap();
-    writer.write_all(token.as_bytes()).unwrap();
-    drop(writer);
-    OwnedFd::from(reader)
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("token");
+    std::fs::write(&path, token).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    OwnedFd::from(file)
 }
 
 /// One blocking resolve of `name` under `token`, off the runtime.

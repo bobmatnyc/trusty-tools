@@ -7,8 +7,9 @@
 //! never grants, revokes or starts a server. It links no tokio and no
 //! trusty-common, so any program can use it under the `api` feature.
 //! What: [`GrantedClient`] reads the grant token from the fd whose number is
-//! in [`TOKEN_FD_ENV`], puts the token back on that fd number for child
-//! processes (DOC-74 §10.5), checks the socket's directory and mode, sends
+//! in [`TOKEN_FD_ENV`] without consuming it, so the command's siblings and
+//! descendants read the same token (DOC-74 §10.5), checks the socket's
+//! directory and mode, sends
 //! one `secrets.resolve` frame and returns the [`SecretValue`]. [`resolve`]
 //! does the same through one process-wide client. Every failure is a
 //! [`GrantedError`]. Blocking, std only; an async caller wraps the call in
@@ -53,8 +54,8 @@ pub const RESOLVE_WAIT: Duration = Duration::from_secs(135);
 
 /// A handle that resolves keys under this process's exec grant.
 ///
-/// Why: the token pipe can be read once, so a client holds the token for
-/// every later resolve of the process.
+/// Why: reading the token checks the fd every time, so a client reads it
+/// once and holds it for every later resolve of the process.
 /// What: the socket path, the token (never printed; `Debug` shows
 /// `<redacted>`) and the resolve wait. No public constructor takes a token
 /// string, so a caller is never led to put one in argv or env.
@@ -73,18 +74,18 @@ impl GrantedClient {
     /// Why: `tm secrets exec` hands the token down on an inherited fd and
     /// puts only its number in the environment (Architect ruling Q1).
     /// What: reads the home directory as tm does (`$HOME`, else the user
-    /// database), then the fd number, then the token (without
-    /// blocking), and puts the token back on the same fd number so child
-    /// processes share the grant. Dials nothing.
+    /// database), then the fd number, then the token with `pread` at offset
+    /// 0. The fd stays open with its flags and offset unchanged, so every
+    /// other process holding it (a sibling, a child) reads the same token.
+    /// Dials nothing.
     ///
     /// # Errors
     ///
     /// [`GrantedError::HomeUnavailable`], [`GrantedError::NoGrant`],
-    /// [`GrantedError::TokenUnreadable`], [`GrantedError::InvalidToken`],
-    /// [`GrantedError::Rearm`].
+    /// [`GrantedError::TokenUnreadable`], [`GrantedError::InvalidToken`].
     ///
     /// Test: `granted_env_without_home_is_an_error`,
-    /// `granted_client_rearms_the_token_for_a_child`,
+    /// `granted_client_siblings_both_resolve`,
     /// `granted_client_resolves_through_the_real_binary`.
     pub fn from_env() -> Result<Self, GrantedError> {
         Self::from_env_parts(home_dir(), std::env::var_os(TOKEN_FD_ENV).as_deref())
@@ -94,21 +95,21 @@ impl GrantedClient {
     fn from_env_parts(home: Option<OsString>, fd: Option<&OsStr>) -> Result<Self, GrantedError> {
         let socket = default_socket(home)?;
         let fd = token::parse_token_fd(fd)?;
-        let token = token::take_inherited(fd)?;
+        let token = token::read_inherited(fd)?;
         Ok(Self::with_token(socket, token))
     }
 
     /// The client for the token on `fd`, which this call consumes.
     ///
-    /// What: the same read and format check as [`Self::from_env`], on an fd
-    /// the caller owns; the token is not put back, since `fd` closes here.
+    /// What: the same checks and read as [`Self::from_env`], on an fd the
+    /// caller owns; `fd` closes here. Fd 0-2 is [`GrantedError::NoGrant`].
     ///
     /// # Errors
     ///
-    /// As [`Self::from_env`], less `Rearm`.
+    /// As [`Self::from_env`].
     ///
     /// Test: `granted_client_checks_the_token_before_dialing`,
-    /// `granted_client_token_fd_errors_never_block`.
+    /// `granted_client_refuses_a_token_fd_of_the_wrong_shape`.
     pub fn from_token_fd(fd: OwnedFd) -> Result<Self, GrantedError> {
         let socket = default_socket(home_dir())?;
         let token = token::read_owned(fd)?;
@@ -191,11 +192,11 @@ fn default_socket(home: Option<OsString>) -> Result<PathBuf, GrantedError> {
 
 /// Read `key` under this process's grant, through one process-wide client.
 ///
-/// Why: the token pipe can be read once per process, so every call shares
-/// the client the first call built.
+/// Why: one client per process checks and reads the token fd once; every
+/// call shares the client the first call built.
 /// What: builds the client with [`GrantedClient::from_env`] on first use.
-/// If that failed, every later call returns the same error; it never reads
-/// the drained pipe again.
+/// If that failed, every later call returns the same error and the fd is
+/// not read again, so a later call never hides the first cause.
 ///
 /// # Errors
 ///

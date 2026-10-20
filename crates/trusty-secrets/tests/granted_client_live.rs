@@ -3,17 +3,19 @@
 //! Why: AC1 asks for a resolve "against a running service". The unit and
 //! socket tests use fakes or an in-process server on a fake process table;
 //! this one runs the real binary, the kernel's peer pid and the host's own
-//! process tree, and the fd hand-down `tm secrets exec` uses (AC11).
+//! process tree, and the fd hand-down `tm secrets exec` uses (AC11): a
+//! read-only fd on an unlinked file holding the token (#9071 S10).
 //! What: the test re-runs this binary in roles chosen by [`ROLE`]. The
 //! orchestrator starts the real server on `$HOME`'s default socket under a
 //! temp home, with the `file` backend, and seeds `API_KEY` (the `file`
 //! backend keeps no "agents may use" flag, so run it on a host that is not
 //! under an agent, as EVO is; under Claude Code the grant is refused with
-//! `agent_use_refused`). It spawns the `child` role holding a pipe on an inherited fd named by
-//! `TRUSTY_SECRETS_TOKEN_FD`, grants the child's pid, writes the token,
-//! closes the pipe and tells the child to go. The child calls
-//! `trusty_secrets::granted::resolve` twice, then spawns the `grandchild`
-//! role, which resolves through the token the child put back on the same fd.
+//! `agent_use_refused`). It spawns the `child` role holding a read-only fd
+//! on an unlinked, still empty file, named by `TRUSTY_SECRETS_TOKEN_FD`,
+//! grants the child's pid, writes the token through its own writable fd and
+//! tells the child to go. The child calls `trusty_secrets::granted::resolve`
+//! twice, then spawns the `grandchild` role twice, one after the other: two
+//! siblings, each resolving through the same inherited fd.
 //! Every path is under one short temp root, so no Keychain item, no real
 //! home and no `.env.local` is touched. A role reports pids and booleans
 //! only, never a token or a value.
@@ -23,6 +25,7 @@
 
 use std::io::{BufRead, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -44,6 +47,8 @@ const TEST: &str = "granted_client_resolves_through_the_real_binary";
 /// The env var naming a re-run's role; unset in the orchestrator.
 const ROLE: &str = "TS_GRANTED_ROLE";
 const OUT: &str = "TS_GRANTED_OUT";
+/// Which grandchild a re-run is, `0` or `1`.
+const NTH: &str = "TS_GRANTED_NTH";
 const VAULT: &str = "trusty/acme/web";
 const KEY: &str = "API_KEY";
 /// The seeded value; compared, never printed.
@@ -227,9 +232,10 @@ fn parent_pid() -> u32 {
     u32::try_from(unsafe { libc::getppid() }).unwrap()
 }
 
-/// Why: AC1 and AC11 against the real binary — a process holding the token
-/// fd resolves the stored value with `granted::resolve`, and its own child
-/// resolves too, through the token put back on the same fd number.
+/// Why: AC1 and AC11 against the real binary, and S10 AC1 — a process
+/// holding the token fd resolves the stored value with `granted::resolve`,
+/// and two of its children, siblings run one after the other, resolve too
+/// through the same inherited fd.
 /// Test: itself.
 #[test]
 #[ignore = "live: spawns the real binary and a process tree; run on EVO"]
@@ -241,18 +247,23 @@ fn granted_client_resolves_through_the_real_binary() {
             std::io::stdin().lock().read_line(&mut go).unwrap();
             let first = granted::resolve(&key);
             let second = granted::resolve(&key);
-            let grandchild = role("grandchild").status().unwrap();
+            let mut exits = Vec::new();
+            for n in 0..2 {
+                let status = role("grandchild").env(NTH, n.to_string()).status();
+                exits.push(status.unwrap().success());
+            }
             report(
                 "child",
                 &json!({"pid": std::process::id(), "first": outcome(&first),
-                    "second": outcome(&second), "grandchild_exit_ok": grandchild.success()}),
+                    "second": outcome(&second), "grandchildren_exit_ok": exits}),
             );
             return;
         }
         Ok("grandchild") => {
             let result = granted::resolve(&key);
+            let nth = std::env::var(NTH).unwrap();
             report(
-                "grandchild",
+                &format!("grandchild{nth}"),
                 &json!({"pid": std::process::id(), "ppid": parent_pid(),
                     "outcome": outcome(&result)}),
             );
@@ -263,9 +274,19 @@ fn granted_client_resolves_through_the_real_binary() {
     let live = live();
     let out = live.path("out");
     std::fs::create_dir(&out).unwrap();
-    let (reader, mut writer) = std::io::pipe().unwrap();
+    // The stub's shape: a read-only fd on an unlinked file; the token goes
+    // in through the writable fd once the grant exists.
+    let path = live.path("token");
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    let reader = std::fs::File::open(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
     let fd = reader.as_raw_fd();
-    // SAFETY: `F_SETFD` on a pipe end this test owns; the child inherits it.
+    // SAFETY: `F_SETFD` on an fd this test owns; the child inherits it.
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
     let mut child = role("child")
         .env("HOME", live.home())
@@ -277,7 +298,7 @@ fn granted_client_resolves_through_the_real_binary() {
         .unwrap();
     drop(reader);
     let token = grant(&live, child.id());
-    writer.write_all(token.as_bytes()).unwrap();
+    writer.write_all_at(token.as_bytes(), 0).unwrap();
     drop(writer);
     let mut go = child.stdin.take().unwrap();
     go.write_all(b"go\n").unwrap();
@@ -288,22 +309,29 @@ fn granted_client_resolves_through_the_real_binary() {
     println!("child: {got}");
     assert_eq!(got["first"], json!({"ok": true}));
     assert_eq!(got["second"], json!({"ok": true}));
-    assert_eq!(got["grandchild_exit_ok"], true);
-    let grandchild = read_report(&out, "grandchild");
-    println!("grandchild: {grandchild}");
-    assert_eq!(grandchild["outcome"], json!({"ok": true}));
-    assert_eq!(grandchild["ppid"], got["pid"]);
+    assert_eq!(got["grandchildren_exit_ok"], json!([true, true]));
+    let siblings: Vec<Value> = (0..2)
+        .map(|n| read_report(&out, &format!("grandchild{n}")))
+        .collect();
+    for sibling in &siblings {
+        println!("grandchild: {sibling}");
+        assert_eq!(sibling["outcome"], json!({"ok": true}));
+        assert_eq!(sibling["ppid"], got["pid"]);
+    }
 
     let resolves: Vec<Value> = live
         .records()
         .into_iter()
         .filter(|r| r["method"] == "secrets.resolve")
         .collect();
-    assert_eq!(resolves.len(), 3, "{resolves:?}");
-    for (record, pid) in resolves
-        .iter()
-        .zip([&got["pid"], &got["pid"], &grandchild["pid"]])
-    {
+    assert_eq!(resolves.len(), 4, "{resolves:?}");
+    let pids = [
+        &got["pid"],
+        &got["pid"],
+        &siblings[0]["pid"],
+        &siblings[1]["pid"],
+    ];
+    for (record, pid) in resolves.iter().zip(pids) {
         assert_eq!(record["decision"], "allow");
         assert_eq!(record["caller_pid"], *pid);
     }

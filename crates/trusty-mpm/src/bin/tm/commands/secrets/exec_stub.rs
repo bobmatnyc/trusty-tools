@@ -11,7 +11,8 @@
 //!    ends the stub: never a partial environment.
 //! 3. Send every value to tm on `--report-fd` (tm's scrubber needs them,
 //!    Architect ruling Q2) and close it.
-//! 4. Put the token on a fresh pipe whose fd number goes in
+//! 4. Put the token in a read-only fd on an unlinked file
+//!    ([`exec_token::token_file`], #9071 S10) whose fd number goes in
 //!    [`TOKEN_FD_ENV`] (tier 3, ruling Q1), then exec the command with each
 //!    `--env` value set. tm writes the `--stdin` value.
 //!
@@ -34,7 +35,8 @@ use trusty_secrets::SecretKey;
 use trusty_secrets::api::methods::{ResolveRequest, ResolveResponse, method};
 use trusty_secrets::server::OnDemandSecrets;
 
-use super::exec_proc::{clear_cloexec, set_cloexec};
+use super::exec_proc::set_cloexec;
+use super::exec_token;
 use super::exec_wire::{self, ExecSpec, TOKEN_FD_ENV};
 
 /// How long the stub waits for tm to write the token.
@@ -161,15 +163,14 @@ async fn resolve(client: &OnDemandSecrets, token: &str, key: &SecretKey) -> Resu
     Ok(resolved.value.expose().to_owned())
 }
 
-/// A fresh pipe holding `token`, its read end kept across exec; its fd.
+/// The fd the command inherits for `token`: read-only, on an unlinked file
+/// in the temp dir, kept across exec (#9071 S10).
 ///
-/// What: the token is 64 bytes, under the pipe buffer, so the write never
-/// blocks; the write end is closed, so the command reads the token to EOF.
-fn token_for_command(token: &str) -> Option<i32> {
-    let (reader, mut writer) = std::io::pipe().ok()?;
-    writer.write_all(token.as_bytes()).ok()?;
-    drop(writer);
-    let fd = reader.into_raw_fd();
-    clear_cloexec(fd).ok()?;
-    Some(fd)
+/// What: [`exec_token::token_file`] under `temp_dir()`; any failed step is
+/// `None`, so the stub runs nothing (never a fallback to a pipe).
+/// Test: `stub_token_fd_serves_two_sibling_readers`,
+/// `stub_token_fd_is_an_unlinked_read_only_file`.
+pub(super) fn token_for_command(token: &str) -> Option<i32> {
+    let fd = exec_token::token_file(&std::env::temp_dir(), token, None).ok()?;
+    Some(fd.into_raw_fd())
 }
