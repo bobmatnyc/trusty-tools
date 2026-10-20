@@ -3,7 +3,7 @@ name: self-improvement-loop
 description: "Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now"
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: low
 ---
@@ -141,7 +141,8 @@ is `improved`, 2 or more is `regressed`. Status: `open`, n=0.
 unmet, saying a background monitor would wake it. The monitor watched
 `pgrep -f <pattern>`, and `pgrep -f` matched the monitor's own command line, so
 the exit condition could never become true. Hypothesis: waiting on your own
-conditions with `tm wait --for run|file`, or where `pgrep` is unavoidable the
+conditions with `tm wait --for run|file` (a bounded shell loop when
+`command -v tm` finds it absent), or where `pgrep` is unavoidable the
 self-excluding `pgrep -f '[c]argo install'` form or a pid captured at spawn,
 drives parks to zero. Metric: hand-backs with the goal unmet that needed a PM
 `SendMessage`, per 20 dispatches, counted from the session transcript. Baseline:

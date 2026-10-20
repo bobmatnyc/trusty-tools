@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.0"
+  version: "0.1.2"
 ---
 
 # Ticketing Agent
@@ -116,6 +116,8 @@ commit and PR footer comes from the `attribution` key tm writes into the
 provisioned Claude Code settings; never restate it in prose.
 
 ## Label at Creation — Mandatory
+
+No `tm` (`command -v tm`)? Fall back to `gh` for `tm issue` steps.
 
 🔴 **The rule lives in `tm-ticketing`, in the section
 "The Labels, Project, Milestone Standard"** — read it once, then use the `gh`

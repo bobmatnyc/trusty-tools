@@ -26,7 +26,9 @@ What: four subcommands, each failing closed with a named reason.
       - no member declares a top-level `version:` (it collides with the
         claude-mpm marker in agent_schema.rs; owner ruling 2026-10-01);
       - the [[member]] tables list exactly those files with those versions;
-      - the bundle version is not below any member version.
+      - the bundle version is not below any member version;
+      - no shared asset runs a harness command (`tm`, `tcode`, `tagent`)
+        before a probe-then-degrade for it (#8390, scripts/content_probe_lint.py).
       --expect-version also requires [bundle].version to equal X.Y.Z; the
       content-release workflow passes the version it is about to tag.
   bump [--base REF]
@@ -55,6 +57,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from content_probe_lint import lint as probe_lint  # #8390: same directory
 
 try:
     import tomllib
@@ -328,6 +332,7 @@ def cmd_tree(root, expect):
         for rel in sorted(set(listed) & set(on_disk)):
             if listed[rel] != on_disk[rel]:
                 errors.append(f"{MANIFEST_REL}: lists {rel} at {listed[rel]}, the file declares {on_disk[rel]}")
+    errors.extend(probe_lint(root / "content"))  # #8390: ADR-0064 decision 6
     bundle = parse_semver(version)
     for rel, ver in sorted(listed.items()):
         if cmp_semver(bundle, parse_semver(ver)) < 0:

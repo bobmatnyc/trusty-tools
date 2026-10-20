@@ -3,7 +3,7 @@ name: rust-delivery-workflow
 description: "Rust delivery process under agent dispatch: commit before the gate chain, match the local toolchain to CI's clippy pin, cap concurrent cargo builds, keep gate output to a verdict, and batch installs before live verification. Use when planning or running the gates for a Rust change, not when a build feels slow."
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: low
 ---
@@ -99,7 +99,8 @@ the 16-core reference host, 103 s against a target directory another worktree
 had warmed, and 17 s from that path again. `tm doctor`'s `rust_build_env` row
 prints the whole prefix — `CARGO_TARGET_DIR=<dir> CARGO_BUILD_JOBS=<n>
 [RUSTC_WRAPPER=sccache] SKIP_UI_BUILD=1` — so take it from there rather than
-assembling it by hand.
+assembling it by hand. If `command -v tm` finds `tm` absent, assemble it from
+the values above.
 
 ## 5. Gate-Output Economy
 

@@ -4,7 +4,7 @@ role: base-engineer
 extends: base-agent
 skills: [documentation-style]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # BASE-ENGINEER — Foundation for all engineer agents
@@ -282,7 +282,8 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
       unread (#7564).
 - [ ] Renamed/added a test → run this project's own `Test:`-pointer lint if
       it ships one; new/renamed doctor check, MCP tool, bundled agent/skill,
-      or CLI verb → `tm generate capabilities` (#7635).
+      or CLI verb → `tm generate capabilities` (#7635; report it if
+      `command -v tm` is absent).
 - [ ] Changed a shared roster asset under `.../assets/agents/` → run this
       project's own agent-asset consistency check if it ships one (#7718).
 

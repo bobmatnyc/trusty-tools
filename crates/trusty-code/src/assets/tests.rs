@@ -1017,3 +1017,34 @@ fn supporting_agents_resolve_with_their_declared_tool_grant() {
         );
     }
 }
+
+/// #8390 acceptance 4: trusty-code keeps no asset tree of its own. Its agents
+/// and skills moved to `content/` with history (#9013), so a Markdown, TOML or
+/// JSON file reappearing under `src/` is a second roster.
+/// Test: this test.
+#[test]
+fn the_crate_source_tree_holds_no_asset_files() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read src") {
+            let path = entry.expect("entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out);
+            } else if !name.ends_with(".rs") {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    let src = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join("crates/trusty-code/src");
+    let mut strays = Vec::new();
+    walk(&src, &mut strays);
+    assert!(
+        strays.is_empty(),
+        "assets belong in content/ (ADR-0064, #8390), found: {strays:?}"
+    );
+}

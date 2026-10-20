@@ -3,7 +3,7 @@ name: rust-build-performance
 description: "Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs."
 user-invocable: false
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
 category: agent-reference
 effort: low
 ---
@@ -110,7 +110,7 @@ shared `CARGO_TARGET_DIR` reuses registry dependencies; path crates still
 rebuild because their absolute source paths differ. Shared builds serialize on
 Cargo's lock: apply the ownership and wait bounds in §2. `rust-delivery-workflow`
 §4 documents setup; use the `tm doctor` `rust_build_env` prefix, not a
-hand-assembled one.
+hand-assembled one, unless `command -v tm` finds `tm` absent.
 
 Never delete live build caches. The PM reclaims merged, unowned worktrees via
 `tm session prune-worktrees --merged-prs --force` (#5791, #2919); it is not

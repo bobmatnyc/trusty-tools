@@ -3,7 +3,7 @@ name: git-workflow
 description: "Essential Git patterns for effective version control, eliminating redundant Git guidance per agent."
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: low
 ---
@@ -157,7 +157,8 @@ through leaves nothing to restore.
 Under trusty-mpm orchestration this is the PM's pattern, not a dispatched
 agent's: worktree removal is PM-executed via `tm session prune-worktrees`, and
 `tm hook --pm-guard` denies an agent's `git worktree remove` (#5791). An agent
-that needs a clean tree asks the PM for one.
+that needs a clean tree asks the PM for one. Without `tm` (`command -v tm`
+absent), the PM removes the tree by hand.
 
 ### Stashing Work
 

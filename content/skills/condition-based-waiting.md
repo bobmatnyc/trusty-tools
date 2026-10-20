@@ -3,7 +3,7 @@ name: condition-based-waiting
 description: "Replace arbitrary timeouts with condition polling for reliable async tests"
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: low
 ---
@@ -116,6 +116,11 @@ restart it just to change timeout settings. Capture its terminal exit status,
 or append an unconditional `EXIT=` sentinel to its unique log. Wait for that
 sentinel, never a success word such as `passed`; process exit alone does not
 prove success. See #8021.
+
+Check `command -v tm` first; if `tm` is absent, poll the same condition in a
+bounded shell loop (`kill -0 <pid>`, `test -f <file>`, or one
+`gh pr view <n> --json statusCheckRollup` read per pass) that sleeps between
+checks and exits before the ~120s auto-background ceiling.
 
 **Use `tm wait` instead of a fixed timer.** It polls the actual condition in a
 bounded slice and returns before the harness's ~120s auto-background ceiling,
