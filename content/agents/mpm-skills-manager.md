@@ -7,7 +7,7 @@ extends: base-agent
 skills: [tm-capabilities]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # MPM Skills Manager
@@ -62,7 +62,8 @@ logged as a collision since there's no competing source name to blame; (b)
 deleting a skill's source file from `~/.trusty-mpm/skills/` does NOT retract
 copies already deployed into projects — orphaning is by design (mirrors how a
 bundled skill removed from the portfolio also stays deployed until an explicit
-`tm catalog apply --prune`), not a bug to fix.
+`tm catalog apply --prune`), not a bug to fix. If `command -v tm` is absent,
+report the stale copies instead.
 
 **The tm-global roster deploys the user tier too.** `managed_config::ensure_managed_config_dir`
 (daemon-managed sessions) and `standalone::global_config::ensure_global_config_dir`

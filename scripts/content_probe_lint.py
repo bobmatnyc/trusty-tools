@@ -7,11 +7,12 @@ Why: ADR-0064 decision 6 — any agent or skill must work with any harness. An
 
 What: `lint(content_dir)` returns one error per shared asset whose first
   command of a harness comes before any probe-then-degrade for that harness.
-  - A command is a fenced code line that starts with the harness binary
-    (after an optional `$ ` prompt and `VAR=value` prefixes), or an inline
-    code span `<bin> <sub>…` right after "run", "use", "call", "invoke",
-    "execute", "try" or "poll with". A span in a sentence that says "never",
-    "not" or "n't" before it is a prohibition, not a command.
+  - A command is any fenced code line naming the harness binary followed by a
+    subcommand or flag, wherever it sits on the line (after `&&`, `;`, `$(`),
+    or any inline code span `<bin> <sub>…`. A span is a prohibition, not a
+    command, only when a negation governs it directly: "never", "not", "do
+    not" or "n't", optionally followed by one verb, right before the span in
+    its own sentence (sentences split on `.`, `!`, `?` and `;`).
   - A probe is a line naming `command -v <bin>`, `<bin> --version` or
     `<bin> --help` in a paragraph (or fenced block) that also says what to do
     without it: "absent", "missing", "unavailable", "not installed",
@@ -42,9 +43,15 @@ NOT_TM = ("instructions/trusty-code/", "instructions/trusty-review/", "instructi
 
 BIN = "|".join(HARNESSES)
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
-FENCED_CMD_RE = re.compile(rf"^\s*(?:\$\s+)?(?:[A-Z_][A-Z0-9_]*=\S+\s+)*({BIN})(?=\s+\S)")
-INLINE_CMD_RE = re.compile(rf"(?i:\b(?:run|use|call|invoke|execute|try|poll with)\s+)`(({BIN}) [a-z][^`]*)`")
-NEGATION_RE = re.compile(r"(?i)\b(never|not|don't|do not|doesn't|cannot)\b|n't\b")
+# #8390 critic round: anywhere on a fenced line, not only at its start.
+FENCED_CMD_RE = re.compile(rf"(?<![\w./-])({BIN}) +[a-z-][^;&|)#`]*")
+INLINE_CMD_RE = re.compile(rf"`(({BIN}) [a-z][^`]*)`")
+# A negation that governs the span: it ends the sentence prefix, at most one
+# verb between it and the span.
+GOVERNING_NEGATION_RE = re.compile(
+    r"(?i)(?:\b(?:never|not|cannot)|n't)\s+(?:[a-z]+\s+)?$"
+)
+SENTENCE_BREAK_RE = re.compile(r"[.!?;]\s|;")
 DEGRADE_RE = re.compile(r"(?i)absent|missing|unavailable|not installed|not available|not found|fall(s)? ?back|otherwise|\|\|")
 
 
@@ -70,13 +77,13 @@ def commands(lines):
             in_fence = not in_fence
             continue
         if in_fence:
-            m = FENCED_CMD_RE.match(line)
+            m = FENCED_CMD_RE.search(line)
             if m:
-                yield num, m.group(1), line.split("#", 1)[0].strip().lstrip("$ ").strip()
+                yield num, m.group(1), m.group(0).strip()
             continue
         for m in INLINE_CMD_RE.finditer(line):
-            sentence = re.split(r"[.!?]\s", line[: m.start()])[-1]
-            if not NEGATION_RE.search(sentence):
+            sentence = SENTENCE_BREAK_RE.split(line[: m.start()])[-1]
+            if not GOVERNING_NEGATION_RE.search(sentence):
                 yield num, m.group(2), m.group(1)
 
 

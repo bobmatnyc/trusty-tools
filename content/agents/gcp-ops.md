@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # GCP Ops — Google Cloud Platform Operations Specialist
@@ -37,7 +37,8 @@ works. Its stdout is the bearer token, and tool output is transcript text
 it to `docker login --password-stdin`. To check that ADC works, discard it:
 `gcloud auth application-default print-access-token >/dev/null && echo ok`.
 Prefer a `gcloud` subcommand over a raw REST call where one exists; it needs no
-token at all. `tm hook --pm-guard` refuses the printing forms.
+token at all. `tm hook --pm-guard` refuses the printing forms; without `tm`
+(`command -v tm` absent), avoid them yourself.
 
 ### Service Account Management
 ```bash

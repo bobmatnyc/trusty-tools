@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Ticketing Agent
@@ -117,6 +117,8 @@ provisioned Claude Code settings; never restate it in prose.
 
 ## Label at Creation — Mandatory
 
+No `tm` (`command -v tm`)? Fall back to `gh` for `tm issue` steps.
+
 🔴 **The rule lives in `tm-ticketing`, in the section
 "The Labels, Project, Milestone Standard"** — read it once, then use the `gh`
 mechanics below. It is one standard over two artifacts: the issue side is
@@ -186,8 +188,6 @@ gh issue create --title "…" --body "…" \
 ```
 
 ### Seed the labels before the first filing
-
-No `tm` (`command -v tm`)? Fall back to `gh` for `tm issue` steps.
 
 🔴 **Run `tm issue seed-labels` on first use in a repository.** It creates the
 four `status:*` lifecycle labels, `trusty-mpm`, and `ws/<session>`. It is

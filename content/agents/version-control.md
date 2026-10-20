@@ -7,7 +7,7 @@ extends: base-ops
 skills: [git-workflow]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
 metadata:
-  version: "0.1.2"
+  version: "0.1.3"
 ---
 
 # Version Control Agent
@@ -88,8 +88,8 @@ On a Refs-only project — this repo, whose root `CLAUDE.md` says fix PRs use
 and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
 the body onto an open PR, and do not arm auto-merge while a hit stands.
 `tm pr open` runs the same check itself and exits 2 without calling `gh`, so
-this grep is what covers the hand-assembled `gh` fallback and every later
-`gh pr edit`.
+this grep covers the `gh` fallback (`command -v tm` absent) and every
+later `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
@@ -175,7 +175,8 @@ leaves the remote ref stranded too.
 
 Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
-Fallback when `command -v tm` finds none (no merge gate): (1) once `statusCheckRollup`
+
+Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
 lists a check (or the brief says the repo has no CI) and none failed or running
 that the brief does not waive, `gh pr merge <n> --squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`
