@@ -255,6 +255,11 @@ impl DaemonState {
         let _ = self.event_tx.send(value);
     }
 
+    /// The trusty-events producer hook records are projected to (#6849).
+    pub fn action_events(&self) -> &crate::daemon::action_events::ActionEvents {
+        &self.action_events
+    }
+
     /// Subscribe to the live hook-event broadcast stream.
     ///
     /// Why: SSE handlers need a fresh receiver per connection. Wrapping the

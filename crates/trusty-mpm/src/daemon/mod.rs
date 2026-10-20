@@ -9,6 +9,8 @@
 //! Test: the modules carry their own `#[cfg(test)]` suites; `cargo test
 //! -p trusty-mpm-daemon` exercises them.
 
+// #6849: hook records projected onto the trusty-events bus (DOC-73 §3.4).
+pub mod action_events;
 pub mod api;
 pub mod audit;
 pub mod bug_report;
