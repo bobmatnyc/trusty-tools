@@ -111,8 +111,29 @@ fn run_matrix(content: &Path) -> Matrix {
 /// The `manifest.toml` row: the tree's `schema_major` is one the oldest
 /// supported binary reads.
 fn check_schema_floor(content: &Path, rows: &mut Rows) {
-    let _ = content;
-    rows.entry("manifest.toml".to_owned()).or_default();
+    const ROW: &str = "manifest.toml";
+    rows.entry(ROW.to_owned()).or_default();
+    let declared = std::fs::read_to_string(content.join(ROW))
+        .map_err(|e| e.to_string())
+        .and_then(|t| t.parse::<toml::Table>().map_err(|e| e.to_string()))
+        .map(|t| {
+            t.get("bundle")
+                .and_then(|b| b.get("schema_major"))
+                .and_then(toml::Value::as_integer)
+        });
+    match declared {
+        Ok(Some(major)) if major <= OLDEST_SUPPORTED.schema_major => {}
+        Ok(Some(major)) => fail(
+            rows,
+            ROW,
+            format!(
+                "schema_major {major}; {} reads schema_major {} or older",
+                OLDEST_SUPPORTED.binary, OLDEST_SUPPORTED.schema_major
+            ),
+        ),
+        Ok(None) => fail(rows, ROW, "no [bundle].schema_major"),
+        Err(e) => fail(rows, ROW, format!("unreadable: {e}")),
+    }
 }
 
 /// Packages `content` with the release packager and resolves the bundle as an
@@ -147,11 +168,36 @@ fn install_bundle(content: &Path, work: &Path) -> Result<ResolvedContent, String
 
 /// Grades every file of the resolved bundle; `work` holds the deploy targets.
 fn grade_bundle(content: &ResolvedContent, work: &Path, rows: &mut Rows) {
-    let _ = work;
+    let mut files = BTreeMap::new();
     for class in ["agents", "skills", "instructions"] {
-        for key in content.list(class).unwrap_or_default() {
-            rows.entry(key).or_default();
+        match content.list(class) {
+            Ok(keys) => {
+                for key in keys {
+                    match content.read_to_string(&key) {
+                        Ok(text) => {
+                            files.insert(key, text);
+                        }
+                        Err(e) => fail(rows, &key, format!("unreadable: {e}")),
+                    }
+                }
+            }
+            Err(e) => fail(rows, class, format!("not listed: {e}")),
         }
+    }
+    for (key, text) in &files {
+        rows.entry(key.clone()).or_default();
+        if let Err(why) = parse_asset(key, text) {
+            fail(rows, key, why);
+        }
+    }
+    deploy_agents(content, &files, work, rows);
+    deploy_skills(&files, work, rows);
+    if let Err(e) = FrameworkContent::load(content) {
+        fail(
+            rows,
+            "instructions/",
+            format!("the launch loader refused it: {e}"),
+        );
     }
 }
 
