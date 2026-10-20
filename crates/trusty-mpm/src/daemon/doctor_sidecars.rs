@@ -226,10 +226,12 @@ pub(super) async fn probe_health(
 /// `Unknown` when no worker block is present (an older daemon, or an
 /// unreadable body — we cannot claim health we did not observe) and equally
 /// when the daemon's palace-lock stall detector is stopped or absent, `Ok`
-/// otherwise.
+/// otherwise. A held palace lock past the stall line is `Warn`, an unreadable
+/// lock block `Unknown` (#8751, see `doctor_lock_stall`).
 /// Test: `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
 /// `health_body_without_worker_block_is_unknown`,
-/// `memory_without_stall_tracking_is_unknown_not_warn`.
+/// `memory_without_stall_tracking_is_unknown_not_warn`,
+/// `memory_stalled_palace_lock_is_not_ok`.
 fn interpret_health(
     check: &str,
     service: &str,
@@ -308,6 +310,18 @@ fn interpret_health(
                  reporting: {detail} — whether a palace lock is wedged is UNKNOWN"
             ),
         );
+    }
+
+    // #8751: a palace lock held past the stall line is not "workers progressing",
+    // even while the daemon's own wedge line (`wedged`) has not tripped.
+    if let Some(stalled) = super::doctor_lock_stall::stalled_lock_check(
+        check,
+        service,
+        addr,
+        body,
+        super::doctor_lock_stall::lock_stall_threshold(),
+    ) {
+        return stalled;
     }
 
     // Issue #4005 explicitly calls out post-restart warm-up: it is a normal
