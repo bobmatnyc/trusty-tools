@@ -258,6 +258,13 @@ pub async fn serve_with_shutdown(
     }
     // #8994 S2c: decommission's removals reach the worktree ledger.
     services::worktree_removal_ledger::install(&state).await;
+    // #8928 step 3: the sccache unix-socket server, outside any sandbox, when
+    // `build.sccache` is true; never from a gated (scratch-root) daemon.
+    if host_state_refusal(&state).is_none()
+        && let Some(home) = state.user_home()
+    {
+        tokio::task::spawn_blocking(move || crate::core::sccache_socket::start_and_log(&home));
+    }
     // #8233 review round 2 (finding 4): sweep launch specs abandoned by an
     // earlier process. Each carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
     // cleartext, and the per-launch sweep only runs when a NEXT launch happens.

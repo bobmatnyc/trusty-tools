@@ -216,6 +216,19 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          (issue #6868).",
     ),
     (
+        "sccache_socket",
+        "The sccache unix-socket server that sandboxed cargo builds reach (#8928 step 3). Not \
+         applicable (`Ok`) unless `build.sccache: true` in `~/.trusty-tools/trusty-mpm/config.yaml`; \
+         then the tm daemon starts `sccache --start-server` at startup with \
+         `SCCACHE_SERVER_UDS=~/.trusty-mpm/sccache.sock` and no idle timeout, outside any sandbox, \
+         and a sandboxed client sets `SCCACHE_SERVER_UDS=<socket> SCCACHE_CLIENT_SIDE=1`. `Ok` when \
+         a server answers a connect on the socket; `Warn` when `sccache` is not on PATH or the \
+         socket is missing or stale (remedy `tm restart`); `Fail` when the installed sccache \
+         predates 0.9.0, which first served `SCCACHE_SERVER_UDS`; UNKNOWN — never `Ok` — when the \
+         config, `sccache --version` (3 s bound) or the socket path cannot be read. Read-only: a \
+         connect is its only action, and nothing writes `~/.cargo/config.toml`.",
+    ),
+    (
         "base_clone",
         "The base clone each live worktree resolves through still has its git identity — \
          fails naming the base path and how many worktrees hang off it (issue #3605).",

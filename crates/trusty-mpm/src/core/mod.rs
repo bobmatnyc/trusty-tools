@@ -355,6 +355,8 @@ pub mod savings_repair;
 // "nothing folded" decline to one warning per project.
 pub mod savings_sidecar;
 pub mod scaffold_gitignore;
+// #8928 step 3: the sccache unix-socket server for sandboxed builds.
+pub mod sccache_socket;
 pub mod session;
 pub mod session_assets;
 pub mod session_launch;

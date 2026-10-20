@@ -245,6 +245,9 @@ use doctor_pty_headroom::check_pty_headroom;
 #[path = "doctor_rust_build_env.rs"]
 mod doctor_rust_build_env;
 use doctor_rust_build_env::check_rust_build_env;
+// #8928 step 3: the sccache unix-socket server sandboxed builds reach.
+#[path = "doctor_sccache_socket.rs"]
+mod doctor_sccache_socket;
 
 // #6535: the cloud log drain runs inside the daemon and writes to somebody
 // else's bucket, so nothing else on screen says whether it is on, where it
@@ -649,6 +652,7 @@ pub(crate) async fn run_doctor_with_claims(
     // `tm doctor --fix` creates the directory and seeds the `build:` section,
     // and neither ever touches `~/.cargo/config.toml`.
     checks.push(check_rust_build_env(project_dir, &home));
+    checks.push(doctor_sccache_socket::check_sccache_socket(&home));
     // #3605: and this is the identity half — a live worktree keeps its files
     // when the base clone behind it loses its git internals, so every git
     // command there fails while both probes above stay green.
