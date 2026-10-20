@@ -307,8 +307,19 @@ fn spawn_stub(dir: &tempfile::TempDir, stub: Stub) -> StubBus {
                 Stub::HangUp => return,
             }
             let _ = done_rx.await;
-            // A write to a socket whose peer closed fails with EPIPE.
-            let closed = conn.write_all(b"\n").await.is_err();
+            // A write to a socket whose peer closed fails with EPIPE. Polled:
+            // macOS sets FD_CLOEXEC after `socket()`, so a child another test
+            // spawns in that window can hold the probe's fd until it exits.
+            let deadline = tokio::time::Instant::now() + CLOSE_BOUND;
+            let closed = loop {
+                if conn.write_all(b"\n").await.is_err() {
+                    break true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            };
             let _ = closed_tx.send(closed);
             return;
         }
@@ -330,10 +341,13 @@ async fn read_params(bus: &mut StubBus) -> serde_json::Value {
         .expect("the stub reported the request")
 }
 
+/// How long the stub waits to see the probe's connection close.
+const CLOSE_BOUND: Duration = Duration::from_secs(10);
+
 /// Whether the probe's connection was closed once it returned.
 async fn closed_after_probe(bus: StubBus) -> bool {
     let _ = bus.probe_done.send(());
-    tokio::time::timeout(Duration::from_secs(1), bus.peer_closed)
+    tokio::time::timeout(CLOSE_BOUND + Duration::from_secs(1), bus.peer_closed)
         .await
         .expect("the stub reported")
         .expect("the stub answered")
