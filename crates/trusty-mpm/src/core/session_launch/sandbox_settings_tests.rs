@@ -24,7 +24,6 @@ impl Fx {
         let mut inputs = SandboxInputs::new(root.join("ws"), root.join("home"));
         inputs.tmux_socket = Some(PathBuf::from("/private/tmp/tmux-502/tm-ws-abc"));
         inputs.mpm_socket = Some(root.join("Application Support/trusty-mpm.sock"));
-        inputs.sccache_socket = Some(root.join("home/.trusty-mpm/sccache.sock"));
         inputs.cargo_target_dir = Some(root.join("home/.trusty-tools/cargo-target/o/r"));
         std::fs::create_dir_all(inputs.workspace.join(".claude")).expect("mkdir ws");
         let user = root.join("home/.trusty-tools/trusty-mpm/claude-config");
@@ -71,17 +70,16 @@ fn the_pm_policy_names_every_socket_and_no_local_binding() {
     assert_eq!(sandbox["allowUnsandboxedCommands"], json!(false));
     assert_eq!(sandbox["failIfUnavailable"], json!(true));
     let sockets = strings(&policy, "/sandbox/network/allowUnixSockets");
-    let want = [
-        &fx.inputs.tmux_socket,
-        &fx.inputs.mpm_socket,
-        &fx.inputs.sccache_socket,
-    ];
+    let want = [&fx.inputs.tmux_socket, &fx.inputs.mpm_socket];
     for path in want.into_iter().flatten() {
         assert!(sockets.contains(&path.display().to_string()), "{sockets:?}");
     }
     // The socket path with a space is kept verbatim, as one entry.
     assert!(sockets.iter().any(|s| s.contains("Application Support")));
-    assert!(sandbox["network"].get("allowLocalBinding").is_none(), "Q2");
+    assert!(
+        sandbox["network"].get("allowLocalBinding").is_none(),
+        "the tm CLI uses the daemon socket, never a local port"
+    );
     assert!(
         sandbox["network"].get("strictAllowlist").is_none(),
         "user tier only"
@@ -89,7 +87,7 @@ fn the_pm_policy_names_every_socket_and_no_local_binding() {
     let allow_write = strings(&policy, "/sandbox/filesystem/allowWrite");
     let target = fx.inputs.cargo_target_dir.as_ref().expect("target");
     assert!(allow_write.contains(&target.display().to_string()));
-    // Exact files only — never a `.claude/**` rule (Q3).
+    // Exact files only — never a blanket `.claude/**` rule (#8928).
     let deny = strings(&policy, "/permissions/deny");
     assert!(deny.iter().all(|d| !d.contains(".claude/**")), "{deny:?}");
     let settings = format!("Edit(/{})", fx.file("settings.local.json").display());
@@ -111,7 +109,7 @@ fn the_agent_policy_has_no_tmux_socket() {
         !sockets.contains(&tmux.display().to_string()),
         "{sockets:?}"
     );
-    assert_eq!(sockets.len(), 2, "{sockets:?}");
+    assert_eq!(sockets.len(), 1, "{sockets:?}");
     // Everything else matches the PM policy.
     let mut pm_rest = pm.clone();
     pm_rest["sandbox"]["network"]["allowUnixSockets"] = json!(null);

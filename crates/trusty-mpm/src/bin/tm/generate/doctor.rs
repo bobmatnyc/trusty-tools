@@ -217,11 +217,13 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "sccache_socket",
-        "The sccache unix-socket server that sandboxed cargo builds reach (#8928 step 3). Not \
+        "The sccache unix-socket server for UNSANDBOXED cargo builds (#8928 step 3). Not \
          applicable (`Ok`) unless `build.sccache: true` in `~/.trusty-tools/trusty-mpm/config.yaml`; \
          then the tm daemon starts `sccache --start-server` at startup with \
          `SCCACHE_SERVER_UDS=~/.trusty-mpm/sccache.sock` and no idle timeout, outside any sandbox, \
-         and a sandboxed client sets `SCCACHE_SERVER_UDS=<socket> SCCACHE_CLIENT_SIDE=1`. `Ok` when \
+         and an unsandboxed client sets `SCCACHE_SERVER_UDS=<socket> SCCACHE_CLIENT_SIDE=1`. A \
+         sandboxed session never reaches it — the server runs the compiler a client names, \
+         outside the sandbox — and builds with `RUSTC_WRAPPER=\"\"` instead. `Ok` when \
          a server answers a connect on the socket; `Warn` when `sccache` is not on PATH or the \
          socket is missing or stale (remedy `tm restart`); `Fail` when the installed sccache \
          predates 0.9.0, which first served `SCCACHE_SERVER_UDS`; UNKNOWN — never `Ok` — when the \

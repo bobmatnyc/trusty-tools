@@ -1,13 +1,14 @@
 //! Per-role Claude Code sandbox settings (#8928 step 5).
 //!
-//! Why: #8928 moves PM and agent sessions onto the Claude Code sandbox. Owner
-//! rulings 2026-09-30: the policy lives in the project `.claude/settings.json`
-//! (Q1), with `network.strictAllowlist` and the credentials deny in tm's
-//! user-level settings file, because project settings ignore both; the tm CLI
-//! reaches the daemon over `trusty-mpm.sock` with no `allowLocalBinding` (Q2);
-//! there is no `.claude/**` Write deny (Q3); one tmux server per workspace.
-//! The spike's `role-pm.json` / `role-agent.json` / `role-architect.json`
-//! are the templates (`_spikes/sandbox-2026-09-30/REPORT.md` §7).
+//! Why: #8928 moves PM and agent sessions onto the Claude Code sandbox. The
+//! owner's 2026-09-30 rulings on #8928: the policy lives in the project
+//! `.claude/settings.json`, with `network.strictAllowlist` and the credentials
+//! deny in tm's user-level settings file, because project settings ignore
+//! both; the tm CLI reaches the daemon over `trusty-mpm.sock` with no
+//! `allowLocalBinding`; there is no blanket `.claude/**` Write deny; and there
+//! is one tmux server per workspace. The sccache socket is never allowed: the
+//! sccache server runs whatever compiler a client names, outside the sandbox,
+//! so sandboxed sessions build with `RUSTC_WRAPPER` empty (no sccache).
 //! What: [`project_policy`] and [`user_policy`] render the two tiers for a
 //! [`SandboxRole`] from explicit [`SandboxInputs`]; [`write_sandbox_settings`]
 //! merges them into the project file (through `merge_settings`, under the
@@ -32,7 +33,7 @@ pub enum SandboxRole {
     Pm,
     /// A dispatched agent: the PM policy without the tmux socket.
     Agent,
-    /// The Architect: `sandbox.enabled: false` (spike `role-architect.json`).
+    /// The Architect: `sandbox.enabled: false` (it runs unsandboxed, #8928).
     Architect,
 }
 
@@ -48,8 +49,6 @@ pub struct SandboxInputs {
     pub tmux_socket: Option<PathBuf>,
     /// The daemon's `trusty-mpm.sock`.
     pub mpm_socket: Option<PathBuf>,
-    /// The sccache server's unix socket (step 3).
-    pub sccache_socket: Option<PathBuf>,
     /// The shared `CARGO_TARGET_DIR`, which cargo must be able to write.
     pub cargo_target_dir: Option<PathBuf>,
 }
@@ -65,7 +64,7 @@ impl SandboxInputs {
     }
 }
 
-/// Hosts a sandboxed session may reach (spike `role-pm.json`).
+/// Hosts a sandboxed session may reach (#8928).
 pub const ALLOWED_DOMAINS: [&str; 6] = [
     "github.com",
     "api.github.com",
@@ -75,8 +74,8 @@ pub const ALLOWED_DOMAINS: [&str; 6] = [
     "registry.npmjs.org",
 ];
 
-/// Environment variables a sandboxed command never sees (ruling Q1: delivered
-/// through the user tier). `GH_TOKEN`/`GITHUB_TOKEN` are left out: `gh` in the
+/// Environment variables a sandboxed command never sees, delivered through the
+/// user tier because project settings drop the credentials deny (#8928). `GH_TOKEN`/`GITHUB_TOKEN` are left out: `gh` in the
 /// sandbox authenticates with them when a spawn sets them.
 pub const DENIED_ENV_VARS: [&str; 11] = [
     "ANTHROPIC_API_KEY",
@@ -99,11 +98,15 @@ pub const DENIED_ENV_VARS: [&str; 11] = [
 /// `autoAllowBashIfSandboxed` and `enableWeakerNetworkIsolation` true,
 /// `allowUnsandboxedCommands` false, the secret `denyRead` and trust-anchor
 /// `denyWrite` lists, cargo/npm `allowWrite` entries plus the target dir, the
-/// [`ALLOWED_DOMAINS`], and `allowUnixSockets` naming `trusty-mpm.sock`, the
-/// sccache socket and — PM only — the tmux socket. No `allowLocalBinding`
-/// (Q2), no `.claude/**` rule (Q3). The Architect gets `enabled: false` only.
+/// [`ALLOWED_DOMAINS`], `allowUnixSockets` naming `trusty-mpm.sock` and — PM
+/// only — the tmux socket, and `env.RUSTC_WRAPPER` set to `""`. No
+/// `allowLocalBinding` and no blanket `.claude/**` rule (#8928 rulings). Never
+/// the sccache socket: whoever connects names the compiler, and the server
+/// runs it outside the sandbox, so `RUSTC_WRAPPER=""` turns sccache off (#8928
+/// fix round). The Architect gets `enabled: false` only.
 /// Test: `the_pm_policy_names_every_socket_and_no_local_binding`,
-/// `the_agent_policy_has_no_tmux_socket`, `the_architect_policy_disables_the_sandbox`.
+/// `the_agent_policy_has_no_tmux_socket`, `the_architect_policy_disables_the_sandbox`,
+/// `sandboxed_roles_never_reach_the_sccache_socket`.
 pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     if role == SandboxRole::Architect {
         return json!({ "sandbox": { "enabled": false } });
@@ -126,11 +129,8 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     let tmux = (role == SandboxRole::Pm)
         .then_some(inputs.tmux_socket.as_ref())
         .flatten();
-    let sockets: Vec<&PathBuf> = tmux
-        .into_iter()
-        .chain(inputs.mpm_socket.as_ref())
-        .chain(inputs.sccache_socket.as_ref())
-        .collect();
+    // #8928 fix round: never the sccache socket — see the doc above.
+    let sockets: Vec<&PathBuf> = tmux.into_iter().chain(inputs.mpm_socket.as_ref()).collect();
     let mut deny: Vec<String> = Vec::new();
     deny.extend(
         secrets[..2]
@@ -144,7 +144,7 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
             .iter()
             .map(|p| format!("Edit(/{}/**)", p.display())),
     );
-    // #8928 Q3: exact settings files, never `.claude/**`.
+    // #8928: exact settings files, never a blanket `.claude/**` rule.
     for file in [
         ".claude/settings.json",
         ".claude/settings.local.json",
@@ -153,6 +153,7 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
         deny.push(format!("Edit(/{})", ws.join(file).display()));
     }
     json!({
+        "env": { "RUSTC_WRAPPER": "" },
         "permissions": { "deny": deny },
         "sandbox": {
             "enabled": true,
@@ -174,7 +175,8 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
 }
 
 /// The user-tier keys for `role`: `network.strictAllowlist` and the
-/// credentials deny (ruling Q1). The Architect gets nothing.
+/// credentials deny, which only the user tier honors (#8928). The Architect
+/// gets nothing.
 /// Test: `the_user_policy_carries_strict_allowlist_and_credentials`.
 pub fn user_policy(role: SandboxRole) -> Option<Value> {
     if role == SandboxRole::Architect {

@@ -1,9 +1,11 @@
 //! The `tm doctor` `sccache_socket` row (#8928 step 3).
 //!
-//! Why: a sandboxed cargo build reaches sccache only through the unix-socket
-//! server the tm daemon starts (`core::sccache_socket`). Nothing else says
-//! whether that server is up, so a session whose cache silently misses looks
-//! like a slow build.
+//! Why: unsandboxed cargo builds share one sccache server the tm daemon
+//! starts on a unix socket (`core::sccache_socket`). Nothing else says
+//! whether that server is up, so a build whose cache silently misses looks
+//! like a slow build. Sandboxed sessions never use it: the server runs the
+//! compiler a client names outside the sandbox, so they build with
+//! `RUSTC_WRAPPER=""` (#8928 fix round).
 //! What: [`check_sccache_socket`] gathers [`SccacheFacts`] and [`build_check`]
 //! folds them. Not applicable (`Ok`) unless `build.sccache: true`. Then: `Ok`
 //! when a server answers on `~/.trusty-mpm/sccache.sock`; `Warn` when sccache
@@ -72,7 +74,7 @@ pub(super) fn build_check(facts: &SccacheFacts) -> DoctorCheck {
         SccacheFacts::NoBinary => {
             return row(
                 CheckStatus::Warn,
-                "`build.sccache` is true but `sccache` is not on PATH, so sandboxed builds get no \
+                "`build.sccache` is true but `sccache` is not on PATH, so builds get no \
                  cache — install sccache 0.9.0 or later, or set `build.sccache: false` (#8928)"
                     .to_owned(),
             );
@@ -115,15 +117,14 @@ pub(super) fn build_check(facts: &SccacheFacts) -> DoctorCheck {
         SocketState::Listening => row(
             CheckStatus::Ok,
             format!(
-                "sccache {major}.{minor}.{patch} serves {at}; sandboxed cargo uses \
-                 `SCCACHE_SERVER_UDS={at} SCCACHE_CLIENT_SIDE=1` (#8928)"
+                "sccache {major}.{minor}.{patch} serves {at} for unsandboxed cargo \
+                 (`SCCACHE_SERVER_UDS={at} SCCACHE_CLIENT_SIDE=1`); sandboxed sessions \
+                 run with `RUSTC_WRAPPER=\"\"` (#8928)"
             ),
         ),
         SocketState::Missing => row(
             CheckStatus::Warn,
-            format!(
-                "no sccache server on {at}, so sandboxed builds get no cache — {restart} (#8928)"
-            ),
+            format!("no sccache server on {at}, so builds get no cache — {restart} (#8928)"),
         ),
         SocketState::Stale(why) => row(
             CheckStatus::Warn,

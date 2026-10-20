@@ -1,22 +1,23 @@
-//! The sccache unix-socket server for sandboxed builds (#8928 step 3).
+//! The sccache unix-socket server, for UNSANDBOXED builds only (#8928 step 3).
 //!
-//! Why: under the Claude Code sandbox a cargo build cannot reach sccache's
-//! default TCP server (no `allowLocalBinding`, owner ruling Q2), and a server
-//! a sandboxed client starts inherits the sandbox and cannot write its cache.
-//! sccache 0.9.0+ can serve a unix socket (`SCCACHE_SERVER_UDS`), which the
-//! sandbox can allow by path (`allowUnixSockets`). The plan
-//! (`2026-09-30-sandbox-plan-revised.md` §3, step 3): one server started
-//! outside the sandbox, by tm at daemon start; clients set
-//! `SCCACHE_SERVER_UDS` and `SCCACHE_CLIENT_SIDE=1`, so rustc runs in the
-//! sandboxed client and the server only stores.
+//! Why: one long-lived sccache server per machine, started by tm at daemon
+//! start, keeps the compile cache warm for unsandboxed cargo builds over a
+//! unix socket (`SCCACHE_SERVER_UDS`, sccache 0.9.0+) rather than a TCP port.
+//! A sandboxed session must NOT reach it: whoever connects names the compiler,
+//! and the server runs that program itself, outside the sandbox — on sccache
+//! 0.17.0 a script passed as `rustc` ran under the server, whose parent is
+//! launchd, and `SCCACHE_CLIENT_SIDE=1` did not prevent it (#8928 fix round).
+//! So no sandboxed role's `allowUnixSockets` names this socket, and sandboxed
+//! sessions build with `RUSTC_WRAPPER=""` (no sccache at all; see
+//! `core::session_launch::sandbox_settings`).
 //! What: [`socket_path_at`] names the socket; [`client_env`] and
 //! [`server_env`] are the variables each side needs; [`probe_socket`]
-//! classifies the path; [`ensure_server`] starts `sccache --start-server` on
-//! it unless a server already answers; [`start_if_requested`] is the daemon's
-//! entry, a no-op unless `build.sccache: true`. The server's idle timeout is
-//! off (`SCCACHE_IDLE_TIMEOUT=0`): the default 600 s would let it exit and a
-//! sandboxed client could not restart it. tm never writes
-//! `~/.cargo/config.toml`; delivering [`client_env`] to a session is step 6.
+//! classifies the path; [`ensure_server`] checks the sccache version and then
+//! starts `sccache --start-server` on it unless a server already answers;
+//! [`start_if_requested`] is the daemon's entry, a no-op unless
+//! `build.sccache: true`. The server's idle timeout is off
+//! (`SCCACHE_IDLE_TIMEOUT=0`): the default 600 s would let it exit. tm never
+//! writes `~/.cargo/config.toml`.
 //! Test: `sccache_socket_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -41,7 +42,8 @@ pub fn socket_path_at(home: &Path) -> PathBuf {
     home.join(".trusty-mpm").join(SOCKET_FILE)
 }
 
-/// What a sandboxed cargo client needs: the socket and client-side compiles.
+/// What an UNSANDBOXED cargo client sets to use the server. Never handed to a
+/// sandboxed session: the server would run its compiler outside the sandbox.
 /// Test: `client_and_server_env_name_the_socket`.
 pub fn client_env(socket: &Path) -> Vec<(&'static str, String)> {
     vec![
