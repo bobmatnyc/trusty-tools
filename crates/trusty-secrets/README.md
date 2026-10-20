@@ -388,12 +388,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The client reads the grant token from the fd named by
-`TRUSTY_SECRETS_TOKEN_FD` and puts it back on the same fd number, so the
-reading process and its own descendants can resolve too. The grant reaches a
-linear chain, not siblings: the token is one pipe, and the first reader drains
-it for every process that shares it. A sibling of an earlier reader (the second
-command in `sh -c 'migrate && serve'`) finds the pipe drained and fails closed
-with `GrantedError::InvalidToken`; no value is exposed. It dials `~/.trusty-tools/trusty-secrets/secrets.sock`
+`TRUSTY_SECRETS_TOKEN_FD`. `tm secrets exec` makes that fd a read-only fd on
+an unlinked regular file holding exactly the token, and the client reads it
+with `pread` at offset 0, which consumes nothing. Every process that inherits
+the fd resolves: the command, its children, and siblings such as both
+commands in `sh -c 'migrate && serve'`. The client refuses any other fd (a
+pipe, a named or writable file, a socket, a directory) with
+`GrantedError::TokenUnreadable`, and a file that is not exactly 64 lowercase
+hex digits with `GrantedError::InvalidToken`; no value is exposed. It dials `~/.trusty-tools/trusty-secrets/secrets.sock`
 only after checking the directory is 0700 and the socket 0600, both owned by
 you, and waits up to 135 s. It resolves only: it never grants, revokes or
 starts the server. Every failure is a `GrantedError`; a server refusal
