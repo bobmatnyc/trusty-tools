@@ -40,6 +40,10 @@
 #     probe-is-per-harness       FAIL, a `tm` probe does not cover `tcode`
 #     probe-then-degrade-ok / probe-shell-guard-ok          OK
 #     probe-negated-mention-ok   OK, "Never run `tm secrets`" runs nothing
+#     probe-span-after-with      FAIL, "Open … with `tm pr open`" is a command
+#     probe-conditional-not      FAIL, "If … not merged, run `tm pr merge`"
+#     probe-semicolon-negation   FAIL, "Do not idle; run `tm wait`"
+#     probe-fenced-after-and     FAIL, `cd repo && tm doctor`
 #     probe-harness-owned-ok     OK, tm's own instructions name tm freely
 #   bump (scripts/check_content.py bump):
 #     bump-released-unchanged    FAIL, member changed under a released version
@@ -243,6 +247,16 @@ new_repo p-other-harness && engineer "$PROBE" '' 'Run `tcode run --agent qa` nex
 tree probe-is-per-harness 1 "content/agents/engineer.md:8: runs \`tcode run --agent qa\`"
 new_repo p-negated && engineer 'Never run `tm secrets` on the live host.'
 tree probe-negated-mention-ok 0 "OK"
+# Critic round (#8390): spans no imperative verb introduces, a "not" that does
+# not govern the span, a `;` sentence break, and a command after `&&`.
+new_repo p-with && engineer 'Open every PR with `tm pr open --title x`.'
+tree probe-span-after-with 1 "content/agents/engineer.md:6: runs \`tm pr open --title x\`"
+new_repo p-cond && engineer 'If the PR is not merged, run `tm pr merge 5`.'
+tree probe-conditional-not 1 "content/agents/engineer.md:6: runs \`tm pr merge 5\`"
+new_repo p-semi && engineer 'Do not idle; run `tm wait --for run --pid 1`.'
+tree probe-semicolon-negation 1 "content/agents/engineer.md:6: runs \`tm wait --for run --pid 1\`"
+new_repo p-and && engineer '```bash' 'cd repo && tm doctor' '```'
+tree probe-fenced-after-and 1 "content/agents/engineer.md:7: runs \`tm doctor\`"
 # tm's own instructions are read only by tm, so they name tm commands freely.
 new_repo p-owned && w content/instructions/sections/identity.md '# section' 'Run `tm doctor` now.'
 tree probe-harness-owned-ok 0 "OK"
