@@ -62,6 +62,8 @@ mod doctor_tcp_listeners;
 mod doctor_events;
 // #8378 PR-C: the instructional-content source and the installed pin (ADR-0064).
 mod doctor_content;
+// #8390: assets whose advisory `requires:` this binary does not satisfy.
+mod doctor_content_requires;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
