@@ -742,9 +742,8 @@ mod events {
     /// Attach a producer aimed at `socket`, with this rig's tempdir as `$HOME`
     /// so a frame carrying an absolute path under it is detectable.
     fn attach(rig: &mut Rig, socket: &Path) -> Arc<LspEventPublisher> {
-        let publisher = Arc::new(
-            LspEventPublisher::new(socket).with_home(Some(rig.dir.path().to_path_buf())),
-        );
+        let publisher =
+            Arc::new(LspEventPublisher::new(socket).with_home(Some(rig.dir.path().to_path_buf())));
         rig.state = rig.state.clone().with_lsp_events(Arc::clone(&publisher));
         publisher
     }
@@ -834,7 +833,10 @@ mod events {
         rig.ok("analyze.lsp_diagnostics", rig.diag_params()).await;
         let frames = pushed(&publisher, &bus, 4).await;
         assert_eq!(tool(&frames[2]).2, "lsp.publishDiagnostics");
-        assert_eq!(frames[2].parent_id, None, "absent parent_event_id is a root");
+        assert_eq!(
+            frames[2].parent_id, None,
+            "absent parent_event_id is a root"
+        );
         assert_eq!(tool(&frames[3]).0.attrs["result_count"], 1);
     }
 
@@ -929,9 +931,10 @@ mod events {
         assert!(bus.raw().is_empty());
 
         // The daemon resolves no bus socket while the flag is off.
-        let state = lsp_events::attach_with(Rig::with("normal", |c| c.enabled = false).state, || {
-            panic!("the bus socket was resolved with the flag off")
-        });
+        let state =
+            lsp_events::attach_with(Rig::with("normal", |c| c.enabled = false).state, || {
+                panic!("the bus socket was resolved with the flag off")
+            });
         assert!(state.lsp_events.is_none());
     }
 
@@ -940,7 +943,10 @@ mod events {
         let rig = Rig::new("normal");
         let state =
             lsp_events::attach_with(rig.state.clone(), || Err(anyhow::anyhow!("no data dir")));
-        assert!(state.lsp_events.is_none(), "start-up never fails on the bus");
+        assert!(
+            state.lsp_events.is_none(),
+            "start-up never fails on the bus"
+        );
         let path = rig.dir.path().join("b.sock");
         let state = lsp_events::attach_with(rig.state.clone(), move || Ok(path));
         assert!(state.lsp_events.is_some());

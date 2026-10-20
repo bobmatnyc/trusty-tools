@@ -471,6 +471,8 @@ pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     // part of serving.
     remove_retired_discovery_files();
 
+    // #9078 (L4): the event producer, only while ANALYZE_LSP is on.
+    let state = crate::service::lsp_events::attach(state);
     serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
 }
 
@@ -497,6 +499,7 @@ pub async fn serve(state: AnalyzerAppState, socket: &Path) -> Result<()> {
 pub async fn serve_on_demand(state: AnalyzerAppState, socket: &Path) -> Result<()> {
     remove_retired_discovery_files();
 
+    let state = crate::service::lsp_events::attach(state);
     let idle = trusty_common::uds::analyze_idle_timeout_from_env();
     serve_with_idle(state, socket, trusty_common::shutdown_signal(), idle).await
 }
@@ -566,13 +569,17 @@ pub async fn serve_with_shutdown(
 /// spawn timeout.
 ///
 /// Every language-server child is stopped on both exits too, before the
-/// stores are released (#9078).
+/// stores are released (#9078). With an LSP event producer attached, a flush
+/// task drains it while serving and a bounded final flush runs on both exits,
+/// after the unlink (#9078, L4).
 ///
 /// # Errors
 ///
 /// As [`serve`].
 ///
-/// Test: `rpc_unlinks_its_socket_on_shutdown`,
+/// Test: `final_flush_runs_on_idle_exit_and_on_shutdown`,
+/// `the_flush_task_delivers_while_serving`,
+/// `rpc_unlinks_its_socket_on_shutdown`,
 /// `rpc_accepts_a_request_larger_than_the_shared_default`,
 /// `shutdown_with_a_connection_in_flight_frees_its_redb_lock_before_the_unlink`,
 /// `daemon_idle_exit_kills_the_child`,
@@ -598,6 +605,9 @@ pub async fn serve_with_idle(
 
     // #9078: keep a handle on the language servers; the router consumes state.
     let lsp = Arc::clone(&state.lsp);
+    // #9078 (L4): drain LSP events to the bus while serving; never awaited.
+    let events = state.lsp_events.clone();
+    let flusher = events.as_ref().map(|p| p.spawn_flush_task());
     let router = Arc::new(build_router(state));
     info!(socket = %socket.display(), methods = router.method_names().count(), idle = ?idle, "trusty-analyze serving");
     match idle {
@@ -637,6 +647,15 @@ pub async fn serve_with_idle(
         tracing::debug!(socket = %socket.display(), error = %e, "socket already gone");
     }
     drop(listener);
+
+    // #9078 (L4): after the unlink, so a successor is not kept waiting; every
+    // call has ended by now, so its terminal event is in the buffer.
+    if let Some(flusher) = flusher {
+        flusher.abort();
+    }
+    if let Some(events) = events {
+        events.final_flush().await;
+    }
     Ok(())
 }
 

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
 use crate::lsp::{LspConfig, LspManager};
+use crate::service::lsp_events::LspEventPublisher;
 use crate::types::SmellThresholds;
 use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
@@ -93,6 +94,14 @@ pub struct AnalyzerAppState {
     /// `shutdown_all` on both exits.
     /// Test: `daemon_idle_exit_kills_the_child`.
     pub lsp: Arc<LspManager>,
+    /// The producer the `analyze.lsp_*` handlers push their events through
+    /// (#9078, L4; DOC-72 §4).
+    ///
+    /// Why: `None` keeps construction pure — resolving the bus socket creates
+    /// a data directory — so the serve entry points attach it, and only while
+    /// `ANALYZE_LSP` is on (`lsp_events::attach`).
+    /// Test: `flag_off_emits_no_events`, `an_unresolvable_bus_still_serves`.
+    pub lsp_events: Option<Arc<LspEventPublisher>>,
 }
 
 impl AnalyzerAppState {
@@ -121,6 +130,7 @@ impl AnalyzerAppState {
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
             lsp: Arc::new(LspManager::new(LspConfig::from_env())),
+            lsp_events: None,
         }
     }
 
@@ -143,6 +153,7 @@ impl AnalyzerAppState {
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
             lsp: Arc::new(LspManager::new(LspConfig::from_env())),
+            lsp_events: None,
         }
     }
 
@@ -189,6 +200,14 @@ impl AnalyzerAppState {
     /// Test: `daemon_idle_exit_kills_the_child`.
     pub fn with_lsp(mut self, lsp: Arc<LspManager>) -> Self {
         self.lsp = lsp;
+        self
+    }
+
+    /// Attach the LSP event producer (#9078, L4).
+    ///
+    /// Test: `lsp_call_pushes_started_and_finished_with_parent_id`.
+    pub fn with_lsp_events(mut self, publisher: Arc<LspEventPublisher>) -> Self {
+        self.lsp_events = Some(publisher);
         self
     }
 

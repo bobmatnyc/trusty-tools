@@ -25,6 +25,8 @@ mod diagnostics_dispatch;
 
 pub mod events;
 pub(crate) mod handlers;
+// #9078 (L4): the LSP calls' events on the trusty-events bus.
+pub mod lsp_events;
 pub mod rpc;
 
 // Re-export the public API so callers can write `use crate::service::…`

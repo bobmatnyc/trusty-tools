@@ -11,8 +11,10 @@
 //! `[]`, which must never become a success), asks the server, and stamps the
 //! answer with `document_version` and `snapshot`. Every failure is a typed
 //! refusal (`lsp_rpc_error`); none becomes an empty success. Registered with the
-//! ordinary `typed` registration, so a call re-arms the idle window.
-//! Test: `tests/lsp_rpc.rs`.
+//! ordinary `typed` registration, so a call re-arms the idle window. Each call
+//! past parameter validation pushes `lsp.<method>` Started and terminal events
+//! through [`LspCall`] (L4, DOC-72 §4); with the flag off it pushes nothing.
+//! Test: `tests/lsp_rpc.rs`, including its `events` module.
 //!
 //! # Spec References
 //! - [`SPEC-ANALYZELSP-03~draft`](docs/specs/DOC-72-analyze-on-demand-language-server.md#SPEC-ANALYZELSP-03~draft)
@@ -36,6 +38,9 @@ use crate::lsp::manager::resolve_workspace_root;
 use crate::lsp::snapshot::workspace_snapshot;
 use crate::lsp::{LspError, LspLanguage, LspLease, SyncedDocument};
 use crate::service::events::AnalyzerAppState;
+use crate::service::lsp_events::{
+    Attrs, LspCall, TOOL_ANALYSED_AT, TOOL_DIAGNOSTICS, TOOL_REFERENCES,
+};
 
 /// A file synced to its workspace's server, with the workspace stamp.
 struct Opened {
@@ -58,9 +63,22 @@ fn absolute(path: &Path) -> Result<(), RpcError> {
 }
 
 /// One debug line per call: method, path and causal parent, never content
-/// (DOC-72 §4.4). L4 turns the parent into the Started event's `parent_id`.
+/// (DOC-72 §4.4). The parent also heads the call's Started event (L4).
 fn trace_call(method: &str, path: &Path, parent: Option<EventId>) {
     tracing::debug!(method, path = %path.display(), parent = ?parent, "lsp call");
+}
+
+/// The terminal event's stamps for an answer (DOC-72 §4.2): never the
+/// answer itself (§4.4).
+fn stamps(result_count: Option<usize>, document_version: i64, snapshot: &str) -> Attrs {
+    let mut out: Attrs = vec![
+        ("document_version", json!(document_version)),
+        ("snapshot", json!(snapshot)),
+    ];
+    if let Some(n) = result_count {
+        out.push(("result_count", json!(n)));
+    }
+    out
 }
 
 /// Lease the server for `path`'s workspace, sync `path` from disk, stamp the
@@ -151,15 +169,26 @@ impl Opened {
 /// Test: `lsp_references_returns_stamped_locations`,
 /// `references_wait_for_the_server_to_finish_loading`,
 /// `content_modified_is_retried_then_answers`,
-/// `a_hung_server_is_reported_through_the_methods`.
+/// `a_hung_server_is_reported_through_the_methods`,
+/// `lsp_call_pushes_started_and_finished_with_parent_id`,
+/// `errored_terminal_event_on_server_crash`.
 pub async fn lsp_references(
     state: &AnalyzerAppState,
     req: LspReferencesRequest,
 ) -> Result<LspReferencesResponse, RpcError> {
     absolute(&req.path)?;
     trace_call("textDocument/references", &req.path, req.parent_event_id);
+    // #9078 (L4): Started now, Finished/Errored after (DOC-72 §4.2).
+    let mut call = LspCall::start(
+        state,
+        TOOL_REFERENCES,
+        &req.path,
+        req.parent_event_id,
+        vec![("line", json!(req.line)), ("column", json!(req.column))],
+    );
     let run = async {
         let o = open(state, &req.path, req.version).await?;
+        call.workspace(&o.root);
         o.ready().await?;
         let result = o
             .lease
@@ -179,7 +208,11 @@ pub async fn lsp_references(
             snapshot: o.snapshot,
         })
     };
-    run.await.map_err(lsp_rpc_error)
+    let result = run.await;
+    call.finish(&result, |r| {
+        stamps(Some(r.references.len()), r.document_version, &r.snapshot)
+    });
+    result.map_err(lsp_rpc_error)
 }
 
 /// `analyze.lsp_diagnostics`: the server's type-checked diagnostics.
@@ -229,8 +262,16 @@ pub async fn lsp_diagnostics(
         ));
     }
     trace_call("publishDiagnostics", &path, req.parent_event_id);
+    let mut call = LspCall::start(
+        state,
+        TOOL_DIAGNOSTICS,
+        &path,
+        req.parent_event_id,
+        Vec::new(),
+    );
     let run = async {
         let o = open(state, &path, req.version).await?;
+        call.workspace(&o.root);
         o.ready().await?;
         let (own, checked) = o.answer(o.lease.request_timeout()).await?;
         let (files, reason) = match req.scope {
@@ -262,7 +303,12 @@ pub async fn lsp_diagnostics(
             files,
         })
     };
-    run.await.map_err(lsp_rpc_error)
+    let result = run.await;
+    call.finish(&result, |r| {
+        let n = r.files.iter().map(|f| f.diagnostics.len()).sum();
+        stamps(Some(n), r.document_version, &r.snapshot)
+    });
+    result.map_err(lsp_rpc_error)
 }
 
 /// Every publication whose file lies under `root`, sorted by URI.
@@ -310,8 +356,16 @@ pub async fn lsp_analysed_at(
         )));
     }
     trace_call("analysed_at", &req.path, req.parent_event_id);
+    let mut call = LspCall::start(
+        state,
+        TOOL_ANALYSED_AT,
+        &req.path,
+        req.parent_event_id,
+        vec![("version", json!(req.version))],
+    );
     let run = async {
         let o = open(state, &req.path, Some(req.version)).await?;
+        call.workspace(&o.root);
         let client = o.lease.client();
         let deadline = Instant::now() + Duration::from_millis(req.timeout_ms);
         let waited = async {
@@ -334,5 +388,7 @@ pub async fn lsp_analysed_at(
             snapshot: o.snapshot,
         })
     };
-    run.await.map_err(lsp_rpc_error)
+    let result = run.await;
+    call.finish(&result, |r| stamps(None, r.document_version, &r.snapshot));
+    result.map_err(lsp_rpc_error)
 }
