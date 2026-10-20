@@ -87,31 +87,29 @@ someone else to decide, never an instruction to file.
 
 ## Fail-Open Check
 
-Run this over every failure branch the diff adds or touches. Relocated here
-from the always-loaded PM prompt (#4574) — the PM dispatches the check; a
-reviewer runs it.
+Run this over every failure branch the diff adds or touches (#4574). The PM
+dispatches the check; a reviewer runs it.
 
 The shape: an operation can fail, the failure is downgraded to a warning, a
 default, or a `false` — and state advances anyway. The loss is permanent, and
 every alarm that should have caught it reports healthy. A finding here is
-CRITICAL or HIGH by construction: silent data loss, or a broken contract.
+CRITICAL or HIGH: silent data loss, or a broken contract.
 
 1. **Does anything advance past the failure?** A cursor, watermark, index,
    "done" marker, or success return that moves forward when the operation
    failed puts the lost item outside every future window. **Fail closed** —
    hold the state, propagate the error.
    - A third outcome is also acceptable: **reported degradation** — the
-     failure is carried to the caller in the response body (e.g. a
+     failure reaches the caller in the response body (e.g. a
      `{"connected": false, "reason": ...}` field), and that field is under
-     test. This is distinct from silently failing open; the caller can see
-     and act on the degraded state. Contrast within one branch:
+     test. The caller can see and act on it. Contrast within one branch:
      `knowledge_pipeline.rs::search_socket` discards its error via `.ok()`
      (undocumented fail-open) while `knowledge_pipeline/indexing.rs` turns
      the same missing-socket case into an explicit, tested response field
      (reported degradation).
 2. **Name the alarm, then break it.** Identify which check is supposed to catch
    this loss, then ask whether it can report healthy while the loss occurs.
-   Aggregates, tallies and summaries hide single-item failures by construction.
+   Aggregates and summaries hide single-item failures.
 3. **Compare sibling branches.** Asymmetry between arms of one state machine is
    the tell. The arm that fails open is usually the bug.
 4. **Demand an error-arm test.** These ship green because no test ever entered
@@ -120,16 +118,15 @@ CRITICAL or HIGH by construction: silent data loss, or a broken contract.
 5. **Review the fix harder than the bug.** A fix for this shape is the highest
    risk place for it to reappear. Never merge one on the author's own gate.
 6. **Check `cmd | grep -q` under `set -o pipefail`.** `grep -q` exits at its
-   first match and closes the pipe, so a large producer gets SIGPIPE and the
+   first match and closes the pipe; a large producer gets SIGPIPE, so the
    pipeline status is non-zero although the match was found. Measured:
-   `printf '%s\n' "$big" | grep -q '^1$'` on a 200,000-line list returned
-   PIPESTATUS `141 0`, and the `if` took the false branch. Flag it. Capture
-   the output first, or match without `-q`.
-7. **Check a pre-filtered `gh` stub.** A test stub that answers `gh` with a list
-   already narrowed to the expected rows can never show a script that skips
-   its own filter or pagination. The test then passes for the wrong reason.
-   Require the stub to return the unfiltered list, with rows that must be
-   rejected.
+   `printf '%s\n' "$big" | grep -q '^1$'` on 200,000 lines gave PIPESTATUS
+   `141 0` and the `if` took the false branch. Flag it. Capture the output
+   first, or match without `-q`.
+7. **Check a pre-filtered `gh` stub.** A stub that answers `gh` with a list
+   already narrowed to the expected rows cannot show a script that skips its
+   own filter or pagination; the test passes for the wrong reason. Require the
+   unfiltered list, with rows that must be rejected.
 
 ## CI Push-Permission Check
 
