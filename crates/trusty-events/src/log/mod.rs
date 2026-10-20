@@ -34,5 +34,5 @@ mod tests;
 
 pub(crate) use config::{DEFAULT_RETAIN_DAYS, LogConfig};
 pub use error::LogError;
-pub(crate) use replay::ReplayItem;
+pub(crate) use replay::{ReplayFiles, ReplayItem};
 pub(crate) use writer::DurableLog;

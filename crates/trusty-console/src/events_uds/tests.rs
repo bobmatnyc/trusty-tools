@@ -128,6 +128,18 @@ impl Conn {
         self.frame(RpcStreamFrame::error(json!(1), error)).await;
     }
 
+    /// #10071: the liveness item a bus sends to a client that asked.
+    async fn heartbeat(&mut self, head: u64) {
+        self.item(&SubscribeItem::Heartbeat { head }).await;
+    }
+
+    /// A heartbeat, or `false` once the client has closed the connection.
+    async fn try_heartbeat(&mut self) -> bool {
+        let value = serde_json::to_value(SubscribeItem::Heartbeat { head: 0 }).expect("encode");
+        let bytes = encode_frame(&RpcStreamFrame::item(json!(1), value)).expect("encode a frame");
+        self.stream.write_all(&bytes).await.is_ok() && self.stream.flush().await.is_ok()
+    }
+
     fn since(&self) -> (Option<u64>, Option<EventId>) {
         (self.request.params.since_seq, self.request.params.since_id)
     }
@@ -268,8 +280,10 @@ async fn a_quiet_subscription_is_not_dropped() {
     let mut items = relay.subscribe();
 
     let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
-    // Many liveness intervals, and longer than any per-request timeout here.
+    // Many liveness intervals, and longer than any per-request timeout here,
+    // inside one hung bound of `fast`'s production heartbeat.
     stub.no_conn_within(Duration::from_millis(1500)).await;
     assert_eq!(
         relay.status().state,
@@ -305,12 +319,13 @@ async fn a_hangup_resumes_with_seq_and_id() {
         status.last_error == Some(FailureKind::HungUp),
         "the hang-up is named: {status:?}"
     );
-    let conn = stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
     assert_eq!(
         conn.since(),
         (Some(3), Some(held[2].id)),
         "resume names seq and id"
     );
+    conn.heartbeat(3).await;
     status_until(&relay, "connected again", |s| {
         s.state == BusState::Connected
     })
@@ -512,7 +527,8 @@ async fn a_missing_socket_is_reported_and_retried_with_backoff() {
     assert!(b <= 400, "the delay is capped at backoff_max: {b}");
 
     let mut stub = bind_stub(&socket);
-    stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     let status = status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
     assert_eq!(status.retry_in_ms, None);
 }
@@ -523,7 +539,8 @@ async fn a_socket_that_vanishes_under_a_quiet_subscription_is_detected() {
     let mut stub = stub_in(tmp.path());
     let (relay, _client) = run(fast(&stub.socket));
 
-    let _conn = stub.next_conn().await;
+    let mut conn = stub.next_conn().await;
+    conn.heartbeat(0).await;
     status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
     std::fs::remove_file(&stub.socket).expect("remove the socket file");
 
@@ -632,4 +649,254 @@ async fn a_refusal_at_seq_zero_backs_off_rather_than_resyncing() {
     // `fast` backs off 300 ms: no reconnect inside it, one after it.
     stub.no_conn_within(Duration::from_millis(150)).await;
     stub.next_conn().await;
+}
+
+// ─── #10071: hung-daemon detection ───────────────────────────────────────────
+
+/// Every state the relay passes through, recorded by a watcher task. A
+/// status change that keeps the state (a counter) records nothing.
+struct States {
+    seen: Arc<std::sync::Mutex<Vec<BusState>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for States {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl States {
+    fn record(relay: &EventsRelay) -> Self {
+        let mut watch = relay.watch();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = Arc::clone(&seen);
+        let task = tokio::spawn(async move {
+            loop {
+                let state = watch.borrow_and_update().state;
+                {
+                    let mut seen = out.lock().expect("states lock");
+                    if seen.last() != Some(&state) {
+                        seen.push(state);
+                    }
+                }
+                if watch.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+        Self { seen, task }
+    }
+
+    fn seen(&self) -> Vec<BusState> {
+        self.seen.lock().expect("states lock").clone()
+    }
+}
+
+/// A daemon that accepts the subscription and then says nothing is reported
+/// `hung` within two and a half heartbeats, is never shown as connected, and
+/// the client reconnects. `hung` is not `timeout`: the open succeeded.
+#[tokio::test]
+async fn a_daemon_that_accepts_and_goes_silent_is_reported_hung() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let mut config = fast(&stub.socket);
+    config.heartbeat = Duration::from_millis(50);
+    let bound = client::hung_bound(config.heartbeat);
+    let (relay, _client) = run(config);
+    let states = States::record(&relay);
+
+    let _silent = stub.next_conn().await;
+    let opened = tokio::time::Instant::now();
+    let status = status_until(&relay, "hung", |s| s.last_error.is_some()).await;
+    let elapsed = opened.elapsed();
+    assert_eq!(status.last_error, Some(FailureKind::Hung), "{status:?}");
+    assert_eq!(status.state, BusState::Reconnecting, "{status:?}");
+    assert_eq!(
+        serde_json::to_value(FailureKind::Hung).expect("encode"),
+        "hung",
+        "the status route's category"
+    );
+    assert!(
+        elapsed < bound + Duration::from_secs(1),
+        "hung reported after {elapsed:?}, bound {bound:?}"
+    );
+    let again = stub.next_conn().await;
+    assert_eq!(again.request.params.heartbeat_ms, Some(50));
+    assert!(
+        !states.seen().contains(&BusState::Connected),
+        "a silent daemon was shown connected: {:?}",
+        states.seen()
+    );
+}
+
+/// The accept is the kernel's, not the daemon's: the client stays `starting`
+/// until the bus sends a frame, and the first heartbeat makes it connected.
+#[tokio::test]
+async fn the_first_frame_not_the_accept_makes_the_client_connected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let (relay, _client) = run(fast(&stub.socket));
+
+    let mut conn = stub.next_conn().await;
+    assert_eq!(conn.request.params.heartbeat_ms, Some(5_000));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        relay.status().state,
+        BusState::Starting,
+        "{:?}",
+        relay.status()
+    );
+    conn.heartbeat(0).await;
+    status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
+}
+
+/// Heartbeats keep a subscription with no events connected for well over
+/// the hung bound, on one connection, with nothing counted against it.
+#[tokio::test]
+async fn heartbeats_keep_a_quiet_subscription_connected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let mut config = fast(&stub.socket);
+    // #10071 review: a 500 ms bound, so a current-thread runtime's jitter
+    // against the 25 ms beats below cannot read as a hang.
+    config.heartbeat = Duration::from_millis(200);
+    let bound = client::hung_bound(config.heartbeat);
+    let (relay, _client) = run(config);
+
+    let mut conn = stub.next_conn().await;
+    // 2.5 s of beats: longer than the four bounds watched below.
+    let beats = tokio::spawn(async move {
+        for _ in 0..100 {
+            conn.heartbeat(0).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        conn
+    });
+    status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
+    let states = States::record(&relay);
+    stub.no_conn_within(bound * 4).await;
+    let _conn = beats.await.expect("the heartbeat task");
+    let status = relay.status();
+    assert_eq!(states.seen(), [BusState::Connected], "{status:?}");
+    assert_eq!(
+        (
+            status.last_error,
+            status.failures,
+            status.delivered,
+            status.undecodable
+        ),
+        (None, 0, 0, 0),
+        "{status:?}"
+    );
+}
+
+/// A heartbeat moves no cursor and relays nothing: after heartbeats on both
+/// sides of an event, the resume names that event's seq and id.
+#[tokio::test]
+async fn a_heartbeat_never_moves_the_cursor() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let (relay, _client) = run(fast(&stub.socket));
+    let mut items = relay.subscribe();
+
+    let mut conn = stub.next_conn().await;
+    let held = event(4);
+    conn.heartbeat(3).await;
+    conn.event(&held).await;
+    conn.heartbeat(4).await;
+    conn.heartbeat(9).await;
+    assert_eq!(next_event(&mut items).await.0, ResumeToken::of(&held));
+    status_until(&relay, "the heartbeats read", |s| {
+        s.state == BusState::Connected
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(conn);
+
+    let conn = stub.next_conn().await;
+    assert_eq!(
+        conn.since(),
+        (Some(4), Some(held.id)),
+        "resume names the event"
+    );
+    assert!(
+        matches!(items.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+        "a heartbeat was relayed"
+    );
+    let status = relay.status();
+    assert_eq!(
+        (
+            status.delivered,
+            status.duplicates,
+            status.gaps,
+            status.undecodable
+        ),
+        (1, 0, 0, 0),
+        "{status:?}"
+    );
+    assert_eq!(status.last_event, Some(ResumeToken::of(&held).to_string()));
+}
+
+/// #10071 decision 4, lockstep: a bus too old to know `heartbeat_ms` refuses
+/// the field. That is not a refused resume point, so the client keeps its
+/// cursor, backs off as `refused`, and asks again with the field.
+#[tokio::test]
+async fn a_bus_that_refuses_heartbeat_ms_is_refused_not_resynced() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let held = event(7);
+    let mut config = fast(&stub.socket);
+    config.start = Start::After(ResumeToken::of(&held));
+    let (relay, _client) = run(config);
+
+    let mut conn = stub.next_conn().await;
+    conn.error(RpcError::invalid_params(
+        "params do not decode: unknown field `heartbeat_ms`, expected one of \
+         `since_seq`, `since_id`, `filters`",
+    ))
+    .await;
+    let status = status_until(&relay, "reconnecting", |s| {
+        s.state == BusState::Reconnecting
+    })
+    .await;
+    assert_eq!(
+        (status.last_error, status.resyncs),
+        (Some(FailureKind::Refused), 0),
+        "{status:?}"
+    );
+    assert!(status.retry_in_ms.is_some_and(|ms| ms > 0), "{status:?}");
+    let again = stub.next_conn().await;
+    assert_eq!(
+        again.since(),
+        (Some(7), Some(held.id)),
+        "the cursor is kept"
+    );
+    assert_eq!(again.request.params.heartbeat_ms, Some(5_000));
+}
+
+/// #10071 review: frames arriving faster than the liveness interval must not
+/// starve the socket check. Heartbeats every 20 ms against `fast`'s 50 ms
+/// interval; the removed socket file is still reported as `socket_lost`.
+#[tokio::test]
+async fn a_socket_that_vanishes_under_a_beating_subscription_is_detected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut stub = stub_in(tmp.path());
+    let (relay, _client) = run(fast(&stub.socket));
+
+    let mut conn = stub.next_conn().await;
+    let beats = tokio::spawn(async move {
+        while conn.try_heartbeat().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    status_until(&relay, "connected", |s| s.state == BusState::Connected).await;
+    std::fs::remove_file(&stub.socket).expect("remove the socket file");
+
+    let status = status_until(&relay, "socket_lost", |s| {
+        s.last_error == Some(FailureKind::SocketLost)
+    })
+    .await;
+    assert_eq!(status.state, BusState::Reconnecting, "{status:?}");
+    beats.abort();
 }

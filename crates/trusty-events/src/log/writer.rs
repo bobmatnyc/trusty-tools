@@ -19,7 +19,7 @@
 //! task rotates to a new day file at each UTC day boundary (never `event.at`,
 //! which a producer controls and could set to any value), re-applies
 //! retention on every rotation, and re-derives `earliest_retained_seq` from
-//! whatever survives so [`super::replay::replay_since`] always compares
+//! whatever survives so `super::replay::replay_since` always compares
 //! against the truth. #9075: a rotate, write or final-sync error stops the
 //! writer and is published through [`DurableLog::failure`] and
 //! [`DurableLog::failed`]; the bus then refuses new events and the daemon
@@ -44,6 +44,8 @@ use super::config::{LogConfig, WRITE_CHANNEL_CAPACITY, day_file_name};
 use super::error::LogError;
 use super::format::encode_line;
 use super::recovery::{earliest_seq, recover_next_seq};
+use super::replay::ReplayFiles;
+#[cfg(test)]
 use super::replay::{ReplayItem, replay_since};
 use super::retention::enforce_retention;
 
@@ -198,13 +200,26 @@ impl DurableLog {
     }
 
     /// Replay everything persisted after `since_seq`, in order — see
-    /// [`super::replay::replay_since`].
+    /// `super::replay::replay_since`.
     ///
     /// # Errors
     ///
     /// [`LogError::Io`] if a day file cannot be listed or read.
+    // #10071 review: `events.subscribe` reads through `replay_files`; the
+    // whole-log read is left for the tests.
+    #[cfg(test)]
     pub(crate) async fn replay_since(&self, since_seq: u64) -> Result<Vec<ReplayItem>, LogError> {
         replay_since(&self.dir, since_seq, self.earliest_retained_seq()).await
+    }
+
+    /// The same replay one day file at a time — see
+    /// [`super::replay::ReplayFiles`] (#10071 review).
+    ///
+    /// # Errors
+    ///
+    /// [`LogError::Io`] if the log directory cannot be listed.
+    pub(crate) async fn replay_files(&self, since_seq: u64) -> Result<ReplayFiles, LogError> {
+        ReplayFiles::open(&self.dir, since_seq, self.earliest_retained_seq()).await
     }
 
     fn earliest_retained_seq(&self) -> Option<u64> {

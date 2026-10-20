@@ -360,6 +360,16 @@ impl EventBus {
         }
     }
 
+    /// The last `seq` assigned; `0` before the first event (#10071).
+    ///
+    /// Why: a heartbeat carries it, and reading it under the ring lock means a
+    /// bus whose lock is wedged sends no heartbeat, so readers see it hung.
+    /// Test: `super::serve_tests::a_subscription_that_asks_gets_a_heartbeat_first_then_on_its_interval`.
+    pub(crate) fn head(&self) -> u64 {
+        let _ring = self.lock_ring();
+        self.next_seq.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
     /// Why the log writer stopped, if it failed (#9075). A bus whose writer
     /// failed refuses new events, as a closed one does.
     ///
@@ -378,27 +388,6 @@ impl EventBus {
                 None => std::future::pending().await,
             }
         }
-    }
-
-    /// The id the durable log holds for `seq`: `None` without a log,
-    /// `Some(Ok(None))` when no retained day file holds `seq` (#9075).
-    ///
-    /// # Errors
-    ///
-    /// `Some(Err(_))` when a day file could not be listed or read.
-    ///
-    /// Test: `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
-    pub(crate) async fn logged_id(
-        &self,
-        seq: u64,
-    ) -> Option<Result<Option<EventId>, super::log::LogError>> {
-        let replayed = self.replay_since(seq.saturating_sub(1)).await?;
-        Some(replayed.map(|items| {
-            items.into_iter().find_map(|item| match item {
-                super::log::ReplayItem::Event(event) if event.seq == seq => Some(event.id),
-                _ => None,
-            })
-        }))
     }
 
     /// Stop assigning `seq` and release the durable log's writer (#9075).
@@ -427,13 +416,32 @@ impl EventBus {
     ///
     /// `Some(Err(_))` when the log is wired but a day file could not be
     /// listed or read.
-    // #9075: read by `events.subscribe` replay (`crate::subscribe`).
+    // #10071 review: `events.subscribe` reads through `replay_files`.
+    #[cfg(test)]
     pub(crate) async fn replay_since(
         &self,
         since_seq: u64,
     ) -> Option<Result<Vec<super::log::ReplayItem>, super::log::LogError>> {
         let log = self.log.as_ref()?;
         Some(log.replay_since(since_seq).await)
+    }
+
+    /// The durable log after `since_seq`, one day file per step; `None`
+    /// without a log (#10071 review: a subscription beats between reads and
+    /// stops when its reader leaves).
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err(_))` when the log directory could not be listed.
+    ///
+    /// Test: `super::serve_tests::a_slow_replay_read_still_beats`,
+    /// `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
+    pub(crate) async fn replay_files(
+        &self,
+        since_seq: u64,
+    ) -> Option<Result<super::log::ReplayFiles, super::log::LogError>> {
+        let log = self.log.as_ref()?;
+        Some(log.replay_files(since_seq).await)
     }
 
     /// A snapshot of the counters as of this call.

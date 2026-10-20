@@ -19,7 +19,8 @@
 //!       producer-side transport to the trusty-events socket, DOC-73 §4).
 //!       The `events.subscribe` contract (#9075, ADR-0065 decision 3) adds
 //!       `EVENTS_SERVICE`, `METHOD_EVENTS_SUBSCRIBE`, `events_socket_path`,
-//!       `SubscribeParams`, `SubscribeFilter` and `SubscribeItem`, plus — behind
+//!       `SubscribeParams`, `SubscribeFilter`, `SubscribeItem` and the
+//!       `heartbeat_ms` bounds (#10071), plus — behind
 //!       `uds`, unix only — `SubscribeRequest` and `SubscribeFrameError`.
 //!       Everything except `PushClient` is a type with no transport: no
 //!       channel, no process-global sender, no sequence counter. A producer
@@ -72,8 +73,8 @@ pub use lifecycle::{HarnessSource, LifecycleEvent};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 pub use subscribe::{
-    EVENTS_SERVICE, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter, SubscribeItem, SubscribeParams,
-    events_socket_path,
+    EVENTS_SERVICE, HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter,
+    SubscribeItem, SubscribeParams, events_socket_path,
 };
 #[cfg(all(unix, feature = "uds"))]
 pub use subscribe_frame::{SubscribeFrameError, SubscribeRequest};

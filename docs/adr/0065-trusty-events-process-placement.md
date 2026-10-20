@@ -262,6 +262,21 @@ the existing `uds/sse.rs` bridge (#9076). The log starts fresh under
 `<data dir>/trusty-events/event_log/`; console's `event_log/` holds no
 production traffic and is retired, not migrated.
 
+#### Addendum 2026-10-19: opt-in liveness on the subscribe contract (#10071)
+
+Decision 3's contract gains liveness. A subscriber may set `heartbeat_ms`; the
+bus then sends a `heartbeat { head }` item at once and on that interval, and a
+subscriber that does not set it is sent nothing new. A new item kind is safe
+only behind such an opt-in, because `SubscribeItem` rejects an unknown `type`.
+Console asks for 5 s and reports `hung` after 12.5 s without a frame. Daemon
+and console ship in lockstep, with no fallback for an older daemon. Rejected:
+
+- **A console-only connect probe.** It proves only that the accept loop
+  answers, not that a subscription's pump or an open stream is alive.
+- **A request/response `events.ping`.** It proves the router answers but needs
+  a second connection to see a mid-stream hang, and on an older daemon its
+  method-not-found is ambiguous with "healthy".
+
 ### Where this agrees and disagrees with ruling 27
 
 The ruling is right that the bus deserves its own crate and its own process,
