@@ -97,6 +97,9 @@ trusty-progress = { workspace = true }
 # (Phase 2 / #1760) to stage downloads atomically before placing binaries, and in
 # tests for integration-test isolation.
 tempfile = { workspace = true }
+# #9974: format-preserving edit of cargo's `.crates.toml` when a prebuilt takes
+# the trusty-embedderd-py launcher record over.
+toml_edit = { workspace = true }
 
 [dev-dependencies]
 # test-util enables Tokio's paused clock (`#[tokio::test(start_paused = true)]`)

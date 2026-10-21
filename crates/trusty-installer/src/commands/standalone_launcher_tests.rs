@@ -214,7 +214,7 @@ fn cargo_fallbacks_route_through_the_takeover_decision() {
 }
 
 /// Write a path-crate fixture with the given package name and binaries.
-fn write_fixture(dir: &Path, package: &str, version: &str, bins: &[&str]) {
+pub(crate) fn write_fixture(dir: &Path, package: &str, version: &str, bins: &[&str]) {
     std::fs::create_dir_all(dir.join("src")).expect("fixture dir");
     let mut manifest = format!(
         "[package]\nname = \"{package}\"\nversion = \"{version}\"\nedition = \"2021\"\n\n[workspace]\n"
@@ -228,7 +228,7 @@ fn write_fixture(dir: &Path, package: &str, version: &str, bins: &[&str]) {
 }
 
 /// Run real cargo with an isolated target dir; returns (success, stdout+stderr).
-fn real_cargo(args: &[&str], target: &Path) -> (bool, String) {
+pub(crate) fn real_cargo(args: &[&str], target: &Path) -> (bool, String) {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let out = std::process::Command::new(cargo)
         .args(args)
