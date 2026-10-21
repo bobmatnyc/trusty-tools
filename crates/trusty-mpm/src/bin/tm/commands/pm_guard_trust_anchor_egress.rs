@@ -29,9 +29,12 @@
 //! Test: `pm_guard_trust_anchor_egress_tests.rs`; end to end in
 //! `tests/tm_hook_egress_anchor_8454.rs`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+use crate::commands::pm_guard_trust_anchor_paths::eq_fold;
 use trusty_mpm::core::standalone::hooks::egress::{
     EgressGuardState, disables_all_hooks, egress_guard_state,
 };
@@ -245,9 +248,8 @@ pub(super) fn project_settings_verdict(
     let dir_reason = dirs.iter().find_map(|(spelling, incoming)| {
         let Placed::At(lexical) = place(spelling, base, home, true) else {
             let name = spelling.trim_end_matches('/').rsplit('/').next()?;
-            return name
-                .eq_ignore_ascii_case(CLAUDE_DIR)
-                .then(|| unplaceable_reason(spelling));
+            // #10107: folded as APFS compares names.
+            return eq_fold(name, CLAUDE_DIR).then(|| unplaceable_reason(spelling));
         };
         let dir = claude_dir(&lexical)?;
         judge_claude_dir(&dir, *incoming).map(|why| project_reason(spelling, &why))
@@ -267,10 +269,10 @@ pub(super) fn project_settings_verdict(
 
 /// `path` when it, as spelled or after symlinks, is a `.claude` directory.
 fn claude_dir(lexical: &Path) -> Option<PathBuf> {
+    // #10107: folded as APFS compares names.
     let named = |path: &Path| {
         path.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.eq_ignore_ascii_case(CLAUDE_DIR))
+            .is_some_and(|n| name_could_be(n, &[CLAUDE_DIR]))
     };
     match resolve(lexical) {
         Resolved::Path(resolved) if named(&resolved) => Some(resolved),
@@ -306,18 +308,35 @@ fn judge_claude_dir(dir: &Path, incoming: bool) -> Option<String> {
 
 /// Whether a file name is a guarded settings name, in any case.
 fn is_settings_name(name: &str) -> bool {
-    SETTINGS_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
+    // #10107: Unicode folding, so `ſettings.json` (U+017F) matches.
+    SETTINGS_NAMES.iter().any(|n| eq_fold(n, name))
+}
+
+/// Whether the file name `name` could open one of `wanted` on a
+/// case-insensitive APFS volume.
+///
+/// Why: #10107 — APFS folds beyond ASCII, so `ſettings.local.json` opens
+/// `settings.local.json`; an ASCII-only check let it through.
+/// What: [`eq_fold`] against each wanted name. Fail-closed: a name that is not
+/// UTF-8 cannot be folded, so it counts as a match.
+/// Test: `egress_unicode_spellings_of_protected_names_are_denied`,
+/// `egress_a_name_that_cannot_be_folded_counts_as_a_match`.
+pub(super) fn name_could_be(name: &OsStr, wanted: &[&str]) -> bool {
+    match name.to_str() {
+        Some(name) => wanted.iter().any(|w| eq_fold(w, name)),
+        None => true,
+    }
 }
 
 /// The `.claude/` directory when `path`, as spelled or after symlinks, is a
 /// project settings file.
 fn settings_dir(lexical: &Path) -> Option<PathBuf> {
+    // #10107: both names folded as APFS compares them.
     let shaped = |path: &Path| {
-        let name = path.file_name()?.to_str()?;
         let parent = path.parent()?;
-        let dir = parent.file_name()?.to_str()?;
-        (is_settings_name(name) && dir.eq_ignore_ascii_case(CLAUDE_DIR))
-            .then(|| parent.to_path_buf())
+        (name_could_be(path.file_name()?, &SETTINGS_NAMES)
+            && name_could_be(parent.file_name()?, &[CLAUDE_DIR]))
+        .then(|| parent.to_path_buf())
     };
     let resolved = match resolve(lexical) {
         Resolved::Path(resolved) => shaped(&resolved),

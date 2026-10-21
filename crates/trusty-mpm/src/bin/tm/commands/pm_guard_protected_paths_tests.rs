@@ -416,7 +416,117 @@ fn a_bare_hook_program_is_resolved_on_path() {
         fx.write(&bin.join("wrapped-prog"), "x"),
         "a program after env",
     );
-    // An argument is not looked up on PATH.
+    // #10107: every bare word is a program candidate, an argument included,
+    // because `nice -n 10 prog` hides which word is the program.
     std::fs::write(bin.join("inbox-check"), "x").expect("write arg");
-    assert_eq!(fx.write(&bin.join("inbox-check"), "x"), None);
+    denied(fx.write(&bin.join("inbox-check"), "x"), "an argument word");
+}
+
+/// An executable file at `path`, its directory created.
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+    std::fs::write(path, "#!/bin/sh\n").expect("write program");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// `fx` with `command` as its project's one hook and `path` as `PATH`.
+fn hooked(fx: &Fx, command: &str, path: &str) -> ProtectedEnv {
+    let settings = json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": command },
+    ]}]}});
+    std::fs::write(
+        fx.project.join(".claude/settings.json"),
+        settings.to_string(),
+    )
+    .expect("write settings");
+    ProtectedEnv {
+        path: Some(path.into()),
+        ..fx.env()
+    }
+}
+
+/// #10107 item 3: a hook program is protected in every `PATH` directory up to
+/// and including the first executable match, so it cannot be shadowed by a
+/// new file earlier on `PATH`, and a program found nowhere cannot be planted
+/// in any `PATH` directory. Its position survives `env -i`, `nice -n 10`,
+/// `timeout 5`, a newline and `true&&prog`.
+#[test]
+fn a_hook_program_cannot_be_shadowed_earlier_on_path() {
+    let fx = Fx::new();
+    let early = fx.root.join("early-bin");
+    let late = fx.root.join("late-bin");
+    let later = fx.root.join("later-bin");
+    for dir in [&early, &later] {
+        std::fs::create_dir_all(dir).expect("mkdir PATH dir");
+    }
+    let path = format!("{}:{}:{}", early.display(), late.display(), later.display());
+    let write = |env: &ProtectedEnv, target: &Path| {
+        let input = json!({ "file_path": target.display().to_string(), "content": "x" });
+        evaluate("Write", Some(&input), Some(&fx.project), env)
+    };
+    let mut wrong = Vec::new();
+    for (command, prog) in [
+        ("trusty-memory hook", "trusty-memory"),
+        ("env -i prog-env", "prog-env"),
+        ("nice -n 10 prog-nice", "prog-nice"),
+        ("timeout 5 prog-timeout", "prog-timeout"),
+        ("true\nprog-newline", "prog-newline"),
+        ("true&&prog-and", "prog-and"),
+    ] {
+        executable(&late.join(prog));
+        let env = hooked(&fx, command, &path);
+        for target in [early.join(prog), late.join(prog)] {
+            if write(&env, &target).is_none() {
+                wrong.push(format!("{command:?}: {} allowed", target.display()));
+            }
+        }
+        // Past the first executable match the program is not the hook's.
+        if let Some(why) = write(&env, &later.join(prog)) {
+            wrong.push(format!("{command:?}: past the match denied: {why}"));
+        }
+    }
+    // A program on no PATH directory may be planted in none of them.
+    let env = hooked(&fx, "ghost-prog --x", &path);
+    for dir in [&early, &late, &later] {
+        if write(&env, &dir.join("ghost-prog")).is_none() {
+            wrong.push(format!("ghost-prog: {} allowed", dir.display()));
+        }
+    }
+    // A relative PATH entry joins the project root.
+    std::fs::create_dir_all(fx.project.join("rel-bin")).expect("mkdir rel-bin");
+    let env = hooked(&fx, "rel-prog", &format!("rel-bin:{}", late.display()));
+    if write(&env, &fx.project.join("rel-bin/rel-prog")).is_none() {
+        wrong.push("rel-prog: the relative PATH entry allowed".to_owned());
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// #10107 fail-closed: a relative `PATH` entry with no project root to join
+/// it to, and an unset `PATH`, leave a hook program's location unknown, so
+/// the hook-named paths are an error (every write denied), never empty.
+#[test]
+fn an_unresolvable_path_entry_is_an_error() {
+    let fx = Fx::new();
+    let settings = json!({ "hooks": { "Stop": [{ "hooks": [
+        { "type": "command", "command": "user-prog" },
+    ]}]}});
+    let user = fx.home.join(".claude");
+    std::fs::create_dir_all(&user).expect("mkdir user");
+    std::fs::write(user.join("settings.json"), settings.to_string()).expect("write user");
+    let mut wrong = Vec::new();
+    for (what, path) in [
+        ("a relative PATH entry", Some("rel-bin:/usr/bin")),
+        ("no PATH", None),
+    ] {
+        let env = ProtectedEnv {
+            project_dir: None,
+            path: path.map(Into::into),
+            ..fx.env()
+        };
+        if let Ok(named) = hook_named_paths(&env, None) {
+            wrong.push(format!("{what}: Ok({named:?})"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

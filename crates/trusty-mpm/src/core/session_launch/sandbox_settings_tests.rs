@@ -76,8 +76,10 @@ fn the_pm_policy_names_every_socket_and_no_local_binding() {
     }
     // The socket path with a space is kept verbatim, as one entry.
     assert!(sockets.iter().any(|s| s.contains("Application Support")));
-    assert!(
-        sandbox["network"].get("allowLocalBinding").is_none(),
+    // #10107: pinned off, not merely absent, so a merge cannot keep a `true`.
+    assert_eq!(
+        sandbox["network"]["allowLocalBinding"],
+        json!(false),
         "the tm CLI uses the daemon socket, never a local port"
     );
     assert!(
@@ -207,7 +209,7 @@ fn a_weakened_project_file_refuses_the_launch() {
         *project.pointer_mut(pointer).expect("key") = value;
         std::fs::write(&path, project.to_string()).expect("weaken");
         refused(
-            verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user),
+            verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user),
             pointer,
         );
         write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("restore");
@@ -215,12 +217,12 @@ fn a_weakened_project_file_refuses_the_launch() {
     // The user tier without strictAllowlist refuses too.
     std::fs::write(fx.user.join("settings.json"), "{}").expect("weaken user");
     refused(
-        verify_sandbox_settings(SandboxRole::Agent, &fx.inputs.workspace, &fx.user),
+        verify_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user),
         "no strictAllowlist",
     );
     // The Architect's file must disable the sandbox.
     refused(
-        verify_sandbox_settings(SandboxRole::Architect, &fx.inputs.workspace, &fx.user),
+        verify_sandbox_settings(SandboxRole::Architect, &fx.inputs, &fx.user),
         "an Architect with the sandbox on",
     );
 }
@@ -229,7 +231,7 @@ fn a_weakened_project_file_refuses_the_launch() {
 fn unreadable_settings_refuse_the_launch() {
     let fx = Fx::new();
     // No project file at all.
-    let missing = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user);
+    let missing = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
     assert!(
         matches!(missing, Err(SandboxSettingsError::Unreadable { .. })),
         "{missing:?}"
@@ -242,7 +244,7 @@ fn unreadable_settings_refuse_the_launch() {
     ] {
         let before = std::fs::read_to_string(&file).ok();
         std::fs::write(&file, body).expect("corrupt");
-        let result = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user);
+        let result = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
         assert!(
             matches!(result, Err(SandboxSettingsError::Unreadable { .. })),
             "{} = {body:?}: {result:?}",
@@ -356,4 +358,495 @@ fn excluded_commands_refuse_the_launch() {
     )
     .expect("empty");
     write_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user).expect("allowed");
+}
+
+/// #10107: verify the role's sandbox for `fx`.
+fn verify(fx: &Fx, role: SandboxRole) -> Result<(), SandboxSettingsError> {
+    verify_sandbox_settings(role, &fx.inputs, &fx.user)
+}
+
+/// Which settings file a [`Case`] edits.
+#[derive(Debug, Clone, Copy)]
+enum Tier {
+    Project,
+    Local,
+    User,
+}
+
+/// One #10107 shape: a key set at a JSON pointer in one tier's file.
+struct Case {
+    what: &'static str,
+    tier: Tier,
+    pointer: &'static str,
+    value: Value,
+    /// Run on the fresh fixture before the key is set (a symlink to plant).
+    setup: Option<fn(&Fx)>,
+}
+
+fn case(what: &'static str, tier: Tier, pointer: &'static str, value: Value) -> Case {
+    Case {
+        what,
+        tier,
+        pointer,
+        value,
+        setup: None,
+    }
+}
+
+/// A project `Edit(/tools/**)` case with `setup` planting `<ws>/tools`.
+fn linked(what: &'static str, setup: fn(&Fx)) -> Case {
+    Case {
+        setup: Some(setup),
+        ..case(
+            what,
+            Tier::Project,
+            "/permissions/allow",
+            json!(["Edit(/tools/**)"]),
+        )
+    }
+}
+
+impl Fx {
+    /// `<ws>/tools`, the link the [`linked`] cases plant.
+    fn tools(&self) -> PathBuf {
+        self.inputs.workspace.join("tools")
+    }
+
+    /// A directory beside the workspace, outside it.
+    fn outside(&self) -> PathBuf {
+        self.inputs.workspace.with_file_name("outside")
+    }
+}
+
+fn link_outside(fx: &Fx) {
+    std::fs::create_dir_all(fx.outside()).expect("mkdir outside");
+    std::os::unix::fs::symlink(fx.outside(), fx.tools()).expect("link outside");
+}
+
+fn link_dangling(fx: &Fx) {
+    std::os::unix::fs::symlink(fx.outside().join("missing"), fx.tools()).expect("link dangling");
+}
+
+fn link_loop(fx: &Fx) {
+    std::os::unix::fs::symlink(fx.tools(), fx.tools()).expect("link loop");
+}
+
+fn link_inside(fx: &Fx) {
+    let real = fx.inputs.workspace.join("real");
+    std::fs::create_dir_all(&real).expect("mkdir real");
+    std::os::unix::fs::symlink(real, fx.tools()).expect("link inside");
+}
+
+impl Fx {
+    /// The settings file `tier` names.
+    fn tier_file(&self, tier: Tier) -> PathBuf {
+        match tier {
+            Tier::Project => self.file("settings.json"),
+            Tier::Local => self.file("settings.local.json"),
+            Tier::User => self.user.join("settings.json"),
+        }
+    }
+
+    /// Set `pointer` to `value` in `tier`'s file, creating objects on the way.
+    fn set(&self, tier: Tier, pointer: &str, value: Value) {
+        let path = self.tier_file(tier);
+        let mut settings = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut slot = &mut settings;
+        for key in pointer.trim_start_matches('/').split('/') {
+            if !slot.is_object() {
+                *slot = json!({});
+            }
+            slot = &mut slot[key];
+        }
+        *slot = value;
+        std::fs::write(&path, settings.to_string()).expect("write tier");
+    }
+}
+
+/// Run every case on a fresh, verified PM sandbox, and return the ones whose
+/// verify result was not `want_refused`, so one run reports every miss.
+/// `home`, when set, replaces the inputs' home after the baseline write.
+fn misses(cases: Vec<Case>, want_refused: bool, home: Option<PathBuf>) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for c in cases {
+        let mut fx = Fx::new();
+        write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
+        if let Some(home) = &home {
+            fx.inputs.home = home.clone();
+        }
+        if let Some(setup) = c.setup {
+            setup(&fx);
+        }
+        fx.set(c.tier, c.pointer, c.value.clone());
+        let result = verify(&fx, SandboxRole::Pm);
+        let refused = matches!(&result, Err(SandboxSettingsError::Refused(_)));
+        if refused != want_refused {
+            wrong.push(format!(
+                "{} ({:?} {} = {}): {result:?}",
+                c.what, c.tier, c.pointer, c.value
+            ));
+        }
+    }
+    wrong
+}
+
+/// #10107 item 1: a sandbox-widening key in the user tier, which the
+/// key-by-key merge keeps, or in the project tier, refuses the launch.
+#[test]
+fn widening_sandbox_keys_refuse_the_launch() {
+    use Tier::{Project, User};
+    let sccache = "/Users/x/Library/Caches/Mozilla.sccache/sccache.sock";
+    let net = "/sandbox/network";
+    let cases = vec![
+        case(
+            "user allowAllUnixSockets",
+            User,
+            "/sandbox/network/allowAllUnixSockets",
+            json!(true),
+        ),
+        case(
+            "user allowLocalBinding",
+            User,
+            "/sandbox/network/allowLocalBinding",
+            json!(true),
+        ),
+        case(
+            "user filesystem.disabled",
+            User,
+            "/sandbox/filesystem/disabled",
+            json!(true),
+        ),
+        case(
+            "user allowRead",
+            User,
+            "/sandbox/filesystem/allowRead",
+            json!(["/Users/x/.ssh"]),
+        ),
+        case(
+            "user allowUnixSockets re-adding sccache",
+            User,
+            "/sandbox/network/allowUnixSockets",
+            json!([sccache]),
+        ),
+        case(
+            "user allowedDomains",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!(["evil.example"]),
+        ),
+        case(
+            "user allowWrite",
+            User,
+            "/sandbox/filesystem/allowWrite",
+            json!(["/Users/x/.cargo/bin"]),
+        ),
+        case(
+            "user enabled: false",
+            User,
+            "/sandbox/enabled",
+            json!(false),
+        ),
+        case("user network as a non-object", User, net, json!("open")),
+        // Fix round: an empty value passes only when its type is the key's,
+        // `null` never, and `credentials` only as an object — Claude Code may
+        // skip a user file whose values its schema rejects.
+        case("user enabled: []", User, "/sandbox/enabled", json!([])),
+        case(
+            "user allowUnixSockets: null",
+            User,
+            "/sandbox/network/allowUnixSockets",
+            json!(null),
+        ),
+        case(
+            "user credentials: \"x\"",
+            User,
+            "/sandbox/credentials",
+            json!("x"),
+        ),
+        case(
+            "user excludedCommands: null",
+            User,
+            "/sandbox/excludedCommands",
+            json!(null),
+        ),
+        case(
+            "user allowedDomains: {}",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!({}),
+        ),
+        case(
+            "user filesystem: []",
+            User,
+            "/sandbox/filesystem",
+            json!([]),
+        ),
+        case(
+            "user unknown key: []",
+            User,
+            "/sandbox/someFutureKey",
+            json!([]),
+        ),
+        case(
+            "project allowAllUnixSockets",
+            Project,
+            "/sandbox/network/allowAllUnixSockets",
+            json!(true),
+        ),
+        case(
+            "project allowLocalBinding",
+            Project,
+            "/sandbox/network/allowLocalBinding",
+            json!(true),
+        ),
+        case(
+            "project filesystem.disabled",
+            Project,
+            "/sandbox/filesystem/disabled",
+            json!(true),
+        ),
+        case(
+            "project allowRead",
+            Project,
+            "/sandbox/filesystem/allowRead",
+            json!(["/Users/x/.aws"]),
+        ),
+        // Fail-closed: a value that is not `false` is not a `false`.
+        case(
+            "project allowLocalBinding as a string",
+            Project,
+            "/sandbox/network/allowLocalBinding",
+            json!("yes"),
+        ),
+        case(
+            "project allowRead as a string",
+            Project,
+            "/sandbox/filesystem/allowRead",
+            json!("/Users/x/.aws"),
+        ),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 item 1: the project policy pins the permissive booleans to `false`,
+/// over an operator's `true`.
+#[test]
+fn the_project_policy_pins_the_permissive_booleans_off() {
+    let fx = Fx::new();
+    let seeded = json!({ "sandbox": {
+        "allowAppleEvents": true,
+        "network": { "allowAllUnixSockets": true, "allowLocalBinding": true },
+        "filesystem": { "disabled": true },
+    }});
+    std::fs::write(fx.file("settings.json"), seeded.to_string()).expect("seed");
+    let written = write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
+    let project = read(&fx.file("settings.json"));
+    let mut wrong = Vec::new();
+    for pointer in [
+        "/sandbox/allowAppleEvents",
+        "/sandbox/network/allowAllUnixSockets",
+        "/sandbox/network/allowLocalBinding",
+        "/sandbox/filesystem/disabled",
+    ] {
+        if project.pointer(pointer) != Some(&json!(false)) {
+            wrong.push(format!("{pointer} = {:?}", project.pointer(pointer)));
+        }
+    }
+    assert!(wrong.is_empty(), "not pinned false:\n{}", wrong.join("\n"));
+    written.expect("the pinned policy verifies");
+}
+
+/// #10107 item 2: Apple Events, and an edit-tool allow rule outside the
+/// workspace and the `allowWrite` roots, refuse the launch in any tier.
+#[test]
+fn apple_events_and_outside_edit_rules_refuse_the_launch() {
+    use Tier::{Local, Project, User};
+    let allow = "/permissions/allow";
+    let cases = vec![
+        case(
+            "user allowAppleEvents",
+            User,
+            "/sandbox/allowAppleEvents",
+            json!(true),
+        ),
+        case(
+            "project allowAppleEvents",
+            Project,
+            "/sandbox/allowAppleEvents",
+            json!(true),
+        ),
+        case(
+            "project Edit(~/.cargo/bin/**)",
+            Project,
+            allow,
+            json!(["Bash(ls:*)", "Edit(~/.cargo/bin/**)"]),
+        ),
+        case(
+            "project Edit(//usr/local/bin/**)",
+            Project,
+            allow,
+            json!(["Edit(//usr/local/bin/**)"]),
+        ),
+        case(
+            "local Edit(~/.cargo/bin/tm)",
+            Local,
+            allow,
+            json!(["Edit(~/.cargo/bin/tm)"]),
+        ),
+        case(
+            "user Edit(//etc/**)",
+            User,
+            allow,
+            json!(["Edit(//etc/**)"]),
+        ),
+        case(
+            "project Edit(../escape/**)",
+            Project,
+            allow,
+            json!(["Edit(../escape/**)"]),
+        ),
+        case(
+            "project Edit(/src/../../escape)",
+            Project,
+            allow,
+            json!(["Edit(/src/../../escape)"]),
+        ),
+        case("project Edit(//**)", Project, allow, json!(["Edit(//**)"])),
+        case("project bare Edit", Project, allow, json!(["Edit"])),
+        case(
+            "project Write(~/.cargo/bin/**)",
+            Project,
+            allow,
+            json!(["Write(~/.cargo/bin/**)"]),
+        ),
+        case(
+            "project Edit(~bob/x)",
+            Project,
+            allow,
+            json!(["Edit(~bob/x)"]),
+        ),
+        // Fail-closed: an allow list verify cannot read refuses.
+        case(
+            "project permissions.allow as a string",
+            Project,
+            allow,
+            json!("Edit(//**)"),
+        ),
+        case("project non-string allow rule", Project, allow, json!([7])),
+        // Fix round: the path is judged after symlinks, not by spelling.
+        linked("Edit(/tools/**), tools -> a dir outside", link_outside),
+        linked(
+            "Edit(/tools/**), tools -> a missing path outside",
+            link_dangling,
+        ),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 item 2: an edit-tool allow rule inside the workspace or an
+/// `allowWrite` root, and non-edit rules, still verify — the refusal is not
+/// blanket.
+#[test]
+fn inside_edit_rules_still_verify() {
+    use Tier::{Local, Project};
+    let allow = "/permissions/allow";
+    let cases = vec![
+        case(
+            "project Edit(/src/**)",
+            Project,
+            allow,
+            json!(["Edit(/src/**)"]),
+        ),
+        case(
+            "project relative rules",
+            Project,
+            allow,
+            json!(["Edit(docs/*.md)", "Edit(./notes/**)", "Edit(*.rs)"]),
+        ),
+        case(
+            "project Edit(~/.cargo/registry/**), an allowWrite root",
+            Project,
+            allow,
+            json!(["Edit(~/.cargo/registry/**)"]),
+        ),
+        case("local Edit(/**)", Local, allow, json!(["Edit(/**)"])),
+        case(
+            "non-edit rules",
+            Project,
+            allow,
+            json!([
+                "Bash(ls:*)",
+                "Read(//etc/**)",
+                "WebFetch(domain:github.com)"
+            ]),
+        ),
+        case(
+            "project allowAppleEvents: false",
+            Project,
+            "/sandbox/allowAppleEvents",
+            json!(false),
+        ),
+        // Fix round: a link that stays inside the workspace still verifies.
+        linked("Edit(/tools/**), tools -> a dir inside", link_inside),
+    ];
+    let wrong = misses(cases, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fail-closed: a `~` rule with no absolute home to place it on
+/// refuses rather than passing unchecked.
+#[test]
+fn an_edit_rule_with_no_home_to_place_it_refuses() {
+    let cases = vec![case(
+        "project Edit(~/.cargo/registry/**) with no home",
+        Tier::Project,
+        "/permissions/allow",
+        json!(["Edit(~/.cargo/registry/**)"]),
+    )];
+    let wrong = misses(cases, true, Some(PathBuf::new()));
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fail-closed (fix round): a rule path whose symlinks cannot be
+/// resolved — a link loop, which `canonicalize` reports as an error other
+/// than NotFound — refuses rather than passing on its spelling.
+#[test]
+fn an_edit_rule_path_that_cannot_be_resolved_refuses() {
+    let cases = vec![linked("Edit(/tools/**), tools -> itself", link_loop)];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fix round: a user-tier empty value of the key's own type adds
+/// nothing and still verifies, so the type check is not a blanket refusal.
+#[test]
+fn type_matched_empty_user_keys_still_verify() {
+    use Tier::User;
+    let cases = vec![
+        case(
+            "user excludedCommands: []",
+            User,
+            "/sandbox/excludedCommands",
+            json!([]),
+        ),
+        case(
+            "user allowedDomains: []",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!([]),
+        ),
+        case(
+            "user filesystem: {}",
+            User,
+            "/sandbox/filesystem",
+            json!({}),
+        ),
+    ];
+    let wrong = misses(cases, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
 }

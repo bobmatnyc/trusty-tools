@@ -99,14 +99,17 @@ pub const DENIED_ENV_VARS: [&str; 11] = [
 /// `allowUnsandboxedCommands` false, the secret `denyRead` and trust-anchor
 /// `denyWrite` lists, cargo/npm `allowWrite` entries plus the target dir, the
 /// [`ALLOWED_DOMAINS`], `allowUnixSockets` naming `trusty-mpm.sock` and — PM
-/// only — the tmux socket, and `env.RUSTC_WRAPPER` set to `""`. No
-/// `allowLocalBinding` and no blanket `.claude/**` rule (#8928 rulings). Never
+/// only — the tmux socket, and `env.RUSTC_WRAPPER` set to `""`.
+/// `allowLocalBinding`, `allowAllUnixSockets`, `allowAppleEvents` and
+/// `filesystem.disabled` are pinned `false` (#10107), and there is no blanket
+/// `.claude/**` rule (#8928 rulings). Never
 /// the sccache socket: whoever connects names the compiler, and the server
 /// runs it outside the sandbox, so `RUSTC_WRAPPER=""` turns sccache off (#8928
 /// fix round). The Architect gets `enabled: false` only.
 /// Test: `the_pm_policy_names_every_socket_and_no_local_binding`,
 /// `the_agent_policy_has_no_tmux_socket`, `the_architect_policy_disables_the_sandbox`,
-/// `sandboxed_roles_never_reach_the_sccache_socket`.
+/// `sandboxed_roles_never_reach_the_sccache_socket`,
+/// `the_project_policy_pins_the_permissive_booleans_off`.
 pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     if role == SandboxRole::Architect {
         return json!({ "sandbox": { "enabled": false } });
@@ -152,6 +155,8 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     ] {
         deny.push(format!("Edit(/{})", ws.join(file).display()));
     }
+    // #10107: the permissive booleans are pinned off, so an operator's `true`
+    // in the project file is replaced rather than kept by the merge.
     json!({
         "env": { "RUSTC_WRAPPER": "" },
         "permissions": { "deny": deny },
@@ -161,12 +166,16 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
             "allowUnsandboxedCommands": false,
             "autoAllowBashIfSandboxed": true,
             "enableWeakerNetworkIsolation": true,
+            "allowAppleEvents": false,
             "filesystem": {
+                "disabled": false,
                 "denyRead": paths(&secrets),
                 "denyWrite": paths(&anchors),
                 "allowWrite": paths(&allow_write),
             },
             "network": {
+                "allowAllUnixSockets": false,
+                "allowLocalBinding": false,
                 "allowedDomains": ALLOWED_DOMAINS,
                 "allowUnixSockets": sockets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             },
@@ -259,7 +268,7 @@ pub fn write_sandbox_settings(
         .and_then(|inner| inner)
         .map_err(user)?;
     }
-    verify_sandbox_settings(role, &inputs.workspace, user_config_dir)
+    verify_sandbox_settings(role, inputs, user_config_dir)
 }
 
 /// The list keys the merge unions with the operator's entries instead of

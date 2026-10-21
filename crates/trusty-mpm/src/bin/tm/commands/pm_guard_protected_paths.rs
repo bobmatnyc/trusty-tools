@@ -150,12 +150,13 @@ pub(crate) fn evaluate(
     }
     let named = match hook_named_paths(env, cwd) {
         Ok(named) => named,
+        // #10107: `file` may also be a `PATH` entry that cannot be placed.
         Err(file) => {
             return Some(deny(
                 spelled,
                 &format!(
-                    "unknown to be safe, because `{}` cannot be read or parsed, so the paths its \
-                     hooks name are unknown",
+                    "unknown to be safe, because `{}` cannot be read, parsed or placed, so the \
+                     paths the hooks name are unknown",
                     file.display()
                 ),
             ));

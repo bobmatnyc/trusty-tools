@@ -29,6 +29,7 @@ use trusty_mpm::core::architect_launch::ARCHITECT_EXT;
 use trusty_mpm::core::architect_session::SESSION_EXT;
 
 use crate::commands::env_file_grant::GRANT_EXT;
+use crate::commands::pm_guard_trust_anchor_paths::{eq_fold, fold_case};
 
 use super::{Anchors, has_shell_pattern, is_json};
 
@@ -41,10 +42,12 @@ impl Anchors {
     /// anchor path component (`envfile-grants` included), a `*.architect`
     /// launch record, its `*.architect-session` name sidecar, the
     /// `*.architect-conversation` record or a `*.grant` `tm env` grant (any
-    /// case), or a `*.json` while records could be live. #9815: with
-    /// `table_names` set, [`could_name_table`] decides instead.
+    /// case, folded as APFS compares names, #10107), or a `*.json` while
+    /// records could be live. #9815: with `table_names` set,
+    /// [`could_name_table`] decides instead.
     /// Test: `the_launch_record_dir_is_an_anchor`,
-    /// `the_architect_is_denied_targets_that_could_name_the_table`.
+    /// `the_architect_is_denied_targets_that_could_name_the_table`,
+    /// `egress_unicode_spellings_of_protected_names_are_denied`.
     pub(super) fn could_be(&self, spelling: &str) -> bool {
         // #9815 (ruling (b)): the question table matches its own names only.
         if let Some(names) = &self.table_names {
@@ -52,26 +55,27 @@ impl Anchors {
         }
         let name = spelling.trim_end_matches('/');
         let name = name.rsplit('/').next().unwrap_or(name);
+        // #10107: names fold as APFS compares them (`ſ`, `ﬁ`), not ASCII only.
+        let folded = fold_case(name);
         name.is_empty()
             || name == "."
             || name == ".."
             || name.starts_with('~')
             || has_shell_pattern(name)
-            || self
-                .names
-                .iter()
-                .any(|anchor| anchor.eq_ignore_ascii_case(name))
+            || self.names.iter().any(|anchor| eq_fold(anchor, name))
             // #8878 ruling A: a planted launch record would be an identity,
             // and (R1 critic HIGH) a planted name sidecar would rename it.
             // #8939: a planted `tm env` grant would be a main-thread proof.
             // #8981: a planted conversation record would pick what it resumes.
-            || Path::new(name).extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case(ARCHITECT_EXT)
-                    || ext.eq_ignore_ascii_case(SESSION_EXT)
-                    || ext.eq_ignore_ascii_case(GRANT_EXT)
-                    || ext.eq_ignore_ascii_case(CONVERSATION_EXT)
-            })
-            || (self.records_live && is_json(name.as_ref()))
+            || Path::new(&folded)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    [ARCHITECT_EXT, SESSION_EXT, GRANT_EXT, CONVERSATION_EXT]
+                        .iter()
+                        .any(|want| eq_fold(want, ext))
+                })
+            || (self.records_live && is_json(folded.as_ref()))
     }
 
     /// [`Self::could_be`] for a copy destination the guard cannot place.
@@ -118,12 +122,23 @@ pub(super) fn table_names(paths: &[PathBuf]) -> Vec<String> {
 /// What: `.`, `..`, an empty name and a `~user` home could be the table's
 /// directory or one above it, so they deny. One plain variable (`$OUT`,
 /// `${OUT}`) has no text to compare and passes. Anything else is matched as a
-/// pattern, ASCII case-insensitively: a glob, or any other expansion,
-/// matches any text.
-/// Test: `the_architect_is_denied_targets_that_could_name_the_table`,
+/// pattern, both sides folded as APFS compares names (#10107): a glob, or any
+/// other expansion, matches any text.
+/// Test: `the_architect_is_denied_unicode_spellings_of_the_table`,
+/// `the_architect_is_denied_targets_that_could_name_the_table`,
 /// `the_architect_may_make_routine_writes_that_cannot_name_the_table`.
 pub(super) fn could_name_table(names: &[String], spelling: &str) -> bool {
-    let mut tokens = tokens(spelling);
+    // #10107: each literal folds as APFS compares names, `ﬁ` to `fi`.
+    let mut tokens: Vec<Tok> = tokens(spelling)
+        .into_iter()
+        .flat_map(|tok| match tok {
+            Tok::Lit(c) => fold_case(c.encode_utf8(&mut [0; 4]))
+                .chars()
+                .map(Tok::Lit)
+                .collect(),
+            other => vec![other],
+        })
+        .collect();
     while tokens.last() == Some(&Tok::Slash) {
         tokens.pop();
     }
@@ -137,7 +152,7 @@ pub(super) fn could_name_table(names: &[String], spelling: &str) -> bool {
         // #9815 (deviation 1): one plain variable names nothing to compare.
         [Tok::Var] => false,
         last => names.iter().any(|name| {
-            let name: Vec<char> = name.chars().collect();
+            let name: Vec<char> = fold_case(name).chars().collect();
             matches(last, &name)
         }),
     }
