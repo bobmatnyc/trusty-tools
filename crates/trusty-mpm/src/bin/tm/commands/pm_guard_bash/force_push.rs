@@ -16,6 +16,9 @@
 //! any `-c alias.*`, denies, as does `-c` or a git variable on a subcommand
 //! that is not a git builtin, which may be a `push` alias. A shell redirect is
 //! never a remote or the only refspec.
+//! #8878 S5 critic round 1: so does a push after the same command rewrites
+//! git config or a remote, a push with no remote operand in a repository the
+//! guard cannot read, a push `xargs` runs, and `git send-pack`.
 //! Residual: aliases from the user's git config, a push made by a script, and
 //! a push with no remote operand whose `pushRemote` / `push.default=upstream`
 //! sends it to another branch.
@@ -27,98 +30,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::floor_d4::{D4_REMEDY, program_positions};
-use super::{RedirectRole, redirect_role};
+use git_config::{git_env_assignment, git_globals, git_reconfiguration, is_builtin};
+use parse::{Push, parse};
+
+// #8878 S5 critic round 1: split out to keep this file under the SLOC cap.
+#[path = "force_push_git.rs"]
+mod git_config;
+#[path = "force_push_parse.rs"]
+mod parse;
 
 /// The names treated as the default branch when it cannot be determined.
 const FALLBACK_DEFAULTS: &[&str] = &["main", "master"];
 
-/// `git push` options whose value is a separate token.
-// #8878 follow-on: `--recurse-submodules check` takes its value as a token too.
-const PUSH_VALUE_OPTS: &[&str] = &[
-    "push-option",
-    "repo",
-    "receive-pack",
-    "exec",
-    "recurse-submodules",
-];
-
-/// Every `git push` long option (git-push(1)), for unique-prefix resolution.
-const PUSH_LONG_OPTS: &[&str] = &[
-    "all",
-    "branches",
-    "prune",
-    "mirror",
-    "dry-run",
-    "porcelain",
-    "delete",
-    "tags",
-    "follow-tags",
-    "no-follow-tags",
-    "signed",
-    "no-signed",
-    "atomic",
-    "no-atomic",
-    "push-option",
-    "receive-pack",
-    "exec",
-    "force-with-lease",
-    "no-force-with-lease",
-    "force",
-    "no-force",
-    "force-if-includes",
-    "no-force-if-includes",
-    "repo",
-    "set-upstream",
-    "thin",
-    "no-thin",
-    "quiet",
-    "verbose",
-    "progress",
-    "no-progress",
-    "recurse-submodules",
-    "no-recurse-submodules",
-    "verify",
-    "no-verify",
-    "ipv4",
-    "ipv6",
-];
-
-/// `git --list-cmds=builtins` (git 2.54): a subcommand git runs itself, which
-/// no alias can shadow. Any other subcommand may be an alias for `push`.
-const GIT_BUILTINS: &str = "\
-     add am annotate apply archive backfill bisect blame branch bugreport bundle cat-file \
-     check-attr check-ignore check-mailmap check-ref-format checkout checkout--worker \
-     checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree \
-     config count-objects credential credential-cache credential-cache--daemon \
-     credential-store describe diagnose diff diff-files diff-index diff-pairs diff-tree \
-     difftool fast-export fast-import fetch fetch-pack fmt-merge-msg for-each-ref \
-     for-each-repo format-patch fsck fsck-objects fsmonitor--daemon gc get-tar-commit-id grep \
-     hash-object help history hook index-pack init init-db interpret-trailers last-modified \
-     log ls-files ls-remote ls-tree mailinfo mailsplit maintenance merge merge-base \
-     merge-file merge-index merge-ours merge-recursive merge-recursive-ours \
-     merge-recursive-theirs merge-subtree merge-tree mktag mktree multi-pack-index mv \
-     name-rev notes pack-objects pack-redundant pack-refs patch-id pickaxe prune prune-packed \
-     pull push range-diff read-tree rebase receive-pack reflog refs remote remote-ext \
-     remote-fd repack replace replay repo rerere reset restore rev-list rev-parse revert rm \
-     send-pack shortlog show show-branch show-index show-ref sparse-checkout stage stash \
-     status stripspace submodule--helper switch symbolic-ref tag unpack-file unpack-objects \
-     update-index update-ref update-server-info upload-archive upload-archive--writer \
-     upload-pack var verify-commit verify-pack verify-tag version whatchanged worktree \
-     write-tree";
-
-/// The `git push` long option `name` names: exact, or its one unique-prefix
-/// match. `None` when it matches none or several.
-/// Test: `a_force_push_to_the_default_branch_is_denied`.
-fn resolve_long(name: &str) -> Option<&'static str> {
-    if let Some(exact) = PUSH_LONG_OPTS.iter().find(|o| **o == name) {
-        return Some(exact);
-    }
-    let mut matches = PUSH_LONG_OPTS.iter().filter(|o| o.starts_with(name));
-    match (matches.next(), matches.next()) {
-        (Some(only), None) if !name.is_empty() => Some(only),
-        _ => None,
-    }
-}
+/// How to push so the guard can check the remote (#8878 S5 critic round 1:
+/// a variable or `~` in `-C` is joined unexpanded, so the probe fails).
+const PUSH_ADVICE: &str = "Push to a configured remote such as `origin`, from the repository \
+     or with `git -C` and a literal absolute path: the guard never follows a `cd`, and does \
+     not expand a variable or `~` in `-C`.";
 
 /// The repository facts the rule needs, injectable for tests.
 pub(crate) trait GitProbe {
@@ -173,170 +101,132 @@ impl GitProbe for LiveGit {
     }
 }
 
-/// The parsed shape of one `git push`.
-#[derive(Default)]
-struct Push {
-    force: bool,
-    /// `--force-with-lease`, tracked apart: `--no-force` does not clear it.
-    lease: bool,
-    /// An unknown or ambiguous long option, which could be a force.
-    unknown: bool,
-    /// The `--repo` value, the repository when no operand names one.
-    repo: Option<String>,
-    mirror: bool,
-    all: bool,
-    operands: Vec<String>,
-    /// Shell syntax read as words — redirects (`2>&1`, `>`, `log.txt`) and a
-    /// glued `)` (`trunk)`): never a remote or the only refspec, but still
-    /// judged as refspecs, in case quoting made one.
-    shell_words: Vec<String>,
+/// A D4 deny reason with the shared remedy appended.
+fn deny(what: String) -> Option<String> {
+    Some(format!("Hard-floor deny (#8878 D4): {what} {D4_REMEDY}"))
 }
 
 /// The force-push deny for one segment's argv, or `None`.
 ///
-/// What: finds `git … push` through wrappers; `dir` is the directory the git
-/// command runs in (`None` after a `cd`), extended by any `-C` before `push`.
+/// What: finds `git … push` (and `git send-pack`) through wrappers; `dir` is
+/// the directory the git command runs in (`None` after a `cd`), extended by
+/// any `-C` before `push`. `command` is the whole command, scanned for what
+/// else reconfigures git; `appended` says `xargs` may add operands.
+/// Test: `a_push_after_a_git_reconfiguration_is_denied`,
+/// `an_operand_less_push_in_an_unknown_repository_is_denied`,
+/// `a_push_run_by_xargs_is_denied`, `git_send_pack_is_denied`.
 pub(super) fn force_push_reason(
     argv: &[String],
     dir: Option<&Path>,
     git: &dyn GitProbe,
     command: &str,
+    appended: bool,
 ) -> Option<String> {
     for (g, program) in program_positions(argv) {
+        // #8878 S5 critic round 1: `send-pack` pushes without the word `push`.
+        let send_pack = || {
+            deny(
+                "`git send-pack` pushes refs to any repository, a push the guard cannot \
+                  judge. Use `git push` to a configured remote."
+                    .to_string(),
+            )
+        };
+        if program == "git-send-pack" {
+            return send_pack();
+        }
         if program != "git" {
             continue;
         }
-        // #8878 follow-on: `-c`/`--config-env` can alias or reconfigure a push.
+        // #8878 S5: `-c`/`--config-env` can alias or reconfigure a push.
         let (configs, sub, redirected) = git_globals(argv, g);
+        if sub.is_some_and(|i| argv[i] == "send-pack") {
+            return send_pack();
+        }
         let aliased = configs
             .iter()
             .any(|c| c.to_ascii_lowercase().starts_with("alias."));
-        // #8878 PR 2c r2: a subcommand git does not build in can be an alias
-        // for `push`, which the configuration below can define.
-        let may_push = sub.is_some_and(|i| {
-            argv[i] == "push" || !GIT_BUILTINS.split_whitespace().any(|b| b == argv[i])
-        });
+        // #8878 S5: a subcommand git does not build in can be an alias for
+        // `push`, which the configuration below can define.
+        let may_push = sub.is_some_and(|i| argv[i] == "push" || !is_builtin(&argv[i]));
         if aliased || (may_push && !configs.is_empty()) {
-            return Some(format!(
-                "Hard-floor deny (#8878 D4): this `git` command sets `-c`/`--config-env` \
-                 (`{}`), which can alias or reconfigure a push, so the guard cannot tell what \
-                 it pushes where. Run the push without it. {D4_REMEDY}",
+            return deny(format!(
+                "this `git` command sets `-c`/`--config-env` (`{}`), which can alias or \
+                 reconfigure a push, so the guard cannot tell what it pushes where. Run the \
+                 push without it.",
                 configs.join(" ")
             ));
         }
-        // #8878 PR 2c: a `GIT_CONFIG_*` / `GIT_DIR` / `GIT_WORK_TREE` in the
+        // #8878 S5: a `GIT_CONFIG_*` / `GIT_DIR` / `GIT_WORK_TREE` in the
         // command reconfigures or relocates the push the same way `-c` does.
         if let Some(name) = git_env_assignment(command).filter(|_| may_push) {
-            return Some(format!(
-                "Hard-floor deny (#8878 D4): this command sets `{name}`, which can reconfigure \
-                 or relocate a `git push`, so the guard cannot tell what it pushes where. Run \
-                 the push without it. {D4_REMEDY}"
+            return deny(format!(
+                "this command sets `{name}`, which can reconfigure or relocate a `git push`, \
+                 so the guard cannot tell what it pushes where. Run the push without it."
+            ));
+        }
+        // #8878 S5 critic round 1: the probe runs before the command, so a
+        // remote or config the same command rewrites is unseen.
+        if let Some(what) = git_reconfiguration(command).filter(|_| may_push) {
+            return deny(format!(
+                "this command changes the git configuration a push reads ({what}) before \
+                 it pushes, so the guard cannot tell where the push goes. Make the change \
+                 and the push in separate commands."
             ));
         }
         let Some(p) = (g + 1..argv.len()).find(|&i| argv[i] == "push") else {
             continue;
         };
-        // #8878 PR 2c: `--git-dir` / `--work-tree` move the repository the
+        // #8878 S5 critic round 1: `xargs` appends operands the guard never
+        // sees — a remote, a refspec, or a `+` refspec.
+        if appended {
+            return deny(
+                "this `git push` runs under `xargs`, which appends remotes or refspecs the \
+                 guard cannot see. Name the remote and refspecs in the command."
+                    .to_string(),
+            );
+        }
+        // #8878 S5: `--git-dir` / `--work-tree` move the repository the
         // remote is read from; the guard does not follow them.
         let dir = dir
             .filter(|_| !redirected)
             .map(|d| git_dir(d, &argv[g + 1..p]));
         let push = parse(&argv[p + 1..]);
         if let Some(remote) = unconfigured_remote(&push, dir.as_deref(), git) {
-            return Some(format!(
-                "Hard-floor deny (#8878 D4): this `git push` sends to `{remote}`, a URL, a \
-                 path or a name that is not a configured remote (or cannot be checked) — \
-                 network exfiltration. Push to a configured remote such as `origin`, from \
-                 the repository or with `git -C <dir> push`: the guard never follows a `cd`. \
-                 {D4_REMEDY}"
+            return deny(format!(
+                "this `git push` sends to `{remote}`, a URL, a path or a name that is not a \
+                 configured remote (or cannot be checked) — network exfiltration. \
+                 {PUSH_ADVICE}"
+            ));
+        }
+        // #8878 S5 critic round 1: with no remote operand the repository picks
+        // the remote, so it must be one the guard can read.
+        let readable = dir
+            .as_deref()
+            .is_some_and(|d| git.has_remote(d, "origin").is_some());
+        if push.remote().is_none() && !readable {
+            return deny(format!(
+                "this `git push` names no remote, and the guard cannot read the repository \
+                 that picks one (after a `cd`, under `--git-dir`/`--work-tree`, or a `-C` \
+                 directory that is not a repository yet). {PUSH_ADVICE}"
             ));
         }
         if let Some(branch) = forced_default(&push, dir.as_deref(), git) {
-            return Some(format!(
-                "Hard-floor deny (#8878 D4): this `git push` force-updates `{branch}`, the \
-                 default branch (or cannot rule it out). Push to a feature branch, or push \
-                 without force. {D4_REMEDY}"
+            return deny(format!(
+                "this `git push` force-updates `{branch}`, the default branch (or cannot rule \
+                 it out). Push to a feature branch, or push without force."
             ));
         }
     }
     None
 }
 
-/// The `-c` / `--config-env` values among git's global options, the index of
-/// the subcommand (`None` when only options follow `git` at `g`), and whether
-/// `--git-dir` or `--work-tree` relocates the repository.
-fn git_globals(argv: &[String], g: usize) -> (Vec<String>, Option<usize>, bool) {
-    let mut configs = Vec::new();
-    let mut redirected = false;
-    let mut i = g + 1;
-    while let Some(tok) = argv.get(i) {
-        let tok = tok.as_str();
-        match tok {
-            "-c" | "--config-env" => {
-                configs.push(argv.get(i + 1).cloned().unwrap_or_default());
-                i += 2;
-            }
-            "--git-dir" | "--work-tree" => {
-                redirected = true;
-                i += 2;
-            }
-            t if t.starts_with("--git-dir=") || t.starts_with("--work-tree=") => {
-                redirected = true;
-                i += 1;
-            }
-            "-C" | "--namespace" => i += 2,
-            t if t.starts_with("--config-env=") => {
-                configs.push(t["--config-env=".len()..].to_string());
-                i += 1;
-            }
-            t if t.starts_with("-c") => {
-                configs.push(t[2..].to_string());
-                i += 1;
-            }
-            t if t.starts_with('-') => i += 1,
-            _ => return (configs, Some(i), redirected),
-        }
-    }
-    (configs, None, redirected)
-}
-
-/// The first `GIT_CONFIG*`, `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_WORK_TREE`
-/// named anywhere in `command` — an env prefix, `env`, an `export`, or a `+=`.
-///
-/// What: the command is cut on whitespace and shell separators, and each
-/// piece is shlex-unquoted (#8878 PR 2c r2: `'GIT_DIR'=x` is `GIT_DIR=x`) —
-/// or, when it does not lex, stripped of quotes. A piece's name is its leading
-/// identifier after any `$`/`{`, so `GIT_DIR+=x`, `export GIT_DIR` and
-/// `${GIT_DIR:=x}` all name `GIT_DIR`; over-matching an `echo` is the safe
-/// direction.
-/// Test: `a_git_environment_or_relocated_repository_push_is_denied`,
-/// `a_quoted_or_appended_git_variable_is_denied`.
-fn git_env_assignment(command: &str) -> Option<String> {
-    let pieces = command.split(|c: char| c.is_whitespace() || ";&|()`".contains(c));
-    let tokens = pieces.flat_map(|piece| {
-        shlex::split(piece).unwrap_or_else(|| vec![piece.replace(['\'', '"', '\\'], "")])
-    });
-    tokens
-        .map(|tok| {
-            let tok = tok.trim_start_matches(['$', '{']);
-            let end = tok
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or(tok.len());
-            tok[..end].to_string()
-        })
-        .find(|name| {
-            name.starts_with("GIT_CONFIG")
-                || ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"].contains(&name.as_str())
-        })
-}
-
 /// The repository a push names when it is not a configured remote: a URL, a
 /// path, a bare name the repository does not know, or any name whose remote
 /// list cannot be read. `None` for a configured remote or no repository operand.
-// #8878 PR 2c: the probe runs before the command, so a repository the command
+// #8878 S5: the probe runs before the command, so a repository the command
 // itself creates reads as unreadable — only a positive answer allows.
 fn unconfigured_remote(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option<String> {
-    let remote = push.operands.first().or(push.repo.as_ref())?;
+    let remote = push.remote()?;
     let configured =
         is_remote_name(remote) && dir.is_some_and(|d| git.has_remote(d, remote) == Some(true));
     (!configured).then(|| remote.clone())
@@ -351,84 +241,6 @@ fn git_dir(dir: &Path, globals: &[String]) -> PathBuf {
         }
     }
     out
-}
-
-/// Parse the argv after `push`.
-///
-/// Test: `a_redirect_is_not_a_refspec`, `no_force_does_not_clear_a_lease`.
-fn parse(tail: &[String]) -> Push {
-    let mut push = Push::default();
-    let mut i = 0;
-    let mut options_end = false;
-    while i < tail.len() {
-        let mut tok = tail[i].as_str();
-        i += 1;
-        // #8878 S5: a redirect is the shell's, not a refspec — read as one, it
-        // hid the implicit current-branch destination of `git push -f origin 2>&1`.
-        if let Some(follows) = redirect_word(tok) {
-            push.shell_words.push(tok.to_string());
-            if follows && let Some(target) = tail.get(i) {
-                push.shell_words.push(target.clone());
-                i += 1;
-            }
-            continue;
-        }
-        // #8878 S5: so is the `)` that closes `(git push -f origin)`.
-        if let Some(bare) = tok.strip_suffix(')').filter(|b| !b.contains('(')) {
-            push.shell_words.push(tok.to_string());
-            if bare.is_empty() {
-                continue;
-            }
-            tok = bare;
-        }
-        if options_end {
-            push.operands.push(tok.to_string());
-            continue;
-        }
-        if tok == "--" {
-            options_end = true;
-            continue;
-        }
-        if let Some(long) = tok.strip_prefix("--") {
-            let (name, attached) = long
-                .split_once('=')
-                .map_or((long, false), |(n, _)| (n, true));
-            // #8878 fix round: git takes any unique prefix of a long option.
-            let value = long.split_once('=').map(|(_, v)| v.to_string());
-            match resolve_long(name) {
-                Some("force") => push.force = true,
-                // #8878 follow-on: `--no-force` does not clear a lease.
-                Some("force-with-lease") => push.lease = true,
-                Some("no-force-with-lease") => push.lease = false,
-                Some("no-force") => push.force = false,
-                Some("repo") => {
-                    push.repo = value.or_else(|| tail.get(i).cloned());
-                    i += usize::from(!attached);
-                }
-                Some("mirror") => push.mirror = true,
-                Some("all" | "branches") => push.all = true,
-                Some(opt) if !attached && PUSH_VALUE_OPTS.contains(&opt) => i += 1,
-                Some(_) => {}
-                // Unknown or ambiguous: it could be a force — fail closed.
-                None => push.unknown = true,
-            }
-            continue;
-        }
-        match tok {
-            "-o" => i += 1,
-            t if t.starts_with('-') && t.len() > 1 => {
-                // A short cluster: `-f` anywhere before `-o`, whose value ends it.
-                let cluster = &t[1..];
-                let before_o = cluster.split('o').next().unwrap_or_default();
-                push.force |= before_o.contains('f');
-                if cluster.ends_with('o') {
-                    i += 1;
-                }
-            }
-            _ => push.operands.push(tok.to_string()),
-        }
-    }
-    push
 }
 
 /// The default branch this push force-updates, or `None` when it does not.
@@ -482,29 +294,6 @@ fn forced_default(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option
         }
     }
     None
-}
-
-/// Whether `word` is a shell redirect: `Some(true)` when its file is the next
-/// word (`>`, `2>`, `<`, `<<<`), `Some(false)` when attached or a descriptor
-/// operation (`>log`, `2>&1`, `<in`, `<<EOF`), `None` when it is not one.
-///
-/// Why: #8878 S5 (R7) — `git push -f origin 2>&1` read `2>&1` as a refspec.
-/// What: output redirects through [`redirect_role`]; an input redirect is an
-/// optional descriptor number, then `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`.
-/// Test: `a_redirect_is_not_a_refspec`.
-fn redirect_word(word: &str) -> Option<bool> {
-    match redirect_role(word) {
-        RedirectRole::TargetFollows => return Some(true),
-        RedirectRole::Target(_) | RedirectRole::FileDescriptor => return Some(false),
-        RedirectRole::None => {}
-    }
-    let input = word.trim_start_matches(|c: char| c.is_ascii_digit());
-    let rest = input.strip_prefix('<')?;
-    let rest = ["<<", "<-", "<", "&", ">"]
-        .iter()
-        .find_map(|op| rest.strip_prefix(op))
-        .unwrap_or(rest);
-    Some(rest.is_empty())
 }
 
 /// Whether a push's first operand is a remote name rather than a URL or path.

@@ -58,6 +58,9 @@ pub(super) struct Segment {
     /// Whether a `cd`, `pushd` or `popd` ran earlier in the command (or in
     /// this segment), so the directory is unknown; it is never followed.
     pub(super) after_cd: bool,
+    /// Whether `xargs` may append operands to it: the segment names `xargs`,
+    /// or was peeled out of one that does (#8878 S5 critic round 1).
+    pub(super) appended: bool,
 }
 
 /// Classify a Bash command against the D4-remainder floor: `Some(reason)` denies.
@@ -91,7 +94,7 @@ pub(crate) fn evaluate_d4_floor(command: &str, cwd: &Path, git: &dyn GitProbe) -
         let dir: Option<PathBuf> = (!seg.after_cd).then(|| cwd.to_path_buf());
         let reason = exfiltration_reason(&argv, seg.piped)
             .or_else(|| disk_tool_reason(&argv, dir.as_deref()))
-            .or_else(|| force_push_reason(&argv, dir.as_deref(), git, command));
+            .or_else(|| force_push_reason(&argv, dir.as_deref(), git, command, seg.appended));
         if reason.is_some() {
             return reason;
         }
@@ -103,15 +106,27 @@ pub(crate) fn evaluate_d4_floor(command: &str, cwd: &Path, git: &dyn GitProbe) -
 pub(super) fn segments(command: &str) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut after_cd = false;
-    walk(command, false, 0, &mut after_cd, &mut out);
+    let outer = Inherited {
+        piped: false,
+        appended: false,
+    };
+    walk(command, outer, 0, &mut after_cd, &mut out);
     out
 }
 
-/// Depth-bounded core of [`segments`]; `piped_in` is inherited by the first
-/// segment, as a wrapper's stdin is its first command's.
-fn walk(command: &str, piped_in: bool, depth: usize, after_cd: &mut bool, out: &mut Vec<Segment>) {
+/// What a wrapper body inherits from the segment that carries it.
+#[derive(Clone, Copy)]
+struct Inherited {
+    /// The first segment's stdin is the wrapper's.
+    piped: bool,
+    /// The wrapper is, or sits inside, an `xargs`.
+    appended: bool,
+}
+
+/// Depth-bounded core of [`segments`].
+fn walk(command: &str, from: Inherited, depth: usize, after_cd: &mut bool, out: &mut Vec<Segment>) {
     for (n, raw) in split_shell_segments_raw(command).into_iter().enumerate() {
-        let piped = (n == 0 && piped_in) || follows_pipe(command, raw);
+        let piped = (n == 0 && from.piped) || follows_pipe(command, raw);
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
@@ -119,17 +134,30 @@ fn walk(command: &str, piped_in: bool, depth: usize, after_cd: &mut bool, out: &
         if moves_directory(trimmed) {
             *after_cd = true;
         }
+        let appended = from.appended || names_xargs(trimmed);
         out.push(Segment {
             text: trimmed.to_string(),
             piped,
             after_cd: *after_cd,
+            appended,
         });
         if depth < MAX_WRAPPER_DEPTH
             && let WrappedCommand::Inner(inner) = wrapped_command(trimmed)
         {
-            walk(&inner, piped, depth + 1, after_cd, out);
+            let into = Inherited { piped, appended };
+            walk(&inner, into, depth + 1, after_cd, out);
         }
     }
+}
+
+/// Whether any word of `segment` is an `xargs` program (#8878 S5 critic
+/// round 1); over-matching only fails closed.
+fn names_xargs(segment: &str) -> bool {
+    let words = shlex::split(segment)
+        .unwrap_or_else(|| segment.split_whitespace().map(str::to_string).collect());
+    words
+        .iter()
+        .any(|w| w.trim_start_matches(['(', '{', '\\']).rsplit('/').next() == Some("xargs"))
 }
 
 /// Whether a segment may change the shell's directory: one of its shell words,
@@ -143,16 +171,28 @@ fn walk(command: &str, piped_in: bool, depth: usize, after_cd: &mut bool, out: &
 /// What: a word test, never a parse, and the directory is never computed —
 /// over-matching (`echo cd`) only makes it unknown, the fail-closed direction.
 /// A quoted phrase (`-m "fix cd"`) is one word, so it does not match.
+/// #8878 S5 critic round 1: a command word holding `$` or a backtick may be
+/// built into `cd`, so it counts too, as does any such character in a
+/// segment that does not lex.
 /// Test: `every_directory_change_makes_the_directory_unknown`,
 /// `a_cd_is_never_followed`.
 fn moves_directory(segment: &str) -> bool {
     let names_cd =
         |word: &str| CD_WORDS.contains(&word.trim_start_matches(['(', '{', '$', '`', '!']));
+    let built = |word: &str| word.contains(['$', '`']);
     match shlex::split(segment) {
-        Some(words) => words.iter().any(|w| names_cd(w)),
-        None => segment
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .any(names_cd),
+        Some(words) => {
+            words.iter().any(|w| names_cd(w))
+                || program_positions(&words)
+                    .iter()
+                    .any(|&(i, _)| built(&words[i]))
+        }
+        None => {
+            built(segment)
+                || segment
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(names_cd)
+        }
     }
 }
 

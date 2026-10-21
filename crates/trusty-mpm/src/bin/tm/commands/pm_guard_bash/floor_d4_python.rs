@@ -9,8 +9,10 @@
 //! Code that names a network module AND reads local content (a file, stdin,
 //! the environment, a subprocess) denies; a plain download passes. `-c` code
 //! whose stdin is a pipe or a `<` redirect, or that takes a `$(…)` argument,
-//! reads local content. `-m` is judged by the module it runs; a
-//! [`CODE_RUNNERS`] module's arguments are judged as `-c` code (#8878 S5).
+//! reads local content. `-m` of a network module denies; every module's
+//! arguments are judged as `-c` code, a [`CODE_RUNNERS`] argument naming a
+//! network module denies, and a `-m` run fed stdin is judged by the whole
+//! command (#8878 S5).
 //! FAIL-CLOSED: code the guard cannot inspect — a shell expansion inside it, a
 //! dynamic import or `exec`/`eval`, code fed from a pipe or a `<` file, or a
 //! command that does not lex — denies when it names a network module.
@@ -18,7 +20,8 @@
 //! [`CODE_RUNNERS`] module runs, and a module named only through string
 //! building.
 //! Test: `a_python_upload_is_denied`, `python_without_an_upload_passes`,
-//! `python_code_running_modules_judge_their_arguments`.
+//! `python_code_running_modules_judge_their_arguments`,
+//! `every_python_module_judges_its_arguments`.
 
 use super::{D4_REMEDY, program_positions};
 
@@ -103,18 +106,18 @@ pub(super) fn python_upload_reason(text: &str, piped: bool, command: &str) -> Op
     let fed = piped || argv.iter().any(|t| feeds_local(t));
     let seen = match launch(&argv)? {
         PyRun::Code(code) => Some((code, fed)),
-        // #8878 PR 2c r2: `-m` runs that module; its arguments are its data —
-        // except a code runner's (#8878 S5), which are code or a module name.
+        // #8878 S5: `-m` runs that module. A code runner's argument may name
+        // the module it runs. #8878 S5 critic round 1: any module may run its
+        // arguments or its stdin as code, so the arguments are judged as `-c`
+        // code, and a piped or redirected stdin by the whole command.
         PyRun::Module(module, args) => {
             let args = argv.get(args..).unwrap_or_default();
             if names_network(&module) || (runs_code(&module) && args.iter().any(|a| is_network(a)))
             {
                 return reason();
             }
-            if !runs_code(&module) {
-                return None;
-            }
-            Some((args.join("\n"), fed))
+            let stdin_fed = piped || argv.iter().any(|t| reads_stdin_from_a_file(t));
+            (!stdin_fed).then(|| (args.join("\n"), fed))
         }
         // #8878 PR 2c: a `pipx run` package runs code the guard cannot see.
         PyRun::Unseen => None,
@@ -356,6 +359,12 @@ fn feeds_local(token: &str) -> bool {
         .starts_with('<')
         || token.contains("$(")
         || token.contains('`')
+}
+
+/// Whether a token redirects stdin (`<`, `0<`, `<<<`, `<<`), not a `<(…)`.
+fn reads_stdin_from_a_file(token: &str) -> bool {
+    let t = token.strip_prefix('0').unwrap_or(token);
+    t.starts_with('<') && !t.starts_with("<(")
 }
 
 /// Whether code carries a shell expansion the guard does not evaluate.
