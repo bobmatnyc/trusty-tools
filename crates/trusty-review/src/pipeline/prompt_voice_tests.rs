@@ -13,7 +13,7 @@ use crate::{
         ReviewContext, ReviewPrMeta, build_review_prompt, build_system_prompt,
         reviewer_system_prompt,
     },
-    voice::{VoiceConfig, principles::principles_addendum},
+    voice::VoiceConfig,
 };
 
 // Local fixture: this module uses a distinct meta title from prompt_tests.rs
@@ -58,7 +58,12 @@ fn build_system_prompt_stock_only() {
 #[test]
 fn build_system_prompt_with_principles_only() {
     let vc = VoiceConfig {
-        principles: Some(principles_addendum().to_string()),
+        // #9991: the principles addendum is runtime content.
+        principles: Some(
+            prompts()
+                .principles()
+                .expect("the checkout ships the principles"),
+        ),
         voice_addendum: None,
         voice_name: None,
         ..Default::default()

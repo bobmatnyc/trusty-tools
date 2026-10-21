@@ -7,8 +7,9 @@
 //! release installed there is nothing at all. Each must stop the review with a
 //! non-zero exit and the remedy on stderr — visible even with tracing off — and
 //! never review on a missing or empty system prompt. A voice or review
-//! template the config names is content too: a release that lacks it stops
-//! the review the same way. The code under review is a trusted-looking
+//! template the config names is content too, and so is the principles
+//! addendum while it is on (#9991): a release that lacks it stops the review
+//! the same way, and one that lacks the principles still runs with them off. The code under review is a trusted-looking
 //! checkout (`gh pr checkout N`), so the cwd must never be a content source;
 //! only `TRUSTY_REVIEW_CONTENT_CHECKOUT` names one.
 //! What: spawns the built binary with a scratch `$HOME` and cwd, stages each
@@ -251,4 +252,23 @@ fn a_stale_release_without_the_configured_voice_or_template_refuses_run() {
         let out = run_review_at(home.path(), cwd.path(), envs);
         assert_failed(case, &out, &["not reviewed: ", path, "tm content update"]);
     }
+}
+
+/// #9991: with the principles layer off, a release without the principles
+/// addendum still runs: the review gets past content loading, and nothing
+/// names the absent file.
+#[test]
+fn a_release_without_the_principles_still_runs_with_principles_off() {
+    let home = tempfile::tempdir().expect("scratch home");
+    stage_bundle(home.path(), Staged::Without(PRINCIPLES_PATH));
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let off = [("TRUSTY_REVIEW_PRINCIPLES", "false")];
+    let out = run_review_at(home.path(), cwd.path(), &off);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!(
+        "principles off: exit {:?}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(!stderr.contains(PRINCIPLES_PATH), "{stderr}");
+    assert!(!stderr.contains("not reviewed: "), "{stderr}");
 }

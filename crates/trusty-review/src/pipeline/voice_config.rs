@@ -5,23 +5,27 @@
 //! (no I/O, no config reading) and lets tests exercise resolution in isolation.
 //!
 //! What: `build_voice_config` maps a `ReviewConfig` to a `VoiceConfig` by
-//! loading the configured voice package (if any) via `VoiceLoader`, enabling
-//! the principles layer per the config flag, and loading the named review
-//! template (if any, issue #2995) via `ReviewTemplateLoader`. A name the
-//! content ships but cannot supply is an error (#9015); the review refuses.
+//! loading the configured voice package (if any) via `VoiceLoader`, reading
+//! the principles addendum from the prompts' content when the config flag is
+//! on (#9991), and loading the named review template (if any, issue #2995) via
+//! `ReviewTemplateLoader`. A name the content ships but cannot supply is an
+//! error (#9015), and so is an absent or empty principles file; the review
+//! refuses.
 //!
 //! Test: `build_voice_config_no_voice` (principles on),
 //! `build_voice_config_principles_off`, `build_voice_config_duetto_bundled`,
 //! `build_voice_config_unknown_voice_degrades`,
 //! `build_voice_config_review_template_bundled`,
 //! `build_voice_config_unknown_review_template_degrades`,
-//! `build_voice_config_refuses_when_the_content_lacks_the_voice`.
+//! `build_voice_config_refuses_when_the_content_lacks_the_voice`,
+//! `build_voice_config_refuses_when_the_content_lacks_the_principles`.
 
 use crate::{
     config::ReviewConfig,
+    pipeline::prompt_templates::ReviewerPrompts,
     review_template::{ReviewTemplateError, ReviewTemplateLoader},
     runtime_content::PromptContentError,
-    voice::{VoiceConfig, VoiceLoader, VoiceLoaderError, principles::principles_addendum},
+    voice::{VoiceConfig, VoiceLoader, VoiceLoaderError},
 };
 
 /// Build the resolved `VoiceConfig` from `ReviewConfig` for the prompt builder.
@@ -31,8 +35,10 @@ use crate::{
 /// loaders (which discover and parse `voice.toml` / template `.md` files).
 /// Centralising resolution here keeps the prompt builder pure (no I/O, no
 /// config reading).
-/// What: enables/disables the principles layer per `config.voice_principles`;
-/// loads the named voice package (if any) via `VoiceLoader` — the content's
+/// What: when `config.voice_principles` is on, reads the principles addendum
+/// with [`ReviewerPrompts::principles`] from the content `prompts` came from
+/// (#9991); when it is off, reads no principles content. Loads the named voice
+/// package (if any) via `VoiceLoader` — the content's
 /// `duetto`, or a user-config package — degrading with a warning to no-voice
 /// for an unknown or rejected name; loads the named review template (if any,
 /// issue #2995) via `ReviewTemplateLoader` the same way. An unknown name is
@@ -41,15 +47,21 @@ use crate::{
 /// the caller ends the review unreviewed (#9015).
 ///
 /// # Errors
-/// [`PromptContentError`] from either loader's `Content` arm; no voice or
-/// template is configured, no content is read.
+/// [`PromptContentError`] from the principles read (`Missing`, `Invalid`) or
+/// from either loader's `Content` arm. With principles off and no voice or
+/// template configured, no content is read.
 /// Test: `build_voice_config_no_voice`, `build_voice_config_duetto_bundled`,
 /// `build_voice_config_review_template_bundled`,
 /// `build_voice_config_unknown_review_template_degrades`,
-/// `build_voice_config_refuses_when_the_content_lacks_the_voice`.
-pub fn build_voice_config(config: &ReviewConfig) -> Result<VoiceConfig, PromptContentError> {
+/// `build_voice_config_refuses_when_the_content_lacks_the_voice`,
+/// `build_voice_config_refuses_when_the_content_lacks_the_principles`.
+pub fn build_voice_config(
+    config: &ReviewConfig,
+    prompts: &ReviewerPrompts,
+) -> Result<VoiceConfig, PromptContentError> {
+    // #9991: runtime content from the prompts' own source; no default text.
     let principles = if config.voice_principles {
-        Some(principles_addendum().to_string())
+        Some(prompts.principles()?)
     } else {
         None
     };
@@ -136,6 +148,7 @@ pub fn build_voice_config(config: &ReviewConfig) -> Result<VoiceConfig, PromptCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::prompt_templates::test_support::prompts; // #9991
 
     /// Helper: minimal ReviewConfig with voice/template defaults, isolated from
     /// ambient env.
@@ -171,7 +184,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = None;
         config.voice_principles = true;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.principles.is_some(),
             "principles must be enabled by default"
@@ -199,7 +212,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = None;
         config.voice_principles = false;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.principles.is_none(),
             "principles=false must produce None"
@@ -222,7 +235,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = Some("duetto".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.voice_addendum.is_some(),
             "duetto voice must produce a non-None addendum"
@@ -255,7 +268,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = Some("nonexistent-voice-xyz".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.voice_addendum.is_none(),
             "unknown voice must degrade to None (not panic)"
@@ -283,7 +296,7 @@ mod tests {
         let mut config = config_default_voice();
         config.voice_package = Some("duetto".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         let combined = vc.combined_addendum();
         // The principles layer mentions "Review principles" heading.
         let p_pos = combined.find("Review principles").unwrap_or(usize::MAX);
@@ -387,7 +400,7 @@ system_addendum = ""
     fn build_voice_config_review_template_bundled() {
         let mut config = config_default_voice();
         config.review_template = Some("strict-security".to_string());
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.review_template.is_some(),
             "strict-security template must produce a non-None addendum"
@@ -414,7 +427,7 @@ system_addendum = ""
         let mut config = config_default_voice();
         config.review_template = Some("nonexistent-template-xyz".to_string());
         config.voice_principles = true;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.review_template.is_none(),
             "unknown review template must degrade to None (not panic)"
@@ -441,7 +454,7 @@ system_addendum = ""
     fn build_voice_config_no_review_template() {
         let mut config = config_default_voice();
         config.review_template = None;
-        let vc = build_voice_config(&config).expect("content supplies the voice config");
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(vc.review_template.is_none());
         assert!(vc.review_template_name.is_none());
     }
@@ -472,7 +485,8 @@ system_addendum = ""
             } else {
                 config.review_template = Some("strict-security".to_string());
             }
-            let err = build_voice_config(&config).expect_err("stale content must refuse");
+            let err =
+                build_voice_config(&config, prompts()).expect_err("stale content must refuse");
             assert!(
                 matches!(&err, PromptContentError::Missing { path: p, .. } if p == path),
                 "{err:?}"
@@ -480,26 +494,47 @@ system_addendum = ""
         }
         let cache = tempfile::tempdir().expect("cache");
         let _nothing = OverrideGuard::not_installed(cache.path());
-        build_voice_config(&config_default_voice()).expect("no layer configured reads nothing");
+        let mut config = config_default_voice();
+        config.voice_principles = false; // #9991: principles are content too
+        build_voice_config(&config, prompts()).expect("no layer configured reads nothing");
     }
 
-    /// RED-FIRST PROBE (#9991): content without the principles addendum must
-    /// refuse with principles on and no voice set.
+    /// Content without the principles addendum, or with it emptied, is an
+    /// error with principles on and no voice set; with principles off the same
+    /// release still builds the config (#9991).
+    ///
+    /// Why: principles are on by default, so a stale release must stop every
+    /// default review, not send a prompt without the layer; an operator who
+    /// turned them off must not need the file.
+    /// What: prompts from content without `prompts/principles_addendum.md`
+    /// refuse with `Missing` naming the path and the remedy; an emptied file
+    /// refuses with `Invalid`; `voice_principles = false` builds a config with
+    /// no principles from the stale content.
+    /// Test: this test itself.
     #[test]
     #[serial_test::serial]
     fn build_voice_config_refuses_when_the_content_lacks_the_principles() {
-        use crate::runtime_content::{
-            content_path,
-            test_support::{OverrideGuard, installed_without},
-        };
-        let path = content_path("prompts/principles_addendum.md");
-        let _guard = OverrideGuard::content(installed_without(&path));
+        use crate::runtime_content::test_support::{installed_with, installed_without};
+        use crate::voice::principles::principles_path;
+        let path = principles_path();
+        let stale = ReviewerPrompts::from_content(&installed_without(&path)).expect("prompts load");
         let mut config = config_default_voice();
-        config.voice_principles = true;
-        let err = build_voice_config(&config).expect_err("stale content must refuse");
+        config.voice_principles = true; // the default (#756)
+        let err = build_voice_config(&config, &stale).expect_err("stale content must refuse");
         assert!(
             matches!(&err, PromptContentError::Missing { path: p, .. } if p == &path),
             "{err:?}"
         );
+        assert!(err.to_string().contains("tm content update"), "{err}");
+        let empty =
+            ReviewerPrompts::from_content(&installed_with(&path, b"")).expect("prompts load");
+        let err = build_voice_config(&config, &empty).expect_err("an empty file must refuse");
+        assert!(
+            matches!(&err, PromptContentError::Invalid { path: p, .. } if p == &path),
+            "{err:?}"
+        );
+        config.voice_principles = false;
+        let vc = build_voice_config(&config, &stale).expect("principles off reads no principles");
+        assert!(vc.principles.is_none(), "{vc:?}");
     }
 }
