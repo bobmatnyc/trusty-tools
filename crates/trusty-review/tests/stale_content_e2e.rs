@@ -25,7 +25,8 @@ use std::process::{Command, Output, Stdio};
 mod content;
 
 use content::{
-    CONTENT_DIR, STOCK_PATH, Staged, VOICE_PATH, fake_checkout, repo_content, stage_bundle,
+    CONTENT_DIR, PRINCIPLES_PATH, STOCK_PATH, Staged, VOICE_PATH, fake_checkout, repo_content,
+    stage_bundle,
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_trusty-review");
@@ -223,28 +224,31 @@ fn the_named_checkout_is_the_only_checkout_source() {
 }
 
 /// A content release that has the prompts but lacks the voice or review
-/// template the config names: `run` refuses naming the file and the remedy,
-/// rather than reviewing without that layer or with a compiled-in copy.
+/// template the config names, or the principles addendum the default config
+/// layers in: `run` refuses naming the file and the remedy, rather than
+/// reviewing without that layer or with a compiled-in copy.
 #[test]
 fn a_stale_release_without_the_configured_voice_or_template_refuses_run() {
     let template = format!("{CONTENT_DIR}/templates/review/strict-security.md");
-    let cases = [
+    let cases: [(&str, &str, &[(&str, &str)]); 3] = [
         (
             "voice",
             VOICE_PATH,
-            ("TRUSTY_REVIEW_VOICE_PACKAGE", "duetto"),
+            &[("TRUSTY_REVIEW_VOICE_PACKAGE", "duetto")],
         ),
         (
             "template",
             template.as_str(),
-            ("TRUSTY_REVIEW_TEMPLATE", "strict-security"),
+            &[("TRUSTY_REVIEW_TEMPLATE", "strict-security")],
         ),
+        // #9991: principles are on by default, so no variable is set.
+        ("principles", PRINCIPLES_PATH, &[]),
     ];
-    for (case, path, env) in cases {
+    for (case, path, envs) in cases {
         let home = tempfile::tempdir().expect("scratch home");
         stage_bundle(home.path(), Staged::Without(path));
         let cwd = tempfile::tempdir().expect("scratch cwd");
-        let out = run_review_at(home.path(), cwd.path(), &[env]);
+        let out = run_review_at(home.path(), cwd.path(), envs);
         assert_failed(case, &out, &["not reviewed: ", path, "tm content update"]);
     }
 }

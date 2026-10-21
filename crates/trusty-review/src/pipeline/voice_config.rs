@@ -482,4 +482,24 @@ system_addendum = ""
         let _nothing = OverrideGuard::not_installed(cache.path());
         build_voice_config(&config_default_voice()).expect("no layer configured reads nothing");
     }
+
+    /// RED-FIRST PROBE (#9991): content without the principles addendum must
+    /// refuse with principles on and no voice set.
+    #[test]
+    #[serial_test::serial]
+    fn build_voice_config_refuses_when_the_content_lacks_the_principles() {
+        use crate::runtime_content::{
+            content_path,
+            test_support::{OverrideGuard, installed_without},
+        };
+        let path = content_path("prompts/principles_addendum.md");
+        let _guard = OverrideGuard::content(installed_without(&path));
+        let mut config = config_default_voice();
+        config.voice_principles = true;
+        let err = build_voice_config(&config).expect_err("stale content must refuse");
+        assert!(
+            matches!(&err, PromptContentError::Missing { path: p, .. } if p == &path),
+            "{err:?}"
+        );
+    }
 }
