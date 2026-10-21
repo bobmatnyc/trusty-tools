@@ -86,6 +86,8 @@ pub(crate) trait GitProbe {
     fn default_branch(&self, dir: &Path, remote: &str) -> Option<String>;
     /// The checked-out branch in `dir`, if on one.
     fn current_branch(&self, dir: &Path) -> Option<String>;
+    /// Whether `name` is a configured remote in `dir`; `None` when unreadable.
+    fn has_remote(&self, dir: &Path, name: &str) -> Option<bool>;
 }
 
 /// The live repository, read with `git`.
@@ -115,6 +117,19 @@ impl GitProbe for LiveGit {
 
     fn current_branch(&self, dir: &Path) -> Option<String> {
         Self::read(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    }
+
+    fn has_remote(&self, dir: &Path, name: &str) -> Option<bool> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("remote")
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        out.status
+            .success()
+            .then(|| text.lines().any(|line| line.trim() == name))
     }
 }
 
