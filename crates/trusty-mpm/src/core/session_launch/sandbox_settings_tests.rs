@@ -379,6 +379,8 @@ struct Case {
     tier: Tier,
     pointer: &'static str,
     value: Value,
+    /// Run on the fresh fixture before the key is set (a symlink to plant).
+    setup: Option<fn(&Fx)>,
 }
 
 fn case(what: &'static str, tier: Tier, pointer: &'static str, value: Value) -> Case {
@@ -387,7 +389,52 @@ fn case(what: &'static str, tier: Tier, pointer: &'static str, value: Value) -> 
         tier,
         pointer,
         value,
+        setup: None,
     }
+}
+
+/// A project `Edit(/tools/**)` case with `setup` planting `<ws>/tools`.
+fn linked(what: &'static str, setup: fn(&Fx)) -> Case {
+    Case {
+        setup: Some(setup),
+        ..case(
+            what,
+            Tier::Project,
+            "/permissions/allow",
+            json!(["Edit(/tools/**)"]),
+        )
+    }
+}
+
+impl Fx {
+    /// `<ws>/tools`, the link the [`linked`] cases plant.
+    fn tools(&self) -> PathBuf {
+        self.inputs.workspace.join("tools")
+    }
+
+    /// A directory beside the workspace, outside it.
+    fn outside(&self) -> PathBuf {
+        self.inputs.workspace.with_file_name("outside")
+    }
+}
+
+fn link_outside(fx: &Fx) {
+    std::fs::create_dir_all(fx.outside()).expect("mkdir outside");
+    std::os::unix::fs::symlink(fx.outside(), fx.tools()).expect("link outside");
+}
+
+fn link_dangling(fx: &Fx) {
+    std::os::unix::fs::symlink(fx.outside().join("missing"), fx.tools()).expect("link dangling");
+}
+
+fn link_loop(fx: &Fx) {
+    std::os::unix::fs::symlink(fx.tools(), fx.tools()).expect("link loop");
+}
+
+fn link_inside(fx: &Fx) {
+    let real = fx.inputs.workspace.join("real");
+    std::fs::create_dir_all(&real).expect("mkdir real");
+    std::os::unix::fs::symlink(real, fx.tools()).expect("link inside");
 }
 
 impl Fx {
@@ -429,6 +476,9 @@ fn misses(cases: Vec<Case>, want_refused: bool, home: Option<PathBuf>) -> Vec<St
         write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
         if let Some(home) = &home {
             fx.inputs.home = home.clone();
+        }
+        if let Some(setup) = c.setup {
+            setup(&fx);
         }
         fx.set(c.tier, c.pointer, c.value.clone());
         let result = verify(&fx, SandboxRole::Pm);
@@ -500,6 +550,46 @@ fn widening_sandbox_keys_refuse_the_launch() {
             json!(false),
         ),
         case("user network as a non-object", User, net, json!("open")),
+        // Fix round: an empty value passes only when its type is the key's,
+        // `null` never, and `credentials` only as an object — Claude Code may
+        // skip a user file whose values its schema rejects.
+        case("user enabled: []", User, "/sandbox/enabled", json!([])),
+        case(
+            "user allowUnixSockets: null",
+            User,
+            "/sandbox/network/allowUnixSockets",
+            json!(null),
+        ),
+        case(
+            "user credentials: \"x\"",
+            User,
+            "/sandbox/credentials",
+            json!("x"),
+        ),
+        case(
+            "user excludedCommands: null",
+            User,
+            "/sandbox/excludedCommands",
+            json!(null),
+        ),
+        case(
+            "user allowedDomains: {}",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!({}),
+        ),
+        case(
+            "user filesystem: []",
+            User,
+            "/sandbox/filesystem",
+            json!([]),
+        ),
+        case(
+            "user unknown key: []",
+            User,
+            "/sandbox/someFutureKey",
+            json!([]),
+        ),
         case(
             "project allowAllUnixSockets",
             Project,
@@ -647,6 +737,12 @@ fn apple_events_and_outside_edit_rules_refuse_the_launch() {
             json!("Edit(//**)"),
         ),
         case("project non-string allow rule", Project, allow, json!([7])),
+        // Fix round: the path is judged after symlinks, not by spelling.
+        linked("Edit(/tools/**), tools -> a dir outside", link_outside),
+        linked(
+            "Edit(/tools/**), tools -> a missing path outside",
+            link_dangling,
+        ),
     ];
     let wrong = misses(cases, true, None);
     assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
@@ -695,6 +791,8 @@ fn inside_edit_rules_still_verify() {
             "/sandbox/allowAppleEvents",
             json!(false),
         ),
+        // Fix round: a link that stays inside the workspace still verifies.
+        linked("Edit(/tools/**), tools -> a dir inside", link_inside),
     ];
     let wrong = misses(cases, false, None);
     assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
@@ -712,4 +810,43 @@ fn an_edit_rule_with_no_home_to_place_it_refuses() {
     )];
     let wrong = misses(cases, true, Some(PathBuf::new()));
     assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fail-closed (fix round): a rule path whose symlinks cannot be
+/// resolved — a link loop, which `canonicalize` reports as an error other
+/// than NotFound — refuses rather than passing on its spelling.
+#[test]
+fn an_edit_rule_path_that_cannot_be_resolved_refuses() {
+    let cases = vec![linked("Edit(/tools/**), tools -> itself", link_loop)];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fix round: a user-tier empty value of the key's own type adds
+/// nothing and still verifies, so the type check is not a blanket refusal.
+#[test]
+fn type_matched_empty_user_keys_still_verify() {
+    use Tier::User;
+    let cases = vec![
+        case(
+            "user excludedCommands: []",
+            User,
+            "/sandbox/excludedCommands",
+            json!([]),
+        ),
+        case(
+            "user allowedDomains: []",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!([]),
+        ),
+        case(
+            "user filesystem: {}",
+            User,
+            "/sandbox/filesystem",
+            json!({}),
+        ),
+    ];
+    let wrong = misses(cases, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
 }
