@@ -242,6 +242,49 @@ fn tripwire_places_each_tool_path() {
             out,
             "unplaceable",
         ),
+        // #8454 fix round: each directory a command moves to is judged.
+        (
+            "bash cd up",
+            "Bash",
+            json!({"command": "cd .. && cat .env"}),
+            out,
+            "inside",
+        ),
+        (
+            "bash cd clear",
+            "Bash",
+            json!({"command": "cd /tmp && cat .env"}),
+            out,
+            "clear",
+        ),
+        (
+            "bash bare cd",
+            "Bash",
+            json!({"command": "cd && cat .env"}),
+            out,
+            "unplaceable",
+        ),
+        (
+            "bash pushd",
+            "Bash",
+            json!({"command": "pushd +1 && cat .env"}),
+            out,
+            "unplaceable",
+        ),
+        (
+            "bash cd $HOME",
+            "Bash",
+            json!({"command": "cd $HOME/../proj && cat .env"}),
+            out,
+            "inside",
+        ),
+        (
+            "bash expansion",
+            "Bash",
+            json!({"command": "echo $F"}),
+            out,
+            "unplaceable",
+        ),
         (
             "bash no cwd",
             "Bash",
@@ -263,7 +306,7 @@ fn tripwire_places_each_tool_path() {
         out,
     );
     let mention = judge(&secret, Some(&r.home), |_| Ok(listed.clone()));
-    assert_eq!(mention, Touch::Inside(p.clone()));
+    assert_eq!(mention, Touch::Inside(r.proj.clone()));
     let read = call("Read", json!({"file_path": format!("{p}/a")}), out);
     let unknown = judge(&read, Some(&r.home), |_| Err("x".into()));
     assert_eq!(kind(&unknown), "unknown", "projects unreadable");

@@ -8,7 +8,10 @@
 //! `trips.jsonl` ([`crate::core::channels_tripwire`]). `Ok` when the file is
 //! absent or empty. `Warn` when it parses with one or more trip lines,
 //! naming the count and the newest timestamp. `Fail` when a line does not
-//! parse, or when the directory exists but is not a writable directory.
+//! parse, or when the hook cannot append: the directory exists but is not a
+//! writable directory, `trips.jsonl` is not writable, or the directory is
+//! missing and its nearest existing ancestor is not a writable directory
+//! (#8454 fix round).
 //! `Unknown` when the directory or file cannot be stat'ed or read. A `Fail`
 //! outranks a `Warn`. Read-only: it never creates, repairs or truncates.
 //! Test: `doctor_tripwire_record_tests.rs`.
@@ -24,8 +27,13 @@ const NAME: &str = "tripwire_record";
 /// Report the tripwire record's state under `home`. See the module doc.
 pub(super) fn check_tripwire_record(home: &Path) -> DoctorCheck {
     let dir = record_dir(home);
-    let unwritable = match std::fs::symlink_metadata(&dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+    let mut unwritable = match std::fs::symlink_metadata(&dir) {
+        // #8454 fix round: the hook creates a missing directory, so its
+        // nearest existing ancestor must be a writable directory.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match creatable(&dir) {
+            Ok(why) => why,
+            Err(why) => return unknown(why),
+        },
         Err(e) => {
             return unknown(format!("{} cannot be stat'ed ({e})", dir.display()));
         }
@@ -41,7 +49,17 @@ pub(super) fn check_tripwire_record(home: &Path) -> DoctorCheck {
     };
     let file = record_path(home);
     let text = match std::fs::read_to_string(&file) {
-        Ok(text) => Some(text),
+        Ok(text) => {
+            // #8454 fix round: the hook appends to this file, so it must be
+            // writable, not only its directory.
+            if unwritable.is_none() && !writable(&file) {
+                unwritable = Some(format!(
+                    "{} is not writable, so the egress guard cannot record a trip",
+                    file.display()
+                ));
+            }
+            Some(text)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         // A blocked directory leaves the file unreachable; the Fail says why.
         Err(_) if unwritable.is_some() => None,
@@ -85,6 +103,34 @@ pub(super) fn check_tripwire_record(home: &Path) -> DoctorCheck {
             file.display()
         ),
     )
+}
+
+/// Why the hook cannot create the missing directory `dir`, or `None` when
+/// it can; `Err` when an ancestor cannot be stat'ed.
+///
+/// What: walks up to the nearest ancestor that exists (symlinks followed),
+/// which must be a directory this process may write.
+/// Test: `tripwire_record_row_fails_when_the_file_or_ancestor_is_unwritable`.
+fn creatable(dir: &Path) -> Result<Option<String>, String> {
+    for ancestor in dir.ancestors().skip(1) {
+        match std::fs::metadata(ancestor) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{} cannot be stat'ed ({e})", ancestor.display())),
+            Ok(meta) if meta.is_dir() && writable(ancestor) => return Ok(None),
+            Ok(_) => {
+                return Ok(Some(format!(
+                    "{} is missing and its nearest existing ancestor {} is not a writable \
+                     directory, so the egress guard cannot record a trip",
+                    dir.display(),
+                    ancestor.display()
+                )));
+            }
+        }
+    }
+    Ok(Some(format!(
+        "{} has no existing ancestor, so the egress guard cannot record a trip",
+        dir.display()
+    )))
 }
 
 /// An `Unknown` row naming `why`.

@@ -45,10 +45,12 @@ pub(crate) const SENSITIVE_CHECK: &str = "egress-channel-sensitive-path";
 pub(crate) enum Touch {
     /// Outside every listed project: the blanket taint deny stands.
     Clear,
-    /// The spelled path lands inside a listed project, or above one.
-    Inside(String),
-    /// The guard cannot place this path or command, so it may land in one.
-    Unplaceable(String),
+    /// The call lands inside, or above, this listed project dir. #8454 fix
+    /// round: the dir comes from the host config, never from the call.
+    Inside(PathBuf),
+    /// The guard cannot place a path of the call, so it may land in a
+    /// project; a fixed description, never a word of the call.
+    Unplaceable(&'static str),
     /// The listed projects could not be read, for this reason.
     ProjectsUnknown(String),
     /// Judging the call panicked.
@@ -67,10 +69,11 @@ impl Touch {
         }
     }
 
-    /// The path the record keeps, when the cause names one.
+    /// The path the record keeps: the listed project dir of an inside
+    /// touch, and nothing for any other (#8454 fix round).
     fn path(&self) -> Option<String> {
         match self {
-            Self::Inside(path) | Self::Unplaceable(path) => Some(clip(path)),
+            Self::Inside(dir) => Some(clip(&dir.display().to_string())),
             _ => None,
         }
     }
@@ -195,11 +198,11 @@ fn sensitive_reason(payload: &Value, touch: &Touch, taint: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("this tool");
     let what = match touch {
-        Touch::Inside(path) => format!("lands at `{}`, in or above", clip(path)),
-        Touch::Unplaceable(path) => format!(
-            "names `{}`, which the guard cannot place, so it may land in",
-            clip(path)
-        ),
+        // #8454 fix round: no word of the call reaches the reason.
+        Touch::Inside(dir) => format!("lands in or above `{}`,", clip(&dir.display().to_string())),
+        Touch::Unplaceable(what) => {
+            format!("holds {what}, which the guard cannot place, so it may land in")
+        }
         Touch::ProjectsUnknown(why) => {
             format!("cannot be judged against the listed projects ({why}), so it may land in")
         }
