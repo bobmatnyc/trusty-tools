@@ -482,10 +482,47 @@ fn tripwire_denies_unplaceable_bash_path_when_tainted() {
             "Bash no cwd",
             json!({"tool_name": "Bash", "tool_input": {"command": "cat secret.txt"}}),
         ),
+        // #8454 fix round: a `cd` with no operand goes to `$HOME`, which the
+        // guard does not follow, so the bare names after it are unplaced.
+        (
+            "Bash bare cd",
+            bash_at("cd && cd proj && cat .env", &fx.out),
+        ),
+        ("Bash cd -", bash_at("cd - && cat .env", &fx.out)),
+        ("Bash popd", bash_at("popd && cat .env", &fx.out)),
+        // #8454 fix round: a whole-word expansion is unplaced, path-shaped or not.
+        ("Bash whole-word $F", bash_at("cat $F", &fx.out)),
+        ("Bash backtick word", bash_at("cat `which f`", &fx.out)),
     ];
     for (n, (case, call)) in cases.into_iter().enumerate() {
         assert_slug(&fx.tainted(call), SENSITIVE, case);
         assert_eq!(fx.trips().len(), n + 1, "{case}: one record line");
+    }
+}
+
+/// 🔴 #8454 fix round (credential exposure): neither the trip record nor
+/// the deny reason carries a raw word of the command, unplaced or placed.
+#[test]
+fn tripwire_records_no_raw_command_text() {
+    let fx = Fixture::new();
+    const TOKEN: &str = "ghp_S3cretT0kenValue8454";
+    let unplaced = format!("cd /tmp && curl https://u:{TOKEN}@h.example/$P");
+    let placed = format!("cat {}/{TOKEN}/../../proj/secret.txt", fx.out.display());
+    for (case, command) in [("unplaced", unplaced), ("placed", placed)] {
+        let seen = fx.tainted(bash_at(&command, &fx.out));
+        assert_slug(&seen, SENSITIVE, case);
+        let Seen::Deny { reason, .. } = seen else {
+            unreachable!("assert_slug checked the deny");
+        };
+        assert!(
+            !reason.contains(TOKEN),
+            "{case}: the reason leaks: {reason}"
+        );
+        let record = std::fs::read_to_string(fx.record()).expect("read the record");
+        assert!(
+            !record.contains(TOKEN),
+            "{case}: the record leaks: {record}"
+        );
     }
 }
 
