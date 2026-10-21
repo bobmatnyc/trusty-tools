@@ -47,6 +47,8 @@ REQUIRED=(
   tripwire_record_failure_keeps_the_deny
   tripwire_policy_not_ready_stays_not_ready
   tripwire_records_no_raw_command_text
+  tripwire_records_a_cd_behind_a_shell_keyword
+  tripwire_skips_a_redirect_target_as_a_cd_operand
   # src/bin/tm/commands/egress_guard_tripwire_tests.rs.
   tripwire_places_each_tool_path
   tripwire_arm_panic_denies_and_records

@@ -559,3 +559,28 @@ fn tripwire_policy_not_ready_stays_not_ready() {
         "ready again",
     );
 }
+
+/// 🔴 #8454 round 2 (AC1): a `cd` behind a leading shell keyword (`if`,
+/// `then`, `{`) is seen, so the bare names after it trip and are recorded.
+#[test]
+fn tripwire_records_a_cd_behind_a_shell_keyword() {
+    let fx = Fixture::new();
+    let cases = [
+        ("if/then cd", "if cd; then cd proj; cat .env; fi"),
+        ("brace group cd", "{ cd; cat .env; }"),
+    ];
+    for (n, (case, command)) in cases.into_iter().enumerate() {
+        assert_slug(&fx.tainted(bash_at(command, &fx.out)), SENSITIVE, case);
+        assert_eq!(fx.trips().len(), n + 1, "{case}: one record line");
+    }
+}
+
+/// 🔴 #8454 round 2: the word after a bare redirect operator is a redirect
+/// target, not the `cd` operand, so `cd > /tmp/new` is a `cd` with none.
+#[test]
+fn tripwire_skips_a_redirect_target_as_a_cd_operand() {
+    let fx = Fixture::new();
+    let command = "cd > /tmp/new && cd proj && cat .env";
+    assert_slug(&fx.tainted(bash_at(command, &fx.out)), SENSITIVE, "cd >");
+    assert_eq!(fx.trips().len(), 1, "cd >: one record line");
+}
