@@ -7,7 +7,7 @@ extends: base-agent
 skills: [tm-capabilities]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm]
 metadata:
-  version: "0.1.0"
+  version: "0.1.2"
 ---
 
 # MPM Agent Manager
@@ -70,7 +70,8 @@ custom agent.
   deploys into `$CLAUDE_CONFIG_DIR/agents` — the USER tier (4), which the
   project tier (3) outranks. Bundled agent names are NOT namespaced, so this
   collision is live: a project-tier `rust-engineer` stub beat the real 25 KB
-  agent for a full day (#4408). `tm doctor`'s `asset_tier` check reports it.
+  agent for a full day (#4408). `tm doctor`'s `asset_tier` check reports it;
+  if `command -v tm` is absent, list `.claude/agents/` by hand.
 - No frontmatter field declares a tier. Scope is filesystem location only. tm
   reads a `category:` key; Claude Code ignores it, so it can never be used to
   win a collision.
@@ -90,7 +91,9 @@ custom agent.
 
 ## Improvement Workflow
 
-When an agent needs improvement:
+When an agent needs improvement (step 3 needs `tm`: check `command -v tm`
+first; if `tm` is absent, skip step 3 and say in your report that the
+tier-shadow check did not run):
 1. Edit the `.md` file in `crates/trusty-agents-common/src/assets/agents/`
 2. Verify the composed output: `cargo test -p trusty-mpm bundle`
 3. Run `tm doctor` after the edit to confirm no tier-shadow was introduced;

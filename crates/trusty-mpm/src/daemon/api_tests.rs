@@ -1445,6 +1445,8 @@ async fn doctor_endpoint_returns_report() {
         "bundled_asset_lag",
         // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
         "content",
+        // #8390: assets whose advisory `requires:` this binary does not meet.
+        "content_requires",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #8980: an untrusted `session-claudes.json` seals the registry.

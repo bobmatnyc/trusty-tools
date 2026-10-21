@@ -372,6 +372,9 @@ use doctor_tmux_options::check_tmux_options;
 // REGISTRY and was sitting at the 500-SLOC production cap — see that module's
 // own doc. `pub(crate)` because `PROBE_TIMEOUT` is part of the daemon's
 // probe-budget vocabulary; the checks themselves stay `pub(super)`.
+// #8751: the palace-lock stall verdict `doctor_sidecars` gives the memory row.
+#[path = "doctor_lock_stall.rs"]
+mod doctor_lock_stall;
 #[path = "doctor_sidecars.rs"]
 pub(crate) mod doctor_sidecars;
 /// Re-exported so `doctor_search_pin` keeps naming one probe budget (#7685).
@@ -742,6 +745,12 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_bundled_asset_lag(project_dir));
     // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
     checks.push(super::doctor_content::check_content(
+        project_dir,
+        trusty_common::content::default_cache_dir().as_deref(),
+    ));
+    // #8390: assets whose advisory `requires:` this binary does not satisfy.
+    // WARN at worst — the asset still deploys and runs (ADR-0064).
+    checks.push(super::doctor_content_requires::check_content_requires(
         project_dir,
         trusty_common::content::default_cache_dir().as_deref(),
     ));

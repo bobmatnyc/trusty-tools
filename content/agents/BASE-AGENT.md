@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
@@ -74,11 +74,11 @@ result to the PM — nothing wakes you afterward. NEVER end a turn narrating an
 intention to wait ("I'll wait for...", "monitoring in the background"); that
 strands the task until a human notices. FOREGROUND `sleep` is blocked.
 
-Poll the real condition with `tm wait --for run|file|check`, not a fixed
-timer — exit `0` is done; `75` means re-issue the printed `rerun=` command
-verbatim, since the `--timeout` budget spans invocations; `1`/`2` are
-terminal (timeout / bad invocation). The full exit-code table, the
-scratchpad-naming rule (`#7238`, `#7287`), and the backgrounded-wait sentinel
+Poll the real condition with `tm wait --for run|file|check` (absent per
+`command -v tm`: a bounded shell loop), not a fixed timer — exit `0` is done;
+`75` means re-issue the printed `rerun=` command verbatim (the `--timeout`
+budget spans invocations); `1`/`2` are terminal. The full exit-code table, the
+scratchpad-naming rule, and the backgrounded-wait sentinel
 recipe live in one skill (#7723) — before any wait longer than one tool call,
 Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 <!-- #8107: keep the `Read `<path>`` form; it is the instruction an agent acts

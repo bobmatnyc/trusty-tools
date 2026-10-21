@@ -479,7 +479,8 @@ async fn run_doctor_produces_seventy_seven_checks() {
     // #8992 adds agent_orphans (seventy-three → seventy-four).
     // #8988 adds owner_config (seventy-four → seventy-five).
     // #10042 adds events (seventy-five → seventy-six).
-    // #8928 step 3 adds sccache_socket (seventy-six → seventy-seven).
+    // #8390 adds content_requires (seventy-six → seventy-seven).
+    // #8928 step 3 adds sccache_socket (seventy-seven → seventy-eight).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -586,6 +587,8 @@ async fn run_doctor_produces_seventy_seven_checks() {
         "bundled_asset_lag",
         // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
         "content",
+        // #8390: assets whose advisory `requires:` this binary does not meet.
+        "content_requires",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #8980: an untrusted `session-claudes.json` seals the registry.
@@ -1087,4 +1090,43 @@ async fn doctor_report_includes_rust_build_env_row() {
         "the row must say why it did nothing: {}",
         row.message
     );
+}
+
+/// Why (#8751): `tm doctor` read `worker.wedged` but never `worker.stalled_lock`,
+/// so a palace lock held far past `TRUSTY_DOCTOR_LOCK_STALL_SECS` while the
+/// daemon's own wedge line (420 s by default) had not yet tripped left the
+/// memory row green with "workers progressing". `trusty-memory doctor` warns on
+/// the same payload.
+/// What: a healthy-looking body carrying a `stalled_lock` held for a day is not
+/// `Ok`, and the message names the lock kind, the palace and the age.
+/// Test: itself.
+#[tokio::test]
+async fn memory_stalled_palace_lock_is_not_ok() {
+    let body = serde_json::json!({
+        "status": "ok",
+        "daemon_state": "ready",
+        "worker": {
+            "in_flight": 0,
+            "wedged": false,
+            "stall_tracking_ok": true,
+            "stalled_lock": {"palace": "p-held", "lock": "write", "age_secs": 86_400},
+        },
+    });
+    let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
+
+    assert_ne!(
+        check.status,
+        CheckStatus::Ok,
+        "a palace lock held past the stall threshold must not read healthy: {}",
+        check.message
+    );
+    for needle in ["p-held", "write", "86400"] {
+        assert!(
+            check.message.contains(needle),
+            "message must name `{needle}`: {}",
+            check.message
+        );
+    }
 }

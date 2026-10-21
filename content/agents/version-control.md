@@ -7,7 +7,7 @@ extends: base-ops
 skills: [git-workflow]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
 metadata:
-  version: "0.1.1"
+  version: "0.1.3"
 ---
 
 # Version Control Agent
@@ -88,8 +88,8 @@ On a Refs-only project — this repo, whose root `CLAUDE.md` says fix PRs use
 and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
 the body onto an open PR, and do not arm auto-merge while a hit stands.
 `tm pr open` runs the same check itself and exits 2 without calling `gh`, so
-this grep is what covers the hand-assembled `gh` fallback and every later
-`gh pr edit`.
+this grep covers the `gh` fallback (`command -v tm` absent) and every
+later `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
