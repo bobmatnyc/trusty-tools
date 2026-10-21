@@ -692,3 +692,102 @@ fn sign_set_error_display_is_distinct_per_variant() {
     let unique: std::collections::HashSet<&String> = variants.iter().collect();
     assert_eq!(unique.len(), variants.len(), "variant messages collided");
 }
+
+/// A release `.tar.gz` holding one 0755 script per name in `binaries`, each
+/// printing `version_line` — the shape `download::test_fixture::fake_tarball`
+/// builds for one binary.
+fn release_archive(binaries: &[&str], version_line: &str) -> Vec<u8> {
+    use flate2::{write::GzEncoder, Compression};
+    let script = format!("#!/bin/sh\necho '{version_line}'\n");
+    let mut ar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+    for binary in binaries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(script.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        ar.append_data(&mut header, binary, script.as_bytes())
+            .expect("append binary");
+    }
+    ar.into_inner().expect("tar").finish().expect("gzip")
+}
+
+/// Why (#9973 AC4): a `tctl install` of trusty-search from a release archive
+/// must place all three binaries and hand all three to the signing step.
+/// Real signing is `cfg(target_os = "macos")` and no macOS CI job runs this
+/// crate's tests, so the signing step is asserted through its input: the
+/// post-install hook signs `install_dir.join(name)` for each name in
+/// `binaries_for_set(SEARCH_SET)` that exists, the same `install_dir` the
+/// prebuilt install wrote.
+/// What: serves a three-binary trusty-search archive from a loopback release
+/// fixture, installs it through the prebuilt entry
+/// (`download::try_install_prebuilt_at` with fixed endpoints), then asserts
+/// each of the three is placed and is in the signing step's input. Skipped on
+/// a host with no Tier-1 target, where the install falls back before any
+/// request.
+/// Test: this is the test.
+#[tokio::test]
+async fn release_archive_install_hands_all_three_search_binaries_to_signing() {
+    use crate::download::test_fixture::{serve_fixture, sha256_hex, Routes};
+    use crate::download::{glibc, platform, release, Outcome};
+
+    const BINS: [&str; 3] = ["trusty-search", "trusty-embedderd", "trusty-embedderd-py"];
+    let (name, version) = ("trusty-search", "0.61.0");
+    let Some(target) = platform::current_target() else {
+        return;
+    };
+    let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
+    let archive = release::asset_filename(name, version, &suffix);
+    let tarball = release_archive(&BINS, &format!("{name} {version}"));
+    let digest = sha256_hex(&tarball);
+    let mut routes: Routes = std::collections::HashMap::new();
+    routes.insert(
+        "/releases".to_owned(),
+        (
+            200,
+            format!(r#"[{{"tag_name":"{name}-v{version}","prerelease":false}}]"#).into_bytes(),
+        ),
+    );
+    let key = format!("/dl/{name}-v{version}/{archive}");
+    routes.insert(
+        format!("{key}.sha256"),
+        (200, format!("{digest}  {archive}\n").into_bytes()),
+    );
+    routes.insert(key, (200, tarball));
+    let base = serve_fixture(routes).await;
+    let (releases_url, download_base) = (format!("{base}/releases"), format!("{base}/dl"));
+    let install_dir = tempfile::tempdir().expect("tempdir");
+
+    let outcome = crate::download::try_install_prebuilt_at(
+        &crate::download::http_client(),
+        &release::Endpoints {
+            releases_url: &releases_url,
+            download_base: &download_base,
+        },
+        name,
+        install_dir.path(),
+        None,
+    )
+    .await;
+    let Outcome::Installed { paths, .. } = outcome else {
+        panic!("the release archive must install: {outcome:?}");
+    };
+
+    // The signing step's input, as `post_install_signed_set` and
+    // `sign_set_strict` build it.
+    let signed: Vec<std::path::PathBuf> = binaries_for_set(SEARCH_SET)
+        .into_iter()
+        .map(|b| install_dir.path().join(b))
+        .filter(|p| p.exists())
+        .collect();
+    for bin in BINS {
+        let path = install_dir.path().join(bin);
+        assert!(
+            paths.contains(&path) && path.exists(),
+            "{bin} was not installed; placed: {paths:?}"
+        );
+        assert!(
+            signed.contains(&path),
+            "{bin} is not passed to signing; signed: {signed:?}"
+        );
+    }
+}
