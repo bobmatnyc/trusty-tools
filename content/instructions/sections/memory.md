@@ -10,7 +10,6 @@
      registered in a given project, which is why nothing here depends on it.
      Authoring comments are folded out before delivery — see
      `core::instruction_fold`. -->
-Palace context arrives ONCE per session, as the catch-up seed block injected at
-session start. Never assume a per-prompt hook refreshes it; that seed predates
-everything this session has learned. `session_context_catchup` re-reads the
-launch digest's sources on demand with `full: true`.
+Palace context arrives ONCE, as the catch-up seed injected at session start; no
+per-prompt hook refreshes it, so it predates all this session has learned.
+`session_context_catchup` with `full: true` re-reads its sources on demand.

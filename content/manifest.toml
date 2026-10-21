@@ -552,11 +552,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-cli-operations.md"
-version = "1.1.0"
+version = "1.1.1"
 
 [[member]]
 path = "skills/tm-delegation-patterns.md"
-version = "1.2.0"
+version = "1.2.1"
 
 [[member]]
 path = "skills/tm-doctor.md"
@@ -620,7 +620,7 @@ version = "2.2.0"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/tm-verification-protocols.md"
