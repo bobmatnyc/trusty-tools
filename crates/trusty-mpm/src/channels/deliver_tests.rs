@@ -417,7 +417,16 @@ fn answer_with_shell_substitution_is_inert_in_a_shell() {
             continue;
         }
         if !dir.path().join("control").exists() {
-            println!("skipping interactive {shell}: no history expansion here");
+            // #10127: zsh does expand `!#` in double quotes, but the control
+            // line aborts first: `[channel` is a glob "bad pattern", and `#`
+            // is no comment without INTERACTIVE_COMMENTS.
+            let why = if shell == "zsh" {
+                "the control line aborts (`[channel` is a glob bad pattern; \
+                 `#` is no comment without INTERACTIVE_COMMENTS)"
+            } else {
+                "the raw-`!` control line did not run its touch"
+            };
+            println!("skipping interactive {shell}: {why}");
             continue;
         }
         type_interactively(shell, dir.path(), &bang_line).expect("second run");
@@ -444,12 +453,27 @@ fn answer_with_shell_substitution_is_inert_in_a_shell() {
 /// `dir`, then end its input (#10127). `Err` names why it could not run.
 fn type_interactively(shell: &str, dir: &Path, line: &str) -> Result<(), String> {
     use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     let args: &[&str] = match shell {
         "bash" => &["--norc", "--noprofile", "-o", "histexpand", "-i"],
         _ => &["-f", "-o", "BANG_HIST", "-i"],
     };
-    let mut child = Command::new(shell)
+    let mut cmd = Command::new(shell);
+    // #10127: a new session has no controlling tty, so an interactive shell
+    // spawned from a test outside the tty's foreground group (nextest, a
+    // backgrounded run) cannot take SIGTTIN and stop with the test binary.
+    // SAFETY: the hook runs between fork and exec and calls only setsid,
+    // which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
