@@ -355,6 +355,14 @@ fn an_ask_rule_keeps_the_lease_and_asks() {
         r#"{"permissions":{"ask":["Bash(git push:*)"]}}"#,
     )
     .expect("settings");
+    // #8878 S5: the D4 floor denies an operand-less push where it cannot read
+    // the repository, so the hook cwd becomes one.
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(home.path())
+        .status()
+        .expect("git");
+    assert!(init.success(), "git init");
     let stdout = run_hook(
         home.path(),
         &["--pm-guard"],
