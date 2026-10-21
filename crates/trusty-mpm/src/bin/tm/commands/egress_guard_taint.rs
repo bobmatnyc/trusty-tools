@@ -1,8 +1,10 @@
 //! The channel-taint arm of `tm hook --egress-guard` (#8433 P0, D09).
 //!
 //! Why: a session that received a Slack-originated answer is tainted, and the
-//! egress guard must refuse its path tool calls until the policy readiness
-//! gate (#8454 S4) and the sensitive-path tripwire (S6) narrow the refusal. A
+//! egress guard must refuse its path tool calls. The policy readiness gate
+//! (#8454 S4) runs first; on a ready policy the CTO tripwire (S6,
+//! `egress_guard_tripwire.rs`) denies a call in a listed project under its own
+//! slug and records it, and every other call keeps this arm's deny. A
 //! failed taint re-apply at SessionStart leaves the new id tainted, so this is
 //! where D09's "egress denied" takes effect.
 //! What: [`taint_verdict`] judges a gated tool — the path-touching tools in

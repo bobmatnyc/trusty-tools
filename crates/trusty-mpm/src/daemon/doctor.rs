@@ -274,6 +274,10 @@ use doctor_pm_guard::check_pm_guard;
 #[path = "doctor_egress_guard.rs"]
 mod doctor_egress_guard;
 use doctor_egress_guard::check_egress_guard;
+// #8454 S6 prep: the CTO tripwire's durable record, the only trip signal.
+#[path = "doctor_tripwire_record.rs"]
+mod doctor_tripwire_record;
+use doctor_tripwire_record::check_tripwire_record;
 // #9091: whether the `[accounts]` org → gh account table reads.
 #[path = "doctor_org_accounts.rs"]
 mod doctor_org_accounts;
@@ -704,6 +708,8 @@ pub(crate) async fn run_doctor_with_claims(
         active_workspace_paths,
         &home,
     ));
+    // #8454 S6 prep: and whether the egress guard's tripwire has tripped.
+    checks.push(check_tripwire_record(&home));
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
