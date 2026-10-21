@@ -321,13 +321,45 @@ impl TmuxService {
     /// Test: `snapshot_missing_session_is_not_found`.
     pub fn snapshot(name: &str, lines: u32) -> Result<SessionSnapshot, DaemonError> {
         let driver = discover_or_session_error(name)?;
-        driver.monitor_session(name, lines).map_err(|e| {
+        let socket_dir = crate::core::tmux_server::ambient_socket_dir();
+        snapshot_on_any_server(&driver, &socket_dir, name, lines).map_err(|e| {
             tracing::warn!("tmux snapshot for {name} failed: {e}");
             DaemonError::SessionNotFound {
                 id: name.to_string(),
             }
         })
     }
+}
+
+/// Snapshot `name` on the default server, else on the first live workspace
+/// server (`core::tmux_server`) that holds it (#8928 step 4).
+///
+/// What: the default server's error is returned when no workspace server
+/// holds the session; a socket directory that cannot be read is logged and
+/// adds no servers.
+/// Test: `a_snapshot_finds_a_session_on_a_workspace_server`.
+pub(crate) fn snapshot_on_any_server(
+    driver: &TmuxDriver,
+    socket_dir: &Path,
+    name: &str,
+    lines: u32,
+) -> crate::core::Result<SessionSnapshot> {
+    let first = match driver.monitor_session(name, lines) {
+        Ok(snapshot) => return Ok(snapshot),
+        Err(e) => e,
+    };
+    let servers =
+        crate::core::tmux_server::live_workspace_servers(socket_dir).unwrap_or_else(|e| {
+            tracing::warn!(
+                "#8928: cannot list workspace tmux servers in {}: {e}",
+                socket_dir.display()
+            );
+            Vec::new()
+        });
+    servers
+        .iter()
+        .find_map(|server| driver.on_server(server).monitor_session(name, lines).ok())
+        .ok_or(first)
 }
 
 /// Resolve the `claude` binary on `PATH`.
@@ -732,3 +764,8 @@ mod tests {
         }
     }
 }
+
+// #8928 step 4: the snapshot across workspace servers, against live tmux.
+#[cfg(test)]
+#[path = "tmux_service_8928_tests.rs"]
+mod workspace_server_tests;

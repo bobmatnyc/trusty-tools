@@ -98,6 +98,8 @@ mod tm_hook_pm_guard_architect_8453;
 mod tm_hook_pm_guard_heredoc_density_9720;
 mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
+// #8928 step 7: the Write/Edit protected-path check.
+mod tm_hook_pm_guard_protected_paths_8928;
 mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
 // #9791: `file -f`/`-m` on a secret file under each bypass and for the Architect.

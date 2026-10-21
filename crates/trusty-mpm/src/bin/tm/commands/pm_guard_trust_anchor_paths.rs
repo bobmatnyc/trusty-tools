@@ -47,8 +47,50 @@ pub(crate) enum Resolved {
     Unresolvable,
 }
 
-/// Whether `path` starts with `prefix`, each component compared ASCII
-/// case-insensitively.
+/// `s` case-folded the way a case-insensitive APFS volume compares names.
+///
+/// Why (#8928 fix round): APFS folds more than ASCII. `ſ` (U+017F) opens the
+/// same file as `s`, and `K` (U+212A) the same as `k`, so an ASCII-only
+/// comparison let `.claude/ſettings.local.json` pass as an unrelated name.
+/// What: full Unicode case folding for every character that folds into ASCII
+/// or into a multi-character sequence — `ſ`, `ß`/`ẞ`, the Latin ligatures
+/// U+FB00..U+FB06 and the final sigma — and Rust's lowercase mapping for the
+/// rest (which covers `K` to `k` and `Å` to `å`). Folding more than APFS does
+/// can only over-deny.
+/// Test: `unicode_case_folds_cannot_dodge_the_rule`, `case_folding_matches_apfs`.
+pub(crate) fn fold_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\u{17f}' => out.push('s'),
+            '\u{df}' | '\u{1e9e}' => out.push_str("ss"),
+            '\u{fb00}' => out.push_str("ff"),
+            '\u{fb01}' => out.push_str("fi"),
+            '\u{fb02}' => out.push_str("fl"),
+            '\u{fb03}' => out.push_str("ffi"),
+            '\u{fb04}' => out.push_str("ffl"),
+            '\u{fb05}' | '\u{fb06}' => out.push_str("st"),
+            '\u{3c2}' => out.push('\u{3c3}'),
+            c => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// Whether two names are the same file name on a case-insensitive volume.
+pub(crate) fn eq_fold(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || fold_case(a) == fold_case(b)
+}
+
+/// [`eq_fold`] over raw path components.
+fn os_eq_fold(a: &OsStr, b: &OsStr) -> bool {
+    a.as_encoded_bytes()
+        .eq_ignore_ascii_case(b.as_encoded_bytes())
+        || eq_fold(&a.to_string_lossy(), &b.to_string_lossy())
+}
+
+/// Whether `path` starts with `prefix`, each component compared
+/// case-insensitively ([`eq_fold`]; #8928 fix round: Unicode folds too).
 ///
 /// Why (#8878 finding 3): macOS volumes are case-insensitive by default, so
 /// `Config.TOML` opens `config.toml`. On a case-sensitive volume this can only
@@ -56,11 +98,9 @@ pub(crate) enum Resolved {
 pub(crate) fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
     let mut parts = path.components();
     prefix.components().all(|want| {
-        parts.next().is_some_and(|got| {
-            got.as_os_str()
-                .as_encoded_bytes()
-                .eq_ignore_ascii_case(want.as_os_str().as_encoded_bytes())
-        })
+        parts
+            .next()
+            .is_some_and(|got| os_eq_fold(got.as_os_str(), want.as_os_str()))
     })
 }
 
