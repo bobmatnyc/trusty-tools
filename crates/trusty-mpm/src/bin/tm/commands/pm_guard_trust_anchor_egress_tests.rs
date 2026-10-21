@@ -453,3 +453,33 @@ fn egress_anchor_protected_name_in_an_unknown_directory_names_the_retry() {
     );
     assert!(reason.contains("Retry with the absolute path"), "{reason}");
 }
+
+/// 🔴 #10107 item 4: APFS opens `ſettings.local.json` (U+017F) as
+/// `settings.local.json` and `conﬁg.yaml` (U+FB01) as `config.yaml`, so the
+/// #8454 name checks fold beyond ASCII and those spellings are denied, even
+/// when no file of that spelling exists.
+#[test]
+fn egress_unicode_spellings_of_protected_names_are_denied() {
+    let fx = egress_fixture();
+    project_settings(&fx, &pretty(&guarded_settings(json!({}))));
+    let mut wrong = Vec::new();
+    for (command, rule) in [
+        ("echo '{}' > .claude/\u{17f}ettings.local.json", "#8454"),
+        ("echo '{}' > .claude/\u{17f}ettings.json", "#8454"),
+        ("cd .claude && echo x > \u{17f}ettings.local.json", "#8454"),
+        ("cd claude-config && cp a.txt \u{17f}ettings.json", ""),
+        ("cd deploy && echo x > con\u{fb01}g.yaml", ""),
+        ("cd deploy && rm con\u{fb01}g.yaml", ""),
+    ] {
+        match pm_bash(&fx, command) {
+            Some(reason) if reason.contains(rule) => {}
+            other => wrong.push(format!("{command}: {other:?}")),
+        }
+    }
+    let local = fx.cwd.join(".claude/\u{17f}ettings.local.json");
+    let input = write_input(&local, "{\"disableAllHooks\": true}");
+    if pm_verdict(&fx, "Write", input).is_none() {
+        wrong.push(format!("Write {}: allowed", local.display()));
+    }
+    assert!(wrong.is_empty(), "not denied:\n{}", wrong.join("\n"));
+}

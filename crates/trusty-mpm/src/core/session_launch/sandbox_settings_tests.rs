@@ -357,3 +357,357 @@ fn excluded_commands_refuse_the_launch() {
     .expect("empty");
     write_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user).expect("allowed");
 }
+
+/// #10107: verify the role's sandbox for `fx`.
+fn verify(fx: &Fx, role: SandboxRole) -> Result<(), SandboxSettingsError> {
+    verify_sandbox_settings(role, &fx.inputs.workspace, &fx.user)
+}
+
+/// Which settings file a [`Case`] edits.
+#[derive(Debug, Clone, Copy)]
+enum Tier {
+    Project,
+    Local,
+    User,
+}
+
+/// One #10107 shape: a key set at a JSON pointer in one tier's file.
+struct Case {
+    what: &'static str,
+    tier: Tier,
+    pointer: &'static str,
+    value: Value,
+}
+
+fn case(what: &'static str, tier: Tier, pointer: &'static str, value: Value) -> Case {
+    Case {
+        what,
+        tier,
+        pointer,
+        value,
+    }
+}
+
+impl Fx {
+    /// The settings file `tier` names.
+    fn tier_file(&self, tier: Tier) -> PathBuf {
+        match tier {
+            Tier::Project => self.file("settings.json"),
+            Tier::Local => self.file("settings.local.json"),
+            Tier::User => self.user.join("settings.json"),
+        }
+    }
+
+    /// Set `pointer` to `value` in `tier`'s file, creating objects on the way.
+    fn set(&self, tier: Tier, pointer: &str, value: Value) {
+        let path = self.tier_file(tier);
+        let mut settings = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut slot = &mut settings;
+        for key in pointer.trim_start_matches('/').split('/') {
+            if !slot.is_object() {
+                *slot = json!({});
+            }
+            slot = &mut slot[key];
+        }
+        *slot = value;
+        std::fs::write(&path, settings.to_string()).expect("write tier");
+    }
+}
+
+/// Run every case on a fresh, verified PM sandbox, and return the ones whose
+/// verify result was not `want_refused`, so one run reports every miss.
+/// `home`, when set, replaces the inputs' home after the baseline write.
+fn misses(cases: Vec<Case>, want_refused: bool, home: Option<PathBuf>) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for c in cases {
+        let mut fx = Fx::new();
+        write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
+        if let Some(home) = &home {
+            fx.inputs.home = home.clone();
+        }
+        fx.set(c.tier, c.pointer, c.value.clone());
+        let result = verify(&fx, SandboxRole::Pm);
+        let refused = matches!(&result, Err(SandboxSettingsError::Refused(_)));
+        if refused != want_refused {
+            wrong.push(format!(
+                "{} ({:?} {} = {}): {result:?}",
+                c.what, c.tier, c.pointer, c.value
+            ));
+        }
+    }
+    wrong
+}
+
+/// #10107 item 1: a sandbox-widening key in the user tier, which the
+/// key-by-key merge keeps, or in the project tier, refuses the launch.
+#[test]
+fn widening_sandbox_keys_refuse_the_launch() {
+    use Tier::{Project, User};
+    let sccache = "/Users/x/Library/Caches/Mozilla.sccache/sccache.sock";
+    let net = "/sandbox/network";
+    let cases = vec![
+        case(
+            "user allowAllUnixSockets",
+            User,
+            "/sandbox/network/allowAllUnixSockets",
+            json!(true),
+        ),
+        case(
+            "user allowLocalBinding",
+            User,
+            "/sandbox/network/allowLocalBinding",
+            json!(true),
+        ),
+        case(
+            "user filesystem.disabled",
+            User,
+            "/sandbox/filesystem/disabled",
+            json!(true),
+        ),
+        case(
+            "user allowRead",
+            User,
+            "/sandbox/filesystem/allowRead",
+            json!(["/Users/x/.ssh"]),
+        ),
+        case(
+            "user allowUnixSockets re-adding sccache",
+            User,
+            "/sandbox/network/allowUnixSockets",
+            json!([sccache]),
+        ),
+        case(
+            "user allowedDomains",
+            User,
+            "/sandbox/network/allowedDomains",
+            json!(["evil.example"]),
+        ),
+        case(
+            "user allowWrite",
+            User,
+            "/sandbox/filesystem/allowWrite",
+            json!(["/Users/x/.cargo/bin"]),
+        ),
+        case(
+            "user enabled: false",
+            User,
+            "/sandbox/enabled",
+            json!(false),
+        ),
+        case("user network as a non-object", User, net, json!("open")),
+        case(
+            "project allowAllUnixSockets",
+            Project,
+            "/sandbox/network/allowAllUnixSockets",
+            json!(true),
+        ),
+        case(
+            "project allowLocalBinding",
+            Project,
+            "/sandbox/network/allowLocalBinding",
+            json!(true),
+        ),
+        case(
+            "project filesystem.disabled",
+            Project,
+            "/sandbox/filesystem/disabled",
+            json!(true),
+        ),
+        case(
+            "project allowRead",
+            Project,
+            "/sandbox/filesystem/allowRead",
+            json!(["/Users/x/.aws"]),
+        ),
+        // Fail-closed: a value that is not `false` is not a `false`.
+        case(
+            "project allowLocalBinding as a string",
+            Project,
+            "/sandbox/network/allowLocalBinding",
+            json!("yes"),
+        ),
+        case(
+            "project allowRead as a string",
+            Project,
+            "/sandbox/filesystem/allowRead",
+            json!("/Users/x/.aws"),
+        ),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 item 1: the project policy pins the permissive booleans to `false`,
+/// over an operator's `true`.
+#[test]
+fn the_project_policy_pins_the_permissive_booleans_off() {
+    let fx = Fx::new();
+    let seeded = json!({ "sandbox": {
+        "allowAppleEvents": true,
+        "network": { "allowAllUnixSockets": true, "allowLocalBinding": true },
+        "filesystem": { "disabled": true },
+    }});
+    std::fs::write(fx.file("settings.json"), seeded.to_string()).expect("seed");
+    let written = write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
+    let project = read(&fx.file("settings.json"));
+    let mut wrong = Vec::new();
+    for pointer in [
+        "/sandbox/allowAppleEvents",
+        "/sandbox/network/allowAllUnixSockets",
+        "/sandbox/network/allowLocalBinding",
+        "/sandbox/filesystem/disabled",
+    ] {
+        if project.pointer(pointer) != Some(&json!(false)) {
+            wrong.push(format!("{pointer} = {:?}", project.pointer(pointer)));
+        }
+    }
+    assert!(wrong.is_empty(), "not pinned false:\n{}", wrong.join("\n"));
+    written.expect("the pinned policy verifies");
+}
+
+/// #10107 item 2: Apple Events, and an edit-tool allow rule outside the
+/// workspace and the `allowWrite` roots, refuse the launch in any tier.
+#[test]
+fn apple_events_and_outside_edit_rules_refuse_the_launch() {
+    use Tier::{Local, Project, User};
+    let allow = "/permissions/allow";
+    let cases = vec![
+        case(
+            "user allowAppleEvents",
+            User,
+            "/sandbox/allowAppleEvents",
+            json!(true),
+        ),
+        case(
+            "project allowAppleEvents",
+            Project,
+            "/sandbox/allowAppleEvents",
+            json!(true),
+        ),
+        case(
+            "project Edit(~/.cargo/bin/**)",
+            Project,
+            allow,
+            json!(["Bash(ls:*)", "Edit(~/.cargo/bin/**)"]),
+        ),
+        case(
+            "project Edit(//usr/local/bin/**)",
+            Project,
+            allow,
+            json!(["Edit(//usr/local/bin/**)"]),
+        ),
+        case(
+            "local Edit(~/.cargo/bin/tm)",
+            Local,
+            allow,
+            json!(["Edit(~/.cargo/bin/tm)"]),
+        ),
+        case(
+            "user Edit(//etc/**)",
+            User,
+            allow,
+            json!(["Edit(//etc/**)"]),
+        ),
+        case(
+            "project Edit(../escape/**)",
+            Project,
+            allow,
+            json!(["Edit(../escape/**)"]),
+        ),
+        case(
+            "project Edit(/src/../../escape)",
+            Project,
+            allow,
+            json!(["Edit(/src/../../escape)"]),
+        ),
+        case("project Edit(//**)", Project, allow, json!(["Edit(//**)"])),
+        case("project bare Edit", Project, allow, json!(["Edit"])),
+        case(
+            "project Write(~/.cargo/bin/**)",
+            Project,
+            allow,
+            json!(["Write(~/.cargo/bin/**)"]),
+        ),
+        case(
+            "project Edit(~bob/x)",
+            Project,
+            allow,
+            json!(["Edit(~bob/x)"]),
+        ),
+        // Fail-closed: an allow list verify cannot read refuses.
+        case(
+            "project permissions.allow as a string",
+            Project,
+            allow,
+            json!("Edit(//**)"),
+        ),
+        case("project non-string allow rule", Project, allow, json!([7])),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 item 2: an edit-tool allow rule inside the workspace or an
+/// `allowWrite` root, and non-edit rules, still verify — the refusal is not
+/// blanket.
+#[test]
+fn inside_edit_rules_still_verify() {
+    use Tier::{Local, Project};
+    let allow = "/permissions/allow";
+    let cases = vec![
+        case(
+            "project Edit(/src/**)",
+            Project,
+            allow,
+            json!(["Edit(/src/**)"]),
+        ),
+        case(
+            "project relative rules",
+            Project,
+            allow,
+            json!(["Edit(docs/*.md)", "Edit(./notes/**)", "Edit(*.rs)"]),
+        ),
+        case(
+            "project Edit(~/.cargo/registry/**), an allowWrite root",
+            Project,
+            allow,
+            json!(["Edit(~/.cargo/registry/**)"]),
+        ),
+        case("local Edit(/**)", Local, allow, json!(["Edit(/**)"])),
+        case(
+            "non-edit rules",
+            Project,
+            allow,
+            json!([
+                "Bash(ls:*)",
+                "Read(//etc/**)",
+                "WebFetch(domain:github.com)"
+            ]),
+        ),
+        case(
+            "project allowAppleEvents: false",
+            Project,
+            "/sandbox/allowAppleEvents",
+            json!(false),
+        ),
+    ];
+    let wrong = misses(cases, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
+}
+
+/// #10107 fail-closed: a `~` rule with no absolute home to place it on
+/// refuses rather than passing unchecked.
+#[test]
+fn an_edit_rule_with_no_home_to_place_it_refuses() {
+    let cases = vec![case(
+        "project Edit(~/.cargo/registry/**) with no home",
+        Tier::Project,
+        "/permissions/allow",
+        json!(["Edit(~/.cargo/registry/**)"]),
+    )];
+    let wrong = misses(cases, true, Some(PathBuf::new()));
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
