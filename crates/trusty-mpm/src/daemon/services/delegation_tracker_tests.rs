@@ -237,6 +237,47 @@ fn post_tool_use_failure_marks_failed() {
     assert_eq!(only(&state, sid).status, DelegationStatus::Failed);
 }
 
+/// Observe `event` only when Claude Code would deliver it to `tm hook` (#10095).
+fn deliver(state: &DaemonState, session: SessionId, event: HookEvent, payload: &Value) {
+    if crate::test_support::tm_registers_hook(event) {
+        observe(state, session, event, payload);
+    }
+}
+
+/// A failed Agent dispatch, delivered as Claude Code delivers it, ends Failed
+/// and leaves no live record (#10095).
+///
+/// Why: `post_tool_use_failure_marks_failed` calls the branch directly, but no
+/// hook block tm wrote registered `PostToolUseFailure`, so in production the
+/// record stayed Running until the stale sweep.
+/// What: routes the dispatch and its failure through `deliver`, with the
+/// payload `tm hook` forwards for that event: no `tool_response`, and the
+/// `error` text not forwarded.
+/// Test: itself.
+#[test]
+fn failed_agent_dispatch_wire_shape_marks_errored_10095() {
+    let (state, sid) = state_with_session();
+    deliver(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "qa", "t", "toolu_fail"),
+    );
+    let failure = serde_json::json!({
+        "cwd": "/tmp/p",
+        "tool": "Agent",
+        "tool_use_id": "toolu_fail",
+        "transcript_path": "/tmp/p/parent.jsonl",
+        "input": { "subagent_type": "qa", "description": "t", "prompt": "do it" }
+    });
+    deliver(&state, sid, HookEvent::PostToolUseFailure, &failure);
+
+    let d = only(&state, sid);
+    assert_eq!(d.status, DelegationStatus::Failed, "{d:?}");
+    assert!(d.ended_at.is_some(), "a failed dispatch is terminal: {d:?}");
+    assert!(!has_live_children(&state.delegations_for(sid)));
+}
+
 #[test]
 fn subagent_stop_completes_matching_delegation() {
     let (state, sid) = state_with_session();

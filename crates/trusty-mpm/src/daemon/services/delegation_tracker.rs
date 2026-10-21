@@ -193,13 +193,15 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
 /// not take leaves the agent running in the tree. The wire shape is
 /// `is_error` — the one [`TOOL_RESPONSE_KEYS`] member whose meaning is the same
 /// for every tool, and the same key [`on_launched`] already trusts for exactly
-/// this question. `HookEvent::PostToolUseFailure` is NOT the production signal:
-/// no hook block `tm` writes registers that name, so it can never arrive.
+/// this question. #10095: tm now registers `HookEvent::PostToolUseFailure`, and
+/// [`observe`] routes it for `TaskStop` nowhere — a stop that failed releases
+/// nothing, which is the refusal this function exists to make.
 /// What: `true` only for an explicit `is_error: true`. An absent, non-object or
 /// `is_error`-less response is "cannot tell", which does not refuse — see
 /// [`on_task_stop`]'s own note on why that is the right direction here.
 /// Test: `a_failed_task_stop_releases_nothing`,
-/// `a_task_stop_with_no_response_still_releases`.
+/// `a_task_stop_with_no_response_still_releases`,
+/// `a_task_stop_failure_event_releases_nothing_10095`.
 fn stop_reported_failure(payload: &Value) -> bool {
     payload
         .get("tool_response")

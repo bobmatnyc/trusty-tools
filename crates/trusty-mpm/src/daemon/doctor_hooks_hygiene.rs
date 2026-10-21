@@ -227,7 +227,7 @@ pub(super) fn check_hooks_hygiene_with_exe(
 
 /// The toggle-driven hook groups one settings file is missing (#7849).
 ///
-/// Why: `missing_lifecycle_hook_events` answers only for the six-event
+/// Why: `missing_lifecycle_hook_events` answers only for the seven-event
 /// lifecycle triad, which every toggle is additive to — so the group a flipped
 /// flag asks for was invisible to `tm doctor` exactly as it was to
 /// `tm validate`. This reuses the SAME diff the validator reports from, so the
@@ -277,7 +277,9 @@ fn toggle_driven_gaps(settings_path: &Path, hook_exe: Option<&Path>) -> Vec<Stri
 /// `tm doctor --fix`.
 /// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
 /// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
-/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`.
+/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`,
+/// `doctor_flags_missing_post_tool_use_failure_group_10095`,
+/// `doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095`.
 fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
     if gaps.is_empty() {
         return DoctorCheck::new(

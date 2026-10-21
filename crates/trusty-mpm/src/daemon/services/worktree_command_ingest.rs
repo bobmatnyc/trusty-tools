@@ -4,8 +4,9 @@
 //! no tm route records. The `PostToolUse` relay (`matcher: "*"`, `async`)
 //! already brings every Bash call's command and `cwd` to the hook pipeline, so
 //! the tree can be recorded when it appears instead of at the next backfill.
-//! A failed Bash call fires `PostToolUseFailure`, which tm does not subscribe
-//! to, so only `PostToolUse` is read; the record itself rests on disk and git
+//! A failed Bash call fires `PostToolUseFailure`, which tm subscribes to since
+//! #10095 but this module ignores: a failed `git worktree add` made no tree, so
+//! only `PostToolUse` is read. The record itself rests on disk and git
 //! evidence ([`crate::core::worktree_ledger::command_ingest`]).
 //! What: [`spawn_for_bash`] parses the command in memory and, when it names a
 //! `git worktree add|remove|prune` (or names one it cannot resolve), runs the
