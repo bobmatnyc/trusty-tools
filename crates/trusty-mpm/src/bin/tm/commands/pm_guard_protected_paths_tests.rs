@@ -416,9 +416,10 @@ fn a_bare_hook_program_is_resolved_on_path() {
         fx.write(&bin.join("wrapped-prog"), "x"),
         "a program after env",
     );
-    // An argument is not looked up on PATH.
+    // #10107: every bare word is a program candidate, an argument included,
+    // because `nice -n 10 prog` hides which word is the program.
     std::fs::write(bin.join("inbox-check"), "x").expect("write arg");
-    assert_eq!(fx.write(&bin.join("inbox-check"), "x"), None);
+    denied(fx.write(&bin.join("inbox-check"), "x"), "an argument word");
 }
 
 /// An executable file at `path`, its directory created.
