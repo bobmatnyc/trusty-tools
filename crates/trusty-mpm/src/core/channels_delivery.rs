@@ -39,6 +39,23 @@ pub enum DeliveryState {
     Failed,
 }
 
+/// What a trace line delivers (#10127).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryKind {
+    /// A resolved question's answer; a line without `kind` is one.
+    #[default]
+    Answer,
+    /// A held reply's notice; its question is still open.
+    Notice,
+}
+
+impl DeliveryKind {
+    fn is_answer(&self) -> bool {
+        *self == Self::Answer
+    }
+}
+
 /// One line of `delivery.jsonl`. It holds no answer text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryLine {
@@ -55,10 +72,14 @@ pub struct DeliveryLine {
     /// Why a delivery failed: a content-free code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the line delivers (#10127). Not written for an answer, so an
+    /// older line, which has no `kind`, reads as an answer's.
+    #[serde(default, skip_serializing_if = "DeliveryKind::is_answer")]
+    pub kind: DeliveryKind,
 }
 
 impl DeliveryLine {
-    /// A line for `state` stamped now.
+    /// An answer line for `state` stamped now.
     pub fn new(state: DeliveryState, question_id: &str, asker: &str, reason: Option<&str>) -> Self {
         Self {
             v: FORMAT_VERSION,
@@ -67,7 +88,13 @@ impl DeliveryLine {
             question_id: question_id.to_owned(),
             asker: asker.to_owned(),
             reason: reason.map(str::to_owned),
+            kind: DeliveryKind::Answer,
         }
+    }
+
+    /// This line, marked as delivering `kind`.
+    pub fn of_kind(self, kind: DeliveryKind) -> Self {
+        Self { kind, ..self }
     }
 }
 
@@ -185,13 +212,12 @@ pub fn read_deliveries(dir: &Path) -> Result<DeliveryTrace, TaintError> {
 /// What: per question, its last line: `pending` is "delivery unconfirmed",
 /// `failed` is "delivery failed (<reason>)". A `resolved` question (id,
 /// asker) with no line at all is "resolved with no delivery record". Each
-/// message names the question and the asker.
-/// Test: `delivery_problems_name_unsettled_failed_and_unrecorded`.
+/// message names the question and the asker. #10127: answer lines only; a
+/// notice line never settles or stands in for an answer.
+/// Test: `delivery_problems_name_unsettled_failed_and_unrecorded`,
+/// `delivered_notice_never_hides_a_resolved_answer_with_no_delivery`.
 pub fn delivery_problems(lines: &[DeliveryLine], resolved: &[(String, String)]) -> Vec<String> {
-    let mut last: BTreeMap<&str, &DeliveryLine> = BTreeMap::new();
-    for line in lines {
-        last.insert(line.question_id.as_str(), line);
-    }
+    let last = last_lines(lines, DeliveryKind::Answer);
     let mut problems = Vec::new();
     for (id, line) in &last {
         let asker = &line.asker;
@@ -215,6 +241,42 @@ pub fn delivery_problems(lines: &[DeliveryLine], resolved: &[(String, String)]) 
         }
     }
     problems
+}
+
+/// The held-reply notices an operator must look at, one message each
+/// (#10127).
+///
+/// What: per question, its last notice line: `pending` is "notice
+/// unconfirmed", `failed` is "notice failed (<reason>)"; each says the
+/// question is still open. Answer lines are not read.
+/// Test: `notice_send_failure_is_recorded_and_not_retried`.
+pub fn notice_problems(lines: &[DeliveryLine]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (id, line) in last_lines(lines, DeliveryKind::Notice) {
+        let asker = &line.asker;
+        match line.state {
+            DeliveryState::Delivered => {}
+            DeliveryState::Pending => problems.push(format!(
+                "Q-{id} to asker {asker}: held-reply notice unconfirmed (pending, never \
+                 settled); the reply is held and the question is still open"
+            )),
+            DeliveryState::Failed => problems.push(format!(
+                "Q-{id} to asker {asker}: held-reply notice failed ({}); the reply is held and \
+                 the question is still open",
+                line.reason.as_deref().unwrap_or("unknown")
+            )),
+        }
+    }
+    problems
+}
+
+/// The last line of `kind` per question id.
+fn last_lines(lines: &[DeliveryLine], kind: DeliveryKind) -> BTreeMap<&str, &DeliveryLine> {
+    let mut last = BTreeMap::new();
+    for line in lines.iter().filter(|l| l.kind == kind) {
+        last.insert(line.question_id.as_str(), line);
+    }
+    last
 }
 
 #[cfg(test)]

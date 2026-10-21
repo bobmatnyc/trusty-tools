@@ -225,7 +225,7 @@ fn resolve_is_called_only_from_inbound() {
 
 /// The deliverer's real env over the shared fake driver, holding one `Active`
 /// record bound to pane `%7` (#10127).
-async fn deliver_env_on_pane(
+pub(super) async fn deliver_env_on_pane(
     dir: &tempfile::TempDir,
 ) -> (
     super::DaemonDeliverEnv,
@@ -264,7 +264,7 @@ async fn deliver_env_on_pane(
 }
 
 /// Every key the fake recorded, on any send primitive.
-fn keys_typed(fake: &crate::session_manager::tests::FakeTmuxDriver) -> usize {
+pub(super) fn keys_typed(fake: &crate::session_manager::tests::FakeTmuxDriver) -> usize {
     fake.pane_send_calls.lock().expect("sends").len()
         + fake.pane_literal_calls.lock().expect("literals").len()
         + fake.send_calls.lock().expect("session sends").len()
