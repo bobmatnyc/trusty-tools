@@ -5,6 +5,7 @@
 //! What: the limits as constants, [`check_title`] (one line, at most 120
 //! characters), [`check_paragraph`] (no blank line), [`size_verdict`]
 //! (LDG-2.8.5: warn above 8 KB, refuse above 16 KB when the file grows),
+//! [`check_line`] (one-line fields: `finish` and the session record's),
 //! [`normalize_ts`] (LDG-2.3.6: minute input gains `:00`) and
 //! [`check_writable`] (#9757 AC4: refuse a newer schema). These check a
 //! write; a store read keeps whatever it holds (live stores carry titles over
@@ -80,6 +81,27 @@ pub fn check_paragraph<'a>(name: &str, text: &'a str, max: usize) -> Result<&'a 
         )));
     }
     Ok(t)
+}
+
+/// A one-line field, trimmed: at most `max` characters, non-empty when
+/// `required` (the prototype's `_lim`).
+///
+/// # Errors
+/// [`LedgerError::Invalid`] naming the field.
+pub fn check_line(
+    name: &str,
+    text: &str,
+    max: usize,
+    required: bool,
+) -> Result<String, LedgerError> {
+    let t = text.trim();
+    if t.contains('\n') || t.chars().count() > max || (required && t.is_empty()) {
+        let non_empty = if required { ", non-empty" } else { "" };
+        return Err(LedgerError::Invalid(format!(
+            "{name} must be one line, <= {max} chars{non_empty}"
+        )));
+    }
+    Ok(t.to_owned())
 }
 
 /// `YYYY-MM-DDTHH:MM[:SS]Z` as `YYYY-MM-DDTHH:MM:SSZ` (LDG-2.3.6).

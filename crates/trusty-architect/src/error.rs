@@ -292,9 +292,11 @@ pub enum NotifyError {
     },
 }
 
-/// Why a PM ledger read, check or init failed (#9756 P0). Every variant but
-/// [`LedgerError::Io`] is the prototype's exit 2: the input or the store is
-/// refused and nothing was written.
+/// Why a PM ledger read, check, init or write failed (#9756 P0, #9758).
+/// [`LedgerError::code`] maps each to the `mpm.dbatg.*` error class and so
+/// to the prototype's exit code: a conflict is 1, an unreadable or locked
+/// store 3, every other variant 2 (the input or the store is refused and
+/// nothing was written).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LedgerError {
@@ -332,9 +334,27 @@ pub enum LedgerError {
         #[source]
         source: std::io::Error,
     },
+    /// The store changed under the write: `if_v` did not match, or `v`
+    /// moved during the read-modify-write (LDG-2.8.2 `tamper`).
+    #[error("{0}")]
+    Conflict(String),
+    /// The store lock was not granted in time, or a commit journal does not
+    /// match the files it would complete.
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 impl LedgerError {
+    /// The `mpm.dbatg.*` error class, which fixes the CLI exit code.
+    pub fn code(&self) -> crate::ledger::rpc::RpcErrorCode {
+        use crate::ledger::rpc::RpcErrorCode;
+        match self {
+            Self::Conflict(_) => RpcErrorCode::Conflict,
+            Self::Io { .. } | Self::Unavailable(_) => RpcErrorCode::Unavailable,
+            _ => RpcErrorCode::Invalid,
+        }
+    }
+
     /// [`LedgerError::Io`] for `path`; a short form for `map_err`.
     pub(crate) fn io(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
         move |source| Self::Io {

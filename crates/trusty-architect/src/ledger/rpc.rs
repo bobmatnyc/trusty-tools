@@ -7,7 +7,8 @@
 //! request and response type per method, and [`Op`], the batch op. Requests
 //! refuse unknown keys (#9995 AC5: an unknown option key exits 2), unlike the
 //! stored records, which keep them. [`Op::check`] applies the field limits
-//! before any write. Nothing is registered with the daemon yet.
+//! before any write. [`StoreRef::paths`] normalises the project path. The
+//! daemon serves `init`, `batch` and `show` (#9758); the rest is #9995.
 //! Test: `ledger_rpc_types_use_the_mpm_prefix_and_round_trip`,
 //! `ledger_request_refuses_unknown_keys`, `ledger_title_and_paragraph_limits`.
 
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::Prefix;
 use super::limits::{PARAGRAPH_MAX, check_paragraph, check_title};
+use super::store::{StorePaths, resolve_project};
 use crate::error::LedgerError;
 
 /// Every `mpm.dbatg.*` method, in the plan's order.
@@ -181,9 +183,20 @@ message!(/// `refs` input row.
 message!(/// `ctx_use` input.
     CtxUseInput { active: u8, stale: u8, ctx: u64, #[serde(default)] keep: String });
 
+impl StoreRef {
+    /// The store's files, `project` normalised to its launch directory.
+    ///
+    /// # Errors
+    /// As [`super::store::resolve_project`] and [`StorePaths::new`].
+    pub fn paths(&self) -> Result<StorePaths, LedgerError> {
+        StorePaths::new(&resolve_project(&self.project)?, &self.session)
+    }
+}
+
 impl Op {
-    /// The field limits every op shares (title, one-paragraph fields); run
-    /// before the op touches a store.
+    /// Every limit an op carries on its own, run before it touches a store:
+    /// title, paragraphs, `finish`, options, and the session record's rows,
+    /// row caps, `who`, `owed.expect`, refs and `ctx_use` (#9758).
     ///
     /// # Errors
     /// [`LedgerError::Invalid`] naming the field.
@@ -194,7 +207,10 @@ impl Op {
             })
         };
         match self {
-            Self::Add(a) => check_title(&a.title).map(drop),
+            Self::Add(a) => {
+                check_title(&a.title)?;
+                super::ops::add_fields(a).map(drop)
+            }
             Self::Update(u) => {
                 u.title.as_deref().map(check_title).transpose()?;
                 para("answer", u.answer.as_deref())?;
@@ -204,7 +220,8 @@ impl Op {
                 Err(LedgerError::Invalid("close needs an outcome".into()))
             }
             Self::Close(c) => para("outcome", Some(&c.outcome)),
-            Self::Session(_) | Self::Prune(_) => Ok(()),
+            Self::Session(s) => super::ops::session_fields(s, "1970-01-01T00:00Z").map(drop),
+            Self::Prune(_) => Ok(()),
         }
     }
 }
