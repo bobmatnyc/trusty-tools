@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.61.0] — 2026-10-21
+
+### Added
+
+- `cargo install trusty-search` now also installs the `trusty-embedderd-py` Python/MPS sidecar launcher next to `trusty-search`, where the daemon looks for it first. Before this, no install path produced the launcher, so the Apple Silicon python bootstrap always failed and the daemon stayed on ort (#9468).
+- Upgrading from a machine that ran `cargo install trusty-embedderd-py`: run `cargo uninstall trusty-embedderd-py` first, or cargo refuses the install because another package owns that binary name. `tctl` takes over the launcher with `cargo install --force` from the same release and never runs `cargo uninstall` (#9468).
+- `/health` reports `embedder_recycle` (embed-sidecar recycles by trigger, failed footprint reads, the last recycle's trigger and pids, and the recycle back-off level, cause and end time), and the MCP `search_health` result now carries `embedderd_rss_mb` (`null` when no sidecar runs) and `embedder_recycle`. Both sidecar arms recycle by footprint, age and call count; see the `TRUSTY_EMBEDDERD_RECYCLE_*` rows in the embedder tables (#9828).
+- Search responses name the embedder that served them. `meta.embedder` on `search.query` (the MCP `search`, `search_lexical`, `search_semantic` and `search_kg` tools) and a top-level `embedder` on the `search.query.all` fan-out carry `active`, `intended`, `bootstrap` (`n/a`, `bootstrapping`, `installing_venv`, `probing`, `retrying`, `failed`, `ready` or `fell_back_to_ort`) and `note`. While the python embedder installs, waits for a retry or has failed, `note` says the results come from the ort fallback and why; once python serves it is `null`. The same holds for explicit `TRUSTY_EMBEDDER=python` (or `TRUSTY_EMBEDDER_PYTHON_EAGER`): a startup failure reports `failed` with the cause, a later fallback to ort reports `fell_back_to_ort` with the cause, and `/health` reports both as `degraded` (#9970).
+- `/health`'s `python_bootstrap` gains `phase` and `note`, the same step and note search responses carry (#9970).
+
+### Fixed
+
+- On Apple Silicon, the background python/MPS bootstrap now looks up the `trusty-embedderd-py` launcher before it touches the venv. With the launcher missing it creates no venv, runs no `uv` and downloads no torch (about 3 GB before); the daemon stays on ort and `search.health` reports `embedder_bootstrap: "failed"` with `python_bootstrap.last_error` naming the missing launcher (#9468).
+- A permanent bootstrap failure (missing launcher, venv build error) now ends the bootstrap on its first attempt instead of repeating it for every startup attempt. A readiness-probe failure still retries as before (#9468).
+- Tests that can write the index registry (reindex, reconcile, search, registration and router tests) now run in the `serial_test` group, and a test-build search waits for its last-queried stamp, so no registry write lands in the data dir a `#[serial]` test has pointed `TRUSTY_DATA_DIR` at. `create_refuses_a_data_dir_inside_the_work_tree` no longer finds a stray `indexes.toml.lock` in its work tree. A ratchet test fails on any new untagged test in a file that reaches the registry, or in a test module such a file mounts (#9684).
+- `run_daemon` now subscribes to its stop channel before it binds the socket, so an in-process stop sent as soon as the socket accepts is never dropped. Only in-process callers such as the tests could reach that window; `a_normal_stop_leaves_every_corpus_openable_read_only` timed out at 20 s on a loaded CI shard for this reason (#9736).
+- `search.health` reports `embedderd_rss_mb` for a lazily spawned embed sidecar (the `TRUSTY_EMBEDDER=python` arm) and follows it across a recycle, a crash restart and an idle shutdown. The daemon's pid forwarder used to stop at the first `0` pid, which a lazy sidecar reads before its first spawn; it now treats `0` as "no sidecar for now" and stops at daemon shutdown (#9828).
+- A live `search.index.reindex.stream` now ends with an `end` frame after its terminal event. It used to stay open after `complete`, so the CLI hung up mid-stream and every live reindex logged `uds rpc connection failed ... the stream's peer closed the socket` (#9933).
+- A reindex that panics or is cancelled now records its fatal `error` event in the replay buffer, under the same lock as its `Failed` status, when that lock is free, so a stream opened after the failure replays the error. A live stream ends on a fatal `error` frame it delivers, so it never ends without it or waits after it (#9933).
+- On Apple Silicon, a python/MPS sidecar that starts too slowly for the startup attempts no longer pins the daemon to the ort sidecar for its whole uptime. The bootstrap keeps retrying in the background after 2, 5 and 10 minutes, then every 30 minutes, and switches to python on the first success; ort keeps serving throughout. Only a missing launcher or a venv build error is still a terminal `failed` (#9949).
+- Each bootstrap attempt's budget now reaches the sidecar supervisor as its startup timeout, so attempt 2 really gets the 2x budget its log line names instead of being cut off at the flat `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (#9949).
+- Only the first bootstrap attempt runs the full `import sentence_transformers` venv recheck (about 70 s on a busy host); later attempts use the cheap liveness check (#9949).
+- `search.health` reports `embedder_bootstrap: "retrying"` (with `status: "degraded"`) while background retries run, and a new `python_bootstrap` object with `state`, `attempts`, `last_error` and `next_retry_at`. Existing fields are unchanged (#9949).
+- Daemon shutdown stops the bootstrap retry task and tears down an attempt in flight, so no python sidecar outlives the daemon (#9949).
+- On Apple Silicon with `TRUSTY_EMBEDDER` unset or `auto`, `trusty-search doctor` now runs the Python/MPS checks (`uv`, venv, launcher, device) instead of printing "not enabled". A missing `trusty-embedderd-py` launcher is a warning that names the path searched and the fix: `tctl install trusty-search` or `cargo install trusty-search --locked --force`. Linux and `TRUSTY_EMBEDDER=stdio` still print "not enabled" (#9968).
+- `TRUSTY_EMBEDDER=python` now looks up the `trusty-embedderd-py` launcher before it builds the venv. With the launcher missing it builds no venv and downloads no torch, and falls back to ort as before (#9968).
+- On Apple Silicon with `TRUSTY_EMBEDDER` unset or `auto`, `trusty-search doctor` reports an unusable uv (`TRUSTY_UV_FETCH=0` with no uv, a bad `TRUSTY_UV_BIN`) and an unresolvable venv layout as warnings, as it already did for a missing launcher: the daemon stays on ort. With `TRUSTY_EMBEDDER=python` they stay errors (#9970).
+- On Apple Silicon, a network failure or timeout during the first python venv build (the ~3 GB torch install, the pinned uv download, or the first download of the embedding model) no longer ends the python bootstrap. The background loop retries it on the existing 2, 5, 10 and 30 minute backoff and switches to python on the first good build; while it waits, `embedder_bootstrap` and `meta.embedder.bootstrap` read `retrying` and the note names the error. Low disk space, `ENOSPC`, `TRUSTY_UV_FETCH=0` with no uv and a missing launcher still end it as `failed` (#9971).
+- `rehydrate_dedupes_concurrent_callers_onto_one_scan` counts rehydrate scans through a `cfg(test)` per-indexer counter instead of asserting on elapsed time (test-only; no runtime change)
+
+### Changed
+
+- The `DELETE /indexes/{id}` regression tests (#4123, #6363, #6380, #8167, #8438, #8664) call the `delete_index_report` core instead of the test-only axum router, with the same assertions on status, body, registry and disk (#9535).
+- Test-only: removed the HTTP halves of the socket stream tests, the HTTP-wire contributed-graph 503 test, and the `tests_3304` same-origin guard suite for the test-only axum router. The socket stream tests, `an_unmerged_contribution_is_refused_identically_and_stays_unqueryable`, and the shared guard tests in trusty-common and trusty-agents keep that coverage (#9535).
+- The socket parity tests share one `http_body`, `http_refusal` and `params` in `service::rpc::test_support`, and the `search.logs.tail` parity tests decode `n` with the socket's own `LogsTail::into_report_params` instead of an HTTP-only decode (#9535).
+
+### Removed
+
+- The public HTTP items the deleted test router left without a caller: the `/ui` handlers (`ui_index_handler`, `ui_asset_handler`) and the `include_dir!` embed of `ui-dist/`, `chat_handler`, `list_chat_providers`, `registry_orphans_handler`, `metrics_handler`, `request_metrics_middleware`, `apply_limiter`, `apply_query_timeout`, and the `typeahead_handler_for_tests` / `TypeaheadParamsForTests` re-export. The socket methods are unchanged; each still serves the core these wrapped (#9535).
+- The `include_dir` dependency, the `tower` dev-dependency, and trusty-search's request for trusty-common's `axum-server` feature. The Prometheus recorder (`install_recorder`, `MetricsState`) and `metrics-exporter-prometheus` stay: `start` still installs the recorder (#9535).
+- The test-only axum router (`service::server::build_router`, `build_router_with_self_origins`, `build_router_on`) and the handlers only it called: `upgrade_handler` (it wrapped no core and has no socket method; use `trusty-search upgrade`), the two SSE handlers (`status_stream_handler`, `reindex_stream_handler` and its heartbeat constants), `get_config_handler`, `patch_config_handler`, `search_similar_handler`, `graph_stats_handler`, `warm_start_handler`, `warm_status_handler` and `add_index_roots_handler`. The socket serves each `*_report` core they wrapped (#9535).
+- The unused `tower-http` dependency (#9535).
+- The crate's UI pipeline: `build.rs`, the committed `ui-dist/` bundle, and the Makefile's `build-ui`, `sync-ui`, `release-prep` and `ui` targets. The published tarball no longer carries either file; the search dashboard is built, served and published by trusty-console (#9535).
+- `SearchAppState::daemon_port`, `SearchAppState::openrouter_enabled` and `SearchAppState::with_daemon_port`, which had no reader once the `/ui` handlers were deleted. `with_openrouter_api_key` still sets the key that chat-provider detection reads (#9535).
+
+### Security
+
+- The `zip` crate that reads `.docx`, `.pptx` and `.xlsx` files and chat-attachment spreadsheets moves from 2.4.2 to 9.0.4, clearing RUSTSEC-2026-0367, RUSTSEC-2026-0368 and RUSTSEC-2026-0369 for this dependency. trusty-search never called the affected `extract()` API; extraction behaviour and the zip-bomb size caps are unchanged (#10019).
+- A zip entry whose size header understates its real content is now refused by zip 9 itself, before the spreadsheet guard's own byte cap is reached. The file is still skipped; only the logged reason changes (#10019).
+
 ## [0.60.0] — 2026-10-10
 
 ### Breaking

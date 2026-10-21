@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.16.0] — 2026-10-21
+
+### Added
+
+- `tctl install`, `start`, `stop`, `restart` and `status` manage trusty-events, the event bus daemon, as an optional stable-set member (#10042). `tctl` writes its LaunchAgent `com.trusty.events`: `trusty-events serve`, restarted after any exit (as the console's unit is), at most every 10 s, with no socket or port key; `tctl stop` unloads it. `tctl status` reports it `healthy` when its Unix socket accepts a connection and `down` when the socket is missing or refuses (a stale socket); it does not yet check liveness beyond the accept (#10071). Installing an event producer (trusty-mpm, trusty-analyze) also installs trusty-events as a soft member: `tctl install` names it as optional, and if it fails the run still succeeds and every other member is installed.
+
+### Fixed
+
+- The confirmed-down tests' `dead_addr` fixture now names a multicast address
+  that the kernel refuses inside `connect(2)`, instead of `127.0.0.1:1`. Ten
+  probe, verify and pinned-download tests no longer time out on a host that
+  hangs a connect to a closed loopback port, such as WSL2 with mirrored
+  networking (#9613).
+- `probe_ignores_http_proxy_env` exports `HTTP_PROXY` only in a child test
+  process, so concurrent tests no longer send fixture requests through its
+  dead proxy (#9613).
+
+### Changed
+
+- `tctl status`, `stack health` and the install verify tail probe trusty-mpm with `mpm.health` on its Unix socket, not `GET /health` on 7880 or its `http_addr`. A stub on a recorded `http_addr` no longer reads as the daemon (#6288).
+- `tctl install trusty-search` and `tctl sign trusty-search` now sign `trusty-embedderd-py` with `trusty-search` and `trusty-embedderd` (identifier `com.trusty.trusty-embedderd-py`). The launcher has shipped with trusty-search since #9468; before this change it stayed ad-hoc signed. A new test fails when a signing set and the binaries its crate installs disagree (Refs [#9973](https://github.com/bobmatnyc/trusty-tools/issues/9973))
+- Owner ruling D94 moved the `trusty-embedderd-py` launcher binary from the trusty-embedderd-py package to trusty-search: trusty-embedderd-py 0.2.0 is library-only, while 0.1.x installed the launcher itself (#9468). On a machine that ran `cargo install trusty-embedderd-py` 0.1.x, cargo still records that package as the launcher's owner and refuses a plain `cargo install trusty-search`. When `tctl install` or `tctl upgrade` falls back to `cargo install trusty-search` and `cargo install --list` shows the standalone package owning the launcher, tctl now adds `--force`, so trusty-search takes the binary over and cargo drops the old record. tctl never runs `cargo uninstall`, and the install still runs under the ownership guard, so a failed install leaves the existing launcher in place. Every other install is unchanged, without `--force` (#9974).
+
 ## [0.15.0] — 2026-10-10
 
 ### Breaking

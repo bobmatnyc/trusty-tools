@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-10-21
+
+### Breaking
+
+- trusty-embedderd-py 0.2.0 is library-only: it no longer builds or installs the `trusty-embedderd-py` launcher binary. trusty-search now ships that binary, so `cargo install trusty-search` installs it next to `trusty-search` (#9468).
+- If you installed the launcher on its own (`cargo install trusty-embedderd-py`), uninstall it with `cargo uninstall trusty-embedderd-py` before you upgrade trusty-search; cargo refuses to install a binary that another package owns. `tctl` takes over the launcher with `cargo install --force` from the release that ships this change and never runs `cargo uninstall` (#9468).
+- New `trusty_embedderd_py::run()` holds the launcher logic the old `main` had; its CLI, arguments and exit codes are unchanged (#9468).
+
+### Added
+
+- The venv bootstrap now uses a cached, verified `uv` when none is installed: an installed `uv` (`TRUSTY_UV_BIN`, `PATH`, the well-known install dirs) still wins, and otherwise `<data>/py-embedder/uv/0.12.23/uv` is used only when its bytes match the digest recorded at install. The new `uv_fetch::install_verified` checks an on-disk uv 0.12.23 archive against an embedded SHA-256 before extracting it and refuses unsafe entries; under its `.fetch.lock` it first removes any `.uv.tmp.*` file a killed install left, and stops with an error if one cannot be removed (#9468).
+- The venv bootstrap now fetches the pinned uv 0.12.23 over HTTPS when no `uv` is installed or cached, so a machine without uv can bootstrap the Python/MPS sidecar. The archive is checked against the SHA-256 embedded in the binary before anything is extracted, and the download is bounded to 300 s in total and 64 MiB; a slow or oversized download fails instead of hanging. Racing bootstraps download once: each re-checks the cache after taking `.fetch.lock` (#9966).
+- `TRUSTY_UV_FETCH=0` (or `false`, `off`, `no`) turns the download off. With no uv found the bootstrap then fails with an error that names `TRUSTY_UV_FETCH` and `TRUSTY_UV_BIN`, replacing the earlier "not yet available" message, and trusty-search stays on the Rust ort embedder (#9966).
+- A cached uv that fails its digest check (a changed binary or a torn `uv.sha256`) is never run: with the download on it is replaced by a freshly verified download, and with `TRUSTY_UV_FETCH=0` the bootstrap fails and names the refused file. `install_verified` now refuses an archive over 64 MiB before reading it (#9966).
+- `locate_uv`, and with it `trusty-search doctor` without `--fix`, never fetches: it finds only an installed or verified cached uv and writes nothing. With neither, the doctor's uv row is a warning that uv is not installed and that the bootstrap fetches the pinned uv 0.12.23 unless `TRUSTY_UV_FETCH=0`; with `TRUSTY_UV_FETCH=0` it stays an error. The venv build and `doctor --fix` still fetch (#9966).
+- Venv-build failures are typed: `VenvBuildError` (`InsufficientDisk`, `Timeout`, `DownloadFailed`, `StepFailed`) and `failure_kind`, which reads an error's first typed cause and answers `Transient` or `Permanent`. A network failure or timeout (a stalled or failed `uv python install` / `uv pip sync`, a failed uv download, a stalled first smoke test, or a network failure while the smoke test downloads the model, which it reports with exit code 75) is transient; low disk, `ENOSPC`, `TRUSTY_UV_FETCH=0` with no uv, a failed local uv step and untyped errors are permanent. A download step, the model download included, that fails with less than ~3 GB free reports `InsufficientDisk`. A build that follows a failed one first removes the unfinished venv, so `uv venv` does not refuse the leftover directory; a venv marked `.ready` is never removed (#9971).
+
+### Fixed
+
+- The Python embed sidecar calls `torch.mps.empty_cache()` after every encode on MPS (never on CPU or CUDA), so the MPS allocator no longer keeps the memory of every batch shape it has seen. A missing `torch.mps` is skipped and a failing call is logged once (#9828).
+
 ## [0.1.5] — 2026-09-28
 
 ### Fixed
