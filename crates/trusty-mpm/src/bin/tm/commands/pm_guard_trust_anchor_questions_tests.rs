@@ -180,6 +180,22 @@ fn mismatches(fx: &Fixture, env: &HookEnv, commands: &[String], want_denied: boo
         .collect()
 }
 
+/// 🔴 #10107 item 4: the narrow table rule folds names as APFS does, so a
+/// `ſ` (U+017F) spelling of a table name is denied to the Architect.
+#[test]
+fn the_architect_is_denied_unicode_spellings_of_the_table() {
+    let fx = with_table();
+    let rows = [
+        "echo x > \"$D/que\u{17f}tions.jsonl\"",
+        "cp forged \"$D/questions.j\u{17f}onl.lock\"",
+        "mv forged \"$D/channel\u{17f}\"",
+        "rm -rf \"$D/.tru\u{17f}ty-tools\"",
+    ]
+    .map(str::to_owned);
+    let wrong = mismatches(&fx, &architect_env(&fx), &rows, true);
+    assert!(wrong.is_empty(), "allowed:\n{}", wrong.join("\n"));
+}
+
 /// 🔴 #9815 (Architect ruling (b)): with no taint live, the Architect may make
 /// routine writes whose possible file names cannot be one of the table's
 /// files or its last three directories.
