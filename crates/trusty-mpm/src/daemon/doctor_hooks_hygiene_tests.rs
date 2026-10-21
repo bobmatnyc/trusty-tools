@@ -345,6 +345,117 @@ fn check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file() {
     );
 }
 
+/// Drop the `PostToolUseFailure` key from a settings file: the pre-1.9 shape.
+fn strip_post_tool_use_failure(path: &Path) {
+    let mut val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let removed = val["hooks"]
+        .as_object_mut()
+        .and_then(|hooks| hooks.remove("PostToolUseFailure"));
+    assert!(
+        removed.is_some(),
+        "the merge must have written a PostToolUseFailure group to strip"
+    );
+    std::fs::write(path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+}
+
+/// `hooks_missing_tm_group` warns on a missing `PostToolUseFailure` group and
+/// `--fix --yes` restores it (#10095).
+///
+/// Why: a project provisioned before 1.9 lacks the group, and doctor is how the
+/// operator learns of it; the repair has to close the finding it names.
+/// What: merges a complete file (Ok), strips the one group (Warn naming it),
+/// applies the repair, and asserts Ok again.
+/// Test: itself.
+#[test]
+fn doctor_flags_missing_post_tool_use_failure_group_10095() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("pre-1-9-project");
+    let exe = Path::new("/usr/local/bin/tm");
+    let path = write_settings(&project, &missing_sessionstart_value());
+    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
+        .expect("the merge must succeed against a pinned installed binary");
+    let check = || check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe)).3;
+    assert_eq!(check().status, CheckStatus::Ok, "{}", check().message);
+
+    strip_post_tool_use_failure(&path);
+    let missing = check();
+    assert_eq!(missing.status, CheckStatus::Warn);
+    assert!(
+        missing.message.contains("PostToolUseFailure"),
+        "the report must name the unwired event: {}",
+        missing.message
+    );
+
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&project);
+    let steps = crate::core::doctor_repair::repair_missing_hook_group_with(
+        &fw,
+        &project,
+        Some(exe),
+        crate::core::doctor_repair::RepairMode::Apply,
+    );
+    assert!(
+        steps.len() == 1
+            && matches!(
+                steps[0].status,
+                crate::core::doctor_repair::StepStatus::Applied { .. }
+            ),
+        "the repair must apply: {steps:?}"
+    );
+    assert_eq!(check().status, CheckStatus::Ok, "{}", check().message);
+}
+
+/// A `--fix` that cannot write leaves the finding at Warn (#10095).
+///
+/// Why: Fail-Open Check — a doctor that reported Ok after a refused repair would
+/// hide a project whose failed tool calls never close.
+/// What: strips the group, makes `.claude/` read-only so the atomic write
+/// fails, runs the repair, and asserts the step did not apply and the check is
+/// still Warn.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("failed-fix-project");
+    let exe = Path::new("/usr/local/bin/tm");
+    let path = write_settings(&project, &missing_sessionstart_value());
+    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
+        .expect("the merge must succeed against a pinned installed binary");
+    strip_post_tool_use_failure(&path);
+
+    let claude = project.join(".claude");
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&project);
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let steps = crate::core::doctor_repair::repair_missing_hook_group_with(
+        &fw,
+        &project,
+        Some(exe),
+        crate::core::doctor_repair::RepairMode::Apply,
+    );
+    // Restore before asserting, so a failed assertion still leaves a removable
+    // temp dir behind.
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(steps.len(), 1, "the gap must produce a step: {steps:?}");
+    assert!(
+        matches!(
+            steps[0].status,
+            crate::core::doctor_repair::StepStatus::Failed(_)
+        ),
+        "an unwritable directory must fail the repair: {steps:?}"
+    );
+
+    let missing = check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe)).3;
+    assert_eq!(
+        missing.status,
+        CheckStatus::Warn,
+        "a failed fix must leave the finding at Warn: {}",
+        missing.message
+    );
+    assert!(missing.message.contains("PostToolUseFailure"));
+}
+
 /// A project tm never provisioned is never told to adopt tm's hooks (#7490).
 #[test]
 fn check_hooks_hygiene_missing_group_check_ignores_a_foreign_project() {

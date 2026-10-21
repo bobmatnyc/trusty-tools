@@ -341,6 +341,56 @@ fn test_mpm_hook_additions_has_six_events() {
     );
 }
 
+/// #10095: tm registers `PostToolUseFailure`, so a failed, denied or
+/// interrupted call closes its `Tool::Started` span instead of stalling it.
+///
+/// Why: Claude Code fires a hook only for an event the settings file names, and
+/// the projection's `PostToolUseFailure -> Tool::Errored` arm received nothing.
+/// What: the block carries exactly one group for the event, mirroring
+/// `PostToolUse`: matcher `*`, the shared command, `async: true`, timeout 60. A
+/// synchronous group would hold the failure path for its timeout.
+/// Test: itself.
+#[test]
+fn mpm_hook_additions_registers_post_tool_use_failure_async_10095() {
+    let v = mpm_hook_additions_with_exe(Some(Path::new(STABLE_TEST_EXE)))
+        .expect("a pinned installed-looking exe always resolves");
+    let groups = v["hooks"]["PostToolUseFailure"]
+        .as_array()
+        .expect("PostToolUseFailure must carry a group array");
+    assert_eq!(groups.len(), 1, "exactly one tm group: {groups:?}");
+    let group = &groups[0];
+    assert_eq!(group["matcher"], "*");
+    let hooks = group["hooks"].as_array().expect("hooks array");
+    assert_eq!(hooks.len(), 1, "one command: {hooks:?}");
+    assert_eq!(hooks[0]["type"], "command");
+    assert_eq!(
+        hooks[0]["command"],
+        serde_json::json!(format!("{STABLE_TEST_EXE} hook"))
+    );
+    assert_eq!(hooks[0]["async"], true, "must not block the failure path");
+    assert_eq!(hooks[0]["timeout"], 60);
+}
+
+/// Re-running the global writer leaves one `PostToolUseFailure` group (#10095).
+#[test]
+fn ensure_managed_hooks_writes_one_post_tool_use_failure_group_10095() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().to_path_buf();
+    std::fs::write(cfg.join("settings.json"), "{}\n").unwrap();
+    let exe = Some(Path::new(STABLE_TEST_EXE));
+
+    ensure_managed_hooks_with_exe(&cfg, exe).unwrap();
+    ensure_managed_hooks_with_exe(&cfg, exe).unwrap();
+
+    let val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.join("settings.json")).unwrap()).unwrap();
+    let groups = val["hooks"]["PostToolUseFailure"]
+        .as_array()
+        .expect("the writer must register PostToolUseFailure");
+    assert_eq!(groups.len(), 1, "no duplicate on a re-run: {groups:?}");
+    assert_eq!(groups[0]["hooks"][0]["async"], true);
+}
+
 /// Why: with an absolute exe_override the generated command must start
 /// with '/' in every event slot.
 #[test]

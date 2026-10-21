@@ -1231,6 +1231,52 @@ async fn a_failed_task_stop_releases_nothing() {
     assert!(!after.claimed);
 }
 
+/// A failed `TaskStop` delivered as `PostToolUseFailure` releases nothing (#10095).
+///
+/// Why: tm now registers that event, so Claude Code delivers a stop that did not
+/// take under it. The agent the stop missed is still in the tree, so the
+/// tracker must keep ignoring the event for `TaskStop`.
+/// What: asserts the event is delivered, sends the failure, and asserts a second
+/// unisolated writer is still refused.
+/// Test: itself.
+#[tokio::test]
+async fn a_task_stop_failure_event_releases_nothing_10095() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    let event = crate::core::hook::HookEvent::PostToolUseFailure;
+    assert!(
+        crate::test_support::tm_registers_hook(event),
+        "Claude Code must deliver a failed TaskStop to tm"
+    );
+    crate::daemon::services::delegation_tracker::observe(
+        &state,
+        session,
+        event,
+        &serde_json::json!({
+            "cwd": "/repo",
+            "tool": "TaskStop",
+            "tool_use_id": "toolu_stop",
+            "input": {"task_id": "agent-qa-1"},
+        }),
+    );
+
+    let after = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(after.total, 1, "a failed stop must not release the tree");
+    assert!(!after.claimed);
+}
+
 /// 🔴 The documented fail-OPEN branch: a stop whose response says nothing still
 /// releases.
 ///
