@@ -95,7 +95,7 @@ for name in "${REQUIRED[@]}"; do
   elif [ "$count" -ne 1 ]; then
     report "\`$name\` ran $count times; a required name must be unique"
   elif [ "$lines" != "ok" ]; then
-    report "\`$name\` reported \`$lines\`, not \`ok\` (an ignored test fails this gate)"
+    report "\`$name\` reported \`$lines\`, not \`ok\`"
   fi
 done
 

@@ -88,6 +88,8 @@ pub mod channels_delivery;
 pub mod channels_readiness;
 #[cfg(test)]
 mod channels_readiness_tests;
+// #8454 S6 prep: the CTO tripwire's durable record, shared with `tm doctor`.
+pub mod channels_tripwire;
 pub mod circuit;
 pub mod claude_config;
 // Issue #4467: the shared set of Claude Code process-local session markers every

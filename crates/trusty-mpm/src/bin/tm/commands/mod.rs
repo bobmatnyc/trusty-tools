@@ -50,6 +50,8 @@ pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
+// #8454 S6 prep: the CTO tripwire arm, after the readiness gate.
+pub(crate) mod egress_guard_tripwire;
 // #8454 VC: the egress guard's daemon verdict client.
 pub(crate) mod egress_verdict_client;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`

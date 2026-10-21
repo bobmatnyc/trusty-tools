@@ -573,6 +573,8 @@ async fn run_doctor_produces_seventy_eight_checks() {
         "hooks_missing_tm_group",
         // #8454: the egress-guard entry in every tm-provisioned file.
         "egress_guard",
+        // #8454 S6 prep: the CTO tripwire's trip record.
+        "tripwire_record",
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
