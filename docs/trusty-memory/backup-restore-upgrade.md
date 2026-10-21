@@ -123,29 +123,137 @@ the restore again.
 
 ## Upgrade across a palace format change
 
-The supported upgrade step is N-1 to N. Palace format 1 (trusty-memory 0.33.0)
-upgrades to format 2 (trusty-memory 0.35.0). The daemon migrates a palace
-lazily, when it opens it. The format 1 to 2 change is on derived data and
-rewrites no row.
+### Which release writes which format
 
-Before it migrates, the daemon writes a verified copy of the palace's primary
-files to
-`<data root>/.trusty-memory/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
-or `<data root>/backups/format-migration/…` in the legacy layout, and aborts the migration if that copy fails. The two newest copies per palace
-are kept. This copy is not a `palace backup`: it has a `MANIFEST` file, not
-`manifest.json`, and `palace restore` does not read it.
+| Release | Palace format |
+|---|---|
+| 0.32.x and older | 0 |
+| 0.33.x | 1 |
+| 0.35.0 and later | 2 |
 
-To upgrade:
-
-1. Install the new trusty-memory and start the daemon.
-2. After the palace opens, run `trusty-memory palace backup` for each palace
-   you care about.
-
-`palace backup` and `palace restore` are not in trusty-memory 0.35.0. They ship
-in the next release after 0.35.0 (0.35.1). `palace backup` without a daemon refuses a palace in an older format. It never
-migrates. A backup of a migrated palace is in the new format.
-
+Every release from 0.35.0 reads format 2. From 0.36.0 (unreleased; ships with
+trusty-mpm 1.9.0), a binary migrates a palace at format 0 or 1 in one chain,
+with no intermediate release (ADR-0067, amendment 2026-10-15). 0.35.0 migrates
+only format 1: a format-0 palace needs the two-step path in
+[Upgrading from 0.32.x or older to 0.35.0](#upgrading-from-032x-or-older-to-0350-formattooold).
 A palace in a newer format than the binary supports is refused, not opened.
+
+### Automatic migration
+
+The daemon migrates a palace when it makes its next writer open of it, which
+is at daemon start for every palace. Before the first step, it writes a
+verified copy of the palace's primary files and aborts the migration if that
+copy fails. You do not need to run anything.
+
+A read-only open of an older palace (the CLI, `trusty-memory serve --stdio`) is
+refused with `FormatNeedsMigration` until the daemon has migrated it. The
+format 1 to 2 step is on derived data and rewrites no row.
+
+### Migrate by hand with `palace migrate`
+
+`trusty-memory palace migrate` runs the same chain as the daemon, as a step you
+can preview and check. It is not in trusty-memory 0.35.x. It ships in 0.36.0.
+
+```bash
+trusty-memory palace migrate my-palace --dry-run   # preview; writes nothing
+trusty-memory palace migrate my-palace             # backup, convert, check
+trusty-memory palace migrate --all                 # every palace
+trusty-memory palace migrate --all --yes           # confirm more than one change
+```
+
+- `--dry-run` prints one row per palace: its status (`current`,
+  `needs migration`, `interrupted`, `unverified` or `refused`), the format
+  found, the target, the size, the space the backup needs, the free space and
+  the planned backup directory. It then prints how many palaces would change.
+- A plain run takes the verified backup, runs each format step, then runs the
+  post-checks below. It prints the backup directory, the drawer and triple
+  counts before and after, and `checks:` or `FAILED:` lines.
+- A palace already at the current format is left alone. No backup is taken.
+- An interrupted migration resumes from the format `kg.redb` holds.
+- `--all` prints the dry-run table first and checks the total free space. It
+  refuses without `--yes` when more than one palace would change, and changes
+  nothing. It continues past a palace that fails and names each one
+  that failed or was refused.
+
+The post-checks verify that:
+
+- the format status is `current`;
+- the `kg.redb` markers (`palace_format` and `triple_key`) and the
+  `palace.json` `format_version` agree at the expected value;
+- no `format_migration.json` is left;
+- the drawer and triple counts equal the counts before the migration.
+
+A failed check makes the command exit non-zero. The message names the palace,
+the gap and the verified backup, and states that nothing was deleted.
+
+The command goes through the running daemon when one serves this data root.
+With no daemon, it opens the palaces itself, offline. A daemon's answer is
+final: a failed call is never retried offline.
+
+After `cargo install`, a daemon that was already running is the old release. It
+does not know `palace_migrate`, and the command says so. Restart the daemon on
+the new release (`trusty-memory stop`, then `trusty-memory start`), which
+migrates its palaces at its next writer open. Or stop it and run the command,
+which then migrates offline.
+
+`trusty-memory doctor` prints a `needs migration` warning for each palace that
+is behind. The warning names the command and the backup root.
+
+### Palaces that tm owns
+
+The Session Manager and portfolio palaces belong to the `tm` daemon. Do not run
+`palace migrate` on them. Restart the owning daemon (`tm daemon run`). It
+migrates them at its next open.
+
+### Where the migration backups live
+
+The backup directory is
+`<data root>/.trusty-memory/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
+or `<data root>/backups/format-migration/<palace>/…` in the legacy layout. A
+chain from format 0 writes one `0-to-2-<UTC>` directory, taken before its first
+step.
+
+- It holds the palace's primary files: `palace.json`, `identity.txt`,
+  `kg.redb`, `chat_sessions.redb` and the two deletion journals. It also holds
+  a `MANIFEST` file with the length and SHA-256 of each.
+- The two newest complete backups per palace are kept. Only you delete a
+  backup.
+- It does not hold the vector index (`index.usearch.redb`). The index is
+  derived data, rebuilt from the drawers. After a rollback, re-embed (see
+  [Roll back](#roll-back)).
+- It is not a `palace backup`. It has `MANIFEST`, not `manifest.json`, and
+  `palace restore` does not read it.
+
+### Check a palace you converted by hand
+
+```bash
+trusty-memory palace migrate my-palace --verify
+trusty-memory doctor
+```
+
+`--verify` writes nothing. It runs the post-checks on any palace and prints
+one block per palace. It reads `kg.redb` read-only, or through a temp copy when
+another process holds the file (the line ends `(read from a copy)`).
+
+| Line | Meaning |
+|---|---|
+| `kg_schema palace_format` | The format stamped in `kg.redb`. |
+| `kg_schema triple_key` | The triple-key layout marker. |
+| `palace.json format_version` | The mirror of the format in `palace.json`. |
+| `format_migration.json` | `present` means a migration was interrupted. |
+| `backup` | The newest complete migration backup, and whether it still verifies. A missing or failing backup is reported, not counted as a gap. |
+
+Each marker reads `present (<n>)`, `missing`, `mismatched (<n>, want <m>)` or
+`not applicable (new, empty KG)`. The last is a palace with no data.
+
+The block ends with `OK: every check passed` or one `GAP:` line per failed
+check. With any gap, the command exits non-zero and names the palace and the
+gap. Fix the marker, or run `palace migrate <palace>` to finish the job.
+
+`trusty-memory doctor` reads each palace without writing. In its `palace
+format` line, a palace behind the binary is a warning, one it cannot read
+(held by a daemon, or in need of crash repair) is a warning, and a palace it
+refuses (newer, split markers or unreadable) is a failure.
 
 ### Upgrading from 0.32.x or older to 0.35.0 (FormatTooOld)
 
@@ -170,6 +278,38 @@ trusty-memory 0.36.0, which ships with trusty-mpm 1.9.0, migrates format 0
 directly and adds `trusty-memory palace migrate` (#10094).
 
 ## Roll back
+
+### With a migration backup
+
+Use this after `palace migrate` or the daemon migrated a palace and you need
+the old format back. Writes made since the migration are lost.
+
+1. Stop the daemon: `trusty-memory stop`. Close every MCP client first, or it
+   restarts the daemon.
+2. Pick the backup. It is the newest directory that holds `MANIFEST` and whose
+   name starts with `<old format>-to-`, for example `1-to-2-<UTC>` to return to
+   format 1. A palace can hold both `0-to-2-*` and `1-to-2-*` directories, so
+   the newest one overall can be the wrong one. Copy from it; never move or
+   edit it.
+3. Copy every file in that directory except `MANIFEST` back into the palace
+   directory.
+4. Remove `format_migration.json` from the palace directory, if it is there.
+5. Delete `index.usearch.redb` from the palace directory. The backup does not
+   hold it, so the migrated index stays behind. It can hold chunk rows
+   (`{uuid}#{n}`) that an older binary misreads, and orphan vectors for drawers
+   written after the migration (ADR-0067 D6).
+6. Run the release that matches the old format: 0.33.x for format 1, 0.32.x or
+   older for format 0. Start its daemon. It creates an empty index.
+7. Call `palace_reembed` with `dry_run=false` until it reports `missing: 0`.
+   Recall finds the drawers only after that.
+
+This procedure copies into the existing palace directory, which is why step 5
+is needed. The step-by-step section below restores into a fresh directory, so
+no index exists there.
+
+The detailed form for a format 2 to 1 rollback, with checksum checks, follows.
+
+### Format 2 to 0.33.0, step by step
 
 A binary refuses a palace in a newer format than it supports. After an upgrade
 to format 2, trusty-memory 0.33.0 refuses the migrated palace, and a
