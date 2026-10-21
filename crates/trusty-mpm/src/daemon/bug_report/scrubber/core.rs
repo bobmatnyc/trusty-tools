@@ -65,12 +65,13 @@ pub fn scrub_compat(text: &str) -> (String, Vec<ScrubChange>) {
 
 /// Mask credentials only: rules 1-10 of [`scrub`], no path rewrite, no cut.
 ///
-/// Why (#9167): a `message` event's digest must never fingerprint a secret,
-/// yet for text holding none it must equal the digest of the text the
-/// recipient saw. Rewriting paths or truncating, as [`scrub`] does for a
-/// public bug report, would change ordinary relay text.
-/// What: the text with each credential match replaced by its redaction
-/// placeholder; text with no match comes back unchanged.
+/// Why (#9167): a `message` event's digest must not fingerprint a recognised
+/// credential. Rewriting paths or truncating, as [`scrub`] does for a public
+/// bug report, would change relay text further than that needs.
+/// What: the text with each match of rules 1-10 replaced by its redaction
+/// placeholder. Rule 10 and the `Bearer`/`Authorization` rule also rewrite
+/// ordinary prose that matches them; a credential in a shape no rule knows
+/// (a prose password, a JSON `"api_key": ...`) passes unchanged.
 /// Test: `daemon::action_events::message_tests::a_secret_in_the_text_never_reaches_any_field_9167`.
 pub fn scrub_credentials(text: &str) -> String {
     credential_rules(text).0

@@ -49,8 +49,9 @@ const RECIPIENT_KEYS: [&str; 3] = ["to", "agent_id", "agentId"];
 
 /// `[<Name> Architect HH:MMZ]`, or the older `supervisor` form; the last
 /// minute digit may be `x` (the Architect's `relay-marker.py` grammar).
+/// Anchored: a relay starts with its marker (`relay.sh`'s `MARKER_RE`).
 static RELAY_MARKER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[(?:[A-Za-z][A-Za-z -]{0,40}? )?(?:Architect|supervisor) \d{2}:\d[\dx]Z\]")
+    Regex::new(r"^\[(?:[A-Za-z][A-Za-z -]{0,40}? )?(?:Architect|supervisor) \d{2}:\d[\dx]Z\]")
         .expect("a literal pattern compiles")
 });
 
@@ -111,10 +112,11 @@ pub fn messages(record: &HookEventRecord, bodies: bool) -> Vec<MessageEvent> {
 ///
 /// Why: owner ruling 2026-10-21 — the body is off by default, and the digest
 /// is of the text as sent, never of text holding a secret.
-/// What: masks credentials in `text` first ([`scrub_credentials`]); `bytes`,
-/// `sha256` and `relay` describe that masked text, which equals `text` when
-/// it holds no credential. `body` is the masked text cut to
-/// [`MAX_BODY_BYTES`], and only when `bodies` is set. `to` is masked too.
+/// What: masks credentials in `text` first ([`scrub_credentials`]); `bytes`
+/// and `sha256` describe that scrubbed text, which can differ from what the
+/// recipient saw. `relay` is read from the raw `text` (its grammar cannot
+/// hold a secret). `body` is the scrubbed text cut to [`MAX_BODY_BYTES`],
+/// and only when `bodies` is set. `to` is scrubbed too.
 /// Test: `a_secret_in_the_text_never_reaches_any_field_9167`,
 /// `the_body_is_carried_only_when_enabled_9167`.
 pub fn message_event(
@@ -131,18 +133,21 @@ pub fn message_event(
         channel,
         from: from.to_string(),
         to: scrub_credentials(to).chars().take(MAX_TO_CHARS).collect(),
-        relay: relay_marker(&sent),
+        // #9167: the raw text, so the scan cannot rewrite the marker.
+        relay: relay_marker(text),
         bytes: sent.len() as u64,
         sha256: format!("{:x}", Sha256::digest(sent.as_bytes())),
         body: bodies.then(|| cut(&sent, MAX_BODY_BYTES).to_string()),
     }
 }
 
-/// The first relay marker in `text`, if any.
+/// The relay marker that starts `text`'s trimmed first line, if any.
 ///
-/// Test: `a_relay_marker_is_found_or_left_empty_9167`.
+/// Test: `a_relay_marker_is_found_or_left_empty_9167`,
+/// `a_line_start_marker_is_read_from_the_raw_text_9167`.
 pub fn relay_marker(text: &str) -> Option<String> {
-    RELAY_MARKER.find(text).map(|m| m.as_str().to_string())
+    let first = text.lines().next().unwrap_or_default().trim();
+    RELAY_MARKER.find(first).map(|m| m.as_str().to_string())
 }
 
 /// `message` as a bus event: a child of `parent`, the event its record

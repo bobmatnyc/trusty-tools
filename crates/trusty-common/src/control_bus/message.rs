@@ -53,9 +53,11 @@ pub enum MessageChannel {
 ///       explicitly configured to; it is absent by default (owner ruling
 ///       2026-10-21).
 ///
-/// Security: no field may hold a secret value. A producer runs the text
-/// through a credential scan before it computes `bytes` and `sha256`, so the
-/// digest is never a fingerprint of a secret, and scrubs `to` the same way.
+/// Security: a producer runs the text through a credential scan before it
+/// computes `bytes` and `sha256`, and scrubs `to` the same way. The scan masks
+/// recognised credential shapes; a credential in a shape it does not know can
+/// pass. The digest is over the scrubbed text, so it can differ from the
+/// digest of what the recipient saw.
 /// Test: `super::tests::message_event_omits_an_absent_body_and_relay_9167`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageEvent {
