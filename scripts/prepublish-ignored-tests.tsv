@@ -228,5 +228,11 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # downloads the real uv release, so it stays unselected. 142 + 1 -> 143
 # (Architect GO 12:04Z 2026-10-21, Refs #9663).
 #
+# #9974 (PR #10141) adds one: trusty-installer `real_cargo_accepts_the_takeover`
+# (src/download/cargo_record_tests.rs),
+# `#[ignore = "runs real cargo install on offline path fixtures; run with
+# --include-ignored"]`. It runs a real `cargo install`, so it stays unselected.
+# 143 + 1 -> 144 (Refs #9663; failing run 39681835195).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 143
+# UNSELECTED-BASELINE: 144
