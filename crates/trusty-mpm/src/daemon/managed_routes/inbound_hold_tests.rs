@@ -129,6 +129,44 @@ async fn no_match_holds_audits_and_sends_untainted_notice() {
     assert_eq!(body.0["notice_delivered"], true);
 }
 
+/// 🔴 #10127 (critic HIGH): a delivered notice never stands in for the
+/// answer's delivery. After a held reply's notice, a matched reply whose
+/// task dies after `resolve` leaves the question resolved with no answer
+/// line, and the doctor row still fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delivered_notice_never_hides_a_resolved_answer_with_no_delivery() {
+    let mut fake = Fake::new();
+    fake.table_mode = TableMode::PanicsAfterResolve;
+    let id = fake.open_with("owner-0", OWNER, &owner_conv(), &["Merge", "Hold"]);
+    let rec = recorder_for(&fake);
+    let fake = Arc::new(fake);
+    let env: Arc<dyn InboundEnv + Send + Sync> = Arc::clone(&fake) as _;
+    let held = run_inbound(Arc::clone(&env), &rec, ev(OWNER, &owner_conv(), "maybe")).await;
+    assert!(
+        matches!(
+            held,
+            InboundReply::Held {
+                notice: Delivery::Delivered,
+                ..
+            }
+        ),
+        "{held:?}"
+    );
+    let aborted = run_inbound(env, &rec, ev(OWNER, &owner_conv(), "1")).await;
+    assert!(matches!(aborted, InboundReply::Aborted(_)), "{aborted:?}");
+    assert!(fake.table.state(id).expect("known").answered, "resolved");
+    let live: HashSet<String> = [ASKER.to_owned()].into();
+    let row = channel_taint_row(&rec.dir, &live);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(
+        row.message.contains(&format!(
+            "Q-{id} to asker {ASKER}: resolved with no delivery record"
+        )),
+        "{}",
+        row.message
+    );
+}
+
 /// 🔴 #10127 (plan §6): an `unparsed` append that fails drops the reply as
 /// `table_poisoned` and sends no notice; the question stays open.
 #[tokio::test]

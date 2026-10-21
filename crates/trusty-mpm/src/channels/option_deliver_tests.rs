@@ -18,7 +18,7 @@ use super::tests::{ASKER, Recorder, resolved};
 use super::{DeliverEnv, Delivery, deliver_notice, frame_answer, frame_notice, frame_option};
 use crate::channels::inbound::Held;
 use crate::channels::option_match::{HoldReason, match_reply};
-use crate::core::channels_delivery::{DeliveryLine, DeliveryState};
+use crate::core::channels_delivery::{DELIVERY_FILE, DeliveryKind, DeliveryLine, DeliveryState};
 use crate::core::channels_taint::{self, TaintMark};
 use crate::core::doctor::CheckStatus;
 use crate::daemon::doctor::doctor_channel_taint::channel_taint_row;
@@ -161,4 +161,27 @@ async fn notice_send_failure_is_recorded_and_not_retried() {
         "{}",
         row.message
     );
+    // #10127 (critic HIGH): a notice is its own problem; the question is open.
+    assert!(
+        row.message.contains("the question is still open"),
+        "{}",
+        row.message
+    );
+    assert!(
+        !row.message.contains("the answer is lost"),
+        "{}",
+        row.message
+    );
+    assert!(!row.message.contains("resolved but not"), "{}", row.message);
+    let trace = std::fs::read_to_string(rec.dir.join(DELIVERY_FILE)).expect("trace");
+    assert!(
+        trace.lines().all(|l| l.contains("\"kind\":\"notice\"")),
+        "{trace}"
+    );
+    // A line written before `kind` existed reads as an answer's.
+    let old =
+        r#"{"v":1,"ts":"2026-10-13T00:00:00Z","state":"delivered","question_id":"7","asker":"a"}"#;
+    let old: DeliveryLine = serde_json::from_str(old).expect("old line");
+    assert_eq!(old.kind, DeliveryKind::Answer);
+    assert!(!serde_json::to_string(&old).expect("json").contains("kind"));
 }

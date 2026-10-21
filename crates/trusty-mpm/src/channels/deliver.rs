@@ -29,7 +29,7 @@ use trusty_channels::policy::{Channel, QuestionId};
 use crate::channels::inbound::{Held, Resolved};
 use crate::channels::option_match::{Choice, HoldReason};
 use crate::channels::question_table::Question;
-use crate::core::channels_delivery::{DeliveryLine, DeliveryState};
+use crate::core::channels_delivery::{DeliveryKind, DeliveryLine, DeliveryState};
 use crate::core::channels_taint::{self, TaintMark};
 use crate::session_manager::{ManagedSessionState, SessionKind, SessionRecord};
 
@@ -236,6 +236,7 @@ pub async fn deliver(env: &impl DeliverEnv, resolved: &Resolved) -> Delivery {
         env,
         id: &id,
         asker,
+        kind: DeliveryKind::Answer,
     };
     let view = match env.asker(asker).await {
         Ok(view) => view,
@@ -303,8 +304,9 @@ pub async fn deliver_option(
         env,
         id: &id,
         asker: question.ask.asker_managed_session.as_str(),
+        kind: DeliveryKind::Answer,
     };
-    step.send_untainted(&frame_option(question.id, choice), false)
+    step.send_untainted(&frame_option(question.id, choice))
         .await
 }
 
@@ -324,8 +326,10 @@ pub async fn deliver_notice(env: &impl DeliverEnv, held: &Held) -> Delivery {
         env,
         id: &id,
         asker: question.ask.asker_managed_session.as_str(),
+        // #10127 (critic HIGH): notice lines never settle the answer.
+        kind: DeliveryKind::Notice,
     };
-    step.send_untainted(&frame_notice(question.id, held.reason()), true)
+    step.send_untainted(&frame_notice(question.id, held.reason()))
         .await
 }
 
@@ -375,11 +379,13 @@ struct Step<'a, E> {
     env: &'a E,
     id: &'a str,
     asker: &'a str,
+    /// Whether the lines trace an answer or a notice (#10127).
+    kind: DeliveryKind,
 }
 
 impl<E: DeliverEnv> Step<'_, E> {
     fn line(&self, state: DeliveryState, reason: Option<&str>) -> DeliveryLine {
-        DeliveryLine::new(state, self.id, self.asker, reason)
+        DeliveryLine::new(state, self.id, self.asker, reason).of_kind(self.kind)
     }
 
     /// Log the failure at `code`, settle it `failed`, and return it.
@@ -398,9 +404,10 @@ impl<E: DeliverEnv> Step<'_, E> {
 
     /// The untainted path's steps (#10127): the asker's record
     /// ([`check_asker`]), `pending`, one send of `line`, the settle. A
-    /// `notice` failure is logged as a held reply's, and its send code is
+    /// notice's failure is logged as a held reply's, and its send code is
     /// `notice_send_failed`.
-    async fn send_untainted(&self, line: &str, notice: bool) -> Delivery {
+    async fn send_untainted(&self, line: &str) -> Delivery {
+        let notice = self.kind == DeliveryKind::Notice;
         let view = match self.env.asker(self.asker).await {
             Ok(view) => view,
             Err(why) => return self.fail(notice, "asker_missing", &why).await,
