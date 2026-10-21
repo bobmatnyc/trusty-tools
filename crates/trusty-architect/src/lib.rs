@@ -18,6 +18,8 @@
 //! [`ScriptedTmux`] and [`FakeClock`] for tests. Phase A3b-2 adds the poll
 //! cycle and loop ([`poller::Runner`]) on the same seams. Phase A4 adds
 //! [`verbs`], the `tm architect` commands that replace the scripts (#9822).
+//! #9756 P0 adds [`ledger`], the PM Intent Ledger contract (types, ids,
+//! limits, store layout, `mpm.dbatg.*` request types), not yet wired into `tm`.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -30,6 +32,7 @@ mod decimal_table;
 mod error;
 mod fake;
 mod input;
+pub mod ledger;
 mod pointer;
 pub mod poller;
 mod process;
@@ -45,8 +48,8 @@ pub mod verbs;
 pub use classify::input_state_for_send;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use error::{
-    ConfigError, CycleError, NotifyError, RunError, SelfCtxError, SendError, StateError, TmuxError,
-    UsageError, WakeError,
+    ConfigError, CycleError, LedgerError, NotifyError, RunError, SelfCtxError, SendError,
+    StateError, TmuxError, UsageError, WakeError,
 };
 pub use fake::FakeTmux;
 pub use input::{InputState, SendReading, UnknownInputState, classify_input, send_guarded};

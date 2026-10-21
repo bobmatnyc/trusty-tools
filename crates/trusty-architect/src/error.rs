@@ -291,3 +291,55 @@ pub enum NotifyError {
         stderr: String,
     },
 }
+
+/// Why a PM ledger read, check or init failed (#9756 P0). Every variant but
+/// [`LedgerError::Io`] is the prototype's exit 2: the input or the store is
+/// refused and nothing was written.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LedgerError {
+    /// A field, id, code, session name or op broke a rule; the text names it.
+    #[error("{0}")]
+    Invalid(String),
+    /// The store was written by a newer schema; a writer leaves it untouched.
+    #[error("store schema {found} is newer than this writer's {supported}")]
+    NewerSchema {
+        /// The store's `schema`.
+        found: u64,
+        /// [`crate::ledger::SCHEMA_VERSION`].
+        supported: u64,
+    },
+    /// The code is registered to another session that is still live.
+    #[error("code {code} is registered to live session {session}")]
+    CodeTaken {
+        /// The requested code.
+        code: String,
+        /// The session holding it.
+        session: String,
+    },
+    /// Every id of a prefix (`01`..`ff`) is in use.
+    #[error("no free {0} id (01-ff exhausted)")]
+    NoFreeId(char),
+    /// `state.json`, a log line or the registry is not the contract's JSON.
+    #[error("malformed ledger JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A store or registry file could not be read or written.
+    #[error("{path}: {source}")]
+    Io {
+        /// The file.
+        path: std::path::PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl LedgerError {
+    /// [`LedgerError::Io`] for `path`; a short form for `map_err`.
+    pub(crate) fn io(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
