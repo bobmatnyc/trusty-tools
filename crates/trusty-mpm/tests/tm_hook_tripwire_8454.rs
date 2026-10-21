@@ -584,3 +584,56 @@ fn tripwire_skips_a_redirect_target_as_a_cd_operand() {
     assert_slug(&fx.tainted(bash_at(command, &fx.out)), SENSITIVE, "cd >");
     assert_eq!(fx.trips().len(), 1, "cd >: one record line");
 }
+
+/// Assert that `command`, run from `out`, is a sensitive-path deny with one
+/// new record line.
+fn assert_trips_once(command: &str, case: &str) {
+    let fx = Fixture::new();
+    assert_slug(&fx.tainted(bash_at(command, &fx.out)), SENSITIVE, case);
+    assert_eq!(fx.trips().len(), 1, "{case}: one record line");
+}
+
+/// 🔴 #8454 round 3: a `cd` behind a `case WORD in PATTERN)` header is seen.
+#[test]
+fn tripwire_records_a_cd_behind_a_case_pattern() {
+    let command = "case 1 in 1) cd;; esac; cd proj; cat .env";
+    assert_trips_once(command, "case 1)");
+}
+
+/// 🔴 #8454 round 3: a `cd` behind a `(PATTERN)` case pattern is seen.
+#[test]
+fn tripwire_records_a_cd_behind_a_paren_case_pattern() {
+    let command = "case x in (a) cd;; esac; cd proj; cat .env";
+    assert_trips_once(command, "case (a)");
+}
+
+/// 🔴 #8454 round 3: a `cd` in an `f(){ … }` function body is seen.
+#[test]
+fn tripwire_records_a_cd_behind_a_paren_function_header() {
+    let command = "f(){ cd; }; f; cd proj; cat .env";
+    assert_trips_once(command, "f(){");
+}
+
+/// 🔴 #8454 round 3: a `cd` in a `function f { … }` body is seen.
+#[test]
+fn tripwire_records_a_cd_behind_a_function_keyword_header() {
+    let command = "function f { cd; }; f; cd proj; cat .env";
+    assert_trips_once(command, "function f {");
+}
+
+/// 🔴 #8454 round 3: `cd>/tmp/x` is a `cd` with no operand; the glued
+/// redirect carries its own target. No later `cd` here: one would leave the
+/// glued word unplaced and trip on its own.
+#[test]
+fn tripwire_records_a_cd_with_a_glued_redirect_and_target() {
+    let command = "cd>/tmp/x && cat .env";
+    assert_trips_once(command, "cd>/tmp/x");
+}
+
+/// 🔴 #8454 round 3: in `cd> /tmp/x` the glued operator takes the next word
+/// as its target, so the `cd` has no operand.
+#[test]
+fn tripwire_records_a_cd_with_a_glued_bare_redirect() {
+    let command = "cd> /tmp/x && cd proj && cat .env";
+    assert_trips_once(command, "cd> /tmp/x");
+}

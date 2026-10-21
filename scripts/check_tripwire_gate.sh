@@ -49,6 +49,12 @@ REQUIRED=(
   tripwire_records_no_raw_command_text
   tripwire_records_a_cd_behind_a_shell_keyword
   tripwire_skips_a_redirect_target_as_a_cd_operand
+  tripwire_records_a_cd_behind_a_case_pattern
+  tripwire_records_a_cd_behind_a_paren_case_pattern
+  tripwire_records_a_cd_behind_a_paren_function_header
+  tripwire_records_a_cd_behind_a_function_keyword_header
+  tripwire_records_a_cd_with_a_glued_redirect_and_target
+  tripwire_records_a_cd_with_a_glued_bare_redirect
   # src/bin/tm/commands/egress_guard_tripwire_tests.rs.
   tripwire_places_each_tool_path
   tripwire_arm_panic_denies_and_records
