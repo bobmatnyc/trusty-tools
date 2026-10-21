@@ -31,7 +31,7 @@ use serde_json::Value;
 use super::Touch;
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::{
-    AnchorWrite, anchor_writes, shell_segments_map, split_heredoc_bodies, tokenize,
+    AnchorWrite, anchor_writes, keyword_words, shell_segments_map, split_heredoc_bodies, tokenize,
 };
 use crate::commands::pm_guard_trust_anchor_paths::{
     Placed, Resolved, dequote, fold_case, place, resolve, starts_with_ci,
@@ -260,8 +260,14 @@ impl Call<'_> {
             Ok(writes) => writes,
             Err(what) => return Touch::Unplaceable(what),
         };
+        // #8454 round 2: `moved` reads the same op list `dir_changes` judges,
+        // so a `cd` one sees the other cannot miss.
+        let ops = match shell_segments_map(command, &segment_dir_changes) {
+            Ok(ops) => ops,
+            Err(what) => return Touch::Unplaceable(what),
+        };
         // After a `cd`, a relative word no longer names the hook's cwd.
-        let moved = writes.contains(&AnchorWrite::DirChange);
+        let moved = !ops.is_empty();
         let base = (!moved).then_some(cwd);
         let touch = first(writes.iter().flat_map(write_words).map(|word| {
             match place(&word, base, self.home, true) {
@@ -275,7 +281,7 @@ impl Call<'_> {
         // #8454 fix round: every directory the command moves to is judged, so
         // a bare name read after the `cd` lands under a judged directory.
         if moved {
-            let touch = self.dir_changes(command, cwd);
+            let touch = self.dir_changes(ops, cwd);
             if touch != Touch::Clear {
                 return touch;
             }
@@ -294,18 +300,14 @@ impl Call<'_> {
         }
     }
 
-    /// Every `cd`/`pushd`/`popd` in `command`, judged in order from `cwd`.
+    /// Every `cd`/`pushd`/`popd` op of a command, judged in order from `cwd`.
     ///
     /// What: an operand is placed against the directory the previous one
     /// reached. A missing operand (`cd` goes to `$HOME`, a bare `pushd` swaps
     /// the stack), `cd -`, a `popd` and a `pushd +N`/`-N` move to a directory
     /// the command does not name, and an operand the guard cannot place, are
     /// each [`Touch::Unplaceable`].
-    fn dir_changes(&self, command: &str, cwd: &Path) -> Touch {
-        let ops = match shell_segments_map(command, &segment_dir_changes) {
-            Ok(ops) => ops,
-            Err(what) => return Touch::Unplaceable(what),
-        };
+    fn dir_changes(&self, ops: Vec<DirOp>, cwd: &Path) -> Touch {
         let mut here = cwd.to_path_buf();
         for op in ops {
             let word = match op {
@@ -365,14 +367,16 @@ enum DirOp {
 }
 
 /// The directory change one segment makes, if it runs `cd`, `pushd` or
-/// `popd`; found past env assignments and wrappers, as the splitter does.
+/// `popd`; found past leading shell keywords (`if`, `then`, `do`, `{`, `!`),
+/// env assignments and wrappers, as the splitter does (#8454 round 2).
 fn segment_dir_changes(segment: &str) -> Result<Vec<DirOp>, &'static str> {
-    let argv = tokenize(&split_heredoc_bodies(segment).0).map_err(|_| UNLEXABLE)?;
+    let words = tokenize(&split_heredoc_bodies(segment).0).map_err(|_| UNLEXABLE)?;
+    let argv = &words[keyword_words(&words, 0).0..];
     let verb = |w: &str| {
         let w = w.strip_prefix('\\').unwrap_or(w);
         matches!(w.rsplit('/').next(), Some("cd" | "pushd" | "popd"))
     };
-    let at = strip_wrapper_prefix(&argv).or_else(|| argv.iter().position(|w| verb(w)));
+    let at = strip_wrapper_prefix(argv).or_else(|| argv.iter().position(|w| verb(w)));
     let Some(at) = at.filter(|at| argv.get(*at).is_some_and(|w| verb(w))) else {
         return Ok(Vec::new());
     };
@@ -380,10 +384,18 @@ fn segment_dir_changes(segment: &str) -> Result<Vec<DirOp>, &'static str> {
     if name.ends_with("popd") {
         return Ok(vec![DirOp::Stack]);
     }
-    let operand = argv[at + 1..]
-        .iter()
-        .filter(|w| !w.starts_with(['<', '>']) && !w.contains(['<', '>']))
-        .find(|w| w.as_str() == "-" || !w.starts_with('-') || is_stack_index(w));
+    let mut rest = argv[at + 1..].iter();
+    let mut operand = None;
+    while let Some(w) = rest.next() {
+        // #8454 round 2: a bare redirect operator's target is not an operand.
+        if is_bare_redirect(w) {
+            rest.next();
+        } else if !w.contains(['<', '>']) && (w == "-" || !w.starts_with('-') || is_stack_index(w))
+        {
+            operand = Some(w);
+            break;
+        }
+    }
     Ok(vec![match operand {
         None if name.ends_with("pushd") => DirOp::Stack,
         None => DirOp::Missing,
@@ -391,6 +403,13 @@ fn segment_dir_changes(segment: &str) -> Result<Vec<DirOp>, &'static str> {
         Some(w) if is_stack_index(w) => DirOp::Stack,
         Some(w) => DirOp::To(w.clone()),
     }])
+}
+
+/// Whether `word` is a redirect operator with its target in the next word:
+/// `>`, `2>>`, `&>`, `<`, `>|` and the like.
+fn is_bare_redirect(word: &str) -> bool {
+    let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    op.contains(['<', '>']) && op.chars().all(|c| matches!(c, '<' | '>' | '&' | '|'))
 }
 
 /// Whether a `pushd`/`cd` argument is a stack index, `+N` or `-N`.
