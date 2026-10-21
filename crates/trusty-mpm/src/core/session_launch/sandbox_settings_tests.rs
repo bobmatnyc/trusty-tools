@@ -76,8 +76,10 @@ fn the_pm_policy_names_every_socket_and_no_local_binding() {
     }
     // The socket path with a space is kept verbatim, as one entry.
     assert!(sockets.iter().any(|s| s.contains("Application Support")));
-    assert!(
-        sandbox["network"].get("allowLocalBinding").is_none(),
+    // #10107: pinned off, not merely absent, so a merge cannot keep a `true`.
+    assert_eq!(
+        sandbox["network"]["allowLocalBinding"],
+        json!(false),
         "the tm CLI uses the daemon socket, never a local port"
     );
     assert!(
@@ -207,7 +209,7 @@ fn a_weakened_project_file_refuses_the_launch() {
         *project.pointer_mut(pointer).expect("key") = value;
         std::fs::write(&path, project.to_string()).expect("weaken");
         refused(
-            verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user),
+            verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user),
             pointer,
         );
         write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("restore");
@@ -215,12 +217,12 @@ fn a_weakened_project_file_refuses_the_launch() {
     // The user tier without strictAllowlist refuses too.
     std::fs::write(fx.user.join("settings.json"), "{}").expect("weaken user");
     refused(
-        verify_sandbox_settings(SandboxRole::Agent, &fx.inputs.workspace, &fx.user),
+        verify_sandbox_settings(SandboxRole::Agent, &fx.inputs, &fx.user),
         "no strictAllowlist",
     );
     // The Architect's file must disable the sandbox.
     refused(
-        verify_sandbox_settings(SandboxRole::Architect, &fx.inputs.workspace, &fx.user),
+        verify_sandbox_settings(SandboxRole::Architect, &fx.inputs, &fx.user),
         "an Architect with the sandbox on",
     );
 }
@@ -229,7 +231,7 @@ fn a_weakened_project_file_refuses_the_launch() {
 fn unreadable_settings_refuse_the_launch() {
     let fx = Fx::new();
     // No project file at all.
-    let missing = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user);
+    let missing = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
     assert!(
         matches!(missing, Err(SandboxSettingsError::Unreadable { .. })),
         "{missing:?}"
@@ -242,7 +244,7 @@ fn unreadable_settings_refuse_the_launch() {
     ] {
         let before = std::fs::read_to_string(&file).ok();
         std::fs::write(&file, body).expect("corrupt");
-        let result = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs.workspace, &fx.user);
+        let result = verify_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
         assert!(
             matches!(result, Err(SandboxSettingsError::Unreadable { .. })),
             "{} = {body:?}: {result:?}",
@@ -360,7 +362,7 @@ fn excluded_commands_refuse_the_launch() {
 
 /// #10107: verify the role's sandbox for `fx`.
 fn verify(fx: &Fx, role: SandboxRole) -> Result<(), SandboxSettingsError> {
-    verify_sandbox_settings(role, &fx.inputs.workspace, &fx.user)
+    verify_sandbox_settings(role, &fx.inputs, &fx.user)
 }
 
 /// Which settings file a [`Case`] edits.
