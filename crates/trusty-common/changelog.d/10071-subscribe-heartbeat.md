@@ -1,2 +1,0 @@
-Added
-- `events.subscribe` gains opt-in liveness: `SubscribeParams::heartbeat_ms` asks the bus for a `SubscribeItem::Heartbeat { head }` at once and then on that interval. A request without it is unchanged on the wire, and the bus never sends a heartbeat to it. `HEARTBEAT_MS_MIN` (100) and `HEARTBEAT_MS_MAX` (3,600,000) are the bounds the bus accepts. `SubscribeParams` has a new public field, so a struct literal must set it (#10071).

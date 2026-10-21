@@ -1,3 +1,0 @@
-Fixed
-- On Apple Silicon, the background python/MPS bootstrap now looks up the `trusty-embedderd-py` launcher before it touches the venv. With the launcher missing it creates no venv, runs no `uv` and downloads no torch (about 3 GB before); the daemon stays on ort and `search.health` reports `embedder_bootstrap: "failed"` with `python_bootstrap.last_error` naming the missing launcher (#9468).
-- A permanent bootstrap failure (missing launcher, venv build error) now ends the bootstrap on its first attempt instead of repeating it for every startup attempt. A readiness-probe failure still retries as before (#9468).
