@@ -32,7 +32,8 @@
 //! #9949: a probe that fails every startup attempt no longer pins the daemon
 //! to ort. [`drive_bootstrap`] keeps retrying in the background with capped
 //! backoff ([`background_retry_delay`]) until one attempt succeeds; only a
-//! permanent failure (missing launcher, venv build error) is terminal.
+//! permanent failure (missing launcher, a venv build error other than a
+//! network failure or timeout — #9971) is terminal.
 //! #9468: each attempt locates the launcher before any venv work, and a
 //! permanent failure ends the bootstrap on its first occurrence.
 //!
@@ -145,14 +146,24 @@ impl AttemptError {
     ///
     /// Why: a missing launcher was retried, and each retry rebuilt the venv
     /// (a ~3 GB torch download) before failing the same lookup again.
-    /// What: `Launcher` and `Venv` are permanent: another attempt repeats the
-    /// same missing binary or the same failed build. `Probe` is transient: a
-    /// contended host can answer minutes later (#9949).
+    /// What: `Launcher` is permanent: another attempt repeats the same
+    /// missing binary. `Venv` follows `trusty_embedderd_py::failure_kind`
+    /// (#9971): a network failure or timeout is transient, low disk, a
+    /// missing uv or a failed local step is permanent. `Probe` is transient:
+    /// a contended host can answer minutes later (#9949).
     /// Test: `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
-    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`.
+    /// `graceful_bootstrap_transient_failure_keeps_retrying` in `start/tests_9949.rs`;
+    /// `venv_network_failure_retries_then_swaps_to_python`,
+    /// `venv_disk_full_failure_is_not_retried` in `start/venv_retry_9971_tests.rs`.
     fn at(step: FailedStep, e: anyhow::Error) -> Self {
+        use trusty_embedderd_py::FailureKind;
         match step {
-            FailedStep::Launcher | FailedStep::Venv => Self::Permanent(e),
+            FailedStep::Launcher => Self::Permanent(e),
+            // #9971: typed classification; a dropped torch download retries.
+            FailedStep::Venv => match trusty_embedderd_py::failure_kind(&e) {
+                FailureKind::Transient => Self::Transient(e),
+                FailureKind::Permanent => Self::Permanent(e),
+            },
             FailedStep::Probe => Self::Transient(e),
         }
     }
@@ -406,7 +417,8 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// What: makes up to `retries` startup attempts (linear backoff, `2 *
 /// attempt` seconds). The first permanent error ([`AttemptError::at`]) marks
 /// the bootstrap `Failed` and returns, in a startup or a background attempt
-/// (#9468). If every startup attempt failed on the probe, marks it `Retrying`
+/// (#9468). If every startup attempt failed transiently (the probe, or a venv
+/// network failure — #9971), marks it `Retrying`
 /// and keeps attempting in the background, waiting [`background_retry_delay`]
 /// between rounds, until an attempt succeeds, a permanent error ends it, or
 /// the switchable's `BootstrapControl` is shut down. Every failed attempt records its error in
@@ -430,7 +442,9 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// `graceful_bootstrap_permanent_failure_ends_the_retry_loop`,
 /// `graceful_bootstrap_transient_failure_keeps_retrying`,
 /// `graceful_bootstrap_shutdown_cancels_a_pending_retry`,
-/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`.
+/// `graceful_bootstrap_background_decided_failure_is_terminal` in `start/tests_9949.rs`;
+/// `venv_network_failure_retries_then_swaps_to_python` in
+/// `start/venv_retry_9971_tests.rs`.
 pub(super) async fn drive_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
@@ -468,7 +482,8 @@ pub(super) async fn drive_bootstrap(
         }
     }
 
-    // #9949: the probe failed, not the setup — keep retrying while ort serves.
+    // #9949: every startup attempt failed transiently (the probe, or #9971 a
+    // venv-build network failure) — keep retrying while ort serves.
     let mut round = 0usize;
     loop {
         let delay = background_retry_delay(round);

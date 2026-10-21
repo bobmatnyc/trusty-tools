@@ -1339,14 +1339,17 @@ On Apple Silicon (aarch64 macOS), `trusty-search start` serves on the ort
 stdio sidecar immediately (zero HTTP-listener delay) while a detached
 background task bootstraps the python/MPS sidecar, proves it with one real
 readiness-probe embed call, and hot-swaps the running embedder over to it.
-When every startup attempt fails on the readiness probe, the bootstrap keeps
+When every startup attempt fails on the readiness probe, or on a network
+failure or timeout during the venv build (#9971), the bootstrap keeps
 retrying in the background (#9949) after 2, 5 and 10 minutes, then every 30
 minutes, and hot-swaps on the first success; ort serves throughout.
 `/health`'s `embedder_bootstrap` reports `"retrying"` (and `status:
 "degraded"`), and its `python_bootstrap` object carries `state`, `attempts`,
 `last_error` and `next_retry_at` (RFC 3339 UTC), plus `phase` and `note`
 (#9970, below). Only a permanent failure — the
-launcher is missing, or the venv build returns an error — is terminal: the
+launcher is missing, or the venv build fails for a reason other than a
+network failure or timeout (low disk, `TRUSTY_UV_FETCH=0` with no uv, a
+failed local step; #9971) — is terminal: the
 first one ends the bootstrap, the daemon stays on ort for its lifetime and
 `embedder_bootstrap` reports `"failed"`, with `last_error` naming the cause.
 Each attempt looks up the launcher before any venv work, so a missing

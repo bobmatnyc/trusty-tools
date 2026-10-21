@@ -20,6 +20,8 @@
 //!   * [`bootstrap::ensure_venv`] — per-respawn venv bootstrap, called by the
 //!     launcher binary via [`run`] (cheap, torch-free `.ready` recheck).
 //!   * [`launcher::locate_launcher_binary`] — env/sibling/PATH discovery.
+//!   * [`venv_error::failure_kind`] — whether a failed bootstrap is worth
+//!     retrying (#9971).
 //!   * [`run`] — the whole launcher; trusty-search's `trusty-embedderd-py`
 //!     binary is a one-line shim over it. This crate is library-only (#9468).
 
@@ -34,9 +36,12 @@ pub mod launcher;
 mod spawn_retry;
 // #9468, #9966: locate uv, or fetch and cache a pinned, SHA-256-verified one (D1a).
 pub mod uv_fetch;
+// #9971: typed venv-build failures and their transient/permanent kind.
+pub mod venv_error;
 
 pub use bootstrap::{ensure_venv, ensure_venv_eager, resolve_layout, VenvLayout};
 pub use launcher::{exec_sidecar, locate_launcher_binary};
+pub use venv_error::{failure_kind, FailureKind, VenvBuildError};
 
 use std::process::ExitCode;
 
