@@ -20,6 +20,9 @@ impl GitProbe for FakeGit {
     fn has_remote(&self, _dir: &Path, name: &str) -> Option<bool> {
         Some(name == "origin")
     }
+    fn config(&self, _dir: &Path, _key: &str) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
 }
 
 const ON_FEATURE: FakeGit = FakeGit {
@@ -421,6 +424,9 @@ impl GitProbe for NoRepo {
     fn has_remote(&self, _dir: &Path, _name: &str) -> Option<bool> {
         None
     }
+    fn config(&self, _dir: &Path, _key: &str) -> Option<Vec<String>> {
+        None
+    }
 }
 
 fn verdict_with_probe(command: &str, git: &dyn GitProbe) -> Option<String> {
@@ -598,7 +604,9 @@ const QUOTED_GIT_ENV_PUSHES: [&str; 4] = [
 #[test]
 fn a_quoted_or_appended_git_variable_is_denied() {
     assert_denied(&QUOTED_GIT_ENV_PUSHES);
-    assert_allowed(&["GIT_DIRTY=1 git push origin feat"]);
+    // #8878 S5 round 2: an allowlist now, so an unknown `GIT_*` denies too.
+    assert_denied(&["GIT_DIRTY=1 git push origin feat"]);
+    assert_allowed(&["GIT_TRACE2_EVENT=/tmp/t git push origin feat"]);
 }
 
 /// A subcommand git does not build in may be a `push` alias that the
@@ -1147,4 +1155,38 @@ fn routine_pushes_still_pass_the_round_2_rows() {
     ]);
     assert_eq!(live_push(&[], "git push origin feat"), None);
     assert_eq!(live_push(&[], "git push -u origin HEAD"), None);
+}
+
+/// A feature checkout with `origin` whose git config cannot be read.
+struct UnreadableConfig;
+
+impl GitProbe for UnreadableConfig {
+    fn default_branch(&self, _dir: &Path, _remote: &str) -> Option<String> {
+        Some("trunk".into())
+    }
+    fn current_branch(&self, _dir: &Path) -> Option<String> {
+        Some("feat".into())
+    }
+    fn has_remote(&self, _dir: &Path, name: &str) -> Option<bool> {
+        Some(name == "origin")
+    }
+    fn config(&self, _dir: &Path, _key: &str) -> Option<Vec<String>> {
+        None
+    }
+}
+
+/// Fail-open check: a config read that fails is unknown, never "unset".
+#[test]
+fn an_unreadable_push_config_is_unknown() {
+    for command in ["git push", "git push origin"] {
+        assert!(
+            verdict_with_probe(command, &UnreadableConfig).is_some(),
+            "{command}"
+        );
+    }
+    // A refspec operand needs no configured refspec.
+    assert_eq!(
+        verdict_with_probe("git push origin feat", &UnreadableConfig),
+        None
+    );
 }

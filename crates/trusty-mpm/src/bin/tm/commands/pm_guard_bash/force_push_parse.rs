@@ -180,18 +180,18 @@ pub(super) fn parse(tail: &[String]) -> Push {
 }
 
 /// `word` with the shell syntax glued to its end removed: everything from its
-/// first `>` or `<` (a redirect), then one trailing `&` (background), then a
-/// `)` closing a subshell — the word bash passes to git.
+/// first `>` or `<` (a redirect), then one trailing `&` (background), then
+/// every `)` closing a subshell — the word bash passes to git.
 ///
 /// Why: #8878 S5 critic round 1, HIGH 3 — a redirect or `&` written with no
 /// space after a refspec stayed in the word, so the refspec never matched.
-/// Test: `a_redirect_is_not_a_refspec`.
+/// #8878 S5 round 2, row 6: nested subshells close with `))`.
+/// Test: `a_redirect_is_not_a_refspec`, `a_nested_subshell_still_reads_the_refspec`.
 fn shell_free(word: &str) -> &str {
     let word = word.find(['>', '<']).map_or(word, |at| &word[..at]);
     let word = word.strip_suffix('&').unwrap_or(word);
-    word.strip_suffix(')')
-        .filter(|bare| !bare.contains('('))
-        .unwrap_or(word)
+    let bare = word.trim_end_matches(')');
+    if bare.contains('(') { word } else { bare }
 }
 
 /// Whether `word` is a shell redirect: `Some(true)` when its file is the next

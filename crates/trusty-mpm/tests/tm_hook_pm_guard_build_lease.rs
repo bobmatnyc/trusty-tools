@@ -356,13 +356,19 @@ fn an_ask_rule_keeps_the_lease_and_asks() {
     )
     .expect("settings");
     // #8878 S5: the D4 floor denies an operand-less push where it cannot read
-    // the repository, so the hook cwd becomes one.
-    let init = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(home.path())
-        .status()
-        .expect("git");
-    assert!(init.success(), "git init");
+    // the repository, or (round 2) where the remote it picks is not
+    // configured, so the hook cwd becomes a repository with `origin`.
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://example.invalid/r.git"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(home.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
     let stdout = run_hook(
         home.path(),
         &["--pm-guard"],

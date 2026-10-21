@@ -19,12 +19,29 @@
 //! #8878 S5 critic round 1: so does a push after the same command rewrites
 //! git config or a remote, a push with no remote operand in a repository the
 //! guard cannot read, a push `xargs` runs, and `git send-pack`.
+//! #8878 S5 round 2: a push with no remote operand is judged against the
+//! remote its configuration picks, and one with no refspec against the
+//! configured `remote.<r>.push` / `remote.<r>.mirror`; a refspec built at run
+//! time is the default; `find -exec` appends operands; and `git http-push` /
+//! `git remote-<transport>` push without the word `push`.
 //! Residual: aliases from the user's git config, a push made by a script, and
-//! a push with no remote operand whose `pushRemote` / `push.default=upstream`
-//! sends it to another branch.
+//! a forced push with no refspec whose `push.default` (`upstream`,
+//! `matching`) sends it to another branch.
+//! Known residual (#8878 S5 row 4; owner ruling D8f, 2026-10-21): the
+//! two-call redirect. One Bash call rewrites where a remote points
+//! (`git remote set-url origin <url>`, a `remote.origin.url` write) and
+//! pushes nothing; a later call runs a plain `git push origin <branch>`. The
+//! guard judges each call alone: the first has no push to protect, and by the
+//! second the repository already holds the new URL, while `has_remote` checks
+//! that `origin` is a configured name, not where it points. Seeing it needs
+//! state across calls, which a one-call classifier does not have; it is
+//! documented, not denied.
 //! Test: `a_force_push_to_the_default_branch_is_denied`,
 //! `a_force_push_elsewhere_passes`, `an_unknown_current_branch_denies`,
-//! `a_push_to_an_unconfigured_remote_is_denied`, `a_redirect_is_not_a_refspec`.
+//! `a_push_to_an_unconfigured_remote_is_denied`, `a_redirect_is_not_a_refspec`,
+//! `an_operand_less_push_resolves_its_configured_remote_and_refspecs`,
+//! `a_runtime_built_refspec_is_judged_as_the_default`,
+//! `a_transport_helper_push_is_denied`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,6 +73,9 @@ pub(crate) trait GitProbe {
     fn current_branch(&self, dir: &Path) -> Option<String>;
     /// Whether `name` is a configured remote in `dir`; `None` when unreadable.
     fn has_remote(&self, dir: &Path, name: &str) -> Option<bool>;
+    /// Every value of config `key` in `dir`: empty when unset, `None` when
+    /// unreadable (#8878 S5 round 2).
+    fn config(&self, dir: &Path, key: &str) -> Option<Vec<String>>;
 }
 
 /// The live repository, read with `git`.
@@ -99,6 +119,28 @@ impl GitProbe for LiveGit {
             .success()
             .then(|| text.lines().any(|line| line.trim() == name))
     }
+
+    fn config(&self, dir: &Path, key: &str) -> Option<Vec<String>> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "--get-all", key])
+            .output()
+            .ok()?;
+        // git-config(1): exit 1 is "the key is not set"; any other failure
+        // is unreadable, which the caller treats as unknown.
+        match out.status.code() {
+            Some(0) => Some(
+                String::from_utf8(out.stdout)
+                    .ok()?
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            Some(1) => Some(Vec::new()),
+            _ => None,
+        }
+    }
 }
 
 /// A D4 deny reason with the shared remedy appended.
@@ -123,24 +165,24 @@ pub(super) fn force_push_reason(
     appended: bool,
 ) -> Option<String> {
     for (g, program) in program_positions(argv) {
-        // #8878 S5 critic round 1: `send-pack` pushes without the word `push`.
-        let send_pack = || {
-            deny(
-                "`git send-pack` pushes refs to any repository, a push the guard cannot \
-                  judge. Use `git push` to a configured remote."
-                    .to_string(),
-            )
+        // #8878 S5 critic round 1 / round 2 row 9: these push without the
+        // word `push`.
+        let transport = |name: &str| {
+            deny(format!(
+                "`git {name}` pushes refs to any repository without the word `push`, a push \
+                 the guard cannot judge. Use `git push` to a configured remote."
+            ))
         };
-        if program == "git-send-pack" {
-            return send_pack();
+        if let Some(name) = program.strip_prefix("git-").filter(|n| pushes_refs(n)) {
+            return transport(name);
         }
         if program != "git" {
             continue;
         }
         // #8878 S5: `-c`/`--config-env` can alias or reconfigure a push.
         let (configs, sub, redirected) = git_globals(argv, g);
-        if sub.is_some_and(|i| argv[i] == "send-pack") {
-            return send_pack();
+        if let Some(i) = sub.filter(|&i| pushes_refs(&argv[i])) {
+            return transport(&argv[i]);
         }
         let aliased = configs
             .iter()
@@ -180,8 +222,8 @@ pub(super) fn force_push_reason(
         // sees — a remote, a refspec, or a `+` refspec.
         if appended {
             return deny(
-                "this `git push` runs under `xargs`, which appends remotes or refspecs the \
-                 guard cannot see. Name the remote and refspecs in the command."
+                "this `git push` runs under `xargs` or `find -exec`, which append remotes or \
+                 refspecs the guard cannot see. Name the remote and refspecs in the command."
                     .to_string(),
             );
         }
@@ -198,19 +240,34 @@ pub(super) fn force_push_reason(
                  {PUSH_ADVICE}"
             ));
         }
-        // #8878 S5 critic round 1: with no remote operand the repository picks
-        // the remote, so it must be one the guard can read.
-        let readable = dir
-            .as_deref()
-            .is_some_and(|d| git.has_remote(d, "origin").is_some());
-        if push.remote().is_none() && !readable {
-            return deny(format!(
-                "this `git push` names no remote, and the guard cannot read the repository \
-                 that picks one (after a `cd`, under `--git-dir`/`--work-tree`, or a `-C` \
-                 directory that is not a repository yet). {PUSH_ADVICE}"
-            ));
-        }
-        if let Some(branch) = forced_default(&push, dir.as_deref(), git) {
+        // #8878 S5 critic round 1 / round 2 row 5: with no remote operand
+        // the repository picks the remote, so it must be one the guard can
+        // read, and a configured remote name.
+        let remote = match push.remote() {
+            Some(remote) => remote.clone(),
+            None => {
+                let Some(remote) = dir.as_deref().and_then(|d| implicit_remote(d, git)) else {
+                    return deny(format!(
+                        "this `git push` names no remote, and the guard cannot read the \
+                         repository that picks one (after a `cd`, under `--git-dir`/`--work-tree`, \
+                         or a `-C` directory that is not a repository yet). {PUSH_ADVICE}"
+                    ));
+                };
+                let configured = is_remote_name(&remote)
+                    && dir
+                        .as_deref()
+                        .is_some_and(|d| git.has_remote(d, &remote) == Some(true));
+                if !configured {
+                    return deny(format!(
+                        "this `git push` names no remote, and the repository sends it to \
+                         `{remote}` (`pushRemote`, `remote.pushDefault` or `branch.<b>.remote`), \
+                         a URL, a path or a name that is not a configured remote. {PUSH_ADVICE}"
+                    ));
+                }
+                remote
+            }
+        };
+        if let Some(branch) = forced_default(&push, &remote, dir.as_deref(), git) {
             return deny(format!(
                 "this `git push` force-updates `{branch}`, the default branch (or cannot rule \
                  it out). Push to a feature branch, or push without force."
@@ -243,9 +300,47 @@ fn git_dir(dir: &Path, globals: &[String]) -> PathBuf {
     out
 }
 
+/// Whether git subcommand `name` sends refs to a repository without being
+/// `push`: `send-pack`, `http-push`, or a `remote-<transport>` helper.
+fn pushes_refs(name: &str) -> bool {
+    matches!(name, "send-pack" | "http-push") || name.starts_with("remote-")
+}
+
+/// The remote a push with no repository operand sends to, per git-push(1):
+/// `branch.<b>.pushRemote`, then `remote.pushDefault`, then
+/// `branch.<b>.remote`, then `origin`. `None` when the config is unreadable.
+/// Test: `an_operand_less_push_resolves_its_configured_remote_and_refspecs`,
+/// `an_unreadable_push_config_is_unknown`.
+fn implicit_remote(dir: &Path, git: &dyn GitProbe) -> Option<String> {
+    let branch = git.current_branch(dir);
+    let on_branch = |key: &str| branch.as_ref().map(|b| format!("branch.{b}.{key}"));
+    let keys = [
+        on_branch("pushRemote"),
+        Some("remote.pushDefault".to_string()),
+        on_branch("remote"),
+    ];
+    for key in keys.into_iter().flatten() {
+        if let Some(value) = git.config(dir, &key)?.pop() {
+            return Some(value);
+        }
+    }
+    Some("origin".to_string())
+}
+
 /// The default branch this push force-updates, or `None` when it does not.
-fn forced_default(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option<String> {
-    let remote = push.operands.first().map_or("origin", String::as_str);
+///
+/// #8878 S5 round 2: with no refspec operand, the configured
+/// `remote.<remote>.mirror` and `remote.<remote>.push` decide what is pushed
+/// (row 5); an unreadable one is unknown. A refspec the shell builds at run
+/// time is the default under force, or when it may start with `+` (row 8).
+/// Test: `an_operand_less_push_resolves_its_configured_remote_and_refspecs`,
+/// `a_runtime_built_refspec_is_judged_as_the_default`.
+fn forced_default(
+    push: &Push,
+    remote: &str,
+    dir: Option<&Path>,
+    git: &dyn GitProbe,
+) -> Option<String> {
     let defaults: Vec<String> = dir
         .filter(|_| is_remote_name(remote))
         .and_then(|d| git.default_branch(d, remote))
@@ -259,7 +354,28 @@ fn forced_default(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option
         return Some(first_default());
     }
     let current = || dir.and_then(|d| git.current_branch(d));
-    let refspecs = push.operands.get(1..).unwrap_or_default();
+    let mut refspecs = push.operands.get(1..).unwrap_or_default().to_vec();
+    if refspecs.is_empty()
+        && let Some(d) = dir.filter(|_| is_remote_name(remote))
+    {
+        let read = |key: &str| git.config(d, &format!("remote.{remote}.{key}"));
+        let (Some(mirror), Some(configured)) = (read("mirror"), read("push")) else {
+            return Some(first_default());
+        };
+        let off =
+            |v: &String| ["false", "no", "off", "0"].contains(&v.to_ascii_lowercase().as_str());
+        if mirror.last().is_some_and(|v| !off(v)) {
+            return Some(first_default());
+        }
+        refspecs = configured;
+    }
+    let runtime = |spec: &String| spec.contains(['$', '`']);
+    if refspecs
+        .iter()
+        .any(|s| (runtime(s) && (forced || s.starts_with('+'))) || s.starts_with(['$', '`']))
+    {
+        return Some(first_default());
+    }
     if refspecs.is_empty() && forced {
         // #8878: the implicit destination is the current branch; unknown denies.
         match current() {

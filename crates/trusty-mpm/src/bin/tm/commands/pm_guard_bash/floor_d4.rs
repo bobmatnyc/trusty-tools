@@ -58,8 +58,9 @@ pub(super) struct Segment {
     /// Whether a `cd`, `pushd` or `popd` ran earlier in the command (or in
     /// this segment), so the directory is unknown; it is never followed.
     pub(super) after_cd: bool,
-    /// Whether `xargs` may append operands to it: the segment names `xargs`,
-    /// or was peeled out of one that does (#8878 S5 critic round 1).
+    /// Whether `xargs` or `find -exec` may append operands to it: the segment
+    /// names one, or was peeled out of one that does (#8878 S5 critic round 1,
+    /// round 2 row 7).
     pub(super) appended: bool,
 }
 
@@ -134,7 +135,7 @@ fn walk(command: &str, from: Inherited, depth: usize, after_cd: &mut bool, out: 
         if moves_directory(trimmed) {
             *after_cd = true;
         }
-        let appended = from.appended || names_xargs(trimmed);
+        let appended = from.appended || appends_operands(trimmed);
         out.push(Segment {
             text: trimmed.to_string(),
             piped,
@@ -151,13 +152,16 @@ fn walk(command: &str, from: Inherited, depth: usize, after_cd: &mut bool, out: 
 }
 
 /// Whether any word of `segment` is an `xargs` program (#8878 S5 critic
-/// round 1); over-matching only fails closed.
-fn names_xargs(segment: &str) -> bool {
+/// round 1) or a `find` [`EXEC_FLAGS`] flag, which puts a file name among the
+/// operands (#8878 S5 round 2, row 7); over-matching only fails closed.
+/// Test: `a_push_run_by_xargs_is_denied`, `a_push_find_runs_is_denied`.
+fn appends_operands(segment: &str) -> bool {
     let words = shlex::split(segment)
         .unwrap_or_else(|| segment.split_whitespace().map(str::to_string).collect());
-    words
-        .iter()
-        .any(|w| w.trim_start_matches(['(', '{', '\\']).rsplit('/').next() == Some("xargs"))
+    words.iter().any(|w| {
+        EXEC_FLAGS.contains(&w.as_str())
+            || w.trim_start_matches(['(', '{', '\\']).rsplit('/').next() == Some("xargs")
+    })
 }
 
 /// Whether a segment may change the shell's directory: one of its shell words,
