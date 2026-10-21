@@ -11,7 +11,8 @@
 //! each session's root, its open tool calls and its open worktrees, all
 //! bounded. It reads identifiers only (tool name, `tool_use_id`, `agent_id`,
 //! `agent_type`, a path); a prompt, a tool input or response, a transcript
-//! path or a message never leaves this module.
+//! path or a message never leaves this module. #9167: a relay's text leaves
+//! only as `super::message` digests it, never as text unless bodies are on.
 //! Test: `projection_tests.rs`.
 //!
 //! # Spec References
@@ -95,6 +96,8 @@ pub struct Threader {
     sessions: HashMap<SessionId, Thread>,
     tick: u64,
     home: Vec<PathBuf>,
+    /// Whether `message` events carry their body (#9167); off by default.
+    bodies: bool,
 }
 
 impl Threader {
@@ -114,7 +117,18 @@ impl Threader {
             sessions: HashMap::new(),
             tick: 0,
             home: prefixes,
+            bodies: false,
         }
+    }
+
+    /// Carry the credential-scanned body on `message` events (#9167).
+    pub fn set_message_bodies(&mut self, on: bool) {
+        self.bodies = on;
+    }
+
+    /// Whether `message` events carry their body.
+    pub fn message_bodies(&self) -> bool {
+        self.bodies
     }
 
     /// Project one hook record onto the bus events it implies.
@@ -133,6 +147,7 @@ impl Threader {
     /// | `FileChanged` | `File::Written` | root |
     /// | `WorktreeCreate`, `WorktreeRemove` | `Workflow::Start`, `Workflow::Stop` | root, its `Start` |
     /// | any other | `Hook { kind, data }` | root |
+    /// | a relay (`super::message`) | `Message`, after the above | the above |
     ///
     /// A `FileChanged` whose path fails `is_coding_file` projects to nothing.
     /// A record for a session with no root first mints a `Session::Started`
@@ -173,6 +188,12 @@ impl Threader {
         let id = EventId::new();
         let (body, parent) = step(thread, record, id, &self.home);
         out.push(envelope(record, id, Some(parent), body));
+        // #9167: a relay on this record is a `message` event, child of `id`.
+        out.extend(
+            super::message::messages(record, self.bodies)
+                .into_iter()
+                .map(|m| super::message::envelope(record, m, id)),
+        );
         if record.event == HookEvent::SessionEnd {
             self.sessions.remove(&record.session);
         }

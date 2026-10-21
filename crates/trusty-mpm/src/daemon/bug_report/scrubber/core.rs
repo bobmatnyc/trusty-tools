@@ -63,13 +63,24 @@ pub fn scrub_compat(text: &str) -> (String, Vec<ScrubChange>) {
     (result.text, result.changes)
 }
 
-/// Internal implementation: returns the cleaned string and change list.
+/// Mask credentials only: rules 1-10 of [`scrub`], no path rewrite, no cut.
 ///
-/// Why: separated from [`scrub`] so the summary can be built after all rules run.
-/// What: applies each rule in priority order; each rule replaces matches with
-///       a tagged redaction placeholder and records a [`ScrubChange`].
-/// Test: via `scrub` public entry point.
-fn scrub_inner(text: &str) -> (String, Vec<ScrubChange>) {
+/// Why (#9167): a `message` event's digest must not fingerprint a recognised
+/// credential. Rewriting paths or truncating, as [`scrub`] does for a public
+/// bug report, would change relay text further than that needs.
+/// What: the text with each match of rules 1-10 replaced by its redaction
+/// placeholder. Rule 10 and the `Bearer`/`Authorization` rule also rewrite
+/// ordinary prose that matches them; a credential in a shape no rule knows
+/// (a prose password, a JSON `"api_key": ...`) passes unchanged.
+/// Test: `daemon::action_events::message_tests::a_secret_in_the_text_never_reaches_any_field_9167`.
+pub fn scrub_credentials(text: &str) -> String {
+    credential_rules(text).0
+}
+
+/// Rules 1-10, every credential pattern in priority order; each replaces
+/// matches with a tagged placeholder and records a [`ScrubChange`].
+// #9167: split out of `scrub_inner` so `scrub_credentials` reuses it.
+fn credential_rules(text: &str) -> (String, Vec<ScrubChange>) {
     let mut result = text.to_string();
     let mut changes: Vec<ScrubChange> = Vec::new();
 
@@ -172,6 +183,17 @@ fn scrub_inner(text: &str) -> (String, Vec<ScrubChange>) {
             hint: format!("{n} key=value secret(s) redacted"),
         });
     }
+    (result, changes)
+}
+
+/// Internal implementation: returns the cleaned string and change list.
+///
+/// Why: separated from [`scrub`] so the summary can be built after all rules run.
+/// What: [`credential_rules`], then the path rules and the truncation, each
+///       recording a [`ScrubChange`].
+/// Test: via `scrub` public entry point.
+fn scrub_inner(text: &str) -> (String, Vec<ScrubChange>) {
+    let (mut result, mut changes) = credential_rules(text);
 
     // Rule 11: POSIX absolute paths.
     let (r, n) = redact_posix_paths(&result);

@@ -191,7 +191,8 @@ fn first_positional<'a>(args: &'a [String], value_opts: &[&str]) -> Option<&'a s
 }
 
 /// Drop leading `NAME=value` assignments and [`PREFIX_WORDS`].
-fn strip_prefix_words(words: &[String]) -> &[String] {
+// #9167: shared with the daemon's `tmux send-keys` recogniser.
+pub(crate) fn strip_prefix_words(words: &[String]) -> &[String] {
     let skip = words
         .iter()
         .take_while(|w| PREFIX_WORDS.contains(&w.as_str()) || is_assignment(w))
@@ -249,7 +250,8 @@ fn is_separator(c: char) -> bool {
 /// here-string and is kept). `&` splits unless it is part of a redirection
 /// (`2>&1`, `&>`). An unclosed quote leaves the rest in one segment, which
 /// `shlex` then refuses.
-fn segments(command: &str) -> Vec<String> {
+// #9167: shared with the daemon's `tmux send-keys` recogniser.
+pub(crate) fn segments(command: &str) -> Vec<String> {
     let chars: Vec<char> = command.chars().collect();
     let mut out = Vec::new();
     let mut cur = String::new();

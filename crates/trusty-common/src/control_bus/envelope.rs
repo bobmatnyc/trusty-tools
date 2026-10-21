@@ -21,7 +21,8 @@
 //!       `super::tests::payload_ping_round_trips`,
 //!       `super::tests::payload_domain_matches_serde_tag`,
 //!       `super::tests::harness_payload_action_round_trips`,
-//!       `super::tests::harness_payload_pre_action_payload_still_deserializes`.
+//!       `super::tests::harness_payload_pre_action_payload_still_deserializes`,
+//!       `super::tests::message_event_round_trips_with_a_snake_case_channel_9167`.
 
 // #6846: `HarnessPayload` and `HarnessEvent` moved here from
 // `trusty_agents_common::events::bus`; that module keeps its stderr transport.
@@ -37,6 +38,7 @@ use serde_json::Value;
 use super::action::ActionEvent;
 use super::event_id::EventId;
 use super::lifecycle::{HarnessSource, LifecycleEvent};
+use super::message::MessageEvent;
 
 /// Domain-tagged inner union carried inside a `HarnessEvent`.
 ///
@@ -49,15 +51,17 @@ use super::lifecycle::{HarnessSource, LifecycleEvent};
 /// What: `serde(tag = "domain", content = "event")` produces
 ///       `{"domain":"lifecycle","event":{...}}`, `{"domain":"hook","event":
 ///       {"kind":...,"data":...}}`, `{"domain":"ping"}`, or
-///       `{"domain":"action","event":{...}}` (issue #6847, DOC-73 §3.1). An
-///       old subscriber that matches on `domain` skips an `action` frame
-///       cleanly rather than failing to deserialize. `Ping` is the transport
+///       `{"domain":"action","event":{...}}` (issue #6847, DOC-73 §3.1), or
+///       `{"domain":"message","event":{...}}` (#9167). An old subscriber that
+///       matches on `domain` skips an `action` or `message` frame cleanly
+///       rather than failing to deserialize. `Ping` is the transport
 ///       keepalive, kept out of the lifecycle enum.
 /// Test: `super::tests::payload_lifecycle_round_trips`,
 ///       `super::tests::payload_hook_round_trips`,
 ///       `super::tests::payload_ping_round_trips`,
 ///       `super::tests::harness_payload_action_round_trips`,
-///       `super::tests::harness_payload_pre_action_payload_still_deserializes`.
+///       `super::tests::harness_payload_pre_action_payload_still_deserializes`,
+///       `super::tests::a_domain_matching_subscriber_skips_a_message_frame_9167`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "domain", content = "event", rename_all = "snake_case")]
 pub enum HarnessPayload {
@@ -71,11 +75,15 @@ pub enum HarnessPayload {
     /// (issue #6847). Additive: an old subscriber matching on `domain` alone
     /// skips this arm rather than failing to deserialize (§3.3).
     Action(ActionEvent),
+    /// One inter-session message (#9167). Its own domain, not an
+    /// `ActionEvent` kind, so the six-kind taxonomy stays as DOC-73 §3.2
+    /// fixes it (owner ruling 2026-10-21). Additive, as `Action` was.
+    Message(MessageEvent),
 }
 
 impl HarnessPayload {
     /// The domain string for this payload (`"lifecycle"`, `"hook"`, `"ping"`,
-    /// `"action"`).
+    /// `"action"`, `"message"`).
     ///
     /// Why: `Filter` matches on the domain without serialising the whole
     ///      payload; keeping the mapping here is the single source of truth.
@@ -87,6 +95,7 @@ impl HarnessPayload {
             HarnessPayload::Hook { .. } => "hook",
             HarnessPayload::Ping => "ping",
             HarnessPayload::Action(_) => "action",
+            HarnessPayload::Message(_) => "message",
         }
     }
 }

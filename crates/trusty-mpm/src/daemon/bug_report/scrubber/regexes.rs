@@ -30,19 +30,24 @@ pub(super) static RE_SK_PREFIX: std::sync::LazyLock<Regex> = std::sync::LazyLock
 });
 
 pub(super) static RE_GITHUB_TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    // GitHub PAT prefixes: ghp_ gho_ ghu_ ghs_ ghr_
-    Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}").expect("valid GitHub token regex")
+    // GitHub PAT prefixes: ghp_ gho_ ghu_ ghs_ ghr_, and fine-grained github_pat_.
+    // #9167: `github_pat_` added; `session_ref_publish` already treats it as one.
+    Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}")
+        .expect("valid GitHub token regex")
 });
 
-pub(super) static RE_AWS_KEY: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").expect("valid AWS key regex"));
+// #9167: `ASIA` (an STS temporary key) added beside `AKIA`.
+pub(super) static RE_AWS_KEY: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?:AKIA|ASIA)[0-9A-Z]{16}").expect("valid AWS key regex")
+});
 
 pub(super) static RE_GOOGLE_KEY: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"AIza[0-9A-Za-z_\-]{35}").expect("valid Google key regex")
 });
 
 pub(super) static RE_SLACK_TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"xox[baprs]-[A-Za-z0-9\-]+").expect("valid Slack token regex") // pragma: allowlist secret
+    // #9167: `xoxe-` (refresh) and `xapp-` (app-level) added.
+    Regex::new(r"(?:xox[baprse]|xapp)-[A-Za-z0-9\-]+").expect("valid Slack token regex") // pragma: allowlist secret
 });
 
 pub(super) static RE_CONN_STRING: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {

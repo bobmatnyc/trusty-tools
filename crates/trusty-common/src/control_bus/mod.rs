@@ -14,7 +14,9 @@
 //!       envelope's `id`/`parent_id` type, issue #6847), `Filter` (the
 //!       subscriber-side predicate), the `ActionEvent` taxonomy and its
 //!       supporting types (`ActionMeta`, `Actor`, `ObjectRef`, `ObjectType`,
-//!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), and
+//!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), the
+//!       `MessageEvent` and `MessageChannel` of the `message` domain (#9167),
+//!       and
 //!       — behind the `uds` feature, unix only — `PushClient` (the buffered
 //!       producer-side transport to the trusty-events socket, DOC-73 §4).
 //!       The `events.subscribe` contract (#9075, ADR-0065 decision 3) adds
@@ -53,6 +55,8 @@ mod envelope;
 mod event_id;
 mod filter;
 mod lifecycle;
+// #9167: the `message` domain; types only, like `action`.
+mod message;
 #[cfg(all(unix, feature = "uds"))]
 mod push_client;
 // #9075: the subscribe half of the wire contract (ADR-0065 decision 3). The
@@ -70,6 +74,7 @@ pub use envelope::{HarnessEvent, HarnessPayload};
 pub use event_id::EventId;
 pub use filter::Filter;
 pub use lifecycle::{HarnessSource, LifecycleEvent};
+pub use message::{MessageChannel, MessageEvent};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 pub use subscribe::{
