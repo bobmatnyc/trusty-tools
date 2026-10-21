@@ -131,9 +131,12 @@ the restore again.
 | 0.33.x | 1 |
 | 0.35.0 and later | 2 |
 
-The current release reads format 2. It migrates a palace at format 0 or 1, in
-one chain, with no intermediate release (ADR-0067, amendment 2026-10-15). A
-palace in a newer format than the binary supports is refused, not opened.
+Every release from 0.35.0 reads format 2. From 0.36.0 (unreleased; ships with
+trusty-mpm 1.9.0), a binary migrates a palace at format 0 or 1 in one chain,
+with no intermediate release (ADR-0067, amendment 2026-10-15). 0.35.0 migrates
+only format 1: a format-0 palace needs the two-step path in
+[Upgrading from 0.32.x or older to 0.35.0](#upgrading-from-032x-or-older-to-0350-formattooold).
+A palace in a newer format than the binary supports is refused, not opened.
 
 ### Automatic migration
 
@@ -149,8 +152,7 @@ format 1 to 2 step is on derived data and rewrites no row.
 ### Migrate by hand with `palace migrate`
 
 `trusty-memory palace migrate` runs the same chain as the daemon, as a step you
-can preview and check. It is not in trusty-memory 0.35.x. It ships in the
-release after 0.35.1.
+can preview and check. It is not in trusty-memory 0.35.x. It ships in 0.36.0.
 
 ```bash
 trusty-memory palace migrate my-palace --dry-run   # preview; writes nothing

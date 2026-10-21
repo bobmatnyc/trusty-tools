@@ -670,37 +670,10 @@ directly and adds `trusty-memory palace migrate` (#10094).
 
 ### Upgrading
 
-Full guide, with backup, restore and rollback:
+Backup, restore, `trusty-memory palace migrate` (0.36.0 and later), rollback and
+the checks for a palace converted by hand are in
 [backup-restore-upgrade.md](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/trusty-memory/backup-restore-upgrade.md).
-
-- **Formats.** 0.32.x and older write format 0, 0.33.x write format 1, and
-  0.35.0 and later write format 2. An upgrade that skips releases needs no
-  intermediate release.
-- **Automatic.** The daemon migrates a palace at its next writer open, behind a
-  verified backup.
-- **By hand.** `trusty-memory palace migrate <palace> --dry-run` previews the
-  plan and writes nothing. `trusty-memory palace migrate <palace>` takes the
-  backup, converts, then checks that the format is current, the markers agree,
-  no `format_migration.json` remains and the counts are unchanged. A failed
-  check exits non-zero and names the backup. `--all` covers every palace and
-  needs `--yes` when more than one would change. It goes through the daemon when
-  one runs and works offline when none does. A daemon started before the
-  upgrade must be restarted on the new release first.
-- **Backups.** `<data_root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
-  with a `MANIFEST`. The two newest per palace are kept. The vector index is
-  not in them.
-- **Rollback.** Stop the daemon. Pick the newest backup that holds `MANIFEST`
-  and whose name starts with `<old format>-to-`. Copy its files (not
-  `MANIFEST`) back into the palace directory. Remove `format_migration.json` if
-  present. Delete `index.usearch.redb`, which the backup does not hold and an
-  older binary can misread (ADR-0067 D6). Run the release that matches the old
-  format, then re-embed with `palace_reembed` (`dry_run=false`) until it
-  reports `missing: 0`.
-- **Converted by hand?** `trusty-memory palace migrate <palace> --verify` and
-  `trusty-memory doctor` report each marker as present, missing or mismatched.
-  A non-zero exit names the gap.
-- **Session Manager and portfolio palaces** belong to `tm`. Restart its daemon
-  (`tm daemon run`) instead of running the command.
+A format-0 palace on 0.35.0 follows the two-step path above.
 
 ## Feature Flags
 
