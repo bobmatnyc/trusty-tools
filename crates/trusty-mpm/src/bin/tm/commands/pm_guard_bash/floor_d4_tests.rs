@@ -704,6 +704,8 @@ fn a_redirect_is_not_a_refspec() {
         "git push -f 2>&1",
         "{ git push -f origin trunk; }",
         "(git push -f origin trunk)",
+        "(git push -f origin)",
+        "(git push -f origin )",
         "if true; then git push -f origin trunk; fi",
     ] {
         assert!(
@@ -715,6 +717,7 @@ fn a_redirect_is_not_a_refspec() {
         "git push origin feat 2>&1",
         "git push -f origin feat > push.log",
         "git push origin > push.log",
+        "(git push origin feat)",
     ] {
         assert_eq!(
             verdict_with(command, &ON_TRUNK),

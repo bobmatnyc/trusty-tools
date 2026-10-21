@@ -9,15 +9,24 @@
 //! Code that names a network module AND reads local content (a file, stdin,
 //! the environment, a subprocess) denies; a plain download passes. `-c` code
 //! whose stdin is a pipe or a `<` redirect, or that takes a `$(…)` argument,
-//! reads local content. `-m` is judged by the module it runs.
+//! reads local content. `-m` is judged by the module it runs; a
+//! [`CODE_RUNNERS`] module's arguments are judged as `-c` code (#8878 S5).
 //! FAIL-CLOSED: code the guard cannot inspect — a shell expansion inside it, a
 //! dynamic import or `exec`/`eval`, code fed from a pipe or a `<` file, or a
 //! command that does not lex — denies when it names a network module.
-//! Residual: a script file the command runs (#8879), and a module named
-//! only through string building.
-//! Test: `a_python_upload_is_denied`, `python_without_an_upload_passes`.
+//! Residual: a script file the command runs (#8879), including one a
+//! [`CODE_RUNNERS`] module runs, and a module named only through string
+//! building.
+//! Test: `a_python_upload_is_denied`, `python_without_an_upload_passes`,
+//! `python_code_running_modules_judge_their_arguments`.
 
 use super::{D4_REMEDY, program_positions};
+
+/// `-m` modules that run their arguments as code (`timeit`, `pdb -c`) or run
+/// a module their arguments name (`runpy X`, `cProfile -m X`, `trace
+/// --module X`).
+// #8878 S5: the PR 2c review HIGH — only the module name was judged.
+const CODE_RUNNERS: &[&str] = &["timeit", "pdb", "cProfile", "profile", "trace", "runpy"];
 
 /// Modules that open a network connection.
 const NETWORK_MODULES: &[&str] = &[
@@ -94,8 +103,19 @@ pub(super) fn python_upload_reason(text: &str, piped: bool, command: &str) -> Op
     let fed = piped || argv.iter().any(|t| feeds_local(t));
     let seen = match launch(&argv)? {
         PyRun::Code(code) => Some((code, fed)),
-        // #8878 PR 2c r2: `-m` runs that module; its arguments are its data.
-        PyRun::Module(module) => return names_network(&module).then(reason).flatten(),
+        // #8878 PR 2c r2: `-m` runs that module; its arguments are its data —
+        // except a code runner's (#8878 S5), which are code or a module name.
+        PyRun::Module(module, args) => {
+            let args = argv.get(args..).unwrap_or_default();
+            if names_network(&module) || (runs_code(&module) && args.iter().any(|a| is_network(a)))
+            {
+                return reason();
+            }
+            if !runs_code(&module) {
+                return None;
+            }
+            Some((args.join("\n"), fed))
+        }
         // #8878 PR 2c: a `pipx run` package runs code the guard cannot see.
         PyRun::Unseen => None,
         PyRun::Other(tail) => other_run(&argv[tail..], body, piped)?.map(|code| (code, false)),
@@ -117,8 +137,8 @@ pub(super) fn python_upload_reason(text: &str, piped: bool, command: &str) -> Op
 enum PyRun {
     /// `-c CODE`.
     Code(String),
-    /// `-m MODULE`.
-    Module(String),
+    /// `-m MODULE`, and the index in argv where the module's arguments start.
+    Module(String, usize),
     /// A `pipx run` package: code the guard cannot see.
     Unseen,
     /// Neither: the argv after the interpreter starts at this index.
@@ -152,9 +172,14 @@ fn launch(argv: &[String]) -> Option<PyRun> {
         let module = argv[at + 2..]
             .iter()
             .position(|t| t == "-m" || t == "--module")
-            .map(|m| argv.get(at + 3 + m).cloned().unwrap_or_default());
+            .map(|m| {
+                (
+                    argv.get(at + 3 + m).cloned().unwrap_or_default(),
+                    at + 4 + m,
+                )
+            });
         return match (other, program.as_str(), module) {
-            (_, _, Some(module)) => Some(PyRun::Module(module)),
+            (_, _, Some((module, args))) => Some(PyRun::Module(module, args)),
             (None, "pipx", _) => Some(PyRun::Unseen),
             (Some(tail), _, _) => Some(PyRun::Other(tail)),
             (None, _, _) => None,
@@ -236,9 +261,10 @@ fn python_run(argv: &[String], from: usize) -> PyRun {
                 }
                 'c' => return PyRun::Code(rest.to_string()),
                 'm' if rest.is_empty() => {
-                    return PyRun::Module(argv.get(i + 1).cloned().unwrap_or_default());
+                    let module = argv.get(i + 1).cloned().unwrap_or_default();
+                    return PyRun::Module(module, i + 2);
                 }
-                'm' => return PyRun::Module(rest.to_string()),
+                'm' => return PyRun::Module(rest.to_string(), i + 1),
                 'W' | 'X' | 'Q' => {
                     step = if rest.is_empty() { 2 } else { 1 };
                     break;
@@ -273,12 +299,19 @@ fn words(text: &str) -> impl Iterator<Item = String> + '_ {
 /// Whether `text` names a [`NETWORK_MODULES`] module (or a submodule),
 /// directly or as a `from <pkg> import <mod>` pair.
 fn names_network(text: &str) -> bool {
-    let network = |word: &str| {
-        NETWORK_MODULES
-            .iter()
-            .any(|m| word == *m || word.starts_with(&format!("{m}.")))
-    };
-    words(text).any(|word| network(&word)) || from_imports(text).iter().any(|w| network(w))
+    words(text).any(|word| is_network(&word)) || from_imports(text).iter().any(|w| is_network(w))
+}
+
+/// Whether one word is a [`NETWORK_MODULES`] module or a submodule of one.
+fn is_network(word: &str) -> bool {
+    NETWORK_MODULES
+        .iter()
+        .any(|m| word == *m || word.starts_with(&format!("{m}.")))
+}
+
+/// Whether `module` is a [`CODE_RUNNERS`] module.
+fn runs_code(module: &str) -> bool {
+    CODE_RUNNERS.contains(&module)
 }
 
 /// Every `pkg.name` a `from pkg import name[, name]` statement binds (#8878

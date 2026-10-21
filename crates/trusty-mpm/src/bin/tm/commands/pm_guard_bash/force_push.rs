@@ -10,18 +10,24 @@
 //! FAIL-CLOSED: a destination that needs the current branch denies when the
 //! branch cannot be read, including after a `cd`; a wildcard destination
 //! denies.
-//! #8878 follow-on: a push to a URL, a path or an unconfigured name denies
-//! whether forced or not, and any `-c`/`--config-env` on a push, or any
-//! `-c alias.*`, denies. #8878 PR 2c r2: so does `-c` or a git variable on a
-//! subcommand that is not a git builtin, which may be a `push` alias.
-//! Residual: aliases from the user's git config, and a push made by a script.
+//! #8878 S5 (owner ruling 2026-09-29 14:06Z): a push to a URL, a path or an
+//! unconfigured name denies whether forced or not — after a `cd` the remote
+//! cannot be checked, so it denies too; any `-c`/`--config-env` on a push, or
+//! any `-c alias.*`, denies, as does `-c` or a git variable on a subcommand
+//! that is not a git builtin, which may be a `push` alias. A shell redirect is
+//! never a remote or the only refspec.
+//! Residual: aliases from the user's git config, a push made by a script, and
+//! a push with no remote operand whose `pushRemote` / `push.default=upstream`
+//! sends it to another branch.
 //! Test: `a_force_push_to_the_default_branch_is_denied`,
-//! `a_force_push_elsewhere_passes`, `an_unknown_current_branch_denies`.
+//! `a_force_push_elsewhere_passes`, `an_unknown_current_branch_denies`,
+//! `a_push_to_an_unconfigured_remote_is_denied`, `a_redirect_is_not_a_refspec`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::floor_d4::{D4_REMEDY, program_positions};
+use super::{RedirectRole, redirect_role};
 
 /// The names treated as the default branch when it cannot be determined.
 const FALLBACK_DEFAULTS: &[&str] = &["main", "master"];
@@ -180,6 +186,10 @@ struct Push {
     mirror: bool,
     all: bool,
     operands: Vec<String>,
+    /// Shell syntax read as words — redirects (`2>&1`, `>`, `log.txt`) and a
+    /// glued `)` (`trunk)`): never a remote or the only refspec, but still
+    /// judged as refspecs, in case quoting made one.
+    shell_words: Vec<String>,
 }
 
 /// The force-push deny for one segment's argv, or `None`.
@@ -236,7 +246,8 @@ pub(super) fn force_push_reason(
             return Some(format!(
                 "Hard-floor deny (#8878 D4): this `git push` sends to `{remote}`, a URL, a \
                  path or a name that is not a configured remote (or cannot be checked) — \
-                 network exfiltration. Push to a configured remote such as `origin`. \
+                 network exfiltration. Push to a configured remote such as `origin`, from \
+                 the repository or with `git -C <dir> push`: the guard never follows a `cd`. \
                  {D4_REMEDY}"
             ));
         }
@@ -343,15 +354,40 @@ fn git_dir(dir: &Path, globals: &[String]) -> PathBuf {
 }
 
 /// Parse the argv after `push`.
+///
+/// Test: `a_redirect_is_not_a_refspec`, `no_force_does_not_clear_a_lease`.
 fn parse(tail: &[String]) -> Push {
     let mut push = Push::default();
     let mut i = 0;
+    let mut options_end = false;
     while i < tail.len() {
-        let tok = tail[i].as_str();
+        let mut tok = tail[i].as_str();
         i += 1;
+        // #8878 S5: a redirect is the shell's, not a refspec — read as one, it
+        // hid the implicit current-branch destination of `git push -f origin 2>&1`.
+        if let Some(follows) = redirect_word(tok) {
+            push.shell_words.push(tok.to_string());
+            if follows && let Some(target) = tail.get(i) {
+                push.shell_words.push(target.clone());
+                i += 1;
+            }
+            continue;
+        }
+        // #8878 S5: so is the `)` that closes `(git push -f origin)`.
+        if let Some(bare) = tok.strip_suffix(')').filter(|b| !b.contains('(')) {
+            push.shell_words.push(tok.to_string());
+            if bare.is_empty() {
+                continue;
+            }
+            tok = bare;
+        }
+        if options_end {
+            push.operands.push(tok.to_string());
+            continue;
+        }
         if tok == "--" {
-            push.operands.extend(tail[i..].iter().cloned());
-            break;
+            options_end = true;
+            continue;
         }
         if let Some(long) = tok.strip_prefix("--") {
             let (name, attached) = long
@@ -412,18 +448,17 @@ fn forced_default(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option
     }
     let current = || dir.and_then(|d| git.current_branch(d));
     let refspecs = push.operands.get(1..).unwrap_or_default();
-    if refspecs.is_empty() {
-        if !forced {
-            return None;
-        }
+    if refspecs.is_empty() && forced {
         // #8878: the implicit destination is the current branch; unknown denies.
-        return match current() {
-            Some(branch) if !defaults.contains(&branch) => None,
-            Some(branch) => Some(branch),
-            None => Some(first_default()),
-        };
+        match current() {
+            Some(branch) if !defaults.contains(&branch) => {}
+            Some(branch) => return Some(branch),
+            None => return Some(first_default()),
+        }
     }
-    for spec in refspecs {
+    // #8878 S5: shell words are judged as refspecs too — the fail-closed
+    // reading of a quoted refspec that only looks like a redirect or a `)`.
+    for spec in refspecs.iter().chain(&push.shell_words) {
         let plus = spec.starts_with('+');
         if !(plus || forced) {
             continue;
@@ -447,6 +482,29 @@ fn forced_default(push: &Push, dir: Option<&Path>, git: &dyn GitProbe) -> Option
         }
     }
     None
+}
+
+/// Whether `word` is a shell redirect: `Some(true)` when its file is the next
+/// word (`>`, `2>`, `<`, `<<<`), `Some(false)` when attached or a descriptor
+/// operation (`>log`, `2>&1`, `<in`, `<<EOF`), `None` when it is not one.
+///
+/// Why: #8878 S5 (R7) — `git push -f origin 2>&1` read `2>&1` as a refspec.
+/// What: output redirects through [`redirect_role`]; an input redirect is an
+/// optional descriptor number, then `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`.
+/// Test: `a_redirect_is_not_a_refspec`.
+fn redirect_word(word: &str) -> Option<bool> {
+    match redirect_role(word) {
+        RedirectRole::TargetFollows => return Some(true),
+        RedirectRole::Target(_) | RedirectRole::FileDescriptor => return Some(false),
+        RedirectRole::None => {}
+    }
+    let input = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = input.strip_prefix('<')?;
+    let rest = ["<<", "<-", "<", "&", ">"]
+        .iter()
+        .find_map(|op| rest.strip_prefix(op))
+        .unwrap_or(rest);
+    Some(rest.is_empty())
 }
 
 /// Whether a push's first operand is a remote name rather than a URL or path.
