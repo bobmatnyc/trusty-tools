@@ -196,4 +196,4 @@ pub(crate) async fn cargo_install(crate_name: &str, captured: bool) -> anyhow::R
 
 #[cfg(test)]
 #[path = "standalone_launcher_tests.rs"]
-mod tests;
+pub(crate) mod tests;
