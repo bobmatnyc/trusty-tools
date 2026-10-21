@@ -222,5 +222,11 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # `#[ignore]` reason and the same reason to stay unselected (the binary must be
 # built in the same cargo run). 140 + 2 -> 142 (Architect-approved 2026-10-19, #10071).
 #
+# #9966 (B2, PR #9984) adds one: trusty-embedderd-py
+# `real_pinned_asset_matches_the_embedded_digest` (src/uv_fetch_tests.rs),
+# `#[ignore = "network: downloads the real pinned uv release (#9966)"]`. It
+# downloads the real uv release, so it stays unselected. 142 + 1 -> 143
+# (Architect GO 12:04Z 2026-10-21, Refs #9663).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 142
+# UNSELECTED-BASELINE: 143
