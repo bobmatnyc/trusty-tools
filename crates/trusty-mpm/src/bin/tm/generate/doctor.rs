@@ -282,7 +282,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "tripwire_record",
-        "Whether the CTO tripwire in `tm hook --egress-guard` has tripped: reads `~/.trusty-tools/trusty-mpm/channels/tripwire/trips.jsonl`, the durable record of each channel-tainted session's tool call that reached a project the channel host config lists. `Ok` when the record is absent or empty; `Warn` naming the trip count and the newest timestamp when it holds trips, since until the go-live alert lands this row is the only trip signal; `Fail` on a line that does not parse or a record directory the hook cannot write; `Unknown` when the file or directory cannot be read. Read-only (issue #8454).",
+        "Whether the CTO tripwire in `tm hook --egress-guard` has tripped: reads `~/.trusty-tools/trusty-mpm/channels/tripwire/trips.jsonl`, the durable record of each channel-tainted session's tool call that reached a project the channel host config lists. `Ok` when the record is absent or empty; `Warn` naming the trip count and the newest timestamp when it holds trips, since until the go-live alert lands this row is the only trip signal; `Fail` on a line that does not parse or a record the hook cannot append to (an unwritable directory or `trips.jsonl`, or a missing directory under an unwritable ancestor); `Unknown` when the file or directory cannot be read. Read-only (issue #8454).",
     ),
     (
         "tcc_taint",
