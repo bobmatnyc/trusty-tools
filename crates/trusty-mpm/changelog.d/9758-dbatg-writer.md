@@ -1,0 +1,2 @@
+Added
+- `tm dbatg` (`init`, `add`, `update`, `close`, `batch`, `prune`, `show`), the `mpm.dbatg.init`, `mpm.dbatg.batch` and `mpm.dbatg.show` daemon methods and the `dbatg` MCP tool write and read a PM session's Intent Ledger with the prototype's stdout and exit codes; when the daemon is down, `tm dbatg` writes the caller's own store in-process under the same lock, and a batch retried with the same `--request-id` is applied once ([#9758](https://github.com/bobmatnyc/trusty-tools/issues/9758))

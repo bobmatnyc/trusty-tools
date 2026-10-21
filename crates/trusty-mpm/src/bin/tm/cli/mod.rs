@@ -890,6 +890,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ArchitectAction,
     },
+    /// The PM ledger: `init`, `add`, `update`, `close`, `batch`, `prune`, `show`.
+    ///
+    /// Writes go through the daemon; when it is down, this session's own
+    /// store is written in-process under the same lock.
+    // #9758. Test: `cli_parses_every_dbatg_verb`.
+    Dbatg(DbatgArgs),
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///
     /// Only the bound Architect may run either verb.
