@@ -668,6 +668,13 @@ the newest 0.33.x release:
 trusty-memory 0.36.0, which ships with trusty-mpm 1.9.0, migrates format 0
 directly and adds `trusty-memory palace migrate` (#10094).
 
+### Upgrading
+
+Backup, restore, `trusty-memory palace migrate` (0.36.0 and later), rollback and
+the checks for a palace converted by hand are in
+[backup-restore-upgrade.md](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/trusty-memory/backup-restore-upgrade.md).
+A format-0 palace on 0.35.0 follows the two-step path above.
+
 ## Feature Flags
 
 | Flag | Default | Description |
