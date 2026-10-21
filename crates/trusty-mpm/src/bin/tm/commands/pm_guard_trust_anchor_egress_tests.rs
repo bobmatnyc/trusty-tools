@@ -483,3 +483,18 @@ fn egress_unicode_spellings_of_protected_names_are_denied() {
     }
     assert!(wrong.is_empty(), "not denied:\n{}", wrong.join("\n"));
 }
+
+/// 🔴 #10107 fail-closed: a file name that is not UTF-8 cannot be folded, so
+/// the name check counts it as a protected name rather than passing it.
+#[test]
+fn egress_a_name_that_cannot_be_folded_counts_as_a_match() {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = std::ffi::OsStr::from_bytes(b"\xffettings.json");
+    assert!(egress::name_could_be(raw, &["settings.json"]));
+    let folded = std::ffi::OsStr::new("\u{17f}ettings.json");
+    assert!(egress::name_could_be(folded, &["settings.json"]));
+    assert!(!egress::name_could_be(
+        std::ffi::OsStr::new("notes.json"),
+        &["settings.json"]
+    ));
+}
