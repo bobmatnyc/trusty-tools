@@ -177,6 +177,7 @@ impl Fake {
             asker_managed_session: ASKER.into(),
             conversation: conv.clone(),
             message_ts: conv.thread_ts.clone(),
+            options: Vec::new(),
         };
         self.table.open(id, ask).expect("open question");
         id

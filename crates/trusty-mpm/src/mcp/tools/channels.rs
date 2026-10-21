@@ -13,7 +13,8 @@ use super::tool;
 
 /// Build the one channel tool descriptor.
 ///
-/// What: `ask_owner`, two required string arguments, closed schema.
+/// What: `ask_owner`, two required string arguments and the optional
+/// `options` list (#10127), closed schema.
 /// Test: `super::tests::ask_owner_tool_schema_is_closed`.
 pub(super) fn channels_tools() -> Vec<Value> {
     vec![tool(
@@ -24,8 +25,10 @@ pub(super) fn channels_tools() -> Vec<Value> {
          recipient must be a Slack user id (`U…`) that a channel route names; \
          a channel or group-DM id is refused. Returns `{ question_id, route, \
          dm_channel_id, thread_ts }` once the question is posted and recorded; \
-         an answer binds to `question_id`. Every refusal sends nothing and \
-         names its rule (`asker_unproven`, `recipient_not_user_id`, \
+         an answer binds to `question_id`. `options` (2 to 6 labels) are \
+         posted numbered from 1 and echoed in the result. Every refusal \
+         sends nothing and names its rule (`asker_unproven`, \
+         `recipient_not_user_id`, `options_invalid`, \
          `no_route`, `snapshot_stale`, `user_token_refused`, \
          `table_unavailable`, ...). `send_outcome_unknown` means the question \
          may have been posted; its id is never reused.",
@@ -39,6 +42,16 @@ pub(super) fn channels_tools() -> Vec<Value> {
                 "question": {
                     "type": "string",
                     "description": "The question text, 1 to 4000 bytes."
+                },
+                // #10127: Architect ruling Q5; `ask_owner` enforces the rest.
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 6,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 80 },
+                    "description": "Optional answer labels, 2 to 6, each 1 to 80 bytes \
+                                    with no control character, unique ignoring case, and \
+                                    none equal to another option's number."
                 }
             },
             "required": ["recipient", "question"],

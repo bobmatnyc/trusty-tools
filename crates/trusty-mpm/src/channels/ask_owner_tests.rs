@@ -52,6 +52,8 @@ struct Fake {
     reply: Mutex<Result<Posted, SendFailure>>,
     audit_home: Option<PathBuf>,
     posts: AtomicUsize,
+    // #10127: every posted text, so the rendering is observable.
+    texts: Mutex<Vec<String>>,
     kinds: Mutex<Vec<MessageKind>>,
     resolved: Mutex<Vec<String>>,
 }
@@ -71,6 +73,7 @@ impl Fake {
             reply: Mutex::new(Ok(posted("1700000000.000100"))),
             audit_home: Some(home.to_path_buf()),
             posts: AtomicUsize::new(0),
+            texts: Mutex::new(Vec::new()),
             kinds: Mutex::new(Vec::new()),
             resolved: Mutex::new(Vec::new()),
         }
@@ -165,9 +168,10 @@ impl AskEnv for Fake {
         &self,
         _token: &Secret<String>,
         _recipient: &str,
-        _text: &str,
+        text: &str,
     ) -> Result<Posted, SendFailure> {
         self.posts.fetch_add(1, Ordering::SeqCst);
+        self.texts.lock().expect("texts").push(text.to_owned());
         self.reply.lock().expect("reply").clone()
     }
 
@@ -214,6 +218,15 @@ fn req(recipient: &str) -> AskOwnerRequest {
     AskOwnerRequest {
         recipient: recipient.into(),
         question: "Merge #9856 now?".into(),
+        options: Vec::new(),
+    }
+}
+
+/// #10127: an ask to the owner with option `labels`.
+fn req_with(labels: &[&str]) -> AskOwnerRequest {
+    AskOwnerRequest {
+        options: labels.iter().map(|l| (*l).to_owned()).collect(),
+        ..req(OWNER)
     }
 }
 
@@ -499,6 +512,138 @@ fn concurrent_asks_take_distinct_ids_n_rounds() {
     let ops = table_ops(&home);
     assert_eq!(ops.iter().filter(|o| *o == "reserve").count(), 2 * ROUNDS);
     assert_eq!(ops.iter().filter(|o| *o == "open").count(), 2 * ROUNDS);
+}
+
+/// The texts the fake posted, in order.
+fn texts(fake: &Fake) -> Vec<String> {
+    fake.texts.lock().expect("texts").clone()
+}
+
+/// The decoded `open` line for `id` in the log under `home`.
+fn open_line(home: &Path, id: u64) -> serde_json::Value {
+    std::fs::read_to_string(questions_path(home))
+        .expect("log")
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("log line"))
+        .find(|v| v["op"] == "open" && v["question"]["id"] == id)
+        .expect("an open line")
+}
+
+/// #10127: the options are posted numbered from 1 under the question, the
+/// stored question carries them, and the result echoes them.
+#[test]
+fn ask_with_options_lists_them_numbered_in_the_slack_text() {
+    let (_tmp, home) = temp_home();
+    let fake = Fake::new(&home);
+    let asked = ask_owner(&fake, asker(), &req_with(&["Merge", "Hold", "Ask Bob"])).expect("ask");
+    let id = asked.question_id;
+    assert_eq!(
+        texts(&fake),
+        [format!(
+            "[Q-{id}] Merge #9856 now?\n1. Merge\n2. Hold\n3. Ask Bob"
+        )]
+    );
+    let stored = fake.real_table().get(id).expect("open question");
+    assert_eq!(stored.ask.options, ["Merge", "Hold", "Ask Bob"]);
+    assert_eq!(asked.options, ["Merge", "Hold", "Ask Bob"]);
+    assert_eq!(
+        open_line(&home, id)["question"]["options"],
+        serde_json::json!(["Merge", "Hold", "Ask Bob"])
+    );
+}
+
+/// The ask is refused with `options_invalid`: nothing reserved, nothing
+/// posted, one audit line.
+fn assert_options_refused(labels: &[&str]) {
+    let (_tmp, home) = temp_home();
+    let fake = Fake::new(&home);
+    let got = ask_owner(&fake, asker(), &req_with(labels));
+    assert_refused(&fake, got, "options_invalid");
+}
+
+/// The ask with `labels` succeeds and posts them.
+fn assert_options_accepted(labels: &[&str]) {
+    let (_tmp, home) = temp_home();
+    let fake = Fake::new(&home);
+    let asked = ask_owner(&fake, asker(), &req_with(labels)).expect("accepted");
+    assert_eq!(asked.options, labels, "{labels:?}");
+}
+
+/// #10127 Q5: 2 to 6 options; the bounds themselves are accepted.
+#[test]
+fn ask_with_one_or_seven_options_is_refused() {
+    assert_options_refused(&["Merge"]);
+    assert_options_refused(&["a", "b", "c", "d", "e", "f", "g"]);
+    assert_options_accepted(&["a", "b"]);
+    assert_options_accepted(&["a", "b", "c", "d", "e", "f"]);
+}
+
+/// #10127 Q5: unique after case fold, and no label equal to another
+/// option's number; a label equal to its own number reads one way.
+#[test]
+fn ask_with_duplicate_after_case_fold_or_numeric_label_is_refused() {
+    for labels in [
+        &["Merge", "merge"][..],
+        &["Hold", " HOLD "],
+        &["Merge", "Hold", "1"],
+        &["2", "Hold"],
+        &["02", "Hold"],
+    ] {
+        assert_options_refused(labels);
+    }
+    assert_options_accepted(&["1", "2"]);
+    assert_options_accepted(&["Merge", "7"]);
+}
+
+/// #10127 Q5: each label 1 to 80 bytes with no control character.
+#[test]
+fn ask_with_overlong_or_control_char_label_is_refused() {
+    let at_cap = "x".repeat(80);
+    let over = "x".repeat(81);
+    let over_multibyte = "é".repeat(41);
+    for labels in [
+        vec![over.as_str(), "Hold"],
+        vec![over_multibyte.as_str(), "Hold"],
+        vec!["", "Hold"],
+        vec!["   ", "Hold"],
+        vec!["Merge\nnow", "Hold"],
+        vec!["Merge", "Hold\u{7}"],
+        vec!["Merge", "Hold\u{85}"],
+    ] {
+        assert_options_refused(&labels);
+    }
+    assert_options_accepted(&[at_cap.as_str(), "Hold"]);
+}
+
+/// #10127: no options is today's ask: the same text, and no `options` key in
+/// the stored line, so a pre-P2 daemon still reads it.
+#[test]
+fn ask_without_options_posts_todays_text() {
+    let (_tmp, home) = temp_home();
+    let fake = Fake::new(&home);
+    let asked = ask_owner(&fake, asker(), &req(OWNER)).expect("ask");
+    let id = asked.question_id;
+    assert_eq!(texts(&fake), [format!("[Q-{id}] Merge #9856 now?")]);
+    assert!(asked.options.is_empty());
+    let open = open_line(&home, id);
+    assert!(
+        open["question"].get("options").is_none(),
+        "a free-text question wrote an options key: {open}"
+    );
+    let reply = serde_json::to_value(&asked).expect("encode");
+    assert!(reply.get("options").is_none(), "{reply}");
+}
+
+/// #10127 fail-open check: a store write that fails before the post leaves
+/// nothing posted, with options as without.
+#[test]
+fn ask_with_options_posts_nothing_when_reserve_fails() {
+    let (_tmp, home) = temp_home();
+    let mut fake = Fake::new(&home);
+    fake.table_mode = TableMode::ReserveFails;
+    let got = ask_owner(&fake, asker(), &req_with(&["Merge", "Hold"]));
+    assert_refused(&fake, got, "reserve_failed");
+    assert!(texts(&fake).is_empty(), "a question was posted");
 }
 
 #[test]

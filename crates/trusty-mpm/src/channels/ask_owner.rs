@@ -8,7 +8,7 @@
 //! reissued.
 //! What: [`ask_owner`] runs the whole decision over an [`AskEnv`], in
 //! order: the proven asker, the recipient's shape (a Slack user id, Q6),
-//! the question text, the policy snapshot's `check_egress`, the bot ref and
+//! the question text, its option labels (#10127), the policy snapshot's `check_egress`, the bot ref and
 //! token, the question table, `reserve`, the post, then `open`. Each refusal
 //! writes one audit line and returns an [`AskError`] naming the rule. A
 //! failure after `reserve` keeps the id reserved; the table never reuses it.
@@ -22,7 +22,7 @@ use trusty_channels::policy::{Channel, DenyReason, MessageKind, QuestionId, Rout
 use trusty_common::credentials::Secret;
 
 use crate::channels::question_table::{
-    Ask, Conversation, Question, QuestionTable, QuestionTableError,
+    Ask, Conversation, Question, QuestionTable, QuestionTableError, validate_options,
 };
 use crate::channels::slack_bot::{Posted, SendFailure};
 use crate::channels::snapshot::{Refusal, SnapshotDeny};
@@ -41,6 +41,11 @@ pub struct AskOwnerRequest {
     pub recipient: String,
     /// The question text.
     pub question: String,
+    /// The answer options, numbered from 1 in the posted text; empty for a
+    /// free-text question.
+    // #10127: optional, so a body without it is today's ask.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// A question that was posted and opened.
@@ -54,6 +59,9 @@ pub struct Asked {
     pub dm_channel_id: String,
     /// The question's thread.
     pub thread_ts: String,
+    /// The options the question was posted with (#10127).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// Why an ask was refused or failed. [`AskError::code`] is the rule.
@@ -76,6 +84,9 @@ pub enum AskError {
     /// The question is empty or over [`MAX_QUESTION_BYTES`].
     #[error("question_invalid: the question must be 1..={MAX_QUESTION_BYTES} bytes")]
     QuestionInvalid,
+    /// The option labels break a rule (#10127, Architect ruling Q5).
+    #[error("options_invalid: {0}")]
+    OptionsInvalid(&'static str),
     /// The policy snapshot or a route rule refused the send.
     #[error("{0}: the channel policy refused the send")]
     Policy(&'static str),
@@ -135,6 +146,7 @@ impl AskError {
             Self::AskerUnproven(_) => "asker_unproven",
             Self::RecipientNotUserId(_) => "recipient_not_user_id",
             Self::QuestionInvalid => "question_invalid",
+            Self::OptionsInvalid(_) => "options_invalid",
             Self::Policy(code) => code,
             Self::NoBotRef(_) => "no_bot_ref",
             Self::UserTokenRefused(_) => "user_token_refused",
@@ -217,7 +229,13 @@ pub trait AskEnv {
 /// `ask_owner_refuses_when_token_cannot_resolve`,
 /// `ask_owner_unknown_send_outcome_keeps_id_reserved`,
 /// `ask_owner_open_failure_after_send_reports_sent_unrecorded`,
-/// `ask_owner_refusal_stands_when_audit_write_fails`.
+/// `ask_owner_refusal_stands_when_audit_write_fails`,
+/// `ask_with_options_lists_them_numbered_in_the_slack_text`,
+/// `ask_with_one_or_seven_options_is_refused`,
+/// `ask_with_duplicate_after_case_fold_or_numeric_label_is_refused`,
+/// `ask_with_overlong_or_control_char_label_is_refused`,
+/// `ask_without_options_posts_todays_text`,
+/// `ask_with_options_posts_nothing_when_reserve_fails`.
 pub fn ask_owner(
     env: &dyn AskEnv,
     asker: Result<String, String>,
@@ -239,6 +257,12 @@ pub fn ask_owner(
     }
     if req.question.trim().is_empty() || req.question.len() > MAX_QUESTION_BYTES {
         return fail(AskError::QuestionInvalid);
+    }
+    // #10127: a bad label set is refused before anything is reserved or sent.
+    if !req.options.is_empty()
+        && let Err(why) = validate_options(&req.options)
+    {
+        return fail(AskError::OptionsInvalid(why));
     }
     let route = match env.check_egress(&req.recipient, ASK_KIND) {
         Ok(route) => route,
@@ -263,8 +287,7 @@ pub fn ask_owner(
         Ok(id) => id,
         Err(e) => return fail(AskError::ReserveFailed(e.to_string())),
     };
-    // #9856: the id goes in the text, so a reply can name it as data (P5).
-    let text = format!("[Q-{id}] {}", req.question);
+    let text = question_text(id, &req.question, &req.options);
     let posted = match env.post(&token, &req.recipient, &text) {
         Ok(posted) => posted,
         Err(SendFailure::Rejected(code)) => return fail(AskError::SendRejected { id, code }),
@@ -281,6 +304,7 @@ pub fn ask_owner(
             thread_ts: posted.ts.clone(),
         },
         message_ts: posted.ts.clone(),
+        options: req.options.clone(),
     };
     match table.open(id, ask) {
         Ok(_) => Ok(Asked {
@@ -288,12 +312,26 @@ pub fn ask_owner(
             route: route.name().to_owned(),
             dm_channel_id: posted.channel,
             thread_ts: posted.ts,
+            options: req.options.clone(),
         }),
         Err(e) => fail(AskError::SentUnrecorded {
             id,
             why: e.to_string(),
         }),
     }
+}
+
+/// The posted text: `[Q-<id>] <question>`, then one `<n>. <label>` line per
+/// option.
+fn question_text(id: QuestionId, question: &str, options: &[String]) -> String {
+    // #9856: the id goes in the text, so a reply can name it as data (P5).
+    let head = format!("[Q-{id}] {question}");
+    // #10127: options are numbered from 1, the number a reply may give.
+    let lines = options
+        .iter()
+        .enumerate()
+        .map(|(n, label)| format!("\n{}. {label}", n + 1));
+    std::iter::once(head).chain(lines).collect()
 }
 
 /// True for a Slack user id: `U` then upper-case ASCII letters and digits

@@ -235,8 +235,13 @@ impl OrchestratorBackend for MockBackend {
     }
 
     // #9856: echoes its arguments so dispatch's wiring is observable.
-    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String> {
-        Ok(json!({ "recipient": recipient, "question": question }))
+    async fn ask_owner(
+        &self,
+        recipient: &str,
+        question: &str,
+        options: Vec<String>,
+    ) -> Result<Value, String> {
+        Ok(json!({ "recipient": recipient, "question": question, "options": options }))
     }
 
     // #9979: echoes the turn it received so the pass-through is observable.
@@ -1787,6 +1792,40 @@ async fn dispatch_ask_owner_tool() {
         assert_eq!(result["isError"], true, "{args}");
         let text = result["content"][0]["text"].as_str().expect("text");
         assert!(text.contains("missing required string argument"), "{text}");
+    }
+}
+
+/// Why (#10127): `options` reaches the backend as given, absent or `null`
+/// means none, and a shape the schema refuses fails before the daemon is
+/// asked.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_ask_owner_passes_options_and_rejects_bad_shapes() {
+    let base = json!({ "recipient": "U0OWNER1", "question": "Merge now?" });
+    let with = |options: Value| {
+        let mut args = base.clone();
+        args["options"] = options;
+        args
+    };
+    for (args, want) in [
+        (with(json!(["Merge", "Hold"])), json!(["Merge", "Hold"])),
+        (with(Value::Null), json!([])),
+        (base.clone(), json!([])),
+    ] {
+        let resp = dispatch(&MockBackend, call("ask_owner", args.clone())).await;
+        let result = resp.result.expect("a result");
+        assert_eq!(result["isError"], false, "{args}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        let echoed: Value = serde_json::from_str(text).expect("echo is JSON");
+        assert_eq!(echoed["options"], want, "{args}");
+    }
+    for bad in [json!([]), json!("Merge"), json!(["Merge", 2]), json!({})] {
+        let args = with(bad);
+        let resp = dispatch(&MockBackend, call("ask_owner", args.clone())).await;
+        let result = resp.result.expect("a result");
+        assert_eq!(result["isError"], true, "{args}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("`options`"), "{text}");
     }
 }
 

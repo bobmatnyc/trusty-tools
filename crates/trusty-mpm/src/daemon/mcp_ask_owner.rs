@@ -22,6 +22,7 @@ pub async fn ask_owner(
     state: &Arc<DaemonState>,
     recipient: &str,
     question: &str,
+    options: Vec<String>,
 ) -> Result<Value, String> {
     use super::managed_routes::ask_owner::ask_owner_op;
     use super::services::delegation_repair_caller::RepairPeer;
@@ -31,6 +32,8 @@ pub async fn ask_owner(
     let req = AskOwnerRequest {
         recipient: recipient.to_owned(),
         question: question.to_owned(),
+        // #10127: the option labels; `ask_owner` validates them.
+        options,
     };
     let asked = ask_owner_op(state, peer, req)
         .await
@@ -44,6 +47,7 @@ pub async fn ask_owner(
     _state: &Arc<DaemonState>,
     _recipient: &str,
     _question: &str,
+    _options: Vec<String>,
 ) -> Result<Value, String> {
     Err("ask_owner: this build has no channels feature".to_owned())
 }

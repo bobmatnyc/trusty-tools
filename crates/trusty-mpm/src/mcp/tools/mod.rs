@@ -362,7 +362,8 @@ mod tests {
     }
 
     /// #9856: the schema stays closed, so no argument can name the asker, a
-    /// kind or a channel; only a recipient and the question text.
+    /// kind or a channel; only a recipient, the question text and (#10127)
+    /// the optional option labels, bounded per Architect ruling Q5.
     #[test]
     fn ask_owner_tool_schema_is_closed() {
         let catalog = tool_catalog();
@@ -380,7 +381,14 @@ mod tests {
         let props = schema["properties"].as_object().expect("properties");
         let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
         names.sort_unstable();
-        assert_eq!(names, ["question", "recipient"], "{schema}");
+        assert_eq!(names, ["options", "question", "recipient"], "{schema}");
+        let options = &props["options"];
+        assert_eq!(options["type"], "array", "{schema}");
+        assert_eq!(options["minItems"], 2, "{schema}");
+        assert_eq!(options["maxItems"], 6, "{schema}");
+        assert_eq!(options["items"]["type"], "string", "{schema}");
+        assert_eq!(options["items"]["minLength"], 1, "{schema}");
+        assert_eq!(options["items"]["maxLength"], 80, "{schema}");
     }
 
     /// #9979: the arguments are `mpm.sessions.chat`'s request fields, and the

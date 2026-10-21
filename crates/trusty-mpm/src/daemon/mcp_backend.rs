@@ -565,8 +565,13 @@ impl OrchestratorBackend for StateBackend {
     }
 
     /// Back `ask_owner` (#9856) — see `super::mcp_ask_owner`.
-    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String> {
-        super::mcp_ask_owner::ask_owner(&self.state, recipient, question).await
+    async fn ask_owner(
+        &self,
+        recipient: &str,
+        question: &str,
+        options: Vec<String>,
+    ) -> Result<Value, String> {
+        super::mcp_ask_owner::ask_owner(&self.state, recipient, question, options).await
     }
 
     /// Back `sessions_chat` (#9979) — see `super::mcp_chat`.
