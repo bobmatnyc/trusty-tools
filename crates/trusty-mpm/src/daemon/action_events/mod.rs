@@ -27,7 +27,10 @@ use trusty_common::control_bus::{PushClient, PushFlushOutcome};
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
 
+// #9167: inter-session messages, projected beside the actions.
+pub mod message;
 pub mod projection;
+pub mod tmux_send;
 
 /// How often the flush task drains the buffer (as #9078's producer).
 pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -149,6 +152,11 @@ impl ActionPublisher {
     /// Show paths outside a session's `cwd` relative to `home`.
     pub fn with_home(self, home: Option<PathBuf>) -> Self {
         *self.threader.lock() = projection::Threader::new(home);
+        self
+    }
+
+    /// Carry the credential-scanned body on `message` events.
+    pub fn with_message_bodies(self, _on: bool) -> Self {
         self
     }
 
@@ -381,5 +389,7 @@ pub fn start_with(
     }
 }
 
+#[cfg(test)]
+mod message_tests;
 #[cfg(test)]
 mod tests;

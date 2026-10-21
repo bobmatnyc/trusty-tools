@@ -117,6 +117,11 @@ impl Threader {
         }
     }
 
+    /// Carry the credential-scanned body on `message` events.
+    pub fn with_message_bodies(self, _on: bool) -> Self {
+        self
+    }
+
     /// Project one hook record onto the bus events it implies.
     ///
     /// Why: DOC-73 §3.4 maps the hooks with an obvious kind; everything else

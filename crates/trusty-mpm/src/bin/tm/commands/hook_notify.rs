@@ -22,8 +22,8 @@ use trusty_mpm::client::DaemonClient;
 
 use super::tmux_attach::tmux_pane_id_from_env;
 use trusty_mpm::core::standalone::hooks::notification::{
-    INBOX_EVENTS_FILE, NOTIFICATION_EVENT, NOTIFY_INBOX_ENV, NotificationHookConfig, PushTarget,
-    resolve_push_target,
+    INBOX_EVENTS_FILE, NOTIFICATION_EVENT, NOTIFY_INBOX_ENV, NotificationHookConfig,
+    PUSHED_MESSAGE_FIELD, PushTarget, resolve_push_target,
 };
 
 /// The longest `tm hook` waits on the inbox append: one second.
@@ -44,7 +44,12 @@ pub(crate) const FORWARD_TIMEOUT: Duration = Duration::from_secs(1);
 /// `trusty-mpm: Notification forward failed` line to stderr.
 /// Test: `tm_hook_notification_8392::a_notification_reaches_the_daemon_and_the_inbox`,
 /// `tm_hook_notification_8392::a_stuck_inbox_costs_one_logged_failure_and_exit_zero`.
-pub(crate) fn forward_notification(event: &str, stdin: Option<&Value>, cwd: &str) {
+pub(crate) fn forward_notification(
+    event: &str,
+    stdin: Option<&Value>,
+    cwd: &str,
+    _payload: &mut Value,
+) {
     if event != NOTIFICATION_EVENT {
         return;
     }
@@ -66,6 +71,9 @@ pub(crate) fn forward_notification(event: &str, stdin: Option<&Value>, cwd: &str
         eprintln!("trusty-mpm: Notification forward failed (#8392): {reason}");
     }
 }
+
+/// Name a completed push on the daemon payload.
+pub(crate) fn record_push(_payload: &mut Value, _inbox: &Path, _line: Option<String>) {}
 
 /// What the inbox line is built from, moved onto the worker thread.
 pub(crate) struct LineContext {
@@ -93,9 +101,9 @@ pub(crate) fn forward_to_target(
     target: &PushTarget,
     context: LineContext,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let dir = match target {
-        PushTarget::Unset => return Ok(()),
+        PushTarget::Unset => return Ok(None),
         PushTarget::NotAbsolute => {
             return Err("the configured inbox is not an absolute path; not forwarded".into());
         }
@@ -110,7 +118,7 @@ pub(crate) fn forward_to_target(
         let _ = tx.send(append_line(&worker_file, &line));
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => Ok(None),
         Ok(Err(e)) => Err(format!("{}: {e}", file.display())),
         Err(_) => Err(format!(
             "{}: no answer within {} ms",

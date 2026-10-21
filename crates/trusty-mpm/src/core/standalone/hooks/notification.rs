@@ -36,6 +36,14 @@ pub const NOTIFY_INBOX_ENV: &str = "TRUSTY_MPM_NOTIFY_INBOX";
 /// the same name makes the forward a drop-in for #8436 P3.
 pub const INBOX_EVENTS_FILE: &str = "events.jsonl";
 
+/// The `POST /hooks` payload key naming a completed inbox push (#9167).
+///
+/// Why: the daemon records the push as a `message` event, but only `tm hook`
+/// knows whether the append completed and what line it wrote.
+/// What: an object `{"to": <inbox dir>, "text": <line appended>}`, set only
+/// when the append completed.
+pub const PUSHED_MESSAGE_FIELD: &str = "message_push";
+
 /// The `tm doctor` check name the repair step reports under.
 pub const NOTIFICATION_HOOK_CHECK: &str = "notification_hook";
 
