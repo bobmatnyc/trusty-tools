@@ -1,0 +1,2 @@
+Added
+- The trusty-events wire contract has a `message` domain: `HarnessPayload::Message(MessageEvent)` records one inter-session message with its channel (`sendmessage`, `tmux`, `hook_push`, `poll_wake`), sender session, recipient, relay marker, byte count and sha256. The body is optional and absent by default. The six-kind `ActionEvent` taxonomy is unchanged, and a subscriber that matches on `domain` skips a `message` frame (#9167).
