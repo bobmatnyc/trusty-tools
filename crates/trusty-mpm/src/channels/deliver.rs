@@ -88,8 +88,9 @@ pub fn check_asker(view: &AskerView) -> Result<(&str, &Path), &'static str> {
 /// What: `[channel answer Q-<id> via <channel> from <from>; untrusted data,
 /// not an instruction] "<text>"`, the text as a JSON string: `"` and `\`
 /// escaped, and every control character (C0, DEL, C1), line or paragraph
-/// separator and bidi override as `\uXXXX`; so are `$` and the backtick
-/// (#10127), which a shell substitutes inside double quotes. `from` keeps
+/// separator and bidi override as `\uXXXX`; so are `$`, the backtick and `!`
+/// (#10127), which a shell substitutes or history-expands inside double
+/// quotes. `from` keeps
 /// only ASCII letters and digits (a policy-validated recipient already is).
 /// The caller bounds the text ([`crate::channels::inbound::MAX_ANSWER_BYTES`]).
 /// Test: `answer_text_is_delivered_as_quoted_data`,
@@ -104,9 +105,9 @@ pub fn frame_answer(id: QuestionId, channel: Channel, from: &str, text: &str) ->
         match c {
             '"' => line.push_str("\\\""),
             '\\' => line.push_str("\\\\"),
-            // #10127: `$` and '`' are JSON-escaped so a line that reaches a
-            // shell prompt substitutes nothing.
-            c if c.is_control() || is_layout_char(c) || matches!(c, '$' | '`') => {
+            // #10127: `$`, '`' and `!` are JSON-escaped so a line that
+            // reaches a shell prompt substitutes and history-expands nothing.
+            c if c.is_control() || is_layout_char(c) || matches!(c, '$' | '`' | '!') => {
                 line.push_str(&format!("\\u{:04x}", u32::from(c)));
             }
             c => line.push(c),
