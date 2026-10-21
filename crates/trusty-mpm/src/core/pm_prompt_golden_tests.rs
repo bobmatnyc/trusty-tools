@@ -138,6 +138,24 @@ fn golden_bundled_fallback_prompt() {
 }
 
 #[test]
+fn the_bundled_fallback_prompt_stays_within_its_resident_budget() {
+    // #8999: the composed prompt is resident in every PM turn. The trim cut it
+    // from 26,881 bytes to under this budget; a rule added later must displace
+    // text or move behind a skill pointer, not grow the prompt.
+    const BUDGET_BYTES: usize = 22_800;
+    let composed =
+        compose_bundled_fallback_with_overrides(rc(), FIXED_STACK, FIXED_ROSTER, None, &[])
+            .0
+            .expect("package composes");
+    assert!(
+        composed.len() <= BUDGET_BYTES,
+        "the bundled-fallback PM prompt is {} bytes, over the {BUDGET_BYTES}-byte \
+         resident budget — move detail behind a skill pointer rather than growing it",
+        composed.len()
+    );
+}
+
+#[test]
 fn golden_roster_absent_assembly_prompt() {
     // Configuration 2, REPLACING the retired `.trusty-mpm/AGENT_DELEGATION.md`
     // snapshot (#4286). That configuration no longer exists — no file can force
