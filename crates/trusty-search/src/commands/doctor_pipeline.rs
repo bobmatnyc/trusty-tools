@@ -21,8 +21,8 @@ use super::doctor_checks::mcp_registration::{
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_http_listener, check_lock_file, check_log_rotation,
     check_model_cache, check_python_device_note, check_python_launcher, check_python_uv,
-    check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses, health_http_addr,
-    health_version, is_apple_silicon, print_index_breakdown, probe_daemon_health,
+    doctor_data_dir, fetch_index_names, fetch_index_statuses, health_http_addr, health_version,
+    is_apple_silicon, layout_check_result, print_index_breakdown, probe_daemon_health,
     python_embedder_selection_for, summarize_indexes, CheckResult, EmptyIndex,
     PythonEmbedderSelection,
 };
@@ -300,16 +300,14 @@ impl DoctorCheck for PythonEmbedderCheck {
             )];
         }
 
-        let mut results = vec![check_python_uv()];
-        match trusty_embedderd_py::resolve_layout() {
-            Ok(layout) => results.push(check_python_venv(&layout)),
-            Err(e) => results.push(CheckResult::Error(format!(
-                "Python/MPS embedder: could not resolve venv layout: {e:#}"
-            ))),
-        }
-        results.push(check_python_launcher(selection));
-        results.push(check_python_device_note());
-        results
+        // #9970: under the graceful default the uv and layout rows downgrade
+        // to Warn, as the launcher row does.
+        vec![
+            check_python_uv(selection),
+            layout_check_result(trusty_embedderd_py::resolve_layout(), selection),
+            check_python_launcher(selection),
+            check_python_device_note(),
+        ]
     }
 }
 
@@ -615,6 +613,40 @@ mod tests {
                     "the launcher Warn names the searched path and the fix: {msg}"
                 ),
                 other => panic!("a missing launcher is a Warn, got {other:?}"),
+            }
+        }
+    }
+
+    /// #9970: a bad `TRUSTY_UV_BIN` is a Warn under the Apple Silicon default
+    /// (the daemon stays on ort and says so) and an Error under explicit
+    /// `TRUSTY_EMBEDDER=python`, the same split the launcher row makes.
+    /// Mutation caught: the pre-#9970 uv row is an Error for both.
+    #[tokio::test]
+    #[serial]
+    async fn uv_rows_warn_under_the_graceful_default_and_error_for_explicit_python() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let _d = EnvVarGuard::set(
+            "TRUSTY_DATA_DIR_OVERRIDE",
+            data.path().to_str().expect("utf-8"),
+        );
+        let _f = EnvVarGuard::set("TRUSTY_UV_FETCH", "0");
+        let bad = data.path().join("no-such-uv");
+        let _u = EnvVarGuard::set("TRUSTY_UV_BIN", bad.to_str().expect("utf-8"));
+        for (value, graceful) in [(None, true), (Some("python"), false)] {
+            let _e = match value {
+                Some(v) => EnvVarGuard::set("TRUSTY_EMBEDDER", v),
+                None => EnvVarGuard::remove("TRUSTY_EMBEDDER"),
+            };
+            let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
+            let check = PythonEmbedderCheck {
+                is_apple_silicon: true,
+            };
+            let uv = &check.run(&state).await[0];
+            let names_cause = |m: &str| m.contains("TRUSTY_UV_BIN");
+            match uv {
+                CheckResult::Warn(m) if graceful && names_cause(m) => {}
+                CheckResult::Error(m) if !graceful && names_cause(m) => {}
+                other => panic!("TRUSTY_EMBEDDER={value:?}: unexpected uv row {other:?}"),
             }
         }
     }

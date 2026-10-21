@@ -222,6 +222,7 @@ async fn health_reports_the_python_bootstrap_retry_detail() {
             attempts: 3,
             last_error: Some("python readiness probe timed out after 90s".to_string()),
             next_retry_at: Some(next),
+            ..Default::default()
         }
     });
     state.install_switchable_embedder(Arc::clone(&switchable));

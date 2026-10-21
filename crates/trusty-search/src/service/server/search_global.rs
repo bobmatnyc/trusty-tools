@@ -247,6 +247,8 @@ pub(crate) async fn global_search_report(
             "query_embed": "not_run",
             "embed_degraded": false,
             "partial": cold_indexes_skipped > 0,
+            // #9970: the fan-out's `meta.embedder`; it has no `meta` block.
+            "embedder": super::search_meta::embedder_entry(state),
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         }));
@@ -530,6 +532,8 @@ pub(crate) async fn global_search_report(
         "embed_degraded": embed.status.degraded(),
         // #9027: true when any index was skipped or the embed degraded.
         "partial": partial,
+        // #9970: the active/intended embedder and the agent note.
+        "embedder": super::search_meta::embedder_entry(state),
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

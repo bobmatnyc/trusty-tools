@@ -60,14 +60,19 @@
 //! `fallback_propagates_error_when_build_ort_fails`,
 //! `fallback_logs_build_failure_exactly_once`,
 //! `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
-//! in this module's `tests`.
+//! in this module's `tests`; the #9970 trip listener:
+//! `eager_python_latch_trip_reports_ort_with_a_note` in `start/tests_9970.rs`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::Embedder;
+
+/// #9970: hears the trip reason and the fallback embedder once, when the
+/// latch trips, so `meta.embedder` and `/health` stop reporting python.
+pub(super) type TripListener = Box<dyn Fn(&str, &Arc<dyn Embedder>) + Send + Sync>;
 
 /// Build function for the Rust ort fallback embedder — injected so tests can
 /// substitute a fake without touching the real `locate_embedderd_binary`
@@ -106,9 +111,16 @@ pub(super) struct FallbackEmbedderAdapter {
     primary: Arc<dyn Embedder>,
     build_fallback: Box<FallbackBuilder>,
     state: Mutex<FallbackState>,
+    // #9970: filled by `build_embedder` once the `SwitchableEmbedder` exists.
+    on_trip: Arc<OnceLock<TripListener>>,
 }
 
 impl FallbackEmbedderAdapter {
+    /// The slot `build_embedder` fills with the latch-trip listener (#9970).
+    pub(super) fn trip_listener(&self) -> Arc<OnceLock<TripListener>> {
+        Arc::clone(&self.on_trip)
+    }
+
     pub(super) fn new(
         primary: Arc<dyn Embedder>,
         build_fallback: impl Fn() -> Result<Arc<dyn Embedder>> + Send + Sync + 'static,
@@ -121,6 +133,7 @@ impl FallbackEmbedderAdapter {
                 trip_logged: false,
                 build_failed_logged: false,
             }),
+            on_trip: Arc::new(OnceLock::new()),
         }
     }
 
@@ -166,6 +179,14 @@ impl FallbackEmbedderAdapter {
         match (self.build_fallback)() {
             Ok(fb) => {
                 guard.active = Some(Arc::clone(&fb));
+                drop(guard);
+                // #9970: ort serves from here on; the agent note must say so.
+                if let Some(listener) = self.on_trip.get() {
+                    let reason = format!(
+                        "its supervisor gave up restarting it; last error: {primary_err:#}"
+                    );
+                    listener(&reason, &fb);
+                }
                 Some(fb)
             }
             Err(build_err) => {

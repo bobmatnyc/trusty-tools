@@ -13,7 +13,9 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::core::embed::Embedder as _;
-use crate::service::embedder_supervisor::{BackendKind, BootstrapState};
+use crate::service::embedder_supervisor::BootstrapState;
+// #9970: moved to `embedder_view`, which search responses share.
+use crate::service::embedder_supervisor::embedder_view::{backend_kind_str, bootstrap_state_str};
 
 use super::state::{DaemonTransport, ReconcileSummary, SearchAppState, WarmBootSummary};
 
@@ -422,43 +424,6 @@ pub(super) struct EmbedderInfo {
     backend: String,
 }
 
-/// `BackendKind` → the `backend` string `/health` reports.
-///
-/// Why: kept as a standalone pure function so the mapping is unit-testable
-/// without constructing a full `HealthResponse`.
-/// What: one lowercase tag per variant.
-///
-/// Forward-note (PR-1 review, low priority): `BackendKind::Remote` collapses
-/// HTTP and UDS remotes into one variant, so this always reports `"remote"`
-/// for both transports. Splitting into `RemoteHttp`/`RemoteUnix` (or adding a
-/// sub-label) would let `/health` distinguish them — deferred as low
-/// priority since neither has resolution-order or safety implications.
-/// Test: `backend_kind_str_maps_every_variant`.
-fn backend_kind_str(kind: BackendKind) -> &'static str {
-    match kind {
-        BackendKind::Ort => "ort",
-        BackendKind::Python => "python",
-        BackendKind::Remote => "remote",
-        BackendKind::InProcess => "in_process",
-        BackendKind::Candle => "candle",
-    }
-}
-
-/// `BootstrapState` → the `embedder_bootstrap` string `/health` reports.
-///
-/// Why: standalone pure function, same rationale as [`backend_kind_str`].
-/// Test: `bootstrap_state_str_maps_every_variant`.
-fn bootstrap_state_str(state: BootstrapState) -> &'static str {
-    match state {
-        BootstrapState::NotApplicable => "n/a",
-        BootstrapState::Bootstrapping => "bootstrapping",
-        BootstrapState::Ready => "ready",
-        BootstrapState::Failed => "failed",
-        BootstrapState::Retrying => "retrying",
-        BootstrapState::FellBackToOrt => "fell_back_to_ort",
-    }
-}
-
 pub(super) async fn health_handler(
     State(state): State<Arc<SearchAppState>>,
 ) -> Json<HealthResponse> {
@@ -629,10 +594,16 @@ pub(super) async fn health_handler(
         .as_ref()
         .filter(|sw| sw.active().bootstrap != BootstrapState::NotApplicable)
         .map(|sw| {
-            crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth::new(
-                embedder_bootstrap,
-                &sw.bootstrap_control().report(),
-            )
+            // #9970: the same step and agent note search responses carry.
+            let view = crate::service::embedder_supervisor::embedder_view::EmbedderView::of(sw);
+            crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth {
+                phase: view.bootstrap,
+                note: view.note,
+                ..crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth::new(
+                    embedder_bootstrap,
+                    &sw.bootstrap_control().report(),
+                )
+            }
         });
     // #4125: a permanent embedder capability downgrade must reach `status`.
     //
@@ -1225,6 +1196,7 @@ pub(crate) async fn health_report(state: Arc<SearchAppState>) -> serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::embedder_supervisor::BackendKind;
 
     /// `backend_kind_str` must cover every `BackendKind` variant with a
     /// distinct, stable, lowercase tag — a missing/renamed arm would fail to

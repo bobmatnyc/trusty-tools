@@ -28,6 +28,24 @@ use tokio_util::sync::CancellationToken;
 /// this is short; it is charged to the SIGTERM window the index flush also uses.
 pub const BOOTSTRAP_STOP_BUDGET: Duration = Duration::from_secs(5);
 
+/// The step an in-flight bootstrap attempt is on (#9970).
+///
+/// Why: `BootstrapState::Bootstrapping` covers both the multi-minute venv
+/// build and the short readiness probe, and the agent note names which one.
+/// What: set by `graceful_bootstrap::try_bootstrap_once` as it enters each
+/// step and reset to `Idle` when the attempt ends.
+/// Test: `a_blocked_venv_step_reports_installing_venv_then_no_note_after_the_swap`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BootstrapPhase {
+    /// No attempt is running.
+    #[default]
+    Idle,
+    /// `ensure_venv` is running: venv build, torch download or recheck.
+    InstallingVenv,
+    /// The adapter is built and the readiness probe is running.
+    Probing,
+}
+
 /// What the python bootstrap last did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BootstrapReport {
@@ -39,6 +57,8 @@ pub struct BootstrapReport {
     /// When the next background attempt starts. `None` while an attempt runs,
     /// after a success, and after a terminal failure.
     pub next_retry_at: Option<SystemTime>,
+    /// #9970: the step the running attempt is on.
+    pub phase: BootstrapPhase,
 }
 
 /// The `/health` view of the python bootstrap (#9949), serialized as the
@@ -53,20 +73,33 @@ pub struct PythonBootstrapHealth {
     pub last_error: Option<String>,
     /// RFC 3339 UTC time of the next background attempt, when one is scheduled.
     pub next_retry_at: Option<String>,
+    /// #9970: `meta.embedder.bootstrap` on search responses — `state`, with
+    /// `installing_venv` / `probing` while an attempt runs.
+    pub phase: &'static str,
+    /// #9970: the same agent note search responses carry; `null` once python
+    /// serves.
+    pub note: Option<String>,
 }
 
 impl PythonBootstrapHealth {
     /// Combine the state string `/health` already computed with `report`.
+    /// `phase` starts as `state` and `note` as `None`; `/health` fills both
+    /// from [`super::embedder_view::EmbedderView`].
     pub fn new(state: &'static str, report: &BootstrapReport) -> Self {
         Self {
             state,
             attempts: report.attempts,
             last_error: report.last_error.clone(),
-            next_retry_at: report
-                .next_retry_at
-                .map(|at| chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339()),
+            next_retry_at: report.next_retry_at.map(rfc3339),
+            phase: state,
+            note: None,
         }
     }
+}
+
+/// `at` as an RFC 3339 UTC string, the form `/health` and the note use.
+pub fn rfc3339(at: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339()
 }
 
 /// Retry detail plus the stop handle for the graceful python bootstrap.
@@ -206,6 +239,7 @@ mod tests {
             attempts: 3,
             last_error: Some("probe timed out".to_string()),
             next_retry_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(120)),
+            ..BootstrapReport::default()
         };
         let view = PythonBootstrapHealth::new("retrying", &report);
         assert_eq!(view.state, "retrying");

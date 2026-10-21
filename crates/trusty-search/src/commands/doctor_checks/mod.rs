@@ -467,18 +467,24 @@ pub fn python_embedder_selection_for(
 
 /// Check `uv` presence + version (required to bootstrap the Python/MPS venv).
 /// `locate_uv` never fetches (#9966), so this stays read-only.
-pub fn check_python_uv() -> CheckResult {
-    uv_check_result(trusty_embedderd_py::bootstrap::locate_uv())
+pub fn check_python_uv(selection: PythonEmbedderSelection) -> CheckResult {
+    uv_check_result(trusty_embedderd_py::bootstrap::locate_uv(), selection)
 }
 
 /// Map a `locate_uv` outcome to a doctor row.
 ///
 /// Why (#9966): with no uv installed the bootstrap fetches the pinned uv, so
 /// "not installed" is not fatal unless `TRUSTY_UV_FETCH=0`.
-/// What: `Ok` with the version; `Warn` for `UvError::NotInstalled`; `Error`
-/// for everything else (fetch off, bad `TRUSTY_UV_BIN`, refused cache).
-/// Test: `uv_check_result_warns_when_the_bootstrap_would_fetch`.
-pub(crate) fn uv_check_result(found: anyhow::Result<std::path::PathBuf>) -> CheckResult {
+/// What: `Ok` with the version; `Warn` for `UvError::NotInstalled`; for
+/// everything else (fetch off, bad `TRUSTY_UV_BIN`, refused cache) the same
+/// downgrade as [`launcher_check_result`]: `Warn` under `GracefulDefault`
+/// (#9970 — the daemon stays on ort and says so), `Error` otherwise.
+/// Test: `uv_check_result_warns_when_the_bootstrap_would_fetch`,
+/// `uv_rows_warn_under_the_graceful_default_and_error_for_explicit_python`.
+pub(crate) fn uv_check_result(
+    found: anyhow::Result<std::path::PathBuf>,
+    selection: PythonEmbedderSelection,
+) -> CheckResult {
     use trusty_embedderd_py::uv_fetch::UvError;
     match found {
         Err(e)
@@ -499,9 +505,34 @@ pub(crate) fn uv_check_result(found: anyhow::Result<std::path::PathBuf>) -> Chec
                 .unwrap_or_else(|| "version unknown".to_string());
             CheckResult::Ok(format!("uv: {} ({})", version, path.display()))
         }
+        // #9970: degraded, not broken — the graceful default serves on ort.
+        Err(e) if selection == PythonEmbedderSelection::GracefulDefault => {
+            CheckResult::Warn(format!(
+                "uv unavailable: {e:#} — the Apple Silicon default stays on ort until \
+                 uv is usable; install uv or set TRUSTY_UV_BIN"
+            ))
+        }
         Err(e) => CheckResult::Error(format!(
             "uv not found: {e:#} — required to bootstrap the Python/MPS embedder \
              (TRUSTY_EMBEDDER=python); install uv or set TRUSTY_UV_BIN"
+        )),
+    }
+}
+
+/// Map a venv-layout lookup to a doctor row: the venv check on `Ok`, and on
+/// an error the [`uv_check_result`] downgrade (#9970).
+/// Test: `layout_check_result_warns_under_the_graceful_default`.
+pub(crate) fn layout_check_result(
+    found: anyhow::Result<trusty_embedderd_py::VenvLayout>,
+    selection: PythonEmbedderSelection,
+) -> CheckResult {
+    match found {
+        Ok(layout) => check_python_venv(&layout),
+        Err(e) if selection == PythonEmbedderSelection::GracefulDefault => CheckResult::Warn(
+            format!("Python/MPS embedder: could not resolve venv layout: {e:#} — staying on ort"),
+        ),
+        Err(e) => CheckResult::Error(format!(
+            "Python/MPS embedder: could not resolve venv layout: {e:#}"
         )),
     }
 }
