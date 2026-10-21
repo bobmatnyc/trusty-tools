@@ -144,3 +144,45 @@ fn tripwire_record_row_unknown_when_unreadable() {
         row.message
     );
 }
+
+/// 🔴 #8454 fix round: a record the hook cannot append to Fails — a
+/// read-only `trips.jsonl` in a writable directory, and a missing
+/// `tripwire/` whose nearest existing ancestor is read-only.
+#[test]
+fn tripwire_record_row_fails_when_the_file_or_ancestor_is_unwritable() {
+    if is_root() {
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = record_dir(home.path());
+    append(&dir, &trip(1_800_000_000)).expect("append");
+    let file = record_path(home.path());
+    let file_mode = Mode::set(&file, 0o400);
+    let row = check_tripwire_record(home.path());
+    assert_eq!(
+        row.status,
+        CheckStatus::Fail,
+        "read-only file: {}",
+        row.message
+    );
+    assert!(row.message.contains("trips.jsonl"), "{}", row.message);
+    drop(file_mode);
+
+    let bare = tempfile::tempdir().expect("tempdir");
+    let dir = record_dir(bare.path());
+    let ancestor = dir.parent().and_then(Path::parent).expect("ancestor");
+    std::fs::create_dir_all(ancestor).expect("mkdir ancestor");
+    let _dir_mode = Mode::set(ancestor, 0o500);
+    let row = check_tripwire_record(bare.path());
+    assert_eq!(
+        row.status,
+        CheckStatus::Fail,
+        "read-only ancestor: {}",
+        row.message
+    );
+    assert!(
+        row.message.contains(&ancestor.display().to_string()),
+        "{}",
+        row.message
+    );
+}

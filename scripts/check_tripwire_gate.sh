@@ -46,6 +46,7 @@ REQUIRED=(
   tripwire_denies_unplaceable_bash_path_when_tainted
   tripwire_record_failure_keeps_the_deny
   tripwire_policy_not_ready_stays_not_ready
+  tripwire_records_no_raw_command_text
   # src/bin/tm/commands/egress_guard_tripwire_tests.rs.
   tripwire_places_each_tool_path
   tripwire_arm_panic_denies_and_records
@@ -56,6 +57,7 @@ REQUIRED=(
   tripwire_record_row_warns_with_count_and_newest
   tripwire_record_row_fails_on_unparseable_line_or_unwritable_dir
   tripwire_record_row_unknown_when_unreadable
+  tripwire_record_row_fails_when_the_file_or_ancestor_is_unwritable
 )
 
 LOG="$(mktemp "${TMPDIR:-/tmp}/tripwire-gate.XXXXXX")"
