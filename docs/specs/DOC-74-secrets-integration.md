@@ -1576,7 +1576,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
 | S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
 | S10 PR 1 | Token hand-down as a read-only fd on an unlinked file, read with `pread` (§10.5); the Rust client drops its pipe read and `GrantedError::Rearm`; `tm secrets exec` sweeps stale `tm-grant-*` directories (#9071, #9072) | 5 | S9 |
-| S10 | `tm secrets resolve <key>` command; no published Python or npm package (owner ruling 2026-10-21, #9072) | 3 | S10 PR 1 |
+| S10 | `tm secrets resolve <key>` command; no published Python or npm package (owner ruling 2026-10-21, #9072) | 6 | S10 PR 1 |
 
 ### 15.10 Child re-scope
 
