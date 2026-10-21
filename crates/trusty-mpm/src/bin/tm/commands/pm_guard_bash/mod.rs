@@ -136,7 +136,8 @@ pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::{
     DeleteTarget, evaluate_destructive_delete_command, lone_inert_heredoc,
 };
-pub(crate) use floor_d4::evaluate_d4_floor;
+// #8454 round 3: the tripwire skips the same leading grammar.
+pub(crate) use floor_d4::{evaluate_d4_floor, grammar_prefix};
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use linked_worktree_head_move::{
