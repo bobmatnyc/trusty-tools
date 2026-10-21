@@ -684,6 +684,11 @@ mod tests {
         fn capture_pane(&self, name: &str, _p: &str, lines: usize) -> Result<String, ManagedError> {
             self.capture(name, lines)
         }
+
+        /// #10127: the pane runs its harness; the paste is the subject here.
+        fn pane_harness(&self, _n: &str, _p: &str, _h: &str) -> crate::core::process::PaneClaude {
+            crate::core::process::PaneClaude::Present
+        }
     }
 
     /// `session_send` must report `sent: false` when the pane proves the

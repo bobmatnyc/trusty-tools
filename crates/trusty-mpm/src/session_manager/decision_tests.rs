@@ -165,6 +165,15 @@ impl ManagedTmuxDriver for AnswerDriver {
         self.inner.pane_identity(pane_id)
     }
 
+    fn pane_harness(
+        &self,
+        name: &str,
+        pane: &str,
+        harness: &str,
+    ) -> crate::core::process::PaneClaude {
+        self.inner.pane_harness(name, pane, harness)
+    }
+
     fn runtime_ready(&self, name: &str) -> bool {
         !self.hooks.lock().unwrap().runtime_never_starts && self.inner.runtime_ready(name)
     }

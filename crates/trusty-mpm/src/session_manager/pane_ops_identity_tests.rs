@@ -156,9 +156,16 @@ async fn a_pane_identity_naming_another_session_refuses_every_pane_operation() {
 async fn an_owned_pane_still_receives_keys_capture_and_shutdown() {
     let f = Fixture::new(FakeTmux::default()).await;
     let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
-    f.scoped(f.mgr.inject(&id, MARK, Submit::Enter))
+    // #10127: the owned pane passes the ownership gate and reaches the
+    // harness probe, which the fake's empty `#{pane_pid}` cannot satisfy.
+    let r = f.scoped(f.mgr.inject(&id, MARK, Submit::Enter)).await;
+    assert!(
+        matches!(&r, Err(ManagedError::NoLiveHarness(why)) if why.starts_with("harness_unconfirmed:")),
+        "{r:?}"
+    );
+    f.scoped(f.mgr.inject(&id, MARK, Submit::Interrupt))
         .await
-        .expect("inject into the owned pane");
+        .expect("Ctrl-C into the owned pane");
     f.scoped(f.mgr.capture_pane(&id, 20))
         .await
         .expect("capture the owned pane");
@@ -452,7 +459,9 @@ async fn a_resume_that_recreates_the_pane_makes_the_record_ownable() {
         matches!(ownership, RuntimeOwnership::Owned { .. }),
         "{ownership:?}"
     );
-    f.scoped(f.mgr.inject(&id, MARK, Submit::NoSubmit))
+    // #10127: typed text also needs a live harness, which this pane may not
+    // run; Ctrl-C passes the same ownership gate with no harness probe.
+    f.scoped(f.mgr.inject(&id, MARK, Submit::Interrupt))
         .await
         .expect("the resumed record's pane takes keys");
 }
