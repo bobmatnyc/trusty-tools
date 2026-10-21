@@ -31,7 +31,8 @@ use serde_json::Value;
 use super::Touch;
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::{
-    AnchorWrite, anchor_writes, keyword_words, shell_segments_map, split_heredoc_bodies, tokenize,
+    AnchorWrite, anchor_writes, grammar_prefix, keyword_words, shell_segments_map,
+    split_heredoc_bodies, tokenize,
 };
 use crate::commands::pm_guard_trust_anchor_paths::{
     Placed, Resolved, dequote, fold_case, place, resolve, starts_with_ci,
@@ -368,23 +369,33 @@ enum DirOp {
 
 /// The directory change one segment makes, if it runs `cd`, `pushd` or
 /// `popd`; found past leading shell keywords (`if`, `then`, `do`, `{`, `!`),
-/// env assignments and wrappers, as the splitter does (#8454 round 2).
+/// shell grammar (a `case` header and pattern, a function header), env
+/// assignments and wrappers, as the splitter does (#8454 rounds 2 and 3).
+/// A redirect glued to the verb (`cd>/x`, `cd> /x`) leaves the verb a verb.
 fn segment_dir_changes(segment: &str) -> Result<Vec<DirOp>, &'static str> {
     let words = tokenize(&split_heredoc_bodies(segment).0).map_err(|_| UNLEXABLE)?;
-    let argv = &words[keyword_words(&words, 0).0..];
+    let argv = &words[lead_words(&words)..];
     let verb = |w: &str| {
-        let w = w.strip_prefix('\\').unwrap_or(w);
-        matches!(w.rsplit('/').next(), Some("cd" | "pushd" | "popd"))
+        matches!(
+            split_glued(w).0.rsplit('/').next(),
+            Some("cd" | "pushd" | "popd")
+        )
     };
     let at = strip_wrapper_prefix(argv).or_else(|| argv.iter().position(|w| verb(w)));
     let Some(at) = at.filter(|at| argv.get(*at).is_some_and(|w| verb(w))) else {
         return Ok(Vec::new());
     };
-    let name = argv[at].rsplit('/').next().unwrap_or_default();
+    let (part, glued) = split_glued(&argv[at]);
+    let name = part.rsplit('/').next().unwrap_or_default();
     if name.ends_with("popd") {
         return Ok(vec![DirOp::Stack]);
     }
     let mut rest = argv[at + 1..].iter();
+    // #8454 round 3: a bare operator glued to the verb (`cd>`) takes the
+    // next word as its target.
+    if is_bare_redirect(glued) {
+        rest.next();
+    }
     let mut operand = None;
     while let Some(w) = rest.next() {
         // #8454 round 2: a bare redirect operator's target is not an operand.
@@ -403,6 +414,31 @@ fn segment_dir_changes(segment: &str) -> Result<Vec<DirOp>, &'static str> {
         Some(w) if is_stack_index(w) => DirOp::Stack,
         Some(w) => DirOp::To(w.clone()),
     }])
+}
+
+/// How many leading words of a segment are shell keywords ([`keyword_words`]),
+/// shell grammar ([`grammar_prefix`]) or a lone `()`, peeled in turn (#8454
+/// round 3). `shell_segments_map` lifts the body out of a `(a)` case pattern,
+/// which leaves `()`; `grammar_prefix` reads unlifted words and keeps it.
+fn lead_words(words: &[String]) -> usize {
+    let mut at = 0;
+    loop {
+        let grammar = grammar_prefix(&words[at..]);
+        let grammar = grammar + usize::from(words.get(at + grammar).is_some_and(|w| w == "()"));
+        let skipped = grammar + keyword_words(words, at + grammar).0;
+        if skipped == 0 {
+            return at;
+        }
+        at += skipped;
+    }
+}
+
+/// A word split at its first `<` or `>`, a leading `\` dropped: the command
+/// part, then the redirect glued to it (empty when there is none). shlex
+/// splits only on whitespace, so `cd>/x` is one word (#8454 round 3).
+fn split_glued(word: &str) -> (&str, &str) {
+    let word = word.strip_prefix('\\').unwrap_or(word);
+    word.split_at(word.find(['<', '>']).unwrap_or(word.len()))
 }
 
 /// Whether `word` is a redirect operator with its target in the next word:
