@@ -361,6 +361,7 @@ fn resolved_question_without_a_delivery_line_is_a_doctor_fail() {
         asker_managed_session: "m-arch".into(),
         conversation: conversation.clone(),
         message_ts: "1700000000.000100".into(),
+        options: Vec::new(),
     };
     table.open(id, ask).expect("open");
     let ok = channel_taint_row(&dir, &live);

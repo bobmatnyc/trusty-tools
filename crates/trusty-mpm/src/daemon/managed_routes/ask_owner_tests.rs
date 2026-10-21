@@ -197,7 +197,7 @@ async fn http_route_refuses_ask_owner_as_unproven() {
 async fn mcp_ask_owner_over_http_rpc_is_refused_as_unproven() {
     let (state, _tmp) = daemon().await;
     // Outside a socket dispatch there is no kernel peer, as over `POST /rpc`.
-    let err = crate::daemon::mcp_ask_owner::ask_owner(&state, "U0OWNER1", "Merge?")
+    let err = crate::daemon::mcp_ask_owner::ask_owner(&state, "U0OWNER1", "Merge?", Vec::new())
         .await
         .expect_err("refused");
     assert!(err.starts_with("asker_unproven"), "{err}");

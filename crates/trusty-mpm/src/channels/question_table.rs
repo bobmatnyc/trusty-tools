@@ -4,10 +4,10 @@
 //! once, and only from the recipient and conversation it was asked in. The
 //! record must survive a daemon restart. This is a Fail-Open Check site: no
 //! failure here may let a question resolve twice or from the wrong party.
-//! What: an append-only JSONL log of `reserve`, `open` and `resolve` records,
-//! replayed into memory by [`QuestionTable::open_at`]. The shape follows the
-//! crate-private gchat ledger in trusty-channels; the code is this module's
-//! own. One `std::sync::Mutex` covers each operation's check, append and
+//! What: an append-only JSONL log of `reserve`, `open`, `resolve` and
+//! `unparsed` (#10127) records, replayed into memory by
+//! [`QuestionTable::open_at`]. The shape follows the crate-private gchat
+//! ledger in trusty-channels; the code is this module's own. One `std::sync::Mutex` covers each operation's check, append and
 //! apply. A lifetime `flock` on `questions.jsonl.lock` refuses a second table
 //! on the same path. Any append error poisons the table until it is reopened,
 //! and the replay then decides. A poisoned or dropped table releases its
@@ -35,6 +35,14 @@ mod seal;
 
 // #9923: the inbound event claim log reuses this table's flock and seal.
 pub mod claims;
+
+// #10127: the answer side moved out at the SLOC cap; it gains `unparsed`.
+mod answer;
+pub use answer::{Answer, ResolveOutcome, Unparsed, UnparsedOutcome};
+
+// #10127: the option-label rules, shared by `ask_owner` and the replay.
+mod options;
+pub use options::{MAX_OPTION_BYTES, MAX_OPTIONS, MIN_OPTIONS, validate_options};
 
 /// The record format version every line carries.
 pub const FORMAT_VERSION: u32 = 1;
@@ -137,6 +145,11 @@ pub struct Ask {
     pub conversation: Conversation,
     /// The posted message's timestamp.
     pub message_ts: String,
+    /// The option labels, numbered from 1; empty for a free-text question.
+    // #10127: a line written before options existed reads as empty, and an
+    // empty set is not written, so a pre-P2 daemon still reads such a line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// One open or answered question.
@@ -149,50 +162,6 @@ pub struct Question {
     /// What was asked, of whom and where.
     #[serde(flatten)]
     pub ask: Ask,
-}
-
-/// The first answer recorded for a question. Holds no answer text, only its
-/// digest and length; P5 delivers the text from its own buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Answer {
-    /// Who answered.
-    pub answerer: String,
-    /// When it was recorded (RFC 3339, milliseconds).
-    pub answered_at: String,
-    /// Lowercase hex SHA-256 of the answer text.
-    pub text_sha256: String,
-    /// The answer text's length in bytes.
-    pub text_len: usize,
-}
-
-impl Answer {
-    /// The record of `answerer` answering `text` now.
-    fn new(answerer: &str, text: &str) -> Self {
-        Self {
-            answerer: answerer.to_owned(),
-            answered_at: now(),
-            text_sha256: sha256_hex(text),
-            text_len: text.len(),
-        }
-    }
-}
-
-/// What [`QuestionTable::resolve`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveOutcome {
-    /// The question was open and now holds this answer, durably.
-    Resolved,
-    /// The question already had an answer; nothing changed.
-    AlreadyResolved {
-        /// The answer that won.
-        first: Answer,
-    },
-    /// The answerer or conversation is not the question's; nothing changed.
-    NotRecipient,
-    /// No open or answered question has this id (a reserved-only id too).
-    Unknown,
-    /// The table is poisoned; nothing changed in memory. Reopen it.
-    Poisoned,
 }
 
 /// The live table: the log handle, the replayed book and the poison flag.
@@ -380,56 +349,6 @@ impl QuestionTable {
         };
         self.commit(&mut state, record)?;
         Ok(question)
-    }
-
-    /// Resolve question `id` with `answer` from `answerer` in `conversation`,
-    /// once.
-    ///
-    /// Why: the arbiter for P5. `check_inbound` matches route names only,
-    /// and its `answered` copy is taken before this call, so the recipient,
-    /// the conversation and "still open" are judged here, in the same lock
-    /// hold as the append (#8433 r6 item 4).
-    /// What: `Unknown` for no open or answered question; `NotRecipient`
-    /// unless `answerer` and `conversation` equal the question's;
-    /// `AlreadyResolved` with the first answer; else appends `resolve`,
-    /// syncs it and returns `Resolved`. An append error poisons the table
-    /// and returns `Poisoned`.
-    /// Test: `concurrent_answers_resolve_exactly_once_n_rounds`,
-    /// `first_answer_wins_second_gets_already_answered_by_x_at_t`,
-    /// `answerer_must_be_the_questions_recipient`,
-    /// `answer_from_other_conversation_is_refused`,
-    /// `resolve_is_durable_before_it_returns`.
-    pub fn resolve(
-        &self,
-        id: QuestionId,
-        answerer: &str,
-        conversation: &Conversation,
-        answer: &str,
-    ) -> ResolveOutcome {
-        let Ok(mut state) = self.lock() else {
-            return ResolveOutcome::Poisoned;
-        };
-        let Some(entry) = state.book.questions.get(&id) else {
-            return ResolveOutcome::Unknown;
-        };
-        // #8433 r6: recipient and conversation are checked inside the CAS.
-        let ask = &entry.question.ask;
-        if ask.recipient != answerer || ask.conversation != *conversation {
-            return ResolveOutcome::NotRecipient;
-        }
-        if let Some(first) = &entry.answer {
-            return ResolveOutcome::AlreadyResolved {
-                first: first.clone(),
-            };
-        }
-        let record = Record::Resolve {
-            id,
-            answer: Answer::new(answerer, answer),
-        };
-        match self.commit(&mut state, record) {
-            Ok(()) => ResolveOutcome::Resolved,
-            Err(_) => ResolveOutcome::Poisoned,
-        }
     }
 
     /// The policy's view of question `id`, for `check_inbound`.

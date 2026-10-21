@@ -132,6 +132,7 @@ fn resolved_for(asker: &str) -> Resolved {
                 thread_ts: "1700000000.000100".into(),
             },
             message_ts: "1700000000.000100".into(),
+            options: Vec::new(),
         },
     };
     Resolved::for_test(question, "U0OWNER1", "approve")

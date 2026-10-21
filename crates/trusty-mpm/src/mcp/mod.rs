@@ -175,9 +175,16 @@ pub trait OrchestratorBackend: Send + Sync {
     /// What: the daemon proves the asker from the kernel's peer pid on the
     /// daemon socket and refuses an unproven one; returns the question id,
     /// route, DM channel and thread, or an error naming the rule.
-    /// Test: `dispatch_ask_owner_tool` (mock); the decision in
-    /// `channels/ask_owner_tests.rs`.
-    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String>;
+    /// #10127: `options` are the answer labels, empty for a free-text ask.
+    /// Test: `dispatch_ask_owner_tool`,
+    /// `dispatch_ask_owner_passes_options_and_rejects_bad_shapes` (mock); the
+    /// decision in `channels/ask_owner_tests.rs`.
+    async fn ask_owner(
+        &self,
+        recipient: &str,
+        question: &str,
+        options: Vec<String>,
+    ) -> Result<Value, String>;
 
     // ── #9979: the coordinator chat turn ─────────────────────────────────────
 
@@ -757,9 +764,12 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
         "ask_owner" => match (
             required_str(&args, "recipient"),
             required_str(&args, "question"),
+            ask_owner_options(&args),
         ) {
-            (Ok(recipient), Ok(question)) => backend.ask_owner(&recipient, &question).await,
-            (Err(e), _) | (_, Err(e)) => Err(e),
+            (Ok(recipient), Ok(question), Ok(options)) => {
+                backend.ask_owner(&recipient, &question, options).await
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
         },
         // #9979: the `mpm.sessions.chat` request, passed through whole.
         "sessions_chat" => match required_str(&args, "message") {
@@ -884,6 +894,26 @@ pub(crate) fn required_str_array(args: &Value, key: &str) -> Result<Vec<String>,
                 .ok_or_else(|| format!("`{key}` must contain only strings"))
         })
         .collect()
+}
+
+/// `ask_owner`'s optional `options`: absent or `null` is none (#10127).
+///
+/// Why: the schema gives `options` 2 to 6 strings, so a present but empty
+/// list or a non-string label must fail here, not read as a free-text ask.
+/// What: `Ok(vec![])` when absent or `null`; the strings when `options` is a
+/// non-empty array of strings; a descriptive error otherwise. The label
+/// rules are `ask_owner`'s.
+/// Test: `dispatch_ask_owner_passes_options_and_rejects_bad_shapes`.
+fn ask_owner_options(args: &Value) -> Result<Vec<String>, String> {
+    match args.get("options") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) if !items.is_empty() => items
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "`options` must contain only strings".to_owned()),
+        Some(_) => Err("`options` must be an array of 2 to 6 strings".to_owned()),
+    }
 }
 
 /// Extract a required unsigned-integer argument or produce a descriptive error.
