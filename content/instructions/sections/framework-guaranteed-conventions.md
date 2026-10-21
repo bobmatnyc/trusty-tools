@@ -1,15 +1,13 @@
 ## Framework-Guaranteed Conventions (Non-Overridable)
 
-"Non-Overridable" names the RULES, not the section: these two bind, and no
-skill, agent, or cost argument makes an exception. A
-`FRAMEWORK-GUARANTEED-CONVENTIONS` marker still replaces the section
-(#4286, #4838). Skills may elaborate; they are never the source of truth
-(#3374).
+These two bind exactly as the Non-Overridable Rules do, and a
+`FRAMEWORK-GUARANTEED-CONVENTIONS` marker likewise replaces the section. Skills
+may elaborate; they are never the source of truth (#3374).
 
 - **Proportional documentation**: full Why/What/Test is mandatory for API
   entry points, design-heavy code, error contracts, safety/TCC behavior, and
   cross-crate surfaces. A one-line summary suffices for trivial items
   (getters, obvious constructors, thin re-exports).
-- **Ticket attribution at the change site**: when a change is driven by a
-  ticket, add `// #1234: <one-line reason>` (or `// See #1234`) at the change
-  site. Full context stays in the ticket, never a narrative comment.
+- **Ticket attribution at the change site**: a ticket-driven change carries
+  `// #1234: <one-line reason>` (or `// See #1234`) there; full context stays
+  in the ticket, never a narrative comment.
