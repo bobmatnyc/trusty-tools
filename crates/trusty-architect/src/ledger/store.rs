@@ -257,14 +257,29 @@ pub(crate) fn lock(path: &Path, wait: Option<Duration>) -> Result<File, LedgerEr
     }
 }
 
-/// Writes `text` to a temp file beside `path`, fsyncs it and renames it over.
-pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), LedgerError> {
+/// Writes `text` to a temp file beside `path`, fsyncs it, renames it over,
+/// then fsyncs the directory so the rename is durable before the caller's
+/// next step (#9758: the journal is removed only after this returns).
+/// Test: `ledger_writer_kill_after_the_state_replace_replays_without_reapplying`.
+pub(crate) fn write_atomic(path: &Path, text: impl AsRef<[u8]>) -> Result<(), LedgerError> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let result = File::create(&tmp)
-        .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
+        .and_then(|mut f| f.write_all(text.as_ref()).and_then(|()| f.sync_all()))
         .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    result.map_err(LedgerError::io(path))
+    result.map_err(LedgerError::io(path))?;
+    sync_dir(path)
+}
+
+/// Fsyncs the directory holding `path`, making a rename or unlink in it durable.
+pub(crate) fn sync_dir(path: &Path) -> Result<(), LedgerError> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(LedgerError::io(dir))
 }

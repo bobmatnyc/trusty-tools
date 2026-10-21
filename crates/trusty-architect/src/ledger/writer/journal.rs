@@ -23,7 +23,7 @@ use crate::ledger::rpc::BatchResponse;
 use crate::ledger::store::{StorePaths, write_atomic};
 
 /// Appends the journal's lines where they are missing, replaces
-/// `state.json` and removes the journal.
+/// `state.json` (directory fsynced) and only then removes the journal.
 pub(super) fn complete(
     paths: &StorePaths,
     j: &Journal,
@@ -35,26 +35,62 @@ pub(super) fn complete(
         .at(CommitStep::Logged, paths)
         .map_err(LedgerError::io(&paths.state))?;
     write_atomic(&paths.state, &j.state)?;
+    faults
+        .at(CommitStep::Replaced, paths)
+        .map_err(LedgerError::io(&paths.journal))?;
     remove(&paths.journal)
+}
+
+/// `path`'s bytes, decoded as the prototype does (`decode('utf-8',
+/// 'replace')`); `None` only when it does not exist (#9758: any other read
+/// error refuses the batch instead of reading as empty).
+/// Test: `ledger_writer_replays_a_request_id_past_a_non_utf8_log_line`,
+/// `ledger_writer_refuses_when_the_archive_is_unreadable`.
+pub(super) fn read_lossy(path: &Path) -> Result<Option<String>, LedgerError> {
+    match fs::read(path) {
+        Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(LedgerError::io(path)(e)),
+    }
 }
 
 /// Finishes a commit a killed writer left (LDG-2.8.2 replay): a whole
 /// journal one `v` above `state.json` is completed; any other is dropped.
+/// An unreadable or non-UTF-8 journal is left for repair and refuses the
+/// batch (#9758).
+/// Test: `ledger_writer_leaves_a_non_utf8_journal_and_refuses`.
 pub(super) fn recover(paths: &StorePaths) -> Result<(), LedgerError> {
-    let Ok(text) = fs::read_to_string(&paths.journal) else {
-        return Ok(());
+    let bytes = match fs::read(&paths.journal) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(LedgerError::io(&paths.journal)(e)),
     };
+    let text = String::from_utf8(bytes).map_err(|_| {
+        LedgerError::Unavailable(format!(
+            "{} is not UTF-8; left for repair",
+            paths.journal.display()
+        ))
+    })?;
     let journal: Option<Journal> = serde_json::from_str(&text).ok();
-    let current = fs::read_to_string(&paths.state)
-        .ok()
-        .and_then(|t| state_v(&t));
+    let Some(state) = read_lossy(&paths.state)? else {
+        return Err(LedgerError::Invalid(
+            "state.json missing beside a commit journal; run init".into(),
+        ));
+    };
     match journal {
-        Some(j) if current.is_some_and(|v| v + 1 == j.v) => complete(paths, &j, &NoFaults),
+        Some(j) if state_v(&state).is_some_and(|v| v + 1 == j.v) => complete(paths, &j, &NoFaults),
         _ => remove(&paths.journal),
     }
 }
 
 /// Appends `text` at offset `at` of `path` unless a previous attempt did.
+///
+/// #9758: the prototype appends `log.jsonl` without the lock, so foreign
+/// lines can sit after `at`. `text` already present at a line start after
+/// `at` is done; a torn prefix of it at the end is finished; otherwise the
+/// whole of `text` is appended on a fresh line, so it lands exactly once.
+/// Test: `ledger_writer_commits_past_a_foreign_log_append_at_staged`,
+/// `ledger_writer_recovers_a_killed_commit_past_a_foreign_log_append`.
 pub(super) fn redo(path: &Path, at: u64, text: &str) -> Result<(), LedgerError> {
     if text.is_empty() {
         return Ok(());
@@ -66,23 +102,55 @@ pub(super) fn redo(path: &Path, at: u64, text: &str) -> Result<(), LedgerError> 
     };
     let start = usize::try_from(at).unwrap_or(usize::MAX).min(have.len());
     let tail = &have[start..];
-    if tail.starts_with(text.as_bytes()) {
+    let want = text.as_bytes();
+    let landed = (0..tail.len())
+        .filter(|&i| i == 0 || tail[i - 1] == b'\n')
+        .any(|i| tail[i..].starts_with(want));
+    if landed {
         return Ok(());
     }
-    let rest = text.as_bytes().strip_prefix(tail).ok_or_else(|| {
-        LedgerError::Unavailable(format!(
-            "{} does not match the commit journal; left for repair",
-            path.display()
-        ))
-    })?;
+    let mut rest = want.strip_prefix(tail).map(<[u8]>::to_vec);
+    if rest.is_none() {
+        let fresh = have.is_empty() || have.ends_with(b"\n");
+        rest = Some([if fresh { &b""[..] } else { b"\n" }, want].concat());
+    }
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(LedgerError::io(path))?;
-    f.write_all(rest)
+    f.write_all(&rest.unwrap_or_default())
         .and_then(|()| f.sync_all())
         .map_err(LedgerError::io(path))
+}
+
+/// Drops `archive.jsonl` lines whose `cv` is above `v`: orphans of a commit
+/// that never replaced `state.json` (the prototype's `reconcile_archive`,
+/// #9758). Other lines keep their bytes.
+/// Test: `ledger_writer_drops_an_orphan_archive_line_before_reusing_its_cv`.
+pub(super) fn reconcile_archive(path: &Path, v: u64) -> Result<(), LedgerError> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(LedgerError::io(path)(e)),
+    };
+    let orphan = |line: &[u8]| {
+        serde_json::from_slice::<Value>(line.trim_ascii_end())
+            .ok()
+            .and_then(|x| x.get("cv")?.as_u64())
+            .is_some_and(|cv| cv > v)
+    };
+    let lines: Vec<&[u8]> = bytes.split_inclusive(|b| *b == b'\n').collect();
+    if !lines.iter().any(|l| orphan(l)) {
+        return Ok(());
+    }
+    let keep: Vec<u8> = lines
+        .into_iter()
+        .filter(|l| !orphan(l))
+        .flatten()
+        .copied()
+        .collect();
+    write_atomic(path, keep)
 }
 
 /// The result of an earlier batch with `id`, from its `log.jsonl` line.
@@ -90,7 +158,7 @@ pub(super) fn replay(paths: &StorePaths, id: &str) -> Result<Option<BatchRespons
     if id.is_empty() {
         return Ok(None);
     }
-    let log = fs::read_to_string(&paths.log).unwrap_or_default();
+    let log = read_lossy(&paths.log)?.unwrap_or_default();
     let line = log
         .lines()
         .rev()

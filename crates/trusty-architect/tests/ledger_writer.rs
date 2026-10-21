@@ -644,3 +644,228 @@ fn ledger_op_check_enforces_the_writer_limits() -> R {
     }
     Ok(())
 }
+
+// #9758 fix round: the writer fails closed on read errors and on foreign
+// `log.jsonl` appends, and scans decoded values and request ids.
+
+/// A prototype-shaped line the hook appends to `log.jsonl` without the lock.
+const FOREIGN: &str = "{\"ts\": \"2026-10-21T10:00Z\", \"session\": \"pm-hook\", \"kind\": \"hook\", \"text\": \"foreign\"}\n";
+
+fn append(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(bytes)
+}
+
+/// One `0xFF` byte, then a newline: not UTF-8.
+fn not_utf8() -> Vec<u8> {
+    let mut junk = vec![0xFF_u8];
+    junk.extend_from_slice(b" junk\n");
+    junk
+}
+
+/// Appends [`FOREIGN`] to `log.jsonl` at `0`, as the unlocked hook would.
+struct ForeignAppendAt(CommitStep);
+
+impl Faults for ForeignAppendAt {
+    fn at(&self, step: CommitStep, paths: &StorePaths) -> io::Result<()> {
+        if step == self.0 {
+            append(&paths.log, FOREIGN.as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn ledger_writer_commits_past_a_foreign_log_append_at_staged() -> R {
+    let s = Store::new()?;
+    let req = s.req(json!([task("past foreign")]), "req-f")?;
+    let first = s.run_with(&ForeignAppendAt(CommitStep::Staged), &req)?;
+    assert_eq!(writer::render_ids(&first), "th-T01");
+    let log = read(&s.paths.log);
+    assert_eq!(log.matches("past foreign").count(), 2, "{log}");
+    assert_eq!(log.matches("pm-hook").count(), 1, "{log}");
+    assert!(!s.paths.journal.exists(), "the store is wedged");
+    assert_eq!(s.run_with(&writer::NoFaults, &req)?, first);
+    s.ok(json!([task("next")]))?;
+    assert_eq!(s.ids("tasks"), ["th-T01", "th-T02"]);
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_recovers_a_killed_commit_past_a_foreign_log_append() -> R {
+    let s = Store::new()?;
+    let req = s.req(json!([task("crash me")]), "req-k")?;
+    assert!(s.run_with(&KillAt(CommitStep::Staged), &req).is_err());
+    assert!(s.paths.journal.exists());
+    append(&s.paths.log, FOREIGN.as_bytes())?;
+    let first = s.run_with(&writer::NoFaults, &req)?;
+    assert_eq!(writer::render_ids(&first), "th-T01");
+    assert_eq!(s.ids("tasks"), ["th-T01"]);
+    let log = read(&s.paths.log);
+    assert_eq!(log.matches("crash me").count(), 2, "applied once: {log}");
+    assert_eq!(log.matches("pm-hook").count(), 1);
+    assert!(!s.paths.journal.exists());
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_replays_a_request_id_past_a_non_utf8_log_line() -> R {
+    let s = Store::new()?;
+    let req = s.req(json!([task("once")]), "turn-9")?;
+    let first = s.run_with(&writer::NoFaults, &req)?;
+    append(&s.paths.log, &not_utf8())?;
+    assert_eq!(s.run_with(&writer::NoFaults, &req)?, first);
+    assert_eq!(s.ids("tasks"), ["th-T01"]);
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line() -> R {
+    let s = Store::new()?;
+    s.ok(json!([task("t")]))?;
+    s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
+    append(&s.paths.archive, &not_utf8())?;
+    let mut reuse = task("u");
+    reuse["id"] = json!("th-T01");
+    let err = s.run(json!([reuse])).err().ok_or("archived id reissued")?;
+    assert!(err.to_string().contains("is archived"), "{err}");
+    assert_eq!(s.ids("tasks"), Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_leaves_a_non_utf8_journal_and_refuses() -> R {
+    let s = Store::new()?;
+    let mut journal = b"{\"v\": ".to_vec();
+    journal.extend(not_utf8());
+    fs::write(&s.paths.journal, &journal)?;
+    let before = s.files();
+    let err = s
+        .run(json!([task("t")]))
+        .err()
+        .ok_or("journal overwritten")?;
+    assert_eq!(exit(&err), 3, "{err}");
+    assert_eq!(s.files(), before);
+    assert_eq!(fs::read(&s.paths.journal)?, journal);
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_refuses_when_the_archive_is_unreadable() -> R {
+    let s = Store::new()?;
+    if s.paths.archive.exists() {
+        fs::remove_file(&s.paths.archive)?;
+    }
+    fs::create_dir(&s.paths.archive)?;
+    let before = read(&s.paths.state);
+    let err = s.run(json!([task("t")])).err().ok_or("committed blind")?;
+    assert_eq!(exit(&err), 3, "{err}");
+    assert_eq!(read(&s.paths.state), before);
+    Ok(())
+}
+
+/// A boundary-anchored scanner: `ghp_` after a non-word character (or at
+/// the start) with 16+ alphanumerics, as a `\b`-anchored regex matches.
+fn scan_word(text: &str) -> Option<String> {
+    let hit = text.match_indices("ghp_").any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let word = before.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let run = text[at + 4..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .count();
+        !word && run >= 16
+    });
+    hit.then(|| "ghp_…".to_owned())
+}
+
+fn run_word_scanned(req: &BatchRequest) -> Result<BatchResponse, LedgerError> {
+    let clock = FakeClock::new(NOW);
+    let scan = scan_word;
+    Writer::new(&clock, &scan).batch(req)
+}
+
+#[test]
+fn ledger_writer_refuses_a_secret_after_an_escaped_newline() -> R {
+    let s = Store::new()?;
+    s.ok(json!([task("t")]))?;
+    let [state, log, _] = s.files();
+    let outcome = "merged\nghp_abcdefghijklmnop0123";
+    let req = s.req(
+        json!([{"op": "close", "id": "th-T01", "outcome": outcome}]),
+        "",
+    )?;
+    let err = run_word_scanned(&req).err().ok_or("secret written")?;
+    assert_eq!(exit(&err), 2, "{err}");
+    assert_eq!(read(&s.paths.state), state);
+    let added = read(&s.paths.log)[log.len()..].to_owned();
+    assert!(added.contains("secret_refused"), "{added}");
+    assert!(!added.contains("abcdefghijklmnop"), "{added}");
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_refuses_a_secret_shaped_request_id() -> R {
+    let s = Store::new()?;
+    let [state, log, _] = s.files();
+    let req = s.req(json!([task("t")]), "ghp_abcdefghijklmnop0123")?;
+    let err = s
+        .run_with(&writer::NoFaults, &req)
+        .err()
+        .ok_or("secret request_id logged")?;
+    assert_eq!(exit(&err), 2, "{err}");
+    assert_eq!(read(&s.paths.state), state);
+    let added = read(&s.paths.log)[log.len()..].to_owned();
+    assert!(added.contains("secret_refused"), "{added}");
+    assert!(!added.contains("abcdefghijklmnop"), "{added}");
+    Ok(())
+}
+
+#[test]
+fn ledger_writer_drops_an_orphan_archive_line_before_reusing_its_cv() -> R {
+    let s = Store::new()?;
+    s.ok(json!([task("t")]))?;
+    let cv = s.state()["v"].as_u64().ok_or("v")? + 1;
+    let orphan = json!({
+        "archived_at": "2026-10-21T09:30Z", "closed_at": "2026-10-21T09:30Z",
+        "kind": "task", "cv": cv,
+        "item": {"id": "th-T09", "goal": "th-G01", "title": "orphan",
+                 "status": "done", "to": "", "outcome": "x"},
+    });
+    append(&s.paths.archive, (orphan.to_string() + "\n").as_bytes())?;
+    s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
+    let at_cv: Vec<Value> = read(&s.paths.archive)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|l| l["cv"] == json!(cv))
+        .collect();
+    assert_eq!(at_cv.len(), 1, "{at_cv:?}");
+    assert_eq!(at_cv[0]["item"]["id"], "th-T01");
+    assert!(!read(&s.paths.archive).contains("th-T09"));
+    Ok(())
+}
+
+/// The journal outlives the `state.json` replace: a kill there leaves the
+/// new state and the journal, and the next writer drops the journal and
+/// replays the request instead of applying it again.
+#[test]
+fn ledger_writer_kill_after_the_state_replace_replays_without_reapplying() -> R {
+    let s = Store::new()?;
+    let req = s.req(json!([task("crash me")]), "req-r")?;
+    assert!(s.run_with(&KillAt(CommitStep::Replaced), &req).is_err());
+    assert_eq!(s.ids("tasks"), ["th-T01"], "state.json not replaced");
+    assert!(
+        s.paths.journal.exists(),
+        "journal removed before the replace"
+    );
+    let again = s.run_with(&writer::NoFaults, &req)?;
+    assert_eq!(writer::render_ids(&again), "th-T01");
+    assert_eq!(s.ids("tasks"), ["th-T01"]);
+    assert_eq!(read(&s.paths.log).matches("crash me").count(), 2);
+    assert!(!s.paths.journal.exists());
+    Ok(())
+}

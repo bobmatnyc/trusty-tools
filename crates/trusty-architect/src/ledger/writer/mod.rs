@@ -11,7 +11,8 @@
 //! value), checks `if_v`, applies every op to a copy, archives what closed,
 //! prunes once when the result would pass the 16 KB bar, and commits:
 //! journal (fsync), `v` re-read (a change logs `tamper`), archive lines, log
-//! lines, `state.json` replace, journal removed (LDG-2.8.2). [`show`] reads.
+//! lines, `state.json` replace and directory fsync, journal removed
+//! (LDG-2.8.2). Only a missing file reads as empty (#9758). [`show`] reads.
 //! Test: `tests/ledger_writer.rs`, `ledger_writer_matches_prototype_bytes`.
 //!
 //! # Spec References
@@ -32,7 +33,10 @@ use serde_json::Value;
 
 pub use show::{minute, render_ids, render_prune, show};
 
-use self::journal::{append_notice, complete, file_len, notice, recover, remove, replay, state_v};
+use self::journal::{
+    append_notice, complete, file_len, notice, read_lossy, reconcile_archive, recover, remove,
+    replay, state_v,
+};
 use crate::clock::Clock;
 use crate::error::LedgerError;
 use crate::ledger::ids::LedgerId;
@@ -53,6 +57,9 @@ pub enum CommitStep {
     Staged,
     /// The archive and log lines are appended; `state.json` is not replaced.
     Logged,
+    /// `state.json` is replaced and its directory fsynced; the journal is
+    /// not yet removed (#9758).
+    Replaced,
 }
 
 /// Faults a commit runs through; production uses [`NoFaults`].
@@ -156,7 +163,7 @@ impl<'a> Writer<'a> {
         }
         let now = Now::at(self.clock.now_unix());
         let session = req.store.session.as_str();
-        if let Some(refusal) = self.secret(&req.ops) {
+        if let Some(refusal) = self.secret(req) {
             append_notice(&paths, &now, session, "secret_refused", &refusal)?;
             return Err(bad(refusal));
         }
@@ -176,8 +183,8 @@ impl<'a> Writer<'a> {
                 st.v
             )));
         }
-        let archived = archived_ids(&paths);
-        let answered = answered_times(&paths);
+        let archived = archived_ids(&paths)?;
+        let answered = answered_times(&paths)?;
         let cx = Context {
             archived: &archived,
             answered: &answered,
@@ -210,14 +217,31 @@ impl<'a> Writer<'a> {
         commit.run(self.faults, st, events, gone, &answered, &req.request_id)
     }
 
-    /// The refusal text for the first secret-shaped op, naming its shape only.
-    fn secret(&self, ops: &[Op]) -> Option<String> {
-        ops.iter().enumerate().find_map(|(i, op)| {
-            let text = serde_json::to_string(op).ok()?;
-            let shape = (self.scan)(&text)?;
+    /// The refusal text for a secret-shaped `request_id` or the first
+    /// secret-shaped op, naming its shape only.
+    ///
+    /// #9758: each decoded string is scanned on its own, so a JSON escape
+    /// (`\n` before a token) cannot hide it from a boundary-anchored shape,
+    /// and an op that cannot be serialized for the scan is refused.
+    /// Test: `ledger_writer_refuses_a_secret_after_an_escaped_newline`,
+    /// `ledger_writer_refuses_a_secret_shaped_request_id`.
+    fn secret(&self, req: &BatchRequest) -> Option<String> {
+        const FIX: &str = "write a location, never a value";
+        if let Some(shape) = (self.scan)(&req.request_id) {
+            return Some(format!(
+                "request_id refused: secret-shaped value ({shape}); {FIX}"
+            ));
+        }
+        req.ops.iter().enumerate().find_map(|(i, op)| {
+            let n = i + 1;
+            let Ok(value) = serde_json::to_value(op) else {
+                return Some(format!(
+                    "op {n} refused: it could not be scanned for secrets"
+                ));
+            };
+            let shape = scan_strings(&value, self.scan)?;
             Some(format!(
-                "op {} refused: secret-shaped value ({shape}); write a location, never a value",
-                i + 1
+                "op {n} refused: secret-shaped value ({shape}); {FIX}"
             ))
         })
     }
@@ -320,6 +344,9 @@ impl Commit<'_> {
             };
             log += &(serde_json::to_string(&line)? + "\n");
         }
+        // #9758: an orphan archive line from a crashed prototype commit
+        // must go before this commit reuses its `cv`.
+        reconcile_archive(&self.paths.archive, self.loaded_v)?;
         let journal = Journal {
             v: st.v,
             archive_at: file_len(&self.paths.archive),
@@ -350,19 +377,33 @@ impl Commit<'_> {
     }
 }
 
+/// The first string in `v` (object keys included) that `scan` flags.
+fn scan_strings(v: &Value, scan: SecretScan<'_>) -> Option<String> {
+    match v {
+        Value::String(s) => scan(s),
+        Value::Array(a) => a.iter().find_map(|x| scan_strings(x, scan)),
+        Value::Object(o) => o
+            .iter()
+            .find_map(|(k, x)| scan(k).or_else(|| scan_strings(x, scan))),
+        _ => None,
+    }
+}
+
 /// Ids in `archive.jsonl` (LDG-2.2.3: an archived id is never reissued).
-fn archived_ids(paths: &StorePaths) -> Vec<LedgerId> {
-    let text = fs::read_to_string(&paths.archive).unwrap_or_default();
+/// #9758: a read error refuses the batch; only a missing file is empty.
+/// Test: `ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line`.
+fn archived_ids(paths: &StorePaths) -> Result<Vec<LedgerId>, LedgerError> {
+    let text = read_lossy(&paths.archive)?.unwrap_or_default();
     let id = |l: &str| {
         let v: Value = serde_json::from_str(l).ok()?;
         LedgerId::parse(v["item"]["id"].as_str()?).ok()
     };
-    text.lines().filter_map(id).collect()
+    Ok(text.lines().filter_map(id).collect())
 }
 
 /// The last `answered` time per id in `log.jsonl`, either log shape.
-fn answered_times(paths: &StorePaths) -> BTreeMap<String, f64> {
-    let text = fs::read_to_string(&paths.log).unwrap_or_default();
+fn answered_times(paths: &StorePaths) -> Result<BTreeMap<String, f64>, LedgerError> {
+    let text = read_lossy(&paths.log)?.unwrap_or_default();
     let mut out = BTreeMap::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -381,7 +422,7 @@ fn answered_times(paths: &StorePaths) -> BTreeMap<String, f64> {
             out.insert(id.to_owned(), at);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Seconds since the epoch of a minute- or second-precision UTC time.
