@@ -23,6 +23,12 @@ impl GitProbe for OnMain {
     fn current_branch(&self, _dir: &Path) -> Option<String> {
         Some("main".into())
     }
+    fn has_remote(&self, _dir: &Path, name: &str) -> Option<bool> {
+        Some(name == "origin")
+    }
+    fn config(&self, _dir: &Path, _key: &str) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
 }
 
 /// No live Architect launch record: the #8902 pane floor does not apply.
