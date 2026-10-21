@@ -329,6 +329,8 @@ fn cli_parses_every_secrets_verb() {
         vec!["copy", "--from", "keychain", "--to", "spare"],
         vec!["copy", "--from", "keychain", "--to", "spare", "A", "grp.B"],
         vec!["doctor"],
+        // #9072: the tier-3 grant client.
+        vec!["resolve", "K"],
     ] {
         let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
         let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?}: {e}"));
@@ -348,6 +350,7 @@ fn cli_parses_every_secrets_verb() {
         vec!["copy", "--from", "keychain"],
         vec!["remove"],
         vec!["import"],
+        vec!["resolve"],
     ] {
         let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
         assert!(Cli::try_parse_from(argv).is_err(), "{args:?} parsed");

@@ -79,17 +79,22 @@ fn report(out: &std::process::Output) -> String {
 }
 
 /// A real trusty-secrets server over `backend`, under a scratch `$HOME`.
-struct Live {
-    home: tempfile::TempDir,
-    repo: PathBuf,
-    vault: String,
+///
+/// #9072: shared with `tm_secrets_resolve`, which seeds flagged keys under
+/// `index` and so needs no detached run.
+pub(crate) struct Live {
+    pub(crate) home: tempfile::TempDir,
+    pub(crate) repo: PathBuf,
+    pub(crate) vault: String,
+    /// The server's names-index root.
+    pub(crate) index: PathBuf,
     audit: PathBuf,
     client: OnDemandSecrets,
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Live {
-    async fn new(backend: Arc<dyn SecretBackend>, repo_name: &str) -> Self {
+    pub(crate) async fn new(backend: Arc<dyn SecretBackend>, repo_name: &str) -> Self {
         let home = tempfile::Builder::new()
             .prefix("tsl")
             .tempdir_in("/tmp")
@@ -114,6 +119,7 @@ impl Live {
         )
         .expect("machine.yaml");
         let audit = settings.audit_log.clone();
+        let index = settings.index_root.clone();
         let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
             BackendId::KEYCHAIN => Ok(Arc::clone(&backend)),
             other => Err(SecretsError::UnknownBackend {
@@ -137,6 +143,7 @@ impl Live {
             vault: format!("trusty/trusty-test/{}", repo_name.to_ascii_lowercase()),
             home,
             repo,
+            index,
             audit,
             client,
             _stop: stop,
@@ -144,7 +151,7 @@ impl Live {
     }
 
     /// One project-scoped call from this (detached) test process.
-    async fn call(&self, method: &str, params: Value) -> Result<Value, ClientError> {
+    pub(crate) async fn call(&self, method: &str, params: Value) -> Result<Value, ClientError> {
         let params = with_project(&self.repo, params).expect("utf-8");
         self.client.call(method, params).await
     }

@@ -156,6 +156,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
   - `remove` — Remove one key of the project scope
+  - `resolve` — Print one key's value inside a `tm secrets exec` grant
   - `set` — Add or replace one key of the project scope. The value comes from the clipboard
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons

@@ -40,6 +40,9 @@ mod exec_token;
 mod exec_wire;
 #[cfg(unix)]
 mod paste;
+// #9072: `tm secrets resolve`, the tier-3 grant client.
+#[cfg(unix)]
+mod resolve;
 #[cfg(unix)]
 mod session;
 #[cfg(unix)]
@@ -85,6 +88,11 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
             Err(_) => 1,
         };
         std::process::exit(code);
+    }
+    // #9072: dials only the granted socket; the on-demand client could
+    // start a server.
+    if let SecretsAction::Resolve { key } = &action {
+        return resolve::run(key.text(), &mut std::io::stdout()).await;
     }
     let client = trusty_secrets::server::OnDemandSecrets::new()
         .map_err(|e| anyhow::anyhow!("tm secrets: {e}"))?;
@@ -154,6 +162,7 @@ pub(crate) async fn dispatch(
             verbs::copy(ctx, &from, &to, &keys, out).await
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
+        SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,
         // #9621: both end the process, so only [`run`] dispatches them.
         SecretsAction::Exec { .. } | SecretsAction::ExecStub { .. } => {
             anyhow::bail!("tm secrets exec: runs only from the command line")

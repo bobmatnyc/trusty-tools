@@ -112,6 +112,19 @@ pub(crate) enum SecretsAction {
     },
     /// Report socket and backend reachability, never a value.
     Doctor,
+    // #9072: tier 3 of DOC-74 §15.8 for any language, on the command line.
+    /// Print one key's value inside a `tm secrets exec` grant.
+    ///
+    /// Reads the grant token from the fd that `TRUSTY_SECRETS_TOKEN_FD`
+    /// names and asks the running trusty-secrets server for `KEY`. On
+    /// success stdout holds the value and nothing else, with no trailing
+    /// newline. No grant, a bad token, a refused key or a server that is not
+    /// running exits 1 with a fixed message on stderr and nothing on stdout.
+    /// Never starts a server.
+    Resolve {
+        /// The key name, as granted by `tm secrets exec`.
+        key: ArgText,
+    },
     // #9621: tier 1 of DOC-74 §15.8 — `--env` and `--stdin`; no `--dotenv`.
     /// Run a command with project keys in its environment or on its stdin.
     ///
