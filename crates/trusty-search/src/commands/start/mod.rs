@@ -30,6 +30,8 @@ mod graceful_bootstrap;
 // inline branches no test could reach — which data dir every per-instance path
 // derives from, and whether an explicit one may auto-discover.
 mod isolation;
+// #9970: the python intent behind the installed embedder, for the agent note.
+mod python_intent;
 // #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
 // starts, which used to match by process name alone.
 // #8686: `service restart` scopes its kill set with the same plan.
@@ -63,6 +65,10 @@ mod tests_9949;
 // #9968: the eager python path looks up the launcher before the venv build.
 #[cfg(test)]
 mod tests_9968;
+
+// #9970: the agent note on search while the python venv installs.
+#[cfg(test)]
+mod tests_9970;
 
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
