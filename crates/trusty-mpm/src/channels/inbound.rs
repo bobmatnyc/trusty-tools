@@ -9,10 +9,13 @@
 //! table), the question table, the binding by conversation (#9873 Q2; `[Q-n]`
 //! text is data only), `check_inbound` with that binding, the route's rate
 //! window (Q7), the text bound (Q10), the asker preflight (Q4), then
-//! [`QuestionTable::resolve`], the arbiter. Only a `Resolved` verdict carries
-//! the text on, to `crate::channels::deliver`. This file holds the crate's
-//! only `resolve` call (Q8). Blocking: the daemon runs it on the blocking pool.
-//! Test: `inbound_tests.rs`.
+//! (#10127) the reply read as one option ([`option_match::match_reply`]): a
+//! match goes to [`QuestionTable::resolve`], the arbiter; any other reply is
+//! held by [`QuestionTable::mark_unparsed`], the question left open. Only a
+//! `Resolved` verdict carries the answer on, to `crate::channels::deliver`.
+//! This file holds the crate's only `resolve` call (Q8). Blocking: the daemon
+//! runs it on the blocking pool.
+//! Test: `inbound_tests.rs`, `inbound_options_tests.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,8 +26,9 @@ use trusty_channels::policy::{
     RateLimit, RateLimiter, Route,
 };
 
+use crate::channels::option_match::{self, Choice, HoldReason};
 use crate::channels::question_table::{
-    Answer, Conversation, Question, QuestionTable, ResolveOutcome,
+    Answer, Conversation, Question, QuestionTable, ResolveOutcome, UnparsedOutcome,
 };
 use crate::channels::snapshot::{Refusal, SnapshotDeny};
 
@@ -66,6 +70,14 @@ pub trait AnswerTable: Send + Sync {
         conversation: &Conversation,
         text: &str,
     ) -> ResolveOutcome;
+    /// See [`QuestionTable::mark_unparsed`] (#10127).
+    fn mark_unparsed(
+        &self,
+        id: QuestionId,
+        answerer: &str,
+        conversation: &Conversation,
+        text: &str,
+    ) -> UnparsedOutcome;
     /// See [`QuestionTable::is_poisoned`].
     fn is_poisoned(&self) -> bool;
 }
@@ -96,6 +108,16 @@ impl AnswerTable for QuestionTable {
     ) -> ResolveOutcome {
         // #9873 Q8: the crate's one `resolve` call site.
         QuestionTable::resolve(self, id, answerer, conversation, text)
+    }
+
+    fn mark_unparsed(
+        &self,
+        id: QuestionId,
+        answerer: &str,
+        conversation: &Conversation,
+        text: &str,
+    ) -> UnparsedOutcome {
+        QuestionTable::mark_unparsed(self, id, answerer, conversation, text)
     }
 
     fn is_poisoned(&self) -> bool {
@@ -174,6 +196,7 @@ pub struct Resolved {
     question: Question,
     answerer: String,
     text: String,
+    choice: Option<Choice>,
 }
 
 impl Resolved {
@@ -192,6 +215,12 @@ impl Resolved {
         &self.text
     }
 
+    /// The option the reply named (#10127); `decide` resolves no other
+    /// reply. `None` only from [`Resolved::for_test`].
+    pub fn choice(&self) -> Option<&Choice> {
+        self.choice.as_ref()
+    }
+
     /// A `Resolved` built outside [`decide`], for the deliverer's tests only.
     #[cfg(test)]
     pub(crate) fn for_test(question: Question, answerer: &str, text: &str) -> Self {
@@ -199,7 +228,34 @@ impl Resolved {
             question,
             answerer: answerer.to_owned(),
             text: text.to_owned(),
+            choice: None,
         }
+    }
+}
+
+/// A reply held instead of delivered (#10127). Built only by [`decide`],
+/// after `mark_unparsed` returned `Marked`; it holds no reply byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    question: Question,
+    reason: HoldReason,
+}
+
+impl Held {
+    /// The question the reply was held for, still open.
+    pub fn question(&self) -> &Question {
+        &self.question
+    }
+
+    /// Why the reply was held.
+    pub fn reason(&self) -> HoldReason {
+        self.reason
+    }
+
+    /// A `Held` built outside [`decide`], for the deliverer's tests only.
+    #[cfg(test)]
+    pub(crate) fn for_test(question: Question, reason: HoldReason) -> Self {
+        Self { question, reason }
     }
 }
 
@@ -208,6 +264,9 @@ impl Resolved {
 pub enum Verdict {
     /// The question is resolved; deliver the answer.
     Resolved(Resolved),
+    /// The reply is held and annotated; the question stays open. Send the
+    /// asker a notice (#10127).
+    Held(Held),
     /// Dropped; nothing changed.
     Dropped(Dropped),
 }
@@ -217,7 +276,11 @@ pub enum Verdict {
 /// Why: see the module doc; the order is the contract.
 /// What: each step that refuses returns [`Verdict::Dropped`] with its code,
 /// after one audit line (a rate-window drop writes one per window). Only
-/// `resolve` returning `Resolved` yields [`Verdict::Resolved`].
+/// `resolve` returning `Resolved` yields [`Verdict::Resolved`], and only a
+/// reply naming one option reaches `resolve` (#10127). Any other reply,
+/// after the preflight, goes to `mark_unparsed`: `Marked` writes one audit
+/// line with the [`HoldReason`] code and yields [`Verdict::Held`]; a refusal
+/// drops with `resolve`'s codes.
 /// Test: `unknown_sender_changes_no_state_and_is_logged`,
 /// `matched_route_without_open_question_never_starts_a_prompt`,
 /// `second_answer_gets_already_answered`,
@@ -229,13 +292,21 @@ pub enum Verdict {
 /// `inbound_drop_stands_when_audit_write_fails`,
 /// `over_long_answer_drops_without_resolving`,
 /// `failed_preflight_leaves_the_question_open_and_answerable`,
-/// `per_binding_rate_limit_drops_101st`, `poisoned_rate_limiter_drops`.
+/// `per_binding_rate_limit_drops_101st`, `poisoned_rate_limiter_drops`,
+/// `no_match_holds_audits_and_sends_untainted_notice`,
+/// `free_text_question_reply_is_held_like_a_no_match`,
+/// `unparsed_write_failure_sends_no_notice_and_keeps_question_open`,
+/// `matched_reply_with_poisoned_table_delivers_nothing`,
+/// `failed_preflight_marks_nothing`.
 pub fn decide(env: &dyn InboundEnv, ev: &InboundEvent) -> Verdict {
-    let drop_with = |code: &'static str, first: Option<Answer>, rate_limited: bool| {
-        // #9873 (F14): an audit error is logged; the drop stands either way.
+    // #9873 (F14): an audit error is logged; the drop (or hold) stands.
+    let audit = |code: &'static str, rate_limited: bool| {
         if let Err(why) = env.audit(ev, code, rate_limited) {
             tracing::error!(%why, code, "inbound drop: audit line not written");
         }
+    };
+    let drop_with = |code: &'static str, first: Option<Answer>, rate_limited: bool| {
+        audit(code, rate_limited);
         Verdict::Dropped(Dropped { code, first })
     };
     let refuse = |code| drop_with(code, None, false);
@@ -308,19 +379,35 @@ pub fn decide(env: &dyn InboundEnv, ev: &InboundEvent) -> Verdict {
         tracing::warn!(%why, question = id, "inbound answer: asker cannot take it now");
         return refuse("asker_unavailable");
     }
-    match table.resolve(id, &answerer, &ev.conversation, &ev.text) {
-        ResolveOutcome::Resolved => Verdict::Resolved(Resolved {
-            question,
-            answerer,
-            text: ev.text.clone(),
-        }),
+    let refused = |outcome: ResolveOutcome| match outcome {
         ResolveOutcome::AlreadyResolved { first } => {
             drop_with("already_resolved", Some(first), false)
         }
         ResolveOutcome::NotRecipient => refuse("not_recipient"),
         ResolveOutcome::Unknown => refuse("unknown_question"),
-        // #9873 (F5): durability unknown; the reopen's replay decides.
-        ResolveOutcome::Poisoned => refuse("table_poisoned"),
+        // #9873 (F5): durability unknown; the reopen's replay decides. No
+        // refusal carries `Resolved`; one that did fails closed here.
+        ResolveOutcome::Poisoned | ResolveOutcome::Resolved => refuse("table_poisoned"),
+    };
+    // #10127 (df-Da7 Q1, Q2 c): only a reply naming one option resolves.
+    let Some(choice) = option_match::match_reply(&question.ask.options, &ev.text) else {
+        let reason = HoldReason::for_options(&question.ask.options);
+        return match table.mark_unparsed(id, &answerer, &ev.conversation, &ev.text) {
+            UnparsedOutcome::Marked => {
+                audit(reason.code(), false);
+                Verdict::Held(Held { question, reason })
+            }
+            UnparsedOutcome::Refused(outcome) => refused(outcome),
+        };
+    };
+    match table.resolve(id, &answerer, &ev.conversation, &ev.text) {
+        ResolveOutcome::Resolved => Verdict::Resolved(Resolved {
+            question,
+            answerer,
+            text: ev.text.clone(),
+            choice: Some(choice),
+        }),
+        outcome => refused(outcome),
     }
 }
 
@@ -428,3 +515,8 @@ impl InboundLimiter {
 #[cfg(test)]
 #[path = "inbound_tests.rs"]
 pub(crate) mod tests;
+
+// #10127 (S5 P2b): the option match and the hold.
+#[cfg(test)]
+#[path = "inbound_options_tests.rs"]
+pub(crate) mod options_tests;

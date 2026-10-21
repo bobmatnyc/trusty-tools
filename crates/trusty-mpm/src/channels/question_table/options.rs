@@ -64,7 +64,8 @@ pub fn validate_options(options: &[String]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The form two labels are compared in: trimmed, then lower-cased.
-fn option_key(label: &str) -> String {
+/// The form two labels, or a reply and a label (#10127 P2b), are compared
+/// in: trimmed, then lower-cased.
+pub(crate) fn option_key(label: &str) -> String {
     label.trim().to_lowercase()
 }
