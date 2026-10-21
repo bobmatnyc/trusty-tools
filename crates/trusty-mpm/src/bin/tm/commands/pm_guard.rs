@@ -75,7 +75,8 @@
 //! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
 //! can set either var there and self-exempt from this entire guard. That gap
 //! predates this PR by many issues and is NOT introduced or widened by it;
-//! tracked separately as issue #3981, not fixed here. It was the first place
+//! tracked separately as issue #3981, not fixed here (#8928 step 7 now denies
+//! that write: `pm_guard_protected_paths`). It was the first place
 //! in the file to pierce an automatic-marker exemption; see that call
 //! site's comment for why it must never be routed through [`evaluate_tool`]
 //! instead.
@@ -237,6 +238,9 @@ use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktre
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 use crate::commands::pm_guard_architect_envfile::gate_secret_file_read;
 use crate::commands::pm_guard_floor::{self, ArchitectGate};
+use crate::commands::pm_guard_protected_paths::{
+    PROTECTED_PATH_RULE, ProtectedEnv, evaluate as protected_paths,
+};
 pub(crate) use crate::commands::pm_guard_response::{
     build_pm_guard_deny_response, build_pretooluse_context_response,
 };
@@ -623,6 +627,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // #8878: the trust-anchor floor, ahead of Guards 1 and 4 — a subagent,
     // even the Architect's, is "an agent" under the ruling.
     if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
+        return Ok(());
+    }
+    // #8928 step 7: Write/Edit to settings, `.mcp.json`, git config or hooks,
+    // a hook-run path, or skill/agent frontmatter `hooks:`; ahead of Guards 1/4.
+    let env = ProtectedEnv::ambient();
+    if let Some(reason) = protected_paths(tool_name, tool_input, Some(&hook_cwd), &env)
+        && !architect.is_architect()
+    {
+        audit_denied_tool(&refused, PROTECTED_PATH_RULE, &reason).await;
+        println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());
     }
 

@@ -1411,6 +1411,8 @@ async fn doctor_endpoint_returns_report() {
         // See #6868: this machine's Rust build settings and the prefix line a
         // PM pastes into an engineer brief.
         "rust_build_env",
+        // #8928 step 3: the sccache unix-socket server.
+        "sccache_socket",
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
