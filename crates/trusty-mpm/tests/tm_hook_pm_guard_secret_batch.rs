@@ -262,6 +262,18 @@ fn pm_guard_refuses_a_traversal_past_a_branch_prefix_7557() {
     ] {
         assert_denied_citing(&run_bash(command, cwd.path()), "#7266", command);
     }
+    // #8878 S5: the D4 floor admits a push only to a configured remote.
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://example.invalid/r.git"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd.path())
+            .status()
+            .expect("git");
+        assert!(ok.success(), "git {args:?}");
+    }
     for command in [
         "for b in docs/secrets-integration-spec; do echo $b; done",
         "git push origin HEAD:feat/7527-tm-secrets-skill",

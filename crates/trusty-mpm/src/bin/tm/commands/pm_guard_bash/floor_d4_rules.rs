@@ -9,6 +9,8 @@
 //! [`disk_tool_reason`] — `diskutil` erase/zero/partition/resize/delete verbs
 //! and a forced unmount; `dd of=/dev/…` (not a pseudo-device); `mkfs*`, `newfs*`, `fdisk`, `asr`;
 //! `hdiutil burn`/`erasekeys`/`resize` and a forced `detach`/`eject`.
+//! #8878 S5 (owner ruling 2026-09-29 14:06Z): `curl -H @file` and
+//! `-K`/`--config`; `gpt` write verbs, `wipefs`, and `gdd` under the `dd` rule.
 //! Test: `floor_d4_tests.rs`.
 
 use std::path::Path;
@@ -95,6 +97,10 @@ fn curl_uploads(tail: &[String]) -> bool {
         'd' => value.starts_with('@'),
         'F' => value.contains(['@', '<']),
         'T' => true,
+        // #8878 S5: `-H @file` reads headers from a file or stdin, and a
+        // `-K` config file can carry any upload option.
+        'H' => value.starts_with('@'),
+        'K' => true,
         _ => false,
     };
     let mut i = 0;
@@ -115,6 +121,8 @@ fn curl_uploads(tail: &[String]) -> bool {
             };
             if (CURL_DATA_LONGS.contains(&name.as_str()) && data_file)
                 || name == "--upload-file"
+                || name == "--config"
+                || (name == "--header" && value.starts_with('@'))
                 || (name == "--form" && value.contains(['@', '<']))
             {
                 return true;
@@ -263,11 +271,13 @@ pub(super) fn disk_tool_reason(argv: &[String], dir: Option<&Path>) -> Option<St
         let has = |word: &str| lower.iter().any(|t| t == word);
         let destructive = match program.as_str() {
             "diskutil" => lower.iter().any(|t| diskutil_destroys(t, &lower)),
-            "dd" => tail.iter().any(|t| {
+            // #8878 S5: GNU `gdd` takes the same `of=` rule.
+            "dd" | "gdd" => tail.iter().any(|t| {
                 t.strip_prefix("of=")
                     .is_some_and(|out| dd_writes_a_device(out, dir))
             }),
-            "fdisk" | "asr" => true,
+            "fdisk" | "asr" | "wipefs" => true,
+            "gpt" => GPT_VERBS.iter().any(|verb| has(verb)),
             "hdiutil" => {
                 has("burn")
                     || has("erasekeys")
@@ -285,6 +295,12 @@ pub(super) fn disk_tool_reason(argv: &[String], dir: Option<&Path>) -> Option<St
     }
     None
 }
+
+/// The `gpt` verbs that write a partition table; `show` alone is read-only.
+const GPT_VERBS: &[&str] = &[
+    "add", "create", "destroy", "label", "migrate", "recover", "remove", "resize", "set", "unset",
+    "boot", "biosboot",
+];
 
 /// Whether one lowercased `diskutil` word is a destroying verb.
 fn diskutil_destroys(word: &str, all: &[String]) -> bool {

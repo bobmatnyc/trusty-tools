@@ -3486,6 +3486,19 @@ fn pm_guard_allows_a_git_ref_name_and_a_text_payload() {
     // file each landed in the secret-bearing file class while this guard opened
     // no file at all.
     let (_dir, repo) = main_checkout_fixture();
+    // #8878 S5: the D4 floor admits a push only to a configured remote, so
+    // the fixture's placeholder `.git` becomes a repository with `origin`.
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://example.invalid/r.git"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .expect("git");
+        assert!(ok.success(), "git {args:?}");
+    }
     for command in [
         // No `\"` in any row: `bash_payload_at` interpolates the command into
         // raw JSON, so a bare double quote would break the payload and the
