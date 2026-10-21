@@ -163,11 +163,32 @@ fn send_keys_text_follows_tmux_argument_rules_9167() {
     assert_eq!(untargeted[0].target, None);
 }
 
-/// A secret in the text reaches no field. The digest and byte count describe
-/// the scanned text the event would carry as its body, never the raw text.
+/// The fleet's token shapes, built at run time so no literal token sits in
+/// the source: GitHub classic and fine-grained, Slack bot/refresh/app, AWS
+/// long-term and STS.
+fn fleet_tokens() -> Vec<String> {
+    vec![
+        format!("ghp_{}", "A1b2C3d4E5".repeat(4)),
+        format!("github_pat_{}", "A1b2C3d4E5_".repeat(4)),
+        format!("xoxb-{}", "1234-A1b2C3".repeat(3)),
+        format!("xoxe-1-{}", "A1B2C3D4E5".repeat(3)),
+        format!("xapp-1-{}", "A1B2C3D4E5".repeat(3)),
+        format!("AKIA{}", "Q7R2".repeat(4)),
+        format!("ASIA{}", "Q7R2".repeat(4)),
+    ]
+}
+
+/// A secret in the text reaches no field, for every fleet token shape. The
+/// digest and byte count describe the scanned text the event would carry as
+/// its body, never the raw text.
 #[test]
 fn a_secret_in_the_text_never_reaches_any_field_9167() {
-    let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+    for token in fleet_tokens() {
+        secret_reaches_no_field(&token);
+    }
+}
+
+fn secret_reaches_no_field(token: &str) {
     let raw = format!("deploy with {token} then report");
     let s = SessionId::new();
     let off = only(messages(
@@ -180,7 +201,7 @@ fn a_secret_in_the_text_never_reaches_any_field_9167() {
     ));
     for m in [&off, &on] {
         let wire = serde_json::to_string(m).expect("serialize");
-        assert!(!wire.contains(&token), "secret leaked: {wire}");
+        assert!(!wire.contains(token), "secret leaked: {wire}");
     }
     assert_ne!(off.sha256, sha(&raw), "never a digest of the raw text");
     let body = on.body.clone().expect("enabled body");
@@ -194,7 +215,7 @@ fn a_secret_in_the_text_never_reaches_any_field_9167() {
 
     let tmux = format!("tmux send-keys -t =p: -l 'key {token}'");
     let wire = serde_json::to_string(&messages(&bash(s, &tmux), true)).expect("ser");
-    assert!(!wire.contains(&token), "secret leaked via tmux: {wire}");
+    assert!(!wire.contains(token), "secret leaked via tmux: {wire}");
 }
 
 /// The body rides only when enabled, and is cut at [`MAX_BODY_BYTES`] while
@@ -216,12 +237,14 @@ fn the_body_is_carried_only_when_enabled_9167() {
     assert_eq!(m.sha256, sha(&long));
 }
 
-/// The relay marker lands in `relay`; text without one leaves it empty.
+/// The relay marker lands in `relay` only when it starts the trimmed first
+/// line, as `relay.sh` and `relay-marker.py` read it; text without one, or
+/// with one later in the text, leaves it empty.
 #[test]
 fn a_relay_marker_is_found_or_left_empty_9167() {
     let found = [
         ("[Ops Architect 22:2xZ] go", "[Ops Architect 22:2xZ]"),
-        ("ack [Architect 08:15Z]", "[Architect 08:15Z]"),
+        ("  [Architect 08:15Z] ack", "[Architect 08:15Z]"),
         (
             "[Dev Fleet supervisor 23:59Z] x",
             "[Dev Fleet supervisor 23:59Z]",
@@ -231,12 +254,30 @@ fn a_relay_marker_is_found_or_left_empty_9167() {
         assert_eq!(relay_marker(text).as_deref(), Some(marker), "{text}");
     }
     for text in [
+        "ack [Architect 08:15Z]",
+        "quoting the PM:\n[Ops Architect 22:21Z] go",
         "no marker here",
         "[Ops Architect 2:1Z]",
         "[Ops Architect 22:21]",
     ] {
         assert_eq!(relay_marker(text), None, "{text}");
     }
+}
+
+/// The marker is read from the raw text: a line-start marker is found even
+/// when the credential scan rewrites part of its first line (the `Bearer`
+/// rule spans the marker's name here), and the secret is still masked.
+#[test]
+fn a_line_start_marker_is_read_from_the_raw_text_9167() {
+    let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+    let raw = format!("[Bearer Ops Architect 08:0xZ] rotate {token}");
+    let m = only(messages(
+        &send_message(SessionId::new(), HookEvent::PreToolUse, &raw),
+        true,
+    ));
+    assert_eq!(m.relay.as_deref(), Some("[Bearer Ops Architect 08:0xZ]"));
+    let wire = serde_json::to_string(&m).expect("serialize");
+    assert!(!wire.contains(&token), "secret leaked: {wire}");
 }
 
 /// A completed Notification push is a `hook_push` event to the inbox, whose
