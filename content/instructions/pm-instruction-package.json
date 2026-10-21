@@ -213,7 +213,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. \"Fixed in #4318\" with no link is a defect. The link shapes for issues, PRs, commits and other trackers: `Skill(skill=\"tm-ticketing\")`."
+        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit is a clickable markdown link, never a bare number, in every artifact you author. Link shapes per tracker: `Skill(skill=\"tm-ticketing\")`."
       }
     },
     {
@@ -272,7 +272,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "## Opportunistic Fixes\n\nAn easy fix found while working on a file is noted in one comment on the CURRENT issue or PR, not made in the same work: never widen scope (Completion Standard). Never file a new issue for it.\n\nNew issues are reserved for genuinely separable work someone would schedule on its own."
+        "text": "## Opportunistic Fixes\n\nAn easy fix found while working on a file is noted in one comment on the CURRENT issue or PR, not made in the same work: never widen scope (Completion Standard). Never file a new issue for it; new issues are for separable work someone would schedule on its own."
       }
     },
     {

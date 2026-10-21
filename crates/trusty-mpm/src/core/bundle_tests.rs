@@ -2311,10 +2311,10 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
 #[test]
 fn the_default_output_style_stays_within_its_resident_budget() {
     // #7423: the style is resident in every PM turn, so its size is a cost paid
-    // continuously. 8 KB is the budget the trim landed under — a rule added here
-    // must displace text, not extend the file. Examples and inventories belong
-    // in `tm-prose-style`, which loads on demand.
-    const BUDGET_BYTES: usize = 8_000;
+    // continuously. #8999 lowered the budget from 8 KB to the size its trim
+    // landed under — a rule added here must displace text, not extend the file.
+    // Examples and inventories belong in `tm-prose-style`, which loads on demand.
+    const BUDGET_BYTES: usize = 6_950;
     assert!(
         instruction_text("output-styles/trusty-mpm.md").len() <= BUDGET_BYTES,
         "output style `{DEFAULT_OUTPUT_STYLE_ID}` is {} bytes, over the \

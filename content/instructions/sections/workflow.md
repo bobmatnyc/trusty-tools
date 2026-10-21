@@ -10,76 +10,66 @@
   no CI iteration loops, no critic round on narrow changes.
 - HARDEN — once feature-complete: the project risk/stage test ladder,
   required review and release gates. Publish only after those pass.
-- Spend the verification budget where blast radius is real — destructive paths,
-  SemVer/release, security. Cut ceremony everywhere else. Slow feature release
-  *causes* too many things in flight, so shortening time-to-land is the fix;
-  capping WIP treats the symptom.
-- 🔴 The hard line: never turn red green by deleting coverage. No `#[ignore]`,
-  no cfg-gating, no `--exclude`, no narrowing to `--lib`. Going fast licenses
-  running fewer gates, never making a failing gate report success.
+- Spend verification where blast radius is real (destructive paths,
+  SemVer/release, security); cut ceremony elsewhere. Slow release
+  *causes* too many things in flight: shorten time-to-land, not cap WIP.
+- 🔴 The hard line: never turn red green by deleting coverage — no `#[ignore]`,
+  cfg-gating, `--exclude`, or narrowing to `--lib`. Going fast licenses fewer
+  gates, never a failing gate reporting success.
 
 ## Risk — the second input to every skip condition
 
-- **Low** — docs, comments, mechanical metadata.
-- **Normal** — a localized behaviour change inside one package.
-- **High** — security, destructive or irreversible paths, persisted state,
-  release/SemVer, or a contract another package depends on.
-- Where a skip condition is a size or simplicity heuristic, High risk means it
-  does not hold: a 30-line change to a credential path still earns its review.
-- These labels say nothing about how much testing a change needs. The project's
-  test ladder in its `CLAUDE.md` answers that and is authoritative.
-- `code-analyzer` is a separate agent from `code-critic`. Per-phase
-  dispatch-brief templates and the rest of the delivery chain:
-  `Skill(skill="tm-workflow")`.
+- **Low** — docs, comments, mechanical metadata. **Normal** — a localized
+  behaviour change inside one package. **High** — security, destructive or
+  irreversible paths, persisted state, release/SemVer, or a contract another
+  package depends on.
+- High risk defeats a size or simplicity skip heuristic: a 30-line change to a
+  credential path still earns its review.
+- These labels do not size testing; the project's `CLAUDE.md` test ladder does.
+  Per-phase brief templates and the delivery chain: `Skill(skill="tm-workflow")`.
 
 ### Fail-Open Check (BLOCKING: a fix-bar class)
 
-- A failure branch is an operation whose failure is downgraded to a warning, a
-  default, or a `false`, while state advances anyway.
-- A change that adds or touches one is not reviewed until an error-arm
-  regression test FAILS against the pre-fix commit.
-- Name the Fail-Open Check in the brief for `code-analyzer` or `code-critic`;
-  its seven checks are in the `code-review-standards` skill.
+A failure branch downgrades an operation's failure to a warning, a default, or a
+`false` while state advances anyway. A change that adds or touches one is not
+reviewed until an error-arm regression test FAILS against the pre-fix commit.
+Name the Fail-Open Check in the `code-analyzer` or `code-critic` brief; its
+seven checks are in the `code-review-standards` skill.
 
 ## Layout ADRs Are Defaults, Not Mandates
 
-A project-layout ADR or scaffold (e.g. an `apps/` + `packages/` workspace) is
-the default for a project whose layout is still undefined, is
-framework-specific, and never justifies dispatching work to restructure an
-existing layout to match it (owner ruling 2026-09-22, #8382).
+A layout ADR or scaffold is the framework-specific default for a project whose
+layout is still undefined; it never justifies dispatching work to restructure
+an existing layout to match it (#8382).
 
 ## Live Issue Status
 
 Dispatching work against an issue: have `ticketing` mark it in progress, and
-update it when the work lands or blocks. Detail: `Skill(skill="tm-ticketing")`.
+update it when the work lands or blocks (`Skill(skill="tm-ticketing")`).
 
 ## Source Citations
 
-- Link to a GitHub blob permalink pinned to a commit SHA, never `blob/main`.
-- Link text is `path:line`, and the line number is verified before linking.
+Link a GitHub blob permalink pinned to a commit SHA, never `blob/main`, with
+link text `path:line` and the line number verified first.
 
 ## Before Push
 
 - A credential scan by `security` over `git diff origin/main...HEAD` is
-  mandatory before any `git push`, and blocks the push on a hit.
-- Three-dot, never two-dot: two-dot reports files deleted from `main` since your
-  branch point as your own additions.
-- Verify the base ref BEFORE diffing (#7748): compare `git rev-parse
-  refs/remotes/origin/main` with `git ls-remote origin refs/heads/main`, and
-  `git fetch origin main` when they disagree.
-- The branch protection it sits inside, and the review and changelog gates:
-  `Skill(skill="tm-workflow")`.
+  mandatory before any `git push`, and blocks the push on a hit. Three-dot,
+  never two-dot: two-dot reports files deleted from `main` since your branch
+  point as your own additions.
+- Verify the base ref BEFORE diffing (#7748): `git fetch origin main` when
+  `refs/remotes/origin/main` and `git ls-remote origin refs/heads/main` disagree.
 
 ## Merge-Queue Ownership
 
-- Exactly one session owns a repository's merge queue at a time. A session that
-  does not own it routes the merge to the owner and reports that it did.
-- An owner's merge authorization is scoped to the PRs presented when it was
-  given: "merge them as they clear" is not a standing licence over PRs another
-  session opens afterward.
+- Exactly one session owns a repository's merge queue; any other routes the
+  merge to the owner and reports that it did.
+- An owner's merge authorization covers only the PRs presented when it was
+  given, not PRs another session opens afterward.
 - 🔴 Green required contexts are not sufficient to merge. Check each PR for an
   outstanding review verdict first — a `code-critic` BLOCK, a requested-changes
   review, a hold label. A BLOCK is not a CI context, so no status check sees it.
-- Hold a PR by marking it in GitHub state — draft, assignee, or a `do-not-merge`
-  label — never by message; messages are advisory and lose races.
+- Hold a PR in GitHub state — draft, assignee, or a `do-not-merge` label —
+  never by message; messages are advisory and lose races.
 - Claiming the queue and handing it off: `Skill(skill="tm-workflow")`.

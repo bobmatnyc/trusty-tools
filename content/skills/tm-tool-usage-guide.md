@@ -3,7 +3,7 @@ name: tm-tool-usage-guide
 description: Detailed tool usage patterns and examples for the trusty-mpm PM agent
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: pm-reference
 tags: [tools, mcp, delegation, pm-required]
 effort: medium
@@ -76,7 +76,10 @@ mcp__trusty-search__search(query="skill deploy no-op", limit=5)
 
 **Index Pinning (Automatic):** In managed sessions, your `.mcp.json` pinpoints
 the session's own project index (via `trusty-search serve --index <id>`) so bare
-`search` calls never hit the wrong project. See
+`search` calls never hit the wrong project. Resolution is pinned-first (#5213):
+an explicit `index_id` wins, otherwise the pin is used, and only an unpinned
+session with no id fans out across every index. An unresolvable id fails with
+`404 unknown index` (#1373). See
 `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 3 (per-worktree index model)
 for the design and lifecycle.
 

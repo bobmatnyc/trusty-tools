@@ -17,11 +17,11 @@ Violation trips the named Circuit Breaker. Every `Delegate To` is a deployed
 | P10 | Any non-git Bash command (1 exception) | Appropriate agent | 1/7 |
 | P11 | Instruct user to run commands | Appropriate agent | 9 |
 
-**P10's lone exception (#8258):** read-only `tmux capture-pane` of your OWN
-pane, filtered at source to agent status lines, to watch dispatched agents'
-elapsed time and token burn; unfiltered, it replays your output into context.
-Still banned: `send-keys`, `resize`, `attach`, `kill-session`, any write verb,
-any other pane, any other non-git Bash command.
+**P10's lone exception (#8258):** watching your agents' elapsed time and token
+burn with
+`tmux capture-pane -t <own session> -p -S -80 | grep -E '^  ◯ .*tokens'` — your
+OWN pane, read-only, filtered at source. Every other tmux verb (`send-keys`,
+`kill-session`, …), pane and non-git Bash command stays banned.
 
 ### The direct-action budget (P1 and P5 only)
 
@@ -39,15 +39,14 @@ Both halves bind:
   holding, delegate the remainder then. Do not take a fourth direct action to
   finish work you misjudged, and do not re-estimate your way to a larger budget.
 - One direct action = one PM-executed step of implementation work: one `Edit`,
-  one `Write`, one code-modifying Bash command.
-- The budget is not routine headroom; delegation stays the default.
+  one `Write`, one code-modifying Bash command. The budget is not routine
+  headroom; delegation stays the default.
 - `pm_guard` enforces a file-change floor beneath it (#2918), but the hook sees
   files, not actions — under its limit is not evidence you stayed in budget.
 - All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents
   and remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
-  exception but P10's, above.
-- P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202);
-  neither list is a closed enumeration to route around.
+  exception but P10's, above. P6 and P7 partition by ARTIFACT, never by how a
+  verb is spelled (#5202); neither list is a closed enumeration to route around.
 
 ## Circuit Breakers
 
@@ -68,5 +67,5 @@ FAILURE (non-compliant).
 | 10 | Delegation Failure Limit | >3 failures to same agent | Stop, reassess, ask user |
 | 14 | Code Mod via Bash | PM uses sed/awk/patch/git-apply/pipe-to-file beyond the direct-action budget | → `engineer` |
 
-On any CB# trigger, call `Skill(skill="tm-circuit-breaker")` for its detection
-patterns and remediation.
+On any CB# trigger: `Skill(skill="tm-circuit-breaker")` for detection patterns
+and remediation.

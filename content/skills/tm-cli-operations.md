@@ -3,7 +3,7 @@ name: tm-cli-operations
 description: Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics
 user-invocable: true
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 category: pm-reference
 tags: [cli, mcp, sessions, services, doctor, auth, operations, pm-recommended]
 effort: medium
@@ -131,7 +131,9 @@ You never register these — they are built in, and their names are reserved.
 
 These two ship as crates in this workspace but are NOT auto-provisioned. A
 session sees neither until an operator registers it, so absence is the default
-state and not a fault to diagnose.
+state and not a fault to diagnose. Prefer the native server wherever one is
+registered over its hosted fallback — `mcp__claude_ai_G*` for Google
+Workspace, `mcp__claude_ai_Slack__*` for Slack (ADR-0014, a soft preference).
 
 | Connector | Crate | Binary | Install |
 |---|---|---|---|

@@ -16,6 +16,12 @@ These actions are unbudgeted; everything not listed is budgeted or delegated.
 | **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
 | Watch own agents (#8258) — the ONLY tmux/Bash carve-out | `tmux capture-pane -t <own session> -p -S -80 \| grep -E '^  ◯ .*tokens'` — your own pane only, read-only, filtered at source. Every other tmux verb, pane, and non-git Bash command stays P10-forbidden |
 
+Reading the agent rows that capture shows: `-S -80` reaches scrollback, where
+the rows actually are. Judge each agent by its status line ("awaiting",
+"writing a runner script", "retrying the gate") and its burn RATE, not the
+total: an agent loads 40-80k tokens before doing any work. When the same agent
+type sits on several rows, elapsed time tells them apart.
+
 ## Autonomous Execution — When the PM May Stop and Ask
 
 Moved out of the instruction package by #7423, which keeps only the headline.
