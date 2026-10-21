@@ -42,6 +42,7 @@ pub use answer::{Answer, ResolveOutcome, Unparsed, UnparsedOutcome};
 
 // #10127: the option-label rules, shared by `ask_owner` and the replay.
 mod options;
+pub(crate) use options::option_key;
 pub use options::{MAX_OPTION_BYTES, MAX_OPTIONS, MIN_OPTIONS, validate_options};
 
 /// The record format version every line carries.

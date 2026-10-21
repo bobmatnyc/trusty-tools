@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::inbound::{InboundReply, inbound_op};
+use crate::channels::deliver::Delivery;
 use crate::channels::inbound::{Dropped, InboundEvent, snapshot_code};
 use crate::channels::question_table::claims::Claim;
 use crate::channels::socket_mode::transport::transport_for;
@@ -87,6 +88,12 @@ fn outcome_code(reply: &InboundReply) -> &'static str {
     match reply {
         InboundReply::Delivered { .. } => "delivered",
         InboundReply::Dropped(Dropped { code, .. }) => code,
+        // #10127: a failed notice is the outcome the operator must see.
+        InboundReply::Held {
+            notice: Delivery::Failed { code, .. },
+            ..
+        } => code,
+        InboundReply::Held { code, .. } => code,
         InboundReply::DeliveryFailed { code, .. } => code,
         InboundReply::Aborted(_) => "inbound_aborted",
     }

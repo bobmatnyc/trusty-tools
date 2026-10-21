@@ -25,7 +25,8 @@ use super::{
 };
 use crate::channels::audit_log::{ChannelAudit, audit_path};
 use crate::channels::question_table::{
-    Answer, Ask, Conversation, Question, QuestionTable, ResolveOutcome, questions_path,
+    Answer, Ask, Conversation, Question, QuestionTable, ResolveOutcome, UnparsedOutcome,
+    questions_path,
 };
 use crate::channels::snapshot::{Refusal, SnapshotDeny};
 
@@ -119,6 +120,16 @@ impl AnswerTable for Counting {
         outcome
     }
 
+    fn mark_unparsed(
+        &self,
+        id: QuestionId,
+        answerer: &str,
+        conversation: &Conversation,
+        text: &str,
+    ) -> UnparsedOutcome {
+        self.inner.mark_unparsed(id, answerer, conversation, text)
+    }
+
     fn is_poisoned(&self) -> bool {
         matches!(self.mode, TableMode::Poisoned) || self.inner.is_poisoned()
     }
@@ -167,8 +178,21 @@ impl Fake {
         }
     }
 
-    /// Reserve and open one question of `route` to `recipient` in `conv`.
+    /// Reserve and open one question of `route` to `recipient` in `conv`,
+    /// with the options `approve` and `reject` (#10127: a reply to a
+    /// question with no options is held, never resolved).
     pub(crate) fn open(&self, route: &str, recipient: &str, conv: &Conversation) -> QuestionId {
+        self.open_with(route, recipient, conv, &["approve", "reject"])
+    }
+
+    /// [`Self::open`] with the option labels `options`; none is free text.
+    pub(crate) fn open_with(
+        &self,
+        route: &str,
+        recipient: &str,
+        conv: &Conversation,
+        options: &[&str],
+    ) -> QuestionId {
         let id = self.table.reserve().expect("reserve");
         let ask = Ask {
             channel: Channel::Slack,
@@ -177,7 +201,7 @@ impl Fake {
             asker_managed_session: ASKER.into(),
             conversation: conv.clone(),
             message_ts: conv.thread_ts.clone(),
-            options: Vec::new(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
         };
         self.table.open(id, ask).expect("open question");
         id
@@ -307,6 +331,7 @@ pub(crate) fn dropped(verdict: &Verdict) -> &'static str {
     match verdict {
         Verdict::Dropped(d) => d.code,
         Verdict::Resolved(r) => panic!("expected a drop, resolved {}", r.question().id),
+        Verdict::Held(h) => panic!("expected a drop, held {}", h.question().id),
     }
 }
 
@@ -528,7 +553,8 @@ fn inbound_drop_stands_when_audit_write_fails() {
 }
 
 /// 🔴 #9873 (F17, AC7): an answer over the bound drops whole before
-/// `resolve`; one at the bound resolves.
+/// `resolve`; one at the bound passes it (#10127: and, naming no option, is
+/// held).
 #[test]
 fn over_long_answer_drops_without_resolving() {
     let fake = Fake::new();
@@ -542,10 +568,11 @@ fn over_long_answer_drops_without_resolving() {
     assert_eq!(dropped(&verdict), "answer_empty");
     let fits = "y".repeat(MAX_ANSWER_BYTES);
     let verdict = decide(&fake, &ev(OWNER, &owner_conv(), &fits));
-    let Verdict::Resolved(r) = verdict else {
-        panic!("an answer at the bound must resolve: {verdict:?}");
+    let Verdict::Held(h) = verdict else {
+        panic!("an answer at the bound must pass it: {verdict:?}");
     };
-    assert_eq!(r.text(), fits);
+    assert_eq!(h.question().id, id);
+    assert_eq!(fake.table.unparsed(id)[0].text_len, MAX_ANSWER_BYTES);
 }
 
 /// 🔴 #9873 (Q4, AC6): a preflight failure drops before `resolve`, so the

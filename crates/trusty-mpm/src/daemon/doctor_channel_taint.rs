@@ -117,14 +117,25 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
     // #9873 (Q5, F18): an unreadable delivery trace or log is never `Ok`;
     // #9873 fix round: it adds a part and never lowers a `Fail`.
     let (undelivered, mut unreadable) = delivery_problems_in(dir);
+    // #10127: a held reply's lost notice is its own problem; the question
+    // is still open.
+    let notices = notice_problems_in(dir);
     let held = files.len();
     let tail = format!("Nothing was deleted; see {}.", dir.display());
     // #9877: a D09 record that exists but cannot be read may hold failures,
     // so it grades `Fail` like one that names them.
     let d09_fail = d09_unreadable.is_some();
     unreadable.extend(d09_unreadable);
-    if failures > 0 || d09_fail || !undelivered.is_empty() {
+    if failures > 0 || d09_fail || !undelivered.is_empty() || !notices.is_empty() {
         let mut parts = Vec::new();
+        if !notices.is_empty() {
+            parts.push(format!(
+                "{} held-reply notice(s) not confirmed delivered (see {}): {}.",
+                notices.len(),
+                channels_delivery::DELIVERY_FILE,
+                notices.join("; ")
+            ));
+        }
         if !undelivered.is_empty() {
             // #9873 (AC2, Q4): a resolved answer is final; name each loss.
             parts.push(format!(
@@ -188,6 +199,15 @@ fn reapply_failures_in(dir: &Path) -> (usize, Option<String>) {
             )),
         ),
     }
+}
+
+/// The held-reply notice problems in taint directory `dir` (#10127); none
+/// when the trace cannot be read, which [`delivery_problems_in`] reports.
+/// Test: `notice_send_failure_is_recorded_and_not_retried`.
+fn notice_problems_in(dir: &Path) -> Vec<String> {
+    channels_delivery::read_deliveries(dir)
+        .map(|trace| channels_delivery::notice_problems(&trace.lines))
+        .unwrap_or_default()
 }
 
 /// The delivery problems in taint directory `dir` (#9873 Q5, Q4a).

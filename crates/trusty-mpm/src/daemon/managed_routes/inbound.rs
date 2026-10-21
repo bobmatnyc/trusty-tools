@@ -8,8 +8,11 @@
 //! over [`DaemonInboundEnv`] (table, audit and the asker's pane proof all
 //! block), then `channels::deliver::deliver` over [`DaemonDeliverEnv`]: the
 //! taint and the trace on the blocking pool, the send through
-//! `SessionManager::inject`. [`reply`] maps the outcome to HTTP (#9873 Q6).
-//! Test: `inbound_tests.rs` (this directory).
+//! `SessionManager::inject`. #10127: a named option goes by
+//! `deliver_option` and a held reply's notice by `deliver_notice`, both
+//! untainted and through the same `send`. [`reply`] maps the outcome to
+//! HTTP (#9873 Q6).
+//! Test: `inbound_tests.rs`, `inbound_hold_tests.rs` (this directory).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,9 +22,11 @@ use serde_json::{Value, json};
 use trusty_channels::policy::{Channel, DropReason, QuestionId, QuestionState, Route};
 
 use crate::channels::audit_log::ChannelAudit;
-use crate::channels::deliver::{AskerView, DeliverEnv, Delivery, check_asker, deliver};
+use crate::channels::deliver::{
+    AskerView, DeliverEnv, Delivery, check_asker, deliver, deliver_notice, deliver_option,
+};
 use crate::channels::inbound::{
-    AnswerTable, Dropped, InboundEnv, InboundEvent, RateBucket, RateTake, Verdict, decide,
+    AnswerTable, Dropped, Held, InboundEnv, InboundEvent, RateBucket, RateTake, Verdict, decide,
 };
 use crate::channels::question_table::Question;
 use crate::channels::snapshot::Refusal;
@@ -41,6 +46,16 @@ pub enum InboundReply {
     },
     /// Dropped; nothing changed.
     Dropped(Dropped),
+    /// Held: annotated, the question still open, the asker sent a notice
+    /// (#10127).
+    Held {
+        /// The question the reply was held for.
+        question_id: QuestionId,
+        /// Why it was held, as its audit code.
+        code: &'static str,
+        /// The notice's delivery; a failure is final, the reply stays held.
+        notice: Delivery,
+    },
     /// Resolved, but not delivered or not confirmed; final (#8433 Q4).
     DeliveryFailed {
         /// The question it answered.
@@ -104,10 +119,16 @@ pub(crate) async fn run_inbound(
     };
     let resolved = match verdict {
         Verdict::Dropped(dropped) => return InboundReply::Dropped(dropped),
+        Verdict::Held(held) => return notify_held(env, &held).await,
         Verdict::Resolved(resolved) => resolved,
     };
     let question_id = resolved.question().id;
-    match deliver(env, &resolved).await {
+    // #10127: a named option goes untainted; text only ever goes tainted.
+    let delivery = match resolved.choice() {
+        Some(choice) => deliver_option(env, resolved.question(), choice).await,
+        None => deliver(env, &resolved).await,
+    };
+    match delivery {
         Delivery::Delivered => InboundReply::Delivered { question_id },
         Delivery::Failed { code, sent } => InboundReply::DeliveryFailed {
             question_id,
@@ -117,15 +138,50 @@ pub(crate) async fn run_inbound(
     }
 }
 
+/// Send `held`'s asker its notice (#10127).
+///
+/// What: [`deliver_notice`]; its outcome rides on [`InboundReply::Held`],
+/// never on the question, which stays open.
+/// Test: `no_match_holds_audits_and_sends_untainted_notice`.
+async fn notify_held(env: &impl DeliverEnv, held: &Held) -> InboundReply {
+    InboundReply::Held {
+        question_id: held.question().id,
+        code: held.reason().code(),
+        notice: deliver_notice(env, held).await,
+    }
+}
+
 /// The HTTP status and JSON body for `outcome` (#9873 Q6, AC3).
 ///
-/// What: 200 delivered; a drop by [`status_of`] its code, with
-/// `already_resolved` carrying the first answer's answerer and time; 502
+/// What: 202 held (#10127), with whether the notice was delivered; 200
+/// delivered; a drop by [`status_of`] its code, with `already_resolved`
+/// carrying the first answer's answerer and time; 502
 /// with `resolved: true` for a delivery failure after `resolve`; 500
 /// `inbound_aborted`.
-/// Test: `inbound_fake_route_status_map`.
+/// Test: `inbound_fake_route_status_map`,
+/// `no_match_holds_audits_and_sends_untainted_notice`.
 pub fn reply(outcome: &InboundReply) -> (StatusCode, Json<Value>) {
     match outcome {
+        InboundReply::Held {
+            question_id,
+            code,
+            notice,
+        } => {
+            let notice_error = match notice {
+                Delivery::Delivered => None,
+                Delivery::Failed { code, .. } => Some(*code),
+            };
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "resolved": false,
+                    "held": code,
+                    "question_id": question_id,
+                    "notice_delivered": notice_error.is_none(),
+                    "notice_error": notice_error,
+                })),
+            )
+        }
         InboundReply::Delivered { question_id } => (
             StatusCode::OK,
             Json(json!({ "resolved": true, "delivered": true, "question_id": question_id })),
@@ -332,3 +388,8 @@ mod tests;
 #[cfg(test)]
 #[path = "inbound_seen_tests.rs"]
 mod seen_tests;
+
+// #10127 (S5 P2b): option answers and held replies through the glue.
+#[cfg(test)]
+#[path = "inbound_hold_tests.rs"]
+mod hold_tests;

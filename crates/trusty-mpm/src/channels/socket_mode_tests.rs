@@ -131,6 +131,7 @@ impl SocketEnv for TestEnv {
         match &self.inbound {
             Some(fake) => match decide(&**fake, &ev) {
                 Verdict::Resolved(_) => "resolved".to_owned(),
+                Verdict::Held(h) => h.reason().code().to_owned(),
                 Verdict::Dropped(d) => d.code.to_owned(),
             },
             None => "acted".to_owned(),
