@@ -47,8 +47,10 @@ fn sleep_pane(
     let pane = driver
         .get_pane_id(&name)
         .expect("the live session has a pane");
+    // #8443: an exact target; a `%N` pane id renders unchanged.
+    let target = trusty_common::tmux::exact_pane_target(&name, &pane);
     let pid = server
-        .query(&["display-message", "-p", "-t", &pane, "#{pane_pid}"])
+        .query(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
         .and_then(|pid| pid.parse().ok())
         .expect("the pane pid");
     // Declared after `session`, so a timeout below drops it first.
