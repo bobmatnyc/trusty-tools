@@ -9,6 +9,8 @@
 //! calls [`ActionEvents::publish`]. Publishing projects the record
 //! ([`projection::Threader`]) and buffers the result in a `PushClient`
 //! (bounded by count and bytes, overflow counted) — no I/O on the hook path.
+//! #9167: a relay record also yields `message` events ([`message`]), which
+//! ride the same buffer, flush and failure handling.
 //! [`start`] attaches a publisher and its flush task at serve start;
 //! [`ActionEvents::shutdown`], called from both exit paths, ends the task and
 //! runs one final flush within [`FINAL_FLUSH_BUDGET`].
@@ -151,12 +153,17 @@ impl ActionPublisher {
 
     /// Show paths outside a session's `cwd` relative to `home`.
     pub fn with_home(self, home: Option<PathBuf>) -> Self {
-        *self.threader.lock() = projection::Threader::new(home);
+        let mut threader = self.threader.lock();
+        let bodies = threader.message_bodies();
+        *threader = projection::Threader::new(home);
+        threader.set_message_bodies(bodies);
+        drop(threader);
         self
     }
 
-    /// Carry the credential-scanned body on `message` events.
-    pub fn with_message_bodies(self, _on: bool) -> Self {
+    /// Carry the credential-scanned body on `message` events (#9167).
+    pub fn with_message_bodies(self, on: bool) -> Self {
+        self.threader.lock().set_message_bodies(on);
         self
     }
 
@@ -374,7 +381,12 @@ pub fn start_with(
     }
     match resolve() {
         Ok(socket) => {
-            let publisher = Arc::new(ActionPublisher::new(socket).with_flush_interval(flush_every));
+            // #9167: message bodies only when the operator turned them on.
+            let publisher = Arc::new(
+                ActionPublisher::new(socket)
+                    .with_flush_interval(flush_every)
+                    .with_message_bodies(message::bodies_from_env()),
+            );
             let events = state.action_events();
             if !events.attach(Arc::clone(&publisher)) {
                 return false;

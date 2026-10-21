@@ -41,14 +41,17 @@ pub(crate) const FORWARD_TIMEOUT: Duration = Duration::from_secs(1);
 /// What: no-op for any other event and for an unset target. Otherwise builds
 /// the inbox line (the prototype `notify-supervisor.sh` shape the Architect's
 /// poller reads) and runs [`forward_to_target`]; a failure prints one
-/// `trusty-mpm: Notification forward failed` line to stderr.
+/// `trusty-mpm: Notification forward failed` line to stderr. #9167: a
+/// completed append is named on `payload`, the daemon POST's, by
+/// [`record_push`].
 /// Test: `tm_hook_notification_8392::a_notification_reaches_the_daemon_and_the_inbox`,
-/// `tm_hook_notification_8392::a_stuck_inbox_costs_one_logged_failure_and_exit_zero`.
+/// `tm_hook_notification_8392::a_stuck_inbox_costs_one_logged_failure_and_exit_zero`,
+/// `tm_hook_message_events_9167::a_notification_push_reaches_the_bus_with_the_inbox_line_digest_9167`.
 pub(crate) fn forward_notification(
     event: &str,
     stdin: Option<&Value>,
     cwd: &str,
-    _payload: &mut Value,
+    payload: &mut Value,
 ) {
     if event != NOTIFICATION_EVENT {
         return;
@@ -67,13 +70,31 @@ pub(crate) fn forward_notification(
         // #8392: only a `%N` pane id is kept; tmux prefix-matches anything else.
         tmux_pane: tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok()),
     };
-    if let Err(reason) = forward_to_target(&target, context, FORWARD_TIMEOUT) {
-        eprintln!("trusty-mpm: Notification forward failed (#8392): {reason}");
+    match forward_to_target(&target, context, FORWARD_TIMEOUT) {
+        Ok(line) => {
+            if let PushTarget::Inbox(dir) = &target {
+                record_push(payload, dir, line);
+            }
+        }
+        Err(reason) => eprintln!("trusty-mpm: Notification forward failed (#8392): {reason}"),
     }
 }
 
-/// Name a completed push on the daemon payload.
-pub(crate) fn record_push(_payload: &mut Value, _inbox: &Path, _line: Option<String>) {}
+/// Name a completed push on the daemon payload (#9167).
+///
+/// Why: only this process knows the append completed and what it wrote; the
+/// daemon turns the field into a `hook_push` `message` event.
+/// What: sets [`PUSHED_MESSAGE_FIELD`] to `{"to": <inbox>, "text": <line>}`
+/// when `line` is `Some`; leaves `payload` untouched otherwise.
+/// Test: `a_completed_append_returns_the_line_it_wrote_9167`.
+pub(crate) fn record_push(payload: &mut Value, inbox: &Path, line: Option<String>) {
+    if let Some(line) = line {
+        payload[PUSHED_MESSAGE_FIELD] = serde_json::json!({
+            "to": inbox.display().to_string(),
+            "text": line,
+        });
+    }
+}
 
 /// What the inbox line is built from, moved onto the worker thread.
 pub(crate) struct LineContext {
@@ -92,11 +113,12 @@ pub(crate) struct LineContext {
 /// Why: the bound has to cover the open as well as the write — opening a FIFO
 /// with no reader blocks forever — so the whole append runs on a detached
 /// thread and the hook stops waiting at the bound. Process exit reaps it.
-/// What: `Ok` for [`PushTarget::Unset`] and for a completed append; `Err` with a
+/// What: `Ok(None)` for [`PushTarget::Unset`]; `Ok(Some(line))`, the line
+/// written without its newline, for a completed append (#9167); `Err` with a
 /// reason for a relative target (the value is not echoed), an append error, or
 /// no answer within `timeout`. The inbox directory is never created.
 /// Test: `an_unset_target_forwards_nothing`, `a_missing_inbox_is_an_error_not_a_mkdir`,
-/// `a_fifo_with_no_reader_times_out`.
+/// `a_fifo_with_no_reader_times_out`, `a_completed_append_returns_the_line_it_wrote_9167`.
 pub(crate) fn forward_to_target(
     target: &PushTarget,
     context: LineContext,
@@ -115,10 +137,10 @@ pub(crate) fn forward_to_target(
     std::thread::spawn(move || {
         let tmux_session = context.tmux_pane.as_deref().and_then(tmux_session_of);
         let line = inbox_line(&context, tmux_session, chrono::Utc::now());
-        let _ = tx.send(append_line(&worker_file, &line));
+        let _ = tx.send(append_line(&worker_file, &line).map(|()| line));
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(())) => Ok(None),
+        Ok(Ok(line)) => Ok(Some(line)),
         Ok(Err(e)) => Err(format!("{}: {e}", file.display())),
         Err(_) => Err(format!(
             "{}: no answer within {} ms",
