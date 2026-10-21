@@ -437,6 +437,8 @@ pub mod architect_compat;
 // #8436: the Architect's fixed core and its composed prompt.
 pub mod architect_core;
 pub mod architect_launch;
+// #10127: the Architect's own `--settings` deny and chat-token env scrub.
+pub mod architect_lockdown;
 pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;

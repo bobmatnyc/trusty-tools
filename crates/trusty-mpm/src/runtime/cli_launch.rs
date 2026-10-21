@@ -108,10 +108,36 @@ fn base(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
 /// [--append-system-prompt-file p] --setting-sources … [--mcp-config f]
 /// [--settings s] [--disallowedTools …] --dangerously-skip-permissions`, every token unquoted
 /// because no shell parses it. The profile is the one `mcp_env`'s stamp names.
+/// #10127: the shipped [`crate::core::architect_lockdown::Lockdown::PRODUCTION`]
+/// applies ([`isolated_spec_with`]); its error refuses the launch.
 /// Test: `isolated_spec_matches_the_shell_line_it_replaces`,
 /// `worst_case_cli_launch_line_is_short_and_carries_no_token`,
 /// `an_architect_isolated_spec_keeps_every_tool`.
-pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
+pub fn isolated_spec(
+    cwd: &Path,
+    launch: &CliLaunch<'_>,
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
+    isolated_spec_with(
+        cwd,
+        launch,
+        &crate::core::architect_lockdown::Lockdown::PRODUCTION,
+    )
+}
+
+/// [`isolated_spec`] under the named `lockdown` (#10127).
+///
+/// What: an Architect's `--settings` pair is
+/// [`crate::core::architect_lockdown::Lockdown::settings_argv`] (the owner
+/// file and the deny as one payload), and its env loses the lockdown's
+/// variables — unset, and dropped from `env_set`. A PM launch is unchanged.
+/// Test: `architect_launch_carries_every_glob_and_its_capitalised_variant`,
+/// `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`,
+/// `a_carrier_file_that_cannot_be_read_refuses_the_architect_launch`.
+pub(crate) fn isolated_spec_with(
+    cwd: &Path,
+    launch: &CliLaunch<'_>,
+    lockdown: &crate::core::architect_lockdown::Lockdown<'_>,
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
     let mut spec = base(cwd, launch.alternate_screen);
     if let Some(dir) = launch.config_dir {
         spec.env_set
@@ -141,15 +167,18 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
             launch.scoped_mcp,
         ));
     // #8988: the owner MCP policy, right after the file it filters.
+    // #10127: an Architect's deny joins it as ONE `--settings` (last one wins).
     spec.args
-        .extend(crate::core::launch_policy::carrier::settings_argv(
-            launch.settings,
-        ));
+        .extend(lockdown.settings_argv(profile, launch.settings)?);
     spec.args
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     spec.args
         .extend(split(crate::core::model_inject::PERMISSION_MODE_FLAG));
-    spec
+    // #10127: an Architect child inherits none of the lockdown's variables.
+    let unset = lockdown.env_unset(profile);
+    spec.env_set.retain(|(name, _)| !unset.contains(name));
+    spec.env_unset.extend(unset);
+    Ok(spec)
 }
 
 /// The spec for the in-place `tm session start`.

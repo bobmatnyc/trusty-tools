@@ -89,15 +89,24 @@ pub(crate) fn relaunch_command() -> String {
 /// composed for (#8453) and, for a PM, `CLAUDE_CODE_DISABLE_ARTIFACT='1'`
 /// (#8992), then `claude --append-system-prompt-file '<file>'` and, for a PM,
 /// the `--disallowedTools` pair. Every value is single-quoted because the pane
-/// shell re-splits the line.
+/// shell re-splits the line. #10127 Q2: an Architect stamp is an error naming
+/// [`crate::core::architect_lockdown::TYPED_LINE_REFUSAL`] — this line cannot
+/// carry the Architect lockdown.
 /// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
 /// `pm_launch_builders_carry_the_prompt_file`,
-/// `gui_spawn_command_trims_a_pm_and_not_an_architect`.
-pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, String)) -> String {
+/// `gui_spawn_command_trims_a_pm`, `gui_spawn_command_refuses_an_architect`.
+pub(crate) fn gui_spawn_command(
+    prompt_file: &std::path::Path,
+    stamp: &(String, String),
+) -> anyhow::Result<String> {
     use crate::core::pm_tool_trim::{stamped_profile, trim_args, trim_env};
     use crate::core::spawn_disclaim::pane::shell_single_quote;
     // #8992: the stamp's profile decides the trim; each piece is one shell word.
     let profile = stamped_profile(std::slice::from_ref(stamp));
+    // #10127 Q2: fail closed — never an Architect without its lockdown.
+    if profile.is_architect() {
+        anyhow::bail!(crate::core::architect_lockdown::TYPED_LINE_REFUSAL);
+    }
     let env: String = trim_env(profile)
         .iter()
         .map(|(k, v)| format!(" {k}={}", shell_single_quote(v)))
@@ -106,13 +115,13 @@ pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, 
         .iter()
         .map(|a| format!(" {}", shell_single_quote(a)))
         .collect();
-    format!(
+    Ok(format!(
         "env{} {}={}{env} claude --append-system-prompt-file {}{args}",
         crate::core::claude_env_scrub::env_unset_flags(),
         stamp.0,
         shell_single_quote(&stamp.1),
         shell_single_quote(&prompt_file.display().to_string())
-    )
+    ))
 }
 
 /// Compose and write the GUI spawn's PM prompt for `workdir`, then return the
@@ -144,16 +153,15 @@ pub(crate) fn gui_spawn_line(
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`;
     // the pane shell re-splits the line, so each token is single-quoted.
     // #8992: the profile decides whether the skill and tool parts apply.
+    // #10127 Q2: an Architect is refused before any settings file is written,
+    // and the prompt written for it is removed.
+    let stamp = crate::core::session_profile::launch_env(cli.profile);
+    let command = gui_spawn_command(&file, &stamp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&file);
+    })?;
     let settings =
         crate::core::launch_policy::provision_settings_default(workdir, None, cli.profile);
-    Ok(format!(
-        "{}{}",
-        gui_spawn_command(
-            &file,
-            &crate::core::session_profile::launch_env(cli.profile)
-        ),
-        settings.shell_words()
-    ))
+    Ok(format!("{command}{}", settings.shell_words()))
 }
 
 #[cfg(test)]
@@ -165,7 +173,8 @@ mod tests {
     #[test]
     fn gui_spawn_command_carries_the_prompt_file_and_the_stamp() {
         let stamp = ("TRUSTY_MPM_SESSION_PROFILE".to_owned(), "pm".to_owned());
-        let cmd = gui_spawn_command(std::path::Path::new("/t/with space/p.txt"), &stamp);
+        let cmd = gui_spawn_command(std::path::Path::new("/t/with space/p.txt"), &stamp)
+            .expect("a PM line");
         assert!(cmd.starts_with("env -u "), "{cmd}");
         assert!(cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"), "{cmd}");
         assert!(
@@ -179,12 +188,12 @@ mod tests {
     }
 
     /// #8992: the GUI spawn of a PM carries the Artifact switch and the deny
-    /// flag; a supervisor stamp keeps every tool. Before the fix the line
-    /// ended at the prompt file for both.
+    /// flag. Before the fix the line ended at the prompt file.
     #[test]
-    fn gui_spawn_command_trims_a_pm_and_not_an_architect() {
+    fn gui_spawn_command_trims_a_pm() {
         let file = std::path::Path::new("/t/p.txt");
-        let pm = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into()));
+        let pm = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into()))
+            .expect("a PM line");
         assert!(
             pm.contains(" CLAUDE_CODE_DISABLE_ARTIFACT='1' claude "),
             "{pm}"
@@ -193,16 +202,23 @@ mod tests {
             pm.ends_with(" '--disallowedTools' 'Workflow,DesignSync'"),
             "{pm}"
         );
-        let sup = gui_spawn_command(
-            file,
-            &("TRUSTY_MPM_SESSION_PROFILE".into(), "supervisor".into()),
-        );
-        assert!(!sup.contains("CLAUDE_CODE_DISABLE_ARTIFACT"), "{sup}");
-        assert!(!sup.contains("--disallowedTools"), "{sup}");
-        assert!(
-            sup.ends_with("--append-system-prompt-file '/t/p.txt'"),
-            "{sup}"
-        );
+    }
+
+    /// #10127 Q2: the typed line cannot carry the Architect lockdown, so either
+    /// Architect stamp is refused with an error naming why. Before the fix it
+    /// returned a launch line with no lockdown.
+    #[test]
+    fn gui_spawn_command_refuses_an_architect() {
+        let file = std::path::Path::new("/t/p.txt");
+        for value in ["architect", "supervisor"] {
+            let err = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), value.into()))
+                .expect_err("an Architect stamp is refused");
+            assert_eq!(
+                err.to_string(),
+                crate::core::architect_lockdown::TYPED_LINE_REFUSAL
+            );
+            assert!(err.to_string().contains("cannot carry"), "{err}");
+        }
     }
 
     /// #8286: the line names the file the prompt was written to.

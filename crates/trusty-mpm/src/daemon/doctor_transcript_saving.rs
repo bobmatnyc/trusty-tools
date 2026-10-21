@@ -167,7 +167,9 @@ fn launch_lines() -> Vec<LaunchLine> {
     let gui_line = crate::daemon::spawn_command::gui_spawn_command(
         probe,
         &crate::core::session_profile::launch_env(crate::core::session_profile::SessionProfile::Pm),
-    );
+    )
+    // #10127: only an Architect stamp is refused; this probe is a PM.
+    .expect("a PM line builds");
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
     // #8286: the prompt-carrying twin of the spec the in-place launch sends.
     let inplace_line =
@@ -207,7 +209,9 @@ fn launch_lines() -> Vec<LaunchLine> {
             settings: None,
             alternate_screen: false,
         },
-    );
+    )
+    // #10127: only an Architect launch can fail the lockdown; this probe is a PM.
+    .expect("a PM launch takes no Architect lockdown");
     let inplace = crate::runtime::cli_launch::inplace_spec(cwd, probe, false);
     let client = crate::runtime::cli_launch::client_spec(cwd, Some(probe), false);
 

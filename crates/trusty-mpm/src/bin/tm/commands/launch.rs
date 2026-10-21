@@ -398,7 +398,7 @@ pub(crate) async fn launch(
         // cannot carry as arguments; #8453: plus the profile stamp.
         &cli.env,
         &files,
-    );
+    )?;
     let spec_dir = launch_spec_dir(home)?;
 
     // 11. Print the full-screen robot splash then the rich info panel.
@@ -684,7 +684,7 @@ pub(crate) async fn connect(
             &files,
             // #8405: the operator's config decides the renderer.
             trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        );
+        )?;
         let spec_dir = launch_spec_dir(home)?;
         let sent =
             trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
@@ -778,7 +778,7 @@ pub(crate) fn connect_claude_spec(
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     isolated_claude_spec(
         cwd,
         None,
@@ -805,7 +805,7 @@ pub(crate) fn launch_claude_spec(
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     isolated_claude_spec(
         cwd,
         Some(pm_model),
@@ -831,9 +831,10 @@ fn isolated_claude_spec(
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     let token = config_dir.and_then(|_| trusty_mpm::core::oauth_token::resolve_oauth_token());
-    trusty_mpm::runtime::cli_launch::isolated_spec(
+    // #10127: an Architect lockdown error refuses the launch.
+    Ok(trusty_mpm::runtime::cli_launch::isolated_spec(
         cwd,
         &trusty_mpm::runtime::cli_launch::CliLaunch {
             model,
@@ -847,7 +848,7 @@ fn isolated_claude_spec(
                 config_root,
             ),
         },
-    )
+    )?)
 }
 
 /// Where a CLI launch under `home` writes its spec (#8308).

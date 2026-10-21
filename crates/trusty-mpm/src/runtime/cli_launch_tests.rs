@@ -56,7 +56,9 @@ fn isolated_spec_carries_the_owner_settings_after_the_mcp_config() {
         settings: Some(Path::new("/h/with space/s.json")),
         alternate_screen: false,
     };
-    let args = super::isolated_spec(Path::new("/work"), &launch).args;
+    let args = super::isolated_spec(Path::new("/work"), &launch)
+        .expect("spec")
+        .args;
     let at = args.iter().position(|a| a == "--mcp-config").expect("mcp");
     assert_eq!(
         args[at + 2..at + 4],
@@ -80,7 +82,7 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(Path::new("/work"), &launch);
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
     let line = crate::core::model_inject::build_claude_command_with_configured(
         launch.model,
         launch.prompt_file,
@@ -149,7 +151,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             settings: None,
             alternate_screen: false,
         };
-        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
         assert!(
             !spec.args.iter().any(|a| a == "--disallowedTools"),
             "stamp {value:?}: {:?}",
@@ -171,7 +173,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             settings: None,
             alternate_screen: false,
         };
-        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
         assert!(
             env_words(&spec).contains(&"CLAUDE_CODE_DISABLE_ARTIFACT=1".to_owned()),
             "stamp {value:?}: {:?}",
@@ -203,7 +205,7 @@ fn an_architect_isolated_spec_keeps_every_tool() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(Path::new("/work"), &launch);
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
     assert!(!spec.args.iter().any(|a| a == "--disallowedTools"));
     assert!(
         !env_words(&spec)
@@ -290,7 +292,7 @@ fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
         settings: None,
         alternate_screen: false,
     };
-    let spec = super::isolated_spec(&managed, &launch);
+    let spec = super::isolated_spec(&managed, &launch).expect("spec");
     assert!(env_words(&spec).contains(&format!("CLAUDE_CODE_OAUTH_TOKEN={token}")));
 
     let spec_dir = super::spec_dir(Some(home)).expect("a named home always resolves");
