@@ -451,6 +451,41 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// Block until the freshly spawned child `pid` has finished its exec.
+    ///
+    /// Why (#10144): on Linux, `Command::spawn` returns once the child has
+    /// swapped in its new address space, but the kernel sets
+    /// `/proc/<pid>/comm` a few steps later in the same `execve`. A name read
+    /// in that window returns the spawning test thread's name
+    /// (`core::process::`), so a walk looking for `sleep` reads `Absent`.
+    /// What: polls `/proc/<pid>/maps` until it maps the file
+    /// `/proc/<pid>/exe` names, other than this test binary. The kernel maps
+    /// the new image only after it has set the name, so the name is final.
+    /// macOS `posix_spawn` finishes the exec before it returns: no wait.
+    /// Test: `a_pane_running_no_harness_reads_absent`.
+    fn wait_for_exec(pid: u32) {
+        #[cfg(target_os = "linux")]
+        {
+            let me = std::env::current_exe().expect("test binary path");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("read exe");
+                let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).expect("maps");
+                let image = exe.to_string_lossy();
+                if exe != me && maps.lines().any(|line| line.ends_with(image.as_ref())) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pid {pid} never finished its exec"
+                );
+                sleep(Duration::from_millis(1));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
+    }
+
     /// #10127: the harness walk tells a running harness, a pane running none,
     /// and an unreadable pane apart; a dead pane process is never `Absent`.
     #[test]
@@ -464,6 +499,9 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = pane.id();
+        // #10144: `spawn()` returns before Linux renames the child; wait for
+        // the exec to finish so the name read below is `sleep`'s own.
+        wait_for_exec(pid);
         assert_eq!(harness_under_pane(pid, "sleep"), PaneClaude::Present);
         assert_eq!(
             harness_under_pane(pid, "no-such-harness"),
