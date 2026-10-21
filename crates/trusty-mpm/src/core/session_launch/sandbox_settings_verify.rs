@@ -204,28 +204,35 @@ fn widening_key(value: Option<&Value>, key: &str, file: &Path) -> Option<Sandbox
 /// Why: #10107 — the merge keeps every user-tier key, and list keys such as
 /// `allowUnixSockets` merge across tiers, so a user-tier list could re-add the
 /// sccache socket.
-/// What: a key whose value is `null`, `[]` or `{}` adds nothing and passes;
-/// a non-object `sandbox` is left to the `strictAllowlist` check, which
-/// refuses it. `network` passes only as an object whose other keys are empty.
+/// What: `credentials` passes only as an object. Any other key passes only
+/// when [`is_empty_of_its_type`]; a non-object `sandbox` is left to the
+/// `strictAllowlist` check, which refuses it. `network` passes too as an
+/// object whose other keys are empty of their type. #10107 fix round: Claude
+/// Code may skip a user file whose values its schema rejects, which would
+/// drop `strictAllowlist` and the credentials deny, so `null` and a
+/// mistyped empty value refuse.
 /// Test: `widening_sandbox_keys_refuse_the_launch`,
+/// `type_matched_empty_user_keys_still_verify`,
 /// `excluded_commands_refuse_the_launch`.
 fn user_tier_keys(user: &Value, file: &Path) -> Result<(), SandboxSettingsError> {
     let Some(sandbox) = user.get("sandbox").and_then(Value::as_object) else {
         return Ok(());
     };
     for (key, value) in sandbox {
-        let allowed = key == "credentials"
-            || is_empty(value)
-            || (key == "network"
-                && value.as_object().is_some_and(|network| {
-                    network
-                        .iter()
-                        .all(|(k, v)| k == "strictAllowlist" || is_empty(v))
-                }));
+        let allowed = match key.as_str() {
+            "credentials" => value.is_object(),
+            "network" => value.as_object().is_some_and(|network| {
+                network
+                    .iter()
+                    .all(|(k, v)| k == "strictAllowlist" || is_empty_of_its_type(k, v))
+            }),
+            _ => is_empty_of_its_type(key, value),
+        };
         if !allowed {
             return Err(refused(&format!(
                 "`{}` sets `sandbox.{key}` to {value}; tm's user tier may hold only \
-                 `sandbox.network.strictAllowlist` and `sandbox.credentials`",
+                 `sandbox.network.strictAllowlist`, a `sandbox.credentials` object, and \
+                 empty values of a key's own type",
                 file.display()
             )));
         }
@@ -233,11 +240,26 @@ fn user_tier_keys(user: &Value, file: &Path) -> Result<(), SandboxSettingsError>
     Ok(())
 }
 
-/// Whether a settings value adds nothing: `null`, `[]` or `{}`.
-fn is_empty(value: &Value) -> bool {
-    value.is_null()
-        || value.as_array().is_some_and(Vec::is_empty)
-        || value.as_object().is_some_and(serde_json::Map::is_empty)
+/// The sandbox keys whose value is a list.
+const LIST_KEYS: [&str; 7] = [
+    "excludedCommands",
+    "allowUnixSockets",
+    "allowedDomains",
+    "allowRead",
+    "allowWrite",
+    "denyRead",
+    "denyWrite",
+];
+
+/// The sandbox keys whose value is an object.
+const OBJECT_KEYS: [&str; 3] = ["network", "filesystem", "credentials"];
+
+/// Whether `value` adds nothing and has `key`'s type: `[]` for a
+/// [`LIST_KEYS`] key, `{}` for an [`OBJECT_KEYS`] key. `null`, and any empty
+/// value of an unknown key, is not (#10107 fix round).
+fn is_empty_of_its_type(key: &str, value: &Value) -> bool {
+    (LIST_KEYS.contains(&key) && value.as_array().is_some_and(Vec::is_empty))
+        || (OBJECT_KEYS.contains(&key) && value.as_object().is_some_and(serde_json::Map::is_empty))
 }
 
 /// Where one tier's rule paths are placed.
@@ -259,11 +281,13 @@ struct Place<'a> {
 /// What: each [`EDIT_RULES`] rule's path is placed as Claude Code reads it —
 /// `//p` absolute, `~/p` under the home, `/p` under each of `place.bases`, any
 /// other relative to the workspace — and its literal prefix (up to the first
-/// glob) must sit inside one of `roots`. Fail-closed: a non-list `allow`, a
-/// non-text rule, a bare `Edit`, a `..` segment, a `~user` path and a home
-/// that is not absolute all refuse.
+/// glob), after [`resolve_existing`], must sit inside one of `roots`, each
+/// resolved the same way. Fail-closed: a non-list `allow`, a non-text rule, a
+/// bare `Edit`, a `..` segment, a `~user` path, a home that is not absolute
+/// and a path or root whose symlinks cannot be resolved all refuse.
 /// Test: `apple_events_and_outside_edit_rules_refuse_the_launch`,
-/// `inside_edit_rules_still_verify`, `an_edit_rule_with_no_home_to_place_it_refuses`.
+/// `inside_edit_rules_still_verify`, `an_edit_rule_with_no_home_to_place_it_refuses`,
+/// `an_edit_rule_path_that_cannot_be_resolved_refuses`.
 fn edit_allow_rules(
     settings: &Value,
     file: &Path,
@@ -279,28 +303,78 @@ fn edit_allow_rules(
             "sets `permissions.allow` to {allow}, not a list"
         )));
     };
+    let mut edits = Vec::new();
     for rule in rules {
         let Some(text) = rule.as_str() else {
             return Err(why(format!(
                 "holds the allow rule {rule}, which is not text"
             )));
         };
-        let Some(spec) = edit_spec(text) else {
-            continue;
-        };
-        let inside = rule_prefixes(spec, place).is_some_and(|prefixes| {
-            prefixes
-                .iter()
-                .all(|prefix| roots.iter().any(|root| prefix.starts_with(root)))
-        });
-        if !inside {
-            return Err(why(format!(
+        edits.extend(edit_spec(text).map(|spec| (text, spec)));
+    }
+    if edits.is_empty() {
+        return Ok(());
+    }
+    // #10107 fix round: judged after symlinks, so a committed `tools ->
+    // <outside>` link cannot pass `Edit(/tools/**)` on its spelling.
+    let unresolved = |path: &Path, e: std::io::Error| {
+        why(format!(
+            "names `{}`, whose symlinks cannot be resolved ({e})",
+            path.display()
+        ))
+    };
+    let mut real_roots = Vec::new();
+    for root in roots {
+        real_roots.push(resolve_existing(root).map_err(|e| unresolved(root, e))?);
+    }
+    for (text, spec) in edits {
+        let outside = || {
+            why(format!(
                 "allows `{text}`, which widens the sandbox's writes outside the workspace and \
                  its `allowWrite` roots"
-            )));
+            ))
+        };
+        for prefix in rule_prefixes(spec, place).ok_or_else(outside)? {
+            let real = resolve_existing(&prefix).map_err(|e| unresolved(&prefix, e))?;
+            if !real_roots.iter().any(|root| real.starts_with(root)) {
+                return Err(outside());
+            }
         }
     }
     Ok(())
+}
+
+/// `path` with the symlinks of its deepest existing ancestor resolved, and
+/// the rest joined as spelled.
+///
+/// Why: #10107 fix round — the sandbox writes where a link points, not where
+/// it is spelled.
+/// What: walks `path`'s ancestors to the first that `canonicalize` resolves.
+/// Fail-closed: a `canonicalize` error other than NotFound is `Err`, and so
+/// is a dangling symlink on the way, which a later write could follow out.
+/// Test: `apple_events_and_outside_edit_rules_refuse_the_launch`,
+/// `an_edit_rule_path_that_cannot_be_resolved_refuses`,
+/// `inside_edit_rules_still_verify`.
+fn resolve_existing(path: &Path) -> std::io::Result<PathBuf> {
+    for ancestor in path.ancestors() {
+        match std::fs::canonicalize(ancestor) {
+            Ok(real) => {
+                let rest = path.strip_prefix(ancestor).map_err(std::io::Error::other)?;
+                return Ok(if rest.as_os_str().is_empty() {
+                    real
+                } else {
+                    real.join(rest)
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(ancestor).is_ok() {
+                    return Err(std::io::Error::other("a dangling symlink"));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no ancestor resolves"))
 }
 
 /// The path of an [`EDIT_RULES`] rule (`""` for a bare one), or `None` for
