@@ -288,7 +288,7 @@ and the #9030 backend routes (owner ruling). Those are now merged.
 | S7 | `tm secrets exec --dotenv` | not started |
 | S8 | Exec-granted `secrets.resolve` | not started |
 | S9 | Rust client | not started |
-| S10 | Python (PyPI) and npm clients, with publish workflows | not started |
+| S10 | `tm secrets resolve <key>` command; no published Python or npm package (owner ruling 2026-10-21, #9072) | not started |
 
 ### Claude Code mods (release 6, trusty-mpm 2.2.0)
 
