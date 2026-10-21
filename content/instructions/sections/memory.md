@@ -4,7 +4,7 @@
      could rely on. The guaranteed seed is `catchup_context`, built once at
      launch by `core::session_launch::prepare_session` from
      `core::catchup::run_catchup_blocking` (`include_palace`); the
-     `session_context_catchup` MCP tool re-reads the same three-source digest.
+     `session_context_catchup` MCP tool re-reads the three sources with `full: true` (#9883).
      The optional `[hooks] prompt_context` entry
      (`core::session_launch::settings`, `TRUSTY_MEMORY_HOOKS`) may or may not be
      registered in a given project, which is why nothing here depends on it.
@@ -13,4 +13,4 @@
 Palace context arrives ONCE per session, as the catch-up seed block injected at
 session start. Never assume a per-prompt hook refreshes it; that seed predates
 everything this session has learned. `session_context_catchup` re-reads the
-same launch digest on demand.
+launch digest's sources on demand with `full: true`.

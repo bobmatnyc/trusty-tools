@@ -3591,6 +3591,77 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
     }
 }
 
+/// Why (#9883 criterion 5): the resume default became the lean answer — the
+/// resolved snapshot plus live `git status` — with the digest behind
+/// `full: true`. A skill still teaching the watermarked digest as the default
+/// would send the PM looking for a `sessions` array that is no longer there.
+/// What: the skill names the lean fields and `full: true` / `--full` as the
+/// digest switch, and no longer calls the default a watermarked digest or
+/// `full` a watermark switch.
+/// Test: this test.
+#[test]
+fn session_resume_skill_matches_the_lean_default_9883() {
+    let text = skill_text("skills/tm-session-resume.md");
+    for needle in [
+        "\"git_status\"",
+        "\"resolved_session\"",
+        "\"digest\": \"lean\"",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?}");
+    }
+    for stale in [
+        "watermarked markdown digest",
+        "true ignores the watermark",
+        "ignore the watermark, full history",
+    ] {
+        assert!(!text.contains(stale), "still says {stale:?}");
+    }
+}
+
+/// Why (#9883): `--all-projects` scans the full digest, so `tm sessions
+/// catchup` refuses it without `--full`. Shipped content that still teaches
+/// the bare form hands the PM a parse error.
+/// What: every `.md` under the checkout's `content/` — no line names
+/// `catchup` followed by `--all-projects` without `--full` between them.
+/// Test: this test.
+#[test]
+fn shipped_content_never_teaches_all_projects_without_full_9883() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable content dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                out.push(path);
+            }
+        }
+    }
+    let root = crate::core::content_source::test_support::repo_root().join("content");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        files.len() > 100,
+        "content walk found {} files",
+        files.len()
+    );
+    let mut offenders = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("utf-8 content");
+        for (n, line) in text.lines().enumerate() {
+            let Some(at) = line.find("catchup") else {
+                continue;
+            };
+            let rest = &line[at..];
+            if let Some(flag) = rest.find("--all-projects")
+                && !rest[..flag].contains("--full")
+            {
+                offenders.push(format!("{}:{}: {line}", file.display(), n + 1));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
 /// Why (#8408): every relaunch recreates the tmux window, so the skill's old
 /// "select the recorded `@id`" step pointed a resumed PM at a window that no
 /// longer existed.

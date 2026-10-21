@@ -67,6 +67,11 @@ pub struct CatchupOptions {
     /// Maximum number of palace drawers to include.
     pub drawer_limit: usize,
     /// When true, ignore the watermark and return full history.
+    ///
+    /// #9883: this is what `session_context_catchup`
+    /// `full: true` and `tm sessions catchup --full` run — the full digest.
+    /// `false` is the watermarked digest, which only session-start injection
+    /// still asks for; the manual default is the lean answer instead.
     pub full: bool,
 }
 

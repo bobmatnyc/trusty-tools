@@ -1,0 +1,2 @@
+Changed
+- `tm-session-resume` 2.0.0 teaches the lean resume default: the resolved snapshot (`resolved_session`) plus live `git_status`, with the full digest behind `full: true` / `--full`; the watermarked digest and its guidance are removed. The memory section says `session_context_catchup` re-reads the launch digest's sources with `full: true`, and the tm-capabilities CLI and MCP references are regenerated (#9883).
