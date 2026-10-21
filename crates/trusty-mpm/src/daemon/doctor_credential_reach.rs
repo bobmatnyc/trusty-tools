@@ -8,9 +8,9 @@
 //! the only symptom is "the overseer stopped working after an update" with
 //! nothing in `tm doctor` to explain it. This row explains it.
 //!
-//! What: [`check_credential_reach`] asks
-//! [`trusty_common::credentials::resolve_env_var_bounded`] for each credential
-//! the daemon consumes and reports PRESENT / ABSENT / the store's error KIND /
+//! What: [`check_credential_reach`] asks the daemon's own resolver for each
+//! credential the daemon consumes — env first, or store first for the Slack
+//! bot token (#9936) — and reports PRESENT / ABSENT / the store's error KIND /
 //! TIMED OUT. It never prints a value, and it is bounded by the same constant
 //! the daemon uses, so running `tm doctor` can never hang on a dialog either.
 //!
@@ -32,6 +32,14 @@ const CHECK_NAME: &str = "credential_reach";
 /// (`openrouter`, `anthropic`) and the chat channels (`telegram`, `slack`).
 /// Test: `row_reports_one_line_per_daemon_credential`.
 const DAEMON_PROVIDERS: &[&str] = &["openrouter", "anthropic", "telegram", "slack"];
+
+/// The [`DAEMON_PROVIDERS`] the daemon resolves store first (#9936).
+///
+/// Why (PR #10000 review): the row must check the token the daemon uses. The
+/// Slack bot token is read store first (`channels::slack_bot::SLACK_BOT_REF`,
+/// behind the `channels` feature, so named here by value).
+/// Test: `slack_is_checked_store_first_and_the_rest_env_first_9936`.
+const STORE_FIRST_PROVIDERS: &[&str] = &["slack"];
 
 /// One credential's reachability, as a phrase for the row.
 ///
@@ -119,25 +127,29 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
 pub(crate) fn check_credential_reach() -> DoctorCheck {
     // Runs on the blocking pool — see `check_credential_reach_async`, the only
     // caller on an async path. Nothing here may be awaited.
-    // #9121: the gated resolver, so the latch holds even if this row's own
-    // sandbox check regressed.
+    // #9121: the gated resolvers, so the latch holds even if this row's own
+    // sandbox check regressed. #9936: each credential through the daemon's door.
     check_credential_reach_with(
         crate::secret_source::sandboxed(),
         crate::secret_source::resolve_bounded_gated,
+        crate::secret_source::resolve_store_first_gated,
     )
 }
 
-/// [`check_credential_reach`] with the sandbox state and the resolver injected.
+/// [`check_credential_reach`] with the sandbox state and the resolvers injected.
 ///
 /// Why (#9121): this probe walks `.env.local` and the Keychain, so a sandboxed
 /// daemon answering `GET /api/v1/doctor` would read the operator's store.
-/// What: `sandbox` → an `Ok` row saying no tier was consulted; `resolve` is
-/// never called. Otherwise one verdict per [`DAEMON_PROVIDERS`] entry.
+/// What: `sandbox` → an `Ok` row saying no tier was consulted; no resolver is
+/// called. Otherwise one verdict per [`DAEMON_PROVIDERS`] entry, read through
+/// `store_first` for [`STORE_FIRST_PROVIDERS`] and `env_first` for the rest.
 /// Test: `a_sandboxed_row_consults_no_credential_tier`,
-/// `an_unsandboxed_row_consults_every_daemon_credential`.
+/// `an_unsandboxed_row_consults_every_daemon_credential`,
+/// `slack_is_checked_store_first_and_the_rest_env_first_9936`.
 pub(crate) fn check_credential_reach_with(
     sandbox: bool,
-    resolve: impl Fn(&str) -> Result<String, SecretResolveError>,
+    env_first: impl Fn(&str) -> Result<String, SecretResolveError>,
+    store_first: impl Fn(&str) -> Result<String, SecretResolveError>,
 ) -> DoctorCheck {
     if sandbox {
         return DoctorCheck::new(
@@ -150,7 +162,12 @@ pub(crate) fn check_credential_reach_with(
         .iter()
         .map(|provider| {
             let var = env_var_for(provider).unwrap_or(provider);
-            verdict_for(var, &resolve(var))
+            let outcome = if STORE_FIRST_PROVIDERS.contains(provider) {
+                store_first(var)
+            } else {
+                env_first(var)
+            };
+            verdict_for(var, &outcome)
         })
         .collect();
     build_row(&verdicts)

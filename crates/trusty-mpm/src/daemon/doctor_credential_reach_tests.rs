@@ -259,10 +259,12 @@ async fn a_probe_that_panics_is_unknown_not_a_lost_row() {
 fn a_sandboxed_row_consults_no_credential_tier() {
     let calls = std::sync::atomic::AtomicUsize::new(0);
 
-    let check = check_credential_reach_with(true, |_var| {
+    let resolve = |_var: &str| {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(FAKE_VALUE.to_string())
-    });
+    };
+
+    let check = check_credential_reach_with(true, resolve, resolve);
 
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
@@ -277,14 +279,84 @@ fn a_sandboxed_row_consults_no_credential_tier() {
 fn an_unsandboxed_row_consults_every_daemon_credential() {
     let calls = std::sync::atomic::AtomicUsize::new(0);
 
-    let check = check_credential_reach_with(false, |_var| {
+    let resolve = |_var: &str| {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(FAKE_VALUE.to_string())
-    });
+    };
+
+    let check = check_credential_reach_with(false, resolve, resolve);
 
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
         DAEMON_PROVIDERS.len()
     );
     assert!(!check.message.contains("sandbox"), "{}", check.message);
+}
+
+/// Why (#9936, PR #10000 review): the daemon reads the Slack bot token store
+/// first. A row wired to the env-first door checks a different token than the
+/// daemon uses, and reports it reachable while the daemon fails on a store
+/// error. The injected-resolver test cannot see the production wiring; this
+/// reads it.
+/// Test: this test.
+#[test]
+fn the_production_row_wires_the_store_first_door_9936() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/daemon/doctor_credential_reach.rs");
+    let text = std::fs::read_to_string(path).expect("read doctor_credential_reach.rs");
+    let start = text
+        .find("fn check_credential_reach()")
+        .expect("the production row");
+    let body = &text[start..];
+    let body = &body[..body.find("\n}\n").expect("end of the production row")];
+    assert!(
+        body.contains("resolve_store_first_gated"),
+        "the row does not pass the store-first door: {body}"
+    );
+    assert!(
+        body.contains("resolve_bounded_gated"),
+        "the row dropped the env-first door for the other credentials: {body}"
+    );
+}
+
+/// Why (#9936, PR #10000 review): with a Slack token in the environment and a
+/// store that errors, the daemon fails to resolve it. The row must report that
+/// error, not "present" from the environment.
+/// Test: this test.
+#[test]
+fn slack_is_checked_store_first_and_the_rest_env_first_9936() {
+    let slack =
+        trusty_common::credential_registry::env_var_for("slack").expect("slack is registered");
+    let env_calls = std::sync::Mutex::new(Vec::new());
+    let store_calls = std::sync::Mutex::new(Vec::new());
+
+    let check = check_credential_reach_with(
+        false,
+        |var: &str| {
+            env_calls.lock().expect("lock").push(var.to_string());
+            Ok(FAKE_VALUE.to_string())
+        },
+        |var: &str| {
+            store_calls.lock().expect("lock").push(var.to_string());
+            Err(SecretResolveError::Store {
+                var: var.to_string(),
+                kind: trusty_common::credentials::StoreErrorKind::Io,
+                cached: false,
+            })
+        },
+    );
+
+    assert_eq!(*store_calls.lock().expect("lock"), vec![slack.to_string()]);
+    let env_calls = env_calls.lock().expect("lock");
+    assert_eq!(env_calls.len(), DAEMON_PROVIDERS.len() - 1, "{env_calls:?}");
+    assert!(!env_calls.iter().any(|v| v == slack), "{env_calls:?}");
+    assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+    assert!(
+        check.message.contains(&format!(
+            "{slack}: the credential store could not supply it (io)"
+        )),
+        "{}",
+        check.message
+    );
+    assert!(!check.message.contains(FAKE_VALUE), "{}", check.message);
 }
