@@ -9,13 +9,16 @@
 //! What: [`evaluate_d4_floor`] walks every segment of a Bash command — through
 //! `sh -c` / `env -S` / `xargs` / `eval` wrappers, remembering which segment
 //! reads a pipe — and returns the first deny from [`super::floor_d4_rules`]
-//! (uploads and disk tools) or [`super::force_push`].
+//! (uploads and disk tools), [`python`] (python uploads, #8878 S5) or
+//! [`super::force_push`].
 //! FAIL-CLOSED: a command the guard cannot classify, or a segment that does not
 //! lex, denies when its text names any program this floor covers. A wrapper
 //! followed by a flag (`sudo -u root dd …`) makes every token a candidate
-//! program.
-//! Residual: a script file the command runs, a shell function or alias, and a
-//! program reached through an interpreter (`python -c`) are not seen.
+//! program. No `cd` is ever followed (#8878 ruling 2026-09-29 18:57Z): any
+//! segment naming `cd`, `pushd` or `popd` leaves every later segment in an
+//! unknown directory.
+//! Residual: a script file the command runs (#8879), a shell function or
+//! alias, and a program reached through an interpreter other than python.
 //! Test: `floor_d4_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -25,13 +28,22 @@ use super::floor_d4_rules::{disk_tool_reason, exfiltration_reason};
 use super::force_push::{GitProbe, force_push_reason};
 use super::shell_lex::{WrappedCommand, wrapped_command};
 use super::{MAX_WRAPPER_DEPTH, split_shell_segments_raw, unclassifiable_command};
-use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, first_command_token, strip_wrapper_prefix};
+use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, strip_wrapper_prefix};
+use python::{heredoc_split, python_upload_reason};
+
+// #8878 S5: the python-upload row, a child module so it shares this file's
+// helpers without a `pm_guard_bash` declaration.
+#[path = "floor_d4_python.rs"]
+mod python;
 
 /// The words whose presence makes an unparseable command a D4 candidate.
 const D4_WORDS: &[&str] = &[
     "curl", "wget", "scp", "rsync", "nc", "ncat", "netcat", "ssh", "diskutil", "dd", "mkfs",
-    "newfs", "fdisk", "hdiutil", "asr", "push",
+    "newfs", "fdisk", "hdiutil", "asr", "push", "socat", "sftp", "gpt", "wipefs", "gdd",
 ];
+
+/// The words that move a shell's directory (#8878 S5).
+const CD_WORDS: &[&str] = &["cd", "pushd", "popd"];
 
 /// Tokens after which the next token runs as a program (`find -exec`).
 pub(super) const EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
@@ -43,7 +55,8 @@ pub(super) struct Segment {
     pub(super) text: String,
     /// Whether its standard input is a pipe (`a | b`, `a |& b`).
     pub(super) piped: bool,
-    /// Whether a `cd` ran earlier in the command, so the directory is unknown.
+    /// Whether a `cd`, `pushd` or `popd` ran earlier in the command (or in
+    /// this segment), so the directory is unknown; it is never followed.
     pub(super) after_cd: bool,
 }
 
@@ -63,8 +76,14 @@ pub(crate) fn evaluate_d4_floor(command: &str, cwd: &Path, git: &dyn GitProbe) -
         return Some(unparseable_reason());
     }
     for seg in segments(command) {
-        let Some(argv) = shlex::split(seg.text.trim()) else {
-            if mentions_d4_word(&seg.text) {
+        // #8878 S5: python code first, then the operator line of any
+        // here-document — its body is data, read by the rules that consume it.
+        if let Some(reason) = python_upload_reason(&seg.text, seg.piped, command) {
+            return Some(reason);
+        }
+        let (head, _) = heredoc_split(&seg.text);
+        let Some(argv) = shlex::split(head.trim()) else {
+            if mentions_d4_word(head) {
                 return Some(unparseable_reason());
             }
             continue;
@@ -72,7 +91,7 @@ pub(crate) fn evaluate_d4_floor(command: &str, cwd: &Path, git: &dyn GitProbe) -
         let dir: Option<PathBuf> = (!seg.after_cd).then(|| cwd.to_path_buf());
         let reason = exfiltration_reason(&argv, seg.piped)
             .or_else(|| disk_tool_reason(&argv, dir.as_deref()))
-            .or_else(|| force_push_reason(&argv, dir.as_deref(), git));
+            .or_else(|| force_push_reason(&argv, dir.as_deref(), git, command));
         if reason.is_some() {
             return reason;
         }
@@ -97,7 +116,7 @@ fn walk(command: &str, piped_in: bool, depth: usize, after_cd: &mut bool, out: &
         if trimmed.is_empty() {
             continue;
         }
-        if first_command_token(trimmed).as_deref() == Some("cd") {
+        if moves_directory(trimmed) {
             *after_cd = true;
         }
         out.push(Segment {
@@ -110,6 +129,30 @@ fn walk(command: &str, piped_in: bool, depth: usize, after_cd: &mut bool, out: &
         {
             walk(&inner, piped, depth + 1, after_cd, out);
         }
+    }
+}
+
+/// Whether a segment may change the shell's directory: one of its shell words,
+/// stripped of a leading `(`, `{`, `$`, backtick or `!`, is a [`CD_WORDS`]
+/// word. A segment that does not lex is split on every non-word character.
+///
+/// Why: #8878 S5 — PR 2c followed a literal `cd` and was BLOCKed twice for it
+/// (a `cd` inside a comment, a quoted `~`); the ruling keeps main's "any `cd`
+/// makes the directory unknown", and this widens it to `pushd`, `popd` and a
+/// `cd` behind `{`, `(` or `if`, which the first-word test missed.
+/// What: a word test, never a parse, and the directory is never computed —
+/// over-matching (`echo cd`) only makes it unknown, the fail-closed direction.
+/// A quoted phrase (`-m "fix cd"`) is one word, so it does not match.
+/// Test: `every_directory_change_makes_the_directory_unknown`,
+/// `a_cd_is_never_followed`.
+fn moves_directory(segment: &str) -> bool {
+    let names_cd =
+        |word: &str| CD_WORDS.contains(&word.trim_start_matches(['(', '{', '$', '`', '!']));
+    match shlex::split(segment) {
+        Some(words) => words.iter().any(|w| names_cd(w)),
+        None => segment
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(names_cd),
     }
 }
 
