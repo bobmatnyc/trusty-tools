@@ -1,2 +1,0 @@
-Added
-- The venv bootstrap now uses a cached, verified `uv` when none is installed: an installed `uv` (`TRUSTY_UV_BIN`, `PATH`, the well-known install dirs) still wins, and otherwise `<data>/py-embedder/uv/0.12.23/uv` is used only when its bytes match the digest recorded at install. The new `uv_fetch::install_verified` checks an on-disk uv 0.12.23 archive against an embedded SHA-256 before extracting it and refuses unsafe entries; under its `.fetch.lock` it first removes any `.uv.tmp.*` file a killed install left, and stops with an error if one cannot be removed (#9468).

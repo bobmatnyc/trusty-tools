@@ -1,2 +1,0 @@
-Fixed
-- On Apple Silicon, a network failure or timeout during the first python venv build (the ~3 GB torch install, the pinned uv download, or the first download of the embedding model) no longer ends the python bootstrap. The background loop retries it on the existing 2, 5, 10 and 30 minute backoff and switches to python on the first good build; while it waits, `embedder_bootstrap` and `meta.embedder.bootstrap` read `retrying` and the note names the error. Low disk space, `ENOSPC`, `TRUSTY_UV_FETCH=0` with no uv and a missing launcher still end it as `failed` (#9971).
