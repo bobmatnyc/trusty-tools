@@ -1545,15 +1545,16 @@ Tier 3 must not widen the limit.
 | Language | Package | Dependencies |
 |---|---|---|
 | Rust | `trusty-secrets` with `api` only: `trusty_secrets::granted`, blocking, Unix (no `client` feature, Df0; Architect ruling D1, 2026-10-12, #9071) | None new: `api` enables the already-optional `serde_json` and `libc` |
-| Python | `trusty-secrets` on PyPI | Standard library only (`socket`, `json`, `os`) |
-| JS/TS | `@trusty-tools/secrets` on npm | Node built-ins only (`node:net`) |
+| Any language | `tm secrets resolve <key>` (Rust command in `tm`) | None new: it resolves a granted key over the socket using `TRUSTY_SECRETS_TOKEN_FD` |
 | Go | Later | — |
 
 The wire format is newline-terminated JSON-RPC 2.0
 ([`rpc.rs`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/uds/rpc.rs#L13-L18),
 [`JSONRPC_VERSION`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/uds/server/wire.rs#L29)).
-The repo has no PyPI or npm publish workflow, so S10 adds one publish child
-per registry.
+No Python or npm package is published (owner ruling 2026-10-21, #9072).
+Python and Node callers shell out to `tm secrets resolve <key>`. A
+stdlib-only script in the tm bundle is added only when a real in-process
+consumer appears. The npm package is dropped.
 
 ### 15.9 Slices
 
@@ -1575,7 +1576,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
 | S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
 | S10 PR 1 | Token hand-down as a read-only fd on an unlinked file, read with `pread` (§10.5); the Rust client drops its pipe read and `GrantedError::Rearm`; `tm secrets exec` sweeps stale `tm-grant-*` directories (#9071, #9072) | 5 | S9 |
-| S10 | Python and npm clients, plus their publish workflows | 3 each | S10 PR 1 |
+| S10 | `tm secrets resolve <key>` command; no published Python or npm package (owner ruling 2026-10-21, #9072) | 3 | S10 PR 1 |
 
 ### 15.10 Child re-scope
 
