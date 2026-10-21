@@ -11,7 +11,7 @@ name = "trusty-installer"
 # 0.15.0 (Refs #9214 PR-A): minor — `probe_http::dual_transport` is removed and
 # trusty-search is probed over its socket only. crates.io is at 0.13.8; 0.14.0
 # is unpublished on main and the Architect set 0.15.0.
-version = "0.16.0"
+version = "0.16.1"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
@@ -97,6 +97,9 @@ trusty-progress = { workspace = true }
 # (Phase 2 / #1760) to stage downloads atomically before placing binaries, and in
 # tests for integration-test isolation.
 tempfile = { workspace = true }
+# #9974: format-preserving edit of cargo's `.crates.toml` when a prebuilt takes
+# the trusty-embedderd-py launcher record over.
+toml_edit = { workspace = true }
 
 [dev-dependencies]
 # test-util enables Tokio's paused clock (`#[tokio::test(start_paused = true)]`)

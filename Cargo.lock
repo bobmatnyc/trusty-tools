@@ -11499,7 +11499,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11517,6 +11517,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "trusty-common",

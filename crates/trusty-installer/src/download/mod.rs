@@ -25,6 +25,8 @@
 //! Test: Each submodule has its own tests (pure + `#[ignore]`-tagged live tests).
 //! The orchestrator's fallback decision logic is tested in `tests` below.
 
+// #9974: a prebuilt that places the launcher takes cargo's record of it over.
+mod cargo_record;
 // Tools released outside this workspace (tga, trusty-audit) — ruling 2026-09-28.
 pub(crate) mod external;
 pub mod fetch;
@@ -45,6 +47,7 @@ pub(crate) mod test_fixture;
 use std::path::PathBuf;
 
 use anyhow::Context;
+pub use cargo_record::CargoRecordError;
 // #5777: the `DEFAULT_INSTALL_DIR = "~/.local/bin"` const that lived here was
 // deleted with the Phase 3 destination flip — no code read it, and the real
 // default is `default_install_dir()` below (the shared canonical cargo bin
@@ -154,6 +157,10 @@ pub enum Outcome {
     /// The artifact downloaded but failed SHA-256 verification. Terminal —
     /// the caller must abort, never fall back (#5518).
     ChecksumMismatch(ChecksumMismatch),
+    /// The binaries were placed, but cargo's install metadata still names a
+    /// standalone `trusty-embedderd-py` as the launcher's owner and could not
+    /// be taken over. Terminal — the caller reports it as a failure (#9974).
+    CargoRecord(CargoRecordError),
 }
 
 /// Attempt to install a prebuilt binary for `crate_name` into `install_dir`.
@@ -335,6 +342,17 @@ pub(crate) async fn try_install_prebuilt_at(
         &tarball_url,
         result,
     );
+    // #9974: placing the launcher also takes cargo's record of it over, or the
+    // install fails naming the metadata file.
+    let outcome = match outcome {
+        Outcome::Installed { paths, version } => {
+            match cargo_record::take_over_launcher(crate_name, &version, install_dir, &paths) {
+                Ok(()) => Outcome::Installed { paths, version },
+                Err(e) => Outcome::CargoRecord(e),
+            }
+        }
+        other => other,
+    };
 
     // A load-dynamic asset dlopen()s libonnxruntime.so at startup and will not
     // run until ORT_DYLIB_PATH is set — surface the setup steps rather than
@@ -964,6 +982,7 @@ mod tests {
             Outcome::ChecksumMismatch(m) => {
                 panic!("a real GitHub release must verify against its own checksum: {m}")
             }
+            Outcome::CargoRecord(e) => panic!("a temp dir holds no cargo metadata: {e}"),
         }
     }
 }
@@ -974,3 +993,7 @@ mod tests {
 // per #5153). `mod_tests.rs` is classified test-file by basename.
 #[cfg(test)]
 mod mod_tests;
+
+// #9974: the prebuilt path's cargo-record takeover, end to end.
+#[cfg(test)]
+mod cargo_record_tests;
