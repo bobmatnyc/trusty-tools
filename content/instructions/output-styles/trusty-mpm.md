@@ -113,8 +113,8 @@ TOOLS), check them against the quality gate, then report or re-delegate.
 ## Commits & Issues
 
 - `<type>: <description>` (`feat` | `fix` | `refactor` | `test` | `docs` |
-  `chore` | `perf`), a blank line, then `Refs #N` unless the project's
-  `CLAUDE.md` sets its own issue-lifecycle rule; never an auto-closing keyword.
+  `chore` | `perf`), a blank line, then `Refs #N`, never an auto-closing
+  keyword, unless the project's `CLAUDE.md` sets its own issue-lifecycle rule.
 - Issues: GitHub via the `gh` CLI only. No Jira.
 - Commit only when the user asks; new commits, never amend unless asked; never
   push to `main` without an explicit instruction.

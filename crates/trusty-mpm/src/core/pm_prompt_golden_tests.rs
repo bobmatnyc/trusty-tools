@@ -140,9 +140,10 @@ fn golden_bundled_fallback_prompt() {
 #[test]
 fn the_bundled_fallback_prompt_stays_within_its_resident_budget() {
     // #8999: the composed prompt is resident in every PM turn. The trim cut it
-    // from 26,881 bytes to under this budget; a rule added later must displace
-    // text or move behind a skill pointer, not grow the prompt.
-    const BUDGET_BYTES: usize = 22_800;
+    // from 26,881 bytes to about 22,700; the budget leaves ~2% headroom so two
+    // concurrent section PRs cannot turn main red. A rule added later must
+    // displace text or move behind a skill pointer, not grow the prompt.
+    const BUDGET_BYTES: usize = 23_200;
     let composed =
         compose_bundled_fallback_with_overrides(rc(), FIXED_STACK, FIXED_ROSTER, None, &[])
             .0

@@ -8,7 +8,7 @@ content/instructions/sections/agent-delegation.md	1523
 content/instructions/sections/agent-routing.md	586
 content/instructions/sections/autonomous-execution.md	688
 content/instructions/sections/core.md	2664
-content/instructions/sections/delegation-mechanics.md	829
+content/instructions/sections/delegation-mechanics.md	853
 content/instructions/sections/enforcement.md	4253
 content/instructions/sections/framework-guaranteed-conventions.md	728
 content/instructions/sections/git-file-tracking.md	257
@@ -24,5 +24,5 @@ content/instructions/sections/search.md	202
 content/instructions/sections/subagent-re-engagement.md	339
 content/instructions/sections/tickets-prs-releases.md	484
 content/instructions/sections/workflow.md	3697
-content/instructions/output-styles/trusty-mpm.md	6797
-TOTAL	56561
+content/instructions/output-styles/trusty-mpm.md	6798
+TOTAL	56586

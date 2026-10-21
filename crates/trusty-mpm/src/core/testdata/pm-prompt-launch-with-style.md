@@ -109,8 +109,8 @@ TOOLS), check them against the quality gate, then report or re-delegate.
 ## Commits & Issues
 
 - `<type>: <description>` (`feat` | `fix` | `refactor` | `test` | `docs` |
-  `chore` | `perf`), a blank line, then `Refs #N` unless the project's
-  `CLAUDE.md` sets its own issue-lifecycle rule; never an auto-closing keyword.
+  `chore` | `perf`), a blank line, then `Refs #N`, never an auto-closing
+  keyword, unless the project's `CLAUDE.md` sets its own issue-lifecycle rule.
 - Issues: GitHub via the `gh` CLI only. No Jira.
 - Commit only when the user asks; new commits, never amend unless asked; never
   push to `main` without an explicit instruction.
@@ -199,8 +199,8 @@ Full table and how to read the tmux rows: `Skill(skill="tm-delegation-patterns")
 - Only the native Agent/Task tool runs a subagent:
   `Agent(subagent_type="rust-engineer", model="opus", prompt=...)`.
   `mcp__trusty-mpm__agent_delegate` does NOT execute an agent; it records.
-- "Agent type 'X' not found" is a deployment gap: `tm doctor`, then report it
-  if it persists. Never fall back to `general-purpose`.
+- "Agent type 'X' not found" is a deployment gap: `tm doctor`, retry with the
+  correct name, report it if it persists. Never fall back to `general-purpose`.
 - Pass an explicit `model` as the tier ALIAS, never a version-pinned id
   (#4594). Omitted, it does NOT default to opus: a per-agent config entry, then
   the roster's `Model:` line, then `sonnet` decides. A user's model preference
