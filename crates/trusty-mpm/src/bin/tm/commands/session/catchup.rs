@@ -14,13 +14,17 @@
 //! Manual catchup (both full and non-full) does NOT advance the watermark;
 //! only auto-inject on session start advances it (PR4).
 //! `--json` prints the MCP tool's paged JSON instead (#8017).
+//! #9883: without `--full` both forms print the lean answer — the resolved
+//! snapshot plus live `git status` — through the MCP tool's own path.
 //! Test: `handle_catchup_no_sessions_produces_notice`,
-//! `handle_catchup_full_flag_is_accepted` in the inline test block.
+//! `handle_catchup_full_flag_is_accepted`, `lean_markdown_*` in the inline test
+//! block.
 //!
 // CUTOVER BRIDGE (claude-mpm format parsing) — remove post-migration (#1762)
 
 use std::path::PathBuf;
 
+use serde_json::Value;
 use trusty_mpm::core::{
     catchup::{CatchupOptions, run_catchup},
     claude_mpm_registry::{default_registry_path, discover_claude_mpm_projects},
@@ -28,19 +32,26 @@ use trusty_mpm::core::{
 
 use crate::commands::project::resolve_dir;
 
-/// Handle `tm session catchup [--all-projects] [--full]`.
+/// Handle `tm session catchup [--full [--all-projects]]`.
 ///
 /// Why: provides the catch-up entry-point for `tm session catchup`.
-/// What: collects project directories to scan (cwd always included; registry
+/// What: without `full`, prints [`render_lean_markdown`] of the lean
+/// `session_context_catchup` answer for the current project (#9883). With
+/// `full`, collects project directories to scan (cwd always included; registry
 /// projects appended when `all_projects` is set), runs the catch-up runtime
-/// (watermark-aware when `full=false`, full history when `full=true`), and
-/// prints the digest to stdout. Manual catchup does NOT advance the watermark —
-/// only auto-inject on session start does.
+/// with no watermark, and prints the digest to stdout. Manual catchup does NOT
+/// advance the watermark — only auto-inject on session start does.
 /// Test: `cli_parses_session_catchup` in `tests.rs` exercises the parse path;
 /// the handler itself is smoke-tested by `handle_catchup_*` below.
 ///
 // CUTOVER BRIDGE — remove post-migration (#1762)
 pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Result<()> {
+    if !full {
+        // #9883: reuse the MCP tool's identity resolution — never a fork of it.
+        let lean = catchup_page(false, false, 0).await?;
+        print!("{}", render_lean_markdown(&lean));
+        return Ok(());
+    }
     let mut project_dirs: Vec<PathBuf> = vec![resolve_dir(None)?];
 
     // CUTOVER BRIDGE — remove post-migration (#1762)
@@ -75,9 +86,8 @@ pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Re
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,
             drawer_limit: config.catchup.drawer_limit,
-            // When full=true: ignore watermark (full history).
-            // When full=false: use watermark (incremental since last run).
-            full,
+            // #9883: only `--full` reaches here; the full digest has no watermark.
+            full: true,
         };
         // Manual catchup never advances the watermark.
         let context = run_catchup(&opts, false).await;
@@ -102,9 +112,27 @@ pub(crate) async fn handle_catchup_json(
     full: bool,
     sessions_offset: usize,
 ) -> anyhow::Result<()> {
+    let page = catchup_page(all_projects, full, sessions_offset).await?;
+    println!("{}", serde_json::to_string_pretty(&page)?);
+    Ok(())
+}
+
+/// The `session_context_catchup` answer for the current project.
+///
+/// Why: the JSON and markdown forms must resolve the caller the same way the
+/// MCP tool does (#5272, #5386), so both go through this one call.
+/// What: the current project, this process's managed session id (as the
+/// `serve --stdio` bridge stamps it for the MCP tool), no tmux window.
+/// Test: `session_context_catchup_returns_expected_shape`,
+/// `the_default_returns_the_resolved_snapshot_and_live_git_status_only`.
+async fn catchup_page(
+    all_projects: bool,
+    full: bool,
+    sessions_offset: usize,
+) -> anyhow::Result<Value> {
     let dir = resolve_dir(None)?;
     let session_id = trusty_common::catchup::session_id::managed_session_id_from_env();
-    let page = trusty_mpm::daemon::mcp_context::session_context_catchup(
+    trusty_mpm::daemon::mcp_context::session_context_catchup(
         &dir.to_string_lossy(),
         session_id.as_deref(),
         None,
@@ -113,13 +141,85 @@ pub(crate) async fn handle_catchup_json(
         sessions_offset,
     )
     .await
-    .map_err(anyhow::Error::msg)?;
-    println!("{}", serde_json::to_string_pretty(&page)?);
-    Ok(())
+    .map_err(anyhow::Error::msg)
+}
+
+/// Render a lean `session_context_catchup` answer as markdown (#9883).
+///
+/// Why: `tm sessions catchup` without `--json` prints markdown, and its lean
+/// default must carry what the JSON one does — never a silently thinner view.
+/// What: the resolved snapshot (path, route, recorded sections) or why none
+/// resolved; whether the checkout moved past it; the live `git status`, or
+/// why it is unavailable; a hydration error when one occurred; and a pointer
+/// to `--full`.
+/// Test: `lean_markdown_renders_the_snapshot_and_live_status`,
+/// `lean_markdown_names_an_unresolved_snapshot_and_unavailable_status`.
+pub(crate) fn render_lean_markdown(lean: &Value) -> String {
+    let mut out = String::from("## Resume Snapshot\n\n");
+    match lean["resolved_snapshot"].as_str() {
+        Some(path) => {
+            let via = lean["resolved_via"].as_str().unwrap_or("unknown");
+            out.push_str(&format!("`{path}` (resolved via {via})\n\n"));
+            let session = &lean["resolved_session"];
+            for (key, title) in [
+                ("summary", "Summary"),
+                ("in_progress", "In Progress"),
+                ("next_steps", "Next Steps"),
+                ("git_context", "Git Context (at pause)"),
+            ] {
+                if let Some(text) = session[key].as_str().filter(|t| !t.trim().is_empty()) {
+                    out.push_str(&format!("### {title}\n{}\n\n", text.trim()));
+                }
+            }
+            if lean["resolved_snapshot_superseded"] == true {
+                let total = &lean["commits_since_snapshot_total"];
+                out.push_str(&format!(
+                    "Superseded: {total} commit(s) landed since this snapshot.\n\n"
+                ));
+            }
+        }
+        None => {
+            out.push_str("No snapshot resolved for this session.\n");
+            if let Some(note) = lean["resolved_note"].as_str() {
+                out.push_str(&format!("{note}\n"));
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str("## Git Status (live)\n\n");
+    let status = &lean["git_status"];
+    if status["available"] == true {
+        let entries = status["entries"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if entries.is_empty() {
+            out.push_str("clean\n");
+        } else {
+            for entry in entries.iter().filter_map(Value::as_str) {
+                out.push_str(&format!("    {entry}\n"));
+            }
+            if status["truncated"] == true {
+                out.push_str(&format!("({} entries in total)\n", status["entries_total"]));
+            }
+        }
+    } else {
+        let error = status["error"].as_str().unwrap_or("unavailable");
+        out.push_str(&format!("{error}\n"));
+    }
+    if let Some(error) = lean["session_refs"]["error"].as_str() {
+        out.push_str(&format!("\nSession refs not refreshed: {error}\n"));
+    }
+    out.push_str(
+        "\nRun `tm sessions catchup --full` for every paused session, recent commits and memory.\n",
+    );
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    use super::render_lean_markdown;
+    use serde_json::json;
     use tempfile::TempDir;
     use trusty_mpm::core::native_session_finder::{find_paused_sessions, render_resume_context};
 
@@ -142,5 +242,62 @@ mod tests {
         let sessions = find_paused_sessions(tmp.path()).unwrap();
         let rendered = render_resume_context(&sessions);
         assert!(!rendered.is_empty());
+    }
+
+    /// #9883: the markdown lean default carries the snapshot's recorded
+    /// sections, the supersession, and the live tree verbatim.
+    #[test]
+    fn lean_markdown_renders_the_snapshot_and_live_status() {
+        let text = render_lean_markdown(&json!({
+            "digest": "lean",
+            "resolved_snapshot": "/p/.trusty-mpm/sessions/s/session-1.md",
+            "resolved_via": "session_id",
+            "resolved_session": {
+                "summary": "Did the thing.",
+                "next_steps": "- ship",
+                "git_context": "branch: main",
+            },
+            "resolved_snapshot_superseded": true,
+            "commits_since_snapshot_total": 2,
+            "git_status": {
+                "available": true,
+                "entries": [" M a.rs", "?? b.rs"],
+                "entries_total": 2,
+                "truncated": false,
+            },
+            "session_refs": { "error": null },
+        }));
+        for needle in [
+            "`/p/.trusty-mpm/sessions/s/session-1.md` (resolved via session_id)",
+            "### Summary\nDid the thing.",
+            "### Next Steps\n- ship",
+            "### Git Context (at pause)\nbranch: main",
+            "Superseded: 2 commit(s)",
+            "     M a.rs\n",
+            "    ?? b.rs\n",
+            "tm sessions catchup --full",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        assert!(!text.contains("In Progress"), "{text}");
+    }
+
+    /// #9883: no snapshot and a failed probe are stated, never left blank.
+    #[test]
+    fn lean_markdown_names_an_unresolved_snapshot_and_unavailable_status() {
+        let text = render_lean_markdown(&json!({
+            "resolved_snapshot": null,
+            "resolved_note": "tmux_session route not tried",
+            "git_status": { "available": false, "error": "unavailable: git status timed out" },
+            "session_refs": { "error": "no origin" },
+        }));
+        for needle in [
+            "No snapshot resolved for this session.",
+            "tmux_session route not tried",
+            "unavailable: git status timed out",
+            "Session refs not refreshed: no origin",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
     }
 }

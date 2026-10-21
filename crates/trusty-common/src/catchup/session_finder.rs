@@ -282,8 +282,8 @@ pub fn filter_sessions_since(
                 out.dropped_undatable += 1;
                 eprintln!(
                     "catchup: warning: withholding a paused session with no derivable \
-                     pause timestamp from the since-{wm} digest; re-run with \
-                     full=true to see it"
+                     pause timestamp from the since-{wm} digest; re-run catch-up \
+                     with `--full` / `full: true` to see it"
                 );
             }
         }
@@ -493,7 +493,7 @@ fn render_session(out: &mut String, session: &PausedSession) {
 /// What: reads the file, extracts sections by `## <Header>` delimiters, and
 /// attempts to parse a timestamp from the filename (`session-YYYYMMDD-HHMMSS.md`).
 /// Test: `parse_trusty_mpm_session_extracts_sections`.
-fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
+pub(crate) fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
 

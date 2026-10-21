@@ -318,21 +318,20 @@ pub(super) fn session_tools() -> Vec<Value> {
         ),
         tool(
             "session_context_catchup",
-            "Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: \
-             paused sessions (native trusty-mpm + legacy claude-mpm formats), \
-             recent git commits, and recent memory-palace activity — the same \
-             three sources `tm session catchup` renders as markdown, restructured \
-             as typed fields. This is a manual PEEK: it NEVER advances the \
-             incremental-catchup watermark (only automatic session-start \
-             injection does that), so calling it repeatedly is always safe and \
-             `watermark_advanced` in the result is always `false`. An empty \
-             `sessions` array means \"nothing paused since your last catch-up\" \
-             ONLY when `undatable_sessions_dropped` is 0 — non-zero means that \
-             many paused sessions exist but could not be dated and were \
-             withheld; re-call with `full: true` to see them. `sessions` and \
-             `resolved_snapshot` answer different questions (\"what paused \
-             since last catch-up\" vs \"what should I resume from\") and \
-             legitimately disagree under a recent watermark. \
+            "Return STRUCTURED (JSON, not prose) resume context for `project_dir`. \
+             By DEFAULT the answer is LEAN (#9883): `digest: \"lean\"`, the \
+             snapshot resolved for you (`resolved_snapshot`, `resolved_via`, and \
+             `resolved_session` — its `summary`, `in_progress`, `next_steps` and \
+             pause-time `git_context`, or null), a LIVE `git_status` (`available`, \
+             at most 40 `git status --porcelain` `entries`, `entries_total`, \
+             `truncated`; `available: false` with an `error` starting \
+             `unavailable:` when git failed or timed out), and the resolution \
+             fields below — no `sessions`, `recent_commits` or `recent_memory`. \
+             `full: true` returns the FULL digest instead: paused sessions \
+             (native trusty-mpm + legacy claude-mpm), recent git commits and \
+             recent memory-palace activity over the whole history, no watermark. \
+             Neither ever advances the catch-up watermark, so repeated calls are \
+             safe and `watermark_advanced` is always `false`. \
              `resolved_snapshot` names a snapshot belonging to the `session_id` \
              you pass; several sessions share one store, so there is no \"latest \
              overall\" fallback. When that id owns nothing — a relaunch mints a \
@@ -423,16 +422,16 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "all_projects": {
                         "type": "boolean",
-                        "description": "Also scan every project in the legacy claude-mpm registry, merging their sessions/commits/memory into the same arrays. Defaults to false (project_dir only)."
+                        "description": "Also scan every project in the legacy claude-mpm registry, merging their sessions/commits/memory into the same arrays. Full digest only: requires `full: true`, else the call errors. Defaults to false (project_dir only)."
                     },
                     "full": {
                         "type": "boolean",
-                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false. Full history is paged, not dropped — walk `sessions_next_offset` to read all of it."
+                        "description": "Return the full digest — paused sessions, recent commits and recent memory over the whole history, with no watermark — instead of the lean default (the resolved snapshot plus live `git_status`). Defaults to false. The full digest is paged, not dropped — walk `sessions_next_offset` to read all of it."
                     },
                     "sessions_offset": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Index into the ordered session list this page starts at. Defaults to 0, the page a resume wants — it holds the sessions you own. Pass the previous response's `sessions_next_offset` to continue; when that field is null you have the whole history. The offset is POSITIONAL into a list rebuilt from disk on every call, so a snapshot paused between two calls shifts the indexes and a later page can repeat a record you already have — de-duplicate by `source_file` or `paused_at` if that matters to you (#5557)."
+                        "description": "Full digest only (a non-zero value without `full: true` errors). Index into the ordered session list this page starts at. Defaults to 0, the page a resume wants — it holds the sessions you own. Pass the previous response's `sessions_next_offset` to continue; when that field is null you have the whole history. The offset is POSITIONAL into a list rebuilt from disk on every call, so a snapshot paused between two calls shifts the indexes and a later page can repeat a record you already have — de-duplicate by `source_file` or `paused_at` if that matters to you (#5557)."
                     }
                 },
                 "required": ["project_dir"],

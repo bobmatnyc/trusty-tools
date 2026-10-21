@@ -155,6 +155,21 @@ fn paused_session_to_json(session: &PausedSession) -> PausedSessionJson {
     }
 }
 
+/// One native snapshot file as its structured record (#9883).
+///
+/// Why: the lean `session_context_catchup` default answers with the resolved
+/// snapshot alone, without scanning the store, and still has to hand back what
+/// a resume restores — summary, in-progress work, next steps and the pause-time
+/// `git_context`.
+/// What: parses `path` with the parser [`find_paused_sessions`] uses and maps
+/// it like any digest entry, `owned: true` — callers pass only a snapshot the
+/// resolver attributed to them. Errs when the file cannot be read.
+/// Test: `snapshot_json_maps_one_native_snapshot`,
+/// `snapshot_json_errs_on_a_missing_file`.
+pub fn snapshot_json(path: &std::path::Path) -> anyhow::Result<PausedSessionJson> {
+    super::session_finder::parse_trusty_mpm_session(path).map(|s| paused_session_to_json(&s))
+}
+
 /// A recent memory-palace drawer, trimmed to the fields the catch-up JSON
 /// output surfaces.
 ///
@@ -709,5 +724,34 @@ mod tests {
         assert_eq!(json.next_steps.as_deref(), Some("q1"));
         assert!(json.tmux_window.is_none());
         assert!(json.source_file.is_none());
+    }
+
+    /// #9883: the lean resume reads the resolved snapshot alone — the same
+    /// record the digest would list for it, pause-time `git_context` included.
+    #[test]
+    fn snapshot_json_maps_one_native_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session-20261020-120000.md");
+        fs::write(
+            &path,
+            "## Summary\nLean.\n\n## Next Steps\n- ship\n\n## Git Context\nbranch: main\n",
+        )
+        .unwrap();
+        let json = snapshot_json(&path).unwrap();
+        assert_eq!(json.format, "trusty-mpm");
+        assert_eq!(json.summary, "Lean.");
+        assert_eq!(json.next_steps.as_deref(), Some("- ship"));
+        assert_eq!(json.git_context.as_deref(), Some("branch: main"));
+        assert_eq!(json.source_file, Some(path.display().to_string()));
+        assert!(json.owned);
+        assert!(json.paused_at.is_some());
+    }
+
+    /// #9883: a snapshot that vanished between resolution and read is an
+    /// error the caller reports, never an empty record.
+    #[test]
+    fn snapshot_json_errs_on_a_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        assert!(snapshot_json(&tmp.path().join("session-gone.md")).is_err());
     }
 }

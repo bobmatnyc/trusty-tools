@@ -3,7 +3,7 @@ name: tm-session-management
 description: PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration
 user-invocable: true
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
 category: pm-workflow
 tags: [session, context, pause, resume, worktree, pm-recommended]
 effort: medium
@@ -112,15 +112,18 @@ Resume delegates to the real CLI command rather than manually parsing
 session files:
 
 ```bash
-tm session catchup                  # current project only
-tm session catchup --all-projects   # also scan machine-wide claude-mpm/trusty-mpm projects
+tm session catchup                       # this session's snapshot + live git status
+tm session catchup --full                # full digest of this project, no watermark
+tm session catchup --full --all-projects # also scan machine-wide claude-mpm/trusty-mpm projects
 ```
 
-This renders a unified, newest-first digest across both the native
-`.trusty-mpm/sessions/` format and the legacy `.claude-mpm/sessions/` format
-(a cutover bridge — see `core/catchup/`, issue #1762 — that will be removed
-once migration off claude-mpm is complete). After running catchup: reconcile
-against `git log --oneline -5` / `git status`, present the digest, restore todo
+By default this prints the lean answer (#9883): the snapshot resolved for
+this session and the live `git status`. `--full` renders a unified,
+newest-first digest across both the native `.trusty-mpm/sessions/` format and
+the legacy `.claude-mpm/sessions/` format (a cutover bridge — see
+`core/catchup/`, issue #1762 — that will be removed once migration off
+claude-mpm is complete); `--all-projects` needs `--full`. After running
+catchup: compare the snapshot with the live status, present it, restore todo
 state, then continue under the Autonomous Execution rule — a resume is not
 itself a reason to stop and ask (#8361). The one question a resume may ask is
 which session to resume from, and only when more than one is listed. A project

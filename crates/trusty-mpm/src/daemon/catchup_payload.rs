@@ -124,16 +124,7 @@ pub(crate) fn catchup_payload(
         "resume_verify": resume_verify,
         "undatable_sessions_dropped": undatable_sessions_dropped,
         "watermark_advanced": false,
-        // #7830 review: hydration used to fail into `tracing::debug!`, below
-        // the default filter, so a resume that silently read an empty cache
-        // looked identical to one with nothing to restore.
-        "session_refs": {
-            "hydrated": session_refs.hydrated,
-            "refs_seen": session_refs.refs_seen,
-            "own_ref_found": session_refs.own_ref_found,
-            "restored": session_refs.restored,
-            "error": session_refs.error,
-        },
+        "session_refs": session_refs.to_json(),
     });
     if let (Some(note), Some(map)) = (note, body.as_object_mut()) {
         map.insert("resolved_note".into(), json!(note));
@@ -172,6 +163,24 @@ pub(crate) struct HydrationReceipt {
     pub(crate) restored: usize,
     /// Why the pass did not complete, when it did not.
     pub(crate) error: Option<String>,
+}
+
+impl HydrationReceipt {
+    /// The `session_refs` response object, shared by the full and lean answers.
+    ///
+    /// #7830 review: hydration used to fail into `tracing::debug!`, below the
+    /// default filter, so a resume that silently read an empty cache looked
+    /// identical to one with nothing to restore.
+    /// Test: `catchup_reports_a_hydration_failure_without_failing_the_catchup`.
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "hydrated": self.hydrated,
+            "refs_seen": self.refs_seen,
+            "own_ref_found": self.own_ref_found,
+            "restored": self.restored,
+            "error": self.error,
+        })
+    }
 }
 
 #[cfg(test)]
