@@ -216,7 +216,7 @@ impl Resolved {
     }
 
     /// The option the reply named (#10127); `decide` resolves no other
-    /// reply. `None` only from [`Resolved::for_test`].
+    /// reply. `None` only from `Resolved::for_test`.
     pub fn choice(&self) -> Option<&Choice> {
         self.choice.as_ref()
     }
