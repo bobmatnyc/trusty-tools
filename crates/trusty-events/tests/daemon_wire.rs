@@ -5,8 +5,14 @@ mod common;
 
 use std::collections::HashSet;
 
-use common::{event, large_event, next_event, next_frame, next_item, open, push, start, subscribe};
-use trusty_common::control_bus::{SubscribeFilter, SubscribeItem, SubscribeParams};
+use common::{
+    event, large_event, next_event, next_frame, next_full_event, next_item, open, push, start,
+    subscribe,
+};
+use trusty_common::control_bus::{
+    HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageEvent, SubscribeFilter,
+    SubscribeItem, SubscribeParams,
+};
 use trusty_common::uds::UdsRpcError;
 use trusty_common::uds::server::CODE_INVALID_PARAMS;
 
@@ -259,4 +265,43 @@ async fn the_daemon_refuses_a_zero_heartbeat_ms() {
         }
         other => panic!("expected an invalid_params refusal, got {other:?}"),
     }
+}
+
+/// A `message` event (#9167) crosses the daemon intact: ingested on the
+/// producers' socket, kept, and delivered to a subscriber that asks for the
+/// `message` domain, with every field as the producer wrote it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_event_round_trips_through_the_daemon_9167() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let daemon = start(tmp.path(), &[]).await;
+    let message = MessageEvent {
+        at: chrono::Utc::now(),
+        channel: MessageChannel::Tmux,
+        from: "s1".to_string(),
+        to: "=dev-pm:".to_string(),
+        relay: Some("[Ops Architect 08:0xZ]".to_string()),
+        bytes: 31,
+        sha256: "0f".repeat(32),
+        body: None,
+    };
+    let sent = HarnessEvent {
+        source: HarnessSource::Mpm,
+        session: Some("s1".to_string()),
+        seq: 0,
+        at: message.at,
+        payload: HarnessPayload::Message(message),
+        id: Default::default(),
+        parent_id: Some(Default::default()),
+    };
+    push(&daemon.socket, vec![event("s1"), sent.clone()]).await;
+
+    let only_messages = SubscribeFilter {
+        domains: Some(vec!["message".to_string()]),
+        ..SubscribeFilter::default()
+    };
+    let mut stream = subscribe(&daemon.socket, Some(0), only_messages).await;
+    let got = next_full_event(&mut stream).await;
+    assert_eq!(got.seq, 2, "the ping at seq 1 is filtered out");
+    assert_eq!(got.payload, sent.payload);
+    assert_eq!((got.id, got.parent_id), (sent.id, sent.parent_id));
 }

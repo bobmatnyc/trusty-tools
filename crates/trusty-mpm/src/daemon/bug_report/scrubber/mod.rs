@@ -30,5 +30,5 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use core::{scrub, scrub_compat};
+pub use core::{scrub, scrub_compat, scrub_credentials};
 pub use types::{MAX_BODY_BYTES, ScrubChange, ScrubResult};

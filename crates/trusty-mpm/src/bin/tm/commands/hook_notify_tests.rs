@@ -45,8 +45,30 @@ fn the_inbox_line_carries_the_prototype_fields() {
 fn an_unset_target_forwards_nothing() {
     assert_eq!(
         forward_to_target(&PushTarget::Unset, context(), FORWARD_TIMEOUT),
-        Ok(())
+        Ok(None)
     );
+}
+
+/// #9167: a completed append hands back the exact line it wrote, so the
+/// `message` event's digest is of the text the inbox received.
+#[test]
+fn a_completed_append_returns_the_line_it_wrote_9167() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = PushTarget::Inbox(tmp.path().to_path_buf());
+    let line = forward_to_target(&target, context(), FORWARD_TIMEOUT)
+        .unwrap()
+        .expect("the line appended");
+    let file = std::fs::read_to_string(tmp.path().join(INBOX_EVENTS_FILE)).unwrap();
+    assert_eq!(file, format!("{line}\n"));
+    let mut payload = serde_json::json!({"cwd": "/w"});
+    record_push(&mut payload, tmp.path(), Some(line.clone()));
+    assert_eq!(
+        payload[PUSHED_MESSAGE_FIELD],
+        serde_json::json!({"to": tmp.path().display().to_string(), "text": line})
+    );
+    let mut untouched = serde_json::json!({"cwd": "/w"});
+    record_push(&mut untouched, tmp.path(), None);
+    assert_eq!(untouched, serde_json::json!({"cwd": "/w"}));
 }
 
 /// The inbox directory is operator-named; a typo must not mint a directory.

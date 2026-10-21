@@ -602,15 +602,15 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
-    // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
-    super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd);
     // #2610 (idle-parking flags), #1956 (tool/input), #2864 (subagent
     // correlation keys: tool_use_id / agent_id / transcript paths). Built by
     // `commands::hook_payload` — a pure, unit-tested function that performs no
     // I/O and never writes to stdout, so the PreToolUse stdout-purity contract
     // documented above is preserved.
-    let payload =
+    let mut payload =
         super::hook_payload::build_hook_payload(&cwd, stdin_payload.as_ref(), idle_parking);
+    // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
+    super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd, &mut payload);
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,

@@ -202,6 +202,94 @@ fn harness_payload_action_round_trips() {
     assert_eq!(back, p);
 }
 
+// ---- MessageEvent (#9167) ----
+
+fn sample_message(channel: MessageChannel) -> MessageEvent {
+    MessageEvent {
+        at: chrono::Utc::now(),
+        channel,
+        from: "7f3c0000-0000-4000-8000-000000000001".into(),
+        to: "=dev-pm:".into(),
+        relay: Some("[Ops Architect 22:2xZ]".into()),
+        bytes: 42,
+        sha256: "ab".repeat(32),
+        body: None,
+    }
+}
+
+/// A `HarnessPayload::Message` serializes as its own `message` domain, each
+/// channel as a lowercase snake string, and round-trips unchanged.
+#[test]
+fn message_event_round_trips_with_a_snake_case_channel_9167() {
+    let cases = [
+        (MessageChannel::SendMessage, "sendmessage"),
+        (MessageChannel::Tmux, "tmux"),
+        (MessageChannel::HookPush, "hook_push"),
+        (MessageChannel::PollWake, "poll_wake"),
+    ];
+    for (channel, wire) in cases {
+        let p = HarnessPayload::Message(sample_message(channel));
+        let s = serde_json::to_string(&p).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+        assert_eq!(v["domain"], "message", "{s}");
+        assert_eq!(v["event"]["channel"], wire, "{s}");
+        assert_eq!(v["event"]["bytes"], 42, "{s}");
+        assert_eq!(v["event"]["relay"], "[Ops Architect 22:2xZ]", "{s}");
+        let back: HarnessPayload = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, p);
+        assert_eq!(p.domain(), "message");
+    }
+}
+
+/// The body is omitted from the wire when absent, and a minimal frame with no
+/// `relay` and no `body` still deserializes, so both fields are additive.
+#[test]
+fn message_event_omits_an_absent_body_and_relay_9167() {
+    let mut m = sample_message(MessageChannel::Tmux);
+    m.relay = None;
+    let s = serde_json::to_string(&HarnessPayload::Message(m.clone())).expect("serialize");
+    assert!(!s.contains("\"body\""), "{s}");
+    assert!(!s.contains("\"relay\""), "{s}");
+    let minimal = r#"{"domain":"message","event":{"at":"2026-10-21T08:00:00Z","channel":"tmux","from":"s","to":"=p:","bytes":0,"sha256":"e3b0"}}"#;
+    match serde_json::from_str::<HarnessPayload>(minimal).expect("minimal frame parses") {
+        HarnessPayload::Message(back) => {
+            assert_eq!(back.body, None);
+            assert_eq!(back.relay, None);
+            assert_eq!(back.channel, MessageChannel::Tmux);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A subscriber that matches on `domain` alone skips a `message` frame: an
+/// action- or hook-only filter rejects it, and the action-only axes of the
+/// wire filter never match it.
+#[test]
+fn a_domain_matching_subscriber_skips_a_message_frame_9167() {
+    let ev = envelope(
+        HarnessPayload::Message(sample_message(MessageChannel::SendMessage)),
+        Some("s"),
+    );
+    let old = Filter {
+        domains: Some(vec!["action", "hook", "lifecycle", "ping"]),
+        ..Default::default()
+    };
+    assert!(!old.matches(&ev));
+    let wanted = Filter {
+        domains: Some(vec!["message"]),
+        ..Default::default()
+    };
+    assert!(wanted.matches(&ev));
+    let by_kind = SubscribeFilter {
+        kind: Some("tool".into()),
+        ..SubscribeFilter::default()
+    };
+    assert!(!by_kind.matches(&ev));
+    // A reader that knows only the domain tag reads it without the type.
+    let raw: serde_json::Value = serde_json::to_value(&ev).expect("value");
+    assert_eq!(raw["payload"]["domain"], "message");
+}
+
 // ---- ActionEvent taxonomy (DOC-73 §3.2) ----
 
 fn sample_meta() -> ActionMeta {
@@ -718,6 +806,7 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     ("control_bus/envelope.rs", include_str!("envelope.rs")),
     ("control_bus/event_id.rs", include_str!("event_id.rs")),
     ("control_bus/filter.rs", include_str!("filter.rs")),
+    ("control_bus/message.rs", include_str!("message.rs")),
     // #6847: `push_client.rs` is the one file in this list that DOES dial a
     // socket — see `control_bus_declares_no_transport`'s doc comment for why
     // the scan below still passes it (it holds no global state, and none of

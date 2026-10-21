@@ -76,6 +76,8 @@ mod tm_hook_egress_guard_8454;
 // #9923: the egress guard taints a hook-less id under a live mark.
 mod tm_hook_egress_lazy_taint_9923;
 mod tm_hook_idle_parking;
+// #9167: relays through `tm hook` reach the bus as `message` events.
+mod tm_hook_message_events_9167;
 mod tm_hook_notification_8392;
 // #8531: `tm hook` SessionStart over the socket, HTTP only on Unreachable.
 mod tm_hook_pm_guard;
