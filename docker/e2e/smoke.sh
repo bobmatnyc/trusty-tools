@@ -35,21 +35,6 @@ skip() { echo "  [SKIP] $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 
 section() { echo ""; echo "=== $1 ==="; }
 
-# Wait up to $2 seconds for $1 (HTTP URL) to return 200.
-wait_http() {
-    local url="$1"
-    local timeout="${2:-30}"
-    local elapsed=0
-    while ! curl -sf "${url}" > /dev/null 2>&1; do
-        sleep 1
-        elapsed=$((elapsed + 1))
-        if [ "${elapsed}" -ge "${timeout}" ]; then
-            echo "  ERROR: ${url} did not become healthy within ${timeout}s" >&2
-            return 1
-        fi
-    done
-}
-
 # run_capture VAR LABEL CMD... — run CMD, store its stdout+stderr in VAR.
 # On a non-zero exit, print the captured output (so CI shows the error) and
 # return CMD's exit code. Call as `if ! run_capture ...; then fail ...; fi`:
@@ -98,6 +83,55 @@ memory_tool_call() {
         | trusty-memory serve --stdio --palace personal
 }
 
+# The socket the trusty-search daemon binds, by the daemon's own rule
+# (trusty-common search_rpc.rs `search_socket_under`, data_dir.rs
+# `resolve_data_dir`): `$TRUSTY_DATA_DIR/trusty-search.sock` when set, else
+# the Linux data dir (`$XDG_DATA_HOME`, else ~/.local/share)/trusty-search/.
+if [ -n "${TRUSTY_DATA_DIR:-}" ]; then
+    TS_SOCK="${TRUSTY_DATA_DIR}/trusty-search.sock"
+else
+    TS_SOCK="${XDG_DATA_HOME:-${HOME}/.local/share}/trusty-search/trusty-search.sock"
+fi
+
+# wait_search_daemon PID LOG TIMEOUT — wait up to TIMEOUT seconds for the
+# trusty-search daemon PID to bind TS_SOCK. #8937: the daemon serves its socket
+# only since #9214; there is no :7878 /health and `trusty-search port` exits 1.
+# Gives up early when PID exits; on failure prints the daemon's own LOG.
+wait_search_daemon() {
+    local pid="$1" log="$2" timeout="${3:-60}" elapsed=0 why=""
+    while [ ! -S "${TS_SOCK}" ]; do
+        case "$(ps -p "${pid}" -o stat= 2>/dev/null || true)" in
+            ''|Z*) why="exited before binding ${TS_SOCK}"; break ;;
+        esac
+        if [ "${elapsed}" -ge "${timeout}" ]; then
+            why="did not bind ${TS_SOCK} within ${timeout}s"
+            break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    [ -z "${why}" ] && return 0
+    echo "  ERROR: trusty-search daemon (pid ${pid}) ${why}" >&2
+    echo "  --- trusty-search daemon log (${log}) ---"
+    cat "${log}" 2>/dev/null || echo "  <no log at ${log}>"
+    echo "  --- end ---"
+    return 1
+}
+
+# search_tool_call TOOL ARGS_JSON — one MCP stdio session against
+# `trusty-search serve`, which proxies every tool to the daemon socket; prints
+# the JSON-RPC replies. Same shape as memory_tool_call.
+# shellcheck disable=SC2329  # invoked through run_capture
+search_tool_call() {
+    local tool="$1" args="$2"
+    local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e-smoke","version":"0"}}}'
+    local inited='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    local call
+    call="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}"
+    { printf '%s\n' "${init}" "${inited}" "${call}"; sleep 4; } \
+        | trusty-search serve
+}
+
 # mcp_result_ok OUTPUT — true when the id-2 reply is a result, not an error.
 mcp_result_ok() {
     local reply
@@ -132,17 +166,15 @@ TS_VERSION="$(trusty-search --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 echo "  Binary : ${TS_BIN}"
 echo "  Version: ${TS_VERSION}"
 
-# Start daemon in background (foreground flag keeps it in-process).
-TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > "${E2E_LOG_DIR}/ts.log" 2>&1 &
+# Start the daemon in the background. #8937: --foreground keeps it in-process,
+# so TS_PID is the daemon and ts.log holds its own log; a bare `start` forks a
+# detached child with its output sent to /dev/null.
+TRUSTY_SKIP_RAM_CHECK=1 trusty-search start --foreground > "${E2E_LOG_DIR}/ts.log" 2>&1 &
 TS_PID=$!
+echo "  Socket : ${TS_SOCK}"
 
-# Wait for HTTP to come up on the auto-selected port.
-sleep 3
-TS_PORT="$(trusty-search port 2>/dev/null || echo '7878')"
-echo "  Port   : ${TS_PORT}"
-
-if wait_http "http://127.0.0.1:${TS_PORT}/health" 30; then
-    pass "trusty-search daemon healthy"
+if wait_search_daemon "${TS_PID}" "${E2E_LOG_DIR}/ts.log" 60; then
+    pass "trusty-search daemon healthy (socket ${TS_SOCK})"
 
     # Create a lexical-only index over the fixture repo (no ONNX required).
     # IMPORTANT: the directory must NOT be under a path component named "fixtures"
@@ -206,13 +238,22 @@ if wait_http "http://127.0.0.1:${TS_PORT}/health" 30; then
         # The fixture data/ directory contains a >64KiB JSON file.
         # With hygiene defaults, the data/ dir and large JSON files should be
         # excluded from the index. Verify by checking listed chunks for the file.
-        CHUNKS_OUT="$(curl -sf "http://127.0.0.1:${TS_PORT}/indexes/${INDEX_ID}/chunks?limit=1000" 2>/dev/null || echo '{}')"
-
-        DATA_JSON_HITS="$(echo "${CHUNKS_OUT}" | grep -c 'large_dataset\.json' || true)"
-        if [ "${DATA_JSON_HITS}" -eq 0 ]; then
-            pass "hygiene: data/large_dataset.json excluded from index (>64KiB .json in data/)"
+        # #8937: list over the daemon socket (MCP `list_chunks` through
+        # `trusty-search serve`). The listing must succeed and name src/auth.rs,
+        # so a dead or failing call FAILs instead of reading as "excluded".
+        if run_capture CHUNKS_OUT "trusty-search list_chunks" search_tool_call list_chunks \
+            "{\"index_id\":\"${INDEX_ID}\",\"full\":true}" \
+            && mcp_result_ok "${CHUNKS_OUT}" \
+            && grep -q 'auth\.rs' <<< "${CHUNKS_OUT}"; then
+            DATA_JSON_HITS="$(grep -c 'large_dataset\.json' <<< "${CHUNKS_OUT}" || true)"
+            if [ "${DATA_JSON_HITS}" -eq 0 ]; then
+                pass "hygiene: data/large_dataset.json excluded from index (>64KiB .json in data/)"
+            else
+                fail "hygiene: data/large_dataset.json was NOT excluded — hygiene defaults missing"
+            fi
         else
-            fail "hygiene: data/large_dataset.json was NOT excluded — hygiene defaults missing"
+            echo "  list_chunks response (first 2000 bytes): ${CHUNKS_OUT:0:2000}"
+            fail "hygiene: could not list ${INDEX_ID} chunks over the socket (no src/auth.rs in the listing)"
         fi
     else
         skip "hygiene assertion requires trusty-search >= ${HYGIENE_MIN_VERSION}, installed ${TS_VERSION} — skipping"
@@ -368,17 +409,13 @@ echo "  Version: ${TA_VERSION}"
 
 # trusty-analyze requires a running trusty-search daemon.
 echo "  Starting trusty-search for analyze scenario ..."
-TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > "${E2E_LOG_DIR}/ts2.log" 2>&1 &
+# #8937: --foreground and the socket wait, as in scenario 1.
+TRUSTY_SKIP_RAM_CHECK=1 trusty-search start --foreground > "${E2E_LOG_DIR}/ts2.log" 2>&1 &
 TS2_PID=$!
-sleep 3
-TS2_PORT="$(trusty-search port 2>/dev/null || echo '7878')"
-echo "  trusty-search port: ${TS2_PORT}"
+echo "  trusty-search socket: ${TS_SOCK}"
 
-if ! wait_http "http://127.0.0.1:${TS2_PORT}/health" 30; then
+if ! wait_search_daemon "${TS2_PID}" "${E2E_LOG_DIR}/ts2.log" 60; then
     fail "trusty-search dependency for analyze did not start"
-    echo "  --- ts log ---"
-    cat "${E2E_LOG_DIR}/ts2.log"
-    echo "  --- end ---"
     kill "${TS2_PID}" 2>/dev/null || true
     TS2_PID=""
 fi
@@ -397,13 +434,11 @@ if [ -n "${TS2_PID}" ]; then
     echo "${TS2_INDEX_LOG}" > "${E2E_LOG_DIR}/ts2-index.log"
 
     # Start trusty-analyze daemon.
-    # Note: --search-url is a GLOBAL flag (before the subcommand), not a serve flag.
-    # Use the TRUSTY_SEARCH_URL env var to keep the invocation readable.
     # #8937: the daemon serves a Unix socket only (ADR-0032); TA_PORT is unused.
+    # It reaches trusty-search over its socket too (#9214); TRUSTY_SEARCH_URL is gone.
     TA_SOCK="${XDG_DATA_HOME:-/tmp/trusty-data}/trusty-analyze/trusty-analyze.sock"
     echo "  Starting trusty-analyze daemon (socket ${TA_SOCK}) ..."
-    TRUSTY_SEARCH_URL="http://127.0.0.1:${TS2_PORT}" \
-        trusty-analyze serve --foreground > "${E2E_LOG_DIR}/ta.log" 2>&1 &
+    trusty-analyze serve --foreground > "${E2E_LOG_DIR}/ta.log" 2>&1 &
     TA_PID=$!
 
     if wait_socket "${TA_SOCK}" 30; then
