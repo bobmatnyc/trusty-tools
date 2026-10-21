@@ -237,6 +237,24 @@ pub(crate) const TEST_DIR_PREFIX: &str = "tm-test-";
 /// `resolve_stable_hook_exe_with_refuses_an_ephemeral_exe` and siblings.
 pub(crate) const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
 
+/// Would Claude Code run `tm hook` for `event` under tm's own hook block?
+///
+/// Why (#10095): Claude Code fires a hook only for an event the settings file
+/// registers a group under, so a daemon arm for an event tm never registers is
+/// dead in production however well a direct call to it tests. A test that
+/// routes its events through this gate proves the live path, not the branch.
+/// What: `true` when [`crate::core::standalone::hooks::mpm_hook_additions_with_exe`],
+/// pinned to [`STABLE_HOOK_EXE`], carries a group under `event`'s wire name.
+/// Test: `failed_agent_dispatch_wire_shape_marks_errored_10095`,
+/// `failed_tool_call_closes_started_with_errored_10095`.
+pub(crate) fn tm_registers_hook(event: crate::core::hook::HookEvent) -> bool {
+    let block = crate::core::standalone::hooks::mpm_hook_additions_with_exe(Some(
+        std::path::Path::new(STABLE_HOOK_EXE),
+    ))
+    .expect("the pinned installed-looking exe always resolves");
+    block["hooks"].get(event.wire_name()).is_some()
+}
+
 /// How long a `tm-test-*` directory may sit in the hermetic root before
 /// [`sweep_stale_test_dirs`] treats it as leaked and removes it.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);

@@ -307,7 +307,7 @@ pub struct HooksConfig {
     /// `true` (default) → unchanged behavior. `false` → the entry is omitted
     /// from the project-tier `.claude/settings.json`, and any entry a previous
     /// launch wrote there is stripped. Every other hook — `SessionStart`, the
-    /// PM guard, and the six-event lifecycle triad — is unaffected either way.
+    /// PM guard, and the seven-event lifecycle triad — is unaffected either way.
     pub prompt_context: bool,
 }
 

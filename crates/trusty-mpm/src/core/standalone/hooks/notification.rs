@@ -3,7 +3,7 @@
 //! Why: Claude Code fires `Notification` when a session needs permission or
 //! sits idle awaiting input — the "needs user action" signal a fleet
 //! supervisor wants pushed rather than polled. [`super::mpm_hook_additions_with_exe`]
-//! writes six lifecycle events and never this one, and an operator who did not
+//! writes seven lifecycle events and never this one, and an operator who did not
 //! ask must keep exactly that, so the entry is opt-in. Nothing names "the
 //! supervisor session", so where `tm hook` forwards the event is configured,
 //! never inferred.
@@ -165,7 +165,7 @@ pub fn notification_hook_additions_with_exe(
 /// the settings lock, [`plan_notification_hook`] computes the new value; an
 /// unchanged plan returns `Ok(false)` without writing, and a changed one is
 /// snapshotted and published atomically. Returns `true` when the file changed.
-/// Test: `opt_in_off_installs_exactly_the_six_lifecycle_events`,
+/// Test: `opt_in_off_installs_exactly_the_seven_lifecycle_events`,
 /// `opt_in_on_writes_one_entry_and_rerunning_is_idempotent`,
 /// `opt_in_off_removes_only_the_entry_tm_wrote`,
 /// `a_malformed_settings_file_is_refused_and_left_byte_identical`.

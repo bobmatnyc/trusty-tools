@@ -188,6 +188,48 @@ fn terminals_parent_their_opening_event_6849() {
     assert_eq!(again[0].parent_id, Some(root_a));
 }
 
+/// A failed call, delivered as Claude Code delivers it, closes its
+/// `tool:started` with `tool:errored` (#10095).
+///
+/// Why: the `PostToolUseFailure -> Tool::Errored` arm only ran in tests; no
+/// hook block tm wrote registered the event, so a failed call left its
+/// `Started` open until DOC-73 §5.2's stall marker.
+/// What: projects only the records `tm_registers_hook` lets through and
+/// asserts one `tool:errored` whose parent is the call's `tool:started`.
+/// Test: itself.
+#[test]
+fn failed_tool_call_closes_started_with_errored_10095() {
+    let session = SessionId::new();
+    let call = json!({"cwd": "/w", "tool": "Bash", "tool_use_id": "toolu_x"});
+    let stream = [
+        record(session, HookEvent::SessionStart, json!({"cwd": "/w"})),
+        record(session, HookEvent::PreToolUse, call.clone()),
+        record(session, HookEvent::PostToolUseFailure, call),
+    ];
+    let delivered: Vec<HookEventRecord> = stream
+        .into_iter()
+        .filter(|r| crate::test_support::tm_registers_hook(r.event))
+        .collect();
+    let events = project_all(&delivered);
+
+    let started = events
+        .iter()
+        .find(|e| label(e) == "tool:started")
+        .expect("the call opens");
+    let errored: Vec<_> = events
+        .iter()
+        .filter(|e| label(e) == "tool:errored")
+        .collect();
+    assert_eq!(
+        errored.len(),
+        1,
+        "the failed call must close: {:?}",
+        events.iter().map(label).collect::<Vec<_>>()
+    );
+    assert_eq!(errored[0].parent_id, Some(started.id));
+    assert_eq!(call_id(errored[0]), Some("toolu_x"));
+}
+
 /// DOC-73 §3.2: an event names its object by reference. Nothing from a
 /// prompt, a tool input or response, a transcript path or a message survives,
 /// and no absolute home path does either.

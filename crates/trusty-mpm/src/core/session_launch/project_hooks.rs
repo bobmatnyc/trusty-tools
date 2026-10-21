@@ -44,7 +44,7 @@ use crate::core::standalone::hooks::{
 /// What: starts from [`TRUSTY_MEMORY_HOOKS`] (parsed; `UserPromptSubmit` +
 /// `SessionStart`), inserts the [`pm_guard_hook_value`] `PreToolUse` block,
 /// then appends every group from
-/// [`mpm_hook_additions_with_exe`]`(None)`'s six-event lifecycle triad onto
+/// [`mpm_hook_additions_with_exe`]`(None)`'s seven-event lifecycle triad onto
 /// the corresponding event array (deduping by deep equality, mirroring
 /// [`trusty_common::claude_config::merge_hook_entries`]'s own semantics).
 /// `PreToolUse` and `SessionStart` — sources for more than one of the three —

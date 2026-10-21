@@ -55,7 +55,7 @@ use std::path::Path;
 /// The `hook` sub-command argv tails tm persists into a settings file.
 ///
 /// Why (#7262): the second half of the two-part test above. Each entry is a
-/// shape one of tm's writers produces: `" hook"` is the six-event lifecycle
+/// shape one of tm's writers produces: `" hook"` is the seven-event lifecycle
 /// triad ([`super::mpm_hook_additions_with_exe`]), [`PM_GUARD_SUFFIX`] the PM
 /// enforcement guard, [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
 /// groups, [`PROMPT_FEEDBACK_SUFFIX`] the #7688 prompt-feedback capture, and

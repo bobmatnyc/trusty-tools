@@ -1401,7 +1401,7 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
     // PostToolUse/Stop ARE now registered — with the triad's `... hook`
     // command, never a `trusty-memory ...` one. See
     // `project_hooks_tests::write_project_hooks_writes_lifecycle_triad` for
-    // the full six-event triad assertion.
+    // the full seven-event triad assertion.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 

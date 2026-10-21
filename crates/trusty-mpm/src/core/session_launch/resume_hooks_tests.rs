@@ -241,6 +241,40 @@ fn missing_events_names_a_sessionstart_gap() {
     );
 }
 
+/// A pre-1.9 file — every lifecycle group but `PostToolUseFailure` — names
+/// exactly that one gap (#10095).
+///
+/// Why: a project provisioned before tm registered the event must be told about
+/// it by `tm doctor` until session prepare or `--fix` merges it in.
+/// What: six tm lifecycle groups, written by hand in the pre-1.9 shape, yield
+/// `["PostToolUseFailure"]` and nothing else.
+/// Test: itself.
+#[test]
+fn missing_events_names_a_post_tool_use_failure_gap_10095() {
+    let cmd = format!("{STABLE_HOOK_EXE} hook");
+    let group = serde_json::json!([{
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": cmd, "timeout": 5 }]
+    }]);
+    let mut hooks = serde_json::Map::new();
+    for event in [
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "SessionEnd",
+    ] {
+        hooks.insert(event.to_string(), group.clone());
+    }
+    let pre_19 = serde_json::json!({ "hooks": hooks });
+
+    assert_eq!(
+        missing_lifecycle_hook_events(&pre_19),
+        vec!["PostToolUseFailure".to_string()]
+    );
+}
+
 /// A file the merge has just produced has no gaps left.
 #[test]
 fn missing_events_is_empty_for_a_complete_file() {

@@ -148,8 +148,9 @@ fn settings_is_writable_object(project_dir: &Path) -> bool {
 /// a project that does not run tm sessions owes no hook group, and adding one
 /// would undo what `hooks_contamination`'s repair just removed. Otherwise
 /// every [`MPM_LIFECYCLE_HOOK_EVENTS`] entry whose array carries no tm-owned
-/// command, in the canonical six-event order.
+/// command, in the canonical seven-event order.
 /// Test: `missing_events_names_a_sessionstart_gap`,
+/// `missing_events_names_a_post_tool_use_failure_gap_10095`,
 /// `missing_events_is_empty_for_a_complete_file`,
 /// `missing_events_is_empty_for_a_file_tm_never_provisioned`.
 pub fn missing_lifecycle_hook_events(val: &Value) -> Vec<String> {
