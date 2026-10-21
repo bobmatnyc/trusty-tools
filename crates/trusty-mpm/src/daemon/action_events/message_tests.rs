@@ -134,25 +134,31 @@ fn send_keys_text_follows_tmux_argument_rules_9167() {
     let cases: &[(&str, Vec<SendKeys>)] = &[
         // Arguments are typed back to back; a key name is a key, not text.
         (
-            "tmux send-keys -t s hello world Enter",
-            vec![call("s", "helloworld")],
+            "tmux send-keys -t =s: hello world Enter",
+            vec![call("=s:", "helloworld")],
         ),
-        ("tmux -L sock send -t s 'a b' C-m", vec![call("s", "a b")]),
+        (
+            "tmux -L sock send -t =s: 'a b' C-m",
+            vec![call("=s:", "a b")],
+        ),
         // `-l` makes every argument literal; flags may be combined.
         (
             "TMUX= tmux send-keys -lt=x: Enter",
             vec![call("=x:", "Enter")],
         ),
         (
-            "tmux send-keys -t s hi \\; send-keys -t s Enter",
-            vec![call("s", "hi")],
+            "tmux send-keys -t =s: hi \\; send-keys -t =s: Enter",
+            vec![call("=s:", "hi")],
         ),
-        ("/opt/bin/tmux send-keys -t p -- -n", vec![call("p", "-n")]),
+        (
+            "/opt/bin/tmux send-keys -t =p: -- -n",
+            vec![call("=p:", "-n")],
+        ),
         // Not a send-keys call, or no text typed.
-        ("echo \"tmux send-keys -t s hi\"", vec![]),
-        ("git commit -m 'tmux send-keys -t s hi'", vec![]),
-        ("tmux send-keys -X -t s copy-selection", vec![]),
-        ("tmux send-keys -t s C-c", vec![]),
+        ("echo \"tmux send-keys -t =s: hi\"", vec![]),
+        ("git commit -m 'tmux send-keys -t =s: hi'", vec![]),
+        ("tmux send-keys -X -t =s: copy-selection", vec![]),
+        ("tmux send-keys -t =s: C-c", vec![]),
         ("tmux list-panes -a", vec![]),
     ];
     for (command, want) in cases {
