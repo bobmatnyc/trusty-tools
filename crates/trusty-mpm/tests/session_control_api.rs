@@ -133,6 +133,10 @@ impl ManagedTmuxDriver for RecordingDriver {
     fn send_interrupt_to_pane(&self, name: &str, _pane_id: &str) -> Result<(), ManagedError> {
         self.send_interrupt(name)
     }
+    /// #10127: the one pane runs its harness.
+    fn pane_harness(&self, _n: &str, _p: &str, _h: &str) -> trusty_mpm::core::process::PaneClaude {
+        trusty_mpm::core::process::PaneClaude::Present
+    }
     fn capture_pane(
         &self,
         name: &str,

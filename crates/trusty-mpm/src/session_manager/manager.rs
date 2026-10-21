@@ -134,6 +134,12 @@ pub enum ManagedError {
     #[error("{0}")]
     NoPendingDecision(String),
 
+    /// #10127: a pane write refused because the record's pane runs no live
+    /// harness (`no_live_harness: …`) or the probe could not tell
+    /// (`harness_unconfirmed: …`); nothing was typed.
+    #[error("{0}")]
+    NoLiveHarness(String),
+
     /// An auto-resume failed AND has already recorded the failure (#8233).
     ///
     /// Why: `resume_auto` marks the record errored itself, which APPENDS
@@ -629,7 +635,9 @@ impl SessionManager {
     /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
     /// proves the record's pane with [`Self::owned_pane`] (issue #2468's
     /// sibling-window hijack; #9101: a pane id from before a tmux server
-    /// restart, or a record with no pane id, is refused) before dispatching
+    /// restart, or a record with no pane id, is refused) and, except for an
+    /// interrupt, proves the record's harness runs there (#10127,
+    /// `require_live_harness`) before dispatching
     /// to that pane: [`Submit::Enter`] → `send_line_to_pane` (literal +
     /// Enter), [`Submit::NoSubmit`] → `send_keys_literal_to_pane` (literal
     /// only), [`Submit::Interrupt`] → `send_interrupt_to_pane` (Ctrl-C).
@@ -645,7 +653,8 @@ impl SessionManager {
     /// `inject_refuses_when_stored_pane_gone`,
     /// `inject_refuses_a_legacy_record_without_pane_id`
     /// in `pane_scoped_tests.rs`;
-    /// `a_stale_record_after_a_server_restart_never_sends_keys`.
+    /// `a_stale_record_after_a_server_restart_never_sends_keys`;
+    /// `inbound_send_into_an_exited_harness_pane_types_nothing`.
     pub async fn inject(
         &self,
         id: &ManagedSessionId,
@@ -674,6 +683,11 @@ impl SessionManager {
             )));
         }
         let pane = self.owned_pane(id, &record)?;
+        // #10127: a pane whose harness exited is a shell; type nothing there.
+        // Ctrl-C stays ungated: it stops, it never runs text.
+        if !matches!(submit, Submit::Interrupt) {
+            self.require_live_harness(&record, &pane)?;
+        }
         let name = record.tmux_name.as_str();
         let result = match submit {
             Submit::Enter => self.tmux.send_line_to_pane(name, &pane, text),

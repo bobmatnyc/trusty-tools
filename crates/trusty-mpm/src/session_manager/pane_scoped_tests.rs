@@ -174,6 +174,38 @@ async fn inject_refuses_a_legacy_record_without_pane_id() {
     assert!(fake.pane_send_calls.lock().unwrap().is_empty());
 }
 
+/// #10127: the harness probe reads the record's own pane for its runtime's
+/// binary, on every text write; Ctrl-C to a pane running no harness still
+/// goes through, unprobed.
+#[tokio::test]
+async fn inject_probes_the_owned_pane_for_the_runtime_binary() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    mgr.inject(&record.id, "a", Submit::Enter)
+        .await
+        .expect("enter");
+    mgr.inject(&record.id, "b", Submit::NoSubmit)
+        .await
+        .expect("nosubmit");
+    let mut tcode = mgr.get(&record.id).await.expect("record");
+    tcode.runtime = crate::runtime::RuntimeKind::Tcode;
+    mgr.store.write().await.upsert(tcode).await.expect("tcode");
+    mgr.inject(&record.id, "c", Submit::Enter)
+        .await
+        .expect("tcode");
+    let probes = |b: &str| ("%6015".to_owned(), b.to_owned());
+    assert_eq!(
+        fake.pane_harness_calls.lock().unwrap().as_slice(),
+        [probes("claude"), probes("claude"), probes("tcode")]
+    );
+    *fake.pane_claude_override.lock().unwrap() = Some(crate::core::process::PaneClaude::Absent);
+    mgr.inject(&record.id, "", Submit::Interrupt)
+        .await
+        .expect("interrupt is ungated");
+    assert_eq!(fake.pane_harness_calls.lock().unwrap().len(), 3, "no probe");
+    assert_eq!(fake.pane_interrupt_calls.lock().unwrap().len(), 1);
+}
+
 // ── answer_decision: pane-scoped-when-known / refuse-when-gone / legacy-fallback ──
 
 /// #9841 (D1): an answer needs a pending decision, so these pane tests seed

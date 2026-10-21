@@ -163,16 +163,29 @@ pub enum PaneClaude {
 /// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
 /// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
 pub fn pane_claude(session_name: &str) -> PaneClaude {
-    let Some(pane_pid) = tmux_pane_pid(session_name) else {
-        return PaneClaude::Unknown;
-    };
+    match tmux_pane_pid(session_name) {
+        Some(pane_pid) => harness_under_pane(pane_pid, "claude"),
+        None => PaneClaude::Unknown,
+    }
+}
+
+/// Whether a process named `harness` runs under pane process `pane_pid`
+/// (#10127: the tree walk [`pane_claude`] does, for any harness binary).
+///
+/// What: the pane process, its children, and a #2997 disclaim wrapper's
+/// children; a case-insensitive substring match on the process name.
+/// `Present` on the first match; `Unknown` when a name or child list cannot
+/// be read; else `Absent`.
+/// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
+/// `a_pane_running_no_harness_reads_absent`.
+pub fn harness_under_pane(pane_pid: u32, harness: &str) -> PaneClaude {
     let mut level = vec![pane_pid];
     let mut unknown = false;
     // Depth 0: the pane process; 1: its children; 2: a wrapper's children.
     for depth in 0..3 {
         let mut next = Vec::new();
         for pid in level {
-            match process_name_checked(pid) {
+            match process_name_matches(pid, harness) {
                 Some(true) => return PaneClaude::Present,
                 Some(false) => {}
                 None => unknown = true,
@@ -280,16 +293,18 @@ fn process_args(pid: u32) -> Option<String> {
 /// substring match accepts both `claude` and `claude-code`.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn process_name_contains_claude(pid: u32) -> bool {
-    process_name_checked(pid).unwrap_or(false)
+    process_name_matches(pid, "claude").unwrap_or(false)
 }
 
-/// [`process_name_contains_claude`], with `None` when the name cannot be read
-/// (#8942: [`pane_claude`] must tell a failed lookup from "not claude").
-fn process_name_checked(pid: u32) -> Option<bool> {
+/// Whether process `pid`'s name contains `needle`, case-insensitively, with
+/// `None` when the name cannot be read (#8942: [`pane_claude`] must tell a
+/// failed lookup from "not claude"; #10127: any harness name).
+fn process_name_matches(pid: u32, needle: &str) -> Option<bool> {
+    let needle = needle.to_ascii_lowercase();
     #[cfg(target_os = "linux")]
     {
         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            return Some(comm.to_ascii_lowercase().contains("claude"));
+            return Some(comm.to_ascii_lowercase().contains(&needle));
         }
     }
     let output = Command::new("ps")
@@ -299,7 +314,7 @@ fn process_name_checked(pid: u32) -> Option<bool> {
         Ok(out) if out.status.success() => Some(
             String::from_utf8_lossy(&out.stdout)
                 .to_ascii_lowercase()
-                .contains("claude"),
+                .contains(&needle),
         ),
         _ => None,
     }
@@ -434,6 +449,29 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// #10127: the harness walk tells a running harness, a pane running none,
+    /// and an unreadable pane apart; a dead pane process is never `Absent`.
+    #[test]
+    fn a_pane_running_no_harness_reads_absent() {
+        use std::process::Stdio;
+        let mut pane = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = pane.id();
+        assert_eq!(harness_under_pane(pid, "sleep"), PaneClaude::Present);
+        assert_eq!(
+            harness_under_pane(pid, "no-such-harness"),
+            PaneClaude::Absent
+        );
+        let _ = pane.kill();
+        let _ = pane.wait();
+        assert_eq!(harness_under_pane(u32::MAX, "claude"), PaneClaude::Unknown);
     }
 
     /// #8938: a child listing run by a descendant still sees that descendant's

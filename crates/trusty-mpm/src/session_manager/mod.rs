@@ -26,6 +26,8 @@ pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #10127: the no-live-harness refusal every pane write runs.
+mod harness_gate;
 // #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
 pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.

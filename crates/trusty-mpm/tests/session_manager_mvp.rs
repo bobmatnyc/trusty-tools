@@ -130,6 +130,10 @@ impl ManagedTmuxDriver for RecordingTmux {
     fn send_line_to_pane(&self, name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
         self.send_line(name, text)
     }
+    /// #10127: the recorded pane runs its harness.
+    fn pane_harness(&self, _n: &str, _p: &str, _h: &str) -> trusty_mpm::core::process::PaneClaude {
+        trusty_mpm::core::process::PaneClaude::Present
+    }
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(self.printed.lock().unwrap().clone())
     }

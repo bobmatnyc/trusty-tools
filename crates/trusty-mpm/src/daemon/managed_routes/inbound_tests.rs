@@ -222,3 +222,94 @@ fn resolve_is_called_only_from_inbound() {
         "fn g() { ManifestSources::resolve(a, b); }"
     ));
 }
+
+/// The deliverer's real env over the shared fake driver, holding one `Active`
+/// record bound to pane `%7` (#10127).
+async fn deliver_env_on_pane(
+    dir: &tempfile::TempDir,
+) -> (
+    super::DaemonDeliverEnv,
+    Arc<crate::session_manager::tests::FakeTmuxDriver>,
+    String,
+) {
+    let fake = crate::session_manager::tests::FakeTmuxDriver::new();
+    *fake.pane_id_override.lock().expect("pane id") = Some("%7".into());
+    let mgr = crate::session_manager::SessionManager::new(dir.path(), fake.clone())
+        .await
+        .expect("manager");
+    let ws = dir.path().to_path_buf();
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(ws.clone()),
+            Some("inbound-harness".into()),
+            Some(ws.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_workspace(
+        &record.id,
+        ws,
+        crate::session_manager::ManagedSessionState::Active,
+    )
+    .await
+    .expect("active");
+    let env = super::DaemonDeliverEnv {
+        mgr: Arc::new(mgr),
+        dir: Some(dir.path().join("taint")),
+    };
+    (env, fake, record.id.to_string())
+}
+
+/// Every key the fake recorded, on any send primitive.
+fn keys_typed(fake: &crate::session_manager::tests::FakeTmuxDriver) -> usize {
+    fake.pane_send_calls.lock().expect("sends").len()
+        + fake.pane_literal_calls.lock().expect("literals").len()
+        + fake.send_calls.lock().expect("session sends").len()
+}
+
+/// 🔴 #10127 (df-Da4): the inbound deliverer's send into a pane whose harness
+/// has exited, or cannot be confirmed, is refused with a stable code and
+/// types nothing — the line never reaches a shell prompt.
+#[tokio::test]
+async fn inbound_send_into_an_exited_harness_pane_types_nothing() {
+    use crate::channels::deliver::DeliverEnv;
+    use crate::core::process::PaneClaude;
+    for (verdict, code) in [
+        (PaneClaude::Absent, "no_live_harness"),
+        (PaneClaude::Unknown, "harness_unconfirmed"),
+    ] {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let (env, fake, id) = deliver_env_on_pane(&dir).await;
+        *fake.pane_claude_override.lock().expect("probe") = Some(verdict);
+        let line = crate::channels::deliver::frame_answer(
+            7,
+            trusty_channels::policy::Channel::Slack,
+            OWNER,
+            "$(touch /tmp/x)",
+        );
+        let err = env.send(&id, &line).await.expect_err("refused");
+        assert!(err.contains(code), "{verdict:?}: {err}");
+        assert_eq!(keys_typed(&fake), 0, "{verdict:?}: nothing typed");
+    }
+}
+
+/// #10127 positive control: a pane running its harness takes the line, on
+/// the record's own pane.
+#[tokio::test]
+async fn inbound_send_into_a_live_harness_pane_is_typed() {
+    use crate::channels::deliver::DeliverEnv;
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (env, fake, id) = deliver_env_on_pane(&dir).await;
+    *fake.pane_claude_override.lock().expect("probe") =
+        Some(crate::core::process::PaneClaude::Present);
+    env.send(&id, "the line").await.expect("sent");
+    let sends = fake.pane_send_calls.lock().expect("sends").clone();
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert_eq!(
+        (sends[0].1.as_str(), sends[0].2.as_str()),
+        ("%7", "the line")
+    );
+}

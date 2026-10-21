@@ -42,6 +42,17 @@ impl TmuxDriver {
         Ok(command.to_owned())
     }
 
+    /// The pid of pane `pane_id`'s own process, its shell (#10127).
+    ///
+    /// What: `display-message -t %N -p '#{pane_pid}'`, parsed; `Err` as
+    /// [`Self::pane_identity_line`] does, and on an unparsable answer.
+    pub fn pane_pid(&self, pane_id: &str) -> Result<u32> {
+        let line = self.pane_display_line(pane_id, "#{pane_pid}")?;
+        line.trim().parse().map_err(|_| {
+            Error::Protocol(format!("tmux reported no pid for pane {pane_id}: {line:?}"))
+        })
+    }
+
     /// Every pane of session `name`, as the runtime reaper reads panes (#8241).
     ///
     /// What: `list-panes -s -t =name: -F '#{pane_id} #{pane_pid}
