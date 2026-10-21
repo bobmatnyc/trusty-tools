@@ -81,7 +81,7 @@ fn write_docx(path: &std::path::Path, paragraphs: &[&str]) {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         zip.start_file("word/document.xml", opts).unwrap();
         zip.write_all(document_xml.as_bytes()).unwrap();
         zip.finish().unwrap();

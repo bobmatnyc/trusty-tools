@@ -147,7 +147,8 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
 /// What: requires `project_dir`; reads the optional `session_id`,
 /// `tmux_window`, `tmux_session_created` (#8408: an integer, or the digit
 /// string `tmux display-message` prints; anything else is absent),
-/// `all_projects` (default false), `full` (default false), and
+/// `all_projects` (default false), `full` (default false — the lean answer;
+/// `true` is the full digest, #9883), and
 /// `sessions_offset` (default 0). A negative or non-integer `sessions_offset`
 /// reads as 0 rather than erroring — the first page is always the right answer
 /// to an unparseable one, and it is what an omitted value means (#5557).

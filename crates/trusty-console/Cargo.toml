@@ -108,11 +108,7 @@ thiserror          = { workspace = true }
 # Spool entries hold the raw webhook body byte-exact; base64 keeps the JSON
 # container from corrupting bytes the HMAC was computed over.
 base64             = { workspace = true }
-# #6848 slice 3b: the durable event-log writer rotates day files on the UTC
-# calendar day (`chrono::Utc::now().date_naive()`) and formats/parses day
-# filenames (`chrono::NaiveDate`) — production code, not just test fixtures,
-# so this moved out of dev-dependencies.
-chrono             = { workspace = true }
+# #9075: `chrono` left with the event-bus core, its only user (now trusty-events).
 # #9066 (owner ruling Df0): the wire vocabulary and the ancestry walk only —
 # no `server`, no `store`, so no keychain and no second trusty-common edge.
 trusty-secrets     = { workspace = true, features = ["api", "ancestry"] }
@@ -123,6 +119,9 @@ libc               = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }
+# #9076: tests build `HarnessEvent`s, whose `at` is a chrono timestamp.
+# Already in the graph through trusty-common, so this compiles nothing new.
+chrono         = { workspace = true }
 # #8271: `test-util` gives the socket-budget tests a paused clock; it must
 # never reach the production build, so it lives here only.
 tokio          = { workspace = true, features = ["test-util"] }

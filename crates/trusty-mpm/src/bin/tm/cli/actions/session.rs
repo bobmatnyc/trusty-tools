@@ -460,31 +460,34 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge).
+    /// Print this session's resume context: the resolved snapshot plus live git
+    /// status, or with `--full` the full catch-up digest (DOC-28 cutover bridge).
     ///
     /// Why: during migration from claude-mpm to trusty-mpm, paused sessions may
     /// exist in both the legacy JSON format (`.claude-mpm/sessions/`) and the
     /// native markdown format (`.trusty-mpm/sessions/`). `catchup` merges both
     /// and renders a work-context digest so the PM can restore full context
-    /// without re-spawning the old tool.
-    /// What: scans the current project (and, with `--all-projects`, every project
-    /// registered in `~/.claude-mpm/session-registry.db`); calls
-    /// `native_session_finder::find_paused_sessions` + `render_resume_context`
-    /// and prints the resulting markdown to stdout.
-    /// The `--full` flag is accepted for forward-compatibility with PR2 (watermark
-    /// logic); for PR1 it forces full history and is otherwise a no-op.
-    /// `--json` prints the `session_context_catchup` MCP tool's paged JSON
-    /// instead, one page per `--sessions-offset` (#8017).
+    /// without re-spawning the old tool. #9883: a resume needs only its own
+    /// snapshot and the live tree, so that lean answer is the default.
+    /// What: by default resolves this caller's snapshot through the
+    /// `session_context_catchup` path and prints it with `git status`. `--full`
+    /// prints the full digest — every paused session, recent commits and
+    /// memory, no watermark — for the current project and, with
+    /// `--all-projects`, every project registered in
+    /// `~/.claude-mpm/session-registry.db`. `--json` prints the
+    /// `session_context_catchup` MCP tool's JSON instead, one page per
+    /// `--sessions-offset` (#8017).
     /// Test: `cli_parses_session_catchup` in `tests.rs`,
     /// `cli_parses_session_catchup_json_page`.
     ///
     // CUTOVER BRIDGE — remove post-migration (#1762)
     Catchup {
         /// Also enumerate machine-wide projects via the claude-mpm session registry.
-        #[arg(long)]
+        // #9883: a digest option, so it needs `--full`.
+        #[arg(long, requires = "full")]
         all_projects: bool,
-        /// Force full history mode (watermark logic lands in PR2; accepted now for
-        /// forward-compatibility).
+        /// Print the full digest — paused sessions, recent commits and memory,
+        /// no watermark — instead of the resolved snapshot and live git status.
         #[arg(long)]
         full: bool,
         /// Print the `session_context_catchup` JSON page instead of markdown.

@@ -1,0 +1,45 @@
+[package]
+name = "trusty-events"
+# #9075: first release. ADR-0043 allows only registry installs and ADR-0065 runs
+# this crate's binary as its own daemon, so it publishes like any other crate.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://trustytools.dev"
+readme = "README.md"
+description = "The trusty-* event bus daemon: one Unix socket for HarnessEvent ingest and events.subscribe, a bounded ring and a day-rotated NDJSON log (ADR-0065)."
+keywords = ["events", "event-bus", "daemon", "uds", "trusty"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["/src/**/*", "/Cargo.toml", "/README.md"]
+
+# ADR-0065 decision 1: no other workspace crate links this library. The wire
+# contract its clients use lives in `trusty-common::control_bus`; the guard is
+# `tests/no_other_crate_links_bus.rs`.
+[lib]
+name = "trusty_events"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trusty-events"
+path = "src/main.rs"
+
+[dependencies]
+# `uds`: the hardened socket, the JSON-RPC stream writer and the
+# `events.subscribe` frame types (#9075).
+trusty-common = { workspace = true, features = ["uds"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The log rotates on the UTC calendar day and names its files by date.
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

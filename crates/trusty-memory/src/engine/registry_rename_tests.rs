@@ -4,7 +4,8 @@
 //! every refusal must leave both untouched and every partial run must either
 //! roll back or be finishable by a re-run.
 //! What: one test per refusal class, the happy path, `replace_empty`, both
-//! resume points, the rolled-back move, and the reversed rename.
+//! resume points, the rolled-back move, the reversed rename, and the waits
+//! for closed store files and released redb locks.
 //! Test: this file.
 
 use super::*;
@@ -414,4 +415,261 @@ fn rename_palace_allows_the_reverse_rename() {
     let map = aliases(root);
     assert_eq!(map.get("b-p").map(String::as_str), Some("a-p"));
     assert_eq!(map.get("a-p"), None, "no alias is keyed by the live id");
+}
+
+/// Why (#9945): a dropped handle's KG writer task keeps `kg.redb` open until
+/// a runtime worker polls its abort. A rename that moved the directory first
+/// left the next open of the new id on a read-only snapshot — the CI failure
+/// of `rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated`.
+/// What: holds the runtime's only worker across the rename, so the aborted
+/// task cannot drop its store, then requires a writable reopen of the new id.
+/// Test: itself.
+#[test]
+fn rename_palace_waits_for_a_dropped_handle_to_close_its_files() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _entered = rt.enter();
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let reg = PalaceRegistry::new();
+    drop(create(&reg, root, "busy-src"));
+    let (started, worker_held) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        started.send(()).expect("signal");
+        std::thread::sleep(Duration::from_millis(800));
+    });
+    worker_held.recv().expect("the worker is held");
+
+    let opts = RenameOptions {
+        busy_wait: Duration::from_secs(5),
+        ..RenameOptions::default()
+    };
+    reg.rename_palace(root, "busy-src", "busy-dst", &opts)
+        .expect("rename");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("busy-dst"))
+        .expect("open the renamed palace");
+    assert!(
+        !reopened.is_read_only(),
+        "the renamed palace reopened on a read-only snapshot"
+    );
+}
+
+/// Why (#9945): with `replace_empty`, `check_target` opens and drops the
+/// target, whose KG writer keeps `kg.redb` cached until polled. The source
+/// then moves onto that path and the next open of `new` reused the trashed
+/// target's store (its drawers, its writes landing in `.trash`).
+/// What: holds the runtime's only worker across the rename, then requires the
+/// reopened `new` palace to hold the source's drawer and to accept a write.
+/// Test: itself.
+#[test]
+fn rename_palace_replace_empty_waits_for_the_targets_dropped_writer() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _entered = rt.enter();
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    // Built through a scratch registry that is dropped and awaited, so the
+    // registry under test caches no handle: the rename's first wait finds
+    // nothing and cannot absorb the held worker below.
+    let drawer = Drawer::new(uuid::Uuid::new_v4(), "from the source");
+    let kept = drawer.id;
+    {
+        let scratch = PalaceRegistry::new();
+        let src = create(&scratch, root, "rep-src");
+        src.kg.upsert_drawer_sync(&drawer).unwrap();
+        drop(src);
+        drop(create(&scratch, root, "rep-dst"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ["rep-src", "rep-dst"]
+        .iter()
+        .any(|id| KgStoreRedb::is_cached(&root.join(id).join("kg.redb")))
+    {
+        assert!(Instant::now() < deadline, "the scratch stores never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let reg = PalaceRegistry::new();
+    let (started, worker_held) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        started.send(()).expect("signal");
+        std::thread::sleep(Duration::from_millis(800));
+    });
+    worker_held.recv().expect("the worker is held");
+
+    let opts = RenameOptions {
+        replace_empty: true,
+        busy_wait: Duration::from_secs(5),
+        ..RenameOptions::default()
+    };
+    let outcome = reg
+        .rename_palace(root, "rep-src", "rep-dst", &opts)
+        .expect("rename");
+    let trashed = outcome.trashed_target.expect("the target was trashed");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("rep-dst"))
+        .expect("open the renamed palace");
+    assert!(!reopened.is_read_only(), "reopened on a read-only snapshot");
+    let ids: Vec<_> = reopened
+        .kg
+        .load_drawers()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(ids, vec![kept], "served the trashed target's store");
+    reopened
+        .kg
+        .upsert_drawer_sync(&Drawer::new(uuid::Uuid::new_v4(), "written after"))
+        .expect("the renamed palace is writable");
+    assert!(trashed.starts_with(root.join(".trash")));
+}
+
+/// Why (#9945): the redb lock lives in `Database`, which `HnswStore` holds
+/// itself; a detached blocking job holding an `Arc<HnswStore>` outlives the
+/// dropped handle and its `VectorDbState`. A rename that moved the directory
+/// then reopened on a read-only snapshot.
+/// What: keeps the store alive after the handle drops; the rename must answer
+/// `Busy` with `<src>` in place and `<dst>` absent, and succeed once the store
+/// is released.
+/// Test: itself.
+#[test]
+fn rename_palace_refuses_while_a_detached_vector_job_holds_the_database() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let reg = PalaceRegistry::new();
+    let handle = create(&reg, root, "vec-src");
+    let job_store = handle.vector_store.hnsw_arc_for_test();
+    drop(handle);
+
+    let err = reg
+        .rename_palace(root, "vec-src", "vec-dst", &opts())
+        .unwrap_err();
+    assert!(matches!(err, PalaceRenameError::Busy { .. }), "{err:?}");
+    assert!(root.join("vec-src").exists(), "the source moved");
+    assert!(!root.join("vec-dst").exists(), "the target was created");
+    assert!(aliases(root).is_empty(), "an alias was written");
+
+    drop(job_store);
+    reg.rename_palace(root, "vec-src", "vec-dst", &opts())
+        .expect("rename once the job released the store");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("vec-dst"))
+        .expect("open the renamed palace");
+    assert!(!reopened.is_read_only(), "reopened on a read-only snapshot");
+}
+
+/// Build palace `id` through a scratch registry, drop it, and wait until no
+/// store in this process tracks its redb files.
+fn create_untracked(root: &Path, id: &str) {
+    drop(create(&PalaceRegistry::new(), root, id));
+    let dir = root.join(id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while KgStoreRedb::is_cached(&dir.join(KG_FILE))
+        || vector_db_is_open(&dir.join("index.usearch"))
+    {
+        assert!(Instant::now() < deadline, "the scratch stores never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Hold a raw redb lock on `path` from another thread until the returned
+/// sender fires, is dropped, or `hold` elapses; returns once it is held.
+fn hold_redb_lock(
+    path: PathBuf,
+    hold: Duration,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (locked, lock_held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let db = redb::Database::create(&path).expect("hold the redb lock");
+        locked.send(()).expect("signal");
+        let _ = released.recv_timeout(hold);
+        drop(db);
+    });
+    lock_held.recv().expect("the lock is held");
+    (holder, release)
+}
+
+/// Why (#10035): the #9945 wait polls in-process strong counts, which reach
+/// zero before `redb::Database::drop` releases the OS file lock. A reopen
+/// racing that drop outlasted the open retry and got a read-only snapshot.
+/// What: a raw `redb::Database` with no cached store holds `<src>/kg.redb`
+/// for ~500 ms; the rename must wait for the lock, so the new id reopens
+/// writable.
+/// Test: itself.
+#[test]
+fn rename_palace_waits_for_a_held_kg_file_lock() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    create_untracked(root, "lock-src");
+    let reg = PalaceRegistry::new();
+    // Kept alive (not `_`) so the holder waits out the full hold.
+    let (holder, _release) = hold_redb_lock(
+        root.join("lock-src").join(KG_FILE),
+        Duration::from_millis(500),
+    );
+
+    let opts = RenameOptions {
+        busy_wait: Duration::from_secs(5),
+        ..RenameOptions::default()
+    };
+    reg.rename_palace(root, "lock-src", "lock-dst", &opts)
+        .expect("rename");
+    let reopened = reg
+        .open_palace(root, &PalaceId::new("lock-dst"))
+        .expect("open the renamed palace");
+    let read_only = reopened.is_read_only();
+    drop(reopened);
+    holder.join().expect("the lock holder");
+    assert!(
+        !read_only,
+        "the renamed palace reopened on a read-only snapshot"
+    );
+}
+
+/// Why (#10035): a file lock that outlasts `busy_wait` must refuse the rename
+/// with nothing changed, and the lock probe must never create a file.
+/// What: `<src>` has no vector file; a raw redb lock on `<src>/kg.redb`
+/// outlasts the wait, so the rename is `Busy` with `<src>`, the aliases and
+/// `palace.json` unchanged and no vector file created. Once the lock is
+/// released the rename succeeds, still creating no vector file.
+/// Test: itself.
+#[test]
+fn rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    create_untracked(root, "held-src");
+    let vectors = root.join("held-src").join("index.usearch.redb");
+    std::fs::remove_file(&vectors).expect("a new palace has a vector file");
+    let reg = PalaceRegistry::new();
+    let (holder, release) =
+        hold_redb_lock(root.join("held-src").join(KG_FILE), Duration::from_secs(30));
+
+    let err = reg
+        .rename_palace(root, "held-src", "held-dst", &opts())
+        .unwrap_err();
+    assert!(matches!(err, PalaceRenameError::Busy { .. }), "{err:?}");
+    assert_eq!(
+        json_id(root, "held-src"),
+        ("held-src".into(), "held-src".into())
+    );
+    assert!(!root.join("held-dst").exists(), "the target was created");
+    assert!(aliases(root).is_empty(), "an alias was written");
+    assert!(!vectors.exists(), "the probe created the vector file");
+
+    drop(release);
+    holder.join().expect("the lock holder");
+    reg.rename_palace(root, "held-src", "held-dst", &opts())
+        .expect("rename once the lock is released");
+    assert!(
+        !root.join("held-dst").join("index.usearch.redb").exists(),
+        "the probe created the vector file"
+    );
 }

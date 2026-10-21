@@ -15,8 +15,6 @@
 //! Test: each variant is exercised by the `cli_parses_*` unit tests in
 //! `tests.rs`.
 
-use std::net::SocketAddr;
-
 use clap::{Parser, Subcommand};
 
 mod actions;
@@ -40,19 +38,12 @@ pub(crate) use crate::cli_manager::ManagerAction;
 /// default value without importing the library constant under a different
 /// name; `#[cfg(test)]` reflects that it has no production callers.
 /// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_URL`].
-/// Test: used throughout `tests.rs`; `core::discovery::default_url_matches_addr`
-/// proves URL and addr agree.
+/// Test: used throughout `tests.rs`.
 #[cfg(test)]
 pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 
-/// Default daemon bind address for the `daemon --addr` flag (issue #1268).
-///
-/// Why: keeps the daemon's bind default tied to the same
-/// [`trusty_mpm::core::DEFAULT_DAEMON_URL`] the client resolvers fall back to
-/// (see `core::discovery`), so `tm start` and the thin CLI always agree.
-/// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_ADDR`].
-/// Test: `core::discovery::default_addr_parses`.
-pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
+// #6288 S3a: `DEFAULT_ADDR`, the `daemon --addr` bind default, went with the
+// bind; the flag is accepted and ignored (owner ruling Q1).
 
 /// trusty-mpm command-line interface.
 ///
@@ -739,9 +730,12 @@ pub(crate) enum Command {
     Worktrees(crate::commands::worktrees::WorktreesArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
-        /// Address the daemon HTTP API binds to.
-        #[arg(long, env = "TRUSTY_MPM_ADDR", default_value = DEFAULT_ADDR)]
-        addr: SocketAddr,
+        /// DEPRECATED, ignored (#6288 S3a): the daemon serves its Unix socket
+        /// only and binds no TCP port. Accepted, with one deprecation log line,
+        /// so a launchd plist that still passes `--addr` keeps starting the
+        /// daemon rather than crash-looping it; removed in 2.0.0.
+        #[arg(long, env = "TRUSTY_MPM_ADDR")]
+        addr: Option<String>,
         /// DEPRECATED (issue #3330, ADR-0011 loopback-only doctrine): the
         /// daemon's secondary Tailscale listener has been removed —
         /// non-loopback ingress is exclusively `trusty-console`'s job (its
@@ -877,8 +871,10 @@ pub(crate) enum Command {
     /// Set up and inspect the Architect, the one fleet supervisor per user.
     ///
     /// `init` creates the project, grants it the supervisor profile and
-    /// starts tmux session `tm-architect`; `status` checks that setup.
-    // #8436. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    /// starts tmux session `tm-architect`; `status` checks that setup;
+    /// `relaunch` restarts the Architect's `claude` and binds it.
+    // #8436, #9092. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`,
+    // `cli_parses_fleet_relaunch`.
     Fleet {
         /// Fleet action to perform.
         #[command(subcommand)]

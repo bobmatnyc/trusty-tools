@@ -1,14 +1,15 @@
 //! The Architect's shipped skills, deployed into its project tier at launch (#9540).
 //!
-//! Why: `tm fleet init` seeds `tm-fleet-check` and `tm-context-refresh` into
-//! the Architect project once. Nothing wrote them again, so a deleted copy
+//! Why: `tm fleet init` seeds the Architect skills ([`SHIPPED`]: the two
+//! `tm-*` skills and, since #9997, the `architect-*` skills) into the
+//! Architect project once. Nothing wrote them again, so a deleted copy
 //! stayed gone and a framework update never reached an untouched copy. They
 //! must reach the Architect only (rulings df-D21, df-D22): the managed skill
 //! tier is shared by every PM and outranks the project tier, so the one valid
 //! destination is the Architect's own `<project>/.claude/skills`.
-//! What: [`SHIPPED`] names each skill and its content file; #9132 reads the
-//! bytes from content at runtime ([`super::architect_seed`]), and `tm fleet
-//! init` seeds the same bytes. [`deploy_for_launch`] runs at every launch,
+//! What: [`SHIPPED`] names each skill; its content file is
+//! [`ShippedSkill::source`]. #9132 reads the bytes from content at runtime
+//! ([`super::architect_seed`]), and `tm fleet init` seeds the same bytes. [`deploy_for_launch`] runs at every launch,
 //! resume and relaunch; for a positive Architect profile it calls
 //! [`deploy_architect_skills`], and for anything else it writes nothing. A
 //! copy that differs from the last deployed copy is project-custom and is
@@ -37,21 +38,35 @@ pub struct ArchitectSkill {
     pub previous: &'static [&'static str],
 }
 
-/// Where one shipped skill's text lives in content, and its shipped history.
+/// The content directory of the Architect's skills, relative to `instructions/`.
+pub const SKILLS_DIR: &str = "architect/skills";
+
+/// One shipped skill: its stem and its shipped history.
+///
+/// Why: #9997 AC5 — adding a skill must be one content file plus one
+/// [`SHIPPED`] entry; a second hand-written path could disagree with the stem.
+/// What: the content file is always `<SKILLS_DIR>/<stem>.md`
+/// ([`Self::source`]); the loader, the seed and the launch deploy all iterate
+/// the table they are given.
+/// Test: `one_more_shipped_entry_and_content_file_load_seed_and_deploy`.
 #[derive(Debug, Clone, Copy)]
 pub struct ShippedSkill {
-    /// Directory name under `.claude/skills/`.
+    /// Directory name under `.claude/skills/`, and the content file's stem.
     pub stem: &'static str,
-    /// The `SKILL.md` source, relative to `instructions/` (#9132).
-    pub source: &'static str,
     /// See [`ArchitectSkill::previous`].
     pub previous: &'static [&'static str],
+}
+
+impl ShippedSkill {
+    /// The `SKILL.md` source, relative to `instructions/` (#9132).
+    pub fn source(&self) -> String {
+        format!("{SKILLS_DIR}/{}.md", self.stem)
+    }
 }
 
 /// `tm-fleet-check`, the Architect's per-pass fleet check.
 pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
     stem: "tm-fleet-check",
-    source: "architect/skills/tm-fleet-check.md",
     // Every earlier shipped text (git history of the asset). Edit the asset
     // and the old hash joins this list, or a `tm fleet init` seed of the old
     // text reads as project-custom; `the_shipped_history_is_pinned_*` trips.
@@ -61,23 +76,51 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "a485db4f6b3fc33fba3a880a0f56b903da5433ae78474c341b96e8002f0c8726",
         // #9132: the compiled-in text, before `version:` became `metadata:`.
         "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
+        // #9997: the `records/` text, before the `local/` layout.
+        "7535d8bc496f17cd1a9d80e461073aa9539fd070329231cb2508a6e65981287a",
+        // #9997 U1b: the `local/` text, before the 250k bar and relay.sh.
+        "90391f732f01ebcb4e9551f846e77cdc8706f4bf62ef02ea930ad0450a7ec9aa",
     ],
 };
 
 /// `tm-context-refresh`, the Architect's context refresh.
 pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
     stem: "tm-context-refresh",
-    source: "architect/skills/tm-context-refresh.md",
     previous: &[
         "e44d87a0715798a89ee20ab450ac4ff2b320d274c3ba3569c6894ec0277d883c",
         "922ed43c92abc1288a1053b1180e9cc6e0b1a1b259b5d51a163d6a94b7663e8f",
         // #9132: the compiled-in text, before `version:` became `metadata:`.
         "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
+        // #9997: the `records/` text, before the `local/` layout.
+        "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
+        // #9997 U1b: the 50% text, before the 250k-token bar.
+        "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
     ],
 };
 
-/// Every skill the Architect receives, in deploy order.
-pub const SHIPPED: &[ShippedSkill] = &[FLEET_CHECK, CONTEXT_REFRESH];
+/// A skill on its first release: no earlier shipped text to recognise.
+const fn first_release(stem: &'static str) -> ShippedSkill {
+    ShippedSkill {
+        stem,
+        previous: &[],
+    }
+}
+
+/// Every skill the Architect receives, in deploy order. A new skill is one
+/// entry here plus `content/instructions/<SKILLS_DIR>/<stem>.md` (#9997).
+pub const SHIPPED: &[ShippedSkill] = &[
+    FLEET_CHECK,
+    CONTEXT_REFRESH,
+    // #9997 U1b: the skills the operating manual indexes, first shipped here.
+    first_release("architect-tmux-ops"),
+    first_release("architect-operating-rules"),
+    first_release("architect-workflow"),
+    first_release("architect-search-memory"),
+    first_release("architect-github"),
+    first_release("architect-strategy"),
+    first_release("architect-completion-standard"),
+    first_release("architect-owner-model"),
+];
 
 /// The deploy record, beside the skills in the project tier.
 ///

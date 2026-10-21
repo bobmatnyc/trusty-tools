@@ -203,6 +203,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_update",
         "palace_rename",
         "palace_backup",
+        // #10094: the explicit format migration.
+        "palace_migrate",
         "palace_list",
         "palace_info",
         "palace_compact",

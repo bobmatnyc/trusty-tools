@@ -36,9 +36,13 @@ alias `opus` as its model.
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
 4. **Fleet files.** `init` seeds `CLAUDE.md` with the fleet specifics (the
-   user, the watch set, the cadence, the records layout), creates `records/`,
-   writes the poller to `scripts/`, and writes the Architect-only skills
-   `tm-fleet-check` and `tm-context-refresh` to `.claude/skills/`. It writes
+   user, the watch set, the cadence, the records layout), seeds `local/` with
+   the record templates (state, actions, goals, user, instance facts, a
+   per-project template, the owner model and the mandates schema), writes
+   the poller and the relay scripts (`relay.sh`, `posted.sh`) to `scripts/`,
+   the voice guide to `docs/architect/`, and the Architect-only skills
+   (`tm-fleet-check`, `tm-context-refresh` and the `architect-*` skills the
+   operating manual indexes) to `.claude/skills/`. It writes
    each file only when it is absent and reports an edited one as skipped, so
    your edits survive every later run. The seeded `CLAUDE.md` declares no
    IDENTITY, ENFORCEMENT or WORKFLOW override blocks, and the project's
@@ -69,7 +73,9 @@ project's hook only and leaves every other watched project unchanged.
 `tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
 the allowlist entry, the profile request, the running `tm-architect` session
 in that directory, and its Architect launch stamp. It exits 1 when any check
-fails. The watched set joins the report in P3.
+fails. Its `skills` row also warns when an Architect set up before `local/`
+still keeps its records in the old directory; move them into `local/`
+yourself, because `tm` moves nothing. The watched set joins the report in P3.
 
 ## Without `tm fleet`
 

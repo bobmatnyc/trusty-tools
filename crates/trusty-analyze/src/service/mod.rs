@@ -8,7 +8,7 @@
 //!
 //! What: Thin coordinator module. Declares the submodules and re-exports the
 //! public surface so callers import from `service` rather than the internal
-//! submodules. The served surface is twenty JSON-RPC methods over a hardened
+//! submodules. The served surface is the JSON-RPC methods over a hardened
 //! Unix socket — see [`rpc::METHODS`], which is the list, rather than a copy of
 //! it here that would go stale.
 //!
@@ -25,13 +25,15 @@ mod diagnostics_dispatch;
 
 pub mod events;
 pub(crate) mod handlers;
+// #9078 (L4): the LSP calls' events on the trusty-events bus.
+pub mod lsp_events;
 pub mod rpc;
 
 // Re-export the public API so callers can write `use crate::service::…`
 // without knowing which submodule owns each item.
 pub use events::AnalyzerAppState;
 pub use rpc::{
-    build_router, serve, serve_on_demand, socket_path, METHODS, METHOD_HEALTH,
+    build_router, serve, serve_on_demand, serve_until, socket_path, METHODS, METHOD_HEALTH,
     SHUTDOWN_FLUSH_TIMEOUT,
 };
 

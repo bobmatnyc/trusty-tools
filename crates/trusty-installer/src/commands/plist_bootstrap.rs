@@ -161,6 +161,15 @@ impl StubLaunchctl {
         Self::default()
     }
 
+    /// A stub whose `bootstrap` fails with `reason` (#10042: usable outside
+    /// this module, where the private `calls` field blocks struct syntax).
+    pub fn failing_bootstrap(reason: &str) -> Self {
+        Self {
+            fail_bootstrap: Some(reason.to_owned()),
+            ..Self::default()
+        }
+    }
+
     /// Every LAUNCHD call recorded so far, in order, as `"bootout <domain>
     /// <path>"` / `"bootstrap <domain> <path>"` strings.
     pub fn calls(&self) -> Vec<String> {

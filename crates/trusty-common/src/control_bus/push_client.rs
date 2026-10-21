@@ -1,11 +1,12 @@
-//! `PushClient`: the producer-side buffered UDS transport to console's event
-//! bus (DOC-73 §4.2, issue #6847).
+//! `PushClient`: the producer-side buffered UDS transport to the
+//! trusty-events socket (DOC-73 §4.2, issue #6847).
 //!
-//! Why: Owner ruling 2026-09-05 makes trusty-console the one event bus in the
-//!      workspace; every other harness is a producer that pushes to it. The
+//! Why: ADR-0065 runs the one event bus in the workspace as the
+//!      `trusty-events` daemon (#9075; trusty-console hosted it before);
+//!      every harness is a producer that pushes to it. The
 //!      non-blocking invariant (§4.1) — "[the bus] shouldn't block
 //!      functionality, just messages and observability" — means a producer's
-//!      `send` can never wait on console being reachable, so the buffering and
+//!      `send` can never wait on the bus being reachable, so the buffering and
 //!      the actual socket I/O have to be two different operations: enqueue is
 //!      synchronous and infallible, and only an explicit [`PushClient::flush`]
 //!      touches the network.
@@ -19,7 +20,7 @@
 //!       BYTE size (default [`DEFAULT_PUSH_BUFFER_BYTES`], 8 MiB) — either
 //!       limit evicts the oldest buffered frame and counts it (§4.2
 //!       "Overflow: the `dropped` count"). [`PushClient::flush`] dials
-//!       console's ingest socket ONCE via [`crate::uds::connect_hardened`]
+//!       the trusty-events socket ONCE via [`crate::uds::connect_hardened`]
 //!       and writes every buffered frame down that one connection with
 //!       [`crate::uds::write_frame`] — the same newline-terminated JSON
 //!       framing [`crate::uds::send_framed_notification`] uses for a single
@@ -76,7 +77,7 @@ pub const DEFAULT_PUSH_BUFFER_BYTES: u64 = 8 * 1024 * 1024;
 /// Default per-frame dial-and-write budget for [`PushClient::flush`].
 ///
 /// Why: A [`flush`](PushClient::flush) call must not hang the caller when
-///      console is unreachable — the same reasoning [`crate::uds::rpc`]'s own
+///      the bus is unreachable — the same reasoning [`crate::uds::rpc`]'s own
 ///      timeouts document. 500ms is far above a local UDS round-trip and far
 ///      below anything a caller would notice as a stall.
 pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_millis(500);
@@ -87,14 +88,17 @@ pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_millis(500);
 ///      frames actually left the buffer and, when draining stopped early,
 ///      why — without `flush` needing to be infallible in a way that hides
 ///      partial progress.
-/// What: `sent` is always accurate even when `error` is `Some`: it counts only
-///       frames console's socket actually accepted. `error` is `None` when the
-///       buffer was fully drained (including the empty-buffer case).
+/// What: `sent` is always accurate even when `error` is `Some`: it counts the
+///       frames written to the trusty-events socket. There is no delivery
+///       acknowledgement, so a written frame can still be lost if the bus dies
+///       before ingesting it (#9075). `error` is `None` when the buffer was
+///       fully drained (including the empty-buffer case).
 /// Test: `tests::push_client_flushes_once_the_socket_appears`,
 ///       `tests::push_client_buffers_when_the_socket_is_absent`.
 #[derive(Debug)]
 pub struct PushFlushOutcome {
-    /// Frames console's ingest socket accepted this call.
+    /// Frames written to the trusty-events socket this call; written, not
+    /// acknowledged (#9075).
     pub sent: usize,
     /// Set when draining stopped before the buffer was empty; the frame that
     /// failed is left at the front of the buffer for the next flush attempt.
@@ -161,6 +165,29 @@ impl PushBuffer {
     }
 }
 
+/// A frame popped for a write that has not completed (#9078).
+///
+/// Why: `flush` is a future, and a caller may drop it mid-write — a flush
+/// task aborted at shutdown, or an outer timeout. A frame popped and then
+/// dropped with the future was lost without being counted.
+/// What: dropping this re-queues the frame at the front of the buffer; a
+/// completed write clears `frame` first. A frame cut off mid-write is sent
+/// again whole on the next connection; the cut-off bytes end without a
+/// newline, so they are not a frame.
+/// Test: `tests::a_flush_cancelled_mid_write_requeues_its_frame`.
+struct InFlight<'a> {
+    client: &'a PushClient,
+    frame: Option<QueuedFrame>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            self.client.lock_buffer().push_front(frame);
+        }
+    }
+}
+
 /// Serialized length of `event`'s wire frame, or `0` on a (practically
 /// unreachable) serialization failure — see [`QueuedFrame`].
 fn frame_byte_len(event: &HarnessEvent) -> u64 {
@@ -169,8 +196,9 @@ fn frame_byte_len(event: &HarnessEvent) -> u64 {
         .unwrap_or(0)
 }
 
-/// Buffered, non-blocking producer-side client for console's event-bus
-/// ingest socket (DOC-73 §4.2).
+/// Buffered, non-blocking producer-side client for the trusty-events socket
+/// (DOC-73 §4.2, ADR-0065); dial it at
+/// [`super::events_socket_path`].
 ///
 /// Why: See module docs. One instance is meant to be shared (behind an `Arc`,
 ///      by whichever harness embeds it) across every call site that emits a
@@ -235,7 +263,7 @@ impl PushClient {
     /// fails — the non-blocking invariant a producer relies on (DOC-73 §4.1).
     ///
     /// Why: A producer's tool call or workflow step must never stall because
-    ///      console is slow, down, or absent. Keeping `send` pure buffer
+    ///      the bus is slow, down, or absent. Keeping `send` pure buffer
     ///      manipulation — no dial, no write, no `tracing` call on the hot
     ///      path — is what makes that guarantee hold unconditionally rather
     ///      than "usually, unless the socket hangs or the buffer is full".
@@ -267,7 +295,7 @@ impl PushClient {
         }
     }
 
-    /// Attempt to deliver every currently-buffered frame to console's ingest
+    /// Attempt to deliver every currently-buffered frame to the trusty-events
     /// socket, oldest first, over ONE connection.
     ///
     /// Why: The only method in this type that performs I/O, so a caller (a
@@ -286,8 +314,10 @@ impl PushClient {
     ///       already used per-frame. Half-closes the connection once every
     ///       buffered frame has been written. Stops and re-queues the frame
     ///       at the front of the buffer on the first failure (dial, write, or
-    ///       per-operation timeout), so a transient failure loses nothing and
-    ///       the next `flush` call resumes where this one stopped.
+    ///       per-operation timeout), so the frame that failed is kept and the
+    ///       next `flush` call resumes where this one stopped. A frame counts
+    ///       as sent once it is written to the socket; the bus sends no
+    ///       delivery acknowledgement (#9075).
     ///
     /// # Errors
     ///
@@ -295,9 +325,12 @@ impl PushClient {
     /// zero frames. `PushFlushOutcome.error` carries the [`UdsRpcError`] from
     /// the dial or from the first frame that failed to send; `sent` still
     /// reports every frame that succeeded before it.
+    /// Cancelling the returned future mid-write also re-queues the frame
+    /// (#9078).
     /// Test: `tests::push_client_flushes_once_the_socket_appears`,
     ///       `tests::push_client_buffers_when_the_socket_is_absent`,
-    ///       `tests::flush_dials_exactly_once_for_the_whole_drain`.
+    ///       `tests::flush_dials_exactly_once_for_the_whole_drain`,
+    ///       `tests::a_flush_cancelled_mid_write_requeues_its_frame`.
     pub async fn flush(&self) -> PushFlushOutcome {
         if self.lock_buffer().is_empty() {
             return PushFlushOutcome {
@@ -338,15 +371,23 @@ impl PushClient {
             let Some(frame) = self.lock_buffer().pop_front() else {
                 break;
             };
-            match tokio::time::timeout(
-                self.timeout,
-                crate::uds::write_frame(&mut stream, &frame.event),
-            )
-            .await
+            // #9078: held across the write, so a failed OR cancelled write
+            // puts the frame back at the front instead of losing it.
+            let mut in_flight = InFlight {
+                client: self,
+                frame: Some(frame),
+            };
+            let Some(event) = in_flight.frame.as_ref().map(|f| &f.event) else {
+                break;
+            };
+            match tokio::time::timeout(self.timeout, crate::uds::write_frame(&mut stream, event))
+                .await
             {
-                Ok(Ok(())) => sent += 1,
+                Ok(Ok(())) => {
+                    in_flight.frame = None;
+                    sent += 1;
+                }
                 Ok(Err(source)) => {
-                    self.lock_buffer().push_front(frame);
                     return PushFlushOutcome {
                         sent,
                         error: Some(UdsRpcError::Write {
@@ -356,7 +397,6 @@ impl PushClient {
                     };
                 }
                 Err(_) => {
-                    self.lock_buffer().push_front(frame);
                     return PushFlushOutcome {
                         sent,
                         error: Some(UdsRpcError::Timeout {
@@ -429,6 +469,7 @@ mod tests {
                     parent_id: None,
                     actor: Actor::System,
                     objects: Vec::new(),
+                    attrs: Default::default(),
                     schema_version: 1,
                 },
                 phase: crate::control_bus::SessionPhase::Started,
@@ -436,6 +477,42 @@ mod tests {
             id: EventId::new(),
             parent_id: None,
         }
+    }
+
+    /// #9078: a flush cancelled mid-write — a flush task aborted at shutdown,
+    /// or a caller's own timeout — keeps the frame it had popped.
+    #[tokio::test]
+    async fn a_flush_cancelled_mid_write_requeues_its_frame() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("hung.sock");
+        // Bound and listening, never accepted or read: the write blocks once
+        // the socket buffer fills.
+        let _listener: UnixListener = crate::uds::bind_hardened(&sock).expect("bind");
+        let client = Arc::new(PushClient::new(&sock));
+        let mut big = sample_event();
+        if let HarnessPayload::Action(crate::control_bus::ActionEvent::Session { meta, .. }) =
+            &mut big.payload
+        {
+            meta.attrs
+                .insert("pad".into(), serde_json::Value::String("x".repeat(4 << 20)));
+        }
+        client.send(big);
+        client.send(sample_event());
+
+        let c = Arc::clone(&client);
+        let flusher = tokio::spawn(async move { c.flush().await });
+        // Well inside DEFAULT_PUSH_TIMEOUT: the write is blocked, not timed out.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!flusher.is_finished(), "the flush must be stuck mid-write");
+        flusher.abort();
+        let _ = flusher.await;
+
+        assert_eq!(client.dropped(), 0);
+        assert_eq!(
+            client.buffered_len(),
+            2,
+            "the frame popped for the cancelled write is back in the buffer"
+        );
     }
 
     /// A `send` while nothing is listening buffers the frame rather than

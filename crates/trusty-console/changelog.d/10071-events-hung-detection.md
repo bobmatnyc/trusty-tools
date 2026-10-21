@@ -1,0 +1,3 @@
+Changed
+- Console's trusty-events client asks the bus for a heartbeat every 5 s and reports a bus that accepts the connection but sends no frame for 12.5 s as `hung` on `GET /api/console/events/status`, then reconnects with the usual backoff. Before, a stopped or wedged daemon read as a quiet, healthy bus. A heartbeat never moves the resume point and is never relayed (#10071).
+- The status reaches `connected` when the bus sends its first frame, not when the socket accepts. A daemon too old to know `heartbeat_ms` is reported `refused`, and the client keeps its resume point instead of resyncing (#10071).

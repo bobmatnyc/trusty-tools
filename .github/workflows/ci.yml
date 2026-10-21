@@ -298,6 +298,11 @@ jobs:
       - name: Sandbox secrets+console launcher selftest (#9793)
         run: bash scripts/sandbox_secrets_console_selftest.sh
 
+      # #8998: the PM starting-context probe's stream readout and lever argv;
+      # fixture streams only, no claude and no build.
+      - name: PM context probe selftest (#8998)
+        run: bash scripts/pm_context_probe_selftest.sh
+
       # #9224: the installed tagent wrapper must not export `.env.local` under
       # TRUSTY_SANDBOX=1. Its selftest drives a stub tagent, so it needs no build.
       - name: tagent wrapper selftest (#9224)
@@ -616,6 +621,14 @@ jobs:
       - name: cargo clippy -p trusty-channels --features unrouted-slack-mcp -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-channels --all-targets --features unrouted-slack-mcp -- -D warnings
+
+      # #10013: trusty-agents builds trusty-memory with only `mcp-schema`, but
+      # feature unification turns `server` back on in the `--workspace` run
+      # above, so dead code under `mcp-schema` alone reached main unseen. This
+      # step lints trusty-memory's library exactly as trusty-agents builds it.
+      - name: cargo clippy -p trusty-memory --no-default-features --features mcp-schema -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-memory --lib --no-default-features --features mcp-schema -- -D warnings
 
   # --------------------------------------------------------------------------
   # rustdoc-links: broken intra-doc links, on the PR that writes them (#5973).
@@ -2858,6 +2871,12 @@ jobs:
       - name: Enforce content manifest and member versions (#8388)
         if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: python3 scripts/check_content.py tree
+
+      # #9996: the Architect leak patterns (owner names, orgs, hosts, Slack ids,
+      # emails) over content/instructions/architect/**.
+      - name: Enforce Architect leak gate on content (#9996)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: python3 scripts/check_content.py leaks
 
       # #8388: a content member change must land under a bundle version no
       # content-v* tag has used, and the version never goes down.

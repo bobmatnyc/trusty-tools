@@ -4,7 +4,8 @@
 //! seam. Values reach the command's environment or stdin, never an argv and
 //! never tm's own environment. The grant names the child's pid (Architect
 //! ruling 2026-10-10), so tm spawns the child first and grants it second.
-//! What: [`run`] in six steps.
+//! What: [`run`] in six steps, after removing stale token directories a
+//! killed stub left ([`exec_token::sweep`], #9071 S10).
 //! 1. Spawn `tm secrets __exec-stub` in its own process group, with a token
 //!    pipe and a report pipe inherited by fd number ([`exec_wire::stub_args`]).
 //! 2. `secrets.grant` the stub's pid every key, for [`GRANT_TTL_SECS`].
@@ -45,11 +46,15 @@ use trusty_secrets::server::OnDemandSecrets;
 
 use super::exec_proc::{Foreground, Signals, clear_cloexec, kill_group};
 use super::exec_scrub::{Scrubber, pump};
+use super::exec_token;
 use super::exec_wire::{self, ExecSpec, MAX_REPORT_BYTES, Report};
 
 /// The lifetime tm asks for; the server caps it at its own maximum (3600 s
 /// today). Architect ruling Q3: no refresh.
 pub(crate) const GRANT_TTL_SECS: u64 = 3600;
+
+/// [`GRANT_TTL_SECS`]: a token directory older than this holds a dead token.
+const GRANT_TTL: Duration = Duration::from_secs(GRANT_TTL_SECS);
 
 /// How long a signalled command has before its group is killed.
 const GRACE: Duration = Duration::from_secs(5);
@@ -67,13 +72,17 @@ const PREFIX: &str = "tm secrets exec";
 /// `exec_grant_names_the_stub_pid_not_tm`,
 /// `exec_kills_the_stub_group_when_the_grant_is_refused`,
 /// `exec_drain_after_exit_answers_sigterm`,
-/// `exec_drain_after_exit_answers_terminal_ctrl_c`.
+/// `exec_drain_after_exit_answers_terminal_ctrl_c`,
+/// `exec_sweeps_stale_grant_dirs_before_the_stub`.
 pub(crate) async fn run(
     client: &OnDemandSecrets,
     project: &Path,
     spec: ExecSpec,
 ) -> anyhow::Result<i32> {
     let mut signals = Signals::install().map_err(|_| anyhow!("{PREFIX}: cannot watch signals"))?;
+    // #9071 S10 decision 11: a stub killed mid-hand-down leaves a token dir.
+    let uid = nix::unistd::geteuid().as_raw();
+    exec_token::sweep(&std::env::temp_dir(), uid, GRANT_TTL);
     let scrub = !std::io::stdout().is_terminal();
     let (token_r, token_w) = std::io::pipe()?;
     let (report_r, report_w) = std::io::pipe()?;

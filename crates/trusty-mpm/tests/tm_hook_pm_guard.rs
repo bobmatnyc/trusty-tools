@@ -3661,7 +3661,12 @@ fn pm_guard_allows_documents_and_configuration_in_a_main_checkout() {
         "README.md",
         "TASK.md",
         "Cargo.toml",
-        ".claude/settings.json",
+        // #8928's owner scope ruling (2026-09-30): the Write/Edit check covers
+        // exact settings/config files (`.claude/settings.json`,
+        // `.claude/settings.local.json`, `.mcp.json`) in any workspace, plus
+        // frontmatter `hooks:`; there is no blanket `.claude/**` deny. So
+        // `.claude/` is covered here by an agent file with no `hooks:`.
+        ".claude/agents/demo.md",
     ] {
         let target = repo.join(name);
         let input = format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display());

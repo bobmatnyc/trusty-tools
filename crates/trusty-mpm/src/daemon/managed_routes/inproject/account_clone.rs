@@ -240,7 +240,11 @@ fn clone_env_removal_set() -> Vec<&'static str> {
 fn verify_token_login(token: &str) -> Result<String, String> {
     let token = token.to_string();
     verify_token_login_with(crate::core::gh_account::GH_ENFORCE_TIMEOUT, move || {
-        let mut cmd = trusty_common::gh::GhCommand::new(["api", "user", "--jq", ".login"]);
+        // #9750: an explicit token runs the real gh, not a session's shim.
+        let mut cmd =
+            crate::core::gh_shim_path::bypass_session_shim(trusty_common::gh::GhCommand::new([
+                "api", "user", "--jq", ".login",
+            ]));
         // Includes `GH_HOST` — see `clone_env_removal_set`'s doc — so a stale
         // ambient GHE host cannot make this verify against the wrong host
         // while the clone itself still targets `github.com`.

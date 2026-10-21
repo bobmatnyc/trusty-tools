@@ -8,7 +8,8 @@
 //! trusty-search, trusty-memory and (since #6288) trusty-mpm answer a health
 //! method on their Unix socket; trusty-agents still publishes an `http_addr`
 //! file the connector TCP-probes; trusty-analyze and trusty-review are
-//! on-demand members.
+//! on-demand members; trusty-events (#10042) names no health method, so its
+//! socket is probed with a bare connect.
 //! Test: unit tests live in each submodule and point a connector at a socket
 //! or data directory the test owns, never the operator's. Run with
 //! `cargo test -p trusty-console`.
@@ -16,6 +17,8 @@
 mod agents;
 mod analyze;
 mod console;
+// #10042: the event bus daemon's socket state.
+mod events;
 mod helpers;
 mod memory;
 mod mpm;
@@ -27,6 +30,7 @@ mod socket_health;
 pub use agents::AgentsConnector;
 pub use analyze::AnalyzeConnector;
 pub use console::ConsoleConnector;
+pub use events::EventsConnector;
 pub use memory::MemoryConnector;
 pub use mpm::MpmConnector;
 pub use review::ReviewConnector;
@@ -64,12 +68,13 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// command iterate the same set. Issue #1163 lifts the prior #1069 exclusion
 /// of trusty-review: the Review dashboard tab is now fully implemented with a
 /// `console_metrics` MCP tool, so the service is included in the Overview.
-/// What: Returns a `Vec<Box<dyn ServiceConnector>>` with seven connectors:
+/// What: Returns a `Vec<Box<dyn ServiceConnector>>` with eight connectors:
 /// search, memory, analyze, review, mpm (#1222 adds trusty-mpm for the Sessions
 /// tab), agents (#3331 adds trusty-agents so `/api/agents/*` resolves an
 /// upstream under the loopback-only doctrine), console (#6908 adds the console
-/// itself, which was the one local service missing from its own roster).
-/// Test: `test_all_connectors_returns_seven` below.
+/// itself, which was the one local service missing from its own roster),
+/// events (#10042 adds the trusty-events bus daemon, ADR-0065).
+/// Test: `test_all_connectors_returns_eight` below.
 pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
     vec![
         Box::new(SearchConnector::new()),
@@ -78,6 +83,8 @@ pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
         Box::new(ReviewConnector::new()),
         Box::new(MpmConnector::new()),
         Box::new(AgentsConnector::new()),
+        // #10042: the bus daemon, probed over its socket (ADR-0065).
+        Box::new(EventsConnector::new()),
         // #6908: the console lists itself, so the roster covers every local
         // service rather than every local service except the one serving it.
         Box::new(ConsoleConnector::new()),
@@ -124,23 +131,25 @@ mod tests {
     use super::*;
     use crate::connector::ServiceLifecycle;
 
-    /// Why: the registry must return exactly seven connectors in order (search,
+    /// Why: the registry must return exactly eight connectors in order (search,
     /// memory, analyze, review, mpm — #1222; agents — #3331 for the
     /// `/api/agents/*` proxy under the loopback-only doctrine; console — #6908,
-    /// the console's own row).
+    /// the console's own row; events — #10042, the bus daemon).
     /// What: calls all_connectors() and checks IDs.
     /// Test: this test itself.
     #[test]
-    fn test_all_connectors_returns_seven() {
+    fn test_all_connectors_returns_eight() {
         let cs = all_connectors();
-        assert_eq!(cs.len(), 7);
+        assert_eq!(cs.len(), 8);
         assert_eq!(cs[0].id(), "trusty-search");
         assert_eq!(cs[1].id(), "trusty-memory");
         assert_eq!(cs[2].id(), "trusty-analyze");
         assert_eq!(cs[3].id(), "trusty-review");
         assert_eq!(cs[4].id(), "trusty-mpm");
         assert_eq!(cs[5].id(), "trusty-agents");
-        assert_eq!(cs[6].id(), "trusty-console");
+        // #10042: the event bus daemon's socket state.
+        assert_eq!(cs[6].id(), "trusty-events");
+        assert_eq!(cs[7].id(), "trusty-console");
     }
 
     /// REGRESSION (#6416): the de-daemonized members must be exactly
@@ -177,6 +186,7 @@ mod tests {
                 "trusty-memory",
                 "trusty-mpm",
                 "trusty-agents",
+                "trusty-events",
                 "trusty-console"
             ]
         );

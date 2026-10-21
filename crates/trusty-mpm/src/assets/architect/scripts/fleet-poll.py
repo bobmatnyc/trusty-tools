@@ -5,13 +5,16 @@ Why: the owner's ruling (2026-09-25) makes the Architect's polling deterministic
 A Claude session woke every 15 minutes and read every pane with inference even
 when nothing needed action. This script decides without any LLM whether
 anything needs the Architect, and wakes the Architect's pane only then.
-What: every --interval seconds it lists the tmux panes, captures each tm-*
+What: every --interval seconds it lists the tmux panes (the default server's
+and, unless TMUX_SOCKET pins one, every live `tm-ws-*` workspace server's,
+#8928), captures each tm-*
 PM pane, classifies it (input box via scripts/input-state.py `classify`,
 dialog, question, idle, ctx, plan-limit, error, exited — see quiet_sessions,
 below, for two exceptions), reads new permission_prompt / agent_needs_input
 lines of inbox/events.jsonl, checks host load (5-min avg > LOAD_FACTOR x
 cores), disk and swap, self_ctx_alerts (self-ctx.py: the Architect's own
-context, which has no `ctx N%` line to read), and appends each NEW alert as
+context in tokens, which has no `ctx N%` line to read, against the same
+context bar), and appends each NEW alert as
 a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
 alert with the same (session, pane, kind, fingerprint) is not re-emitted
 until it clears for one cycle, or its kind's re-emit interval passes.
@@ -23,8 +26,10 @@ Config (env, all optional): ARCHITECT_SESSION (default tm-architect),
 ARCHITECT_POLL_SESSION (default <ARCHITECT_SESSION>-poll),
 ARCHITECT_INBOX_DIR (default <root>/inbox), ARCHITECT_QUIET_SESSIONS_FILE
 (default <root>/quiet-sessions.txt), TMUX_SOCKET, LOAD_FACTOR, SELF_CTX_DIR,
-SELF_CTX_WINDOW, SELF_CTX_THRESHOLD; see README.md.
-Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py
+CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
+see README.md.
+Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
+tests/test_fleet_poll_workspace_servers.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
 """
@@ -35,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -49,6 +55,8 @@ ALERTS = os.path.join(INBOX, "alerts.jsonl")
 STATE = os.path.join(INBOX, "poll-state.json")
 LOG = os.path.join(INBOX, "poll.log")
 SOCKET = os.environ.get("TMUX_SOCKET", "")
+# #8928 step 4: the name prefix of a workspace's private tmux server.
+WORKSPACE_PREFIX = "tm-ws-"
 
 # The Architect's own tmux session: the only pane this poller sends keys to.
 ARCHITECT = os.environ.get("ARCHITECT_SESSION") or "tm-architect"
@@ -60,8 +68,8 @@ EVENT_TYPES = {"permission_prompt", "agent_needs_input"}  # idle_prompt is not a
 DISK_HIGH = 90
 LOAD_FACTOR_DEFAULT = 1.5  # x cores, vs. the 5-min load avg; env LOAD_FACTOR overrides
 
-SELF_CTX_WINDOW_DEFAULT = 1_000_000
-SELF_CTX_THRESHOLD_DEFAULT = 40
+# #9997: each context-bar warning is logged once per poller process.
+_LOGGED_BAR_WARNINGS = set()
 
 
 def _load_by_path(name, filename):
@@ -104,8 +112,10 @@ def log(msg, dry_run=False):
         f.write(line + "\n")
 
 
-def tmux(*args):
-    cmd = ["tmux", *(["-S", SOCKET] if SOCKET else []), *args]
+def tmux(*args, server=None):
+    # #8928: `server` names a workspace's private server (`tmux -L <server>`).
+    where = ["-L", server] if server else (["-S", SOCKET] if SOCKET else [])
+    cmd = ["tmux", *where, *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -115,19 +125,67 @@ def tmux(*args):
     return r.stdout
 
 
+def socket_dir():
+    """tmux's socket directory: $TMUX_TMPDIR (or /tmp), resolved, + tmux-<uid>."""
+    base = os.path.realpath(os.environ.get("TMUX_TMPDIR") or "/tmp")
+    return os.path.join(base, f"tmux-{os.getuid()}")
+
+
+def workspace_servers(directory=None):
+    """#8928: live workspace servers (`tm-ws-*` sockets that answer), sorted."""
+    directory = directory or socket_dir()
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    live = []
+    for name in sorted(n for n in names if n.startswith(WORKSPACE_PREFIX)):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)  # a wedged server must not stall the cycle
+        try:
+            s.connect(os.path.join(directory, name))
+            live.append(name)
+        except OSError:
+            pass  # not a socket, or a server that exited
+        finally:
+            s.close()
+    return live
+
+
 def list_panes():
-    out = tmux("list-panes", "-a", "-F",
-               "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}")
+    """Panes of the default server and, unless TMUX_SOCKET pins one server,
+    of every live workspace server; each pane names the server it is on."""
+    fmt = "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}"
+    panes = _rows(tmux("list-panes", "-a", "-F", fmt), None)
+    for server in ([] if SOCKET else workspace_servers()):
+        try:
+            panes += _rows(tmux("list-panes", "-a", "-F", fmt, server=server), server)
+        except TmuxError as e:
+            log(f"{server} list-panes ERROR {e}")
+    return panes
+
+
+def _rows(out, server):
     panes = []
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) == 4:
-            panes.append(dict(zip(("session", "pane", "cmd", "active"), parts)))
+            pane = dict(zip(("session", "pane", "cmd", "active"), parts))
+            if server:
+                pane["server"] = server
+            panes.append(pane)
     return panes
 
 
-def capture(pane):
+def capture(pane, server=None):
+    if server:
+        return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane, server=server)
     return tmux("capture-pane", "-e", "-p", "-S", "-80", "-t", pane)
+
+
+def capture_pane(p):
+    """Capture listed pane `p` on the server it was listed from (#8928)."""
+    return capture(p["pane"], p["server"]) if p.get("server") else capture(p["pane"])
 
 
 def send_to_architect(pane, *keys):
@@ -196,23 +254,32 @@ def host_alerts(now):
     return out
 
 
+def resolve_context_bar(dry_run=False):
+    """(bar_tokens, window_tokens) from fleet-classify's context_bar(), logging
+    each warning once per process (#9997): an invalid value falls back to the
+    default and says so; it never switches the alert off."""
+    bar, window, warnings = fleet_classify.context_bar()
+    for w in warnings:
+        if w not in _LOGGED_BAR_WARNINGS:
+            _LOGGED_BAR_WARNINGS.add(w)
+            log(f"WARNING {w}", dry_run)
+    return bar, window
+
+
 def self_ctx_alerts(now, dry_run=False):
     """One "self_ctx" alert when the Architect's own context (self_ctx.py,
-    tailing its transcript) is at/over the threshold. A missing or unreadable
-    transcript logs and yields no alert; self_ctx.py never raises for that."""
+    tailing its transcript) is at/over the context bar, in tokens; no window
+    is involved (#9997). A missing or unreadable transcript logs and yields
+    no alert; self_ctx.py never raises for that."""
+    bar, _ = resolve_context_bar(dry_run)
     try:
-        window = int(os.environ.get("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT))
-        threshold = int(os.environ.get("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT))
         tokens = self_ctx.self_ctx_tokens(SELF_CTX_DIR)
     except (OSError, ValueError, TypeError) as e:
         log(f"self_ctx ERROR {type(e).__name__}: {e}", dry_run)
         return []
-    if tokens is None or window <= 0:
+    if tokens is None or tokens < bar:
         return []
-    pct = 100 * tokens / window
-    if pct < threshold:
-        return []
-    return [alert("self_ctx", str(threshold), f"self ctx {pct:.0f}% ({tokens}/{window} tokens)",
+    return [alert("self_ctx", str(bar), f"self ctx {tokens} tokens (bar {bar} tokens)",
                   ARCHITECT, now=now)]
 
 
@@ -331,6 +398,7 @@ def cycle(state, dry_run=False, now=None):
         log(f"panes=? ERROR {e}; cycle skipped", dry_run)
         return
     state.setdefault("panes", {})
+    bar = resolve_context_bar(dry_run)
     watched = [p for p in panes
                if p["session"].startswith("tm-") and p["session"] not in SKIP_SESSIONS]
     candidates, infos, current = [], [], {}
@@ -345,12 +413,12 @@ def cycle(state, dry_run=False, now=None):
                                         f"pane runs {p['cmd']}, not Claude", s, pid, now))
             continue
         try:
-            info = parse_pane(capture(pid))
+            info = parse_pane(capture_pane(p))
         except TmuxError as e:
             log(f"{s} {pid} capture ERROR {e}", dry_run)
             continue
         infos.append((s, info))
-        found = evaluate(info, ps, now, s, pid)
+        found = evaluate(info, ps, now, s, pid, bar)
         candidates += found
         if dry_run:
             print(f"  {s} {pid} cmd={p['cmd']} box={info['box']} agents={info['agents']} "

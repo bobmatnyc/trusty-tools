@@ -3,7 +3,7 @@ name: verification-before-completion
 description: "Run verification commands and confirm output before claiming success"
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: high
 ---
@@ -205,7 +205,8 @@ because `cargo test` prints a line per test; a sibling spent 546k on
    passing-test detail or rerun merely for another agent to see the same result.
 3. **Non-zero → trim the file, then read it.** Trim reads FROM the file,
    never from the live command: `--quiet` on the command, `grep`/`tail` over
-   the file, or this repo's Unix filter:
+   the file, or this repo's Unix filter. The filter needs `tm`: check
+   `command -v tm` first; if `tm` is absent, use `grep`/`tail` over the file:
 
    ```bash
    tm compress --tool "cargo test" < <scratchpad>/gate-<crate>-<step>.txt

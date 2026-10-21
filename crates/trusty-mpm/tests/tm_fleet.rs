@@ -9,6 +9,7 @@
 //! killed when the test ends. Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -32,13 +33,16 @@ impl FleetEnv {
         std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
         // #8981: each start appends its argv, one line per launch. While the
         // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
-        // a `claude` that cannot load its conversation does.
+        // a `claude` that cannot load its conversation does. #9092: each start
+        // also appends its PID, which `exec` keeps.
         let sleeper = sleeper.display().to_string();
         std::fs::write(
             &claude,
             format!(
-                "#!/bin/sh\necho \"$*\" >> {:?}\ncase \" $* \" in *\" --resume \"*) \
-                 [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} 600\n",
+                "#!/bin/sh\necho \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
+                 *\" --resume \"*) [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} \
+                 600\n",
+                bin.path().join(PID_LOG).display().to_string(),
                 bin.path().join(ARGV_LOG).display().to_string(),
                 bin.path().join(RESUME_FAILS).display().to_string(),
             ),
@@ -64,15 +68,52 @@ impl FleetEnv {
 
     /// `tm <args>`, dialling the daemon at `socket` when one is given.
     fn tm_with_socket(&self, args: &[&str], socket: Option<&Path>) -> Output {
+        self.tm_in_session(args, socket, &[])
+    }
+
+    /// `tm <args>` with one more environment variable set.
+    fn tm_with_env(&self, args: &[&str], key: &str, value: &Path) -> Output {
+        let mut cmd = self.operator_command();
+        cmd.env(key, value);
+        self.confine(cmd, args)
+    }
+
+    /// `tm <args>` dialling `socket`, with each of `markers` set (#10033).
+    fn tm_in_session(
+        &self,
+        args: &[&str],
+        socket: Option<&Path>,
+        markers: &[(&str, &OsStr)],
+    ) -> Output {
+        let mut cmd = self.operator_command();
+        if let Some(socket) = socket {
+            cmd.env("TRUSTY_MPM_SOCKET", socket);
+        }
+        for (key, value) in markers {
+            cmd.env(key, value);
+        }
+        self.confine(cmd, args)
+    }
+
+    /// A `tm` command with an operator shell's environment.
+    ///
+    /// #10033: `tm fleet relaunch` refuses inside a Claude Code session, and
+    /// this suite may itself run under one; drop the markers it would inherit.
+    fn operator_command(&self) -> Command {
+        let mut cmd = common::tm_command_in(self.home.path());
+        for key in trusty_mpm::core::claude_env_scrub::INHERITED_SESSION_MARKERS {
+            cmd.env_remove(key);
+        }
+        cmd
+    }
+
+    /// Run `cmd` with `args` on this environment's tmux server and `PATH`.
+    fn confine(&self, mut cmd: Command, args: &[&str]) -> Output {
         let path = format!(
             "{}:{}",
             self.bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = common::tm_command_in(self.home.path());
-        if let Some(socket) = socket {
-            cmd.env("TRUSTY_MPM_SOCKET", socket);
-        }
         cmd.args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
@@ -193,10 +234,100 @@ impl FleetEnv {
             .expect("tmux");
         assert!(status.success(), "kill-session {name}");
     }
+
+    /// The PIDs of the `<pid>.architect` launch records, sorted.
+    fn recorded_pids(&self) -> Vec<u32> {
+        let dir = self.home.path().join(".trusty-mpm/architect-launch");
+        let mut pids: Vec<u32> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| {
+                        e.ok()?
+                            .file_name()
+                            .to_str()?
+                            .strip_suffix(".architect")?
+                            .parse()
+                            .ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        pids.sort_unstable();
+        pids
+    }
+
+    /// The PID of the fake `claude` started with argument `arg`, waiting up
+    /// to 10 s for it to appear.
+    fn claude_pid_with(&self, arg: &str) -> Option<u32> {
+        let log = self.bin.path().join(PID_LOG);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let pid = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .find(|l| l.split_whitespace().any(|w| w == arg))
+                .and_then(|l| l.split_whitespace().next()?.parse().ok());
+            if pid.is_some() || std::time::Instant::now() >= deadline {
+                return pid;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Type `line` and Enter into tmux session `name`'s pane.
+    fn send_line(&self, name: &str, line: &str) {
+        let status = Command::new("tmux")
+            .args([
+                "send-keys",
+                "-t",
+                &trusty_common::tmux::exact_window_target(name),
+                line,
+                "Enter",
+            ])
+            .env("TMUX_TMPDIR", self.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("tmux");
+        assert!(status.success(), "send-keys {name}");
+    }
+
+    /// `tm fleet status --json` for the Architect directory.
+    fn status_json(&self) -> serde_json::Value {
+        json(&self.tm(&["fleet", "status", "--json", "--dir", dir_arg(&self.dir())]))
+    }
+}
+
+/// SIGTERM `pid` and wait up to 10 s for it to go.
+fn kill_and_wait(pid: u32) {
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while trusty_mpm::core::process::is_process_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !trusty_mpm::core::process::is_process_alive(pid),
+        "pid {pid} survived SIGTERM"
+    );
+}
+
+/// The `--` flag names of one launch's argv, without the conversation flag.
+fn launch_flags(argv: &[String]) -> Vec<&str> {
+    let mut flags: Vec<&str> = argv
+        .iter()
+        .map(String::as_str)
+        .filter(|a| a.starts_with("--") && !matches!(*a, "--resume" | "--session-id"))
+        .collect();
+    flags.sort_unstable();
+    flags
 }
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its argv.
 const ARGV_LOG: &str = "claude-argv.log";
+
+/// The file, in the fake `bin` dir, where the fake `claude` logs its PID and
+/// argv, one line per start.
+const PID_LOG: &str = "claude-pid.log";
 
 /// The marker, in the fake `bin` dir, that makes a `--resume` start fail.
 const RESUME_FAILS: &str = "resume-fails";
@@ -925,4 +1056,366 @@ fn fleet_init_refuses_the_home_directory_before_writing() {
         text(&out)
     );
     assert!(!home.join(".trusty-mpm.toml").exists(), "{}", text(&out));
+}
+
+/// #9092 ruling D6f: `relaunch` stops the bound `claude`, starts a new one
+/// with the flags `init` used, records it in place of the old one, and
+/// re-registers the Architect.
+#[test]
+fn fleet_relaunch_restarts_the_architect_and_rebinds_it() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    let conversation = env.write_transcript(&first).expect("a fresh --session-id");
+    let [old] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&relaunch, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for want in [
+        format!("stopped the bound `claude` pid {old} in tmux session tm-architect"),
+        format!("removed the replaced launch record of claude pid {old}"),
+        "registered tm-architect with the daemon as the Architect".to_owned(),
+        "Architect relaunched in tmux session tm-architect".to_owned(),
+    ] {
+        assert!(stdout.contains(&want), "{want}: {}", text(&out));
+    }
+
+    let second = env.launches(2).get(1).cloned().unwrap_or_default();
+    assert_eq!(flag_value(&second, "--resume"), Some(conversation.as_str()));
+    assert_eq!(launch_flags(&second), launch_flags(&first), "{second:?}");
+    assert_eq!(
+        flag_value(&second, "--model"),
+        flag_value(&first, "--model")
+    );
+    let [new] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+    assert_ne!(new, old);
+    assert!(
+        stdout.contains(&format!("bound to claude pid {new}")),
+        "{}",
+        text(&out)
+    );
+    assert!(!trusty_mpm::core::process::process_name_is_claude(old));
+    assert_eq!(env.status_json()["binding"]["ok"], true);
+    assert_eq!(daemon.requests().len(), 2, "init and relaunch register");
+}
+
+/// #10033 owner ruling D8a: inside a Claude Code session `relaunch` refuses
+/// before it reads anything, so the bound `claude` keeps running and no new
+/// one starts. The marker value is never printed.
+#[test]
+fn fleet_relaunch_refuses_inside_a_claude_code_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let [old] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let markers = [
+        ("CLAUDECODE", OsStr::new("1")),
+        ("CLAUDE_CODE_SESSION_ID", OsStr::new("d8a-session-value")),
+    ];
+    let out = env.tm_in_session(&relaunch, Some(&daemon.socket), &markers);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inside a Claude Code session")
+            && stderr.contains("`CLAUDECODE` is set")
+            && stderr.contains("`CLAUDE_CODE_SESSION_ID` is set"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stderr.contains("d8a-session-value"), "{}", text(&out));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("stopped"));
+    assert_eq!(env.recorded_pids(), vec![old]);
+    assert!(trusty_mpm::core::process::process_name_is_claude(old));
+    assert_eq!(env.launches(1).len(), 1, "a second claude was started");
+    assert_eq!(daemon.requests().len(), 1, "only init registers");
+}
+
+/// #10033: a marker tm cannot read refuses too (fail closed), naming why.
+#[test]
+fn fleet_relaunch_refuses_an_unreadable_session_marker() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let markers = [("CLAUDE_PID", OsStr::from_bytes(b"\xff\xfe"))];
+    let out = env.tm_in_session(&relaunch, None, &markers);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`CLAUDE_PID` is set but its value is not UTF-8"),
+        "{}",
+        text(&out)
+    );
+    // Refused before the directory is read: no PM-profile refusal.
+    assert!(
+        !stderr.contains("would run the PM profile"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// #9092: the reported state — a bare `tm` replaced the Architect's `claude`
+/// with one no record names — is unbound; `relaunch` binds it again and
+/// removes the dead launch's records.
+#[test]
+fn fleet_relaunch_rebinds_a_replaced_claude() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let [launched] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+    kill_and_wait(launched);
+    let fake = env.bin.path().join("claude").display().to_string();
+    env.send_line("tm-architect", &format!("{fake} --replaced"));
+    let replaced = env
+        .claude_pid_with("--replaced")
+        .expect("the replacing claude");
+    assert_eq!(env.status_json()["binding"]["ok"], false, "the #9092 state");
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for want in [
+        format!("stopped the unbound `claude` pid {replaced}"),
+        format!("removed the replaced launch record of claude pid {launched}"),
+    ] {
+        assert!(stdout.contains(&want), "{want}: {}", text(&out));
+    }
+    let [new] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+    assert!(new != launched && new != replaced, "{new}");
+    assert!(!trusty_mpm::core::process::process_name_is_claude(replaced));
+    assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+/// #9092: with no launch record at all (the recovery case), `relaunch`
+/// still restarts and records the Architect.
+#[test]
+fn fleet_relaunch_binds_when_no_prior_record_exists() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    std::fs::remove_dir_all(env.home.path().join(".trusty-mpm/architect-launch")).unwrap();
+    assert_eq!(env.status_json()["binding"]["ok"], false);
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("stopped the unbound `claude` pid"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stdout.contains("removed the replaced"), "{}", text(&out));
+    assert_eq!(env.recorded_pids().len(), 1, "{:?}", env.recorded_pids());
+    assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+/// #9092 ruling Q3: `relaunch` never starts an absent session; it exits 1
+/// naming `tm fleet init`, and writes nothing.
+#[test]
+fn fleet_relaunch_refuses_without_a_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no tmux session tm-architect runs") && stderr.contains("tm fleet init"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.recorded_pids().is_empty());
+    assert!(!env.has_session("tm-architect"));
+    let argv = std::fs::read_to_string(env.bin.path().join(ARGV_LOG)).unwrap_or_default();
+    assert!(!argv.contains("--model"), "a claude was started: {argv}");
+}
+
+/// #9092: a directory that would run the PM profile is refused before tmux
+/// is read.
+#[test]
+fn fleet_relaunch_refuses_a_pm_dir() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("would run the PM profile"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.recorded_pids().is_empty());
+}
+
+/// #9092 failure path: a new `claude` that cannot be recorded is a FAILED
+/// step and exit 1, and `status` reads it as unbound. A file where the
+/// launch record directory goes makes the record fail.
+#[test]
+fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    std::fs::remove_dir_all(&records).unwrap();
+    std::fs::write(&records, "not a directory\n").unwrap();
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("FAILED"), "{}", text(&out));
+    assert!(stdout.contains("but it is NOT bound"), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tm fleet relaunch failed"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(env.status_json()["binding"]["ok"], false);
+}
+
+/// The one launch record's PID; panics unless there is exactly one.
+fn only_record(env: &FleetEnv) -> u32 {
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one launch record: {:?}", env.recorded_pids());
+    };
+    pid
+}
+
+/// The `--model` lines in the fake `claude`'s argv log: one per launch.
+fn launch_count(env: &FleetEnv) -> usize {
+    std::fs::read_to_string(env.bin.path().join(ARGV_LOG))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "--model"))
+        .count()
+}
+
+/// #9092 critic HIGH: a split Architect session's active pane is not the
+/// Architect's, so `relaunch` refuses before it signals or types anything.
+#[test]
+fn fleet_relaunch_refuses_a_split_architect_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let old = only_record(&env);
+    let split = Command::new("tmux")
+        .args([
+            "split-window",
+            "-t",
+            &trusty_common::tmux::exact_window_target("tm-architect"),
+        ])
+        .env("TMUX_TMPDIR", env.tmux_dir.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .status()
+        .expect("tmux");
+    assert!(split.success(), "split-window");
+
+    let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("has 2 panes"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::process_name_is_claude(old),
+        "the Architect was stopped"
+    );
+    assert_eq!(launch_count(&env), 1, "a claude was started");
+    assert_eq!(only_record(&env), old);
+}
+
+/// #9092 critic HIGH: a launch that cannot be prepared — here the prompt
+/// file cannot be written, since `TMPDIR` names a file — refuses before the
+/// running Architect is stopped.
+#[test]
+fn fleet_relaunch_stops_nothing_when_the_launch_cannot_be_prepared() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let old = only_record(&env);
+    let not_a_dir = env.home.path().join("tmp-is-a-file");
+    std::fs::write(&not_a_dir, "").unwrap();
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_env(&relaunch, "TMPDIR", &not_a_dir);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing was stopped"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::process_name_is_claude(old),
+        "the Architect was stopped"
+    );
+    assert_eq!(launch_count(&env), 1, "a claude was started");
+    assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+/// #9092 critic MEDIUM: a relaunched resume that dies keeps the session,
+/// clears the conversation record and names `tm fleet relaunch`, which then
+/// starts a new conversation in the same session.
+#[test]
+fn fleet_relaunch_keeps_the_session_when_the_resume_fails() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    let id = env.write_transcript(&first).expect("a fresh --session-id");
+    let old = only_record(&env);
+    env.mark(RESUME_FAILS);
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm(&relaunch);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for want in [
+        format!("stopped claude pid {old} in tmux session tm-architect"),
+        format!("resuming the Architect's conversation {id} failed"),
+        "kept tmux session tm-architect".to_owned(),
+        "the next `tm fleet relaunch` starts a new conversation".to_owned(),
+    ] {
+        assert!(stderr.contains(&want), "{want}: {}", text(&out));
+    }
+    assert!(!stderr.contains("tm fleet init"), "{}", text(&out));
+    assert!(env.has_session("tm-architect"), "the session was killed");
+    assert!(!env.conversation_record().exists(), "the record was kept");
+
+    // The hint holds: a relaunch now starts a new conversation and binds it.
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    let third = env.launches(3).get(2).cloned().unwrap_or_default();
+    assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
+    assert_eq!(env.status_json()["binding"]["ok"], true);
 }

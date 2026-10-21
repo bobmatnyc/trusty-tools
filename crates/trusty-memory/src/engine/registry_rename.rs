@@ -24,11 +24,14 @@ use crate::engine::palace::PalaceId;
 use crate::engine::palace_emptiness::{
     LegacyProbe, PalaceNotEmpty, check_palace_empty, conservative_legacy_probe,
 };
-use crate::engine::store::palace_format::mirror_to_preserve;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::palace_format::{KG_FILE, mirror_to_preserve};
 use crate::engine::store::palace_store::PalaceStore;
+use crate::engine::store::vector::{redb_path_for, vector_db_is_open};
 use trusty_common::palace_alias::{
     AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent,
 };
+use trusty_common::redb_cache::open_palace_db_read_only;
 
 /// Default bound on waiting for an open-lock or for a cached handle to go idle.
 pub(crate) const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);
@@ -208,8 +211,8 @@ impl PalaceRegistry {
     /// before any write). Takes the open-locks of the ids `old` and `new`
     /// resolve to, deduplicated and in sorted order, then releases the cached
     /// handles of those ids and of the literal `old` and `new` if nothing else
-    /// references them; a lock or handle still
-    /// held after `busy_wait` is
+    /// references them, and waits for their redb files to close; a lock,
+    /// handle or open file still held after `busy_wait` is
     /// `Busy` with nothing changed. Then, in order: the alias write
     /// ([`PalaceAliasStore::rename_target_with_undo`]); for `replace_empty`, the empty
     /// target moves to `<root>/.trash/<new>-replaced-<UTC>/`; the directory
@@ -237,7 +240,12 @@ impl PalaceRegistry {
     /// `rename_palace_failed_move_rolls_back_alias_keys`,
     /// `rename_palace_refuses_a_newer_format_source_and_changes_nothing`,
     /// `rename_palace_allows_the_reverse_rename`,
-    /// `rename_palace_refuses_a_target_with_chat_sessions`.
+    /// `rename_palace_refuses_a_target_with_chat_sessions`,
+    /// `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
+    /// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
+    /// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`,
+    /// `rename_palace_waits_for_a_held_kg_file_lock`,
+    /// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
     pub(crate) fn rename_palace(
         &self,
         data_root: &Path,
@@ -304,6 +312,9 @@ impl PalaceRegistry {
         cached.sort_unstable();
         cached.dedup();
         self.release_all(&cached, opts.busy_wait)?;
+        // #9945: a released handle's KG writer task drops its store only when
+        // a runtime worker next polls it; a reopen racing it gets a snapshot.
+        await_files_closed(data_root, &cached, opts.busy_wait)?;
         let outcome = self.rename_locked(data_root, old, new, opts, mover)?;
         // #9544: drop per-id caches the old id no longer owns.
         let old_id = PalaceId::new(old);
@@ -374,6 +385,11 @@ impl PalaceRegistry {
             .map_err(|e| PalaceRenameError::io(format!("rename palace {old:?}"), e))?;
         let replace = if present(&new_dir)? {
             self.check_target(&new_dir, new, opts)?;
+            // #9945: the check opened and dropped the target; its KG writer
+            // keeps `kg.redb` cached until polled. Moving the source onto the
+            // same path first would serve the trashed target's store as `new`.
+            // Still before the alias write, so a timeout changes nothing.
+            await_files_closed(data_root, &[new.to_string()], opts.busy_wait)?;
             true
         } else {
             match strict_alias(data_root, new)? {
@@ -461,6 +477,62 @@ fn invalid(new: &str, reason: &str) -> PalaceRenameError {
         new: new.to_string(),
         reason: reason.to_string(),
     }
+}
+
+/// Wait until no store in this process holds a redb file of a palace in `keys`.
+///
+/// Why (#9945): dropping the last handle aborts its KG writer task, but the
+/// task's store clone — and with it redb's lock on `kg.redb` — is dropped only
+/// when a runtime worker next polls the task. Moving the directory before then
+/// leaves the file open under its old path, and the next open of the new id
+/// gets `DatabaseAlreadyOpen` and falls back to a read-only snapshot.
+/// What: polls the KG cache for `<root>/<key>/kg.redb` and the live vector
+/// `Database` of `<root>/<key>/index.usearch.redb` (alive while any clone of
+/// its store is, even in a detached blocking job), then the OS redb lock on
+/// both files ([`redb_file_locked`]); a file still open or locked after
+/// `wait` is `Busy`, with nothing changed. Also run on the `replace_empty`
+/// target after `check_target` opened it.
+/// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
+/// `rename_palace_replace_empty_waits_for_the_targets_dropped_writer`,
+/// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`,
+/// `rename_palace_waits_for_a_held_kg_file_lock`,
+/// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
+fn await_files_closed(data_root: &Path, keys: &[String], wait: Duration) -> RenameResult<()> {
+    let deadline = Instant::now() + wait;
+    for key in keys {
+        let dir = data_root.join(key);
+        let (kg, vectors) = (dir.join(KG_FILE), dir.join("index.usearch"));
+        let files = [kg.clone(), redb_path_for(&vectors)];
+        // #10035: a zero strong count is not a released lock — `Database::drop`
+        // commits a trim and flushes before redb unlocks the file.
+        while KgStoreRedb::is_cached(&kg)
+            || vector_db_is_open(&vectors)
+            || files.iter().any(|f| redb_file_locked(f))
+        {
+            if Instant::now() >= deadline {
+                return Err(busy(key, "its store files are still open"));
+            }
+            std::thread::sleep(RELEASE_POLL);
+        }
+    }
+    Ok(())
+}
+
+/// Whether a redb `Database` — in this process or another — locks `path`.
+///
+/// Why (#10035): redb releases its file lock only at the end of
+/// `Database::drop`, after the last strong reference is gone.
+/// What: a read-only open ([`open_palace_db_read_only`]): no write, no repair,
+/// no file creation; it is dropped before returning, so it holds no lock a
+/// later open trips on. Only `DatabaseAlreadyOpen` counts as locked; a missing
+/// file (no vector index yet) or any other error is not a held lock.
+/// Test: `rename_palace_waits_for_a_held_kg_file_lock`,
+/// `rename_palace_refuses_while_a_kg_file_lock_outlasts_the_wait`.
+fn redb_file_locked(path: &Path) -> bool {
+    matches!(
+        open_palace_db_read_only(path),
+        Err(redb::DatabaseError::DatabaseAlreadyOpen)
+    )
 }
 
 /// `Busy` for `palace`.

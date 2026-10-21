@@ -109,7 +109,7 @@ first whenever they answer.
 | `circuit_breaker_status` | Check live per-agent runtime breaker state before a retry (CB#10) |
 | `session_new` / `session_list` / `session_status` / `session_send` / `session_stop` / `session_resume` | Drive durable tmux-backed sessions (see `session-manager-driver` for the full loop) |
 | `session_decommission` / `session_decommission_ephemeral` / `session_prune` | Teardown of managed sessions |
-| `list_recent_errors` / `preview_bug_report` / `report_bug` | The bug-reporting pipeline — see `tm-bug-reporting`, `tm-postmortem` |
+| `list_recent_errors` / `preview_bug_report` / `report_bug` | The bug-reporting pipeline — see `tm-bug-reporting`, `tm-postmortem`. A filed issue still owes a milestone, relationships and state — `tm-ticketing`, "Every issue: milestone, relationships, state" |
 | `project_register` / `project_get` / `project_list` / `project_resolve` | Project registry lookups |
 | `supervisor_status` | Fleet-level supervisor health |
 | `config_read` / `config_write` | Read/write `~/.trusty-mpm/config.toml` |

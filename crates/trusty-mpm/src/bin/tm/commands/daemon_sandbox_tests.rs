@@ -44,7 +44,6 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
         "HOME",
         "PATH",
         "TRUSTY_DATA_DIR_OVERRIDE",
-        "TRUSTY_MPM_ADDR",
         "TMPDIR",
         "TERM",
         "LANG",

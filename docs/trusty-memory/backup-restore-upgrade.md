@@ -147,6 +147,28 @@ migrates. A backup of a migrated palace is in the new format.
 
 A palace in a newer format than the binary supports is refused, not opened.
 
+### Upgrading from 0.32.x or older to 0.35.0 (FormatTooOld)
+
+The published trusty-memory 0.35.0 migrates only format 1, so it refuses a
+format-0 palace with `FormatTooOld`. Palaces written by 0.32.x or older are at
+format 0, so they need the 0.33.0 step. Upgrade in two steps, through 0.33.0,
+the newest 0.33.x release:
+
+1. Stop the daemon.
+2. Install 0.33.0: `cargo install trusty-memory --version 0.33.0 --locked`.
+3. Start its daemon once: `trusty-memory start`. It opens each palace and
+   migrates format 0 to format 1. Before it migrates, it writes a verified
+   backup under `<data root>/backups/format-migration/<palace>/`.
+4. Stop the daemon, then run `trusty-memory doctor`. The `palace format` check
+   passes with "every palace reads at format 1". It warns if a palace still
+   needs migration. In that case, start the daemon again and let it finish.
+5. Install 0.35.0 (or the current release):
+   `cargo install trusty-memory --version 0.35.0 --locked`.
+6. Start its daemon. It migrates format 1 to format 2.
+
+trusty-memory 0.36.0, which ships with trusty-mpm 1.9.0, migrates format 0
+directly and adds `trusty-memory palace migrate` (#10094).
+
 ## Roll back
 
 A binary refuses a palace in a newer format than it supports. After an upgrade

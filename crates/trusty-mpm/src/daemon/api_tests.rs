@@ -1400,6 +1400,8 @@ async fn doctor_endpoint_returns_report() {
         "search_project_duplicate_index",
         "search_project_two_checkouts",
         "search_project_map_unreadable",
+        // #10042: the trusty-events bus socket — serving, absent or stale.
+        "events",
         "worktrees",
         "worktree_disk",
         // #7497: the mount that store sits on, against `disk.max_usage_pct`.
@@ -1409,6 +1411,8 @@ async fn doctor_endpoint_returns_report() {
         // See #6868: this machine's Rust build settings and the prefix line a
         // PM pastes into an engineer brief.
         "rust_build_env",
+        // #8928 step 3: the sccache unix-socket server.
+        "sccache_socket",
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
@@ -1441,6 +1445,8 @@ async fn doctor_endpoint_returns_report() {
         "bundled_asset_lag",
         // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
         "content",
+        // #8390: assets whose advisory `requires:` this binary does not meet.
+        "content_requires",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #8980: an untrusted `session-claudes.json` seals the registry.

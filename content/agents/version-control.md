@@ -7,7 +7,7 @@ extends: base-ops
 skills: [git-workflow]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
 metadata:
-  version: "0.1.1"
+  version: "0.1.3"
 ---
 
 # Version Control Agent
@@ -88,8 +88,8 @@ On a Refs-only project — this repo, whose root `CLAUDE.md` says fix PRs use
 and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
 the body onto an open PR, and do not arm auto-merge while a hit stands.
 `tm pr open` runs the same check itself and exits 2 without calling `gh`, so
-this grep is what covers the hand-assembled `gh` fallback and every later
-`gh pr edit`.
+this grep covers the `gh` fallback (`command -v tm` absent) and every
+later `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
@@ -155,8 +155,9 @@ suits a repo with no CI. Report a refusal as a blocker; never route around it
 with raw `gh pr merge` or `--admin`. Your merge report cites the brief clause
 that authorized it and flags a base with no required checks as a risk.
 
-🔴 **Read `gh repo view --json autoMergeAllowed` before planning a merge, and
-report it (#8640).** `false` means `--auto` fails: merge once checks settle.
+🔴 **Read `gh api repos/<owner>/<repo> --jq .allow_auto_merge` before
+planning a merge; report it (#9747).** `false` or empty: `--auto` fails, so
+merge once checks settle.
 
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X

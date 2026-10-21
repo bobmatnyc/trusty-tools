@@ -41,12 +41,40 @@ fn harness_source_round_trips() {
         (HarnessSource::Agents, "\"agents\""),
         (HarnessSource::Mpm, "\"mpm\""),
         (HarnessSource::Code, "\"code\""),
+        // #9078: trusty-analyze is the fourth producer (DOC-73 §4.4).
+        (HarnessSource::Analyze, "\"analyze\""),
     ] {
         let s = serde_json::to_string(&src).expect("serialize source");
         assert_eq!(s, tag);
         let back: HarnessSource = serde_json::from_str(&s).expect("deserialize source");
         assert_eq!(back, src);
     }
+}
+
+/// #9078: the version-skew case. A reader built before `Analyze` existed has
+/// the three-variant table below; it rejects `"analyze"` with a decode error
+/// rather than mapping it to some other source. The current table accepts it.
+#[test]
+fn old_three_variant_reader_rejects_analyze_source() {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum PreAnalyzeHarnessSource {
+        Agents,
+        Mpm,
+        Code,
+    }
+
+    let err = serde_json::from_str::<PreAnalyzeHarnessSource>("\"analyze\"")
+        .expect_err("a pre-#9078 reader must reject the analyze source");
+    assert!(err.to_string().contains("analyze"), "{err}");
+
+    let now: HarnessSource = serde_json::from_str("\"analyze\"").expect("current reader");
+    assert_eq!(now, HarnessSource::Analyze);
+
+    // A value newer than this build is still a decode error here, not a default.
+    serde_json::from_str::<HarnessSource>("\"some_future_harness\"")
+        .expect_err("an unknown source must be a decode error");
 }
 
 // ---- LifecycleEvent ----
@@ -192,6 +220,7 @@ fn sample_meta() -> ActionMeta {
             id: "s1".into(),
             label: "session s1".into(),
         }],
+        attrs: Default::default(),
         schema_version: 1,
     }
 }
@@ -360,6 +389,35 @@ fn action_meta_schema_version_defaults_to_one() {
     let event: ActionEvent =
         serde_json::from_str(json).expect("deserialize without schema_version");
     assert_eq!(event.meta().schema_version, 1);
+}
+
+// #9078: DOC-72 §4.2 puts an LSP call's metadata in the action metadata.
+#[test]
+fn action_meta_attrs_round_trip_and_are_omitted_when_empty() {
+    let mut meta = sample_meta();
+    meta.attrs.insert("duration_ms".into(), json!(12));
+    meta.attrs.insert("outcome".into(), json!("ok"));
+    let event = ActionEvent::Tool {
+        meta,
+        phase: CallPhase::Finished,
+        tool: "lsp.textDocument/references".into(),
+        call_id: "c-1".into(),
+    };
+    let s = serde_json::to_string(&event).expect("serialize");
+    assert!(
+        s.contains(r#""attrs":{"duration_ms":12,"outcome":"ok"}"#),
+        "{s}"
+    );
+    let back: ActionEvent = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back, event);
+
+    let plain = serde_json::to_string(&sample_action_event()).expect("serialize");
+    assert!(!plain.contains("attrs"), "empty attrs are omitted: {plain}");
+    let old = r#"{"kind": "session", "id": "018f1e0a-0000-7000-8000-000000000000",
+        "at": "2026-01-01T00:00:00Z", "source": "mpm", "actor": {"type": "system"},
+        "phase": "started"}"#;
+    let old: ActionEvent = serde_json::from_str(old).expect("a payload without attrs");
+    assert!(old.meta().attrs.is_empty());
 }
 
 #[test]
@@ -579,6 +637,27 @@ fn filter_by_source() {
     assert!(!f.matches(&ev));
 }
 
+/// #9078: an `analyze` source filter keeps analyze events and drops mpm ones,
+/// on both the in-process `Filter` and the wire `SubscribeFilter`.
+#[test]
+fn filter_matches_analyze_source() {
+    let f = Filter {
+        source: Some(HarnessSource::Analyze),
+        ..Default::default()
+    };
+    let wire: SubscribeFilter =
+        serde_json::from_value(json!({ "source": "analyze" })).expect("wire filter decodes");
+    assert_eq!(wire, SubscribeFilter::from(&f));
+
+    let mut ev = envelope(HarnessPayload::Ping, None);
+    ev.source = HarnessSource::Analyze;
+    assert!(f.matches(&ev));
+    assert!(wire.matches(&ev));
+    ev.source = HarnessSource::Mpm;
+    assert!(!f.matches(&ev));
+    assert!(!wire.matches(&ev));
+}
+
 #[test]
 fn filter_by_session() {
     let f = Filter {
@@ -647,6 +726,16 @@ const MODULE_SOURCES: &[(&str, &str)] = &[
     // regardless of the `#[cfg(all(unix, feature = "uds"))]` gate on its `mod`
     // declaration, so this scan covers it even in a build with `uds` off.
     ("control_bus/push_client.rs", include_str!("push_client.rs")),
+    // #9075: the subscribe contract is held to the same types-only boundary.
+    ("control_bus/subscribe.rs", include_str!("subscribe.rs")),
+    (
+        "control_bus/subscribe_frame.rs",
+        include_str!("subscribe_frame.rs"),
+    ),
+    (
+        "control_bus/subscribe_tests.rs",
+        include_str!("subscribe_tests.rs"),
+    ),
     ("control_bus/tests.rs", include_str!("tests.rs")),
 ];
 
@@ -719,7 +808,7 @@ fn control_bus_declares_no_transport() {
             assert!(
                 !src.contains(needle),
                 "{name} contains `{needle}`: control_bus holds event TYPES only \
-                 — the bus lives in trusty-console (#6846)"
+                 — the bus lives in trusty-events (#6846, #9075)"
             );
         }
 

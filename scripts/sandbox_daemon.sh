@@ -11,11 +11,11 @@
 #   daemon; hand-built `tm daemon` sandboxes are forbidden.
 # What: validates, then runs, in the foreground:
 #     env -i HOME=<dir>/home PATH=<caller's PATH> \
-#            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data TRUSTY_MPM_ADDR=127.0.0.1:<port> \
+#            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data \
 #            TRUSTY_SANDBOX=1 TMUX_TMPDIR=<dir>/data/tmux \
 #            [<FORWARDED names the caller has set>] \
 #            <tm> daemon --sandbox
-#   The six pinned names are always set; FORWARDED names (locale, terminal,
+#   The five pinned names are always set; FORWARDED names (locale, terminal,
 #   account name, temp dir, log filter) pass through only when the caller set
 #   them. No other variable reaches the daemon. Both lists are a subset of the
 #   daemon's own closed allowlist (`ENV_ALLOWLIST` and `LOCALE_CATEGORIES` in
@@ -45,15 +45,15 @@
 #   Socket (#6288): every tm client reaches the daemon over its Unix socket,
 #   <dir>/data/trusty-mpm/trusty-mpm.sock; the script prints that path and the
 #   TRUSTY_MPM_SOCKET pin a client uses to reach this sandbox. A --dir whose
-#   socket path exceeds 103 bytes refuses, as for tmux.
+#   socket path exceeds 103 bytes refuses, as for tmux. #6288 S3a: the daemon
+#   binds no TCP port, so no TRUSTY_MPM_ADDR is passed and --port is ignored.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
 # Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--dry-run]
 #   --bin PATH  the tm binary (default: `tm` on PATH)
-#   --port N    loopback port (default 17881; the daemon falls back to an
-#               ephemeral port when it is busy and records the real one in
-#               <dir>/home/.trusty-mpm/daemon.lock)
+#   --port N    ignored, with a notice (#6288 S3a: the daemon binds no TCP
+#               port); accepted so an older invocation still starts
 #   --dir DIR   an existing sandbox directory (default: a new `mktemp -d`);
 #               must not be, or resolve to, the real home, nor sit under a
 #               `.env.local`
@@ -70,7 +70,8 @@ set -euo pipefail
 # Always set by this script. Keep in step with the exec below.
 # #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
 # #9557: TMUX_TMPDIR gives the daemon its own tmux server.
-PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX TMUX_TMPDIR"
+# #6288 S3a: TRUSTY_MPM_ADDR left with the daemon's TCP bind.
+PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX TMUX_TMPDIR"
 # Passed through from the caller only when set — never a credential.
 FORWARDED="LANG LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
 LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE \
@@ -102,23 +103,22 @@ resolve() {
 }
 
 BIN=""
-PORT="17881"
 DIR=""
 DRY_RUN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
-    --port) [ "$#" -ge 2 ] || usage; PORT="$2"; shift 2 ;;
+    # #6288 S3a: accepted and ignored; the daemon binds no TCP port.
+    --port)
+      [ "$#" -ge 2 ] || usage
+      echo "sandbox_daemon: --port is ignored: the daemon binds no TCP port (#6288)" >&2
+      shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage ;;
     *) echo "sandbox_daemon: unknown argument: $1" >&2; usage ;;
   esac
 done
-
-case "$PORT" in
-  ''|*[!0-9]*) echo "sandbox_daemon: --port must be a number" >&2; usage ;;
-esac
 
 if [ -z "$BIN" ]; then
   BIN="$(command -v tm || true)"
@@ -173,7 +173,6 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
   done
 fi
 
-ADDR="127.0.0.1:$PORT"
 # #9557: the sandbox's own tmux socket directory and socket.
 TMUX_DIR="$SANDBOX/data/tmux"
 SOCK="$TMUX_DIR/tmux-$(id -u)/default"
@@ -206,7 +205,6 @@ done
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon socket: $DAEMON_SOCK"
 echo "sandbox_daemon: client: TRUSTY_MPM_SOCKET=$DAEMON_SOCK tm <command>"
-echo "sandbox_daemon: daemon address: $ADDR (HTTP, no client uses it; retired by #6288)"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
 echo "sandbox_daemon: working directory: $SANDBOX/home"
 echo "sandbox_daemon: tmux socket: $SOCK"
@@ -236,7 +234,6 @@ env -i \
   HOME="$SANDBOX/home" \
   PATH="$PATH" \
   TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
-  TRUSTY_MPM_ADDR="$ADDR" \
   TRUSTY_SANDBOX=1 \
   TMUX_TMPDIR="$TMUX_DIR" \
   ${EXTRA[@]+"${EXTRA[@]}"} \

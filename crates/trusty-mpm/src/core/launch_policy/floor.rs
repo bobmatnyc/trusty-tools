@@ -97,6 +97,15 @@ pub const SKILL_FLOOR_PREFIX: &str = "tm-";
 /// `skill_floor_covers_every_skill_the_prompts_load`,
 /// `every_exact_skill_floor_name_has_a_source`.
 pub const SKILL_FLOOR_EXACT: &[&str] = &[
+    // #9997: the Architect's own seeded skills, like `tm-fleet-check`.
+    "architect-completion-standard",
+    "architect-github",
+    "architect-operating-rules",
+    "architect-owner-model",
+    "architect-search-memory",
+    "architect-strategy",
+    "architect-tmux-ops",
+    "architect-workflow",
     "cargo-publish",
     "git-workflow",
     "code-review-standards",

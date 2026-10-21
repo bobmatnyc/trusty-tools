@@ -588,6 +588,8 @@ impl Drawer {
     /// What: Sets `last_accessed_at = now()` and saturates `access_count`.
     /// Test: After two `record_access()` calls, `access_count == 2`.
     // #9881: live — `PalaceHandle::record_accesses` calls it on every served hit.
+    // #10013: its only caller chain (`tools::recall_access`) needs `server`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn record_access(&mut self) {
         self.last_accessed_at = Some(Utc::now());
         self.access_count = self.access_count.saturating_add(1);

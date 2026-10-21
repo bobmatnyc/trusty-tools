@@ -1,0 +1,493 @@
+//! The bounded in-memory ring, dedup set, counters, seq assignment and
+//! subscriber fan-out.
+//!
+//! Why: DOC-73 §4.3 gives the bus two retention tiers — an in-memory ring for
+//! live subscribers and a durable log for replay (issue #6848 slice 3b, the
+//! `log` submodule). The ring exists so a subscriber that attaches after
+//! events have already flowed still gets recent history rather than only what
+//! arrives from that point on, and dedup-by-id exists because a producer's
+//! [`trusty_common::control_bus`]-based `PushClient` (§4.2, a parallel slice)
+//! replays its local buffer on reconnect — the same event can legitimately
+//! arrive twice. The bus also owns `seq`: DOC-73 §4.3 —
+//! "`seq` is now minted once, by `trusty-events`, for every frame it accepts — not
+//! per-process" — so [`EventBus::ingest`] overwrites whatever the producer
+//! stamped with its own monotonic counter, recovered from the durable log's
+//! tail on startup so numbers never repeat across a restart.
+//! What: [`EventBus`] wraps a capacity-bounded `VecDeque<HarnessEvent>` plus a
+//! `HashSet<EventId>` kept in lock-step with it (an id leaves the set the
+//! moment its event is evicted from the ring, so the set never outgrows the
+//! ring and dedup is a window over what the ring currently holds, not a
+//! global history). [`EventBus::ingest`] is the single write path: dedup,
+//! assign `seq`, evict-oldest-if-full, push, hand off to the durable log (a
+//! non-blocking `try_send`, `log::DurableLog::enqueue`), then fan out to
+//! subscribers over a [`tokio::sync::broadcast`] channel carrying [`BusFrame`]
+//! — `event` plus `persisted`. `persisted` is always `false` on this live
+//! path: by construction the write is still in flight (or was just dropped
+//! under backpressure) at the moment of fan-out, since I/O happens
+//! asynchronously on the writer task, off this hot path. A [`BusFrame`] built
+//! from [`super::log::ReplayItem::Event`] (`events.subscribe` replay, #9075)
+//! is `persisted: true` instead — read from the log, it already is. Ingest
+//! never blocks on a slow subscriber — `broadcast::Sender::send` is
+//! synchronous and a subscriber that falls behind gets `Lagged` on its own
+//! next `recv`, exactly like the ring's own eviction would have produced, per
+//! DOC-73 §4.3's "ingest never blocks on fan-out" rule.
+//! #9075: [`EventBus::attach`] gives an `events.subscribe` stream a consistent
+//! cut (the ring backlog and a live receiver taken under one lock), and
+//! [`EventBus::close`] stops `seq` assignment at shutdown so every `seq`
+//! handed out is one the log writer drains to disk.
+//! Test: `super::tests` — `a_subscriber_receives_ingested_events`,
+//! `duplicate_id_is_deduped`, `eviction_at_capacity_drops_the_oldest`,
+//! `ingest_assigns_sequential_console_seqs_starting_at_one`,
+//! `live_fanout_frames_are_never_marked_persisted`,
+//! `concurrent_producers_write_the_durable_log_in_seq_order`,
+//! `attach_takes_the_backlog_and_live_events_without_a_seam`,
+//! `ingest_after_close_is_refused_and_assigns_no_seq`.
+
+use std::collections::{HashSet, VecDeque};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tokio::sync::broadcast;
+use trusty_common::control_bus::{EventId, HarnessEvent};
+
+use super::log::DurableLog;
+
+/// Default ring capacity (DOC-73 §4.3: "an in-memory ring, capacity
+/// configurable, defaulting to 8192" — "sized for three (soon four)
+/// harnesses' actions rather than one harness's lifecycle").
+pub(crate) const DEFAULT_CAPACITY: usize = 8192;
+
+/// Construction-time configuration for [`EventBus`].
+///
+/// Why a separate type rather than a bare `usize` parameter: a later slice is
+/// expected to source `capacity` from the daemon's own config surface, and a
+/// named struct is where that field grows without changing every call site.
+/// What: `capacity` is the ring's maximum event count; zero is raised to one
+/// so the broadcast channel underneath is always constructible
+/// (`tokio::sync::broadcast::channel` panics at capacity zero).
+/// Test: `super::tests::zero_capacity_is_raised_to_one`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EventBusConfig {
+    pub capacity: usize,
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            capacity: DEFAULT_CAPACITY,
+        }
+    }
+}
+
+/// The counters this and the prior slice make observable (issues #6848).
+///
+/// Why: a later slice serves these over a metrics route; today they exist so
+/// the bus's own behavior — dedup, eviction, durable-write backpressure — is
+/// provable from outside the lock rather than only inferable from ring
+/// contents.
+/// What: a plain snapshot, one `Ordering::Relaxed` load per field — these are
+/// independent counters, not a transaction, so relaxed ordering is sufficient
+/// and matches how trusty-console's pollers read their own gauges.
+// Reserved for the metrics route a later slice adds (#6850); exercised today
+// only by this module's own tests.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct EventBusMetrics {
+    /// Frames accepted into the ring (excludes dedup hits).
+    pub ingested: u64,
+    /// Frames dropped because their id was already in the ring.
+    pub deduped: u64,
+    /// Frames evicted from the ring to make room for a newer one.
+    pub evicted: u64,
+    /// Frames whose durable-log write was skipped because the writer's
+    /// bounded queue was full (issue #6848 slice 3b). Every one of these is
+    /// a permanent gap `super::log::ReplayItem::Gap` will surface on the next
+    /// replay across it.
+    pub log_dropped: u64,
+}
+
+#[derive(Debug, Default)]
+struct Counters {
+    ingested: AtomicU64,
+    deduped: AtomicU64,
+    evicted: AtomicU64,
+    log_dropped: AtomicU64,
+}
+
+/// What [`EventBus::ingest`] did with one frame.
+///
+/// Why: a caller (today, the ingest listener's tests; later, the ingest
+/// listener itself for logging) needs to distinguish "accepted" from
+/// "already seen" without re-deriving it from the metrics delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngestOutcome {
+    /// Accepted into the ring and fanned out to subscribers.
+    Ingested,
+    /// Dropped: an event with this id is already in the ring.
+    Deduped,
+    /// Refused: [`EventBus::close`] ran, so no `seq` is assigned (#9075).
+    Closed,
+}
+
+/// One event as delivered to a live subscriber or replayed from the durable
+/// log (issue #6848 slice 3b).
+///
+/// Why a wrapper rather than broadcasting a bare `HarnessEvent`: a subscriber
+/// needs to tell "just happened, durability still in flight" apart from
+/// "read back from the log, already durable" — see the module docs' full
+/// contract. Kept local to this crate rather than added to
+/// `trusty_common::control_bus::HarnessEvent` because no other crate needs to
+/// agree on it: only this crate's `events.subscribe` pump (#9075) sees a
+/// `BusFrame`; readers get a `control_bus::SubscribeItem`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BusFrame {
+    pub event: HarnessEvent,
+    /// `false` on every live-ingest fan-out (the write is always still
+    /// pending or was just dropped at the moment of send); `true` only for a
+    /// frame built from a replayed, already-written log record.
+    pub persisted: bool,
+}
+
+/// The ring plus its dedup set, always mutated together under one lock.
+struct Ring {
+    capacity: usize,
+    events: VecDeque<HarnessEvent>,
+    ids: HashSet<EventId>,
+    // #9075: set by `EventBus::close`; read under the same lock as `seq`.
+    closed: bool,
+}
+
+/// What [`EventBus::attach`] hands a new subscription.
+///
+/// Why: a subscriber that replays and then follows live events needs both
+/// halves taken at one instant, or an event ingested between them is missed
+/// or delivered twice.
+/// What: `receiver` sees every event after `head`; `backlog` is the ring's
+/// events with `seq > since` at that same instant, oldest first.
+pub(crate) struct Attach {
+    /// Ring events newer than the requested `since_seq`; empty for live-only.
+    pub backlog: Vec<HarnessEvent>,
+    /// The last `seq` assigned at attach time; `0` before the first event.
+    pub head: u64,
+    /// The id of the ring's event at `since`, when the ring still holds it
+    /// (#9075: what a resume's `since_id` is checked against first).
+    pub anchor: Option<EventId>,
+    /// Every event ingested after `head`.
+    pub receiver: broadcast::Receiver<BusFrame>,
+}
+
+/// The event bus core (DOC-73 §4.1), hosted by the `trusty-events` daemon
+/// (ADR-0065).
+///
+/// Why/What: see module docs.
+/// Test: `super::tests`.
+pub(crate) struct EventBus {
+    ring: Mutex<Ring>,
+    counters: Counters,
+    sender: broadcast::Sender<BusFrame>,
+    next_seq: AtomicU64,
+    log: Option<DurableLog>,
+}
+
+impl EventBus {
+    /// Build a bus with the given configuration and no durable log — seq
+    /// numbering starts fresh at 1 and nothing is ever persisted. Test-only:
+    /// #9075 made a log that cannot be opened fatal to the daemon, so the
+    /// degraded no-log fallback console used is gone.
+    ///
+    /// Test: `super::tests::zero_capacity_is_raised_to_one`.
+    #[cfg(test)]
+    pub(crate) fn new(config: EventBusConfig) -> Self {
+        Self::with_log(config, None, 1)
+    }
+
+    /// Build a bus wired to a durable log, resuming seq numbering at
+    /// `recovered_next_seq` (from `log::DurableLog::open`'s
+    /// [`super::log::RecoveredState`]).
+    pub(crate) fn with_log(
+        config: EventBusConfig,
+        log: Option<DurableLog>,
+        recovered_next_seq: u64,
+    ) -> Self {
+        let capacity = config.capacity.max(1);
+        let (sender, _receiver) = broadcast::channel(capacity);
+        Self {
+            ring: Mutex::new(Ring {
+                capacity,
+                events: VecDeque::with_capacity(capacity),
+                ids: HashSet::with_capacity(capacity),
+                closed: false,
+            }),
+            counters: Counters::default(),
+            sender,
+            next_seq: AtomicU64::new(recovered_next_seq.max(1)),
+            log,
+        }
+    }
+
+    /// Accept one frame: dedup by id, assign the bus's own `seq`, evict the
+    /// oldest if full, push, hand off to the durable log, fan out — all
+    /// while still holding the ring lock.
+    ///
+    /// Why the lock is held across the whole decision, INCLUDING the
+    /// durable-log hand-off and the fan-out send (#6848 — moved back under
+    /// the lock after a code-critic review found the gap): `DurableLog::
+    /// enqueue` is a non-blocking `try_send` and `broadcast::Sender::send` is
+    /// synchronous — neither `.await`s or invokes a subscriber's code
+    /// reentrantly, so holding the `std::sync::Mutex` across them costs
+    /// nothing async-wise. Without it, a real ordering bug follows:
+    /// `EventBus` is shared via `Arc` across one tokio task per producer
+    /// connection, and this crate's default multi-threaded runtime can run
+    /// those tasks on different OS threads. The mutex already orders two
+    /// threads' `seq` assignments (5, then 6); if `log.enqueue`/
+    /// `sender.send` ran after the lock was dropped, the OS scheduler would
+    /// be free to run thread B's `try_send(seq=6)` before thread A's
+    /// `try_send(seq=5)`, letting the durable log (and live subscribers)
+    /// observe seq 6 before seq 5 — breaking `replay_since`'s file-order-
+    /// equals-seq-order assumption (`super::log::replay`'s module docs).
+    /// What: see module docs for the algorithm. A duplicate never consumes a
+    /// `seq` value or reaches the log — only genuinely new events do, which
+    /// is what keeps `seq` a compact, gapless (absent backpressure) sequence.
+    /// The durable-log hand-off is `DurableLog::enqueue`, a non-blocking
+    /// `try_send`; a full queue increments `log_dropped` and logs a warning
+    /// but never blocks or fails ingest itself (DOC-73 §4.1's non-blocking
+    /// invariant). A bus with zero subscribers returns a `SendError` from
+    /// `broadcast::Sender::send`, which is discarded — no subscriber is not a
+    /// failure, it is the common case when no reader is subscribed.
+    /// Test: `super::tests::a_subscriber_receives_ingested_events`,
+    /// `super::tests::duplicate_id_is_deduped`,
+    /// `super::tests::eviction_at_capacity_drops_the_oldest`,
+    /// `super::tests::ingest_assigns_sequential_console_seqs_starting_at_one`,
+    /// `super::tests::live_fanout_frames_are_never_marked_persisted`,
+    /// `super::tests::concurrent_producers_write_the_durable_log_in_seq_order`.
+    pub(crate) fn ingest(&self, mut event: HarnessEvent) -> IngestOutcome {
+        let id = event.id;
+        let mut ring = self.lock_ring();
+        // #9075: after `close`, a seq handed out here would never reach the
+        // log, and the next start would hand it out again.
+        if ring.closed || self.log_failure().is_some() {
+            return IngestOutcome::Closed;
+        }
+        if !ring.ids.insert(id) {
+            drop(ring);
+            self.counters.deduped.fetch_add(1, Ordering::Relaxed);
+            return IngestOutcome::Deduped;
+        }
+
+        // DOC-73 §4.3: the bus mints seq once, on acceptance, overwriting
+        // whatever the producer stamped — a per-process value cannot order
+        // across processes.
+        event.seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+
+        if ring.events.len() >= ring.capacity
+            && let Some(evicted) = ring.events.pop_front()
+        {
+            ring.ids.remove(&evicted.id);
+            self.counters.evicted.fetch_add(1, Ordering::Relaxed);
+        }
+        ring.events.push_back(event.clone());
+        self.counters.ingested.fetch_add(1, Ordering::Relaxed);
+
+        // #6848: still under `ring`'s lock — see this fn's doc comment for
+        // why that is required, not just harmless, for on-disk/fan-out seq
+        // order to match assignment order under concurrent producers.
+        if let Some(log) = &self.log
+            && !log.enqueue(event.clone())
+        {
+            self.counters.log_dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                seq = event.seq,
+                "event-bus: durable-log writer is backpressured; this event \
+                 will not be persisted"
+            );
+        }
+
+        // Best-effort: no subscriber is the common case, not a failure to
+        // report. Always `persisted: false` — see the module docs' contract.
+        let _ = self.sender.send(BusFrame {
+            event,
+            persisted: false,
+        });
+        drop(ring);
+        IngestOutcome::Ingested
+    }
+
+    /// Subscribe to every future ingested event (DOC-73 §4.2's fan-out seam).
+    ///
+    /// A subscriber that stops reading falls behind the bounded channel and
+    /// receives `Lagged` on its next `recv` rather than stalling ingest —
+    /// DOC-73 §4.3's "ingest never blocks on fan-out" rule.
+    /// Test: `super::tests::a_subscriber_receives_ingested_events`.
+    // #9075: `events.subscribe` uses `attach`, which also takes the backlog;
+    // this bare receiver is left for the tests.
+    #[cfg(test)]
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<BusFrame> {
+        self.sender.subscribe()
+    }
+
+    /// Take a subscription's starting point: the ring backlog after `since`
+    /// and a live receiver, at one instant (#9075).
+    ///
+    /// Why/What: see [`Attach`]. Both halves are read under the ring lock that
+    /// [`EventBus::ingest`] holds while it assigns `seq` and fans out, so no
+    /// event falls between them.
+    /// Test: `super::tests::attach_takes_the_backlog_and_live_events_without_a_seam`.
+    pub(crate) fn attach(&self, since: Option<u64>) -> Attach {
+        let ring = self.lock_ring();
+        let receiver = self.sender.subscribe();
+        let head = self.next_seq.load(Ordering::Relaxed).saturating_sub(1);
+        // The ring is contiguous in seq, so `since` is at a fixed offset.
+        let anchor = since
+            .zip(ring.events.front())
+            .and_then(|(since, first)| since.checked_sub(first.seq))
+            .and_then(|offset| ring.events.get(usize::try_from(offset).ok()?))
+            .map(|event| event.id);
+        let backlog = match since {
+            Some(since) => ring
+                .events
+                .iter()
+                .filter(|event| event.seq > since)
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        drop(ring);
+        Attach {
+            backlog,
+            head,
+            anchor,
+            receiver,
+        }
+    }
+
+    /// The last `seq` assigned; `0` before the first event (#10071).
+    ///
+    /// Why: a heartbeat carries it, and reading it under the ring lock means a
+    /// bus whose lock is wedged sends no heartbeat, so readers see it hung.
+    /// Test: `super::serve_tests::a_subscription_that_asks_gets_a_heartbeat_first_then_on_its_interval`.
+    pub(crate) fn head(&self) -> u64 {
+        let _ring = self.lock_ring();
+        self.next_seq.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
+    /// Why the log writer stopped, if it failed (#9075). A bus whose writer
+    /// failed refuses new events, as a closed one does.
+    ///
+    /// Test: `tests/daemon_exit.rs::a_log_write_failure_exits_non_zero`.
+    pub(crate) fn log_failure(&self) -> Option<String> {
+        self.log.as_ref().and_then(DurableLog::failure)
+    }
+
+    /// Resolve with the reason once the log writer fails; never resolves when
+    /// there is no log or it does not fail (#9075).
+    pub(crate) fn log_failed(&self) -> impl std::future::Future<Output = String> + Send + 'static {
+        let failed = self.log.as_ref().map(DurableLog::failed);
+        async move {
+            match failed {
+                Some(failed) => failed.await,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Stop assigning `seq` and release the durable log's writer (#9075).
+    ///
+    /// Why: at shutdown, an event accepted after the writer's last line would
+    /// carry a `seq` the log never records, and the next start would assign
+    /// it again — a repeat no reader can detect.
+    /// What: marks the bus closed under the ring lock, so every later
+    /// [`EventBus::ingest`] returns [`IngestOutcome::Closed`], then closes the
+    /// log's queue. The returned handle finishes once the writer has written
+    /// everything already queued; `None` when there is no log.
+    /// Test: `super::tests::ingest_after_close_is_refused_and_assigns_no_seq`,
+    /// `tests/daemon_wire.rs::seq_continues_after_a_restart`.
+    pub(crate) fn close(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let mut ring = self.lock_ring();
+        ring.closed = true;
+        drop(ring);
+        self.log.as_ref().and_then(DurableLog::close)
+    }
+
+    /// Replay everything the durable log has persisted after `since_seq`, in
+    /// order. `None` when this bus has no durable log wired (degraded mode —
+    /// see [`EventBus::new`]).
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err(_))` when the log is wired but a day file could not be
+    /// listed or read.
+    // #10071 review: `events.subscribe` reads through `replay_files`.
+    #[cfg(test)]
+    pub(crate) async fn replay_since(
+        &self,
+        since_seq: u64,
+    ) -> Option<Result<Vec<super::log::ReplayItem>, super::log::LogError>> {
+        let log = self.log.as_ref()?;
+        Some(log.replay_since(since_seq).await)
+    }
+
+    /// The durable log after `since_seq`, one day file per step; `None`
+    /// without a log (#10071 review: a subscription beats between reads and
+    /// stops when its reader leaves).
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err(_))` when the log directory could not be listed.
+    ///
+    /// Test: `super::serve_tests::a_slow_replay_read_still_beats`,
+    /// `super::serve_tests::replay_reads_the_log_up_to_the_ring_then_the_ring`.
+    pub(crate) async fn replay_files(
+        &self,
+        since_seq: u64,
+    ) -> Option<Result<super::log::ReplayFiles, super::log::LogError>> {
+        let log = self.log.as_ref()?;
+        Some(log.replay_files(since_seq).await)
+    }
+
+    /// A snapshot of the counters as of this call.
+    ///
+    /// Test: `super::tests::duplicate_id_is_deduped`,
+    /// `super::tests::eviction_at_capacity_drops_the_oldest`.
+    // Reserved for the metrics route a later slice adds (#6850); exercised
+    // today only by this module's own tests.
+    #[allow(dead_code)]
+    pub(crate) fn metrics(&self) -> EventBusMetrics {
+        EventBusMetrics {
+            ingested: self.counters.ingested.load(Ordering::Relaxed),
+            deduped: self.counters.deduped.load(Ordering::Relaxed),
+            evicted: self.counters.evicted.load(Ordering::Relaxed),
+            log_dropped: self.counters.log_dropped.load(Ordering::Relaxed),
+        }
+    }
+
+    /// How many events the ring currently holds. Test-only introspection —
+    /// no production caller needs the count without also needing the events
+    /// themselves, which [`EventBus::attach`] serves instead.
+    ///
+    /// Test: `super::tests::eviction_at_capacity_drops_the_oldest`.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock_ring().events.len()
+    }
+
+    /// Whether an event with this id is currently in the ring. Test-only
+    /// introspection, for the same reason as [`EventBus::len`].
+    ///
+    /// Test: `super::tests::eviction_at_capacity_drops_the_oldest`,
+    /// `super::tests::duplicate_id_is_deduped`.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: EventId) -> bool {
+        self.lock_ring().ids.contains(&id)
+    }
+
+    /// Recover a poisoned lock rather than panic a second time on top of
+    /// whatever already panicked while holding it — an ingest-path mutex is
+    /// not worth taking the whole bus down over one panicking accessor, and
+    /// the ring's own invariants (capacity, dedup) do not depend on any
+    /// single field having been left mid-update.
+    fn lock_ring(&self) -> std::sync::MutexGuard<'_, Ring> {
+        self.ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}

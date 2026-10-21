@@ -69,6 +69,7 @@ default-members = [
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
+    "crates/trusty-events",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
     "crates/trusty-kb",
@@ -539,7 +540,9 @@ calamine = "0.36"
 # `word/document.xml` ourselves (rather than pulling in docx-rs) matches this
 # repo's own-the-parsing style and avoids a much larger dependency surface for
 # a single-purpose paragraph-text extraction need.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pinned to 9 (issue #10019): every zip below 9.0.0 carries RUSTSEC-2026-0367,
+# -0368 and -0369.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Pinned to >=0.41 (issue #3367): 0.37.5 is vulnerable to RUSTSEC-2026-0194/0195.
 quick-xml = "0.41"
 

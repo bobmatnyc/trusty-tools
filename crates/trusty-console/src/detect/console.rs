@@ -22,7 +22,7 @@
 //! [`crate::service_metrics::apply_metrics_overlay`].
 //! Test: `console_connector_reports_itself_running`,
 //! `console_connector_reports_the_crate_version`,
-//! `super::tests::test_all_connectors_returns_seven`,
+//! `super::tests::test_all_connectors_returns_eight`,
 //! `crate::server::tests::services_route_lists_the_console_itself`.
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};
@@ -33,7 +33,7 @@ use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceS
 /// its ordering, and the CPU/RSS overlay all run off `all_connectors()`. A row
 /// synthesised anywhere else would need the route, the poller cache and the
 /// sampler each taught about one exception, and the UI would need a branch to
-/// render it. As a connector it is the same row as the other six.
+/// render it. As a connector it is the same row as the others.
 /// What: a zero-sized struct — it holds nothing because `detect()` reads
 /// nothing.
 /// Test: `console_connector_reports_itself_running`.

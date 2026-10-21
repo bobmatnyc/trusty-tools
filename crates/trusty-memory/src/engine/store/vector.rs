@@ -143,6 +143,13 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
                 if !observer {
                     let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
                     cache.insert(canonical_key(path), Arc::downgrade(&state));
+                    // #9945: a snapshot copy holds no lock on the live file.
+                    if !state.mode.is_read_only() {
+                        vector_db_files()
+                            .lock()
+                            .expect("vector_db_files poisoned")
+                            .insert(canonical_key(path), Arc::downgrade(&state.db));
+                    }
                 }
                 return Ok(state);
             }
@@ -292,10 +299,41 @@ const MIGRATED_SUFFIX: &str = ".migrated";
 /// the new HNSW vectors. Keeping the redb file co-located (just with a
 /// `.redb` extension) makes upgrade-in-place obvious to operators and keeps
 /// per-palace cleanup simple ("delete the palace data dir").
-fn redb_path_for(usearch_path: &Path) -> PathBuf {
+// #10035: crate-visible so the palace rename probes the same file's lock.
+pub(crate) fn redb_path_for(usearch_path: &Path) -> PathBuf {
     let mut s = usearch_path.as_os_str().to_owned();
     s.push(".redb");
     PathBuf::from(s)
+}
+
+/// Process-wide record of the live (non-snapshot) `Database` of each vector
+/// redb file, keyed like [`vector_db_cache`].
+///
+/// Why (#9945): the redb file lock lives in `Database`, and `HnswStore` keeps
+/// its own `Arc<Database>`. A detached `spawn_blocking` job holding an
+/// `Arc<HnswStore>` outlives every `VectorDbState`, so `vector_db_cache` says
+/// "closed" while the file is still locked.
+/// What: a `Weak<Database>` per path, written when a fresh live open succeeds.
+/// Test: `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
+fn vector_db_files() -> &'static Mutex<HashMap<PathBuf, Weak<Database>>> {
+    static FILES: OnceLock<Mutex<HashMap<PathBuf, Weak<Database>>>> = OnceLock::new();
+    FILES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether any `Database` of the vector redb file of `usearch_path` is alive
+/// in this process, including one held only by a detached blocking job.
+///
+/// Why (#9945): a dropped handle is not a closed file while a spawned task or
+/// blocking job still owns a clone of the store; a palace rename must not move
+/// the file until it is closed.
+/// What: upgrades the `Weak<Database>` recorded for the file's canonical path.
+/// Test: `rename_palace_waits_for_a_dropped_handle_to_close_its_files`,
+/// `rename_palace_refuses_while_a_detached_vector_job_holds_the_database`.
+pub(crate) fn vector_db_is_open(usearch_path: &Path) -> bool {
+    let files = vector_db_files().lock().expect("vector_db_files poisoned");
+    files
+        .get(&canonical_key(&redb_path_for(usearch_path)))
+        .is_some_and(|weak| weak.strong_count() > 0)
 }
 
 /// HNSW-backed vector store with the `UsearchStore` public API.
@@ -769,6 +807,13 @@ impl UsearchStore {
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub fn hnsw_for_test(&self) -> &HnswStore {
         &self.inner
+    }
+
+    /// A clone of the wrapped store, so a test can keep it alive past the
+    /// handle, as a detached blocking job does (#9945).
+    #[cfg(test)]
+    pub(crate) fn hnsw_arc_for_test(&self) -> Arc<HnswStore> {
+        self.inner.clone()
     }
 }
 

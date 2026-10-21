@@ -6,43 +6,69 @@
 //! Community-detection quality (Louvain) was removed in v0.11.0 per the
 //! PROVENANCE-ONLY decision in issue #145 / #152.
 //!
-//! What: Each test hits the live HTTP daemon, whose address is discovered at
-//! runtime via the explicit isolated fixture settings documented in
-//! `support/isolated_benchmark.rs`. Thresholds are documented in
+//! What: Each test talks JSON-RPC to a sandbox daemon over its Unix socket
+//! (#9993: the daemon has bound no TCP port since #9214). The fixture lives in
+//! `support/socket_benchmark.rs`; thresholds are documented in
 //! `docs/trusty-search/regression-testing/baseline-performance-2026-05-22.md`.
 //!
-//! Test: All tests are marked `#[ignore]` so the normal `cargo test` run stays
-//! fast. Run with:
+//! Test: All live tests are marked `#[ignore]` so the normal `cargo test` run
+//! stays fast. Run with:
 //! ```bash
+//! TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search.sock \
+//! TRUSTY_SEARCH_BENCH_INDEX=<index id> \
+//! TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
 //! cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture
 //! ```
 //!
 //! # Prerequisites
-//! 1. Dedicated daemon and marked disposable workspace copy configured via
-//!    `support/isolated_benchmark.rs`; start with `--no-auto-discover`.
-//! 2. The copied workspace registered and fully indexed as `trusty-tools`.
+//! 1. A sandbox daemon from `scripts/sandbox_search_daemon.sh`. Its socket is
+//!    `<dir>/data/trusty-search.sock`; name it in `TRUSTY_SEARCH_BENCH_SOCKET`.
+//!    There is no default, and the live install's socket is refused.
+//! 2. A disposable corpus copy without `.git`, marked
+//!    `.trusty-search-test-corpus`, named in `TRUSTY_SEARCH_TEST_CORPUS_ROOT`.
+//! 3. That copy registered and fully indexed under the id named in
+//!    `TRUSTY_SEARCH_BENCH_INDEX`. Every call names that id and first checks
+//!    that its `root_path` equals the corpus copy.
+//!
+//! A missing daemon, variable, index or root mismatch fails the test, naming
+//! what is missing; nothing is skipped.
+//!
+//! # Results envelope (#9993 G2)
+//! Each latency test reports n, nearest-rank p50/p95/p99, max and qps per
+//! operation (`support/latency_stats.rs`). With
+//! `TRUSTY_SEARCH_BENCH_ENVELOPE=<absolute path>` set, the rows are written
+//! there as the schema-1 envelope shared with trusty-memory
+//! (`support/perf_envelope.rs`); unset, nothing is written. Optional:
+//! `TRUSTY_SEARCH_BENCH_COMMIT`, `TRUSTY_SEARCH_BENCH_LABEL` (`mac`/`evo`).
+//! Run with `--test-threads=1` for a measurement, so tests do not share the
+//! daemon while timed.
 //!
 //! # Regression thresholds
 //! - Query latency p50: <= 500 ms
 //! - Query latency p99: <= 2000 ms
 //! - Index node count:  >= 1 000 (indicates indexing succeeded)
 
-// Live benchmarks require an isolated daemon and disposable source copy.
-// See support/isolated_benchmark.rs for the three required environment variables.
+// #9993: the socket fixture reuses the corpus and root checks below.
 #[path = "support/isolated_benchmark.rs"]
 mod isolated_benchmark;
-use isolated_benchmark::daemon_url;
+#[path = "support/socket_benchmark.rs"]
+mod socket_benchmark;
+use socket_benchmark::{fixture, Fixture};
+// #9993 G2: nearest-rank percentiles + qps, written as the schema-1 envelope.
+#[path = "support/latency_stats.rs"]
+mod latency_stats;
+#[path = "support/perf_envelope.rs"]
+mod perf_envelope;
+use latency_stats::{latency_stats, LatencyStats};
+use perf_envelope::{latency_rows, load_now, RunContext};
 
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
 use serde_json::{json, Value};
 
 // ── Constants ──────────────────────────────────────────────────────────────
-
-const INDEX_NAME: &str = "trusty-tools";
 
 /// Maximum acceptable p50 query latency.
 const LATENCY_P50_THRESHOLD_MS: u128 = 500;
@@ -105,99 +131,95 @@ const REGRESSION_QUERIES: &[(&str, &str, &str)] = &[
 
 // ── Helper ─────────────────────────────────────────────────────────────────
 
-/// Build a reusable `reqwest::Client` with conservative timeouts.
-///
-/// Why: Integration tests must not hang indefinitely if the daemon is slow or
-/// absent; a fixed connect + read timeout surfaces the problem immediately.
-/// What: 2 s connect timeout, 10 s read timeout — generous enough for warm
-/// queries, tight enough to surface hangs.
-/// Test: every test in this module creates one of these.
-fn make_client() -> Client {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("reqwest client construction is infallible with valid config")
-}
-
-/// Issue a `POST /indexes/{id}/search` request and return `(latency_ms, body)`.
-///
-/// Why: Factoring out the search call keeps the latency-measurement tests
-/// DRY and ensures every call uses the same `top_k` and `expand_graph`
-/// settings so results are comparable across runs.
-/// What: Sends `{text, top_k: 10, expand_graph: true}`, measures wall-clock
-/// latency, and deserialises the JSON body.
-/// Test: called by `test_query_latency_p50_under_threshold` and friends.
-async fn search(client: &Client, base: &str, query: &str) -> (u128, Value) {
-    let url = format!("{base}/indexes/{INDEX_NAME}/search");
-    let body = json!({
+/// The `search.query` body every timed query sends.
+fn query_body(query: &str) -> Value {
+    json!({
         "text": query,
         "top_k": 10,
         "expand_graph": true,
         "compact": true,
-    });
-    let t0 = Instant::now();
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .expect("search request should not fail at the transport layer");
-    let latency_ms = t0.elapsed().as_millis();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "POST /indexes/{INDEX_NAME}/search returned non-200 for query '{query}'"
-    );
-    let json: Value = resp
-        .json()
-        .await
-        .expect("search response should be valid JSON");
-    (latency_ms, json)
+    })
 }
 
-/// Compute the p-percentile of a sorted (ascending) slice.
+/// Issue `search.query` over the socket and return `(latency, body)`.
 ///
-/// Why: p50/p99 are the agreed regression thresholds; computing them from raw
-/// samples avoids an external statistics dependency.
-/// What: Returns `values[floor(len * p / 100)]`, clamped to the last index.
-/// Test: Verified informally — for `[1,2,3,4,5]` p50 → 3, p99 → 5.
-fn percentile(sorted: &[u128], p: usize) -> u128 {
-    if sorted.is_empty() {
-        return 0;
+/// Why: Factoring out the search call keeps the latency-measurement tests
+/// DRY and ensures every call uses the same `top_k` and `expand_graph`
+/// settings so results are comparable across runs.
+/// What: Guards the index root, then sends `{text, top_k: 10, expand_graph:
+/// true, compact: true}` and times only the call. Any refusal panics.
+/// Test: called by `test_query_latency_p50_under_threshold` and friends.
+async fn search(fx: &Fixture, query: &str) -> (Duration, Value) {
+    fx.index_call("search.query", Some(query_body(query)))
+        .await
+        .unwrap_or_else(|e| panic!("query '{query}': {e}"))
+}
+
+/// The envelope header this test knows: daemon version, index, load before.
+async fn run_context(fx: &Fixture, load_before: Option<f64>) -> RunContext {
+    RunContext {
+        version: fx.health().await["version"].as_str().map(str::to_string),
+        corpus: Some(fx.index.clone()),
+        load_before,
     }
-    let idx = ((sorted.len() * p) / 100).min(sorted.len() - 1);
-    sorted[idx]
+}
+
+/// Summarize serial `samples`, print them, and record them in the envelope.
+///
+/// What: a serial loop's window is the sum of its samples, because the gaps
+/// between calls are untimed guard work. A summary or write failure panics.
+fn summarize_serial(
+    ctx: &RunContext,
+    op: &str,
+    samples: &[Duration],
+    p99_threshold_ms: Option<f64>,
+) -> LatencyStats {
+    let window = samples.iter().sum();
+    summarize(ctx, op, samples, window, p99_threshold_ms)
+}
+
+/// Summarize `samples` over `window`, print, and record the envelope rows.
+fn summarize(
+    ctx: &RunContext,
+    op: &str,
+    samples: &[Duration],
+    window: Duration,
+    p99_threshold_ms: Option<f64>,
+) -> LatencyStats {
+    let stats = latency_stats(samples, window).unwrap_or_else(|e| panic!("{op}: {e}"));
+    println!(
+        "{op}: n={} p50={:.2} ms p95={:.2} ms p99={:.2} ms max={:.2} ms qps={:.2}",
+        stats.n, stats.p50_ms, stats.p95_ms, stats.p99_ms, stats.max_ms, stats.qps
+    );
+    perf_envelope::record(ctx, latency_rows(op, &stats, p99_threshold_ms))
+        .unwrap_or_else(|e| panic!("{op}: {e}"));
+    stats
+}
+
+/// Whether `search.indexes.list` names `index`, as a bare id or an `{id}` row.
+fn lists_index(listing: &Value, index: &str) -> bool {
+    listing["indexes"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|v| v.as_str() == Some(index) || v["id"].as_str() == Some(index))
+    })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// Verify the daemon responds to the liveness probe within 1 second.
+/// Verify the daemon answers `search.health` and owns the fixture index.
 ///
-/// Why: If health fails, all downstream tests would produce misleading errors
-/// (connection refused vs. assertion failure). Failing fast here guides the
-/// operator to restart the daemon rather than hunt through test output.
-/// What: `GET /health` → 200, body contains `"status":"ok"`.
+/// Why: If health fails, all downstream tests would produce misleading errors.
+/// Failing fast here names the socket the operator must start a daemon on.
+/// What: [`fixture`] requires a `search.health` answer; the body must carry
+/// `"status":"ok"`, and the index root must equal the corpus copy.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_daemon_health() {
-    let base = daemon_url();
-    println!("daemon url: {base}");
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    let resp = client
-        .get(format!("{base}/health"))
-        .send()
-        .await
-        .expect("health check should reach the daemon — is it running?");
-    assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
-    let body: Value = resp.json().await.expect("health response should be JSON");
+    let fx = fixture().await;
+    println!("daemon socket: {}", fx.socket().display());
+    fx.guard().await.unwrap_or_else(|e| panic!("{e}"));
+    let body = fx.health().await;
     assert_eq!(
         body["status"], "ok",
         "health.status should be 'ok', got: {body}"
@@ -205,57 +227,36 @@ async fn test_daemon_health() {
     println!("daemon health: {body}");
 }
 
-/// Confirm that the `trusty-tools` index exists and contains a meaningful graph.
+/// Confirm that the fixture index exists and contains a meaningful graph.
 ///
 /// Why: Subsequent latency and relevance tests are meaningless if the index is
 /// empty or absent. Failing here with a clear message saves debugging time.
-/// What: `GET /indexes` → list contains `trusty-tools`.
-///       `GET /indexes/trusty-tools/graph/stats` → `node_count >= MIN_NODE_COUNT`.
+/// What: `search.indexes.list` names the index;
+///       `search.graph.stats` → `node_count >= MIN_NODE_COUNT`.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_index_exists_and_has_content() {
-    let base = daemon_url();
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
+    let fx = fixture().await;
+    fx.assert_ready().await;
 
-    // Confirm the index is registered.
-    let resp = client
-        .get(format!("{base}/indexes"))
-        .send()
-        .await
-        .expect("GET /indexes should succeed");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.expect("should be JSON");
-    let indexes = body["indexes"]
-        .as_array()
-        .expect("indexes should be an array");
+    let listing = fx.list_indexes().await;
     assert!(
-        indexes.iter().any(|v| v.as_str() == Some(INDEX_NAME)),
-        "index '{INDEX_NAME}' not found in registered indexes: {indexes:?}\n\
-         Run: trusty-search index /path/to/trusty-tools --name {INDEX_NAME}"
+        lists_index(&listing, &fx.index),
+        "index '{}' not found in registered indexes: {listing}",
+        fx.index
     );
-    println!("registered indexes: {indexes:?}");
+    println!("registered indexes: {}", listing["indexes"]);
 
-    // Confirm the graph has been populated.
-    let resp = client
-        .get(format!("{base}/indexes/{INDEX_NAME}/graph/stats"))
-        .send()
+    let (_, stats) = fx
+        .index_call("search.graph.stats", None)
         .await
-        .expect("GET /indexes/{INDEX_NAME}/graph/stats should succeed");
-    assert_eq!(resp.status().as_u16(), 200);
-    let stats: Value = resp.json().await.expect("should be JSON");
+        .unwrap_or_else(|e| panic!("{e}"));
     let node_count = stats["node_count"].as_u64().unwrap_or(0);
     assert!(
         node_count >= MIN_NODE_COUNT,
         "graph node_count {node_count} < MIN_NODE_COUNT {MIN_NODE_COUNT} — \
-         has the index been fully reindexed? Run: trusty-search index /path/to/trusty-tools --name {INDEX_NAME} --force"
+         has the index been fully reindexed?"
     );
     println!(
         "graph stats: nodes={}, edges={}",
@@ -272,38 +273,34 @@ async fn test_index_exists_and_has_content() {
 /// prints a table, and asserts p50 < threshold.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_query_latency_p50_under_threshold() {
-    let base = daemon_url();
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
-    let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len());
+    let load_before = load_now();
+    let fx = fixture().await;
+    fx.assert_ready().await;
+    let mut latencies: Vec<Duration> = Vec::with_capacity(REGRESSION_QUERIES.len());
 
     println!("\n{:<50} {:>12}  top_file", "query", "latency_ms");
     println!("{}", "-".repeat(90));
 
     for (query, _expected_file, _intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&client, &base, query).await;
+        let (elapsed, body) = search(&fx, query).await;
         let top_file = body["results"][0]["file"]
             .as_str()
             .unwrap_or("<no results>");
-        println!("{:<50} {:>12}  {top_file}", query, ms);
-        latencies.push(ms);
+        println!("{:<50} {:>12}  {top_file}", query, elapsed.as_millis());
+        latencies.push(elapsed);
     }
 
-    latencies.sort_unstable();
-    let p50 = percentile(&latencies, 50);
-    println!("\np50 latency: {p50} ms  (threshold: {LATENCY_P50_THRESHOLD_MS} ms)");
+    assert_eq!(latencies.len(), REGRESSION_QUERIES.len(), "missing samples");
+    let ctx = run_context(&fx, load_before).await;
+    let stats = summarize_serial(&ctx, "search.query single pass", &latencies, None);
+    println!("p50 threshold: {LATENCY_P50_THRESHOLD_MS} ms");
 
     assert!(
-        p50 <= LATENCY_P50_THRESHOLD_MS,
-        "p50 query latency {p50} ms exceeds threshold {LATENCY_P50_THRESHOLD_MS} ms"
+        stats.p50_ms <= LATENCY_P50_THRESHOLD_MS as f64,
+        "p50 query latency {:.2} ms exceeds threshold {LATENCY_P50_THRESHOLD_MS} ms",
+        stats.p50_ms
     );
 }
 
@@ -311,43 +308,39 @@ async fn test_query_latency_p50_under_threshold() {
 /// `LATENCY_P99_THRESHOLD_MS`.
 ///
 /// Why: The p99 threshold catches tail latency caused by lock contention,
-/// garbage collection, or cold embedding cache. Running each query 3× gives
-/// 24 samples, enough for a meaningful p99 estimate.
-/// What: Runs all `REGRESSION_QUERIES` three times each (72 total → 24 per
-/// query × 3 repetitions), collects latencies, and asserts p99 < threshold.
+/// garbage collection, or cold embedding cache.
+/// What: Runs all `REGRESSION_QUERIES` three times each, collects latencies,
+/// and asserts p99 < threshold.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_query_latency_p99_under_threshold() {
-    let base = daemon_url();
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
-    let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
+    let load_before = load_now();
+    let fx = fixture().await;
+    fx.assert_ready().await;
+    let mut latencies: Vec<Duration> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
 
     for _ in 0..3 {
         for (query, _, _) in REGRESSION_QUERIES {
-            let (ms, _) = search(&client, &base, query).await;
-            latencies.push(ms);
+            let (elapsed, _) = search(&fx, query).await;
+            latencies.push(elapsed);
         }
     }
 
-    latencies.sort_unstable();
-    let p99 = percentile(&latencies, 99);
-    let p50 = percentile(&latencies, 50);
-    println!(
-        "\n{} samples: p50={p50} ms, p99={p99} ms  (p99 threshold: {LATENCY_P99_THRESHOLD_MS} ms)",
-        latencies.len()
+    assert_eq!(
+        latencies.len(),
+        REGRESSION_QUERIES.len() * 3,
+        "missing samples"
     );
+    let ctx = run_context(&fx, load_before).await;
+    let threshold = LATENCY_P99_THRESHOLD_MS as f64;
+    let stats = summarize_serial(&ctx, "search.query serial", &latencies, Some(threshold));
+    println!("p99 threshold: {LATENCY_P99_THRESHOLD_MS} ms");
 
     assert!(
-        p99 <= LATENCY_P99_THRESHOLD_MS,
-        "p99 query latency {p99} ms exceeds threshold {LATENCY_P99_THRESHOLD_MS} ms"
+        stats.p99_ms <= threshold,
+        "p99 query latency {:.2} ms exceeds threshold {LATENCY_P99_THRESHOLD_MS} ms",
+        stats.p99_ms
     );
 }
 
@@ -361,17 +354,10 @@ async fn test_query_latency_p99_under_threshold() {
 /// `expected_file_fragment`. Prints a pass/fail table for diagnostics.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_result_relevance() {
-    let base = daemon_url();
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
+    let fx = fixture().await;
+    fx.assert_ready().await;
     let mut failures = 0usize;
 
     println!(
@@ -381,7 +367,8 @@ async fn test_result_relevance() {
     println!("{}", "-".repeat(100));
 
     for (query, expected_frag, intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&client, &base, query).await;
+        let (elapsed, body) = search(&fx, query).await;
+        let ms = elapsed.as_millis();
 
         let results = body["results"].as_array().cloned().unwrap_or_default();
         // Accept a match anywhere in the top-3 to allow minor reranking variance.
@@ -425,81 +412,74 @@ async fn test_result_relevance() {
 ///
 /// Why: Multiple agents running in parallel (a common production pattern for
 /// MPM) must not starve each other. Lock contention in the `RwLock<CodeIndexer>`
-/// or the embedder pool would surface here as 503s or timeouts.
-/// What: Issues 8 queries via `tokio::task::JoinSet` simultaneously, asserts
-/// all succeed (HTTP 200) and the wall-clock total stays under 5 seconds.
+/// or the embedder pool would surface here as refusals or timeouts.
+/// What: Issues 8 queries via `tokio::task::JoinSet`, each on its own socket
+/// connection, asserts all succeed and the wall-clock total stays under 5 s.
+/// Each task runs the root guard, then waits on a barrier; the window opens
+/// when the barrier releases, so no guard is inside it (#9993 G2).
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_concurrent_queries_no_errors() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
     use tokio::task::JoinSet;
 
-    let base = daemon_url();
-    isolated_benchmark::assert_index_root(
-        &make_client(),
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&make_client(), INDEX_NAME).await;
+    const TASKS: usize = 8;
+    let load_before = load_now();
+    let fx = fixture().await;
+    fx.assert_ready().await;
 
     // 8 queries drawn from the regression set (cycled if shorter).
     let queries: Vec<&str> = REGRESSION_QUERIES
         .iter()
         .map(|(q, _, _)| *q)
         .cycle()
-        .take(8)
+        .take(TASKS)
         .collect();
 
-    let t0 = Instant::now();
-    let mut join_set: JoinSet<(u128, u16)> = JoinSet::new();
+    // Every task plus this one; the window opens when all have arrived.
+    let start = Arc::new(Barrier::new(TASKS + 1));
+    let mut join_set: JoinSet<Result<Duration, String>> = JoinSet::new();
 
     for query in queries {
-        let query = query.to_string();
-        let base = base.clone();
+        let body = query_body(query);
+        let fx = fx.clone();
+        let start = Arc::clone(&start);
         join_set.spawn(async move {
-            let client = make_client();
-            let url = format!("{base}/indexes/{INDEX_NAME}/search");
-            let body = json!({
-                "text": query,
-                "top_k": 10,
-                "expand_graph": true,
-            });
-            let t1 = Instant::now();
-            let resp = client
-                .post(&url)
-                .json(&body)
-                .send()
+            fx.index_call_after("search.query", Some(body), &start)
                 .await
-                .expect("concurrent search should not fail at the transport layer");
-            let ms = t1.elapsed().as_millis();
-            (ms, resp.status().as_u16())
+                .map(|(elapsed, _)| elapsed)
         });
     }
 
-    let mut statuses: Vec<(u128, u16)> = Vec::new();
+    start.wait().await;
+    let t0 = Instant::now();
+    let mut outcomes: Vec<Result<Duration, String>> = Vec::new();
     while let Some(result) = join_set.join_next().await {
-        statuses.push(result.expect("task should not panic"));
+        outcomes.push(result.expect("task should not panic"));
     }
 
-    let total_ms = t0.elapsed().as_millis();
+    let window = t0.elapsed();
+    let total_ms = window.as_millis();
     println!(
         "\n{} concurrent queries completed in {total_ms} ms",
-        statuses.len()
+        outcomes.len()
     );
-    for (i, (ms, status)) in statuses.iter().enumerate() {
-        println!("  query {i}: {status} in {ms} ms");
+    for (i, outcome) in outcomes.iter().enumerate() {
+        println!("  query {i}: {outcome:?}");
     }
 
-    let errors: Vec<_> = statuses
-        .iter()
-        .filter(|(_, status)| *status != 200)
-        .collect();
+    assert_eq!(outcomes.len(), TASKS, "missing concurrent samples");
+    let errors: Vec<_> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
     assert!(
         errors.is_empty(),
-        "{} concurrent queries returned non-200: {errors:?}",
+        "{} concurrent queries were refused: {errors:?}",
         errors.len()
     );
+    let samples: Vec<Duration> = outcomes.iter().filter_map(|o| o.clone().ok()).collect();
+    let ctx = run_context(&fx, load_before).await;
+    summarize(&ctx, "search.query concurrent x8", &samples, window, None);
 
     assert!(
         total_ms < 5_000,
@@ -507,7 +487,7 @@ async fn test_concurrent_queries_no_errors() {
     );
 }
 
-// ── Live grep endpoint vs system ripgrep ────────────────────────────────────
+// ── search.grep vs system ripgrep ──────────────────────────────────────────
 
 /// Five representative grep patterns covering literal, regex, and word-boundary
 /// shapes — picked to match real LLM grep calls against indexed Rust code.
@@ -520,15 +500,16 @@ const GREP_LATENCY_PATTERNS: &[&str] = &[
 ];
 
 /// Shell out to `rg` (preferred) or `grep` against `root` for `pattern`,
-/// returning `(hit_count, latency_ms)`.
+/// returning `(hit_count, latency)`.
 ///
 /// Why: a fair comparison scans the same eligible source tree. Mirror the
 /// indexer's default directory exclusions so intentionally unindexed build,
 /// dependency, and fixture paths are not mistaken for lost search results.
-/// What: counts matching Rust lines, as `/grep` emits one hit per matching
-/// line. Scan errors fail the benchmark instead of becoming zero reference hits.
+/// What: counts matching Rust lines, as `search.grep` emits one hit per
+/// matching line. Scan errors fail the benchmark instead of becoming zero
+/// reference hits.
 /// Test: used by `test_grep_endpoint_latency_vs_ripgrep`.
-fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
+fn ripgrep_count(root: &Path, pattern: &str) -> (usize, Duration) {
     let started = Instant::now();
     let mut command = if Command::new("rg").arg("--version").output().is_ok() {
         let mut command = Command::new("rg");
@@ -550,7 +531,7 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
         .arg(".")
         .output()
         .expect("reference grep must launch");
-    let elapsed_ms = started.elapsed().as_millis();
+    let elapsed = started.elapsed();
     assert!(
         matches!(out.status.code(), Some(0 | 1)),
         "reference grep failed: {}",
@@ -567,55 +548,37 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
             .parse::<usize>()
             .expect("grep count must be numeric");
     }
-    (hits, elapsed_ms)
+    (hits, elapsed)
 }
 
-/// Compare `/grep` endpoint latency and hit count against system ripgrep for
+/// Compare `search.grep` latency and hit count against system ripgrep for
 /// a representative pattern set.
 ///
-/// Why: the `/grep` endpoint must be (a) at least as recall-complete as
-/// ripgrep over the indexed source tree and (b) within reach of ripgrep's
-/// wall-clock latency — otherwise callers will just shell out themselves and
-/// we lose the centralised regex/glob/context surface plus rate limiting.
-/// What: uses the verified fixture index, resolves its root via
-/// `GET /indexes/:id/status`, then for each of `GREP_LATENCY_PATTERNS` runs
-/// `POST /indexes/:id/grep` and `rg --count` and prints both
-/// latencies, both hit counts, and the ratio. Asserts the `/grep` endpoint
-/// returns at least as many matches as ripgrep for each pattern
-/// (correctness check).
+/// Why: `search.grep` must be (a) at least as recall-complete as ripgrep over
+/// the indexed source tree and (b) within reach of ripgrep's wall-clock
+/// latency — otherwise callers will just shell out themselves and we lose the
+/// centralised regex/glob/context surface plus rate limiting.
+/// What: the guard proves the index root is the corpus copy; for each of
+/// `GREP_LATENCY_PATTERNS` it runs `search.grep` and `rg --count` against that
+/// root and prints both latencies, both hit counts, and the ratio. Asserts
+/// `search.grep` returns at least as many matches as ripgrep per pattern.
 /// Test: this IS the test. Marked `#[ignore]` so the default `cargo test`
 /// run stays fast.
 #[tokio::test]
-#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
+#[ignore = "needs a sandbox trusty-search daemon (support/socket_benchmark.rs)"]
 async fn test_grep_endpoint_latency_vs_ripgrep() {
-    let base = daemon_url();
-    let client = make_client();
-    isolated_benchmark::assert_index_root(
-        &client,
-        INDEX_NAME,
-        &isolated_benchmark::corpus_root(""),
-    )
-    .await;
-    isolated_benchmark::assert_index_ready(&client, INDEX_NAME).await;
+    let load_before = load_now();
+    let fx = fixture().await;
+    fx.assert_ready().await;
+    let root = fx.corpus.clone();
 
-    let index_id = INDEX_NAME;
-
-    // 2. Resolve the on-disk root for that index.
-    let resp = client
-        .get(format!("{base}/indexes/{index_id}/status"))
-        .send()
-        .await
-        .expect("status request");
-    assert_eq!(resp.status().as_u16(), 200);
-    let status: Value = resp.json().await.expect("status JSON");
-    let root_path = status["root_path"]
-        .as_str()
-        .expect("status.root_path must be a string")
-        .to_string();
-    let root = Path::new(&root_path);
-
-    println!("\n=== /grep endpoint vs ripgrep ===");
-    println!("daemon: {base}   index: {index_id}   root: {root_path}");
+    println!("\n=== search.grep vs ripgrep ===");
+    println!(
+        "socket: {}   index: {}   root: {}",
+        fx.socket().display(),
+        fx.index,
+        root.display()
+    );
     println!(
         "| {:<28} | {:>9} | {:>9} | {:>9} | {:>9} | {:>6} |",
         "pattern", "ep hits", "rg hits", "ep ms", "rg ms", "ratio"
@@ -626,26 +589,15 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
     );
 
     let mut shortfalls: Vec<String> = Vec::new();
-    let mut ep_latencies: Vec<u128> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
-    let mut rg_latencies: Vec<u128> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
+    let mut ep_latencies: Vec<Duration> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
+    let mut rg_latencies: Vec<Duration> = Vec::with_capacity(GREP_LATENCY_PATTERNS.len());
 
     for pattern in GREP_LATENCY_PATTERNS {
-        // /grep endpoint.
         let req_body = json!({ "pattern": pattern, "max_results": 10_000 });
-        let t0 = Instant::now();
-        let resp = client
-            .post(format!("{base}/indexes/{index_id}/grep"))
-            .json(&req_body)
-            .send()
+        let (ep_elapsed, ep_body) = fx
+            .index_call("search.grep", Some(req_body))
             .await
-            .expect("POST /grep transport");
-        let ep_ms = t0.elapsed().as_millis();
-        assert_eq!(
-            resp.status().as_u16(),
-            200,
-            "POST /grep returned non-200 for pattern {pattern}"
-        );
-        let ep_body: Value = resp.json().await.expect("grep response JSON");
+            .unwrap_or_else(|e| panic!("grep {pattern}: {e}"));
         assert_eq!(
             ep_body["truncated"], false,
             "grep comparison requires an uncapped response for pattern {pattern}"
@@ -656,55 +608,40 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
             .unwrap_or_default();
 
         // System ripgrep against the same root.
-        let (rg_hits, rg_ms) = ripgrep_count(root, pattern);
+        let (rg_hits, rg_elapsed) = ripgrep_count(&root, pattern);
+        let (ep_ms, rg_ms) = (ep_elapsed.as_millis(), rg_elapsed.as_millis());
 
-        let ratio = if rg_ms == 0 {
+        let ratio = if rg_elapsed.is_zero() {
             f64::INFINITY
         } else {
-            ep_ms as f64 / rg_ms as f64
+            ep_elapsed.as_secs_f64() / rg_elapsed.as_secs_f64()
         };
         println!(
             "| {:<28} | {:>9} | {:>9} | {:>9} | {:>9} | {:>6.2} |",
             pattern, ep_hits, rg_hits, ep_ms, rg_ms, ratio
         );
 
-        ep_latencies.push(ep_ms);
-        rg_latencies.push(rg_ms);
+        ep_latencies.push(ep_elapsed);
+        rg_latencies.push(rg_elapsed);
 
-        // Correctness: the endpoint walks the indexed file set and may legitimately
+        // Correctness: the daemon walks the indexed file set and may legitimately
         // see *more* matches than rg when the index covers files rg's type filter
         // misses. Both exclude the walker's default skipped directories.
         // Require ep_hits >= rg_hits as the floor.
         if ep_hits < rg_hits {
             shortfalls.push(format!(
-                "pattern={pattern:?}: /grep returned {ep_hits} matches, rg returned {rg_hits}"
+                "pattern={pattern:?}: search.grep returned {ep_hits} matches, rg returned {rg_hits}"
             ));
         }
     }
 
-    ep_latencies.sort_unstable();
-    rg_latencies.sort_unstable();
-    let pctl = |xs: &[u128], p: usize| -> u128 {
-        if xs.is_empty() {
-            return 0;
-        }
-        let idx = ((xs.len() * p) / 100).min(xs.len() - 1);
-        xs[idx]
-    };
-    println!(
-        "/grep   P50={} ms  P95={} ms",
-        pctl(&ep_latencies, 50),
-        pctl(&ep_latencies, 95)
-    );
-    println!(
-        "ripgrep P50={} ms  P95={} ms",
-        pctl(&rg_latencies, 50),
-        pctl(&rg_latencies, 95)
-    );
+    let ctx = run_context(&fx, load_before).await;
+    summarize_serial(&ctx, "search.grep", &ep_latencies, None);
+    summarize_serial(&ctx, "ripgrep reference", &rg_latencies, None);
 
     assert!(
         shortfalls.is_empty(),
-        "/grep returned fewer matches than ripgrep for {} pattern(s):\n  {}",
+        "search.grep returned fewer matches than ripgrep for {} pattern(s):\n  {}",
         shortfalls.len(),
         shortfalls.join("\n  ")
     );

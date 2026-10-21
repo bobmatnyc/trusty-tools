@@ -44,6 +44,8 @@ mod proxy_routes;
 mod push_guard_hook;
 mod relocated_interactive_config_4181;
 mod resume_unresumable_mapping;
+// #6288 S3a: the built daemon serves its socket only and holds no TCP listener.
+mod daemon_no_tcp_6288_s3;
 // #9121: `tm daemon --sandbox` refuses secret-carrying envs, never printing values.
 mod sandbox_daemon_9121;
 // #9557: a sandbox daemon reaches only its own tmux server.
@@ -84,6 +86,8 @@ mod tm_hook_pm_guard_build_lease;
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+// #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
+mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
@@ -94,6 +98,8 @@ mod tm_hook_pm_guard_architect_8453;
 mod tm_hook_pm_guard_heredoc_density_9720;
 mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
+// #8928 step 7: the Write/Edit protected-path check.
+mod tm_hook_pm_guard_protected_paths_8928;
 mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
 // #9791: `file -f`/`-m` on a secret file under each bypass and for the Architect.

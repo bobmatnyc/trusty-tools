@@ -65,6 +65,15 @@ under the three classes may opt in the same way. A top-level `version:` is
 refused, because it collides with the claude-mpm marker in
 `crates/trusty-agents-common/src/agents/agent_schema.rs`.
 
+**Which bump a content change needs (#8974).** Bump the changed member's
+`metadata.version` by what the change does to its guidance:
+
+| Change | Bump |
+|---|---|
+| Correction: fixes wrong or unclear text, and adds no new guidance | patch |
+| New guidance: adds a rule, check, step or section | minor |
+| Removal: deletes guidance | major |
+
 **The manifest.** `content/manifest.toml` declares the bundle version, the
 bundle `schema_major` (equal to `SCHEMA_MAJOR` in `scripts/package_content.sh`)
 and one `[[member]]` table, `path` and `version`, per versioned file.
@@ -92,6 +101,54 @@ The bump gate mirrors `check-pr-version-bump.sh`: a version no release has used
 yet may collect the changes of several PRs, so concurrent PRs do not each bump
 and conflict on one line. The release workflow then refuses any version the
 manifest does not declare.
+
+## Compatibility (#8390)
+
+ADR-0064 decision 6: an asset works with any harness version, and nothing in
+the load path gates on a version. Three mechanisms back that rule.
+
+**`requires:` is advisory.** An asset may map a harness to a SemVer
+requirement, in flow or block form:
+
+```yaml
+requires: {tm: ">=1.9.0", tcode: ">=0.5"}
+```
+
+Deploy and load never read it. The `tm doctor` row `content_requires` checks
+the `tm` entry against the running binary and WARNS naming each asset it does
+not satisfy, or whose block does not parse. The row is never FAIL. Entries for
+other harnesses are counted and left to that harness.
+
+**Probe, then degrade.** A shared asset that runs a harness command checks the
+command exists and says what to do without it, in the paragraph of its first
+use or earlier:
+
+> Check `command -v tm` first; if `tm` is absent, poll the same condition in a
+> bounded shell loop instead.
+
+A fenced line such as `command -v tm >/dev/null || exit 0` also counts.
+`python3 scripts/check_content.py tree` enforces the rule through
+`scripts/content_probe_lint.py`: a command is a fenced code line that starts
+with `tm`, `tcode` or `tagent`, or an inline span after "run", "use", "call",
+"invoke", "execute", "try" or "poll with" that no "never" or "not" precedes in
+its sentence. A harness's own assets are exempt for that harness: `tm` owns the
+`tm` and `tm-*` skills and `instructions/` except `instructions/trusty-code/`,
+`instructions/trusty-review/` and `instructions/harness_understanding/`;
+`tcode` owns `agents/trusty-code/` and `instructions/trusty-code/`; `tagent`
+owns `agents/trusty-agents/`.
+
+**The compatibility matrix.** `cargo test -p trusty-mpm --lib
+content::compat_matrix_tests` packages `content/` with
+`scripts/package_content.sh`, installs and resolves the bundle, and
+dry-run-deploys every file against the oldest supported binary (tm 1.7.10,
+bundle `schema_major` 1). It prints one PASS or FAIL row per asset and fails
+on any FAIL row. It checks the manifest's `schema_major`, strict frontmatter
+and a readable `requires:` on every asset a strict reader sees as written, that
+JSON and TOML assets parse, that both agent rosters compose through the shared
+deployer, that every skill entry point declares `name` and `description` and
+deploys, and that the instructions load. It has a row in
+`scripts/asset-content-tests.tsv`, so `capabilities-drift.yml` runs it on a
+content-only PR as well as on a code PR.
 
 ## Installing a release (`tm content`)
 

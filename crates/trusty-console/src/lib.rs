@@ -50,10 +50,9 @@ pub mod bind;
 pub mod connector;
 pub mod console_ui;
 pub mod detect;
-// #6848: the console-hosted event bus core — UDS ingest, the bounded ring,
-// dedup and eviction counters, and the subscriber fan-out a later slice
-// (#6851) wires into an SSE route. No route surface in this crate yet.
-pub(crate) mod event_bus;
+// #9075: the event-bus core that lived here (#6848) moved to the
+// `trusty-events` daemon (ADR-0065). #9076: console reads it as a UDS client.
+pub mod events_uds;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
@@ -530,78 +529,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     webhook::start_retry_sweep(ingress.clone(), WEBHOOK_RETRY_INTERVAL);
     let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
 
-    // ── event-bus ingest (#6848, DOC-73 §4.1/§4.2) ──────────────────────────
-    // Console hosts the one event bus in the workspace; `trusty-mpm`,
-    // `trusty-code`, `trusty-agents` and `trusty-analyze` push `HarnessEvent`
-    // frames here over a UDS socket. Best-effort, unlike the webhook ingress
-    // above: no route in this crate reads the bus yet (that is #6850/#6851),
-    // and DOC-73 §4.1's "non-blocking invariant" makes the bus's own
-    // availability an observability concern, never one console's HTTP surface
-    // depends on — a console that could not bind this socket still serves
-    // everything else.
-    match event_bus::ingest_socket_path() {
-        Ok(socket) => match event_bus::bind_ingest(&socket).await {
-            Ok(listener) => {
-                info!(
-                    socket = %socket.display(),
-                    "console event-bus ingest ready"
-                );
-                // #6848 slice 3b: open the durable NDJSON log before the bus
-                // itself, so seq numbering resumes from the log's recovered
-                // high-water mark rather than restarting at 1 on every
-                // console restart (DOC-73 §4.3). Failing to open it degrades
-                // to `EventBus::new` (no durability, seq restarts at 1) per
-                // the same non-blocking invariant the ingest-bind failure
-                // above already follows — a console that cannot open its
-                // event log still serves everything else.
-                let bus = match event_bus::LogConfig::resolve_default() {
-                    Ok(log_config) => match event_bus::DurableLog::open(log_config).await {
-                        Ok((log, recovered)) => {
-                            info!(
-                                next_seq = recovered.next_seq,
-                                "console event-bus durable log ready"
-                            );
-                            event_bus::EventBus::with_log(
-                                event_bus::EventBusConfig::default(),
-                                Some(log),
-                                recovered.next_seq,
-                            )
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "could not open the console event-bus durable log; \
-                                 events this run will not survive a restart"
-                            );
-                            event_bus::EventBus::new(event_bus::EventBusConfig::default())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "could not resolve the console event-bus durable log directory; \
-                             events this run will not survive a restart"
-                        );
-                        event_bus::EventBus::new(event_bus::EventBusConfig::default())
-                    }
-                };
-                let bus = Arc::new(bus);
-                tokio::spawn(async move {
-                    event_bus::serve_ingest(listener, bus, shutdown_signal()).await;
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "could not bind the console event-bus ingest socket; \
-                     producers cannot push events this run"
-                );
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "could not resolve the console event-bus ingest socket path");
-        }
-    }
+    // #9075: console no longer binds an event-bus ingest socket; producers
+    // push to the trusty-events daemon (ADR-0065). #9076: console subscribes
+    // to it as a client, best-effort; its state is on /api/console/events/status.
+    let _events = events_uds::start(state.events());
 
     // ── bind and serve every listener ───────────────────────────────────────
     // #7524: the gate is chosen per listener by IP, so an Explicit non-loopback

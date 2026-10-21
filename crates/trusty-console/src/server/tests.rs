@@ -119,8 +119,8 @@ async fn test_services_route_returns_json() {
 /// Against `origin/main` there is no `trusty-console` entry at all and the
 /// `find` below returns `None`.
 ///
-/// Why nothing here is asserted about CPU, RSS or the other six rows: this
-/// state has no sampler running, and the six real connectors probe a machine
+/// Why nothing here is asserted about CPU, RSS or the other rows: this
+/// state has no sampler running, and the other real connectors probe a machine
 /// whose daemons this test does not control. The console row is the one whose
 /// every asserted field is decided by this process.
 /// What: builds the router over `detect::all_connectors()`, issues the request,
@@ -223,6 +223,38 @@ async fn test_health_route() {
     assert!(
         body["uptime_secs"].is_u64(),
         "health must report uptime_secs: {body}"
+    );
+}
+
+/// Why: #9076, DOC-73 §8.5 — a console that has not reached the bus must say
+/// "cannot see", not answer like a healthy empty stream, and must keep serving
+/// `/health` (ruling 2a, condition 4).
+/// What: a fresh state whose client never ran: the status route answers 503
+/// with state `starting`, and `/health` is still 200.
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_reports_a_bus_that_was_never_reached() {
+    let router = build_router(make_test_state());
+    let req = Request::builder()
+        .uri("/api/console/events/status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.clone().oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value =
+        serde_json::from_slice(&get_bytes(resp).await).expect("parse json");
+    assert_eq!(body["state"], "starting", "{body}");
+    assert_eq!(body["delivered"], 0, "{body}");
+
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the bus is not console's health"
     );
 }
 
@@ -908,6 +940,69 @@ async fn read_route_refuses_cross_origin() {
         !resp.headers().contains_key("access-control-allow-origin"),
         "a refused cross-origin read must carry no CORS header"
     );
+}
+
+/// Why: #9076 review — the events status route is served on every TCP
+/// listener, so it must face the same Host/Origin check as its
+/// `/api/console` siblings, not a weaker one.
+/// What: through the loopback serve wiring, a cross-origin `GET` of the
+/// status route and of a sibling (`/api/console/sessions`) are both refused
+/// with 403 and no CORS header; the same request from the listener's own
+/// origin reaches the status handler (503 here: the client never ran).
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_refuses_cross_origin_like_its_siblings() {
+    for uri in ["/api/console/sessions", "/api/console/events/status"] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", "127.0.0.1:7788")
+            .header("origin", "http://evil.example.com")
+            .body(Body::empty())
+            .expect("request");
+        let resp = loopback_served_router()
+            .oneshot(req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
+        assert!(
+            !resp.headers().contains_key("access-control-allow-origin"),
+            "{uri}"
+        );
+    }
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/console/events/status")
+        .header("host", "127.0.0.1:7788")
+        .header("origin", "http://127.0.0.1:7788")
+        .body(Body::empty())
+        .expect("request");
+    let resp = loopback_served_router()
+        .oneshot(req)
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Why: #9076 — the status route's 200 is the "can see the bus" answer, so
+/// it must follow the client's state, not be fixed at 503.
+/// What: marks the state's relay connected and reads the route: 200, state
+/// `connected`, and no `socket` field (no absolute path is served).
+/// Test: this test itself.
+#[tokio::test]
+async fn events_status_route_answers_200_when_connected() {
+    let state = make_test_state();
+    state.events().note_connected();
+    let req = Request::builder()
+        .uri("/api/console/events/status")
+        .body(Body::empty())
+        .expect("request");
+    let resp = build_router(state).oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&get_bytes(resp).await).expect("parse json");
+    assert_eq!(body["state"], "connected", "{body}");
+    assert!(body.get("socket").is_none(), "no path is served: {body}");
 }
 
 // ── router-wide guard coverage on the reverse-proxy routes (#3268) ────────

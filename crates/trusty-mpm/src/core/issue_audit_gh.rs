@@ -66,7 +66,8 @@ fn bind(mut cmd: GhCommand, gh_env: &GhEnv) -> GhCommand {
     for (key, value) in gh_env.vars() {
         cmd = cmd.env(key, value);
     }
-    cmd
+    // #9750: a binding runs the real gh, not the calling session's shim.
+    crate::core::gh_shim_path::bind_gh_path(cmd, gh_env.vars(), gh_env.unset_vars())
 }
 
 /// The argv for `gh issue view <n> --json …`.

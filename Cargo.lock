@@ -11047,7 +11047,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11067,6 +11067,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-subscriber",
  "trusty-common",
  "uuid",
 ]
@@ -11090,7 +11091,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.12.7"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11441,6 +11442,7 @@ dependencies = [
  "fs4 0.8.4",
  "hex",
  "include_dir",
+ "reqwest 0.12.28",
  "sha2 0.10.9",
  "tar",
  "tempfile",
@@ -11450,6 +11452,23 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "which 6.0.3",
+]
+
+[[package]]
+name = "trusty-events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
 ]
 
 [[package]]
@@ -11811,7 +11830,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
- "zip 2.4.2",
+ "zip 9.0.4",
 ]
 
 [[package]]
@@ -13776,23 +13795,6 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "displaydoc",
- "flate2",
- "indexmap 2.14.0",
- "memchr",
- "thiserror 2.0.18",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12598812502ed0105f607f941c386f43d441e00148fce9dec3ca5ffb0bde9308"
@@ -13827,6 +13829,21 @@ dependencies = [
  "flate2",
  "indexmap 2.14.0",
  "memchr",
+ "typed-path",
+ "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "9.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap 2.14.0",
+ "memchr",
+ "nix 0.31.3",
  "typed-path",
  "zopfli",
 ]

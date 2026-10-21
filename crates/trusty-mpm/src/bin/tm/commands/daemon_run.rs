@@ -1,4 +1,4 @@
-//! Daemon HTTP-server entry point and its private helpers.
+//! Daemon entry point and its private helpers.
 //!
 //! Why: `run_daemon` and its private helpers (`wait_for_shutdown_signal`,
 //! `spawn_telegram_bot`, `tailscale_deprecated_error`) are a coherent "boot
@@ -9,11 +9,8 @@
 //! covers the deprecation error; the #4397 bare-CLI guard's decision table is
 //! covered hermetically by `commands::launchd_probe::tests::
 //! compute_daemon_refuse_*` (`apply_supervision_signal` itself probes real
-//! launchd/filesystem state, so it is not hermetically fakeable here — see
-//! the daemon e2e suite for the wired-up behaviour); the bind/serve path is
-//! likewise exercised by the daemon e2e suite.
-
-use std::net::SocketAddr;
+//! launchd/filesystem state, so it is not hermetically fakeable here); the
+//! bind/serve path is exercised by `tests/daemon_no_tcp_6288_s3.rs`.
 
 /// What an already-running daemon is reported as, wherever that is reported.
 ///
@@ -30,38 +27,37 @@ use std::net::SocketAddr;
 /// `start_already_running_line_names_no_address`.
 pub(super) const ALREADY_RUNNING_NOTICE: &str = "the trusty-mpm daemon is already running";
 
-/// `daemon` subcommand — run the HTTP daemon (or MCP server) with auto port
-/// selection and lock-file service discovery.
+/// `daemon` subcommand — run the daemon on its Unix socket (or the MCP server)
+/// with lock-file service discovery.
 ///
-/// Why: the daemon must start even when the configured port is busy (auto
-/// fallback to an ephemeral port) and publish its real address so clients can
-/// find it (lock file). Per ADR-0011's loopback-only doctrine (issue #3330,
-/// part of epic #3328), the daemon itself never exposes a non-loopback
-/// listener — `trusty-console` is the sole HTTP surface reachable off-host,
-/// via its own `--tailscale`/Funnel modes.
+/// Why: ADR-0032 leaves `trusty-console` as the only TCP surface; since #6288
+/// S3a the daemon binds no TCP port and serves its socket only. The lock file
+/// tells clients which process is the daemon and which socket it serves.
 /// What: rejects `--tailscale` up front with an actionable error (see
 /// [`tailscale_deprecated_error`]); refuses to start when a launchd unit is
 /// registered but this process isn't launchd-supervised and `--force` was
 /// not passed (issue #4397, see [`apply_supervision_signal`] and
 /// [`unsupervised_daemon_error`]); in MCP mode delegates straight to
-/// `run_mcp`; otherwise binds `addr` (falling back to `127.0.0.1:0` on
-/// `AddrInUse`), writes the lock file, registers a Ctrl-C handler that
-/// removes the lock, then serves the API on the primary (loopback) listener.
+/// `run_mcp`; otherwise logs a deprecation line for a set `addr` (ignored),
+/// removes a stale `http_addr` file, binds the socket and then writes the
+/// lock (refusing, non-zero, when another daemon serves the socket),
+/// registers a signal handler that removes the lock, then serves the socket.
+/// A serve failure removes the lock and returns the error.
 /// Test: `cli_parses_daemon_*` cover flag parsing; `run_daemon_rejects_
 /// tailscale_flag` covers the deprecation error; `sandbox` (#9121) is
 /// covered by `daemon_sandbox_tests.rs`; the #4397 guard's decision
 /// table is covered hermetically by `commands::launchd_probe::tests::
-/// compute_daemon_refuse_*`; the bind/serve path is exercised by the daemon
-/// e2e suite.
+/// compute_daemon_refuse_*`; the bind/serve path by
+/// `a_sandbox_daemon_holds_no_tcp_listener_and_publishes_no_address`,
+/// `a_busy_addr_flag_is_ignored_and_logged_once` and
+/// `a_second_daemon_on_the_same_socket_exits_non_zero_and_leaves_the_lock`.
 pub(crate) async fn run_daemon(
-    addr: SocketAddr,
+    addr: Option<String>,
     tailscale: bool,
     mcp: bool,
     force: bool,
     sandbox: bool,
 ) -> anyhow::Result<()> {
-    use std::io::ErrorKind;
-
     // ADR-0011 loopback-only doctrine (#3330): the secondary Tailscale
     // listener has been removed. Fail loudly and immediately rather than
     // silently ignoring the flag — old invocations (scripts, launchd plists,
@@ -125,73 +121,26 @@ pub(crate) async fn run_daemon(
         return trusty_mpm::daemon::run_mcp(state).await;
     }
 
-    // Refuse to start a second instance: read the lock-file address, probe
-    // `/health`, and bail out cleanly when an existing daemon answers. Without
-    // this guard, the `AddrInUse` fallback below would auto-pick an ephemeral
-    // port and silently spawn a duplicate daemon that splits traffic with the
-    // original. `resolve_daemon_url` already validates the recorded PID is
-    // alive (and clears stale lock files), so a `None`-ish result here means
-    // either no lock exists or the recorded daemon is dead — proceed normally.
-    //
-    // #6288: the daemon still binds TCP until PR 2, so its duplicate guard
-    // reads the lock's recorded HTTP address directly; the client resolvers
-    // return the socket locator, which this TCP probe cannot dial.
-    if let Some(recorded_url) = trusty_mpm::core::client_lock_url()
-        && recorded_url != trusty_mpm::core::DEFAULT_DAEMON_URL
-        && trusty_common::probe_health(&recorded_url, "/health").await
-    {
-        // #6869: the operator gets the fact; the URL goes to the log.
-        tracing::debug!("daemon already running at recorded url {recorded_url}");
-        eprintln!("{ALREADY_RUNNING_NOTICE}");
-        return Ok(());
+    // #6288 S3a: the daemon serves its socket only. The two TCP `/health`
+    // probes that guarded against a duplicate are gone with the port; the
+    // socket bind below is the one guard — it refuses when another trusty-mpm
+    // answers the path, and the process then exits non-zero having published
+    // nothing (`bind_socket_then_publish`).
+    if let Some(notice) = addr_deprecation_notice(addr.as_deref()) {
+        tracing::warn!("{notice}");
     }
-
-    // #1731: the lock file now has to carry the trusty-mpm product magic to be
-    // trusted, so a daemon started by a pre-#1731 binary is invisible to the
-    // check above and the `AddrInUse` fallback below would quietly spawn a
-    // duplicate on an ephemeral port. Ask the address this invocation intends
-    // to bind whether a daemon already answers there. Scoped to `addr`, not the
-    // default, so `--addr` still starts a second daemon on a free port.
-    let intended_url = format!("http://{addr}");
-    if trusty_common::probe_health(&intended_url, "/health").await {
-        // #6869: same demotion as the recorded-url arm above.
-        tracing::debug!("daemon already running at intended url {intended_url}");
-        eprintln!("{ALREADY_RUNNING_NOTICE}");
-        return Ok(());
+    // #6288 S3a: an older daemon's `http_addr` names a port nothing serves now.
+    // Removing it advances no state, so a failure is only a warning.
+    if let Err(e) = trusty_common::remove_daemon_addr("trusty-mpm") {
+        tracing::warn!("failed to remove a stale trusty-mpm http_addr file: {e:#}");
     }
-
-    // Auto port selection: try configured address; fall back to ephemeral.
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == ErrorKind::AddrInUse => {
-            tracing::warn!("port {} is busy — selecting an ephemeral port", addr.port());
-            tokio::net::TcpListener::bind("127.0.0.1:0").await?
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let actual_addr = listener.local_addr()?;
-    let base_url = format!("http://{actual_addr}");
-    tracing::info!("daemon listening on {base_url}");
 
     // #6288: bind the RPC socket and only then write the lock file, which is
-    // what clients discover us by (backward-compat for existing clients that
-    // parse the TOML lock directly, e.g. the old MpmConnector). See
-    // [`bind_socket_then_publish`] for why the order is the point.
+    // what clients discover us by. See [`bind_socket_then_publish`] for why the
+    // order is the point.
     let socket_path = trusty_mpm::daemon::socket::socket_path()?;
-    let rpc = bind_socket_then_publish(
-        &base_url,
-        &socket_path,
-        &trusty_mpm::core::discovery::lock_file_path(),
-    )
-    .await?;
-    // Also write the standard trusty-common http_addr file so the console's
-    // reverse proxy can discover the daemon address via the shared
-    // `read_daemon_addr` helper (#1849 Phase 1).
-    // Convention: store bare `host:port` (no http:// scheme) so that
-    // `detect_service` in trusty-console can TCP-probe it directly.
-    if let Err(e) = trusty_common::write_daemon_addr("trusty-mpm", &actual_addr.to_string()) {
-        tracing::warn!("failed to write trusty-mpm http_addr discovery file: {e:#}");
-    }
+    let lock_path = trusty_mpm::core::discovery::lock_file_path();
+    let rpc = bind_socket_then_publish(&socket_path, &lock_path).await?;
 
     // Auto-start the Telegram bot alongside the daemon when a bot token is
     // configured. `resolve_token` honours `.env.local` → `.env` → the process
@@ -211,6 +160,10 @@ pub(crate) async fn run_daemon(
     // only trapped SIGINT the lock file would leak with a dead PID, and the next
     // client's `resolve_daemon_url` would fall back to the default port (often
     // occupied by an unrelated process) and report "daemon unreachable".
+    // #6849: this handler exits before the serve drain, so it flushes the bus
+    // producer itself, within `SIGNAL_FLUSH_BUDGET` (200 ms) and before the
+    // lock goes; a no-op with no bus attached.
+    let action_events_state = std::sync::Arc::clone(&state);
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         // Stop the supervised Telegram bot first so it does not log a spurious
@@ -218,33 +171,72 @@ pub(crate) async fn run_daemon(
         if let Some(token) = bot_shutdown {
             token.cancel();
         }
-        trusty_mpm::daemon::lock::remove_lock();
-        // Remove the standard http_addr file so the console stops advertising
-        // this (now-dead) daemon address (#1849 Phase 1).
-        if let Err(e) = trusty_common::remove_daemon_addr("trusty-mpm") {
-            tracing::warn!("failed to remove trusty-mpm http_addr discovery file: {e:#}");
-        }
+        trusty_mpm::daemon::action_events::before_signal_exit(
+            &action_events_state,
+            trusty_mpm::daemon::lock::remove_lock,
+        )
+        .await;
         // See #6288: this exit almost certainly wins the race against
         // `serve_with_shutdown`'s graceful drain, so neither the session reap
         // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.
         // The socket is self-healing — `daemon::socket::bind` reclaims a file
-        // nobody is serving — so slice 1 leaves the race alone; slice 7, which
-        // moves the clients onto the socket, is where it gets fixed.
+        // nobody is serving. S3a leaves the race as it was.
         std::process::exit(0);
     });
 
-    trusty_mpm::daemon::serve_http(state, listener, rpc).await
+    let served = trusty_mpm::daemon::serve(state, rpc).await;
+    unpublish_if_failed(served, &lock_path)
+}
+
+/// The deprecation line for `--addr` / `TRUSTY_MPM_ADDR`, when either was set.
+///
+/// Why (#6288 S3a, owner ruling Q1): the daemon binds no TCP port, but the host
+/// launchd plist still passes `--addr 127.0.0.1:7880` and restarts a failed
+/// daemon every 10 s. A hard error would crash-loop it, so the value is
+/// accepted, ignored and named once in the log. Removal is due in 2.0.0.
+/// What: `Some(line)` naming the ignored value when `addr` is set, else `None`.
+/// Test: `addr_deprecation_notice_names_the_ignored_value`;
+/// `a_busy_addr_flag_is_ignored_and_logged_once` proves it is logged once.
+fn addr_deprecation_notice(addr: Option<&str>) -> Option<String> {
+    addr.map(|value| {
+        format!(
+            "--addr / TRUSTY_MPM_ADDR is deprecated and ignored (got {value:?}): the \
+             daemon serves its Unix socket only (#6288, ADR-0032); the flag is \
+             removed in 2.0.0"
+        )
+    })
+}
+
+/// Remove this daemon's lock when serving failed, and pass the result through.
+///
+/// Why (#6288 S3a, the Fail-Open Check): a failed serve makes `run_daemon`
+/// return an error and the process exit non-zero. The lock written at bind
+/// time would otherwise outlive it and name a daemon that serves nothing.
+/// What: on `Err`, removes the lock at `lock_path` if it names this process;
+/// on `Ok`, leaves it — the shutdown handler owns that path.
+/// Test: `unpublish_if_failed_removes_the_lock_on_a_serve_error`,
+/// `unpublish_if_failed_keeps_the_lock_on_a_clean_stop`.
+fn unpublish_if_failed(
+    served: anyhow::Result<()>,
+    lock_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    if served.is_err() {
+        trusty_mpm::core::daemon_identity::remove_lock_owned_by_at(
+            lock_path,
+            &[std::process::id()],
+        );
+    }
+    served
 }
 
 /// Bind the RPC socket, then publish the daemon's identity — in that order.
 ///
 /// Why the order is the whole function (#6288): the lock file names a daemon
-/// that is about to serve, and `run_daemon` has no cleanup path on its error
-/// return. Before this slice there was one bind and it happened first, so a
-/// written lock always named a daemon that had taken every listener it needed.
-/// The socket bind is a second, fallible step; writing the lock between the two
-/// would leave a record naming a process that then aborts, and the next client
-/// would resolve a daemon URL nothing answers.
+/// that is about to serve, and a lock written before a bind that then fails
+/// would name a process that aborted; the next client would resolve a daemon
+/// nothing answers. #6288 S3a: the socket is the only listener and this bind
+/// is also the duplicate guard — another live trusty-mpm on the path refuses
+/// it, and nothing is published.
 ///
 /// What: [`trusty_mpm::daemon::socket::bind`], then
 /// [`trusty_mpm::core::daemon_identity::write_lock_at`]. `lock_path` is a
@@ -259,16 +251,11 @@ pub(crate) async fn run_daemon(
 /// Test: `bind_socket_then_publish_writes_no_lock_when_the_socket_is_taken`,
 /// `bind_socket_then_publish_writes_the_lock_when_the_bind_succeeds`.
 async fn bind_socket_then_publish(
-    base_url: &str,
     socket: &std::path::Path,
     lock_path: &std::path::Path,
 ) -> anyhow::Result<trusty_mpm::daemon::socket::BoundSocket> {
     let rpc = trusty_mpm::daemon::socket::bind(socket).await?;
-    trusty_mpm::core::daemon_identity::write_lock_at(
-        lock_path,
-        base_url,
-        &socket.display().to_string(),
-    );
+    trusty_mpm::core::daemon_identity::write_lock_at(lock_path, &socket.display().to_string());
     Ok(rpc)
 }
 
@@ -517,7 +504,7 @@ mod tests {
             .await
             .expect("the incumbent binds a fresh path");
 
-        let err = bind_socket_then_publish("http://127.0.0.1:7880", &socket, &lock_path)
+        let err = bind_socket_then_publish(&socket, &lock_path)
             .await
             .expect_err("a bind against a live socket must fail");
         assert!(
@@ -533,8 +520,8 @@ mod tests {
         drop(incumbent);
     }
 
-    /// The other half: a successful bind DOES publish, and the record carries
-    /// both endpoints.
+    /// The other half: a successful bind DOES publish, and the record names
+    /// the socket and no TCP address (#6288 S3a).
     ///
     /// Why: an ordering test that only proves the failure path would pass if
     /// the write were deleted outright.
@@ -545,17 +532,59 @@ mod tests {
         let socket = tmp.path().join("sockets").join("trusty-mpm.sock");
         let lock_path = tmp.path().join("daemon.lock");
 
-        let rpc = bind_socket_then_publish("http://127.0.0.1:7880", &socket, &lock_path)
+        let rpc = bind_socket_then_publish(&socket, &lock_path)
             .await
             .expect("a fresh socket binds");
 
         let lock = trusty_mpm::core::daemon_identity::read_lock_at(&lock_path)
             .expect("the lock must be written and readable");
-        assert_eq!(lock.addr, "http://127.0.0.1:7880");
+        assert_eq!(lock.addr, "", "#6288 S3a: no TCP address is advertised");
         assert_eq!(lock.socket_path, socket.display().to_string());
         assert_eq!(lock.pid, std::process::id());
 
         drop(rpc);
+    }
+
+    /// #6288 S3a, the Fail-Open Check: a serve error removes this daemon's
+    /// lock, so no record outlives a process that exits non-zero.
+    /// Test: this function IS the test.
+    #[test]
+    fn unpublish_if_failed_removes_the_lock_on_a_serve_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lock_path = tmp.path().join("daemon.lock");
+        trusty_mpm::core::daemon_identity::write_lock_at(&lock_path, "/s.sock");
+
+        let err = unpublish_if_failed(Err(anyhow::anyhow!("accept loop died")), &lock_path)
+            .expect_err("the serve error passes through");
+        assert!(format!("{err:#}").contains("accept loop died"), "{err:#}");
+        assert!(!lock_path.exists(), "the lock must not outlive the failure");
+    }
+
+    /// The clean stop leaves the lock to the shutdown handler.
+    /// Test: this function IS the test.
+    #[test]
+    fn unpublish_if_failed_keeps_the_lock_on_a_clean_stop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lock_path = tmp.path().join("daemon.lock");
+        trusty_mpm::core::daemon_identity::write_lock_at(&lock_path, "/s.sock");
+
+        unpublish_if_failed(Ok(()), &lock_path).expect("a clean stop is Ok");
+        assert!(lock_path.exists());
+    }
+
+    /// #6288 S3a (owner ruling Q1): a set `--addr` is named, as ignored, in
+    /// one line; an unset one produces none.
+    /// Test: this function IS the test.
+    #[test]
+    fn addr_deprecation_notice_names_the_ignored_value() {
+        assert_eq!(addr_deprecation_notice(None), None);
+        let line = addr_deprecation_notice(Some("127.0.0.1:7880")).expect("a notice");
+        assert!(
+            line.contains("deprecated and ignored"),
+            "the line says the value is ignored: {line}"
+        );
+        assert!(line.contains("127.0.0.1:7880"), "names the value: {line}");
+        assert!(line.contains("2.0.0"), "names the removal release: {line}");
     }
 
     /// `run_daemon` must refuse `--tailscale` before doing anything else —
@@ -563,8 +592,7 @@ mod tests {
     /// and side-effect free to test.
     #[tokio::test]
     async fn run_daemon_rejects_tailscale_flag() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let err = run_daemon(addr, true, false, false, false)
+        let err = run_daemon(None, true, false, false, false)
             .await
             .expect_err("--tailscale must be rejected");
         let msg = err.to_string();

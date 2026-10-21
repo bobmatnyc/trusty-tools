@@ -51,6 +51,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
   - `init` — Set up the Architect project and start its session
+  - `relaunch` — Restart the Architect's `claude` in its running session and bind it
   - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
   - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files
@@ -178,7 +179,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `answer` — Answer a managed session's pending decision
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
-  - `catchup` — Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge)
+  - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
   - `clean` — Reap dead sessions for the current project
   - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
   - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)
@@ -214,7 +215,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `answer` — Answer a managed session's pending decision
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
-  - `catchup` — Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge)
+  - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
   - `clean` — Reap dead sessions for the current project
   - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
   - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)

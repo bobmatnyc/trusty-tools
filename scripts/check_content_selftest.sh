@@ -32,6 +32,19 @@
 #     tree-quoted-top-level-version FAIL, `"version":` is still `version:`
 #     tree-non-ascii-path        FAIL, content/agents/café.md, listed and valid
 #     tree-expect-version-*      the release workflow's version must match
+#   probe (scripts/check_content.py tree, #8390):
+#     probe-{fenced,inline}-unconditional  FAIL, a shared asset runs `tm` unprobed
+#     probe-after-invocation     FAIL, the probe comes after the first command
+#     probe-same-paragraph-ok    OK, a probe in the command's own paragraph
+#     probe-without-degrade      FAIL, a probe with no fallback
+#     probe-is-per-harness       FAIL, a `tm` probe does not cover `tcode`
+#     probe-then-degrade-ok / probe-shell-guard-ok          OK
+#     probe-negated-mention-ok   OK, "Never run `tm secrets`" runs nothing
+#     probe-span-after-with      FAIL, "Open … with `tm pr open`" is a command
+#     probe-conditional-not      FAIL, "If … not merged, run `tm pr merge`"
+#     probe-semicolon-negation   FAIL, "Do not idle; run `tm wait`"
+#     probe-fenced-after-and     FAIL, `cd repo && tm doctor`
+#     probe-harness-owned-ok     OK, tm's own instructions name tm freely
 #   bump (scripts/check_content.py bump):
 #     bump-released-unchanged    FAIL, member changed under a released version
 #     bump-raised                OK
@@ -57,6 +70,11 @@
 #     changelog-crate-non-ascii-fragment OK, crates/demo/changelog.d/8388-café.md
 #     changelog-{staged,untracked}-non-ascii-path FAIL, --staged sees café.md
 #     changelog-file-content-*          --file placement and validation
+#   leaks (scripts/check_content.py leaks, #9996):
+#     leaks-clean / leaks-near-miss  OK
+#     leaks-{owner,org,host,slack,email}  FAIL, one planted line per class
+#     leaks-patterns-missing / -empty-regex / -bad-regex / -scan-root-missing
+#                                    FAIL, the gate cannot scan: never a pass
 #   rollup (scripts/assemble-changelog.sh content <version>):
 #     rollup-writes-content-changelog   section written, fragment deleted
 #
@@ -101,7 +119,7 @@ new_repo() {
   git -C "$REPO" config user.email selftest@example.invalid
   git -C "$REPO" config user.name "content selftest"
   local f
-  for f in check_content.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh; do
+  for f in check_content.py content_probe_lint.py package_content.sh check_changelog_fragment.sh assemble-changelog.sh architect_leak_patterns.txt; do
     [[ -f "$SRC/$f" ]] && cp "$SRC/$f" "$REPO/scripts/"
   done
   cp "$SRC/lib/source_class.sh" "$REPO/scripts/lib/"
@@ -207,6 +225,42 @@ new_repo t-cafe && w content/agents/café.md '---' 'metadata: {version: "1.0.0"}
   w content/manifest.toml "$(cat "$REPO/content/manifest.toml")" '' '[[member]]' 'path = "agents/café.md"' 'version = "1.0.0"'
 tree tree-non-ascii-path 1 "path must match [A-Za-z0-9._/-]+"
 
+# --- probe (#8390) ----------------------------------------------------------
+# engineer <body line>... — the shared engineer agent, valid, with this body.
+engineer() { w content/agents/engineer.md '---' 'name: engineer' 'metadata:' '  version: "1.0.0"' '---' "$@"; }
+PROBE='Check `command -v tm` first; if `tm` is absent, poll with a bounded shell loop instead.'
+new_repo p-fenced && engineer 'Wait on it:' '' '```bash' 'tm wait --for run --pid 1' '```'
+tree probe-fenced-unconditional 1 "content/agents/engineer.md:9: runs \`tm wait --for run --pid 1\` with no probe-then-degrade before it"
+new_repo p-inline && engineer 'Run `tm doctor` after the edit.'
+tree probe-inline-unconditional 1 "content/agents/engineer.md:6: runs \`tm doctor\`"
+new_repo p-ok && engineer "$PROBE" '' 'Run `tm doctor` after the edit.' '' '```bash' 'tm wait --for run --pid 1' '```'
+tree probe-then-degrade-ok 0 "OK"
+new_repo p-shell-ok && engineer '```bash' 'command -v tm >/dev/null || exit 0' 'tm doctor' '```'
+tree probe-shell-guard-ok 0 "OK"
+new_repo p-late && engineer 'Run `tm doctor` after the edit.' '' "$PROBE"
+tree probe-after-invocation 1 "content/agents/engineer.md:6: runs \`tm doctor\`"
+new_repo p-same && engineer 'Run `tm doctor` after the edit.' 'Fallback when `command -v tm` finds none: skip it.'
+tree probe-same-paragraph-ok 0 "OK"
+new_repo p-nodegrade && engineer 'Check `command -v tm` first.' '' 'Run `tm doctor` after the edit.'
+tree probe-without-degrade 1 "content/agents/engineer.md:8: runs \`tm doctor\`"
+new_repo p-other-harness && engineer "$PROBE" '' 'Run `tcode run --agent qa` next.'
+tree probe-is-per-harness 1 "content/agents/engineer.md:8: runs \`tcode run --agent qa\`"
+new_repo p-negated && engineer 'Never run `tm secrets` on the live host.'
+tree probe-negated-mention-ok 0 "OK"
+# Critic round (#8390): spans no imperative verb introduces, a "not" that does
+# not govern the span, a `;` sentence break, and a command after `&&`.
+new_repo p-with && engineer 'Open every PR with `tm pr open --title x`.'
+tree probe-span-after-with 1 "content/agents/engineer.md:6: runs \`tm pr open --title x\`"
+new_repo p-cond && engineer 'If the PR is not merged, run `tm pr merge 5`.'
+tree probe-conditional-not 1 "content/agents/engineer.md:6: runs \`tm pr merge 5\`"
+new_repo p-semi && engineer 'Do not idle; run `tm wait --for run --pid 1`.'
+tree probe-semicolon-negation 1 "content/agents/engineer.md:6: runs \`tm wait --for run --pid 1\`"
+new_repo p-and && engineer '```bash' 'cd repo && tm doctor' '```'
+tree probe-fenced-after-and 1 "content/agents/engineer.md:7: runs \`tm doctor\`"
+# tm's own instructions are read only by tm, so they name tm commands freely.
+new_repo p-owned && w content/instructions/sections/identity.md '# section' 'Run `tm doctor` now.'
+tree probe-harness-owned-ok 0 "OK"
+
 # --- bump -------------------------------------------------------------------
 # bump_repo <name> — main at bundle 1.1.0 tagged content-v1.1.0, then a branch.
 bump_repo() {
@@ -299,6 +353,55 @@ bump_repo c-staged && w content/agents/café.md '---' 'metadata: {version: "1.0.
 gate changelog-staged-non-ascii-path 1 "e.g. content/agents/café.md." --staged
 bump_repo c-untracked && w content/agents/café.md '---' 'metadata: {version: "1.0.0"}' '---'
 gate changelog-untracked-non-ascii-path 1 "e.g. content/agents/café.md." --staged
+
+# --- leaks (#9996) ----------------------------------------------------------
+leak="content/instructions/architect/skills/leak.md"
+leaks() { expect "$1" "$2" "$3" python3 scripts/check_content.py leaks; }
+new_repo leaks && w content/instructions/architect/architect.md '# clean architect'
+leaks leaks-clean 0 "check_content leaks: 1 file(s) scanned — OK"
+w "$leak" 'a bobcat, masala, user@example.com, github.com/acme/x, github.com/bobmatnyc/trusty-tools'
+leaks leaks-near-miss 0 "OK"
+w "$leak" 'ask masa first'
+leaks leaks-owner 1 "FAIL OWNER_NAME: $leak:1"
+w "$leak" 'clone github.com/realcorp/widgets'
+leaks leaks-org 1 "FAIL ORG: $leak:1"
+w "$leak" 'ssh studio.local'
+leaks leaks-host 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'notify U01ABC23DEF'
+leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
+w "$leak" 'mail someone@corp.io'
+leaks leaks-email 1 "FAIL EMAIL: $leak:1"
+for kind in 'gh pr view 1 --repo realcorp/widgets' 'gh pr list -R realcorp/widgets' \
+  'docs at realcorp.github.io' 'clone gitlab.com/realcorp/widgets'; do
+  w "$leak" "$kind"
+  leaks "leaks-org-form: $kind" 1 "FAIL ORG: $leak:1"
+done
+w "$leak" 'gh pr view 1 --repo bobmatnyc/trusty-tools' 'acme.github.io gitlab.com/example/x'
+leaks leaks-org-forms-allowed 0 "OK"
+printf 'x\000y\nask masa\n' >"$REPO/$leak"
+leaks leaks-nul-file 1 "FAIL OWNER_NAME: $leak:2"
+printf '\377\376 ask masa\n' >"$REPO/$leak"
+leaks leaks-non-utf8-file 1 "FAIL OWNER_NAME: $leak:1"
+tok="ghp""_$(printf 'a%.0s' $(seq 1 36))"
+w "$leak" "https://x-access-token:$tok@github.com/acme/x" 'https://deploy:Hunter2Secret@registry.corp.io/x'
+out="$(cd "$REPO" && python3 scripts/check_content.py leaks 2>&1)" && rc=0 || rc=$?
+if [[ "$rc" -ne 1 || "$out" == *"$tok"* || "$out" == *Hunter2Secret* || "$out" != *"FAIL EMAIL"* ]]; then
+  echo "FAIL leaks-credential-not-printed: exit $rc, output:" >&2
+  printf '%s\n' "$out" | sed 's/^/       /' >&2
+  fail=1
+else
+  echo "ok   leaks-credential-not-printed"
+fi
+w "$leak" 'clean'
+mv "$REPO/scripts/architect_leak_patterns.txt" "$REPO/scripts/patterns.bak"
+leaks leaks-patterns-missing 1 "FAIL PATTERNS: "
+printf 'OWNER_NAME\ti\t\n' >"$REPO/scripts/architect_leak_patterns.txt"
+leaks leaks-empty-regex 1 "FAIL PATTERNS: "
+printf 'OWNER_NAME\ti\t(unclosed\n' >"$REPO/scripts/architect_leak_patterns.txt"
+leaks leaks-bad-regex 1 "FAIL GREP_ERROR: "
+mv "$REPO/scripts/patterns.bak" "$REPO/scripts/architect_leak_patterns.txt"
+rm -rf "$REPO/content/instructions/architect"
+leaks leaks-scan-root-missing 1 "FAIL SCAN_ROOT: "
 
 # --- rollup -----------------------------------------------------------------
 new_repo rollup && w content/changelog.d/8388-edit.md 'Changed' '' '- engineer agent edited'

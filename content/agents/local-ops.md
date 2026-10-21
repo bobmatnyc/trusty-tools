@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Local Ops — Local Development Environment Specialist
@@ -108,7 +108,10 @@ cargo build --release -p <crate>         # long build: run it, wait for exit
 
 **A deploy script and a reachability poll are your commands too (#7612).** Run
 the script in the foreground and let it hold the turn. Wait on the thing itself
-with `tm wait --for run`, never on a notification you expect to wake you:
+with `tm wait --for run`, never on a notification you expect to wake you.
+Check `command -v tm` first; if `tm` is absent, poll the same condition
+(`kill -0 <pid>`, `test -f <sentinel>`) in a bounded shell loop that sleeps
+between checks and exits before the tool timeout:
 
 ```bash
 ./scripts/<deploy-script>.sh                        # deploy: foreground, wait for exit

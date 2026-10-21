@@ -22,100 +22,10 @@ use std::process::Command;
 use tracing::warn;
 
 use crate::core::external_session::ExternalSession;
-use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
+use crate::core::tmux_server::server_args;
 use crate::core::{Error, Result};
 use crate::session_manager::ArchitectFloor;
-
-/// Find the end (one PAST the true closing `'`, byte offset into `s`) of a
-/// POSIX shell single-quoted value, given `s` is the text immediately AFTER
-/// the opening quote.
-///
-/// Why: [`shell_single_quote`](crate::runtime::claude_code) escapes an
-/// embedded literal `'` as the 4-byte close-escape-reopen sequence `'\''`
-/// (close the current quote, backslash-escape a literal `'`, reopen a new
-/// quote) — POSIX shells have no in-quote escape, so this is the standard
-/// way to embed a quote inside a single-quoted string. A naive scan for the
-/// FIRST `'` after the opener mistakes that sequence's first byte for the
-/// closer, truncating the redaction and leaking every byte of the value AFTER
-/// the embedded quote in cleartext (a real reviewer-caught edge case: a token
-/// containing `'` would leak its tail). This walks the value treating `'\''`
-/// as one escaped-quote unit to skip over, so only a BARE `'` — one not
-/// followed by `\''` — is treated as the true closer.
-/// What: scans byte-by-byte (safe: the only bytes it compares against are `'`
-/// and `\`, both single-byte ASCII, so it can never land mid-codepoint of a
-/// multi-byte UTF-8 sequence in an untouched run of bytes). At each `'`, if
-/// the next three bytes spell `\''` the whole 4-byte run is an escaped
-/// literal quote — skipped, continue scanning; otherwise this `'` is the true
-/// closer and its index + 1 is returned. Falls back to `s.len()` if no closer
-/// is found (malformed input — treat the rest of the string as the value
-/// rather than panic or leak).
-/// Test: `find_quoted_value_end_stops_at_bare_closer`,
-/// `find_quoted_value_end_skips_escaped_embedded_quote`,
-/// `redact_oauth_token_masks_value_with_embedded_single_quote`.
-fn find_quoted_value_end(s: &str) -> usize {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if bytes[i..].starts_with(b"'\\''") {
-                i += 4; // escaped embedded quote unit — not the closer
-                continue;
-            }
-            return i + 1; // bare closer — include it in the consumed span
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-/// Mask any `CLAUDE_CODE_OAUTH_TOKEN=<value>` secret in `s` before it reaches a
-/// log or a persisted record.
-///
-/// Why: managed-session pane commands interpolate a cleartext
-/// `CLAUDE_CODE_OAUTH_TOKEN='<token>'` (#2246). When [`TmuxDriver::run`] maps a
-/// failed `send-keys` to an error it formats the full argv — which would
-/// otherwise carry that OAuth secret into every downstream `warn!` log in
-/// `daemon::managed_routes::lifecycle` AND into the persisted session `task`
-/// field via `session_manager::manager::mark_errored`, where `tm session ls`
-/// surfaces it. Redacting at this single source closes every one of those
-/// paths at once, so no caller has to remember to scrub.
-/// What: replaces the value of each `CLAUDE_CODE_OAUTH_TOKEN=` assignment with
-/// `<redacted>`, handling both the single-quoted form
-/// (`CLAUDE_CODE_OAUTH_TOKEN='…'` → `CLAUDE_CODE_OAUTH_TOKEN='<redacted>'`,
-/// via [`find_quoted_value_end`] so a value containing an escaped embedded
-/// quote is masked in full, not just up to its first byte) and a bare
-/// unquoted form (value ends at the next ASCII whitespace). All other bytes
-/// are copied through unchanged, so a string with no token is returned
-/// verbatim.
-/// Test: `redact_oauth_token_masks_quoted_value`,
-/// `redact_oauth_token_masks_unquoted_value`,
-/// `redact_oauth_token_masks_value_with_embedded_single_quote`,
-/// `redact_oauth_token_leaves_unrelated_text_untouched`,
-/// `run_style_error_message_does_not_leak_oauth_token`.
-fn redact_oauth_token(s: &str) -> String {
-    let needle = format!("{OAUTH_TOKEN_ENV_VAR}=");
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find(&needle) {
-        out.push_str(&rest[..pos + needle.len()]);
-        let after = &rest[pos + needle.len()..];
-        if let Some(stripped) = after.strip_prefix('\'') {
-            // Single-quoted value: mask up to and including the TRUE closing
-            // quote, correctly skipping any escaped embedded quotes.
-            let end = find_quoted_value_end(stripped);
-            out.push_str("'<redacted>'");
-            rest = &stripped[end..];
-        } else {
-            // Bare value: mask up to the next whitespace (or end of string).
-            let end = after.find(char::is_whitespace).unwrap_or(after.len());
-            out.push_str("<redacted>");
-            rest = &after[end..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
 
 /// A parsed `tmux list-sessions` row.
 ///
@@ -241,6 +151,8 @@ pub struct TmuxDriver {
     tmux_path: String,
     /// #8942: the protected-name check [`Self::kill_session`] asks first.
     floor: ArchitectFloor,
+    /// #8928 step 4: a named (`-L`) server, `None` for the default one.
+    server: Option<String>,
 }
 
 impl TmuxDriver {
@@ -311,6 +223,7 @@ impl TmuxDriver {
         Ok(Self {
             tmux_path: path,
             floor,
+            server: None,
         })
     }
 
@@ -321,6 +234,7 @@ impl TmuxDriver {
         Self {
             tmux_path: tmux_path.into(),
             floor: ArchitectFloor::host(),
+            server: None,
         }
     }
 
@@ -328,6 +242,16 @@ impl TmuxDriver {
     #[cfg(test)]
     pub(crate) fn with_floor(self, floor: ArchitectFloor) -> Self {
         Self { floor, ..self }
+    }
+
+    /// This driver aimed at the named (`tmux -L <name>`) server: every typed
+    /// command it runs goes there (#8928 step 4, a workspace's private server).
+    /// Test: `a_driver_on_a_named_server_reads_only_that_server`.
+    pub fn on_server(&self, name: &str) -> Self {
+        Self {
+            server: Some(name.to_owned()),
+            ..self.clone()
+        }
     }
 
     /// The protected-name check this driver's kills ask (#8942).
@@ -380,7 +304,17 @@ impl TmuxDriver {
     /// `tmux`, and maps a non-zero exit to `Error::Protocol` carrying stderr.
     /// Test: exercised indirectly by the `#[ignore]` integration tests.
     fn run(&self, cmd: &TmuxCommand) -> Result<String> {
-        let output = crate::core::tmux::run_tmux_with_bin(&self.tmux_path, cmd)?;
+        let output = match &self.server {
+            None => crate::core::tmux::run_tmux_with_bin(&self.tmux_path, cmd)?,
+            // #8928 step 4: the same spawn, with the `-L` prefix first.
+            Some(name) => {
+                cmd.validate_targets()
+                    .map_err(|e| Error::Protocol(e.to_string()))?;
+                let mut argv = server_args(name).to_vec();
+                argv.extend(tmux_argv(cmd));
+                crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?
+            }
+        };
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -548,7 +482,9 @@ impl TmuxDriver {
     /// when there are zero sessions — that is mapped to an empty `Vec`.
     /// Test: row parsing covered by `parses_session_row`.
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        let argv = tmux_argv(&TmuxCommand::ListSessions);
+        // #8928 step 4: a named server's listing carries its `-L` prefix.
+        let mut argv: Vec<String> = self.server.iter().flat_map(|s| server_args(s)).collect();
+        argv.extend(tmux_argv(&TmuxCommand::ListSessions));
         let output = Command::new(&self.tmux_path).args(&argv).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1130,6 +1066,13 @@ pub struct SessionSnapshot {
 // #9004: pane identity and kill-by-id, split out for the SLOC cap.
 #[path = "tmux_pane_identity.rs"]
 mod pane_identity;
+
+// #8928 step 4: the OAuth redaction helpers, split out for the SLOC cap.
+#[path = "tmux_redact.rs"]
+mod redact;
+#[cfg(test)]
+use redact::find_quoted_value_end;
+use redact::redact_oauth_token;
 
 #[cfg(test)]
 #[path = "tmux_tests.rs"]

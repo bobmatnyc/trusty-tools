@@ -29,46 +29,10 @@ fn install_then_deploy_deploys_skills() {
     let result = trusty_mpm::core::skill_install_tiers::deploy_install_skill_tiers(&paths)
         .unwrap()
         .stats;
-    // The full /tm- skill portfolio deploys on first install: 21 skills total
-    // — 19 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
-    // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
-    // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
-    // tm-teaching-templates, tm-ticketing,
-    // tm-delegation-patterns, tm-session-management, tm-session-pause,
-    // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations,
-    // tm-slack) + tm-doctor + the tm overview skill
-    // (tm-skills-portfolio epic: the `example-skill.md` placeholder and the
-    // 11 mpm-* guidance skills no longer ship; the previously-orphaned
-    // tm-doctor.md is now wired in; issue #2185 added tm-issues-prune; issue
-    // #2321 added tm-cli-operations; issue #4447 added
-    // tm-slack-canvas-delivery, replaced 1-for-1 by tm-slack, issue #4761) + 2 (issue
-    // #2890: code-review-standards, contract-driven-testing — code-critic's
-    // declared `skills:` dependencies; see
-    // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions
-    // on those two) + 93 (issue #2903,
-    // skill-port batch 1: 25 upstream universal/ skill entry points + 68
-    // references/*.md files carried alongside multi-file skills; see
-    // `tests_behavior_2903_skills_tests.rs` for the dedicated deep
-    // assertions) + 7
-    // (issue #2911: the `documentation-style` bundled skill — entry SKILL.md
-    // plus 6 references/*.md files; see
-    // `tests_behavior_2911_documentation_style_tests.rs` for the dedicated
-    // deep assertions)
-    // + 7 (issue #2913: the `tm-capabilities` auto-generated harness catalog
-    // — entry SKILL.md plus 5 generated + 1 hand-authored references/*.md
-    // files; see `tests_behavior_generate_tests.rs` for the generator's own
-    // coverage) + 1
-    // (rust-build-performance, per Bob directive 2026-07-17: a single
-    // flat-file bundled skill declared by rust-engineer and tauri-engineer;
-    // see `tests_behavior_rust_build_performance_tests.rs` for the dedicated
-    // deploy-reachability assertion).
-    // Issue #5202 retired tm-pr-workflow into tm-workflow: 22 - 1 = 21.
-    // 21 + 2 + 93 + 7 + 7 + 1 = 131. See `bundle_tm_skills.rs`/
-    // `bundle_tm_capabilities.rs`/`bundle.rs`
-    // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
-    // for the authoritative list.
-    // Stats report stems (no .md suffix) because each skill lands as
-    // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
+    // #10055: the deployed set is derived from `content/skills` on disk, never
+    // a hard-coded count — splitting a skill is a content change only.
+    // Stats report deploy keys: `<stem>` for an entry (it lands as
+    // `<dest>/<stem>/SKILL.md`), `<stem>/references/<file>` for a reference.
     for expected in [
         "tm-circuit-breaker",
         "tm-doctor",
@@ -83,21 +47,34 @@ fn install_then_deploy_deploys_skills() {
             result.deployed
         );
     }
-    assert_eq!(
-        result.deployed.len(),
-        146,
-        "expected 146 skill files deployed (19 /tm- portfolio + tm-prose-style (#7423) \
-         + 2 references/README.md for tm-ticketing and tm-workflow (#7727) \
-         + tm-secrets (#7527) + tm-doctor + tm overview + code-review-standards + \
-         contract-driven-testing + 93 skill-port batch-1 entries + 7 documentation-style \
-         entries + 8 tm-capabilities entries (#4946 added references/framework.md) + 1 \
-         rust-build-performance entry + 1 self-improvement-loop entry (#7723) \
-         + 1 rust-delivery-workflow entry (#8192) \
-         + 5 tm-epic entries: SKILL.md + 4 references (#8376) \
-         + 1 tm-architect-setup entry (#8436) \
-         + 1 rust-runtime-performance entry (#9296) \
-         + 1 tm-memory-import entry (#8625)); got {:?}",
+    let on_disk = skill_deploy_keys_on_disk();
+    let gaps = deploy_gaps(&on_disk, &result.deployed);
+    assert!(
+        gaps.is_empty(),
+        "deployed skills != content/skills on disk: {gaps:#?}"
+    );
+    // #10055: the bundle tests' known-gaps data file is testdata and never deploys.
+    assert!(
+        !result
+            .deployed
+            .iter()
+            .any(|key| key.contains("reference-reach-gaps")),
+        "testdata must never deploy: {:?}",
         result.deployed
+    );
+    // Mutation: one reference dropped, or one key deployed twice, is reported.
+    let mut dropped = result.deployed.clone();
+    let reference = dropped
+        .iter()
+        .position(|key| key.contains("/references/"))
+        .expect("a deployed references file");
+    let lost = dropped.remove(reference);
+    assert_eq!(deploy_gaps(&on_disk, &dropped), [format!("missing {lost}")]);
+    let mut doubled = result.deployed.clone();
+    doubled.push(lost.clone());
+    assert_eq!(
+        deploy_gaps(&on_disk, &doubled),
+        [format!("{lost} deployed 2 times")]
     );
     assert!(result.skipped.is_empty());
     assert!(result.unchanged.is_empty());
@@ -125,4 +102,61 @@ fn install_then_deploy_deploys_skills() {
         lines.iter().any(|l| l.contains("tm-circuit-breaker")),
         "lines = {lines:?}"
     );
+}
+
+/// The deploy key of every skill file under the checkout's `content/skills`:
+/// `<stem>` for an entry `<stem>.md`, else its path below `content/skills`
+/// (`<stem>/references/<file>`). Dot-entries are skipped. A plain directory
+/// walk that shares no code with the loader or the deployer, so either one
+/// dropping or doubling a file disagrees with it (#10055).
+fn skill_deploy_keys_on_disk() -> Vec<String> {
+    fn walk(dir: &std::path::Path, rel: &str, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read a content/skills directory") {
+            let entry = entry.expect("a directory entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let key = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if entry.file_type().expect("a file type").is_dir() {
+                walk(&entry.path(), &key, out);
+            } else if !key.contains('/') {
+                out.push(key.trim_end_matches(".md").to_owned());
+            } else {
+                out.push(key);
+            }
+        }
+    }
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+    let mut keys = Vec::new();
+    walk(&root.join("content/skills"), "", &mut keys);
+    assert!(!keys.is_empty(), "the walk found no skill file");
+    keys
+}
+
+/// Every way `deployed` differs from `expected` read as keys deployed once
+/// each: a key missing, a key nobody expected, a key deployed more than once.
+fn deploy_gaps(expected: &[String], deployed: &[String]) -> Vec<String> {
+    let mut seen: std::collections::BTreeMap<&str, usize> = Default::default();
+    for key in deployed {
+        *seen.entry(key).or_default() += 1;
+    }
+    let mut gaps: Vec<String> = expected
+        .iter()
+        .filter(|key| !seen.contains_key(key.as_str()))
+        .map(|key| format!("missing {key}"))
+        .collect();
+    for (key, times) in seen {
+        if !expected.iter().any(|e| e == key) {
+            gaps.push(format!("unexpected {key}"));
+        }
+        if times > 1 {
+            gaps.push(format!("{key} deployed {times} times"));
+        }
+    }
+    gaps
 }

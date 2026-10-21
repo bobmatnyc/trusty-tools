@@ -19,6 +19,9 @@
 //! | `ingest_scip`         | `analyze.scip_ingest`             |
 //! | `scip_status`         | `analyze.scip_status`             |
 //! | `analyzer_health`     | `analyze.health`                  |
+//! | `lsp_diagnostics`     | `analyze.lsp_diagnostics` (#9078) |
+//! | `lsp_references`      | `analyze.lsp_references` (#9078)  |
+//! | `lsp_analysed_at`     | `analyze.lsp_analysed_at` (#9078) |
 //!
 //! #6287 removed the `sse` submodule along with the `POST /mcp` + `GET /mcp/sse`
 //! HTTP transport it served. ADR-0032 makes `trusty-console` the workspace's
@@ -364,6 +367,10 @@ impl AnalyzerMcpServer {
             "review_diff" => self.handle_review_diff(args).await,
             "review_github_pr" => self.handle_review_github_pr(args).await,
             "deep_analysis" => self.handle_deep_analysis(args).await,
+            // #9078: pass-through; the daemon validates and refuses by kind.
+            "lsp_diagnostics" => self.call("analyze.lsp_diagnostics", args.clone()).await,
+            "lsp_references" => self.call("analyze.lsp_references", args.clone()).await,
+            "lsp_analysed_at" => self.call("analyze.lsp_analysed_at", args.clone()).await,
             // Why (#1104 Phase 0b): console_metrics — trusty-console dashboard poll.
             "console_metrics" => console_metrics::handle_console_metrics(self).await,
             // Why (#630): the `tr_review_*` LLM tools delegate into the embedded

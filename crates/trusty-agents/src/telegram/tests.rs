@@ -427,8 +427,9 @@ fn telegram_pid_guard_acquire_writes_and_releases() {
         );
     }
     assert!(path.exists(), "the lock file is not unlinked on drop");
+    // #3516: release is eventual while a sibling's child sits between fork and exec.
     assert!(
-        gateway_lock_holder_at(&path).is_none(),
+        once_released(|| gateway_lock_holder_at(&path).is_none().then_some(())).is_some(),
         "closing the descriptor releases the lock"
     );
 }
@@ -449,9 +450,11 @@ fn telegram_pid_guard_live_conflict_is_rejected() {
         "the refusal must name the holder: {message}"
     );
     drop(winner);
+    // #3516: a sibling test's child can hold a copy of the winner's descriptor
+    // until it execs, so the lock frees once its LAST copy closes.
     assert!(
-        TelegramPidGuard::acquire(path).is_ok(),
-        "the lock frees the moment the winner's descriptor closes"
+        once_released(|| TelegramPidGuard::acquire(path.clone()).ok()).is_some(),
+        "the lock frees once the winner's descriptor closes"
     );
 }
 
@@ -494,8 +497,10 @@ fn telegram_gateway_lock_holder_ignores_an_unlocked_file() {
     std::fs::write(&path, i32::MAX.to_string()).unwrap();
     assert!(gateway_lock_holder_at(&path).is_none(), "unheld lock");
     std::fs::write(&path, "not-a-pid").unwrap();
+    // #3516: the previous probe briefly held the lock, and a sibling's child
+    // may still carry that descriptor between fork and exec.
     assert!(
-        gateway_lock_holder_at(&path).is_none(),
+        once_released(|| gateway_lock_holder_at(&path).is_none().then_some(())).is_some(),
         "unparseable, unheld"
     );
 }
@@ -673,6 +678,31 @@ fn tempdir_for_test() -> PathBuf {
     tempfile::tempdir()
         .expect("create unique tempdir for telegram pid-guard test")
         .keep()
+}
+
+/// How long a released gateway lock may still read as held (#3516).
+const RELEASE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The first `Some` that `probe` yields before [`RELEASE_DEADLINE`], else `None`.
+///
+/// Why (#3516, the #9220 mechanism): every lib test is a thread of one
+/// process, so a sibling test's child holds a copy of each open descriptor
+/// between `fork` and `exec`, and a `flock` stays held until its last copy
+/// closes. Release right after a guard or probe drops is eventual, not
+/// immediate.
+/// What: calls `probe` every 10 ms until it answers `Some` or the deadline
+/// passes. A lock that never frees still fails the caller's assertion.
+/// Test: `telegram_gateway_lock_release_waits_out_a_child_in_its_fork_exec_window`
+/// proves the fork-to-exec hold on this same lock.
+fn once_released<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + RELEASE_DEADLINE;
+    loop {
+        let answer = probe();
+        if answer.is_some() || Instant::now() >= deadline {
+            return answer;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 // ── `/switch` persona pre-check resolution (directory-package fix) ──────────

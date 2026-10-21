@@ -22,7 +22,7 @@
   - [1mPoller restart.[0m It waits until the detection fix is verified. That restart puts all three changes live together: the context alert, the corrected log message and the
     detection fix.
 
-  [1mOpen[0m [1mquestions:[0m 0 for you. I'm waiting on dogfood for [94m]8;id=18bdx7r;https://github.com/example/project/issues/8729\#8729[39m]8;;\ (the memory loss) and #8261 round 7, and on the idle-pane capture.
+  [1mOpen[0m [1mquestions:[0m 0 for you. I'm waiting on the PM for [94m]8;id=18bdx7r;https://github.com/example/project/issues/8729\#8729[39m]8;;\ (the memory loss) and #8261 round 7, and on the idle-pane capture.
 
 [38;5;246m✻[39m [38;5;246mChurned for 18m 9s · done 11:21 PM[39m [38;5;246m· 1[39m [38;5;246mshell, 2[39m [38;5;246mmonitors still running[39m
 

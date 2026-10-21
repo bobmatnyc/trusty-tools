@@ -245,6 +245,9 @@ use doctor_pty_headroom::check_pty_headroom;
 #[path = "doctor_rust_build_env.rs"]
 mod doctor_rust_build_env;
 use doctor_rust_build_env::check_rust_build_env;
+// #8928 step 3: the sccache unix-socket server sandboxed builds reach.
+#[path = "doctor_sccache_socket.rs"]
+mod doctor_sccache_socket;
 
 // #6535: the cloud log drain runs inside the daemon and writes to somebody
 // else's bucket, so nothing else on screen says whether it is on, where it
@@ -369,6 +372,9 @@ use doctor_tmux_options::check_tmux_options;
 // REGISTRY and was sitting at the 500-SLOC production cap — see that module's
 // own doc. `pub(crate)` because `PROBE_TIMEOUT` is part of the daemon's
 // probe-budget vocabulary; the checks themselves stay `pub(super)`.
+// #8751: the palace-lock stall verdict `doctor_sidecars` gives the memory row.
+#[path = "doctor_lock_stall.rs"]
+mod doctor_lock_stall;
 #[path = "doctor_sidecars.rs"]
 pub(crate) mod doctor_sidecars;
 /// Re-exported so `doctor_search_pin` keeps naming one probe budget (#7685).
@@ -472,7 +478,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_five_checks`,
+/// Test: `run_doctor_produces_seventy_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -630,6 +636,8 @@ pub(crate) async fn run_doctor_with_claims(
     // #9169: the project map — this project's index, live duplicates, second
     // checkouts, and whether the daemon can read the map at all.
     checks.extend(check_search_project(project_dir).await);
+    // #10042: the trusty-events bus socket — one UDS connect, never TCP.
+    checks.push(super::doctor_events::check_events().await);
     checks.push(check_worktrees(repos_root, worktree_counts).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
@@ -647,6 +655,7 @@ pub(crate) async fn run_doctor_with_claims(
     // `tm doctor --fix` creates the directory and seeds the `build:` section,
     // and neither ever touches `~/.cargo/config.toml`.
     checks.push(check_rust_build_env(project_dir, &home));
+    checks.push(doctor_sccache_socket::check_sccache_socket(&home));
     // #3605: and this is the identity half — a live worktree keeps its files
     // when the base clone behind it loses its git internals, so every git
     // command there fails while both probes above stay green.
@@ -736,6 +745,12 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_bundled_asset_lag(project_dir));
     // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
     checks.push(super::doctor_content::check_content(
+        project_dir,
+        trusty_common::content::default_cache_dir().as_deref(),
+    ));
+    // #8390: assets whose advisory `requires:` this binary does not satisfy.
+    // WARN at worst — the asset still deploys and runs (ADR-0064).
+    checks.push(super::doctor_content_requires::check_content_requires(
         project_dir,
         trusty_common::content::default_cache_dir().as_deref(),
     ));
@@ -890,7 +905,7 @@ pub async fn run_doctor_for_manager(
 /// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_five_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_eight_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

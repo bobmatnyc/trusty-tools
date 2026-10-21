@@ -175,6 +175,7 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
         target.path(),
         &fw,
         Some(tmp_home.path()),
+        None,
     )
     .await;
 
@@ -195,6 +196,40 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
             .exists(),
         "in-place start must still run prepare_session and stash instructions locally"
     );
+}
+
+/// #9999: `tm session start` prepares the user tier under the config dir it is
+/// handed (`CLAUDE_CONFIG_DIR` in production), never under `<home>/.claude`.
+#[tokio::test]
+async fn session_start_in_place_writes_the_user_tier_under_the_config_dir_9999() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let config_dir = tempfile::TempDir::new().expect("config dir");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let result = start_session_in_place(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+        Some(config_dir.path()),
+    )
+    .await;
+    assert!(result.is_err(), "the unreachable daemon ends this launch");
+
+    let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
+        .expect("prep seeds the user tier in the config dir");
+    assert!(user.contains("statusLine"), "{user}");
+    assert!(config_dir.path().join(".claude.json").exists());
+    assert!(
+        !tmp_home
+            .path()
+            .join(".claude")
+            .join("settings.json")
+            .exists(),
+        "nothing may be written to <home>/.claude/settings.json when a config dir is named"
+    );
+    assert!(!tmp_home.path().join(".claude.json").exists());
 }
 
 /// #8405: an unreadable `config.yaml` never blocks `tm session start`. The
@@ -222,6 +257,7 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
         target.path(),
         &fw,
         Some(tmp_home.path()),
+        None,
     )
     .await;
     let err = result.expect_err("the unreachable daemon, not the config, ends this launch");

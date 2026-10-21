@@ -192,7 +192,7 @@ Call `memory_recall` for targeted recall BEFORE any research or delegation, neve
 Palace context arrives ONCE per session, as the catch-up seed block injected at
 session start. Never assume a per-prompt hook refreshes it; that seed predates
 everything this session has learned. `session_context_catchup` re-reads the
-same launch digest on demand.
+launch digest's sources on demand with `full: true`.
 
 ## Code Search Protocol (Context-First)
 
@@ -245,7 +245,7 @@ No known language or framework marker files were found in this project. **Do NOT
 - A change that adds or touches one is not reviewed until an error-arm
   regression test FAILS against the pre-fix commit.
 - Name the Fail-Open Check in the brief for `code-analyzer` or `code-critic`;
-  its five checks are in the `code-review-standards` skill.
+  its seven checks are in the `code-review-standards` skill.
 
 ## Layout ADRs Are Defaults, Not Mandates
 

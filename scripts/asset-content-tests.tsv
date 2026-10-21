@@ -37,6 +37,7 @@ trusty-agents	lib	workflow::engine::executor::tests::relocate::qa_receives_corre
 trusty-agents	test:cli_project	*	runtime: the spawned tagent reads the bundled agents and workflows copied from content/agents/trusty-agents (#9014)
 trusty-agents	test:plain_cli_repl	plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier	runtime: the spawned tagent deploys the roster from content staged into its HOME (#9014)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
+trusty-agents-common	lib	agents::deployer::tests::stock_tcode_roster_deploys_every_frontmatter_key	reads literal 'content/agents'
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
@@ -85,6 +86,7 @@ trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_delivery_workflow_
 trusty-mpm	bin:tm	tests_behavior_skill_tiers	reads test_roster (#9011)
 trusty-mpm	lib	client::catalog::sm_tools::tests::sm_tools_md_matches_catalog_render	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_managed_workspace_resolves_the_cache_once_a_bundle_lands	reads AgentRoster::load over a stale trusty-tools clone (#9396)
+trusty-mpm	lib	content::compat_matrix_tests	reads the checkout's content: run_matrix packages content/ and loads it through AgentRoster::load / FrameworkContent::load (#8390)
 trusty-mpm	lib	core::agent_orphans::tests	reads test_support::repo_roster and the checkout roster files (#8992)
 trusty-mpm	lib	core::agent_skill_codeploy::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::agent_source::tests	reads test_support::repo_roster
@@ -170,6 +172,7 @@ trusty-mpm	test:integration	tm_hook_pm_guard	reads common::stage_repo_content â€
 trusty-mpm	test:integration	tm_hook_pm_guard_build_lease	reads common::stage_repo_content (#9011)
 trusty-mpm	test:integration	tm_sessions_instructions_diagnostics::instructions_reports_section_status_and_project_style	reads FrameworkContent::load over the checkout (#9012)
 trusty-mpm	lib	daemon::doctor_content::tests::content_row_fails_when_the_pm_package_does_not_parse	reads the checkout's content: fake_checkout_with_package stages a PM package the doctor row parses (#9012)
+trusty-mpm	lib	daemon::doctor_content_requires::tests	reads the checkout's content: copies content/ and reads it through checkout_content, AgentRoster::load and FrameworkContent::load (#8390)
 trusty-review	lib	pipeline::mapreduce::map::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::mapreduce::synthesis::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::prompt::sections_tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)

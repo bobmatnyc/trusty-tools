@@ -168,6 +168,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Whether the trusty-search daemon can read its `project-map.toml` (issue #9169). Fail when `search.project.map` answers the fail-closed internal error — every resolve by project name, owner/repo or path fails until `trusty-search project rebuild-map --yes` moves the file aside and migrates again. Ok when the map is readable. Warn \"not checked\" when the daemon does not answer, predates the map (older than trusty-search 0.60.0), or answers without a map. Read-only; tm never writes the map.",
     ),
     (
+        "events",
+        "Whether the trusty-events bus daemon serves its Unix socket, `<data dir>/trusty-events/trusty-events.sock`, resolved through `trusty_common::control_bus::events_socket_path` as every producer and reader resolves it (ADR-0065, issue #10042). Unix socket only, never TCP: one connect closed at once, then one `events.subscribe` asking for a heartbeat every 500 ms, which waits at most 2 s for the first frame and then closes (#10071). `Ok` only when the bus answers that subscription with a frame. FAILS when the connect completes but no frame arrives within 2 s (hung — stopped or wedged; remedy `tctl restart trusty-events`, log `~/.trusty-events/logs/stderr.log`), when the subscription ends without a frame, when no socket exists (not running; remedy `tctl install trusty-events` or `tctl start trusty-events`), when the socket is stale (the file exists, the connect is refused: the daemon exited, and launchd restarts the trusty-events LaunchAgent within 10 s, or it is hung with a full backlog; remedy `tctl restart trusty-events`), when the path is not a socket, or when the path cannot be read or the socket path cannot be resolved. WARNS when the bus refuses `heartbeat_ms` (older than this tm; the two ship in lockstep, remedy `tctl upgrade trusty-events`) and when the connect neither completes nor is refused. Read-only.",
+    ),
+    (
         "worktrees",
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
     ),
@@ -210,6 +214,21 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          existing key and comment. Neither the check nor the repair ever writes \
          `~/.cargo/config.toml` — it is machine-global for every Rust project on the host \
          (issue #6868).",
+    ),
+    (
+        "sccache_socket",
+        "The sccache unix-socket server for UNSANDBOXED cargo builds (#8928 step 3). Not \
+         applicable (`Ok`) unless `build.sccache: true` in `~/.trusty-tools/trusty-mpm/config.yaml`; \
+         then the tm daemon starts `sccache --start-server` at startup with \
+         `SCCACHE_SERVER_UDS=~/.trusty-mpm/sccache.sock` and no idle timeout, outside any sandbox, \
+         and an unsandboxed client sets `SCCACHE_SERVER_UDS=<socket> SCCACHE_CLIENT_SIDE=1`. A \
+         sandboxed session never reaches it — the server runs the compiler a client names, \
+         outside the sandbox — and builds with `RUSTC_WRAPPER=\"\"` instead. `Ok` when \
+         a server answers a connect on the socket; `Warn` when `sccache` is not on PATH or the \
+         socket is missing or stale (remedy `tm restart`); `Fail` when the installed sccache \
+         predates 0.9.0, which first served `SCCACHE_SERVER_UDS`; UNKNOWN — never `Ok` — when the \
+         config, `sccache --version` (3 s bound) or the socket path cannot be read. Read-only: a \
+         connect is its only action, and nothing writes `~/.cargo/config.toml`.",
     ),
     (
         "base_clone",
@@ -296,6 +315,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "content",
         "The runtime instructional-content source and pin (ADR-0064): the source `tm` reads (`dev` for a trusted trusty-tools checkout above the project, `bundle` for the installed release, `none`), the pinned `content-vX.Y.Z` tag and sha256 from `~/.trusty-mpm/content/content-lock.toml`, and the binary version, which may legitimately differ from the content version. The bundle is verified with the runtime resolver itself — sha256 against the lock, the manifest tag, the archive caps and the schema major. `Ok` for a dev checkout or a verified bundle; reports INFO (an `Ok` row whose message starts `info:`) when nothing is installed while this binary still compiles its content in, and WARNS once ADR-0064 PHASE_1 removes it, either way naming `tm content update` and the manual install (`gh release download <tag>` then `tm content install --from <dir>/<tag>.tar.gz`); never fetches the release itself (#9396); FAILS when the lock or the bundle fails verification and no checkout serves (issue #8378). Read-only.",
+    ),
+    (
+        "content_requires",
+        "Reports content assets whose advisory `requires:` frontmatter this binary does not satisfy (ADR-0064 decision 6). `requires:` maps a harness name to a SemVer requirement (`requires: {tm: \">=1.9.0\"}`); this row checks only the `tm` entry and counts the others. WARNS naming each unmet or unreadable entry — the asset still deploys and runs, so the row is never FAIL and a mismatch never gates anything. WARNS `not checked` when no content resolves; the `content` row says why. Read-only; never fetches (issue #8390).",
     ),
     (
         "session_store",

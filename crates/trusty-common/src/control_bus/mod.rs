@@ -1,7 +1,8 @@
 //! Shared event types for the control bus — types only, no transport.
 //!
-//! Why: Owner ruling 2026-09-05 (superseding DOC-73 §4.1 Option C) makes
-//!      trusty-console the one and only event bus. Every harness —
+//! Why: Owner ruling 2026-09-05 (superseding DOC-73 §4.1 Option C) made one
+//!      event bus for the workspace; ADR-0065 runs it as the `trusty-events`
+//!      daemon (#9075; trusty-console hosted it before). Every harness —
 //!      trusty-agents, trusty-mpm, trusty-code — is a producer that pushes to
 //!      it. Producers and that consumer must agree on the envelope, so the
 //!      envelope cannot live inside any one producer: before this module,
@@ -15,19 +16,25 @@
 //!       supporting types (`ActionMeta`, `Actor`, `ObjectRef`, `ObjectType`,
 //!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), and
 //!       — behind the `uds` feature, unix only — `PushClient` (the buffered
-//!       producer-side transport to console's ingest socket, DOC-73 §4).
+//!       producer-side transport to the trusty-events socket, DOC-73 §4).
+//!       The `events.subscribe` contract (#9075, ADR-0065 decision 3) adds
+//!       `EVENTS_SERVICE`, `METHOD_EVENTS_SUBSCRIBE`, `events_socket_path`,
+//!       `SubscribeParams`, `SubscribeFilter`, `SubscribeItem` and the
+//!       `heartbeat_ms` bounds (#10071), plus — behind
+//!       `uds`, unix only — `SubscribeRequest` and `SubscribeFrameError`.
 //!       Everything except `PushClient` is a type with no transport: no
 //!       channel, no process-global sender, no sequence counter. A producer
 //!       stamps `seq`, `at`, and `id` itself and hands the envelope to
 //!       `PushClient`, which buffers and dials out; the bus that assigns
 //!       `seq` on arrival, orders, retains, and fans events back out is
-//!       trusty-console's alone.
+//!       the `trusty-events` daemon's alone (#9075).
 //! Test: `tests` below covers serde round-trips and the filter matrix, and
 //!       `tests::control_bus_declares_no_transport` reads this module's own
 //!       sources to keep the types-only boundary from eroding — `PushClient`
 //!       is the one deliberate, scanned-and-allowed exception (its own
 //!       module doc explains why it still satisfies that scan); its own
-//!       behavioral tests live beside it in `push_client.rs`.
+//!       behavioral tests live beside it in `push_client.rs`. The subscribe
+//!       contract's golden frames live in `subscribe_tests`.
 
 // #6846: hoisted out of `trusty_agents_common::events`, which keeps its
 // in-process channel and stderr relay until slice 9 (#6854) removes them.
@@ -48,6 +55,12 @@ mod filter;
 mod lifecycle;
 #[cfg(all(unix, feature = "uds"))]
 mod push_client;
+// #9075: the subscribe half of the wire contract (ADR-0065 decision 3). The
+// request frame and its error need `uds::server` and `thiserror`, so they are
+// gated like `push_client`; the types and the socket path are not.
+mod subscribe;
+#[cfg(all(unix, feature = "uds"))]
+mod subscribe_frame;
 
 pub use action::{
     ActionEvent, ActionMeta, Actor, AgentPhase, CallPhase, FilePhase, ObjectRef, ObjectType,
@@ -59,6 +72,15 @@ pub use filter::Filter;
 pub use lifecycle::{HarnessSource, LifecycleEvent};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
+pub use subscribe::{
+    EVENTS_SERVICE, HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter,
+    SubscribeItem, SubscribeParams, events_socket_path,
+};
+#[cfg(all(unix, feature = "uds"))]
+pub use subscribe_frame::{SubscribeFrameError, SubscribeRequest};
 
 #[cfg(test)]
 mod tests;
+// #9075: golden frames for the `events.subscribe` contract (ADR-0065).
+#[cfg(test)]
+mod subscribe_tests;

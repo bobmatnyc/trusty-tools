@@ -184,10 +184,16 @@ pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #9091: asks gh about a login in the daemon's env and in tm's account dirs.
 pub(crate) mod gh_login_probe;
+// #9750: the launch-time keyring login check for a pinned project (D6e).
+pub mod gh_login_verify;
 // #9091: `[accounts]` org → gh account map and the one account resolver.
 pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
 pub mod gh_session_account;
+// #9750: the per-call gh credential shim a pinned session runs (D6e).
+pub mod gh_session_shim;
+// #9750: tm's own gh children run the real gh, not a pinned session's shim.
+pub mod gh_shim_path;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
@@ -349,9 +355,13 @@ pub mod savings_repair;
 // "nothing folded" decline to one warning per project.
 pub mod savings_sidecar;
 pub mod scaffold_gitignore;
+// #8928 step 3: the sccache unix-socket server for sandboxed builds.
+pub mod sccache_socket;
+// #8928 step 4: a workspace's private tmux server.
 pub mod session;
 pub mod session_assets;
 pub mod session_launch;
+pub mod tmux_server;
 // #7422: default-deny MCP scoping — a session loads the trusty-* builtins, the
 // project's own `.mcp.json`, and only the shared servers the project opts into.
 pub mod session_mcp_scope;
@@ -456,11 +466,11 @@ pub mod worktree_removal_facts;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{
-    DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_ADDR, DEFAULT_DAEMON_URL, DaemonUrlError,
-    EXIT_DAEMON_URL_UNREACHABLE, ISOLATED_NO_DAEMON_URL, REFUSED_DAEMON_URL, SOCKET_LOCATOR_PREFIX,
-    client_lock_url, console_addr_to_probe, default_daemon_addr, explicit_url_from_env,
-    explicit_url_notice, is_loopback_url, isolated_environment, lock_file_path, refusal_url,
-    refuse_daemon_spawn_when_isolated, refuse_isolated_no_daemon, resolve_daemon_url,
-    resolve_daemon_url_for_dispatch, socket_from_locator, socket_locator, try_resolve_daemon_url,
+    DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_URL, DaemonUrlError, EXIT_DAEMON_URL_UNREACHABLE,
+    ISOLATED_NO_DAEMON_URL, REFUSED_DAEMON_URL, SOCKET_LOCATOR_PREFIX, client_lock_url,
+    console_addr_to_probe, explicit_url_from_env, explicit_url_notice, is_loopback_url,
+    isolated_environment, lock_file_path, refusal_url, refuse_daemon_spawn_when_isolated,
+    refuse_isolated_no_daemon, resolve_daemon_url, resolve_daemon_url_for_dispatch,
+    socket_from_locator, socket_locator, try_resolve_daemon_url,
 };
 pub use error::{Error, Result};

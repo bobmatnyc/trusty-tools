@@ -428,6 +428,14 @@ payload rather than the envelope. Three rules make it survivable.
 `HarnessPayload`'s existing `domain` tag is untouched, so this versioning applies
 only inside the new `Action` arm.
 
+**The subscribe stream is additive for fields, not for item kinds (#10071).**
+An `events.subscribe` item (§4.4) may gain a field, and an older reader skips
+it. It may not gain a `type` that an older reader is sent unasked:
+`SubscribeItem` rejects an unknown `type` by design, so a typed reader would
+fail on it. A new item kind is therefore sent only to a client that opts in
+through a request field. The first such kind is `heartbeat`, sent only when the
+request sets `heartbeat_ms`.
+
 ### 3.4 What already fits, and what needs an adapter
 
 **Fits with a mechanical mapping.**
@@ -634,8 +642,8 @@ scope, and this spec still has no answer for one (§10 Q3).
   route (§4.4) — read this. Overflow is reported, never silent: a ring overrun
   produces the same `Lag { skipped }`-shaped notice §3.1's envelope already
   carries, and the dashboard renders it as a visible gap marker in both views.
-- **The log.** A durable NDJSON file per day, written by console as each frame
-  is accepted, rotated and retained per #3157's original "durable JSONL
+- **The log.** A durable NDJSON file per day, written by `trusty-events` as
+  each frame is accepted (#9075), rotated and retained per #3157's original "durable JSONL
   logging, rotation, retention, and replay" requirement — the requirement
   survives the epic's closure even though its bus placement did not. A viewer
   that opens mid-session reads the log to build the tree it missed, then
@@ -659,8 +667,9 @@ make telemetry able to break the work it observes.
 2. Producers push independently of any reader, so a browser that stops reading
    lags only console's own SSE buffer (§8.2) — never the ring, and never a
    producer.
-3. The log is written by console as frames arrive, so a lagged SSE reader
-   loses nothing permanently — it re-reads from the log via `since_seq`.
+3. The log is written by `trusty-events` as frames arrive (#9075), so a
+   lagged SSE reader loses nothing permanently — it re-reads from the log via `since_seq` and
+   `since_id` (§4.4).
 
 ### 4.4 Fan-out to viewers
 
@@ -679,8 +688,47 @@ viewer reads console; console is the only fan-out point to browsers.
 
 **SSE, not WebSocket.** The stream is one-directional by construction — the views
 are non-interactive and send nothing back. SSE reconnects on its own with
-`Last-Event-ID`, which maps exactly onto `since_seq`, and it needs no new
-dependency in the axum server console already runs. A WebSocket buys a return
+`Last-Event-ID`, and it needs no new dependency in the axum server console
+already runs. `Last-Event-ID` does not map onto `since_seq` alone: since #9075
+the bus refuses a resume unless it also names the event held at that seq
+(`since_id`), because a crash can hand one `seq` to two events. Console's relay
+therefore sends `id: <seq>:<uuid>` on each event and splits it back into
+`since_seq` and `since_id` on reconnect. When the bus refuses the resume (a
+restart reassigned the seq, or retention dropped it), console resubscribes with
+`since_seq: 0` and drops events it already relayed by `EventId` (#9076). The
+dedupe remembers the last 65,536 relayed ids; after a resync, an older event is
+relayed again. An event console cannot decode (a newer daemon's payload, §3.3)
+is relayed as a one-event gap and the cursor moves past it. A gap carries no
+`id:`, so it does not move the reader's `Last-Event-ID`.
+
+**Liveness is opt-in (#10071).** A subscriber that sets `heartbeat_ms` is sent
+`{"type":"heartbeat","head":<last seq>}` as soon as the bus accepts the
+subscription, before any replay, and then once per interval. `head` is read
+under the ring lock, so a bus whose lock is wedged sends none. A heartbeat is
+not an event: it is never filtered, never moves a reader's resume point, and is
+never relayed to SSE. The bus refuses `heartbeat_ms` outside 100 ms to one hour
+with `invalid_params`. A subscriber that does not set it is sent exactly the
+frames it was sent before. Console asks for 5 s and reports the bus `hung` when
+no frame of any kind arrives for 12.5 s (two and a half intervals, so one lost
+beat is not a hang), then reconnects with its usual backoff and resumes without
+loss. The daemon and console ship in lockstep: an older daemon refuses
+`heartbeat_ms`, which console reports as `refused` without dropping its resume
+point. `tm doctor`'s `events` row asks for 500 ms and waits 2 s for the first
+frame, then closes: a frame is `ok`, silence after the connect is `fail`
+(`hung`, remedy `tctl restart trusty-events`), and a refusal of `heartbeat_ms`
+is a version-skew `warn`.
+
+Console's own connection to the bus is served read-only at
+`GET /api/console/events/status`: `200` when connected, `503` otherwise, with a
+failure category (`not_running`, `refused`, `hung_up`, `hung`, `decode`, …)
+rather than error text, and no filesystem path. `connected` means the bus has
+sent a frame on the open subscription, a heartbeat or an event; a socket that
+only accepts is not connected, because the kernel accepts for a stopped daemon
+too. `hung` means the bus accepted but sent nothing within the bound; `hung_up`
+means it closed the connection. It sits behind the same per-listener
+Host/Origin guard as every other `/api/console` route (#9792), so a
+cross-origin read is refused with `403`. A page can use it to tell "no events"
+from "the bus is down, hung or unreachable" (§8.5). A WebSocket buys a return
 channel this spec has no use for. The existing `console_metrics` polling loop
 (`crates/trusty-console/src/metrics_poller.rs`) is unchanged and keeps serving
 the gauge routes.
@@ -1052,7 +1100,9 @@ a machine at rest are all normal.
   pointed at a stale session id is diagnosable from across the room.
 - **Distinguish empty from disconnected.** No events and a healthy SSE
   connection is "nothing is happening". No events and a dead connection is
-  "cannot see". They render differently, and the second names the daemon.
+  "cannot see". They render differently, and the second names the daemon. A
+  hung bus (§4.4: it accepts but sends no heartbeat) is "cannot see" too, never
+  "nothing is happening".
 
 ---
 

@@ -31,6 +31,7 @@ use crate::core::catchup::resolve::{
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
 use crate::daemon::catchup_host::CatchupHost;
+use crate::daemon::catchup_lean::{LeanParts, lean_payload, live_git_status_async};
 use crate::daemon::catchup_payload::{HydrationReceipt, catchup_payload, resolved_note};
 use crate::daemon::catchup_superseded::assess_snapshot;
 use crate::daemon::mcp_context_session_refs::{hydrate_session_refs, publish_session_ref};
@@ -111,6 +112,13 @@ fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
 /// naming what landed. It is `false` whenever the answer cannot be established
 /// — no snapshot, no recorded commit, a commit git no longer resolves — because
 /// a wrong `true` tells a PM to discard state it still needs.
+///
+/// #9883: everything above about `sessions`, `recent_commits`
+/// and `recent_memory` is the `full: true` answer, which applies no watermark.
+/// The default is lean — [`crate::daemon::catchup_lean::lean_payload`]: the same
+/// resolution, hydration and verify, plus the resolved snapshot's record and a
+/// live `git status`, and no digest. `all_projects` or a non-zero
+/// `sessions_offset` without `full` is an error.
 /// Test: `session_context_catchup_missing_project_dir_errors`,
 /// `session_context_catchup_returns_expected_shape`,
 /// `session_context_catchup_never_resolves_another_sessions_snapshot`,
@@ -190,12 +198,104 @@ pub(crate) async fn session_context_catchup_in(
         ));
     }
 
+    // #9883: both select from the digest, which only `full` returns; refuse
+    // rather than answer a narrower question than the caller asked.
+    if !full && (all_projects || sessions_offset > 0) {
+        return Err(
+            "`all_projects` and `sessions_offset` apply to the full digest; \
+                    pass `full: true` with them (#9883)"
+                .to_string(),
+        );
+    }
+
     // #6888: the reader derives the same id the pause writer derived, so the
     // exact-id route survives a restart that mints a new harness session id.
     let derived = derive_caller_session_id(tmux_window);
     let session_id = session_id.or(derived.as_deref());
 
-    let mut project_dirs = vec![primary.clone()];
+    let config = &host.config;
+    // #7830 / ADR-0062: rebuild the local cache from `refs/tm/sessions/**`
+    // BEFORE anything reads it, so a fresh clone resolves its snapshot through
+    // the unchanged read path.
+    let session_refs = if config.session_refs.enabled {
+        hydrate_session_refs(&primary, session_id).await
+    } else {
+        HydrationReceipt::default()
+    };
+
+    // #8408: the creation time gates the tmux-session route in both the
+    // digest's ownership test and the resolver.
+    let caller = CallerIdentity::new(session_id, tmux_window)
+        .with_tmux_session_created(tmux_session_created);
+
+    // #9883: the digest is `full`'s alone; the lean default never scans it.
+    let merged = if full {
+        Some(full_digest(host, &primary, &caller, all_projects).await)
+    } else {
+        None
+    };
+
+    // PR #5386: the exact-id lookup misses across a Claude Code relaunch, which
+    // mints a new harness session id inside the same tmux window.
+    let resolved = resolve_snapshot_for_identity(&primary, &caller);
+
+    // #7501: a snapshot whose recorded commit the checkout has moved past
+    // describes a plan that may already be done. Fail-open — see
+    // `catchup_superseded`.
+    let freshness = resolved
+        .as_ref()
+        .map(|r| assess_snapshot(&primary, &r.path))
+        .unwrap_or_default();
+
+    // #8408: a null snapshot must say when the tmux-session route was skipped.
+    let note = resolved_note(resolved.as_ref(), &caller);
+    let verified = host.verify_resume(&primary, resolved.as_ref()).await; // #9390
+    let Some(merged) = merged else {
+        // #9883: the lean default — the resolved snapshot plus the live tree.
+        let resolved_session = resolved.as_ref().and_then(|r| {
+            trusty_common::catchup::json::snapshot_json(&r.path)
+                .inspect_err(|e| eprintln!("session_context_catchup: warning: {e}"))
+                .ok()
+        });
+        return Ok(lean_payload(LeanParts {
+            resolved,
+            resolved_session,
+            note,
+            session_refs,
+            freshness,
+            resume_verify: verified,
+            git_status: live_git_status_async(&primary).await,
+        }));
+    };
+    Ok(catchup_payload(
+        merged,
+        sessions_offset,
+        resolved,
+        note,
+        session_refs,
+        freshness,
+        verified,
+    ))
+}
+
+/// The `full: true` digest of `primary`, plus every registered project when
+/// `all_projects` is set, each redacted for `caller` before merging.
+///
+/// Why: #9883 moved the digest behind `full`; split out so the lean default
+/// visibly never reaches it. Per #9883 the full digest applies no
+/// watermark, exactly as `full: true` did before.
+/// What: discovers the extra projects (fail-open on an unreadable registry),
+/// runs [`generate_catchup_json`] per project with `full: true` — which never
+/// persists a watermark — and redacts sessions the caller does not own (#5386).
+/// Test: `only_full_true_returns_the_digest`,
+/// `session_context_catchup_withholds_a_non_owners_handles`.
+async fn full_digest(
+    host: &CatchupHost,
+    primary: &Path,
+    caller: &CallerIdentity<'_>,
+    all_projects: bool,
+) -> trusty_common::catchup::CatchupJson {
+    let mut project_dirs = vec![primary.to_path_buf()];
     if all_projects {
         let registry = crate::core::claude_mpm_registry::default_registry_path();
         match crate::core::claude_mpm_registry::discover_claude_mpm_projects(&registry) {
@@ -216,24 +316,10 @@ pub(crate) async fn session_context_catchup_in(
     }
 
     let config = &host.config;
-    // #7830 / ADR-0062: rebuild the local cache from `refs/tm/sessions/**`
-    // BEFORE anything reads it, so a fresh clone resolves its snapshot through
-    // the unchanged read path.
-    let session_refs = if config.session_refs.enabled {
-        hydrate_session_refs(&primary, session_id).await
-    } else {
-        HydrationReceipt::default()
-    };
-
     // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
     // than concatenating it — an empty `sessions` array is only "nothing
     // paused" when that total is 0.
     let mut merged = trusty_common::catchup::CatchupJson::default();
-    // #8408: the creation time gates the tmux-session route in both the
-    // digest's ownership test and the resolver.
-    let caller = CallerIdentity::new(session_id, tmux_window)
-        .with_tmux_session_created(tmux_session_created);
-
     for dir in &project_dirs {
         let opts = CatchupOptions {
             project_dir: dir.clone(),
@@ -242,7 +328,7 @@ pub(crate) async fn session_context_catchup_in(
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,
             drawer_limit: config.catchup.drawer_limit,
-            full,
+            full: true,
         };
         // Manual catch-up NEVER advances the watermark — only automatic
         // session-start injection does (core/session_launch/mod.rs).
@@ -250,34 +336,10 @@ pub(crate) async fn session_context_catchup_in(
         // #5386: redact per project, before merging — session-id attribution is
         // read from the store of the project that owns the snapshot, so a merged
         // list would check every session against the primary project's log only.
-        redact_sessions_not_owned_by(dir, &caller, &mut digest.sessions);
+        redact_sessions_not_owned_by(dir, caller, &mut digest.sessions);
         merged.absorb(digest);
     }
-
-    // PR #5386: the exact-id lookup misses across a Claude Code relaunch, which
-    // mints a new harness session id inside the same tmux window.
-    let resolved = resolve_snapshot_for_identity(&primary, &caller);
-
-    // #7501: a snapshot whose recorded commit the checkout has moved past
-    // describes a plan that may already be done. Fail-open — see
-    // `catchup_superseded`.
-    let freshness = resolved
-        .as_ref()
-        .map(|r| assess_snapshot(&primary, &r.path))
-        .unwrap_or_default();
-
-    // #8408: a null snapshot must say when the tmux-session route was skipped.
-    let note = resolved_note(resolved.as_ref(), &caller);
-    let verified = host.verify_resume(&primary, resolved.as_ref()).await; // #9390
-    Ok(catchup_payload(
-        merged,
-        sessions_offset,
-        resolved,
-        note,
-        session_refs,
-        freshness,
-        verified,
-    ))
+    merged
 }
 
 /// Back the `session_context_pause` MCP tool.

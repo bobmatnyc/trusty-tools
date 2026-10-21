@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
+use crate::lsp::{LspConfig, LspManager};
+use crate::service::lsp_events::LspEventPublisher;
 use crate::types::SmellThresholds;
 use trusty_common::uds::server::{RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS};
 
@@ -84,6 +86,22 @@ pub struct AnalyzerAppState {
     /// What: defaults to `openai/gpt-4o-mini` when not configured.
     /// Test: covered transitively by `AnalyzerAppState::new`.
     pub llm_model: String,
+    /// The on-demand language-server children (#9078, DOC-72 §2).
+    ///
+    /// Why: the daemon owns every child it spawns, so its exit path can kill
+    /// them. What: built from `LspConfig::from_env()`, off unless
+    /// `ANALYZE_LSP=1`; constructing it spawns nothing. `serve_with_idle` calls
+    /// `shutdown_all` on both exits.
+    /// Test: `daemon_idle_exit_kills_the_child`.
+    pub lsp: Arc<LspManager>,
+    /// The producer the `analyze.lsp_*` handlers push their events through
+    /// (#9078, L4; DOC-72 §4).
+    ///
+    /// Why: `None` keeps construction pure — resolving the bus socket creates
+    /// a data directory — so the serve entry points attach it, and only while
+    /// `ANALYZE_LSP` is on (`lsp_events::attach`).
+    /// Test: `flag_off_emits_no_events`, `an_unresolvable_bus_still_serves`.
+    pub lsp_events: Option<Arc<LspEventPublisher>>,
 }
 
 impl AnalyzerAppState {
@@ -111,6 +129,8 @@ impl AnalyzerAppState {
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
+            lsp: Arc::new(LspManager::new(LspConfig::from_env())),
+            lsp_events: None,
         }
     }
 
@@ -132,6 +152,8 @@ impl AnalyzerAppState {
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
+            lsp: Arc::new(LspManager::new(LspConfig::from_env())),
+            lsp_events: None,
         }
     }
 
@@ -170,6 +192,22 @@ impl AnalyzerAppState {
     /// Test: covered transitively by the binary wiring tests.
     pub fn with_llm_model(mut self, model: impl Into<String>) -> Self {
         self.llm_model = model.into();
+        self
+    }
+
+    /// Replace the language-server manager (#9078).
+    ///
+    /// Test: `daemon_idle_exit_kills_the_child`.
+    pub fn with_lsp(mut self, lsp: Arc<LspManager>) -> Self {
+        self.lsp = lsp;
+        self
+    }
+
+    /// Attach the LSP event producer (#9078, L4).
+    ///
+    /// Test: `lsp_call_pushes_started_and_finished_with_parent_id`.
+    pub fn with_lsp_events(mut self, publisher: Arc<LspEventPublisher>) -> Self {
+        self.lsp_events = Some(publisher);
         self
     }
 
@@ -214,6 +252,17 @@ pub const CODE_NOT_FOUND: i64 = -32004;
 /// Test: `rpc_diagnostics_reports_deadline_exceeded_distinctly`, and
 /// trusty-review's `a_daemon_side_deadline_is_a_timeout_not_a_rejection`.
 pub const CODE_DEADLINE_EXCEEDED: i64 = -32005;
+
+/// JSON-RPC code for a refusal from the language-server capability (#9078).
+///
+/// Why: DOC-72 §2 forbids failing open, and a caller must tell "disabled",
+/// "stale", "hung" and "not installed" apart without parsing prose.
+/// What: `-32006`, the next code in the implementation-defined band. The
+/// error's `data.kind` carries `LspError::code` (`lsp_disabled`, `lsp_stale`,
+/// …) beside the fields that kind needs.
+/// Test: `a_version_other_than_the_current_one_is_stale`,
+/// `disabled_flag_is_lsp_disabled_for_every_method`.
+pub const CODE_LSP_ERROR: i64 = -32006;
 
 /// What kind of failure a handler is reporting.
 ///

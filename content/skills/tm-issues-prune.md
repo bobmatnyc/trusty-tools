@@ -31,6 +31,10 @@ the digest-per-epic rule that replaces a question per issue — belongs to
 `tm-ticketing` and to the project's root `TICKETING.md`, which overrides it.
 Read those for the thresholds; this skill is the sweep that runs them.
 
+🔴 Every issue the sweep closes, relabels or moves keeps a milestone,
+relationships and state — `tm-ticketing`, "Every issue: milestone,
+relationships, state". A close moves the state too.
+
 ## Scope: gh-first, JIRA deferred
 
 This skill operates on **GitHub Issues only**, via the `gh` CLI. JIRA is

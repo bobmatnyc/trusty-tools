@@ -16,11 +16,11 @@ schema_major = 1
 
 [[member]]
 path = "agents/BASE-AGENT.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "agents/BASE-ENGINEER.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/BASE-OPS.md"
@@ -72,7 +72,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/gcp-ops.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/golang-engineer.md"
@@ -88,7 +88,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/local-ops.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "agents/memory-manager.md"
@@ -96,11 +96,11 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/mpm-agent-manager.md"
-version = "0.1.0"
+version = "0.1.2"
 
 [[member]]
 path = "agents/mpm-skills-manager.md"
-version = "0.1.0"
+version = "0.1.2"
 
 [[member]]
 path = "agents/nextjs-engineer.md"
@@ -164,7 +164,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/ticketing.md"
-version = "0.1.0"
+version = "0.1.2"
 
 [[member]]
 path = "agents/trusty-agents/agents/assistant/persona.md"
@@ -256,7 +256,7 @@ version = "0.1.1"
 
 [[member]]
 path = "agents/version-control.md"
-version = "0.1.1"
+version = "0.1.3"
 
 [[member]]
 path = "agents/web-qa.md"
@@ -264,6 +264,38 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/web-ui-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-completion-standard.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-github.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-operating-rules.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-owner-model.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-search-memory.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-strategy.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-tmux-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-workflow.md"
 version = "0.1.0"
 
 [[member]]
@@ -320,7 +352,7 @@ version = "1.0.0"
 
 [[member]]
 path = "instructions/trusty-code/skills/git-workflow/SKILL.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "instructions/trusty-code/skills/internal-comms/SKILL.md"
@@ -388,7 +420,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/api-design-patterns.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/api-documentation.md"
@@ -408,11 +440,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/code-review-standards.md"
-version = "1.0.1"
+version = "1.1.0"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/contract-driven-testing.md"
@@ -428,11 +460,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/env-manager.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/git-workflow.md"
-version = "1.0.1"
+version = "1.1.1"
 
 [[member]]
 path = "skills/internal-comms.md"
@@ -444,7 +476,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/model-context-builder.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/requesting-code-review.md"
@@ -456,11 +488,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/rust-build-performance.md"
-version = "1.2.0"
+version = "1.2.1"
 
 [[member]]
 path = "skills/rust-delivery-workflow.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/rust-runtime-performance.md"
@@ -472,7 +504,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/self-improvement-loop.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/software-patterns.md"
@@ -520,11 +552,11 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-cli-operations.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/tm-delegation-patterns.md"
-version = "1.1.1"
+version = "1.2.0"
 
 [[member]]
 path = "skills/tm-doctor.md"
@@ -540,7 +572,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-init.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/tm-issues-prune.md"
@@ -564,7 +596,7 @@ version = "1.3.0"
 
 [[member]]
 path = "skills/tm-session-management.md"
-version = "1.2.0"
+version = "1.2.1"
 
 [[member]]
 path = "skills/tm-session-pause.md"
@@ -572,7 +604,7 @@ version = "1.1.0"
 
 [[member]]
 path = "skills/tm-session-resume.md"
-version = "1.2.0"
+version = "2.0.0"
 
 [[member]]
 path = "skills/tm-slack.md"
@@ -584,7 +616,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-ticketing.md"
-version = "2.1.0"
+version = "2.2.0"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"
@@ -596,7 +628,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-workflow.md"
-version = "2.1.1"
+version = "2.2.0"
 
 [[member]]
 path = "skills/tm.md"
@@ -604,7 +636,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/verification-before-completion.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/web-performance-optimization.md"
@@ -612,7 +644,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/webapp-testing.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/writing-plans.md"

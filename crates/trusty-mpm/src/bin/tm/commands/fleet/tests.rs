@@ -15,6 +15,7 @@ use super::*;
 use crate::cli::{Cli, Command};
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
+use trusty_mpm::core::project_skill_tier::architect_skills::SHIPPED;
 
 /// A tmux with no session and no stamp; the preflight tests use it too.
 pub(super) const NO_TMUX: Probe = Probe {
@@ -103,6 +104,18 @@ fn cli_parses_fleet_status() {
                 session: None,
             }
         }
+    ));
+}
+
+#[test]
+fn cli_parses_fleet_relaunch() {
+    // #9092: `relaunch` takes `status`'s `--dir` and `--session`.
+    let cli = Cli::try_parse_from(["tm", "fleet", "relaunch", "--session", "tm-sup"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Fleet {
+            action: FleetAction::Relaunch { dir: None, session: Some(s) }
+        } if s == "tm-sup"
     ));
 }
 
@@ -529,6 +542,29 @@ fn a_nested_claude_under_the_architect_is_not_this_session() {
 
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
+/// The pre-#9997 records directory: never seeded, only warned about.
+const STALE_DIR: &str = "records";
+
+/// #9997: every template `tm fleet init` seeds under `local/`.
+const LOCAL_TEMPLATES: &[&str] = &[
+    "local/state.md",
+    "local/actions.md",
+    "local/goals.md",
+    "local/user.md",
+    "local/instance.md",
+    "local/projects/_template.md",
+    "local/owner/README.md",
+    "local/owner/business.md",
+    "local/owner/process.md",
+    "local/owner/decision-making.md",
+    "local/owner/risk-tolerance.md",
+    "local/owner/detail-and-communication.md",
+    "local/owner/contradictions.md",
+    "local/owner/dream-log.md",
+    "local/mandates/README.md",
+    "local/mandates/example.toml",
+];
+
 /// The checkout's Architect seed, read from content once (#9132).
 fn seed() -> &'static ArchitectSeed {
     static SEED: std::sync::OnceLock<ArchitectSeed> = std::sync::OnceLock::new();
@@ -576,22 +612,40 @@ fn a_first_run_seeds_the_architect_project() {
     for rel in super::seed::DIRS {
         assert!(dir.join(rel).is_dir(), "{rel}");
     }
-    for skill in ["tm-fleet-check", "tm-context-refresh"] {
+    for skill in SHIPPED {
         assert!(
             dir.join(".claude/skills")
-                .join(skill)
+                .join(skill.stem)
                 .join("SKILL.md")
                 .is_file(),
-            "{skill}"
+            "{}",
+            skill.stem
         );
     }
+    // #9997: the `local/` layout, every template non-empty, none of the old one.
+    for rel in LOCAL_TEMPLATES {
+        let body = std::fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(!body.trim().is_empty(), "{rel} was seeded empty");
+    }
+    assert!(dir.join("local/projects").is_dir());
+    assert!(
+        !dir.join(STALE_DIR).exists(),
+        "a fresh init created the stale layout"
+    );
     let claude_md = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
     assert!(
         !claude_md.contains("TRUSTY-MPM:"),
         "an override marker was seeded"
     );
     assert!(!claude_md.contains("TRUSTY_MPM_PM_UNRESTRICTED"));
-    assert!(claude_md.contains("records/"), "{claude_md}");
+    assert!(claude_md.contains("local/state.md"), "{claude_md}");
+    for file in seeded_files() {
+        assert!(
+            !file.contents.contains(&format!("{STALE_DIR}/")),
+            "{} still names the stale layout",
+            file.dest
+        );
+    }
     let rendered = report.render();
     assert!(
         rendered.contains("poller start (--no-launch)"),
@@ -661,7 +715,7 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     for (rel, text) in edited {
         std::fs::write(dir.join(rel), text).unwrap();
     }
-    std::fs::remove_file(dir.join("records/actions.md")).unwrap();
+    std::fs::remove_file(dir.join("local/actions.md")).unwrap();
     let report = fx.init().unwrap();
     for (rel, text) in edited {
         assert_eq!(
@@ -680,48 +734,91 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     assert!(
         report
             .steps
-            .contains(&Step::Changed("wrote records/actions.md".to_owned()))
+            .contains(&Step::Changed("wrote local/actions.md".to_owned()))
     );
     assert!(!report.failed(), "{}", report.render());
     let again = fx.init().unwrap();
     assert!(!again.changed(), "{}", again.render());
 }
 
-/// Acceptance 2: every Architect-relative path and script a ported skill
-/// names exists in a freshly initialised project. `inbox/` is excluded: it is
-/// the poller's runtime directory, and `events.jsonl` is absent until #8392.
+/// Acceptance 2, and #9997 AC1: every Architect-relative path and script the
+/// shipped manual and each seeded skill name exists in a freshly initialised
+/// project. `inbox/` is excluded: it is the poller's runtime directory, and
+/// `events.jsonl` is absent until #8392. `scripts/check_architect_paths.sh`
+/// is the CI form of this check, with fenced blocks and command forms too.
 #[test]
 fn every_path_a_ported_skill_names_exists_after_init() {
     let fx = Fixture::new();
     fx.init().unwrap();
     let dir = fx.dir();
-    for skill in ported_skills() {
+    let manual = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("content/instructions/architect/architect.md");
+    let mut texts: Vec<(String, String)> = ported_skills()
+        .into_iter()
+        .map(|s| (s.dest, s.contents.to_owned()))
+        .collect();
+    texts.push((
+        "architect.md".to_owned(),
+        std::fs::read_to_string(&manual).expect("the shipped manual"),
+    ));
+    let mut total = 0;
+    for (name, contents) in &texts {
         let mut checked = 0;
-        for raw in skill
-            .contents
-            .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
-        {
+        for raw in contents.split(|c: char| c.is_whitespace() || "`'\"(),".contains(c)) {
             let word = raw.trim_end_matches(['.', ':', ';']);
-            let architect_path = ["scripts/", "records/", ".claude/"]
+            // #9997: the Architect's records live in `local/`; its docs in `docs/`.
+            let architect_path = ["scripts/", "local/", ".claude/", "docs/", "templates/"]
                 .iter()
                 .any(|p| word.starts_with(p))
                 || word == "CLAUDE.md";
             if !architect_path {
                 continue;
             }
-            // `records/projects/<project>.md` names a directory of per-project files.
-            let path = match word.find('<') {
+            // `local/projects/<project>.md` and `local/projects/*.md` name a
+            // directory of files; the directory must exist.
+            let path = match word.find(['<', '*']) {
                 Some(i) => dir.join(&word[..i]),
                 None => dir.join(word),
             };
-            assert!(
-                path.exists(),
-                "{}: `{word}` is missing after init",
-                skill.dest
-            );
+            assert!(path.exists(), "{name}: `{word}` is missing after init");
             checked += 1;
         }
-        assert!(checked >= 3, "{}: only {checked} paths found", skill.dest);
+        let floor = if name.contains("/tm-") || name == "architect.md" {
+            3
+        } else {
+            0
+        };
+        assert!(checked >= floor, "{name}: only {checked} paths found");
+        total += checked;
+    }
+    assert!(
+        total >= 40,
+        "only {total} paths found across {} texts",
+        texts.len()
+    );
+}
+
+/// #9997 AC3: the relay scripts and the voice guide the manual points at are
+/// seeded, the two shell scripts executable, and the directories the skills
+/// write into exist.
+#[test]
+fn the_relay_scripts_and_the_voice_guide_are_seeded() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for (rel, executable) in [
+        ("scripts/relay.sh", true),
+        ("scripts/posted.sh", true),
+        ("scripts/relay-marker.py", false),
+        ("docs/architect/voice.md", false),
+    ] {
+        let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert_eq!(meta.permissions().mode() & 0o111 != 0, executable, "{rel}");
+    }
+    for rel in ["local/users", "local/briefs"] {
+        assert!(dir.join(rel).is_dir(), "{rel} is not created");
     }
 }
 
@@ -747,7 +844,10 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
     ] {
         assert!(check.contains(needle), "missing: {needle}");
     }
-    assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
+    // #9997: one context bar, in tokens, set in `CLAUDE.md`.
+    assert!(
+        text("tm-context-refresh").contains("the bar (250k tokens by default; set in `CLAUDE.md`)")
+    );
 }
 
 /// #8878 R1 critic MEDIUM: the seeded instructions derive the poller's
@@ -1129,4 +1229,171 @@ fn the_skills_row_names_a_missing_or_custom_skill() {
         "{}",
         report.render()
     );
+}
+
+/// #9997 (decisions 1a and 2): an Architect seeded before `local/` keeps its
+/// `records/`. `tm fleet status` names the stale directory, says the refreshed
+/// skills now name `local/`, and moves nothing.
+#[test]
+fn status_warns_about_a_stale_records_dir_and_moves_nothing() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    assert!(fx.status().skills.ok, "{}", fx.status().render());
+    let dir = fx.dir();
+    let stale = dir.join(STALE_DIR);
+    std::fs::create_dir_all(stale.join("projects")).unwrap();
+    std::fs::write(stale.join("state.md"), "poll_count: 41\n").unwrap();
+    let kept = dir.join("local/projects/kept.md");
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, "kept\n").unwrap();
+
+    let report = fx.status();
+
+    assert!(!report.skills.ok, "{}", report.render());
+    let detail = &report.skills.detail;
+    for needle in [
+        format!("`{STALE_DIR}/`"),
+        "now name `local/`".to_owned(),
+        "moves nothing".to_owned(),
+    ] {
+        assert!(detail.contains(&needle), "missing `{needle}`: {detail}");
+    }
+    assert!(report.render().contains("WARN"), "{}", report.render());
+    assert_eq!(
+        std::fs::read_to_string(stale.join("state.md")).unwrap(),
+        "poll_count: 41\n"
+    );
+    assert!(stale.join("projects").is_dir());
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kept\n");
+}
+
+/// #9997: a re-init on a records-era Architect (a `records/` directory exists)
+/// writes no `local/` template row and creates no `local/` directory.
+#[test]
+fn a_reinit_beside_records_writes_no_local_templates() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    std::fs::remove_dir_all(dir.join("local")).unwrap();
+    std::fs::create_dir_all(dir.join(STALE_DIR)).unwrap();
+
+    let report = fx.init().unwrap();
+
+    assert!(
+        !dir.join("local").exists(),
+        "local/ was written beside records/:\n{}",
+        report.render()
+    );
+    assert!(!report.failed(), "{}", report.render());
+    assert!(dir.join("scripts/fleet-poll.py").is_file());
+}
+
+/// #9997: the init report warns, naming the path, when `records/` and a stale
+/// `local/` sit side by side; it deletes nothing. No `local/`: no warning.
+#[test]
+fn a_reinit_warns_about_a_stale_local_beside_records() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    std::fs::create_dir_all(dir.join(STALE_DIR)).unwrap();
+    let local = dir.join("local");
+
+    let rendered = fx.init().unwrap().render();
+
+    let needle = format!("stale `local/` directory at {}", local.display());
+    assert!(
+        rendered.contains(&needle),
+        "missing `{needle}`:\n{rendered}"
+    );
+    assert!(local.join("state.md").is_file(), "local/ was touched");
+
+    std::fs::remove_dir_all(&local).unwrap();
+    let rendered = fx.init().unwrap().render();
+    assert!(!rendered.contains("stale `local/`"), "{rendered}");
+}
+
+/// #9997 Fail-Open check: a records path that cannot be checked is a warning,
+/// never a silent pass; an absent one or a plain file is no warning.
+#[test]
+fn an_uncheckable_stale_dir_is_a_warning() {
+    use super::status::stale_records_warning;
+    let scratch = tempfile::tempdir().unwrap();
+    assert_eq!(stale_records_warning(scratch.path()), None);
+    std::fs::write(scratch.path().join(STALE_DIR), "a file\n").unwrap();
+    assert_eq!(stale_records_warning(scratch.path()), None);
+    // A file where the Architect directory should be: the lookup errors.
+    let not_a_dir = scratch.path().join("plain-file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let warning = stale_records_warning(&not_a_dir).expect("an error is a warning");
+    assert!(warning.starts_with("cannot check"), "{warning}");
+}
+
+/// #9997: every template asset is seeded byte-equal, so a template added
+/// under `src/assets/architect/templates/` without a `template!` row fails.
+#[test]
+fn every_template_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/templates");
+    let files = seeded_files();
+    let mut stack = vec![root.clone()];
+    let mut checked = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            // Finder metadata, skipped like the drift gate skips it.
+            if path.file_name().is_some_and(|n| n == ".DS_Store") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let dest = if rel == "gitignore" {
+                ".gitignore".to_owned()
+            } else {
+                rel
+            };
+            let seeded = files
+                .iter()
+                .find(|f| f.dest == dest)
+                .unwrap_or_else(|| panic!("{dest}: a template asset tm fleet init does not seed"));
+            assert_eq!(
+                seeded.contents,
+                std::fs::read_to_string(&path).unwrap(),
+                "{dest}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked,
+        LOCAL_TEMPLATES.len() + 1,
+        "templates found: {checked}"
+    );
+}
+
+/// #9997 AC5: a seed carrying one more skill writes it with no change to
+/// `seed.rs`; the table is built from the seed's skills.
+#[test]
+fn a_seed_with_one_more_skill_seeds_it() {
+    use trusty_mpm::core::project_skill_tier::architect_skills::ArchitectSkill;
+    let mut seed = seed().clone();
+    seed.skills.push(ArchitectSkill {
+        stem: "tm-probe-extra",
+        contents: "---\nname: tm-probe-extra\n---\n".to_owned(),
+        previous: &[],
+    });
+    let files = super::seed::files(&seed);
+    let row = files
+        .iter()
+        .find(|f| f.dest == ".claude/skills/tm-probe-extra/SKILL.md")
+        .expect("the extra skill is seeded");
+    assert_eq!(row.contents, "---\nname: tm-probe-extra\n---\n");
+    assert!(!row.executable);
 }

@@ -21,7 +21,12 @@ name        = "trusty-analyze"
 # comment in `src/core/github.rs` under it (retired-route prose cleanup); no
 # public signature changed. Bumped so the `PR version bump vs crates.io` gate
 # clears.
-version     = "0.12.7"
+#
+# 0.13.0 (#9078, L2): MINOR — 0.12.7 is live on crates.io. Adds the public
+# `lsp` module (stdio language-server client and child manager) and a public
+# `lsp` field on `AnalyzerAppState`, which breaks a struct literal outside the
+# crate. L3 and L4 of #9078 ride this same bump.
+version     = "0.13.0"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true

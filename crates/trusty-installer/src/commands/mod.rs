@@ -21,6 +21,8 @@ pub mod content_step;
 pub mod dependency_graph;
 pub mod doctor;
 pub mod ensure;
+// #10042: the launchd plist tctl writes for the trusty-events bus daemon.
+pub mod events_plist;
 pub mod install;
 pub mod install_gate;
 pub mod lifecycle;

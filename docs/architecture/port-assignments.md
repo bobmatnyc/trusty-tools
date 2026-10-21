@@ -48,26 +48,30 @@ else's guard test too).
 |------|------------------|------------------------------|----------------------|
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
-| 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) — **daemon bind only, pending removal**: since #6288 PR 1 no in-repo client dials it (they use the daemon socket); #6288 PR 2 retires the bind | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 
 Socket-only daemons hold no row above. `trusty-events` (the event bus,
 [ADR-0065](../adr/0065-trusty-events-process-placement.md)) is one: it binds no
 TCP port and listens on `trusty_common::daemon_socket_path("trusty-events")`,
-`<data dir>/trusty-events/trusty-events.sock`. It is launchd-supervised
-(`com.trusty.events`). Until #9075 lands the same ingest still binds
-`trusty-console.sock`.
+`<data dir>/trusty-events/trusty-events.sock`. Its launchd job
+(`com.trusty.events`) ships with #10042. Console no longer binds an ingest
+socket (#9075). The `trusty-mpm` daemon is another: since #6288 S3a it
+serves `<data dir>/trusty-mpm/trusty-mpm.sock` only and binds no TCP port.
 
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891`, `7890`, `7881`, `7879` and `7070` are also free again —
-#6277 moved `trusty-review` off TCP onto a Unix socket, #6287 did the same for
-`trusty-analyze`, #6286 for `trusty-memory`, and #6288 and #6289 retired the
-`trusty-mpm` supervisor's and `trusty-embedderd`'s listeners outright — but
-prefer sequential allocation over reusing a released value, so a stale reference
-to any of them in an old log or script cannot resolve to a different daemon.
+is **7892**. `7891`, `7890`, `7881`, `7880`, `7879` and `7070` are also free
+again — #6277 moved `trusty-review` off TCP onto a Unix socket, #6287 did the
+same for `trusty-analyze`, #6286 for `trusty-memory`, #6288 S3a for the
+`trusty-mpm` daemon (7880), and #6288 and #6289 retired the `trusty-mpm`
+supervisor's and `trusty-embedderd`'s listeners outright — but prefer
+sequential allocation over reusing a released value, so a stale reference to
+any of them in an old log or script cannot resolve to a different daemon.
+Do not reuse 7880 in particular: a launchd plist written before #6288 S3a
+still passes `--addr 127.0.0.1:7880`, which the daemon now ignores, and
+operators' scripts and bookmarks still name it.
 
 `7070` is the one to be most careful about: it was the workspace's
 longest-standing default, it is still named as a taken port by the
@@ -86,8 +90,10 @@ of those bind it; all three go when that client migrates. Whatever you pick:
    Neither `trusty-review` nor `trusty-analyze` has one — #6277 and #6287
    removed their `DEFAULT_PORT`s, and #6287 dropped `trusty-analyze`'s 7879
    row from the console's and `trusty-code`'s guard tables in the same change.
-   #6288 dropped the `trusty-mpm-supervisor` 7881 row from both, and #6289
-   dropped `trusty-embedderd`'s 7890 row, for the same reason.
+   #6288 dropped the `trusty-mpm-supervisor` 7881 row from both, #6289
+   dropped `trusty-embedderd`'s 7890 row, and #6288 S3a dropped the
+   `trusty-mpm` daemon's 7880 row from `trusty-code`'s, for the same reason.
+   The console's table keeps 7880 as a collision-history row only.
 4. Add a row to the table above.
 
 ## Incident History
@@ -95,7 +101,8 @@ of those bind it; all three go when that client migrates. Whatever you pick:
 - **#2566** — `trusty-review`'s original default (7880) collided with
   `trusty-mpm`'s `DEFAULT_DAEMON_ADDR`, crash-looping trusty-review's
   launchd agent on every install (`KeepAlive::Always`, 10s throttle).
-  Fixed by moving to 7890.
+  Fixed by moving to 7890. (`DEFAULT_DAEMON_ADDR` was removed with the
+  daemon's bind in #6288 S3a.)
 - **#2573** — trusty-review's follow-up default (7890) itself collided with
   `trusty-embedderd`'s `--http` mode default, which the original
   known-siblings table omitted because embedderd's HTTP listener is a
@@ -162,6 +169,13 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   counters from there, with an absent, corrupt, or stale file reported as such
   rather than as a zero. The installer's #4470 foreign-port guard for this
   bootstrap went with it — a process that binds nothing cannot collide.
+- **#6288 S3a** — the `trusty-mpm` **daemon** left this table. Its clients
+  moved to `<data dir>/trusty-mpm/trusty-mpm.sock` first (#9978), so the bind
+  on 7880 served no in-repo caller; S3a removed it together with the
+  ephemeral-port fallback and the `http_addr` discovery file. `--addr` and
+  `TRUSTY_MPM_ADDR` are accepted and ignored with a deprecation line until
+  2.0.0, because the host launchd plist still passes `--addr 127.0.0.1:7880`
+  and a hard error would crash-loop it on the 10 s throttle.
 - **#3364** — `trusty-code`'s default HTTP port (7881) collided with
   `trusty-mpm`'s supervisor metrics listener (then `DEFAULT_METRICS_ADDR`,
   also 7881; both removed by #6288) — two defaults picked independently, on
