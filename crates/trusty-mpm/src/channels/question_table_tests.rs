@@ -14,7 +14,8 @@ use std::time::Duration;
 use trusty_channels::policy::Channel;
 
 use super::{
-    Answer, Ask, Conversation, Fault, QuestionTable, QuestionTableError, ResolveOutcome, sha256_hex,
+    Answer, Ask, Conversation, Fault, QuestionTable, QuestionTableError, ResolveOutcome,
+    UnparsedOutcome, sha256_hex,
 };
 
 const BOB: &str = "U0ABCDEF1";
@@ -51,6 +52,7 @@ fn ask_of(route: &str, recipient: &str, conversation: Conversation) -> Ask {
         asker_managed_session: "tm-architect".into(),
         conversation,
         message_ts: "1700000000.000100".into(),
+        options: Vec::new(),
     }
 }
 
@@ -1418,4 +1420,264 @@ fn conversation_lookup_on_a_poisoned_table_is_none() {
     set_fault(&table, None);
     assert_eq!(table.find_by_conversation(&bob_conv()), None);
     assert_eq!(table.answer(id), None);
+}
+
+// ── #10127: option questions and the `unparsed` annotation ──────────────────
+
+/// Bob's ask with option `labels`.
+fn bob_options(labels: &[&str]) -> Ask {
+    Ask {
+        options: labels.iter().map(|l| (*l).to_owned()).collect(),
+        ..bob_ask()
+    }
+}
+
+/// #10127: the options are written in the `open` line and replayed.
+#[test]
+fn options_round_trip_through_the_log() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_options(&["Merge", "Hold"]));
+    let plain = ask(&table, ask_of("bob-dm", BOB, conv("D0BOB", "2.0")));
+    drop(table);
+    let log = log_lines(&fx.path);
+    assert_eq!(
+        log[1]["question"]["options"],
+        serde_json::json!(["Merge", "Hold"])
+    );
+    assert!(log[3]["question"].get("options").is_none(), "{}", log[3]);
+    let table = open_at(&fx.path);
+    let got = table.get(id).expect("open question");
+    assert_eq!(got.ask.options, ["Merge", "Hold"]);
+    assert!(
+        table
+            .get(plain)
+            .expect("open question")
+            .ask
+            .options
+            .is_empty()
+    );
+}
+
+/// #10127 back-compat: a log written before options existed opens, and its
+/// questions read as free-text questions that still resolve once.
+#[test]
+fn old_line_without_options_replays_as_no_options() {
+    let fx = fixture();
+    // The byte shape a pre-P2a daemon writes (#8433 P2, #9856).
+    let pre_p2a = concat!(
+        r#"{"v":1,"op":"reserve","id":1,"ts":"2026-10-12T00:00:00.000Z"}"#,
+        "\n",
+        r#"{"v":1,"op":"open","question":{"id":1,"opened_at":"2026-10-12T00:00:01.000Z","#,
+        r#""channel":"slack","route":"bob-dm","recipient":"U0ABCDEF1","#,
+        r#""asker_managed_session":"tm-architect","#,
+        r#""conversation":{"dm_channel_id":"D0BOB","thread_ts":"1700000000.000100"},"#,
+        r#""message_ts":"1700000000.000100"}}"#,
+        "\n",
+    );
+    // The table creates the sealed (0600) file; the old bytes replace its body.
+    drop(open_at(&fx.path));
+    std::fs::write(&fx.path, pre_p2a).expect("write old log");
+    let table = open_at(&fx.path);
+    let question = table.get(1).expect("the old question replays");
+    assert!(question.ask.options.is_empty());
+    assert_eq!(question.ask.recipient, BOB);
+    assert_eq!(
+        table.resolve(1, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+}
+
+/// #10127: a stored option set the ask would refuse fails the open.
+#[test]
+fn stored_option_set_breaking_the_rules_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_options(&["Merge", "Hold"]));
+    table.reserve().expect("reserve");
+    drop(table);
+    let log = log_lines(&fx.path);
+    let (reserve, open, after) = (&log[0], &log[1], &log[2]);
+    for (options, what) in [
+        (serde_json::json!(["Merge"]), "one option"),
+        (
+            serde_json::json!(["a", "b", "c", "d", "e", "f", "g"]),
+            "seven options",
+        ),
+        (
+            serde_json::json!(["Merge", "MERGE"]),
+            "duplicate after case fold",
+        ),
+        (serde_json::json!(["2", "Hold"]), "another option's number"),
+    ] {
+        let bad = edited(open, |o| o["question"]["options"] = options);
+        write_log(&fx.path, &[reserve.clone(), bad, after.clone()]);
+        assert_corrupt(&fx.path, 2, what);
+    }
+}
+
+/// #10127 Q1, Q4: a no-match reply is recorded as digest and length, the
+/// question stays open (it still resolves), and the record replays.
+#[test]
+fn unparsed_record_replays_and_keeps_the_question_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_options(&["Merge", "Hold"]));
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "maybe later"),
+        UnparsedOutcome::Marked
+    );
+    assert!(!table.state(id).expect("known").answered, "still open");
+    assert_eq!(table.answer(id), None);
+    drop(table);
+    let raw = std::fs::read_to_string(&fx.path).expect("log");
+    assert!(
+        !raw.contains("maybe later"),
+        "the reply text reached the log"
+    );
+    let line = log_lines(&fx.path).pop().expect("a line");
+    assert_eq!(line["op"], "unparsed");
+    assert_eq!(line["text_sha256"], sha256_hex("maybe later"));
+    assert_eq!(line["text_len"], 11);
+    let table = open_at(&fx.path);
+    let held = table.unparsed(id);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].text_sha256, sha256_hex("maybe later"));
+    assert_eq!(held[0].text_len, 11);
+    assert!(!table.state(id).expect("known").answered);
+    // Q1: the owner may reply again, and the question still resolves once.
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "hm"),
+        UnparsedOutcome::Marked
+    );
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "2"),
+        ResolveOutcome::Resolved
+    );
+    assert_eq!(table.unparsed(id).len(), 2);
+    drop(table);
+    assert!(open_at(&fx.path).state(id).expect("known").answered);
+}
+
+/// #10127: an `unparsed` line a correct table never writes fails the open.
+#[test]
+fn unparsed_for_unknown_id_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "maybe"),
+        UnparsedOutcome::Marked
+    );
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    let log = log_lines(&fx.path);
+    let ops: Vec<_> = log.iter().map(|r| r["op"].clone()).collect();
+    assert_eq!(ops, ["reserve", "open", "unparsed", "resolve"]);
+    let (reserve, open, unparsed, resolve) = (&log[0], &log[1], &log[2], &log[3]);
+    let cases = [
+        (
+            vec![
+                reserve.clone(),
+                open.clone(),
+                edited(unparsed, |u| u["id"] = 99.into()),
+            ],
+            3,
+            "unparsed for an unknown id",
+        ),
+        (
+            vec![reserve.clone(), unparsed.clone(), open.clone()],
+            2,
+            "unparsed before its open",
+        ),
+        (
+            vec![
+                reserve.clone(),
+                open.clone(),
+                resolve.clone(),
+                unparsed.clone(),
+            ],
+            4,
+            "unparsed for an answered question",
+        ),
+    ];
+    for (rows, line, what) in cases {
+        write_log(&fx.path, &rows);
+        assert_corrupt(&fx.path, line, what);
+    }
+}
+
+/// #10127: `mark_unparsed` refuses what `resolve` refuses and writes nothing.
+#[test]
+fn unparsed_for_unknown_question_writes_nothing() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    let before = std::fs::read(&fx.path).expect("log");
+    let refused = |got: UnparsedOutcome, want: ResolveOutcome, what: &str| {
+        assert_eq!(got, UnparsedOutcome::Refused(want), "{what}");
+        assert_eq!(std::fs::read(&fx.path).expect("log"), before, "{what}");
+    };
+    refused(
+        table.mark_unparsed(99, BOB, &bob_conv(), "x"),
+        ResolveOutcome::Unknown,
+        "unknown id",
+    );
+    refused(
+        table.mark_unparsed(reserved, BOB, &bob_conv(), "x"),
+        ResolveOutcome::Unknown,
+        "reserved-only id",
+    );
+    refused(
+        table.mark_unparsed(id, EVE, &bob_conv(), "x"),
+        ResolveOutcome::NotRecipient,
+        "another answerer",
+    );
+    refused(
+        table.mark_unparsed(id, BOB, &conv("D0BOB", "9.9"), "x"),
+        ResolveOutcome::NotRecipient,
+        "another thread",
+    );
+    assert!(table.unparsed(id).is_empty());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    let first = table.answer(id).expect("answered");
+    let before = std::fs::read(&fx.path).expect("log");
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "x"),
+        UnparsedOutcome::Refused(ResolveOutcome::AlreadyResolved { first })
+    );
+    assert_eq!(std::fs::read(&fx.path).expect("log"), before, "answered");
+}
+
+/// #10127 fail-open check: a failed `unparsed` append poisons the table and
+/// changes nothing in memory; the reopen finds the question open and
+/// unannotated.
+#[test]
+fn unparsed_write_failure_poisons_and_keeps_the_question_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_options(&["Merge", "Hold"]));
+    set_fault(&table, Some(Fault::BeforeWrite));
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "maybe"),
+        UnparsedOutcome::Refused(ResolveOutcome::Poisoned)
+    );
+    set_fault(&table, None);
+    assert!(table.is_poisoned());
+    assert!(table.unparsed(id).is_empty());
+    assert_eq!(
+        table.mark_unparsed(id, BOB, &bob_conv(), "maybe"),
+        UnparsedOutcome::Refused(ResolveOutcome::Poisoned)
+    );
+    drop(table);
+    let table = open_at(&fx.path);
+    assert!(table.unparsed(id).is_empty());
+    assert!(!table.state(id).expect("known").answered);
 }
