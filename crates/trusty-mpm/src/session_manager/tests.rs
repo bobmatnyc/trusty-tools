@@ -117,6 +117,9 @@ pub struct FakeTmuxDriver {
     pane_session: Mutex<Option<String>>,
     /// Controllable `pane_claude` answer (#8942); `Absent` when unset.
     pub pane_claude_override: Mutex<Option<crate::core::process::PaneClaude>>,
+    /// #10127: every `pane_harness` probe, as `(pane_id, harness)`; the
+    /// answer is `pane_claude_override`, `Present` when unset.
+    pub pane_harness_calls: Mutex<Vec<(String, String)>>,
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
     /// text)` (sibling-window hijack fix, follow-up to #2456).
     pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
@@ -180,6 +183,7 @@ impl FakeTmuxDriver {
             pane_exists_override: Mutex::new(None),
             pane_session: Mutex::new(None),
             pane_claude_override: Mutex::new(None),
+            pane_harness_calls: Mutex::new(Vec::new()),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
@@ -335,6 +339,24 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .lock()
             .unwrap()
             .unwrap_or(crate::core::process::PaneClaude::Absent)
+    }
+
+    /// #10127: the fake's one pane runs its harness unless
+    /// `pane_claude_override` says otherwise.
+    fn pane_harness(
+        &self,
+        _name: &str,
+        pane_id: &str,
+        harness: &str,
+    ) -> crate::core::process::PaneClaude {
+        self.pane_harness_calls
+            .lock()
+            .unwrap()
+            .push((pane_id.to_owned(), harness.to_owned()));
+        self.pane_claude_override
+            .lock()
+            .unwrap()
+            .unwrap_or(crate::core::process::PaneClaude::Present)
     }
 
     /// Report the controllable `pane_id_override` (sibling-window hijack fix,

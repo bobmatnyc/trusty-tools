@@ -614,6 +614,24 @@ pub trait ManagedTmuxDriver: Send + Sync {
         crate::core::process::PaneClaude::Unknown
     }
 
+    /// Whether a process named `harness` runs in pane `pane_id` of session
+    /// `name` (#10127).
+    ///
+    /// Why: a record can stay `Active` after its harness exits; its pane is
+    /// then a shell, and typed text runs as a command.
+    /// What: the default is `Unknown`, so a driver that cannot inspect the
+    /// pane never lets text through. The real driver reads the pane's pid
+    /// and asks [`crate::core::process::harness_under_pane`].
+    /// Test: `inbound_send_into_an_exited_harness_pane_types_nothing`.
+    fn pane_harness(
+        &self,
+        _name: &str,
+        _pane_id: &str,
+        _harness: &str,
+    ) -> crate::core::process::PaneClaude {
+        crate::core::process::PaneClaude::Unknown
+    }
+
     /// Durably publish `key=value` into the named session's tmux environment
     /// (#2157 item 1) — belt-and-suspenders alongside the pane-shell `export …;`
     /// prefix `runtime::claude_code`/`runtime::tcode` already send.
