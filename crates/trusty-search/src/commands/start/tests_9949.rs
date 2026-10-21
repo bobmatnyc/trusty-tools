@@ -95,6 +95,10 @@ struct ContendedBootstrap {
     venv_checks: Mutex<Vec<VenvCheck>>,
     /// `ensure_venv` fails (a decided error) from this 0-based call on.
     venv_fails_from: AtomicUsize,
+    /// #9971: `ensure_venv` calls before this 0-based index fail too.
+    venv_fails_before: AtomicUsize,
+    /// #9971: the error a failing `ensure_venv` returns.
+    venv_error: Mutex<fn() -> anyhow::Error>,
 }
 
 impl ContendedBootstrap {
@@ -109,6 +113,8 @@ impl ContendedBootstrap {
             budgets: Mutex::new(Vec::new()),
             venv_checks: Mutex::new(Vec::new()),
             venv_fails_from: AtomicUsize::new(usize::MAX),
+            venv_fails_before: AtomicUsize::new(0),
+            venv_error: Mutex::new(|| anyhow::anyhow!("fake venv rebuild failure")),
         })
     }
 
@@ -130,8 +136,10 @@ impl PythonBootstrap for ContendedBootstrap {
         let mut checks = self.venv_checks.lock().expect("venv_checks lock");
         let call = checks.len();
         checks.push(check);
-        if call >= self.venv_fails_from.load(Ordering::SeqCst) {
-            anyhow::bail!("fake venv rebuild failure");
+        if call >= self.venv_fails_from.load(Ordering::SeqCst)
+            || call < self.venv_fails_before.load(Ordering::SeqCst)
+        {
+            return Err((*self.venv_error.lock().expect("venv_error lock"))());
         }
         Ok(())
     }
@@ -542,3 +550,7 @@ async fn retry_wait_after_a_failed_probe_reads_retrying_with_the_error() {
             .await
     );
 }
+
+// #9971: the venv-build retry tests reuse this file's fakes.
+#[path = "venv_retry_9971_tests.rs"]
+mod venv_retry_9971;

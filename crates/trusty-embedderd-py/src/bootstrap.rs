@@ -45,12 +45,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use fs4::FileExt;
 use include_dir::{include_dir, Dir};
 use sha2::{Digest, Sha256};
 
 use crate::spawn_retry::run_bounded_python_check;
+// #9971: typed build failures, so the caller retries a network failure only.
+use crate::venv_error::{
+    human_bytes, smoke_exit_with, step_exit, VenvBuildError, REQUIRED_FREE_BYTES,
+    SMOKE_NETWORK_EXIT,
+};
 
 /// The Python project (pyproject + hashed uv.lock + `trusty_embed_sidecar`
 /// package + tests) embedded into the binary and materialized at bootstrap.
@@ -58,9 +63,6 @@ static PY_PROJECT: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/python");
 
 /// Pinned CPython version `uv python install` provisions for the venv.
 const PINNED_PYTHON: &str = "3.11";
-
-/// Approximate free space required to build the venv (torch is ~2-3 GB).
-const REQUIRED_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Default bootstrap timeout (each uv step); override via
 /// `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS`.
@@ -521,6 +523,13 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
     let py_root = layout.base.parent().context("venv base has no parent")?;
     // #9966: with no uv anywhere, fetch the pinned one unless TRUSTY_UV_FETCH=0.
     let uv = crate::uv_fetch::locate_or_fetch_uv(&|| Ok(py_root.to_path_buf()))?;
+    build_venv_with(layout, &uv)
+}
+
+/// The build steps after the disk precheck and the uv lookup, with `uv`
+/// injected so a test can drive two attempts through a fake (#9971).
+/// Test: `a_build_after_a_failed_sync_starts_over_the_partial_venv`.
+fn build_venv_with(layout: &VenvLayout, uv: &Path) -> Result<()> {
     materialize_project(&layout.project_dir)?;
 
     // Isolate uv's provisioned CPython + cache under the data dir so the venv
@@ -537,14 +546,15 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
 
     // 1. Pinned CPython.
     run_uv_step(
-        &uv,
+        uv,
         &["python", "install", PINNED_PYTHON],
         &layout.project_dir,
         &uv_python_dir,
     )?;
-    // 2. venv.
+    // 2. venv. #9971: over a clean dir — uv refuses an existing venv.
+    clear_unready_venv(layout)?;
     run_uv_step(
-        &uv,
+        uv,
         &[
             "venv",
             layout.venv_dir.to_str().context("venv path utf8")?,
@@ -557,7 +567,7 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
     // 3. Export the committed, hashed uv.lock → a platform-narrowed hashed
     //    requirements file.
     run_uv_step(
-        &uv,
+        uv,
         &[
             "export",
             "--frozen",
@@ -572,7 +582,7 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
     )?;
     // 4. uv pip sync into the venv from the hashed requirements.
     run_uv_step(
-        &uv,
+        uv,
         &[
             "pip",
             "sync",
@@ -599,17 +609,39 @@ fn build_venv(layout: &VenvLayout) -> Result<()> {
     Ok(())
 }
 
+/// Remove the venv dir a failed, never-ready build left behind (#9971).
+///
+/// Why: a retried build ran `uv venv` over the previous attempt's venv, and
+/// uv (0.11.16 and the pinned 0.12.23) refuses an existing venv without
+/// `--clear`, so the retry failed permanently at step 2. Removing the dir
+/// works with every uv version, unlike a flag older uv lacks.
+/// What: a no-op while `.ready` exists (that venv is never cleared here) or
+/// when there is no venv dir. Otherwise removes only `layout.venv_dir` — a
+/// symlink there is unlinked, not followed. The caller holds the bootstrap
+/// flock.
+/// Test: `a_build_after_a_failed_sync_starts_over_the_partial_venv`,
+/// `clear_unready_venv_spares_a_ready_venv_and_its_siblings`.
+fn clear_unready_venv(layout: &VenvLayout) -> Result<()> {
+    if layout.ready_sentinel().exists() || fs::symlink_metadata(&layout.venv_dir).is_err() {
+        return Ok(());
+    }
+    tracing::info!(
+        venv = %layout.venv_dir.display(),
+        "py-embedder: removing the unfinished venv a failed build left behind"
+    );
+    fs::remove_dir_all(&layout.venv_dir)
+        .with_context(|| format!("remove unfinished venv {}", layout.venv_dir.display()))
+}
+
 /// Precheck: refuse to start a ~3 GB build with insufficient free space.
 fn precheck_disk_space(base: &Path) -> Result<()> {
     // fs4::available_space needs an existing path; base is created by caller.
     match fs4::available_space(base) {
-        Ok(free) if free < REQUIRED_FREE_BYTES => bail!(
-            "insufficient disk space for the Python/MPS sidecar venv: {} free at {}, \
-             need ~{} GB (torch + sentence-transformers)",
-            human_bytes(free),
-            base.display(),
-            REQUIRED_FREE_BYTES / (1024 * 1024 * 1024)
-        ),
+        Ok(free) if free < REQUIRED_FREE_BYTES => Err(VenvBuildError::InsufficientDisk {
+            path: base.to_path_buf(),
+            free_bytes: free,
+        }
+        .into()),
         Ok(free) => {
             tracing::debug!(free = %human_bytes(free), "py-embedder: disk-space precheck ok");
             Ok(())
@@ -623,10 +655,6 @@ fn precheck_disk_space(base: &Path) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn human_bytes(n: u64) -> String {
-    format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 /// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs
@@ -747,17 +775,19 @@ fn run_with_timeout(
                 if status.success() {
                     return Ok(());
                 }
-                bail!("uv {} exited with {status}", args.join(" "));
+                // #9971: a failed download step is retried unless disk is low.
+                return Err(step_exit(args, status.to_string(), cwd).into());
             }
             None => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!(
-                        "uv {} timed out after {}s (TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS)",
-                        args.join(" "),
-                        timeout.as_secs()
-                    );
+                    // #9971: a stalled step (the torch download) is transient.
+                    return Err(VenvBuildError::Timeout {
+                        step: format!("uv {}", args.join(" ")),
+                        secs: timeout.as_secs(),
+                    }
+                    .into());
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -765,18 +795,58 @@ fn run_with_timeout(
     }
 }
 
+/// The smoke test's Python. `argv[1]` is the exit code for a network failure
+/// during the model download (#9971).
+///
+/// The chain walk accepts httpx transport errors and builtin
+/// `ConnectionError`/`TimeoutError`, except hub offline mode. huggingface_hub
+/// 1.24 closes its shared client on `httpx.ConnectError` and then retries on
+/// the closed client, which raises an untyped `RuntimeError`; the no-op
+/// `close_session` keeps the `ConnectError` in the chain.
+const SMOKE_CODE: &str = r#"import sys
+def _net(e):
+    off = getattr(sys.modules.get("huggingface_hub.errors"), "OfflineModeIsEnabled", None)
+    tr = getattr(sys.modules.get("httpx"), "TransportError", None)
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if off is not None and isinstance(e, off):
+            return False
+        if isinstance(e, (ConnectionError, TimeoutError)) or (tr is not None and isinstance(e, tr)):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+try:
+    import huggingface_hub.utils._http as _hub_http
+    _hub_http.close_session = lambda: None
+except Exception:
+    pass
+from trusty_embed_sidecar.model import build_encoder
+try:
+    enc = build_encoder(log=lambda m: print(m))
+except Exception as e:
+    if _net(e):
+        import traceback
+        traceback.print_exc()
+        sys.exit(int(sys.argv[1]))
+    raise
+v = enc(['trusty smoke test'])
+assert len(v) == 1 and len(v[0]) == 384 and any(v[0]), 'bad embedding'
+print('SMOKE_OK')
+"#;
+
 /// Import + one-embed smoke test in the freshly built venv. Loads torch, the
 /// pinned model, and embeds a probe — proving the venv is genuinely usable
 /// before `.ready` is written.
+/// #9971: a network failure during the model download exits
+/// [`SMOKE_NETWORK_EXIT`] and is transient (`smoke_exit_with`).
+/// Test: `a_smoke_test_network_exit_is_transient_and_other_exits_permanent`.
 fn smoke_test(layout: &VenvLayout) -> Result<()> {
     tracing::info!("py-embedder: running import+embed smoke test…");
-    let code = "from trusty_embed_sidecar.model import build_encoder\n\
-                v = build_encoder(log=lambda m: print(m))(['trusty smoke test'])\n\
-                assert len(v) == 1 and len(v[0]) == 384 and any(v[0]), 'bad embedding'\n\
-                print('SMOKE_OK')\n";
     let timeout = bootstrap_timeout();
+    let net_exit = SMOKE_NETWORK_EXIT.to_string();
     let mut cmd = Command::new(&layout.venv_python);
-    cmd.args(["-c", code])
+    cmd.args(["-c", SMOKE_CODE, &net_exit])
         .current_dir(&layout.project_dir)
         .env("PYTHONPATH", &layout.project_dir)
         .stdout(std::process::Stdio::inherit())
@@ -786,15 +856,26 @@ fn smoke_test(layout: &VenvLayout) -> Result<()> {
     loop {
         match child.try_wait().context("poll smoke test")? {
             Some(status) if status.success() => return Ok(()),
-            Some(status) => bail!("py-embedder smoke test failed: {status}"),
+            Some(status) => {
+                let dir = &layout.project_dir;
+                let free = fs4::available_space(dir).ok();
+                return Err(smoke_exit_with(
+                    status.code(),
+                    status.to_string(),
+                    dir,
+                    free,
+                ));
+            }
             None => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!(
-                        "py-embedder smoke test timed out after {}s",
-                        timeout.as_secs()
-                    );
+                    // #9971: the first smoke test downloads the model; a stall is transient.
+                    return Err(VenvBuildError::Timeout {
+                        step: "py-embedder smoke test".to_string(),
+                        secs: timeout.as_secs(),
+                    }
+                    .into());
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
