@@ -27,16 +27,21 @@ use crate::core::session_profile::SessionProfile;
 /// The tool-name globs an Architect launch denies (#10127 Q4).
 ///
 /// Why: owner ruling pending (Architect ruling 2026-10-21, "payload on hold"):
-/// the mechanism ships, the list ships EMPTY. The owner's later ruling changes
-/// only this line.
-/// Test: `the_production_lists_ship_empty`.
+/// the mechanism ships, the list ships EMPTY. Only `isolated_spec` (`tm fleet
+/// init`, `tm launch`, `tm connect`) and the GUI spawn apply it today; five
+/// other Architect launch sites do not, so filling this list also owes their
+/// wiring — `filling_a_production_list_owes_the_uncovered_launch_sites` names
+/// them and fails until they are covered.
+/// Test: `the_production_lists_ship_empty`,
+/// `filling_a_production_list_owes_the_uncovered_launch_sites`.
 pub const ARCHITECT_DENY_GLOBS: &[&str] = &[];
 
 /// The chat-token variables an Architect child does not inherit (#10127 Q3).
 ///
 /// Why: as [`ARCHITECT_DENY_GLOBS`] — Architect-only, shipped EMPTY until the
-/// owner rules.
-/// Test: `the_production_lists_ship_empty`.
+/// owner rules, and owing the same five launch sites when filled.
+/// Test: `the_production_lists_ship_empty`,
+/// `filling_a_production_list_owes_the_uncovered_launch_sites`.
 pub const ARCHITECT_ENV_UNSET: &[&str] = &[];
 
 /// Why an Architect launch was refused.
@@ -102,6 +107,13 @@ impl<'a> Lockdown<'a> {
             deny_globs,
             env_unset,
         }
+    }
+
+    /// Whether both lists are empty, so the lockdown changes no launch.
+    ///
+    /// Test: `gui_spawn_command_launches_an_architect_under_the_empty_lockdown`.
+    pub const fn is_empty(&self) -> bool {
+        self.deny_globs.is_empty() && self.env_unset.is_empty()
     }
 
     /// Every deny glob plus its [`capitalised`] variant, sorted, deduplicated.
@@ -234,7 +246,8 @@ fn merge_deny(body: &mut Map<String, Value>, rules: Vec<String>) -> Result<(), S
 ///
 /// Why: that line is re-split by the pane shell under a 1024-byte limit and
 /// cannot carry the lockdown payload; refusing is an error, never a silent
-/// launch without the lockdown.
+/// launch without the lockdown. Only a non-empty lockdown refuses: an empty one
+/// has nothing to carry.
 /// Test: `gui_spawn_command_refuses_an_architect`.
 pub const TYPED_LINE_REFUSAL: &str = "refusing to launch the Architect through the typed GUI \
      spawn line: it cannot carry the Architect lockdown --settings payload (#10127); launch the \

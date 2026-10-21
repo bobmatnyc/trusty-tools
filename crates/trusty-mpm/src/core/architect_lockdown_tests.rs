@@ -74,6 +74,31 @@ fn the_production_lists_ship_empty() {
     assert!(ARCHITECT_ENV_UNSET.is_empty(), "{ARCHITECT_ENV_UNSET:?}");
 }
 
+/// The Architect launch sites that do NOT apply the lockdown yet (#10127
+/// review). Wiring one into [`Lockdown`] removes it from this list.
+const UNCOVERED_ARCHITECT_LAUNCH_SITES: &[&str] = &[
+    "runtime/managed_launch.rs:249 ManagedLaunch::isolation_args (via runtime/claude_code.rs:577/832)",
+    "runtime/claude_code.rs:589 in-place resume command",
+    "bin/tm/commands/session/start.rs:138 inplace_session_spec",
+    "core/standalone/run.rs:185 run_launch_command (via runtime/cli_launch.rs:353)",
+    "client/http_client/session_connect.rs:314 client launch spec",
+];
+
+/// #10127 tripwire: a non-empty production list with an uncovered Architect
+/// launch site is a fail-open — that site launches the Architect without the
+/// deny or the env scrub. Filling either list owes the wiring named here.
+#[test]
+fn filling_a_production_list_owes_the_uncovered_launch_sites() {
+    let filled = !Lockdown::PRODUCTION.is_empty();
+    assert!(
+        !filled || UNCOVERED_ARCHITECT_LAUNCH_SITES.is_empty(),
+        "ARCHITECT_DENY_GLOBS / ARCHITECT_ENV_UNSET are non-empty, but these Architect launch \
+         sites do not apply the lockdown yet; wire each one (or refuse an Architect there) and \
+         remove it from UNCOVERED_ARCHITECT_LAUNCH_SITES:\n  {}",
+        UNCOVERED_ARCHITECT_LAUNCH_SITES.join("\n  ")
+    );
+}
+
 /// #10127 Q5: each word after the `mcp__` prefix gains a capital, so a
 /// differently-cased server name (`claude_ai_Slack`) is denied too.
 #[test]

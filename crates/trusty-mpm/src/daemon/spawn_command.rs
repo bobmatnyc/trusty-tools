@@ -89,22 +89,39 @@ pub(crate) fn relaunch_command() -> String {
 /// composed for (#8453) and, for a PM, `CLAUDE_CODE_DISABLE_ARTIFACT='1'`
 /// (#8992), then `claude --append-system-prompt-file '<file>'` and, for a PM,
 /// the `--disallowedTools` pair. Every value is single-quoted because the pane
-/// shell re-splits the line. #10127 Q2: an Architect stamp is an error naming
-/// [`crate::core::architect_lockdown::TYPED_LINE_REFUSAL`] — this line cannot
-/// carry the Architect lockdown.
+/// shell re-splits the line. #10127 Q2: under the shipped lockdown
+/// ([`gui_spawn_command_with`]).
 /// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
-/// `pm_launch_builders_carry_the_prompt_file`,
-/// `gui_spawn_command_trims_a_pm`, `gui_spawn_command_refuses_an_architect`.
+/// `pm_launch_builders_carry_the_prompt_file`, `gui_spawn_command_trims_a_pm`.
 pub(crate) fn gui_spawn_command(
     prompt_file: &std::path::Path,
     stamp: &(String, String),
+) -> anyhow::Result<String> {
+    gui_spawn_command_with(
+        prompt_file,
+        stamp,
+        &crate::core::architect_lockdown::Lockdown::PRODUCTION,
+    )
+}
+
+/// [`gui_spawn_command`] under the named `lockdown` (#10127 Q2).
+///
+/// What: an Architect stamp under a non-empty lockdown is an error naming
+/// [`crate::core::architect_lockdown::TYPED_LINE_REFUSAL`] — this line cannot
+/// carry the lockdown. Under an empty lockdown the Architect line is unchanged.
+/// Test: `gui_spawn_command_refuses_an_architect`,
+/// `gui_spawn_command_launches_an_architect_under_the_empty_lockdown`.
+pub(crate) fn gui_spawn_command_with(
+    prompt_file: &std::path::Path,
+    stamp: &(String, String),
+    lockdown: &crate::core::architect_lockdown::Lockdown<'_>,
 ) -> anyhow::Result<String> {
     use crate::core::pm_tool_trim::{stamped_profile, trim_args, trim_env};
     use crate::core::spawn_disclaim::pane::shell_single_quote;
     // #8992: the stamp's profile decides the trim; each piece is one shell word.
     let profile = stamped_profile(std::slice::from_ref(stamp));
-    // #10127 Q2: fail closed — never an Architect without its lockdown.
-    if profile.is_architect() {
+    // #10127 Q2: fail closed — never an Architect without a non-empty lockdown.
+    if profile.is_architect() && !lockdown.is_empty() {
         anyhow::bail!(crate::core::architect_lockdown::TYPED_LINE_REFUSAL);
     }
     let env: String = trim_env(profile)
@@ -153,8 +170,8 @@ pub(crate) fn gui_spawn_line(
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`;
     // the pane shell re-splits the line, so each token is single-quoted.
     // #8992: the profile decides whether the skill and tool parts apply.
-    // #10127 Q2: an Architect is refused before any settings file is written,
-    // and the prompt written for it is removed.
+    // #10127 Q2: an Architect under a non-empty lockdown is refused before any
+    // settings file is written, and the prompt written for it is removed.
     let stamp = crate::core::session_profile::launch_env(cli.profile);
     let command = gui_spawn_command(&file, &stamp).inspect_err(|_| {
         let _ = std::fs::remove_file(&file);
@@ -166,7 +183,8 @@ pub(crate) fn gui_spawn_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{gui_spawn_command, gui_spawn_line, relaunch_command};
+    use super::{gui_spawn_command, gui_spawn_command_with, gui_spawn_line, relaunch_command};
+    use crate::core::architect_lockdown::Lockdown;
 
     /// #8286: the GUI spawn line scrubs the markers, stamps the profile and
     /// hands `claude` the prompt file as one shell word.
@@ -204,20 +222,44 @@ mod tests {
         );
     }
 
-    /// #10127 Q2: the typed line cannot carry the Architect lockdown, so either
-    /// Architect stamp is refused with an error naming why. Before the fix it
+    /// #10127 Q2: the typed line cannot carry a non-empty Architect lockdown,
+    /// so either Architect stamp is refused with an error naming why; a PM
+    /// stamp under the same lockdown still gets its line. Before the fix it
     /// returned a launch line with no lockdown.
     #[test]
     fn gui_spawn_command_refuses_an_architect() {
         let file = std::path::Path::new("/t/p.txt");
+        let lockdown = Lockdown::new(&["mcp__*slack*"], &["SLACK_BOT_TOKEN"]);
         for value in ["architect", "supervisor"] {
-            let err = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), value.into()))
+            let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), value.into());
+            let err = gui_spawn_command_with(file, &stamp, &lockdown)
                 .expect_err("an Architect stamp is refused");
             assert_eq!(
                 err.to_string(),
                 crate::core::architect_lockdown::TYPED_LINE_REFUSAL
             );
             assert!(err.to_string().contains("cannot carry"), "{err}");
+        }
+        let pm = ("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into());
+        assert!(gui_spawn_command_with(file, &pm, &lockdown).is_ok());
+    }
+
+    /// #10127: the shipped lockdown is empty, so an allow-listed Architect dir
+    /// still gets its GUI spawn line, unchanged from before #10127.
+    #[test]
+    fn gui_spawn_command_launches_an_architect_under_the_empty_lockdown() {
+        let file = std::path::Path::new("/t/p.txt");
+        for value in ["architect", "supervisor"] {
+            let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), value.into());
+            let line = gui_spawn_command(file, &stamp).expect("not refused");
+            assert!(
+                line.ends_with(" claude --append-system-prompt-file '/t/p.txt'"),
+                "{line}"
+            );
+            assert_eq!(
+                gui_spawn_command_with(file, &stamp, &Lockdown::new(&[], &[])).expect("line"),
+                line
+            );
         }
     }
 
