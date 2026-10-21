@@ -10,7 +10,9 @@
 //! the code against the registry under an exclusive `flock`, then writes the
 //! registry and an empty schema-1 `state.json` (temp file + rename). Same code
 //! and session again is a no-op. [`load_for_write`] reads a store a writer
-//! may change. Nothing here is wired into `tm` yet (#9756 P0).
+//! may change. [`resolve_project`] normalises a caller's project path to its
+//! launch directory (#9758: a worktree path and its main checkout name one
+//! store).
 //! Test: `ledger_two_sessions_in_one_checkout_get_two_stores`,
 //! `ledger_init_refuses_a_code_held_by_another_live_session`,
 //! `ledger_store_anchors_to_the_launch_dir_from_a_worktree`.
@@ -20,6 +22,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +45,8 @@ pub struct StorePaths {
     pub outbox: PathBuf,
     pub acks: PathBuf,
     pub lock: PathBuf,
+    /// #9758: a commit's redo journal, present only mid-commit.
+    pub journal: PathBuf,
 }
 
 impl StorePaths {
@@ -68,9 +73,27 @@ impl StorePaths {
             outbox: file("outbox.jsonl"),
             acks: file("acks.json"),
             lock: file(".lock"),
+            journal: file("state.json.journal"),
             dir,
         })
     }
+}
+
+/// The launch directory of an absolute, existing `project` path, symlinks
+/// resolved (#9758: store paths are normalised before use).
+///
+/// # Errors
+/// [`LedgerError::Invalid`] for a relative path; [`LedgerError::Io`] when it
+/// cannot be resolved.
+pub fn resolve_project(project: &Path) -> Result<PathBuf, LedgerError> {
+    if !project.is_absolute() {
+        return Err(LedgerError::Invalid(format!(
+            "project {} must be an absolute path",
+            project.display()
+        )));
+    }
+    let real = fs::canonicalize(project).map_err(LedgerError::io(project))?;
+    Ok(launch_dir(&real))
 }
 
 /// The session's launch directory for a `cwd`: the nearest directory with a
@@ -139,7 +162,7 @@ pub fn init_store(
     let code = Code::parse(code)?;
     let paths = StorePaths::new(launch_dir, session)?;
     let now = normalize_ts(now)?;
-    let _lock = lock(&registry.with_extension("lock"))?;
+    let _lock = lock(&registry.with_extension("lock"), None)?;
     let mut reg: Registry = match fs::read_to_string(registry) {
         Ok(text) => serde_json::from_str(&text)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registry::default(),
@@ -196,8 +219,12 @@ pub fn load_for_write(paths: &StorePaths) -> Result<State, LedgerError> {
     Ok(state)
 }
 
-/// An exclusive `flock` on `path`, held until the file drops.
-fn lock(path: &Path) -> Result<File, LedgerError> {
+/// An exclusive `flock` on `path`, held until the file drops. `wait` bounds
+/// the wait (#9758: a hung holder never hangs a writer); `None` blocks.
+///
+/// # Errors
+/// [`LedgerError::Unavailable`] when `wait` passes; [`LedgerError::Io`].
+pub(crate) fn lock(path: &Path, wait: Option<Duration>) -> Result<File, LedgerError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(LedgerError::io(parent))?;
     }
@@ -207,21 +234,52 @@ fn lock(path: &Path) -> Result<File, LedgerError> {
         .write(true)
         .open(path)
         .map_err(LedgerError::io(path))?;
-    // SAFETY: the fd is open for the life of `file`; flock touches nothing else.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(LedgerError::io(path)(std::io::Error::last_os_error()));
+    let mode = libc::LOCK_EX | if wait.is_some() { libc::LOCK_NB } else { 0 };
+    let start = Instant::now();
+    loop {
+        // SAFETY: the fd is open for the life of `file`; flock touches nothing else.
+        if unsafe { libc::flock(file.as_raw_fd(), mode) } == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        match wait {
+            Some(w) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= w {
+                    return Err(LedgerError::Unavailable(format!(
+                        "{} is held by another writer (waited {w:?})",
+                        path.display()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return Err(LedgerError::io(path)(err)),
+        }
     }
-    Ok(file)
 }
 
-/// Writes `text` to a temp file beside `path`, fsyncs it and renames it over.
-fn write_atomic(path: &Path, text: &str) -> Result<(), LedgerError> {
+/// Writes `text` to a temp file beside `path`, fsyncs it, renames it over,
+/// then fsyncs the directory so the rename is durable before the caller's
+/// next step (#9758: the journal is removed only after this returns).
+/// Test: `ledger_writer_kill_after_the_state_replace_replays_without_reapplying`.
+pub(crate) fn write_atomic(path: &Path, text: impl AsRef<[u8]>) -> Result<(), LedgerError> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let result = File::create(&tmp)
-        .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
+        .and_then(|mut f| f.write_all(text.as_ref()).and_then(|()| f.sync_all()))
         .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    result.map_err(LedgerError::io(path))
+    result.map_err(LedgerError::io(path))?;
+    sync_dir(path)
+}
+
+/// Fsyncs the directory holding `path`, making a rename or unlink in it durable.
+pub(crate) fn sync_dir(path: &Path) -> Result<(), LedgerError> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(LedgerError::io(dir))
 }
