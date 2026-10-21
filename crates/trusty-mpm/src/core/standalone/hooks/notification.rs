@@ -3,7 +3,7 @@
 //! Why: Claude Code fires `Notification` when a session needs permission or
 //! sits idle awaiting input — the "needs user action" signal a fleet
 //! supervisor wants pushed rather than polled. [`super::mpm_hook_additions_with_exe`]
-//! writes six lifecycle events and never this one, and an operator who did not
+//! writes seven lifecycle events and never this one, and an operator who did not
 //! ask must keep exactly that, so the entry is opt-in. Nothing names "the
 //! supervisor session", so where `tm hook` forwards the event is configured,
 //! never inferred.

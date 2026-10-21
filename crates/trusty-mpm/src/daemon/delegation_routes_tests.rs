@@ -1127,9 +1127,9 @@ fn launch(state: &Arc<DaemonState>, session: SessionId, tool_use_id: &str, agent
 ///
 /// `outcome` is the `tool_response` the hook projection carries — the REAL wire
 /// discrimination between a stop that took and one that did not (#7511 review).
-/// `HookEvent::PostToolUseFailure` is deliberately not used: no hook block `tm`
-/// writes registers that name, so a test driving it would prove the branch and
-/// not the production path.
+/// A stop that failed outright arrives as `HookEvent::PostToolUseFailure`
+/// instead, registered since #10095 — see
+/// `a_task_stop_failure_event_releases_nothing_10095`.
 fn task_stop(state: &Arc<DaemonState>, session: SessionId, task_id: &str, outcome: Option<Value>) {
     let mut payload = serde_json::json!({
         "cwd": "/repo",

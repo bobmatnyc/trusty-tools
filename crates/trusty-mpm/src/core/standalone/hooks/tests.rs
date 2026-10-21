@@ -315,7 +315,7 @@ fn write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved() {
 }
 
 #[test]
-fn test_mpm_hook_additions_has_six_events() {
+fn test_mpm_hook_additions_has_seven_events() {
     // #1744: SessionStart/SessionEnd must be present so the daemon receives
     // them for claude_session_id capture and immediate-Stopped marking.
     // #2610: SubagentStop must be present so the hook handler sees a delegated
@@ -324,8 +324,17 @@ fn test_mpm_hook_additions_has_six_events() {
     let v = mpm_hook_additions_with_exe(Some(Path::new(STABLE_TEST_EXE)))
         .expect("a pinned installed-looking exe always resolves");
     let hooks = v.get("hooks").expect("missing 'hooks' key");
+    assert_eq!(
+        hooks.as_object().map(serde_json::Map::len),
+        Some(7),
+        "seven lifecycle events: {hooks}"
+    );
     assert!(hooks.get("PreToolUse").is_some(), "missing PreToolUse");
     assert!(hooks.get("PostToolUse").is_some(), "missing PostToolUse");
+    assert!(
+        hooks.get("PostToolUseFailure").is_some(),
+        "missing PostToolUseFailure (#10095)"
+    );
     assert!(hooks.get("Stop").is_some(), "missing Stop");
     assert!(
         hooks.get("SubagentStop").is_some(),
@@ -402,6 +411,7 @@ fn test_mpm_hook_additions_with_exe_embeds_absolute_path() {
     for event in &[
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
@@ -1031,6 +1041,7 @@ fn test_write_project_hooks_collapses_stale_hash_and_mvp_entries() {
     for event in &[
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
@@ -1134,6 +1145,7 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
     // Every other event started empty, so exactly one (MPM) group must survive.
     for event in &[
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
@@ -1464,6 +1476,7 @@ fn write_project_hooks_replaces_a_build_tree_group_instead_of_duplicating_it() {
     for event in [
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "SubagentStop",
         "SessionStart",
