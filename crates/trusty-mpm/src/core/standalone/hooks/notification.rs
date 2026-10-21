@@ -165,7 +165,7 @@ pub fn notification_hook_additions_with_exe(
 /// the settings lock, [`plan_notification_hook`] computes the new value; an
 /// unchanged plan returns `Ok(false)` without writing, and a changed one is
 /// snapshotted and published atomically. Returns `true` when the file changed.
-/// Test: `opt_in_off_installs_exactly_the_six_lifecycle_events`,
+/// Test: `opt_in_off_installs_exactly_the_seven_lifecycle_events`,
 /// `opt_in_on_writes_one_entry_and_rerunning_is_idempotent`,
 /// `opt_in_off_removes_only_the_entry_tm_wrote`,
 /// `a_malformed_settings_file_is_refused_and_left_byte_identical`.
