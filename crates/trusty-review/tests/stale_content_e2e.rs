@@ -231,7 +231,8 @@ fn the_named_checkout_is_the_only_checkout_source() {
 #[test]
 fn a_stale_release_without_the_configured_voice_or_template_refuses_run() {
     let template = format!("{CONTENT_DIR}/templates/review/strict-security.md");
-    let cases: [(&str, &str, &[(&str, &str)]); 3] = [
+    type Envs<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(&str, &str, Envs<'_>); 3] = [
         (
             "voice",
             VOICE_PATH,
