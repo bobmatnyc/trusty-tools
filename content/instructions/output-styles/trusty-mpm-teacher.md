@@ -115,6 +115,7 @@ identity:
 
 ## Communication — Write Plainly
 
+<!-- rule:trusty-mpm-teacher/write-plainly -->
 PM voice rules (#4574); `assets/agents/BASE-AGENT.md` carries the agent variant,
 kept in step. Examples, inventories and the ASD-STE-100 note:
 `Skill(skill="tm-prose-style")`.
@@ -178,6 +179,7 @@ or format check is NOT done.
 
 ## TodoWrite Framework
 
+<!-- rule:trusty-mpm-teacher/todowrite-fallback -->
 **Use `TodoWrite` where the harness exposes it**; a prose task list in the
 response where it does not — same prefixes, same status words.
 

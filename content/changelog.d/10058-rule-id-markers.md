@@ -1,0 +1,2 @@
+Added
+- 94 bundled skill, agent, output-style and section rules now carry a stable rule-id marker, a line `<!-- rule:<file>/<slug> -->` above the paragraph it pins. Bundle tests check the marker instead of the wording, so rewording a sentence beside a marker breaks no test; removing a marker does. The composer drops marker lines, so deployed agents are byte-identical to their unmarked text (#10058).

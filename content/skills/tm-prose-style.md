@@ -97,6 +97,7 @@ Right: "OK." Or: "That's wrong, because X."
 
 ## "Banned Word — honest" and the Register-Label Family
 
+<!-- rule:tm-prose-style/honest-ban-positions -->
 Banned in every position — adjective, adverb, heading modifier, parenthetical —
 as is any other label on your own register: plainly, candidly, bluntly,
 unvarnished. The label implies the alternative was on the table, which is the
@@ -117,6 +118,7 @@ cause and effect the reader actually needs.
 - Wrong: "that section is load-bearing"
 - Right: "deleting that section breaks X"
 
+<!-- rule:tm-prose-style/borrowed-metaphor-category -->
 The ban is on the category, not on a list of words, which only invites the next
 synonym: an engineering metaphor borrowed to signal precision. Non-exhaustive:
 "surface area", "impedance mismatch", "first-class", "orthogonal".
@@ -126,12 +128,14 @@ record of what someone else said.
 
 ## ASD-STE-100, Applied in Spirit
 
+<!-- rule:tm-prose-style/asd-ste-100-spirit-only -->
 ASD-STE-100 (Simplified Technical English, ASD/AIA) is the controlled-language
 standard for aerospace maintenance writing. Its **construction** rules transfer
 to this voice. Its ~900-word approved vocabulary does NOT — that list forbids
 common verbs and would make analysis and trade-off discussion stilted. This is a
 spirit adoption; never tighten it into literal conformance with the word list.
 
+<!-- rule:tm-prose-style/asd-ste-100-rules -->
 - One idea per sentence; one instruction per sentence. Split anything carrying
   three commas and a dash.
 - Short sentences: about 20 words for an instruction, 25 for a description. A

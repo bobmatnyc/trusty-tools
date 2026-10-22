@@ -124,6 +124,7 @@ newest-first work-context digest for the current project instead;
 - ✅ `CLAUDE.md` — project instructions (created or smart-merged). The commit
   and PR footer comes from the `attribution` key tm writes into the provisioned
   Claude Code settings; never restate it in prose.
+<!-- rule:tm-init/build-performance-section -->
 - ✅ **Build Performance pointer (Rust projects only)** — when `Cargo.toml`
   exists at the project root, a scaffolded or refreshed `CLAUDE.md` MUST
   include a short **Build Performance** section, added at setup time instead
@@ -132,9 +133,11 @@ newest-first work-context digest for the current project instead;
     (`Skill(skill="rust-build-performance")`) for the day-to-day discipline —
     `cargo check` first, trim the dependency/feature graph, and protect
     incremental compilation.
+  <!-- rule:tm-init/timings-baseline -->
   - Name `cargo build --timings` as the first concrete action for a new
     contributor: establish a measured baseline before assuming anything is
     slow or reaching for a shared-cache/compiler-flag fix.
+  <!-- rule:tm-init/no-unmeasured-sccache-claim -->
   - **Never assert that `sccache` (or any other shared compilation cache)
     makes builds faster.** The skill's own §6 is explicit that for a
     workspace's own path/member crates — the common multi-worktree
