@@ -500,3 +500,63 @@ async fn a_scan_that_outlives_shutdown_buffers_nothing_9167() {
     );
     assert_eq!(publisher.buffered_len(), 0);
 }
+
+/// #9167: a final scan held past half the shutdown budget logs the timeout
+/// warning and still closes reading, and shutdown returns on time.
+#[tokio::test]
+async fn a_final_scan_past_its_budget_warns_and_still_closes_reading_9167() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript = dir.path().join("b.jsonl");
+    append(&transcript, "");
+    let state = DaemonState::new();
+    let publisher = Arc::new(ActionPublisher::new(dir.path().join("bus.sock")));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    state.push_hook_event(hook(SessionId::new(), HookEvent::PreToolUse, &transcript));
+
+    // #4931: a thread-local capture needs the global level raised first.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let _capture = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    ));
+
+    // Another thread holds the scan lock, so the final scan cannot start.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let publisher = Arc::clone(&publisher);
+        std::thread::spawn(move || {
+            let _held = publisher.scanning.lock();
+            locked_tx.send(()).expect("signal locked");
+            // Returns on release or when the test drops the sender.
+            let _ = release_rx.recv();
+        })
+    };
+    locked_rx.recv().expect("holder took the scan lock");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .action_events()
+            .shutdown_within(Duration::from_millis(200)),
+    )
+    .await
+    .expect("shutdown hung past 5 s with the scan lock held");
+
+    let lines = buffer.tail(64);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("shutdown transcript scan outlived its budget")),
+        "{lines:?}"
+    );
+    // The scan never took its job; only `close()` makes the due list empty.
+    assert!(
+        publisher.received.lock().take_due().is_empty(),
+        "reading still open after the timed-out scan"
+    );
+    drop(release_tx);
+    holder.join().expect("holder thread");
+}
