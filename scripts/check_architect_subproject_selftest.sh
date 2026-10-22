@@ -68,6 +68,9 @@ leak_text() { # $1 = kind
     host_local) printf 'ssh studio.local\n' ;;
     # #10161: the host boundary still catches a <name>.local mid-line.
     host_local_port) printf 'curl http://studio.local:8080/\n' ;;
+    # #10161: a host before Markdown emphasis, and a .localdomain host.
+    host_emphasis) printf 'see _studio.local_ for builds\n' ;;
+    host_localdomain) printf 'ssh myhost.localdomain\n' ;;
     host_tailnet) printf 'ssh box.tail1234.ts.net\n' ;;
     slack) printf 'notify U01ABC23DEF now\n' ;;
     email) printf 'mail someone@corp.io\n' ;;
@@ -147,7 +150,7 @@ unpaired-skill${TAB}UNPAIRED
 empty${TAB}EMPTY"
 # #9996: every new class in the content tree and in the Python tree; the
 # assets copy gets a representative pair.
-for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_local_port host_tailnet slack email gh_config gh_config_long tailnet_ip; do
+for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_local_port host_emphasis host_localdomain host_tailnet slack email gh_config gh_config_long tailnet_ip; do
   case "$kind" in
     owner_*) class=OWNER_NAME ;; org*) class=ORG ;; host_*) class=HOSTNAME ;;
     slack) class=SLACK_ID ;; email) class=EMAIL ;;
@@ -233,6 +236,7 @@ for tree in content python; do
     'localhost 127.0.0.1 .claude/settings.local.json' \
     'window.localStorage a.localeCompare(b) code.language-mermaid db.LOCAL_URL' \
     'threading.local() self.local.cache = 1' \
+    'self.local_cache = {} os.environ.local_settings cfg.internal_api() pre.language-python' \
     'TEMPLATES_REFRESH CONTEXTUALIZE U+1F600' \
     '~/.config/gh-<account> gh-example ~/.config/gh-example/hosts.yml ~/.config/gh-acme' \
     '100.20.1.1 1.100.64.1 100.128.0.1 100.63.255.255' >"$f"
