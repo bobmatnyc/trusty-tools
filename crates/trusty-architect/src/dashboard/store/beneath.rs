@@ -162,11 +162,11 @@ pub(super) fn write_atomic(anchor: &Path, rel: &Path, bytes: &[u8]) -> Result<()
                 .map_err(DashError::io(&path))
         });
     let renamed = written.and_then(|()| rename_in(&dir, tmp, name));
-    if renamed.is_err() {
-        if let Ok(c) = c_name(tmp, &path) {
-            // SAFETY: `dir.fd` is open; a failed unlink of the temp file is ignored.
-            unsafe { libc::unlinkat(dir.fd.as_raw_fd(), c.as_ptr(), 0) };
-        }
+    if renamed.is_err()
+        && let Ok(c) = c_name(tmp, &path)
+    {
+        // SAFETY: `dir.fd` is open; a failed unlink of the temp file is ignored.
+        unsafe { libc::unlinkat(dir.fd.as_raw_fd(), c.as_ptr(), 0) };
     }
     renamed?;
     sync(&dir.fd, &dir.path)

@@ -9,8 +9,8 @@
 //! already a store type, and [`DashError::code`], the error class that fixes
 //! the exit code: a stale `if_version` is 1 (D34), a refused request 2, an
 //! unreadable or locked store 3.
-//! Test: `architect_dashboard_methods_round_trip_over_the_daemon_socket`,
-//! `dashboard_rpc_classes_fix_the_exit_codes`.
+//! Test: `dashboard_rpc_classes_fix_the_exit_codes` (the trusty-mpm daemon,
+//! MCP and CLI tests cover the surfaces).
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-03~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-03~draft)

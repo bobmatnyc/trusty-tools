@@ -13,10 +13,9 @@
 //! a reply as the prototype's CLI does: `json.dump(indent=2)` in its key
 //! order, `pruned` lines raw, `tally`/`footer` as their line unless JSON
 //! was asked for.
-//! Test: `architect_dashboard_methods_round_trip_over_the_daemon_socket`,
-//! `dispatch_architect_dashboard_tool_writes_and_conflicts`,
-//! `dashboard_binary_conflict_exits_1_and_writes_nothing`,
-//! `dashboard_verbs_render_the_prototype_shapes`.
+//! Test: `dashboard_verbs_render_the_prototype_shapes`,
+//! `dashboard_rpc_classes_fix_the_exit_codes` (the trusty-mpm daemon, MCP and
+//! CLI tests cover the surfaces).
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-03~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-03~draft)
