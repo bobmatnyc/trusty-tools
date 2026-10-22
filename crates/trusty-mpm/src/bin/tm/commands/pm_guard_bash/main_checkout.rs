@@ -138,6 +138,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
+use trusty_mpm::daemon::services::delegation_records::DelegationRecordView;
 
 use super::shell_groups::{self, Step};
 use super::{
@@ -146,6 +147,7 @@ use super::{
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
+use crate::commands::pm_guard_dispatch_deny::blocking_records;
 use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 
 // #9146: which directories a command may stand in across `cd`s.
@@ -909,11 +911,21 @@ fn staged_source_deny_reason(target: &Path, source: &[&str]) -> String {
 /// What: names the checkout, the writers the daemon reports, and the remedy.
 /// It attributes the claim to the daemon's records for the reason
 /// [`head_move_deny_reason`] gives: a record can outlive its agent.
-/// Test: `docs_commit_deny_reason_names_the_writer_and_attributes_the_claim`.
-pub(crate) fn docs_commit_deny_reason(target: &Path, live: &[String]) -> String {
+/// Since #6556 it ends with each record's agent id and age, the 6 h sweep that
+/// clears a record nothing closes, and `tm repair delegation --list`.
+/// Test: `docs_commit_deny_reason_names_the_writer_and_attributes_the_claim`,
+/// `pm_guard_docs_commit_deny_names_the_blocking_record_6556` in
+/// `tests/tm_hook_pm_guard.rs`.
+pub(crate) fn docs_commit_deny_reason(
+    target: &Path,
+    live: &[String],
+    records: &[DelegationRecordView],
+) -> String {
     let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
     names.sort_unstable();
     names.dedup();
+    // #6556: a stale record blocked docs commits for hours behind a bare type name.
+    let records = blocking_records(target, records);
     format!(
         "Documents-only commit denied in a SHARED main checkout (ADR-0049): the staged set is \
          documents and configuration, which may be committed in {} — but a commit moves HEAD, \
@@ -925,8 +937,10 @@ pub(crate) fn docs_commit_deny_reason(target: &Path, live: &[String]) -> String 
          will not help. Wait for that agent to finish and commit then, or commit from a worktree: \
          ask the PM to re-dispatch you with `isolation: \"worktree\"`, or \
          `git worktree add .claude/worktrees/<name>`. If you believe that record is stale — the \
-         agent finished without its stop signal reaching the daemon — report it to the PM rather \
-         than retrying this command. Nothing is lost; the staged changes are still in the tree.",
+         agent finished without its stop signal reaching the daemon — the daemon's sweep clears \
+         it once it is 6 h old; clear it sooner with the repair command below, or report it to the PM, \
+         rather than retrying this command. Nothing is lost; the staged changes are still in the \
+         tree.{records}",
         target.display(),
         names.join(", ")
     )
@@ -2558,7 +2572,8 @@ mod tests {
 
     #[test]
     fn docs_commit_deny_reason_names_the_writer_and_attributes_the_claim() {
-        let reason = docs_commit_deny_reason(Path::new("/repo"), &["rust-engineer".to_string()]);
+        let live = ["rust-engineer".to_string()];
+        let reason = docs_commit_deny_reason(Path::new("/repo"), &live, &[]);
         assert!(reason.contains("/repo"), "{reason}");
         assert!(reason.contains("rust-engineer"), "{reason}");
         assert!(reason.contains("ADR-0049"), "{reason}");
