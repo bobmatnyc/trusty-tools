@@ -282,10 +282,12 @@ impl DaemonClient {
 /// [`crate::core::model_inject::write_pm_prompt_file_in`] (production: the
 /// process temp dir; `action` is "launch" or "connect" in the refusal text), and returns [`client_claude_spec`] carrying that file;
 /// `Err` names the file, the I/O cause and `workdir`. The profile the prompt was
-/// composed for also decides the #8992 tool trim.
+/// composed for also decides the #8992 tool trim and, for an Architect, the
+/// #10127 lockdown; a lockdown error refuses the launch.
 /// Test: `launch_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
 /// `connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
-/// `client_prompt_spec_trims_a_pm_launch`.
+/// `client_prompt_spec_trims_a_pm_launch`,
+/// `an_architect_client_prompt_spec_carries_the_lockdown`.
 fn client_prompt_spec(
     dir: &std::path::Path,
     workdir: &str,
@@ -293,12 +295,25 @@ fn client_prompt_spec(
     action: &str,
 ) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
     let project = std::path::Path::new(workdir);
-    // #9012: the PM instructions are runtime content; none refuses the launch.
-    let content = crate::core::content_source::framework_content_for(project)
-        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     // #8992: resolve the profile once, so the prompt and the tool trim agree.
     // This is the resolution `build_system_prompt_for` performs internally.
     let profile = crate::core::session_profile::resolve_ambient(project);
+    client_prompt_spec_as(dir, project, config_root, action, profile)
+}
+
+/// [`client_prompt_spec`] for a resolved `profile` (#10127 test seam).
+///
+/// Test: `an_architect_client_prompt_spec_carries_the_lockdown`.
+fn client_prompt_spec_as(
+    dir: &std::path::Path,
+    project: &std::path::Path,
+    config_root: Option<&std::path::Path>,
+    action: &str,
+    profile: crate::core::session_profile::SessionProfile,
+) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
+    // #9012: the PM instructions are runtime content; none refuses the launch.
+    let content = crate::core::content_source::framework_content_for(project)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let prompt = crate::core::session_launch::build_system_prompt_for_profile(
         &content,
         project,
@@ -314,9 +329,13 @@ fn client_prompt_spec(
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
     // #8992: the same profile decides whether the skill and tool parts apply.
-    spec.args.extend(
-        crate::core::launch_policy::provision_settings_default(project, None, profile).argv(),
-    );
+    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile);
+    // #10127: the owner file and an Architect's deny as ONE `--settings`.
+    crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_spec(
+        profile,
+        settings.file.as_deref(),
+        &mut spec,
+    )?;
     Ok(spec)
 }
 
@@ -393,6 +412,28 @@ mod prompt_refusal_tests {
                     .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
                 "{spec:?}"
             );
+        }
+    }
+
+    /// #10127: the daemon client's launch and connect of an Architect carry
+    /// the production deny as ONE `--settings` and unset every chat token.
+    /// Before the fix the Architect spec carried the bare owner file.
+    #[test]
+    fn an_architect_client_prompt_spec_carries_the_lockdown() {
+        use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+        let project = tempfile::tempdir().expect("project");
+        let dir = tempfile::tempdir().expect("prompt dir");
+        for action in ["launch", "connect"] {
+            let spec = super::client_prompt_spec_as(
+                dir.path(),
+                project.path(),
+                None,
+                action,
+                crate::core::session_profile::SessionProfile::Architect,
+            )
+            .expect("the Architect spec builds");
+            assert_production_deny(&spec.args);
+            assert_chat_tokens_unset(&spec.env_unset);
         }
     }
 }

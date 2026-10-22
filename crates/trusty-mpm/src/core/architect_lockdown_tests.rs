@@ -1,8 +1,9 @@
 //! Tests for the Architect lockdown (#10127 S5 P3).
 //!
-//! Why: the mechanism ships with empty production lists, so every behaviour
-//! test injects its own list through [`Lockdown::new`] and drives the real
-//! launch seam, [`crate::runtime::cli_launch::isolated_spec_with`].
+//! Why: the mechanism tests inject their own list through [`Lockdown::new`]
+//! and drive the real launch seam,
+//! [`crate::runtime::cli_launch::isolated_spec_with`]; the production lists
+//! are pinned to the plan (#10127 D24 = B).
 //! What: hermetic — carrier files live in each test's own `TempDir`.
 //! Test: this file.
 
@@ -11,7 +12,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET, Lockdown, LockdownError, capitalised};
+use super::{
+    ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET, Lockdown, LockdownError, REGISTRY, capitalised,
+    chat_tokens, count_chat_tokens,
+};
 use crate::core::session_profile::{SessionProfile, launch_env};
 use crate::runtime::cli_launch::{CliLaunch, isolated_spec_with};
 use crate::runtime::launch_spec::LaunchSpec;
@@ -66,36 +70,120 @@ fn deny_of(payload: &str) -> Vec<String> {
         .collect()
 }
 
-/// #10127: the owner's ruling changes only these two lines; until then the
-/// mechanism ships with nothing to deny and nothing to unset.
+/// #10127 D24 = B: the deny list is the plan's full list as written
+/// (`s5-p3-plan.md` §1a), the gworkspace braces expanded to four globs.
 #[test]
-fn the_production_lists_ship_empty() {
-    assert!(ARCHITECT_DENY_GLOBS.is_empty(), "{ARCHITECT_DENY_GLOBS:?}");
-    assert!(ARCHITECT_ENV_UNSET.is_empty(), "{ARCHITECT_ENV_UNSET:?}");
+fn the_production_deny_list_is_the_plans_full_list() {
+    assert_eq!(
+        ARCHITECT_DENY_GLOBS,
+        [
+            "mcp__*slack*",
+            "mcp__*gmail*",
+            "mcp__*googlemail*",
+            "mcp__*notion*",
+            "mcp__*googlechat*",
+            "mcp__*google-chat*",
+            "mcp__*gchat*",
+            "mcp__*gworkspace*__*mail*",
+            "mcp__*gworkspace*__*chat*",
+            "mcp__*gworkspace*__*message*",
+            "mcp__*gworkspace*__*draft*",
+        ]
+    );
+    assert!(Lockdown::PRODUCTION.deny_rules().is_ok());
 }
 
-/// The Architect launch sites that do NOT apply the lockdown yet (#10127
-/// review). Wiring one into [`Lockdown`] removes it from this list.
-const UNCOVERED_ARCHITECT_LAUNCH_SITES: &[&str] = &[
-    "runtime/managed_launch.rs:249 ManagedLaunch::isolation_args (via runtime/claude_code.rs:577/832)",
-    "runtime/claude_code.rs:589 in-place resume command",
-    "bin/tm/commands/session/start.rs:138 inplace_session_spec",
-    "core/standalone/run.rs:185 run_launch_command (via runtime/cli_launch.rs:353)",
-    "client/http_client/session_connect.rs:314 client launch spec",
-];
-
-/// #10127 tripwire: a non-empty production list with an uncovered Architect
-/// launch site is a fail-open — that site launches the Architect without the
-/// deny or the env scrub. Filling either list owes the wiring named here.
+/// #10127 Q3 (#8454 box 14): the env list is every Slack and Telegram
+/// credential the registry names, and nothing else.
 #[test]
-fn filling_a_production_list_owes_the_uncovered_launch_sites() {
-    let filled = !Lockdown::PRODUCTION.is_empty();
+fn architect_env_unset_is_every_chat_token_in_the_registry() {
+    assert_eq!(
+        ARCHITECT_ENV_UNSET,
+        [
+            "SLACK_BOT_TOKEN",
+            "SLACK_USER_TOKEN",
+            "SLACK_APP_TOKEN",
+            "TELEGRAM_BOT_TOKEN"
+        ]
+    );
+    for (_, var) in REGISTRY {
+        let chat = var.starts_with("SLACK_") || var.starts_with("TELEGRAM_");
+        assert_eq!(ARCHITECT_ENV_UNSET.contains(var), chat, "{var}");
+    }
+}
+
+/// #10127 Q3: the list is derived, so a new Slack-family entry joins it and a
+/// look-alike key (`slackware`) does not.
+#[test]
+fn chat_tokens_follow_a_new_registry_entry() {
+    const FAKE: &[(&str, &str)] = &[
+        ("openai", "OPENAI_API_KEY"),
+        ("slack", "SLACK_BOT_TOKEN"),
+        ("slack-webhook", "SLACK_WEBHOOK_URL"),
+        ("slackware", "SLACKWARE_KEY"),
+        ("telegram", "TELEGRAM_BOT_TOKEN"),
+    ];
+    const N: usize = count_chat_tokens(FAKE);
+    assert_eq!(
+        chat_tokens::<N>(FAKE),
+        ["SLACK_BOT_TOKEN", "SLACK_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN"]
+    );
+}
+
+/// Whether Claude Code's `*` glob `pattern` matches `name`.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let tail: Vec<&str> = parts.collect();
+    for (i, part) in tail.iter().enumerate() {
+        if i + 1 == tail.len() {
+            return rest.ends_with(part);
+        }
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.is_empty()
+}
+
+/// #10127 C2: `ask_owner` is the Architect's only outbound path, so no rule
+/// (glob or capitalised variant) matches it or any other trusty-mpm tool; the
+/// families' own tools are matched.
+#[test]
+fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
+    let rules = Lockdown::PRODUCTION.deny_rules().expect("rules");
+    let tools: Vec<String> = crate::mcp::tools::tool_catalog()
+        .iter()
+        .map(|t| format!("mcp__trusty-mpm__{}", t["name"].as_str().expect("a name")))
+        .collect();
     assert!(
-        !filled || UNCOVERED_ARCHITECT_LAUNCH_SITES.is_empty(),
-        "ARCHITECT_DENY_GLOBS / ARCHITECT_ENV_UNSET are non-empty, but these Architect launch \
-         sites do not apply the lockdown yet; wire each one (or refuse an Architect there) and \
-         remove it from UNCOVERED_ARCHITECT_LAUNCH_SITES:\n  {}",
-        UNCOVERED_ARCHITECT_LAUNCH_SITES.join("\n  ")
+        tools.contains(&"mcp__trusty-mpm__ask_owner".to_owned()),
+        "{tools:?}"
+    );
+    for tool in &tools {
+        for rule in &rules {
+            assert!(!glob_matches(rule, tool), "{rule} must not match {tool}");
+        }
+    }
+    for denied in [
+        "mcp__slack-mcp__send_message",
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__gmail__send",
+        "mcp__claude_ai_Notion__search",
+        "mcp__google-chat__post",
+        "mcp__gworkspace-mcp__send_gmail_message",
+        "mcp__gworkspace-mcp__create_draft",
+    ] {
+        assert!(rules.iter().any(|r| glob_matches(r, denied)), "{denied}");
+    }
+    assert!(
+        !rules
+            .iter()
+            .any(|r| glob_matches(r, "mcp__gworkspace-mcp__list_files"))
     );
 }
 
@@ -232,24 +320,45 @@ fn architect_launch_unsets_the_env_list_and_a_pm_launch_does_not() {
     assert!(pm.env_set.contains(&assigned[0]), "{:?}", pm.env_set);
 }
 
-/// #10127: with the shipped (empty) lists an Architect launch is exactly the
-/// pre-#10127 launch — no new `--settings`, the carrier argv unchanged, the
-/// scrub unchanged.
+/// #10127: under an empty lockdown an Architect launch is the pre-#10127
+/// launch — no new `--settings`, the carrier argv unchanged, no new unset.
 #[test]
 fn an_empty_deny_list_leaves_the_architect_argv_unchanged() {
     let carrier = Path::new("/h/owner.json");
     let none = Lockdown::new(&[], &[]);
     for settings in [None, Some(carrier)] {
-        let shipped = spec(
-            SessionProfile::Architect,
-            settings,
-            &[],
-            &Lockdown::PRODUCTION,
-        )
-        .expect("spec");
         let bare = spec(SessionProfile::Architect, settings, &[], &none).expect("spec");
-        assert_eq!(shipped, bare);
         let want: Vec<String> = settings.iter().map(|p| p.display().to_string()).collect();
-        assert_eq!(settings_values(&shipped), want);
+        assert_eq!(settings_values(&bare), want);
+        assert!(!bare.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
+    }
+}
+
+/// #10127: `tm fleet init`, `tm launch` and `tm connect` build through
+/// [`crate::runtime::cli_launch::isolated_spec`], which applies the shipped
+/// lockdown: the deny with no owner policy and with one, every chat token
+/// unset.
+#[test]
+fn architect_isolated_spec_carries_the_production_lockdown() {
+    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let carrier = tmp.path().join("owner.json");
+    std::fs::write(&carrier, "{}").expect("carrier");
+    for settings in [None, Some(carrier.as_path())] {
+        let env = [launch_env(SessionProfile::Architect)];
+        let launch = CliLaunch {
+            model: Some("opus"),
+            prompt_file: None,
+            config_dir: None,
+            oauth_token: None,
+            mcp_env: &env,
+            scoped_mcp: None,
+            settings,
+            alternate_screen: false,
+        };
+        let spec = crate::runtime::cli_launch::isolated_spec(Path::new("/work/architect"), &launch)
+            .expect("spec");
+        assert_production_deny(&spec.args);
+        assert_chat_tokens_unset(&spec.env_unset);
     }
 }

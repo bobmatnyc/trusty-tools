@@ -175,9 +175,7 @@ pub(crate) fn isolated_spec_with(
     spec.args
         .extend(split(crate::core::model_inject::PERMISSION_MODE_FLAG));
     // #10127: an Architect child inherits none of the lockdown's variables.
-    let unset = lockdown.env_unset(profile);
-    spec.env_set.retain(|(name, _)| !unset.contains(name));
-    spec.env_unset.extend(unset);
+    lockdown.scrub_spec_env(profile, &mut spec);
     Ok(spec)
 }
 

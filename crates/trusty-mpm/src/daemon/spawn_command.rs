@@ -89,8 +89,9 @@ pub(crate) fn relaunch_command() -> String {
 /// composed for (#8453) and, for a PM, `CLAUDE_CODE_DISABLE_ARTIFACT='1'`
 /// (#8992), then `claude --append-system-prompt-file '<file>'` and, for a PM,
 /// the `--disallowedTools` pair. Every value is single-quoted because the pane
-/// shell re-splits the line. #10127 Q2: under the shipped lockdown
-/// ([`gui_spawn_command_with`]).
+/// shell re-splits the line. #10127 Q2: applies
+/// [`crate::core::architect_lockdown::Lockdown::PRODUCTION`] via
+/// [`gui_spawn_command_with`].
 /// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
 /// `pm_launch_builders_carry_the_prompt_file`, `gui_spawn_command_trims_a_pm`.
 pub(crate) fn gui_spawn_command(
@@ -104,41 +105,100 @@ pub(crate) fn gui_spawn_command(
     )
 }
 
-/// [`gui_spawn_command`] under the named `lockdown` (#10127 Q2).
+/// [`gui_spawn_command`] under the named `lockdown`, with no owner settings
+/// file (#10127 Q2).
 ///
-/// What: an Architect stamp under a non-empty lockdown is an error naming
-/// [`crate::core::architect_lockdown::TYPED_LINE_REFUSAL`] — this line cannot
-/// carry the lockdown. Under an empty lockdown the Architect line is unchanged.
-/// Test: `gui_spawn_command_refuses_an_architect`,
+/// Test: `gui_spawn_command_carries_an_architect_lockdown_instead_of_refusing`,
 /// `gui_spawn_command_launches_an_architect_under_the_empty_lockdown`.
 pub(crate) fn gui_spawn_command_with(
     prompt_file: &std::path::Path,
     stamp: &(String, String),
     lockdown: &crate::core::architect_lockdown::Lockdown<'_>,
 ) -> anyhow::Result<String> {
+    gui_spawn_command_full(prompt_file, stamp, None, lockdown)
+}
+
+/// The GUI spawn line with the owner `carrier` settings file (#8988) and the
+/// #10127 `lockdown`.
+///
+/// Why: the #10127 review found that refusing an Architect here broke GUI New
+/// Session in an allow-listed Architect dir; the line carries the lockdown
+/// instead. Claude Code keeps only the last `--settings`, so the owner file
+/// and the deny travel as one payload.
+/// What: an Architect's [`crate::core::architect_lockdown::Lockdown::env_unset`]
+/// joins the `env -u` scrub; the `--settings` pair is
+/// [`crate::core::architect_lockdown::Lockdown::settings_file_argv`] — for an
+/// Architect a file `<prompt_file>.lockdown.json`, else `carrier` unchanged.
+/// Fail-closed: a payload error, or a line over
+/// [`crate::core::tmux::MAX_PANE_COMMAND_BYTES`] (the tty would drop its tail,
+/// the `--settings` with it), is an error.
+/// Test: `gui_spawn_line_carries_the_architect_lockdown`,
+/// `an_unwritable_lockdown_file_refuses_the_gui_architect_line`,
+/// `an_over_long_gui_line_is_refused`.
+fn gui_spawn_command_full(
+    prompt_file: &std::path::Path,
+    stamp: &(String, String),
+    carrier: Option<&std::path::Path>,
+    lockdown: &crate::core::architect_lockdown::Lockdown<'_>,
+) -> anyhow::Result<String> {
     use crate::core::pm_tool_trim::{stamped_profile, trim_args, trim_env};
     use crate::core::spawn_disclaim::pane::shell_single_quote;
     // #8992: the stamp's profile decides the trim; each piece is one shell word.
     let profile = stamped_profile(std::slice::from_ref(stamp));
-    // #10127 Q2: fail closed — never an Architect without a non-empty lockdown.
-    if profile.is_architect() && !lockdown.is_empty() {
-        anyhow::bail!(crate::core::architect_lockdown::TYPED_LINE_REFUSAL);
-    }
+    // #10127: an Architect's chat tokens join the scrub, ahead of every assignment.
+    let unset: String = lockdown
+        .env_unset(profile)
+        .iter()
+        .map(|name| format!(" -u {name}"))
+        .collect();
     let env: String = trim_env(profile)
         .iter()
         .map(|(k, v)| format!(" {k}={}", shell_single_quote(v)))
         .collect();
-    let args: String = trim_args(profile)
-        .iter()
-        .map(|a| format!(" {}", shell_single_quote(a)))
-        .collect();
-    Ok(format!(
-        "env{} {}={}{env} claude --append-system-prompt-file {}{args}",
+    let words = |argv: Vec<String>| -> String {
+        argv.iter()
+            .map(|a| format!(" {}", shell_single_quote(a)))
+            .collect()
+    };
+    let args = words(trim_args(profile));
+    let settings = words(lockdown.settings_file_argv(
+        profile,
+        carrier,
+        &lockdown_settings_file(prompt_file),
+    )?);
+    let line = format!(
+        "env{}{unset} {}={}{env} claude --append-system-prompt-file {}{args}{settings}",
         crate::core::claude_env_scrub::env_unset_flags(),
         stamp.0,
         shell_single_quote(&stamp.1),
         shell_single_quote(&prompt_file.display().to_string())
-    ))
+    );
+    // #10127 Q2: a truncated line would launch without its `--settings`.
+    check_line_len(&line)?;
+    Ok(line)
+}
+
+/// Refuse a typed line the pane tty would truncate (#10127 Q2).
+///
+/// Test: `an_over_long_gui_line_is_refused`.
+fn check_line_len(line: &str) -> anyhow::Result<()> {
+    let max = crate::core::tmux::MAX_PANE_COMMAND_BYTES;
+    if line.len() > max {
+        anyhow::bail!(
+            "refusing the GUI spawn: its line is {} bytes, over the {max}-byte pane limit, so \
+             the tty would drop its tail (#10127)",
+            line.len()
+        );
+    }
+    Ok(())
+}
+
+/// Where the GUI line writes an Architect's `--settings` payload: beside the
+/// prompt file, as `<prompt_file>.lockdown.json`.
+fn lockdown_settings_file(prompt_file: &std::path::Path) -> std::path::PathBuf {
+    let mut name = prompt_file.as_os_str().to_owned();
+    name.push(".lockdown.json");
+    std::path::PathBuf::from(name)
 }
 
 /// Compose and write the GUI spawn's PM prompt for `workdir`, then return the
@@ -149,8 +209,9 @@ pub(crate) fn gui_spawn_command_with(
 /// prompt and the stamp; the prompt is written under `prompt_dir` (production:
 /// the process temp dir). `Err` names the file, the I/O cause and `workdir`,
 /// and the caller refuses the spawn on it. #8988: the owner `--settings` pair,
-/// shell-quoted ([`crate::core::launch_policy::LaunchSettings::shell_words`]),
-/// ends the line when the workdir's owner has a policy.
+/// shell-quoted, ends the line when the workdir's owner has a policy — for an
+/// Architect merged with the #10127 lockdown ([`gui_spawn_command_full`]). On
+/// any error the files written for this line are removed.
 /// Test: `gui_spawn_line_writes_the_prompt_it_names`,
 /// `gui_spawn_line_refuses_when_the_prompt_file_cannot_be_written`.
 pub(crate) fn gui_spawn_line(
@@ -167,18 +228,22 @@ pub(crate) fn gui_spawn_line(
         workdir,
         "spawn",
     )?;
-    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`;
-    // the pane shell re-splits the line, so each token is single-quoted.
+    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
     // #8992: the profile decides whether the skill and tool parts apply.
-    // #10127 Q2: an Architect under a non-empty lockdown is refused before any
-    // settings file is written, and the prompt written for it is removed.
-    let stamp = crate::core::session_profile::launch_env(cli.profile);
-    let command = gui_spawn_command(&file, &stamp).inspect_err(|_| {
-        let _ = std::fs::remove_file(&file);
-    })?;
     let settings =
         crate::core::launch_policy::provision_settings_default(workdir, None, cli.profile);
-    Ok(format!("{command}{}", settings.shell_words()))
+    let stamp = crate::core::session_profile::launch_env(cli.profile);
+    gui_spawn_command_full(
+        &file,
+        &stamp,
+        settings.file.as_deref(),
+        &crate::core::architect_lockdown::Lockdown::PRODUCTION,
+    )
+    .inspect_err(|_| {
+        // #10127: no prompt or payload file outlives a refused spawn.
+        let _ = std::fs::remove_file(lockdown_settings_file(&file));
+        let _ = std::fs::remove_file(&file);
+    })
 }
 
 #[cfg(test)]
@@ -222,43 +287,122 @@ mod tests {
         );
     }
 
-    /// #10127 Q2: the typed line cannot carry a non-empty Architect lockdown,
-    /// so either Architect stamp is refused with an error naming why; a PM
-    /// stamp under the same lockdown still gets its line. Before the fix it
-    /// returned a launch line with no lockdown.
+    /// The `permissions.deny` array and the connector switch of a payload file.
+    fn payload(path: &std::path::Path) -> (Vec<String>, serde_json::Value) {
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("payload file"))
+                .expect("payload JSON");
+        let deny = body["permissions"]["deny"]
+            .as_array()
+            .expect("permissions.deny")
+            .iter()
+            .map(|v| v.as_str().expect("a rule").to_owned())
+            .collect();
+        (deny, body)
+    }
+
+    /// #10127 review HIGH (GUI refusal regression): GUI New Session in an
+    /// allow-listed Architect dir gets its line under a non-empty lockdown —
+    /// the chat tokens unset ahead of the stamp, the deny in a `--settings`
+    /// file. At ad893bba23 the Architect stamp was refused and this fails.
     #[test]
-    fn gui_spawn_command_refuses_an_architect() {
-        let file = std::path::Path::new("/t/p.txt");
+    fn gui_spawn_command_carries_an_architect_lockdown_instead_of_refusing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("p.txt");
         let lockdown = Lockdown::new(&["mcp__*slack*"], &["SLACK_BOT_TOKEN"]);
         for value in ["architect", "supervisor"] {
             let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), value.into());
-            let err = gui_spawn_command_with(file, &stamp, &lockdown)
-                .expect_err("an Architect stamp is refused");
-            assert_eq!(
-                err.to_string(),
-                crate::core::architect_lockdown::TYPED_LINE_REFUSAL
-            );
-            assert!(err.to_string().contains("cannot carry"), "{err}");
+            let line = gui_spawn_command_with(&file, &stamp, &lockdown)
+                .expect("an Architect GUI spawn is not refused");
+            let unset = line.find(" -u SLACK_BOT_TOKEN").expect("token unset");
+            assert!(unset < line.find(" TRUSTY_MPM_SESSION_PROFILE=").expect("stamp"));
+            let settings = format!(" '--settings' '{}.lockdown.json'", file.display());
+            assert!(line.ends_with(&settings), "{line}");
+            let (deny, body) = payload(&file.with_file_name("p.txt.lockdown.json"));
+            assert!(deny.contains(&"mcp__*slack*".to_owned()), "{deny:?}");
+            assert!(deny.contains(&"mcp__*Slack*".to_owned()), "{deny:?}");
+            assert_eq!(body["disableClaudeAiConnectors"], true);
         }
         let pm = ("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into());
-        assert!(gui_spawn_command_with(file, &pm, &lockdown).is_ok());
+        let line = gui_spawn_command_with(&file, &pm, &lockdown).expect("a PM line");
+        assert!(
+            !line.contains("SLACK_BOT_TOKEN") && !line.contains("--settings"),
+            "{line}"
+        );
     }
 
-    /// #10127: the shipped lockdown is empty, so an allow-listed Architect dir
-    /// still gets its GUI spawn line, unchanged from before #10127.
+    /// #10127: the production line merges the owner carrier file and every
+    /// shipped glob into ONE `--settings`, unsets every shipped chat token,
+    /// and stays under the pane limit for a long temp path.
+    #[test]
+    fn gui_spawn_line_carries_the_architect_lockdown() {
+        use crate::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("T".repeat(60));
+        std::fs::create_dir(&dir).expect("prompt dir");
+        let file = dir.join("tm-spawn-0123456789abcdef0123456789abcdef.txt");
+        let carrier = tmp.path().join("owner.json");
+        std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+        let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), "supervisor".into());
+        let line =
+            super::gui_spawn_command_full(&file, &stamp, Some(&carrier), &Lockdown::PRODUCTION)
+                .expect("the Architect line builds");
+        assert_eq!(line.matches("'--settings'").count(), 1, "{line}");
+        assert!(
+            line.len() <= crate::core::tmux::MAX_PANE_COMMAND_BYTES,
+            "{}",
+            line.len()
+        );
+        for name in ARCHITECT_ENV_UNSET {
+            assert!(line.contains(&format!(" -u {name} ")), "{name}: {line}");
+        }
+        let (deny, body) = payload(&super::lockdown_settings_file(&file));
+        assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
+        for glob in ARCHITECT_DENY_GLOBS {
+            assert!(deny.contains(&(*glob).to_owned()), "{glob} in {deny:?}");
+        }
+    }
+
+    /// #10127 Fail-Open Check: a payload file that cannot be written refuses
+    /// the Architect line with the write error; dropping the deny to launch
+    /// anyway fails this. At ad893bba23 the refusal named no write and fails.
+    #[test]
+    fn an_unwritable_lockdown_file_refuses_the_gui_architect_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("missing-dir").join("p.txt");
+        let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), "supervisor".into());
+        let lockdown = Lockdown::new(&["mcp__*slack*"], &[]);
+        let err = gui_spawn_command_with(&file, &stamp, &lockdown)
+            .expect_err("an unwritable payload refuses the line");
+        assert!(
+            err.to_string().contains("cannot write the --settings file"),
+            "{err}"
+        );
+    }
+
+    /// #10127 Q2 Fail-Open Check: a line over the pane limit would lose its
+    /// tail in the tty, the `--settings` with it, so it is refused. At
+    /// ad893bba23 the over-long line was returned and this fails.
+    #[test]
+    fn an_over_long_gui_line_is_refused() {
+        let file = std::path::PathBuf::from(format!("/{}/p.txt", "d".repeat(1000)));
+        let pm = ("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into());
+        let err = gui_spawn_command(&file, &pm).expect_err("an over-long line is refused");
+        assert!(err.to_string().contains("pane limit"), "{err}");
+    }
+
+    /// #10127: under an empty lockdown an Architect's GUI line is the
+    /// pre-#10127 line — no unset, no `--settings`.
     #[test]
     fn gui_spawn_command_launches_an_architect_under_the_empty_lockdown() {
         let file = std::path::Path::new("/t/p.txt");
         for value in ["architect", "supervisor"] {
             let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), value.into());
-            let line = gui_spawn_command(file, &stamp).expect("not refused");
+            let line = gui_spawn_command_with(file, &stamp, &Lockdown::new(&[], &[]))
+                .expect("not refused");
             assert!(
                 line.ends_with(" claude --append-system-prompt-file '/t/p.txt'"),
                 "{line}"
-            );
-            assert_eq!(
-                gui_spawn_command_with(file, &stamp, &Lockdown::new(&[], &[])).expect("line"),
-                line
             );
         }
     }

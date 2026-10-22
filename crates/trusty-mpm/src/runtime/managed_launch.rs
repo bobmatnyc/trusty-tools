@@ -25,6 +25,7 @@
 use std::path::Path;
 
 use super::launch_spec::LaunchSpec;
+use crate::core::architect_lockdown::{Lockdown, LockdownError};
 
 /// The environment variable a managed spawn always strips, ahead of the
 /// inherited-marker scrub.
@@ -173,9 +174,11 @@ impl ManagedLaunch<'_> {
     /// What: [`managed_env_unset`] + [`managed_env_set`] with an empty argv,
     /// then [`crate::core::alt_screen::configured_env`] for
     /// `alternate_screen` (#8405), the profile stamp, and the #8992
-    /// [`crate::core::pm_tool_trim::trim_env`].
+    /// [`crate::core::pm_tool_trim::trim_env`]. #10127: an Architect loses the
+    /// [`Lockdown::PRODUCTION`] chat tokens on every path, attach included.
     /// Test: `attach_and_resume_share_an_identical_environment`,
     /// `a_pm_spawn_disables_artifacts_and_denies_the_optional_built_ins`,
+    /// `every_architect_spec_seam_carries_the_lockdown`,
     /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
     /// `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`.
     fn base(&self) -> LaunchSpec {
@@ -191,7 +194,7 @@ impl ManagedLaunch<'_> {
         env_set.push(crate::core::session_profile::launch_env(self.profile));
         // #8992: a PM loads no Artifact tools; in `base` so attach matches resume.
         env_set.extend(crate::core::pm_tool_trim::trim_env(self.profile));
-        LaunchSpec {
+        let mut spec = LaunchSpec {
             session_id: self.session_id.to_owned(),
             // #8233 review round 2 (finding 3): one id per LAUNCH, minted here
             // so every builder gets a fresh one and no two launches of the same
@@ -202,7 +205,10 @@ impl ManagedLaunch<'_> {
             args: Vec::new(),
             env_unset: managed_env_unset(self.gh_env),
             env_set,
-        }
+        };
+        // #10127: the Architect's chat tokens, unset and never assigned.
+        Lockdown::PRODUCTION.scrub_spec_env(self.profile, &mut spec);
+        spec
     }
 
     /// The isolation argv every non-`attach` launch carries.
@@ -216,7 +222,9 @@ impl ManagedLaunch<'_> {
     /// `CLAUDE_CONFIG_DIR/agents` relocates into), then the additive
     /// `--mcp-config` (#7892; no `--strict-mcp-config`, so the operator's
     /// user-scope servers load beside tm's builtins), then the #8988 owner
-    /// `--settings <file>` when one was written, then the #8992
+    /// `--settings <file>` when one was written — for an Architect the #10127
+    /// [`Lockdown::settings_argv`] payload, whose error refuses the launch —
+    /// then the #8992
     /// [`crate::core::pm_tool_trim::trim_args`] for a PM, then
     /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] (#1269).
     ///
@@ -225,8 +233,8 @@ impl ManagedLaunch<'_> {
     /// cannot open — the same reason `compose_inplace_args` leaves its tokens
     /// bare.
     /// Test: `spawn_argv_matches_the_shell_line_it_replaces`,
-    /// `spawn_argv_quotes_nothing`.
-    fn isolation_args(&self) -> Vec<String> {
+    /// `spawn_argv_quotes_nothing`, `every_architect_spec_seam_carries_the_lockdown`.
+    fn isolation_args(&self) -> Result<Vec<String>, LockdownError> {
         let mut args = Vec::new();
         if let Some(prompt) = self.prompt_file {
             args.push("--append-system-prompt-file".to_owned());
@@ -242,9 +250,8 @@ impl ManagedLaunch<'_> {
             self.mcp_config,
         ));
         // #8988: the owner MCP policy, right after the file it filters.
-        args.extend(crate::core::launch_policy::carrier::settings_argv(
-            self.settings,
-        ));
+        // #10127: an Architect's deny joins it as ONE `--settings`.
+        args.extend(Lockdown::PRODUCTION.settings_argv(self.profile, self.settings)?);
         // #8992: a PM denies the optional built-ins it never calls.
         args.extend(crate::core::pm_tool_trim::trim_args(self.profile));
         args.extend(
@@ -252,7 +259,7 @@ impl ManagedLaunch<'_> {
                 .split_whitespace()
                 .map(str::to_owned),
         );
-        args
+        Ok(args)
     }
 }
 
@@ -260,13 +267,14 @@ impl ManagedLaunch<'_> {
 ///
 /// Why: the daemon's default on-ramp. See [`ManagedLaunch::isolation_args`] for
 /// why each flag is there.
-/// What: [`ManagedLaunch::base`] plus the isolation argv.
+/// What: [`ManagedLaunch::base`] plus the isolation argv; a #10127 lockdown
+/// error refuses the launch.
 /// Test: `spawn_argv_matches_the_shell_line_it_replaces`,
 /// `spawn_spec_roots_the_child_at_the_workspace`.
-pub(super) fn spawn_spec(launch: &ManagedLaunch<'_>) -> LaunchSpec {
+pub(super) fn spawn_spec(launch: &ManagedLaunch<'_>) -> Result<LaunchSpec, LockdownError> {
     let mut spec = launch.base();
-    spec.args = launch.isolation_args();
-    spec
+    spec.args = launch.isolation_args()?;
+    Ok(spec)
 }
 
 /// Build the spec for a resume (replaces `resume_command`).
@@ -282,13 +290,13 @@ pub(super) fn spawn_spec(launch: &ManagedLaunch<'_>) -> LaunchSpec {
 pub(super) fn resume_spec(
     launch: &ManagedLaunch<'_>,
     claude_session_id: Option<&str>,
-) -> LaunchSpec {
-    let mut spec = spawn_spec(launch);
+) -> Result<LaunchSpec, LockdownError> {
+    let mut spec = spawn_spec(launch)?;
     if let Some(id) = claude_session_id {
         spec.args.push("--resume".to_owned());
         spec.args.push(id.to_owned());
     }
-    spec
+    Ok(spec)
 }
 
 /// Build the spec for `claude attach <short-id>` (replaces `attach_command`).
