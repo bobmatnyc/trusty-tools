@@ -63,6 +63,13 @@ fn rows(handle: &PalaceHandle, id: Uuid) -> usize {
     shapes.get(&id).map_or(0, |s| s.rows)
 }
 
+/// The `state` field of the palace's chunk marker, if it is written.
+fn marker_state(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value["state"].as_str().map(str::to_string)
+}
+
 async fn vector_top1(handle: &PalaceHandle, query: &str) -> Uuid {
     let embedder = shared_embedder().await.expect("embedder");
     let q = embedder
@@ -128,15 +135,21 @@ async fn background_maintenance_reembeds_pre_chunking_drawers() {
         .expect("load")
         .expect("tokenizer");
     let expected = chunk_text(&tok, &text, WINDOW).expect("chunk").len();
+    // The marker is rewritten after the slice ends, so a `complete` marker
+    // means the upsert finished; the row count alone can be read mid-upsert.
+    let marker = root.path().join("legacy").join("chunk_backfill.json");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while rows(&handle, long) != expected {
+    while marker_state(&marker).as_deref() != Some("complete") {
         assert!(
             Instant::now() < deadline,
-            "no background task re-embedded the pre-chunking drawer: {} of {expected} rows",
-            rows(&handle, long)
+            "no background task re-embedded the pre-chunking drawer: {} of {expected} rows, \
+             marker {:?}",
+            rows(&handle, long),
+            marker_state(&marker)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(rows(&handle, long), expected, "one row per chunk");
     assert_eq!(
         vector_top1(&handle, &query).await,
         long,
