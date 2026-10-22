@@ -244,7 +244,7 @@ fn clump_row(n: usize) {
             let start = Instant::now();
             stranded::restrand_evicted(
                 &index,
-                vec![(at.clone(), vec![gone.clone()])],
+                vec![(at.clone(), vec![gone])],
                 u64::MAX,
                 &store.stranded,
             );
