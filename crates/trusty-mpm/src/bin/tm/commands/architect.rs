@@ -7,7 +7,9 @@
 //! (`TMUX_SOCKET`), calls `trusty_architect::verbs`, prints the verb's stdout
 //! as-is, and on an error prints `tm architect: <reason>` to stderr and
 //! returns the exit code: 2 for a bad argument, 1 for input it cannot read,
-//! a tmux it cannot reach, or state it cannot parse.
+//! a tmux it cannot reach, or state it cannot parse. #9167: `poll` records
+//! each wake it submits on the trusty-events bus
+//! (`super::architect_messages`).
 //! Test: `cli_parses_architect_verbs`; the binary in
 //! `tests/tm_architect_verbs.rs`.
 
@@ -57,7 +59,9 @@ fn execute(
                 interval,
                 dry_run,
             };
-            verbs::poll(&args, &config).map(|()| String::new())
+            // #9167: each submitted wake becomes a `poll_wake` message event.
+            let messages = super::architect_messages::poll_sink(&config.poll_session);
+            verbs::poll(&args, &config, messages.as_ref()).map(|()| String::new())
         }),
         ArchitectAction::Classify { file } => {
             read_capture(file.as_deref(), stdin).and_then(|bytes| verbs::classify(&bytes))

@@ -1,0 +1,3 @@
+Added
+- A cross-session message is now recorded at both ends. The receiving session's transcript is read off the hook path, and each arrival becomes one `message` event with `direction: received`, from the sender's socket to the receiving session, with the same credential scan, digest and body rules as the sender's event, so the two sha256 match. A rescan or a daemon restart never records an arrival twice (#9167).
+- `tm architect poll` records each wake it submits as one `poll_wake` `message` event on the trusty-events bus, from the poller's session to the Architect's, with the byte count and sha256 of the text typed. A bus that is down never stops the wake; `poll.log` names the failure. A poller under a scratch `$HOME` or data root pushes nothing (#9167).

@@ -10,7 +10,10 @@
 //! ([`projection::Threader`]) and buffers the result in a `PushClient`
 //! (bounded by count and bytes, overflow counted) — no I/O on the hook path.
 //! #9167: a relay record also yields `message` events ([`message`]), which
-//! ride the same buffer, flush and failure handling.
+//! ride the same buffer, flush and failure handling. #9167 PR2: each hook
+//! record also marks its session's transcript due ([`received`]); the flush
+//! task reads due transcripts off the hook path and buffers one `received`
+//! `message` event per cross-session message that arrived.
 //! [`start`] attaches a publisher and its flush task at serve start;
 //! [`ActionEvents::shutdown`], called from both exit paths, ends the task and
 //! runs one final flush within [`FINAL_FLUSH_BUDGET`].
@@ -32,6 +35,8 @@ use crate::daemon::DaemonState;
 // #9167: inter-session messages, projected beside the actions.
 pub mod message;
 pub mod projection;
+// #9167 PR2: the receiving side of a cross-session message.
+pub mod received;
 pub mod tmux_send;
 
 /// How often the flush task drains the buffer (as #9078's producer).
@@ -138,6 +143,10 @@ pub struct ActionPublisher {
     threader: parking_lot::Mutex<projection::Threader>,
     seq: AtomicU64,
     flush_interval: Duration,
+    /// Transcript read positions for received messages (#9167).
+    received: parking_lot::Mutex<received::Tails>,
+    /// Held across one transcript scan, so two scans never race an offset.
+    scanning: parking_lot::Mutex<()>,
 }
 
 impl ActionPublisher {
@@ -148,6 +157,8 @@ impl ActionPublisher {
             threader: parking_lot::Mutex::new(projection::Threader::new(dirs::home_dir())),
             seq: AtomicU64::new(0),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
+            received: parking_lot::Mutex::default(),
+            scanning: parking_lot::Mutex::new(()),
         }
     }
 
@@ -186,6 +197,56 @@ impl ActionPublisher {
             event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
             self.client.send(event);
         }
+        drop(threader);
+        // #9167: no I/O here; the flush task reads the transcript.
+        self.received.lock().note(record);
+    }
+
+    /// Buffer a `received` event per cross-session message that reached a
+    /// due transcript; returns how many (#9167 PR2).
+    ///
+    /// Why: the arrival is visible only in the receiving transcript, and
+    /// reading it is file I/O, which the hook path must never do.
+    /// What: runs [`Self::scan_received`] on the blocking pool. A failed
+    /// read is logged at debug and retried on the session's next hook.
+    /// Test: `a_received_message_is_one_received_event_with_no_body_9167`,
+    /// `n_messages_between_two_sessions_are_n_sent_and_n_received_9167`.
+    pub async fn collect_received(self: &Arc<Self>) -> usize {
+        let me = Arc::clone(self);
+        match tokio::task::spawn_blocking(move || me.scan_received()).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "action events: transcript scan did not finish");
+                0
+            }
+        }
+    }
+
+    /// [`Self::collect_received`]'s blocking body.
+    fn scan_received(&self) -> usize {
+        let _one_scan = self.scanning.lock();
+        let jobs = self.received.lock().take_due();
+        let mut found = 0;
+        for job in jobs {
+            let scan = match received::read(&job) {
+                Ok(scan) => scan,
+                Err(e) => {
+                    tracing::debug!(error = %e, path = %job.path.display(), "action events: transcript unreadable");
+                    continue;
+                }
+            };
+            self.received.lock().finish(&job, &scan);
+            let (bodies, root) = {
+                let threader = self.threader.lock();
+                (threader.message_bodies(), threader.root_of(&job.session))
+            };
+            for mut event in received::events(job.session, scan.arrivals, bodies, root) {
+                event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
+                self.client.send(event);
+                found += 1;
+            }
+        }
+        found
     }
 
     /// Drain the buffer to the bus once (the only call that does I/O).
@@ -214,6 +275,8 @@ impl ActionPublisher {
             let mut health = FlushHealth::default();
             loop {
                 tick.tick().await;
+                // #9167: received messages ride the same flush.
+                me.collect_received().await;
                 let outcome = me.client.flush().await;
                 health.report(&outcome, me.client.dropped(), Instant::now());
             }
@@ -403,5 +466,7 @@ pub fn start_with(
 
 #[cfg(test)]
 mod message_tests;
+#[cfg(test)]
+mod received_tests;
 #[cfg(test)]
 mod tests;

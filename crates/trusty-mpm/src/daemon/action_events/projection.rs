@@ -131,6 +131,12 @@ impl Threader {
         self.bodies
     }
 
+    /// `session`'s root event, while it is tracked (#9167: the parent of a
+    /// received message).
+    pub fn root_of(&self, session: &SessionId) -> Option<EventId> {
+        self.sessions.get(session).map(|t| t.root)
+    }
+
     /// Project one hook record onto the bus events it implies.
     ///
     /// Why: DOC-73 §3.4 maps the hooks with an obvious kind; everything else
