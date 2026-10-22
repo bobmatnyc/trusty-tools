@@ -145,7 +145,10 @@ fn until_received(sock: &Path) -> tokio::task::JoinHandle<Vec<HarnessEvent>> {
             let mut buf = Vec::new();
             conn.read_to_end(&mut buf).await.expect("read");
             let text = String::from_utf8_lossy(&buf);
-            frames.extend(text.lines().map(|l| serde_json::from_str(l).expect("frame")));
+            frames.extend(
+                text.lines()
+                    .map(|l| serde_json::from_str(l).expect("frame")),
+            );
         }
         frames
     })
@@ -454,4 +457,46 @@ async fn an_arrival_unread_at_shutdown_is_sent_exactly_once_9167() {
     };
     restarted.publish(&later);
     assert_eq!(restarted.collect_received().await, 0, "never sent twice");
+}
+
+/// A scan the shutdown abort left running finishes after the final flush:
+/// it buffers nothing (nothing would flush it) and moves no offset, while
+/// shutdown's own scan has already sent the arrival once.
+#[tokio::test]
+async fn a_scan_that_outlives_shutdown_buffers_nothing_9167() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript = dir.path().join("b.jsonl");
+    append(&transcript, "");
+    let sock = dir.path().join("bus.sock");
+    let state = DaemonState::new();
+    let publisher = Arc::new(ActionPublisher::new(&sock));
+    assert!(state.action_events().attach(Arc::clone(&publisher)));
+    let b = SessionId::new();
+    state.push_hook_event(hook(b, HookEvent::PreToolUse, &transcript));
+    let text = "[Ops Architect 03:30Z] read by a scan still in flight";
+    append(
+        &transcript,
+        &arrival_lines(
+            &b.0.to_string(),
+            text,
+            Utc::now() + chrono::Duration::seconds(1),
+        ),
+    );
+    // The in-flight scan took its job before the abort.
+    let in_flight = publisher.received.lock().take_due();
+    assert_eq!(in_flight.len(), 1);
+    let bus = until_received(&sock);
+    state.action_events().shutdown().await;
+    let frames = tokio::time::timeout(Duration::from_secs(5), bus)
+        .await
+        .expect("shutdown sent no received message within 5 s")
+        .expect("join");
+    assert_eq!(received_digests(&frames), [sha(text)], "{frames:?}");
+
+    assert_eq!(
+        publisher.scan_jobs(in_flight),
+        0,
+        "closed: nothing buffered"
+    );
+    assert_eq!(publisher.buffered_len(), 0);
 }
