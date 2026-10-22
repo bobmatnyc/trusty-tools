@@ -371,6 +371,13 @@ w "$leak" 'notify U01ABC23DEF'
 leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
 w "$leak" 'mail someone@corp.io'
 leaks leaks-email 1 "FAIL EMAIL: $leak:1"
+# #9171: a gh account config dir and a tailnet (CGNAT 100.64/10) address.
+w "$leak" 'cat ~/.config/gh-realacct/hosts.yml'
+leaks leaks-gh-config 1 "FAIL GH_CONFIG_DIR: $leak:1"
+w "$leak" 'ssh 100.101.102.103'
+leaks leaks-tailnet-ip 1 "FAIL TAILNET_IP: $leak:1"
+w "$leak" '~/.config/gh-<account> gh-example ~/.config/gh-example-bot 100.20.1.1 1.100.64.1 100.128.0.1'
+leaks leaks-gh-tailnet-near-miss 0 "OK"
 for kind in 'gh pr view 1 --repo realcorp/widgets' 'gh pr list -R realcorp/widgets' \
   'docs at realcorp.github.io' 'clone gitlab.com/realcorp/widgets'; do
   w "$leak" "$kind"
