@@ -97,6 +97,8 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
     idx
 }
 
+// #10110: batch removal by path prefix or file list.
+mod batch_remove_10110;
 mod branch_and_corpus;
 mod chunk_cap;
 mod corpus_fault;

@@ -1564,3 +1564,50 @@ mod roots_7434;
 // #9510: index-file by an absolute path, a child module reusing this harness.
 #[path = "writes_9510_tests.rs"]
 mod abs_path_9510;
+
+/// #10110: the batch removal answers over the socket, and its refusal carries
+/// the whole body as `data`. `rpc_error_from_http` attaches `data` to a 503
+/// only, so without the dedicated wrapper a partial 500's committed counts —
+/// and this 400's error code — would never reach a socket caller.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn remove_files_over_the_socket_carries_the_refusal_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, rpc) = served(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let put = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_body(put_file(&state, "wf", put).await);
+
+    let counted = rpc_ok(
+        &rpc,
+        writes::METHOD_INDEX_FILES_REMOVE,
+        serde_json::json!({ "index_id": "wf", "body": { "path_prefix": "src", "dry_run": true } }),
+    )
+    .await;
+    assert_eq!(counted["matched_files"], 1, "{counted}");
+    assert_eq!(
+        counted["removed_files"], 0,
+        "a dry run removes nothing: {counted}"
+    );
+
+    let refused = rpc_err(
+        &rpc,
+        writes::METHOD_INDEX_FILES_REMOVE,
+        serde_json::json!({ "index_id": "wf", "body": { "paths": [] } }),
+    )
+    .await;
+    let data = refused.data.expect("the refusal body travels as data");
+    assert_eq!(data["error"], "remove_files_invalid_request", "{data}");
+
+    let removed = rpc_ok(
+        &rpc,
+        writes::METHOD_INDEX_FILES_REMOVE,
+        serde_json::json!({ "index_id": "wf", "body": { "path_prefix": "src" } }),
+    )
+    .await;
+    assert_eq!(removed["removed_files"], 1, "{removed}");
+    assert_eq!(
+        removed["removed_chunks"], counted["matched_chunks"],
+        "{removed}"
+    );
+}

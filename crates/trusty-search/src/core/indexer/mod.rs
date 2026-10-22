@@ -35,6 +35,8 @@ use crate::core::store::VectorStore;
 use crate::core::symbol_graph::SymbolGraph;
 
 pub(crate) mod archive;
+// #10110: batch removal by path prefix or file list.
+mod batch_remove;
 pub(crate) mod corpus_fault;
 // #8167/#8232: closing an index's files when it is deleted.
 mod delete_close;
@@ -122,6 +124,10 @@ pub use ingest::outcome::IndexFileOutcome;
 // #8976: the failed-remove fault seam for `service::reindex::hash_withhold_tests`.
 #[cfg(test)]
 pub(crate) use files::TEST_FAIL_REMOVE;
+// #10110: batch removal by path prefix or file list.
+#[cfg(test)]
+pub(crate) use batch_remove::TEST_FAIL_SLICE_FROM;
+pub(crate) use batch_remove::{BatchRemoveCounts, BatchRemoveError};
 // #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
 #[cfg(test)]
 pub(crate) use ingest::supersede::TEST_FAIL_CHUNK_DELETE;
@@ -131,6 +137,9 @@ pub(crate) use tests::incremental_stamp_9230::break_chunk_writes;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
+// #10110: the batch-removal race test in `service::server::remove_files_tests`.
+#[cfg(test)]
+pub(crate) use idle_evict::RehydrateScanCounter;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #8348: the typed error a pinned semantic query raises when its embed fails.
 pub use search::embed_degrade::{EmbedderUnavailable, PrecomputedQueryVector};
@@ -355,6 +364,11 @@ pub struct CodeIndexer {
     /// (round-3: race landing INSIDE the compare-then-clear critical section
     /// itself) in `indexer::rehydrate_tests`.
     pub(super) rehydrate_generation: Arc<Mutex<u64>>,
+
+    /// #10110: the detached rehydrate holds the read side across its scan and
+    /// publish; a batch removal holds the write side, so a scan never reads
+    /// rows a batch is deleting. See `batch_remove` for the 503 it answers.
+    pub(super) corpus_scan_gate: Arc<tokio::sync::RwLock<()>>,
 
     /// `true` when the most recent `bm25_search` / `grep_fallback_search`
     /// call degraded to an empty lane because the detached rehydrate
@@ -781,6 +795,7 @@ impl CodeIndexer {
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
             rehydrate_generation: Arc::new(Mutex::new(0)),
+            corpus_scan_gate: Arc::new(tokio::sync::RwLock::new(())),
             lane_degraded: Arc::new(AtomicBool::new(false)),
             legacy_chunk_ids_possible: Arc::new(AtomicBool::new(true)),
             migration_in_progress: Arc::new(AtomicBool::new(false)),

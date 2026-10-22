@@ -115,6 +115,8 @@ pub const METHODS: &[&str] = &[
     writes::METHOD_INDEX_RELOCATE,
     writes::METHOD_INDEX_FILE_PUT,
     writes::METHOD_INDEX_FILE_REMOVE,
+    // #10110 — the batch removal.
+    writes::METHOD_INDEX_FILES_REMOVE,
     writes::METHOD_INDEX_REINDEX,
     writes::METHOD_GRAPH_INGEST,
     // #6524 — the embedding pause pair and its file-change stream. Socket-only:

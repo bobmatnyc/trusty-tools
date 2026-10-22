@@ -460,6 +460,8 @@ pub fn tool_descriptors() -> Value {
     // #7434: the multi-root mutation's descriptor lives beside its arm.
     if let Some(list) = defs.as_array_mut() {
         list.push(super::index::add_root_descriptor());
+        // #10110: the batch removal, likewise beside its arm.
+        list.push(super::index::remove_files_descriptor());
     }
     defs
 }

@@ -59,9 +59,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "chat" | "get_call_chain" | "grep" | "console_metrics" | "typeahead" => &[SEARCH_READ],
 
         // Mutating
-        "index_file" | "remove_file" | "create_index" | "delete_index" | "reindex" | "add_root" => {
-            &[SEARCH_WRITE]
-        }
+        "index_file" | "remove_file" | "remove_files" | "create_index" | "delete_index"
+        | "reindex" | "add_root" => &[SEARCH_WRITE],
 
         _ => &[],
     };

@@ -195,6 +195,14 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Bulk,
             serde_json::json!({ "index_id": INDEX, "body": { "path": "src/a.rs" } }),
         ),
+        // #10110: the batch removal shares the per-file writes' lane.
+        (
+            writes::METHOD_INDEX_FILES_REMOVE,
+            Lane::Bulk,
+            serde_json::json!({
+                "index_id": INDEX, "body": { "path_prefix": "src", "dry_run": true },
+            }),
+        ),
         (
             writes::METHOD_INDEX_REINDEX,
             Lane::Bulk,

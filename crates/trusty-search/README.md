@@ -593,7 +593,7 @@ Rust callers use `trusty_search::service::daemon_client::DaemonClient`; the HTTP
 ## MCP tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -611,6 +611,7 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
+| `remove_files` | `index_id`, `dry_run?`, `path_prefix?`, `paths?` | Remove every file under a path prefix, or in a file list, from an index in one call. |
 | `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |

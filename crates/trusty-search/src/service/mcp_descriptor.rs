@@ -81,12 +81,12 @@ mod tests {
         // Issue #537 adds `upgrade` (→ 19). Issue #1104 adds `console_metrics`
         // (→ 20). Issue #1557 adds `typeahead` (→ 21). #9169 (ruling f8)
         // removes `upgrade`, which nothing called (→ 20). #7434 adds
-        // `add_root` (→ 21).
+        // `add_root` (→ 21). #10110 adds `remove_files` (→ 22).
         let tools = SearchMcpService.tools();
         assert_eq!(
             tools.len(),
-            21,
-            "expected 21 MCP tools (including console_metrics, typeahead and add_root), got {}: {:?}",
+            22,
+            "expected 22 MCP tools (including console_metrics, typeahead, add_root and remove_files), got {}: {:?}",
             tools.len(),
             tools
                 .iter()
@@ -134,8 +134,9 @@ mod tests {
         // tools. Issue #537: +1 for upgrade → 19. Issue #1104: +1 for
         // console_metrics → 20. Issue #1557: +1 for typeahead → 21.
         // #9169: -1 for the removed `upgrade` → 20. #7434: +1 for add_root → 21.
+        // #10110: +1 for remove_files → 22.
         let svc: Box<dyn ServiceDescriptor> = Box::new(SearchMcpService);
         assert_eq!(svc.name(), "trusty-search");
-        assert_eq!(svc.tools().len(), 21);
+        assert_eq!(svc.tools().len(), 22);
     }
 }

@@ -253,6 +253,15 @@ impl VectorStore for UsearchStore {
         ids.iter().map(|id| id_to_key.contains_key(id)).collect()
     }
 
+    // #10110: lets a batch-removal retry find vectors whose rows are gone.
+    async fn ids_where(
+        &self,
+        keep: &(dyn for<'a> Fn(&'a str) -> bool + Send + Sync),
+    ) -> Result<Vec<String>> {
+        let id_to_key = self.id_to_key.read().await;
+        Ok(id_to_key.keys().filter(|id| keep(id)).cloned().collect())
+    }
+
     async fn save_to(&self, path: &Path) -> Result<()> {
         self.save(path).await
     }

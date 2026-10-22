@@ -24,6 +24,8 @@
 
 pub mod contrib;
 mod corpus_ops;
+// #10110: range reads and one-transaction deletes for a batch removal.
+mod batch_remove_ops;
 // #8959: durable "persisted symbol graph is stale" mark.
 mod kg_dirty_ops;
 mod kg_ops;
@@ -47,6 +49,7 @@ mod tests;
 mod types;
 
 // #7923: single-transaction path rewrite types used by M002/M004.
+pub(crate) use self::batch_remove_ops::SelectedRows;
 pub use self::corpus_ops::{PathRewrite, PathRewriteOutcome};
 pub use self::open_failure::CorpusOpenFailure;
 pub(crate) use self::open_guard::open_serialized;

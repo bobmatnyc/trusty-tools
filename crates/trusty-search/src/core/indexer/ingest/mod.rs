@@ -92,8 +92,12 @@ impl CodeIndexer {
     /// it to the corpus if wired, and installs it — unless the
     /// contributed-overlay merge failed, in which case the previous serving
     /// graph is kept and the failure is returned (#5505).
+    /// While the corpus is still evicted after the bounded rehydrate wait it
+    /// builds nothing and returns a `merge_error` outcome (#10110).
     /// Test: `test_symbol_graph_rebuilds_after_indexing`;
-    /// `contrib_load_failure_installs_nothing` covers the not-installed arm.
+    /// `contrib_load_failure_installs_nothing` covers the not-installed arm;
+    /// `a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110`
+    /// covers the deferred arm.
     pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
@@ -109,6 +113,23 @@ impl CodeIndexer {
         // nothing was evicted.
         self.ensure_chunks_loaded().await;
         self.ensure_bm25_entities_loaded().await;
+        // #10110: the two waits above are bounded, so a cold scan can outlast
+        // them and leave the maps empty. Building now would persist an empty
+        // graph and clear the durable dirty mark. Keep the mark and the
+        // serving graph, make sure a scan is running, and let the caller
+        // retry (the ticker does, on a later tick).
+        if self.corpus_evicted() {
+            drop(self.begin_corpus_rehydrate());
+            tracing::warn!(
+                index_id = %self.index_id,
+                "kg: corpus still rehydrating after the bounded wait; \
+                 symbol-graph rebuild deferred (#10110)"
+            );
+            return ContribMergeOutcome {
+                merge_error: Some("corpus still rehydrating; rebuild deferred".to_string()),
+                ..ContribMergeOutcome::default()
+            };
+        }
         // #8959: the snapshot below covers every write marked before this.
         let ticket = self.graph_refresh.begin_full_rebuild();
 

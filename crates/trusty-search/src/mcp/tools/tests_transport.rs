@@ -76,6 +76,12 @@ fn tool_table() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             json!({ "index_id": "demo", "path": "a.rs" }),
             vec!["search.index.file.remove"],
         ),
+        // #10110: the batch removal.
+        (
+            "remove_files",
+            json!({ "index_id": "demo", "path_prefix": "vendor", "dry_run": true }),
+            vec!["search.index.files.remove"],
+        ),
         ("list_indexes", json!({}), vec!["search.indexes.list"]),
         (
             "create_index",
@@ -164,7 +170,7 @@ async fn every_tool_reaches_its_socket_method() {
     }
     assert_eq!(
         advertised.len(),
-        21,
+        22,
         "the tool count is part of the contract"
     );
 
