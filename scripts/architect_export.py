@@ -27,14 +27,15 @@ Test: scripts/tests/test_architect_export.py
 import argparse
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 from check_content import Fail, leak_findings, load_leak_rules  # noqa: E402  (same directory)
 
-REPO_ROOT = SCRIPTS.parent
 PATTERNS = SCRIPTS / "architect_leak_patterns.txt"
 MANIFEST = SCRIPTS / "architect_export_manifest.txt"
 # Instance data, never framework: refused even when the manifest lists it (#9171).
@@ -42,6 +43,8 @@ DENY_TOP = {"local", "owner", "records", "inbox"}
 DENY_PREFIX = ("docs/briefs/", ".claude/settings", ".claude/worktrees/")
 DENY_PART = {".git", ".trusty-mpm", ".trusty-channels", "__pycache__", ".pytest_cache"}
 DENY_NAME = re.compile(r"\.env.*|\.mcp\.json|.*\.bak|.*\.lock")
+# A repo root holding either file is a trusty-tools checkout or worktree (#10161).
+TT_MARKERS = ("crates/trusty-common/Cargo.toml", "scripts/architect_leak_patterns.txt")
 
 
 class Refuse(Exception):
@@ -141,6 +144,12 @@ def expand(source, rows):
     return out
 
 
+def repo_roots(path):
+    """Each ancestor of the resolved `path`, itself included, holding a `.git` dir or a `.git` file (worktree)."""
+    real = path.resolve()
+    return [a for a in (real, *real.parents) if os.path.lexists(a / ".git")]
+
+
 def out_of_tree(value, label, flag, env, required):
     """The resolved path of an out-of-tree input file, or None when optional and unset."""
     if not value:
@@ -150,8 +159,9 @@ def out_of_tree(value, label, flag, env, required):
     path = Path(value)
     if not path.is_file():
         raise Refuse(f"{label} missing: {value}")
-    if REPO_ROOT in path.resolve().parents:
-        raise Refuse(f"{label} {value} is inside this repository; keep it out of tree")
+    # #10161: any trusty-tools checkout or worktree, not only this one. Another repo (the source) is fine.
+    if any((root / m).is_file() for root in repo_roots(path) for m in TT_MARKERS):
+        raise Refuse(f"{label} {value} is inside a trusty-tools checkout or worktree; keep it out of tree")
     return path
 
 
@@ -176,12 +186,12 @@ def load_rewrites(path):
 
 
 def check_staging(source, staging):
-    """Refuse a staging dir that is non-empty, overlaps the source, or sits in this repository."""
+    """Refuse a staging dir that is non-empty, overlaps the source, or sits in any git repo or worktree."""
     src, dst = source.resolve(), staging.resolve()
     if dst == src or src in dst.parents or dst in src.parents:
         raise Refuse(f"staging {staging} is inside the source, or holds it")
-    if REPO_ROOT == dst or REPO_ROOT in dst.parents:
-        raise Refuse(f"staging {staging} is inside this repository; stage out of tree, then copy")
+    if repo_roots(staging):  # See #10161
+        raise Refuse(f"staging {staging} is inside a git repository or worktree; stage out of tree, then copy")
     if staging.exists() and (not staging.is_dir() or any(staging.iterdir())):
         raise Refuse(f"staging {staging} must be absent or an empty directory")
 
@@ -238,11 +248,22 @@ def stage(args):
     if args.dry_run:
         print(f"architect_export: dry run, {len(staged)} file(s), {sum(s[3] for s in staged)} rewrite(s), gate clean; nothing written")
         return 0
-    for _, dest, data, count, mode in staged:
-        out = staging / dest
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(data)
-        os.chmod(out, mode)
+    # #10161: build a sibling temp tree and rename it into place, so a failed copy leaves no partial export.
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{staging.name}.partial-", dir=staging.parent))
+    try:
+        for _, dest, data, _, mode in staged:
+            out = tmp / dest
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data)
+            os.chmod(out, mode)
+        if staging.exists():
+            staging.rmdir()  # check_staging proved it empty
+        tmp.rename(staging)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    for _, dest, _, count, _ in staged:
         print(f"staged {dest} ({count} rewrite(s))")
     print(f"architect_export: staged {len(staged)} file(s) into {staging}, gate clean")
     return 0
@@ -251,7 +272,7 @@ def stage(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--source", required=True, help="the Architect checkout to export from (read only)")
-    parser.add_argument("--staging", required=True, help="an absent or empty directory outside this repository")
+    parser.add_argument("--staging", required=True, help="an absent or empty directory outside every git repository")
     parser.add_argument("--manifest", default=str(MANIFEST), help="allow-list (default: the committed starter)")
     parser.add_argument("--deny-file", default=os.environ.get("ARCHITECT_LEAK_DENY_FILE", ""))
     parser.add_argument("--rewrite-file", default=os.environ.get("ARCHITECT_EXPORT_REWRITE_FILE", ""))

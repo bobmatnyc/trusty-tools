@@ -376,7 +376,9 @@ w "$leak" 'cat ~/.config/gh-realacct/hosts.yml'
 leaks leaks-gh-config 1 "FAIL GH_CONFIG_DIR: $leak:1"
 w "$leak" 'ssh 100.101.102.103'
 leaks leaks-tailnet-ip 1 "FAIL TAILNET_IP: $leak:1"
-w "$leak" '~/.config/gh-<account> gh-example ~/.config/gh-example-bot 100.20.1.1 1.100.64.1 100.128.0.1'
+w "$leak" 'cat ~/.config/gh-acmecorp-realname/hosts.yml'
+leaks leaks-gh-config-allowed-prefix 1 "FAIL GH_CONFIG_DIR: $leak:1"
+w "$leak" '~/.config/gh-<account> gh-example ~/.config/gh-example/hosts.yml ~/.config/gh-acme 100.20.1.1 1.100.64.1 100.128.0.1'
 leaks leaks-gh-tailnet-near-miss 0 "OK"
 for kind in 'gh pr view 1 --repo realcorp/widgets' 'gh pr list -R realcorp/widgets' \
   'docs at realcorp.github.io' 'clone gitlab.com/realcorp/widgets'; do

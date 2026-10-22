@@ -275,12 +275,76 @@ def test_out_of_tree_files_refused_inside_this_repo(world):
     try:
         inside.write_text("carol\n")
         proc = world.run("--deny-file", inside)
-        assert proc.returncode == 2 and "inside this repository" in proc.stderr
+        assert proc.returncode == 2 and "inside a trusty-tools checkout or worktree" in proc.stderr
     finally:
         inside.unlink()
     proc = world.run("--staging", SCRIPTS.parent / ".architect-export-test-staging")
-    assert proc.returncode == 2 and "inside this repository" in proc.stderr
+    assert proc.returncode == 2 and "inside a git repository or worktree" in proc.stderr
     assert not (SCRIPTS.parent / ".architect-export-test-staging").exists()
+
+
+def git_repo(path, git_file=False):
+    """A repo at `path`: `git init`, or a `.git` FILE as a linked worktree has."""
+    path.mkdir(parents=True, exist_ok=True)
+    if git_file:
+        (path / ".git").write_text("gitdir: /nonexistent/.git/worktrees/x\n")
+    else:
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path
+
+
+@pytest.mark.parametrize("shape", ["git-dir", "git-file"])
+def test_staging_inside_any_git_repo_refused(world, shape):
+    target = git_repo(world.root / "other", shape == "git-file") / "deep" / "staging"
+    proc = world.run("--staging", target)
+    assert proc.returncode == 2, proc.output
+    assert "inside a git repository or worktree" in proc.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("shape", ["git-dir", "git-file"])
+@pytest.mark.parametrize("flag", ["--deny-file", "--rewrite-file"])
+def test_input_file_inside_any_trusty_tools_checkout_refused(world, shape, flag):
+    tt = git_repo(world.root / "tt", shape == "git-file")
+    (tt / "crates/trusty-common").mkdir(parents=True)
+    (tt / "crates/trusty-common/Cargo.toml").write_text('[package]\nname = "trusty-common"\n')
+    inside = tt / "notes/in.txt"
+    inside.parent.mkdir()
+    inside.write_text("carol\n" if flag == "--deny-file" else "alice\tthe-owner\n/Users/alice\t~\n")
+    proc = world.run(flag, inside)
+    assert proc.returncode == 2, proc.output
+    assert "inside a trusty-tools checkout or worktree" in proc.stderr
+    assert not world.staging.exists()
+
+
+def test_deny_file_inside_other_git_repo_accepted(world):
+    deny = git_repo(world.root / "architect-like") / "local/deny.txt"
+    deny.parent.mkdir()
+    deny.write_text("carol\n")
+    proc = world.run("--deny-file", deny)
+    assert proc.returncode == 0, proc.output
+
+
+def test_copy_failure_leaves_no_partial_staging(world, monkeypatch):
+    sys.path.insert(0, str(SCRIPTS))
+    import architect_export as tool
+
+    real, calls = Path.write_bytes, []
+
+    def flaky(self, data):
+        calls.append(self)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device", str(self))
+        return real(self, data)
+
+    for key in ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    code = tool.main(["--source", str(world.src), "--staging", str(world.staging), "--manifest", str(world.manifest),
+                      "--deny-file", str(world.deny), "--rewrite-file", str(world.rewrite)])
+    assert code == 2 and len(calls) == 2
+    assert not world.staging.exists() or not any(world.staging.iterdir())
+    assert sorted(p.name for p in world.root.iterdir()) == ["deny.txt", "manifest.txt", "rewrite.txt", "src"]
 
 
 def test_committed_manifest_parses_and_is_clean():

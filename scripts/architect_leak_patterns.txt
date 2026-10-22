@@ -31,5 +31,5 @@ ORG	i	[A-Za-z0-9][A-Za-z0-9-]*\.github\.io	(example|acme|bobmatnyc)\.github\.io
 HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?	.*\.local\.[A-Za-z0-9]+|threading\.local
 SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
 EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*example\.(com|org|net)
-GH_CONFIG_DIR	-	\.config/gh-[A-Za-z0-9_.-]+	\.config/gh-(example|acme)[A-Za-z0-9_.-]*
+GH_CONFIG_DIR	-	\.config/gh-[A-Za-z0-9_.-]+	\.config/gh-(example|acme)
 TAILNET_IP	-	(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+([^0-9]|$)
