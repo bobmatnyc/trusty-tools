@@ -1,6 +1,7 @@
 //! #10063 PR 3: `fsck` dangling references (DOC-82 LDG-2.2.5), the change
 //! log's first batch and legacy baseline, symlinked parents on every write
-//! path, and the method names DOC-82 gives the daemon (owner ruling D34).
+//! path, an unreadable reference check, and the method names DOC-82 gives
+//! the daemon (owner ruling D34).
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -283,6 +284,31 @@ fn write_refuses_a_change_log_that_is_a_symlink() -> R {
         assert!(
             matches!(s.get("items", "A02"), Err(DashError::NotFound(_))),
             "{format}: the document was written"
+        );
+    }
+    Ok(())
+}
+
+/// #10063: a store whose id collections cannot be read (here a case variant
+/// of `items`, which the file checks accept) is never reported clean: the
+/// skipped reference check is a problem line.
+#[test]
+fn fsck_reports_references_not_checked_when_the_snapshot_fails() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (s, _) = store(tmp.path(), format)?;
+        write_legacy(
+            &tmp.path().join("store"),
+            format,
+            "Items",
+            &[("D01", json!({"status": "open", "goal": "G09"}))],
+        )?;
+        let problems = s.fsck()?;
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("references not checked: ") && p.contains("Items")),
+            "{format}: {problems:?}"
         );
     }
     Ok(())

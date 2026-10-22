@@ -7,7 +7,8 @@ use serde_json::json;
 use trusty_architect::FakeClock;
 use trusty_architect::dashboard::DashError;
 use trusty_architect::dashboard::rpc::{
-    BatchRequest, GetRequest, IdsRequest, METHODS, StoreRequest, StoreSel, WriteRequest,
+    BatchRequest, DeleteRequest, GetRequest, IdsRequest, METHODS, PrunedRequest, StoreRequest,
+    StoreSel, WriteRequest,
 };
 use trusty_architect::dashboard::verbs::{self, Env, Reply, render};
 use trusty_architect::ledger::rpc::RpcErrorCode;
@@ -138,6 +139,193 @@ fn dashboard_verb_store_refuses_a_second_writer_while_the_lock_is_held() -> R {
     );
     drop(held);
     writer.set("items", "D02", json!({}), Some(0))?;
+    Ok(())
+}
+
+/// Holds `<root>/.lock` exclusively until the returned file drops.
+fn hold_lock(root: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    use std::os::fd::AsRawFd;
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join(".lock"))?;
+    // SAFETY: the fd stays open for `held`'s life; flock touches nothing else.
+    let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err("the test could not take the lock".into());
+    }
+    Ok(held)
+}
+
+/// Each writer's outcome, and the document's final version.
+type Race = (Vec<Result<(), DashError>>, u64);
+
+/// Two blind `set`s of `items/D02` (by `batch` or `set`), both started
+/// while the test holds the lock.
+fn race_blind_sets(via_batch: bool) -> Result<Race, Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    let store = sel(&tmp.path().join("store"));
+    let seed = WriteRequest {
+        store: store.clone(),
+        collection: "items".into(),
+        id: "D01".into(),
+        data: json!({"t": 1}),
+        if_version: None,
+    };
+    verbs::set(&env(), &seed)?;
+    let held = hold_lock(&store.root)?;
+    let writers: Vec<_> = ["A", "B"]
+        .into_iter()
+        .map(|who| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let data = json!({"by": who});
+                if via_batch {
+                    let ops = vec![
+                        json!({"op": "set", "collection": "items", "id": "D02", "data": data}),
+                    ];
+                    verbs::batch(&env(), &BatchRequest { store, ops }).map(|_| ())
+                } else {
+                    let r = WriteRequest {
+                        store,
+                        collection: "items".into(),
+                        id: "D02".into(),
+                        data,
+                        if_version: None,
+                    };
+                    verbs::set(&env(), &r).map(|_| ())
+                }
+            })
+        })
+        .collect();
+    // Both writers reach the lock wait before it is released.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    drop(held);
+    let got = writers
+        .into_iter()
+        .map(|w| w.join().map_err(|_| "writer panicked"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let get = GetRequest {
+        store,
+        collection: "items".into(),
+        id: "D02".into(),
+    };
+    Ok((got, verbs::get(&env(), &get)?.version))
+}
+
+/// #10063: two blind `set`s of one new id, both started while another
+/// writer holds the lock, must not both win: the second would silently
+/// replace the first (code-critic repro). Covers `set` and `batch`.
+#[test]
+fn dashboard_concurrent_blind_sets_of_a_new_id_let_exactly_one_win() -> R {
+    let races = [race_blind_sets(false)?, race_blind_sets(true)?];
+    for (path, (got, version)) in ["set", "batch"].iter().zip(&races) {
+        let won = got.iter().filter(|g| g.is_ok()).count();
+        let conflicts = got
+            .iter()
+            .filter(|g| matches!(g, Err(e @ DashError::Conflict(_)) if e.code().exit_code() == 1))
+            .count();
+        println!("{path}: {won} won, {conflicts} conflict, D02 version {version}: {got:?}");
+    }
+    for (path, (got, version)) in ["set", "batch"].iter().zip(&races) {
+        assert_eq!(
+            got.iter().filter(|g| g.is_ok()).count(),
+            1,
+            "{path}: {got:?}"
+        );
+        let lost = got
+            .iter()
+            .find_map(|g| g.as_ref().err())
+            .ok_or("no loser")?;
+        assert!(matches!(lost, DashError::Conflict(_)), "{path}: {lost:?}");
+        assert_eq!(lost.code().exit_code(), 1, "{path}");
+        assert_eq!(*version, 1, "{path}: the first document was replaced");
+    }
+    Ok(())
+}
+
+/// #10063: a request names the prune log, so over the daemon socket or the
+/// MCP tool it must not append to (a `delete`) or read (`pruned`) a file that
+/// is not a prune log, a symlink named `pruned.jsonl` included.
+#[test]
+fn dashboard_prune_log_not_named_pruned_jsonl_is_refused() -> R {
+    let tmp = tempfile::tempdir()?;
+    let outside = tmp.path().join("home");
+    std::fs::create_dir_all(&outside)?;
+    let rc = outside.join(".zshrc");
+    std::fs::write(&rc, "export A=1\n")?;
+    let transcript = outside.join("transcript.jsonl");
+    std::fs::write(&transcript, "{\"secret\": \"prompt\"}\n")?;
+    let alias = outside.join("pruned.jsonl");
+    std::os::unix::fs::symlink(&rc, &alias)?;
+    let base = sel(&tmp.path().join("store"));
+    let seed = WriteRequest {
+        store: base.clone(),
+        collection: "items".into(),
+        id: "D01".into(),
+        data: json!({"t": 1}),
+        if_version: None,
+    };
+    verbs::set(&env(), &seed)?;
+    for target in [&rc, &transcript, &alias] {
+        let store = StoreSel {
+            prune_log: Some(target.clone()),
+            ..base.clone()
+        };
+        let del = verbs::delete(
+            &env(),
+            &DeleteRequest {
+                store: store.clone(),
+                collection: "items".into(),
+                id: "D01".into(),
+                if_version: None,
+            },
+        );
+        assert!(
+            matches!(&del, Err(DashError::Invalid(_))),
+            "{target:?}: {del:?}"
+        );
+        assert_eq!(del.err().ok_or("deleted")?.code().exit_code(), 2);
+        let read = verbs::pruned(
+            &env(),
+            &PrunedRequest {
+                store,
+                id: None,
+                collection: None,
+            },
+        );
+        assert!(
+            matches!(&read, Err(DashError::Invalid(_))),
+            "{target:?}: {read:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&rc)?, "export A=1\n");
+    assert_eq!(
+        std::fs::read_to_string(&transcript)?,
+        "{\"secret\": \"prompt\"}\n"
+    );
+    // The default prune log, and one named `pruned.jsonl`, still work.
+    let named = StoreSel {
+        prune_log: Some(tmp.path().join("archive/pruned.jsonl")),
+        ..base
+    };
+    verbs::delete(
+        &env(),
+        &DeleteRequest {
+            store: named.clone(),
+            collection: "items".into(),
+            id: "D01".into(),
+            if_version: None,
+        },
+    )?;
+    let lines = verbs::pruned(
+        &env(),
+        &PrunedRequest {
+            store: named,
+            id: Some("D01".into()),
+            collection: None,
+        },
+    )?;
+    assert_eq!(lines.lines.len(), 1);
     Ok(())
 }
 
