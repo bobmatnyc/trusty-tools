@@ -590,6 +590,50 @@ fn prune_log_inside_root_refused() -> R {
 }
 
 #[test]
+fn prune_log_dangling_link_refused() -> R {
+    // #10063 df-G01: a dangling link is opened through, so it is refused.
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("store");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(tmp.path().join("outside"))?;
+    let link = tmp.path().join("outside/pruned.jsonl");
+    std::os::unix::fs::symlink(root.join("leak.jsonl"), &link)?;
+    let dir_link = tmp.path().join("outside/dlink");
+    std::os::unix::fs::symlink(root.join("newdir"), &dir_link)?;
+    for path in [link, dir_link.join("p.jsonl")] {
+        let got = PruneLog::outside(&root, &path);
+        assert!(
+            matches!(got, Err(DashError::Invalid(_))),
+            "{}: {got:?}",
+            path.display()
+        );
+    }
+    assert!(!root.join("leak.jsonl").exists());
+    Ok(())
+}
+
+#[test]
+fn prune_log_late_link_refuses_delete() -> R {
+    for format in FORMATS {
+        let f = Fixture::new(format)?;
+        let s = f.store();
+        s.set("items", "A01", json!({"body": "x"}), None)?;
+        let leak = f.root.join("leak.jsonl");
+        fs::create_dir_all(f.prune.path().parent().ok_or("no parent")?)?;
+        // #10063 df-G01: planted after `outside` checked the path.
+        std::os::unix::fs::symlink(&leak, f.prune.path())?;
+        let got = s.delete("items", "A01", None);
+        assert!(
+            matches!(got, Err(DashError::Io { .. })),
+            "{format}: {got:?}"
+        );
+        assert_eq!(s.get("items", "A01")?.data["body"], "x", "{format}");
+        assert!(!leak.exists(), "{format}: written inside the root");
+    }
+    Ok(())
+}
+
+#[test]
 fn pruned_reads_prototype_lines() -> R {
     let tmp = tempfile::tempdir()?;
     let path = tmp.path().join("archive/pruned.jsonl");

@@ -247,11 +247,26 @@ fn rotate(root: &Path, path: &Path, now: &str) -> Result<(), DashError> {
 
 /// Appends `text` to `path` (created with its directory), then fsyncs it.
 pub(super) fn append_durable(path: &Path, text: &str) -> Result<(), DashError> {
+    append_with(path, text, OpenOptions::new())
+}
+
+/// [`append_durable`], refusing a symlink at `path`'s last component
+/// (`O_NOFOLLOW`): the open fails with [`DashError::Io`] and nothing is
+/// written.
+pub(super) fn append_durable_nofollow(path: &Path, text: &str) -> Result<(), DashError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = OpenOptions::new();
+    // #10063 df-G01: a link planted after the path was checked is not followed.
+    opts.custom_flags(libc::O_NOFOLLOW);
+    append_with(path, text, opts)
+}
+
+fn append_with(path: &Path, text: &str, mut opts: OpenOptions) -> Result<(), DashError> {
     let existed = path.exists();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(DashError::io(parent))?;
     }
-    let mut f = OpenOptions::new()
+    let mut f = opts
         .create(true)
         .append(true)
         .open(path)

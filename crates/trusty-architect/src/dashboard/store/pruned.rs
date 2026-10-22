@@ -9,13 +9,16 @@
 //! memory client.
 //! What: [`PruneLog`], a [`DeleteArchive`] at a path that must not lie under
 //! the store root once symlinks are resolved; it keeps and writes the
-//! resolved path. [`DeleteArchive::record`] appends one canonical line per
-//! removed document, `{by, collection, data, deleted_at, id, version}` (the
-//! AC's shape, owner ruling D34), then fsyncs; [`PruneLog::lines`] returns the
+//! resolved path, never through a symlink at its last component (a dangling
+//! one is refused up front, a late one fails the open).
+//! [`DeleteArchive::record`] appends one canonical line per removed document,
+//! `{by, collection, data, deleted_at, id, version}` (the AC's shape, owner
+//! ruling D34), then fsyncs; [`PruneLog::lines`] returns the
 //! raw lines matching an id and collection, oldest first, in either this
 //! shape or the prototype's (`pruned_at`, `actor`).
 //! Test: `delete_refused_when_pruned_write_fails`, `pruned_by_id_returns_record`,
-//! `prune_log_inside_root_refused`, `pruned_reads_prototype_lines`.
+//! `prune_log_inside_root_refused`, `prune_log_dangling_link_refused`,
+//! `prune_log_late_link_refuses_delete`, `pruned_reads_prototype_lines`.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -25,7 +28,7 @@ use serde_json::{Value, json};
 
 use super::super::canonical::compact;
 use super::super::error::DashError;
-use super::changes::append_durable;
+use super::changes::append_durable_nofollow;
 use super::{DeleteArchive, Removed};
 
 /// An append-only `pruned.jsonl` outside a store's served root.
@@ -39,10 +42,11 @@ impl PruneLog {
     ///
     /// # Errors
     /// [`DashError::Invalid`] when `path` is the root or lies under it
-    /// (symlinks resolved where the path exists), or either path has a `..`
-    /// below a directory that does not exist; [`DashError::Io`] when the
-    /// working directory is needed and unreadable, or an existing part of
-    /// either path cannot be resolved.
+    /// (symlinks resolved where the path exists), either path has a `..`
+    /// below a directory that does not exist, or a part of either path is a
+    /// dangling symlink; [`DashError::Io`] when the working directory is
+    /// needed and unreadable, or an existing part of either path cannot be
+    /// resolved.
     pub fn outside(served_root: &Path, path: impl Into<PathBuf>) -> Result<Self, DashError> {
         let path = path.into();
         let (root, at) = (resolve(served_root)?, resolve(&path)?);
@@ -135,7 +139,7 @@ impl DeleteArchive for PruneLog {
                 compact(&rec) + "\n"
             })
             .collect();
-        append_durable(&self.path, &text)
+        append_durable_nofollow(&self.path, &text)
     }
 }
 
@@ -145,9 +149,10 @@ impl DeleteArchive for PruneLog {
 ///
 /// # Errors
 /// [`DashError::Invalid`] for a `..` in the part that does not exist (it
-/// cannot be resolved before the directory is made); [`DashError::Io`] when
-/// the working directory or an existing ancestor cannot be resolved, never a
-/// fallback to the unresolved path (#10063 df-G01).
+/// cannot be resolved before the directory is made) or a dangling symlink
+/// (the OS would create its target); [`DashError::Io`] when the working
+/// directory or an existing ancestor cannot be resolved, never a fallback to
+/// the unresolved path (#10063 df-G01).
 fn resolve(path: &Path) -> Result<PathBuf, DashError> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -162,6 +167,13 @@ fn resolve(path: &Path) -> Result<PathBuf, DashError> {
         let mut out = match fs::canonicalize(&base) {
             Ok(out) => out,
             Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                // #10063 df-G01: a dangling link exists; a write follows it.
+                if fs::symlink_metadata(&base).is_ok() {
+                    return Err(DashError::Invalid(format!(
+                        "{} is a dangling symlink: the write would follow it",
+                        base.display()
+                    )));
+                }
                 continue;
             }
             Err(e) => return Err(DashError::io(&base)(e)),
