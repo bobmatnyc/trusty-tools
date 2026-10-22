@@ -1,0 +1,3 @@
+Added
+- `tm architect dashboard get|list|set|update|delete|batch|pruned|validate|fsck|tally|footer|ids`, the Architect dashboard store's verbs with `dashboard-db.py`'s arguments and output, run in-process under the store lock; a stale `--if-version` exits 1 ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- The daemon serves the same verbs as `mpm.architect.dashboard.*`, and the `architect_dashboard` MCP tool (op field) runs them for a session with no shell; errors carry the CLI exit code ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))

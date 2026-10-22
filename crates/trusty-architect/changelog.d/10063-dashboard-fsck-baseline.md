@@ -1,0 +1,3 @@
+Fixed
+- The first logged batch on a dashboard store creates `changes.jsonl` before its commit, with one `baseline` line per document already on disk: `fsck` no longer reports a legacy document as having no change line, and still finds a first batch whose change-log append failed ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))
+- Dashboard store writes (documents, the change log, the prune log) open every directory below the store root, or below `/` for the prune log, without following a symlink, so a directory swapped for a symlink after a check can no longer redirect a write ([#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063))

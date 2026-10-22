@@ -23,6 +23,10 @@ use crate::cli::ArchitectAction;
 
 /// Runs `action` against this process's environment; returns the exit code.
 pub(crate) fn run(action: ArchitectAction) -> i32 {
+    // #10063: the dashboard verbs keep the store's exit classes (1, 2, 3).
+    if let ArchitectAction::Dashboard(args) = action {
+        return super::architect_dashboard::run(args);
+    }
     let get = |name: &str| std::env::var(name).ok();
     let out = execute(action, &get, &mut io::stdin().lock());
     let mut stdout = io::stdout().lock();
@@ -81,6 +85,9 @@ fn execute(
             };
             dir.and_then(|d| verbs::self_ctx(&d))
         }
+        ArchitectAction::Dashboard(_) => Err(VerbError::Usage(
+            "dashboard runs through `run`, never `execute`".to_owned(),
+        )),
     };
     match result {
         Ok(stdout) => Output {

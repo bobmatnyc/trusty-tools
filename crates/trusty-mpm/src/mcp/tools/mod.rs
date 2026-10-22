@@ -12,10 +12,10 @@
 //! coordinator chat turn ([`chat`], #9979) — so this is a thin facade that re-exports all and
 //! concatenates their descriptors, keeping each leaf file well under the
 //! 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the thirty-nine MCP tool descriptors (nine core +
+//! What: [`tool_catalog`] builds the forty MCP tool descriptors (nine core +
 //! twelve session + five console + four project + four proxy + one disk + one
-//! secrets + one channel + one chat + one ledger — #1222 / #1220 / #1508 / #1519 / #1517 WI-5 /
-//! #2012 / #2550 / #6927 / #7522 / #9856 / #9979 / #9758 / session-context tools); [`TOOL_CATALOG`]
+//! secrets + one channel + one chat + one ledger + one dashboard — #1222 / #1220 / #1508 / #1519 / #1517 WI-5 /
+//! #2012 / #2550 / #6927 / #7522 / #9856 / #9979 / #9758 / #10063 / session-context tools); [`TOOL_CATALOG`]
 //! lists their names for tests and the startup log; `tool` is the shared
 //! descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
@@ -31,6 +31,8 @@ pub mod console;
 pub mod core;
 // #9758: `dbatg`, the PM ledger writer.
 pub mod dbatg;
+// #10063: `architect_dashboard`, the Architect dashboard store.
+pub mod architect_dashboard;
 // #6927: the Disk dashboard's worktree survey.
 pub mod disk;
 pub mod project;
@@ -44,14 +46,14 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the thirty-nine tool names — the nine core/bug tools,
+/// What: a static slice of the forty tool names — the nine core/bug tools,
 /// the twelve session-lifecycle tools, the five console-facing tools, the four
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), the four
 /// session-manager proxy tools (#2550), the Disk survey (#6927), and
 /// `secrets_get_ref` (#7522), `ask_owner` (#9856), `sessions_chat` (#9979)
-/// and `dbatg` (#9758).
+/// `dbatg` (#9758) and `architect_dashboard` (#10063).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 39] = [
+pub const TOOL_CATALOG: [&str; 40] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -106,6 +108,8 @@ pub const TOOL_CATALOG: [&str; 39] = [
     "sessions_chat",
     // ── 1 ledger tool (#9758, mirrors `mpm.dbatg.*`) ────────────────────────
     "dbatg",
+    // ── 1 dashboard tool (#10063, mirrors `mpm.architect.dashboard.*`) ──────
+    "architect_dashboard",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -120,7 +124,8 @@ pub const TOOL_CATALOG: [&str; 39] = [
 /// `disk::disk_tools` (one descriptor, #6927), `secrets::secrets_tools` (one
 /// descriptor, #7522), `channels::channels_tools` (one descriptor, #9856) and
 /// `chat::chat_tools` (one descriptor, #9979) and `dbatg::dbatg_tools` (one
-/// descriptor, #9758) in catalog order, returning thirty-nine
+/// descriptor, #9758) and `architect_dashboard::architect_dashboard_tools`
+/// (one descriptor, #10063) in catalog order, returning forty
 /// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -134,6 +139,7 @@ pub fn tool_catalog() -> Vec<Value> {
     tools.extend(channels::channels_tools());
     tools.extend(chat::chat_tools());
     tools.extend(dbatg::dbatg_tools());
+    tools.extend(architect_dashboard::architect_dashboard_tools());
     tools
 }
 
@@ -166,9 +172,9 @@ mod tests {
         // #6927 adds disk_survey → 35.
         // #7522 adds secrets_get_ref → 36.
         // #9856 adds ask_owner → 37; #9979 adds sessions_chat → 38.
-        // #9758 adds dbatg → 39.
-        assert_eq!(tool_catalog().len(), 39);
-        assert_eq!(TOOL_CATALOG.len(), 39);
+        // #9758 adds dbatg → 39; #10063 adds architect_dashboard → 40.
+        assert_eq!(tool_catalog().len(), 40);
+        assert_eq!(TOOL_CATALOG.len(), 40);
     }
 
     #[test]
