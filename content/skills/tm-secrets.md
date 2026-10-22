@@ -3,7 +3,7 @@ name: tm-secrets
 description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. The tm secrets CLI does not ship yet.
 user-invocable: true
 metadata:
-  version: "1.3.1"
+  version: "1.4.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
