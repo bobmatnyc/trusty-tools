@@ -56,7 +56,5 @@ pub mod coordinator;
 /// #9758: the PM ledger writer, `mpm.dbatg.init`, `batch` and `show`.
 pub mod dbatg;
 
-// #10063: the dashboard methods' socket tests, ahead of the methods.
-#[cfg(test)]
-#[path = "architect_dashboard_tests.rs"]
-mod architect_dashboard_tests;
+/// #10063: the Architect dashboard store, `mpm.architect.dashboard.*`.
+pub mod architect_dashboard;
