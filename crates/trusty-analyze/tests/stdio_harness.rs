@@ -4,15 +4,17 @@
 //! Why: unit tests in `src/mcp/mod.rs` validate dispatcher wiring in isolation,
 //! but only an out-of-process subprocess test catches issues in the actual
 //! stdio framing, startup gating against trusty-search, and end-to-end tool
-//! responses. This harness drives the real release binary the same way Claude
+//! responses. This harness drives the real binary the same way Claude
 //! Code does — line-delimited JSON-RPC over stdin/stdout — and reports p50/p95/p99
 //! latency per tool.
 //!
 //! What:
-//!   1. Verifies trusty-search is reachable on 127.0.0.1:7878 (skips with a
-//!      clear message if not — analyzer refuses to start without it).
-//!   2. Spawns `target/release/trusty-analyze serve --mcp --port <free>` and
-//!      waits for it to be ready by sending an `initialize` request.
+//!   1. Probes trusty-search with `search.health` on its Unix socket — the path
+//!      `trusty_common::search_rpc::search_socket` resolves, as the analyzer
+//!      does — and skips with a message naming that path when the socket is
+//!      absent or does not answer (#10086: this probed the retired TCP 7878).
+//!   2. Spawns `trusty-analyze serve --mcp --socket <tempdir>` pointed at that
+//!      search socket, and waits for it to be ready by sending `initialize`.
 //!   3. Lists tools, asserts the expected surface is present.
 //!   4. Functional smoke tests for each tool against the `trusty-tools` index
 //!      (or a fallback) — verifies well-formed responses & key fields.
@@ -22,110 +24,85 @@
 //!
 //! Test: `cargo test -p trusty-analyze --test stdio_harness -- --ignored \
 //!        --nocapture full_stdio_suite`. Gated behind `#[ignore]` because it
-//! requires a built release binary AND a running trusty-search daemon — both
-//! present in normal `cargo test` runs would be flaky in CI.
+//! needs a running trusty-search daemon; point it at an isolated one with
+//! `TRUSTY_SEARCH_SOCKET` or `TRUSTY_DATA_DIR` (`scripts/sandbox_search_daemon.sh`).
+
+#[path = "support/fake_search.rs"]
+mod fake_search;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use trusty_common::search_rpc;
 
-const SEARCH_URL: &str = "http://127.0.0.1:7878";
 const TEST_INDEX_PREFERRED: &str = "trusty-tools";
 const PERF_ITERATIONS: usize = 50;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
+/// #10086: bounds each socket probe, so a socket that accepts and never
+/// answers skips the suite instead of hanging it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Why: keep the binary path lookup central so the test fails fast with a
-/// clear message if the release binary is missing.
-/// What: returns the absolute path to `target/release/trusty-analyze`.
-/// Test: covered by `binary_path_exists` (compile-time, indirect).
-fn binary_path() -> Result<PathBuf> {
-    // CARGO_MANIFEST_DIR is `crates/trusty-analyze`; target lives two up.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow!("cannot find workspace root from {manifest_dir:?}"))?;
-    let bin = workspace_root.join("target/release/trusty-analyze");
-    if !bin.exists() {
-        bail!(
-            "release binary not found at {} — run `cargo build --release -p trusty-analyze` first",
-            bin.display()
-        );
-    }
-    Ok(bin)
+/// The `trusty-analyze` binary cargo built for this test target.
+///
+/// #10086: this read `<workspace>/target/release`, which is never populated
+/// when `CARGO_TARGET_DIR` points elsewhere, as it does in this workspace.
+fn binary_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_trusty-analyze"))
 }
 
-/// Why: analyzer refuses to start without trusty-search; surface a friendly
-/// skip rather than a confusing child-process exit-1.
-/// What: blocking HTTP GET against the search /health endpoint.
-/// Test: `precheck_search_up` is asserted at the top of `full_stdio_suite`.
-fn search_is_reachable() -> bool {
-    // Minimal synchronous probe — avoid pulling in reqwest just for a test.
-    let agent = ureq_lite_get(SEARCH_URL.to_string() + "/health");
-    matches!(agent, Ok(body) if body.contains("\"status\":\"ok\""))
+/// Ask trusty-search at `socket` for `search.health`.
+///
+/// Why: the analyzer refuses to start without trusty-search, so the suite
+/// skips with a message naming the socket instead of failing on a child exit 1.
+/// What: `Ok(())` when the daemon answers with a result — the same contract as
+/// the analyzer's own startup gate; otherwise `Err` with a one-line reason that
+/// names the socket path. Bounded by [`PROBE_TIMEOUT`].
+/// Test: `search_probe_names_an_absent_socket`, `search_probe_and_index_pick_speak_the_socket`.
+fn probe_search(socket: &Path) -> std::result::Result<(), String> {
+    // #10086: trusty-search serves its Unix socket only; the TCP 7878 probe is gone.
+    if !socket.exists() {
+        return Err(format!("no socket at {}", socket.display()));
+    }
+    search_rpc::call_blocking(socket, search_rpc::METHOD_HEALTH, json!({}), PROBE_TIMEOUT)
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
 }
 
-/// Why: tests should not depend on reqwest/ureq feature bloat; a tiny inline
-/// HTTP GET over std::net is enough for /health and /indexes probes.
-/// What: blocking HTTP/1.1 GET, returns body string on 2xx.
-/// Test: exercised indirectly by `search_is_reachable` and `pick_index`.
-fn ureq_lite_get(url: String) -> Result<String> {
-    use std::io::{BufRead, BufReader, Read};
-    use std::net::TcpStream;
-
-    let url = url.strip_prefix("http://").unwrap_or(&url);
-    let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
-    let path = format!("/{path}");
-    let mut stream = TcpStream::connect_timeout(
-        &host_port
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .ok_or_else(|| anyhow!("resolve {host_port}"))?,
-        Duration::from_secs(2),
-    )?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n",);
-    stream.write_all(req.as_bytes())?;
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line)?;
-    if !status_line.contains("200") {
-        bail!("non-200 from {url}: {}", status_line.trim());
-    }
-    // Skip headers.
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        if line == "\r\n" || line.is_empty() {
-            break;
-        }
-    }
-    let mut body = String::new();
-    reader.read_to_string(&mut body)?;
-    Ok(body)
+/// Report a skipped suite where a passing run still shows it.
+///
+/// #10086: libtest captures `eprintln!` for a passing test, which would hide
+/// the skip; a write to the stderr handle is not captured.
+fn report_skip(socket: &Path, reason: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "SKIPPED full_stdio_suite: trusty-search is not answering at {} ({reason}). \
+         Start it with `trusty-search start`, or point TRUSTY_SEARCH_SOCKET at a \
+         running daemon (an isolated one: scripts/sandbox_search_daemon.sh).",
+        socket.display()
+    );
 }
-
-use std::net::ToSocketAddrs;
 
 /// Why: tests should run against a real index when available, but degrade
 /// gracefully — most tools accept an arbitrary index id and return an empty
 /// array rather than erroring.
-/// What: returns the preferred index id if listed, else the first index, else
-/// a synthetic non-existent id to exercise empty-response paths.
-/// Test: covered by `pick_index_returns_something`.
-fn pick_index() -> String {
-    let Ok(body) = ureq_lite_get(format!("{SEARCH_URL}/indexes")) else {
+/// What: `search.indexes.list` over `socket`; returns the preferred index id if
+/// listed, else the first index, else a synthetic id to exercise
+/// empty-response paths.
+/// Test: `pick_index_returns_something`, `search_probe_and_index_pick_speak_the_socket`.
+fn pick_index(socket: &Path) -> String {
+    // #10086: the socket twin of `GET /indexes`.
+    let Ok(v) = search_rpc::call_blocking(
+        socket,
+        search_rpc::METHOD_INDEXES_LIST,
+        json!({}),
+        PROBE_TIMEOUT,
+    ) else {
         return TEST_INDEX_PREFERRED.into();
-    };
-    let v: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(_) => return TEST_INDEX_PREFERRED.into(),
     };
     let arr = v.get("indexes").and_then(Value::as_array);
     if let Some(arr) = arr {
@@ -140,17 +117,6 @@ fn pick_index() -> String {
     TEST_INDEX_PREFERRED.into()
 }
 
-/// Why: 7879 is the canonical port and may already be in use by a live
-/// analyzer; pick something well above it for the test child.
-/// What: returns a port unlikely to clash (auto-walk-forward handles residual
-/// collisions inside the child).
-/// Test: implicit — `spawn_child` exits with the actual bound port logged.
-fn ephemeral_port_start() -> u16 {
-    // 17xxx is unlikely to clash with running daemons; auto-walk in serve()
-    // handles any residual collisions.
-    17_879
-}
-
 /// Wraps a spawned trusty-analyze child plus its stdio handles. Drop kills
 /// the child so panics during a test do not leak processes.
 struct AnalyzerProc {
@@ -161,32 +127,31 @@ struct AnalyzerProc {
 }
 
 impl AnalyzerProc {
-    /// Spawn the analyzer in MCP stdio mode and complete the initialize handshake.
-    fn spawn() -> Result<Self> {
-        let bin = binary_path()?;
+    /// Spawn the analyzer in MCP stdio mode against trusty-search at
+    /// `search_socket`, and complete the initialize handshake.
+    fn spawn(search_socket: &Path) -> Result<Self> {
+        let bin = binary_path();
         let tmp = tempfile::tempdir().context("tempdir for facts store")?;
         let facts_path = tmp.path().join("test.facts.redb");
+        let analyze_socket = tmp.path().join("analyze.sock");
         // tempdir drops too early otherwise; leak the handle for the lifetime of the test.
         // (The OS reclaims the dir on process exit anyway.)
         std::mem::forget(tmp);
 
-        let port = ephemeral_port_start();
-
+        // #10086: `--search-url` and `--port` are retired (#9214, #6287). The
+        // child dials the socket the preflight probed, and binds its own socket
+        // in the tempdir so a live analyzer's default socket is never touched.
         let mut cmd = Command::new(&bin);
-        cmd.args([
-            "--search-url",
-            SEARCH_URL,
-            "--facts-path",
-            facts_path.to_str().expect("utf8 facts path"),
-            "serve",
-            "--mcp",
-            "--port",
-            &port.to_string(),
-        ])
-        .env("RUST_LOG", "error")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        cmd.arg("--facts-path")
+            .arg(&facts_path)
+            .args(["serve", "--mcp", "--socket"])
+            .arg(&analyze_socket)
+            .env("TRUSTY_SEARCH_SOCKET", search_socket)
+            .env("TRUSTY_NO_UPDATE_CHECK", "1")
+            .env("RUST_LOG", "error")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().context("spawn trusty-analyze")?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
@@ -338,24 +303,62 @@ fn pctl_helper_sanity() {
 
 #[test]
 fn pick_index_returns_something() {
-    // No assertion on which index — only that the picker yields a non-empty string.
-    let idx = pick_index();
-    assert!(!idx.is_empty(), "pick_index returned empty");
+    // #10086: hermetic — no daemon at this path, so the picker falls back.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let idx = pick_index(&dir.path().join("absent.sock"));
+    assert_eq!(idx, TEST_INDEX_PREFERRED, "fallback when nothing answers");
+}
+
+/// #10086: an absent socket is a skip reason that names the path, not a hang.
+#[test]
+fn search_probe_names_an_absent_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("absent.sock");
+    let reason = probe_search(&socket).expect_err("no daemon at this path");
+    assert!(
+        reason.contains(&socket.display().to_string()),
+        "the skip reason must name the socket: {reason}"
+    );
+}
+
+/// Why: #10086 — the preflight and the index picker must speak trusty-search's
+/// socket protocol, which only a socket that answers can show.
+/// What: serves a fake socket that answers `search.health` and lists two
+/// indexes; asserts the probe passes and the picker prefers the test index.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_probe_and_index_pick_speak_the_socket() {
+    let search = fake_search::FakeSearchSocket::serve(|method, _| match method {
+        "search.health" => Ok(json!({"status": "ok"})),
+        "search.indexes.list" => Ok(json!({"indexes": ["other", TEST_INDEX_PREFERRED]})),
+        other => Err((-32601, format!("unexpected {other}"))),
+    });
+    let socket = search.path().to_path_buf();
+    let (probe, picked) =
+        tokio::task::spawn_blocking(move || (probe_search(&socket), pick_index(&socket)))
+            .await
+            .expect("join the probe");
+    assert_eq!(probe, Ok(()), "a socket answering search.health is up");
+    assert_eq!(picked, TEST_INDEX_PREFERRED);
 }
 
 /// The big one: spawn analyzer, exercise full MCP surface, measure latency.
 #[test]
-#[ignore = "requires release binary + running trusty-search daemon"]
+#[ignore = "requires a running trusty-search daemon on its Unix socket"]
 fn full_stdio_suite() -> Result<()> {
     // -------- Preflight -----------------------------------------------------
-    assert!(
-        search_is_reachable(),
-        "trusty-search must be running on {SEARCH_URL} — start with `trusty-search start`"
-    );
-    let index_id = pick_index();
+    // #10086: probe the Unix socket the analyzer itself resolves; skip, naming
+    // the path, when it is absent or does not answer.
+    let socket = search_rpc::search_socket().context("resolve the trusty-search socket path")?;
+    if let Err(reason) = probe_search(&socket) {
+        report_skip(&socket, &reason);
+        return Ok(());
+    }
+    println!("=== trusty-search answering at {} ===", socket.display());
+    let index_id = pick_index(&socket);
     println!("=== using test index: {index_id} ===");
 
-    let mut proc = AnalyzerProc::spawn()?;
+    let mut proc = AnalyzerProc::spawn(&socket)?;
 
     // -------- tools/list ---------------------------------------------------
     let result = proc.call("tools/list", json!({}))?;
