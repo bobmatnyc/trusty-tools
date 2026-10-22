@@ -304,6 +304,22 @@ impl Embedder for SwitchableEmbedder {
     fn resolved_provider_label(&self) -> Option<String> {
         self.current().resolved_provider_label()
     }
+
+    // #9284: the installed backend's window, so the embed pass can count
+    // truncation through this wrapper. Test:
+    // `switchable_forwards_the_backend_window_and_tokenizer`.
+    fn input_window(&self) -> Option<usize> {
+        self.current().input_window()
+    }
+
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        self.current().chunking_tokenizer()
+    }
 }
 
 #[cfg(test)]

@@ -152,6 +152,20 @@ where
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         <E as trusty_common::embedder::Embedder>::provider(self)
     }
+
+    // #9284: the embed pass counts chunks cut at this window.
+    fn input_window(&self) -> Option<usize> {
+        <E as trusty_common::embedder::Embedder>::input_window(self)
+    }
+
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<std::sync::Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        <E as trusty_common::embedder::Embedder>::chunking_tokenizer(self)
+    }
 }
 
 #[cfg(test)]

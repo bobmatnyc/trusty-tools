@@ -655,6 +655,16 @@ Per-index stats.
     cannot be read, all three are `null` and
     `bm25_truncation_unavailable_reason` is `"corpus_count_unreadable"`; it
     is `null` otherwise. The search `meta` block carries the same four fields.
+  - `embed_window` (#9284): `{window, truncated, unmeasured}`, counted since
+    this indexer was built (in memory; a restart resets it). `truncated`:
+    embedded chunks whose token count, special tokens included, exceeds the
+    embedder's input window, so the vector misses their tail. Counted with the
+    tokenizer the embedder truncates with. `unmeasured`: embedded chunks the
+    window applies to whose length could not be counted (no tokenizer, or a
+    tokenizer error). `window: null` means the embedder reports no window —
+    every sidecar embedder today, since no window crosses the wire — and then
+    nothing is counted; `0` there does not mean nothing was cut. Each embed
+    pass logs one WARN per affected file for at most 8 files, then one summary.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
