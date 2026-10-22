@@ -128,6 +128,7 @@ use trusty_mpm::core::dispatch_isolation::{
 };
 
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
+use trusty_mpm::daemon::services::delegation_records::DelegationRecordView;
 
 use crate::commands::hook_payload::build_hook_payload;
 use crate::commands::pm_guard_daemon_live::daemon_live_for;
@@ -437,7 +438,8 @@ fn unanswered_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String {
 /// dispatch tool, so `claim_shared_tree_dispatch` is handed `eligible = false`
 /// and its record closure never runs — the call is a pure read by construction,
 /// not by the caller's promise. Every failure arm of [`post_shared_tree`]
-/// returns an empty vec, which the caller reads as ALLOW.
+/// returns empty vecs, which the caller reads as ALLOW. The second vec is the
+/// records behind the names, for the docs-commit deny text (#6556).
 ///
 /// **This is the FAIL-OPEN reader, and it is not the only one.** See ADR-0057 —
 /// the worktree-removal rule needs the same question answered fail-CLOSED,
@@ -455,7 +457,7 @@ pub(crate) async fn live_shared_tree_writers(
     session_id: &str,
     cwd: &Path,
     payload: &Value,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<DelegationRecordView>) {
     // #5923: the fail-closed arm is the CLAIM path's alone. This one gates
     // `git merge`/`git rebase`/a docs commit, where denying on a daemon that
     // did not answer would block ordinary git work on the operator's own
@@ -465,7 +467,7 @@ pub(crate) async fn live_shared_tree_writers(
         .await
         .answered()
         .as_ref()
-        .map(writers_in)
+        .map(|body| (writers_in(body), records_in(body)))
         .unwrap_or_default()
 }
 
@@ -518,7 +520,7 @@ fn owners_or_deny(reply: SharedTreeReply) -> Result<Vec<String>, String> {
 /// non-empty answer — the deny needs one positive answer, not a complete
 /// census, so the common deny path still costs one round trip. Every failure arm
 /// of [`post_shared_tree`] contributes nothing, so an unreachable daemon still
-/// answers "nobody here".
+/// answers "nobody here". The records travel with the answer that won (#6556).
 /// Test: `head_move_query_asks_the_checkout_root_and_the_command_directory` in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn live_shared_tree_writers_in(
@@ -526,19 +528,19 @@ pub(crate) async fn live_shared_tree_writers_in(
     session_id: &str,
     dirs: &[&Path],
     payload: &Value,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<DelegationRecordView>) {
     let mut asked: Vec<&Path> = Vec::with_capacity(dirs.len());
     for dir in dirs {
         if asked.contains(dir) {
             continue;
         }
         asked.push(dir);
-        let live = live_shared_tree_writers(url, session_id, dir, payload).await;
-        if !live.is_empty() {
-            return live;
+        let answer = live_shared_tree_writers(url, session_id, dir, payload).await;
+        if !answer.0.is_empty() {
+            return answer;
         }
     }
-    Vec::new()
+    (Vec::new(), Vec::new())
 }
 
 /// Record the isolation the guard just granted, and learn who holds the
