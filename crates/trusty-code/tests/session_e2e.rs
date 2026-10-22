@@ -25,8 +25,6 @@
 
 use crate::support;
 
-use std::time::Duration;
-
 use serde_json::json;
 use support::{
     StdioSession, assert_envelopes_contiguous, find_response, find_session_event, kind_is,
