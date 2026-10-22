@@ -18,10 +18,15 @@
 //! stamp once its graph is saved, and a boot that finds the stamp schedules a
 //! rebuild. A restart, park or crash inside the debounce window therefore
 //! never serves the old persisted graph as current.
+//! A write counts as active from its start, embed included, and the quiet
+//! window never elapses while one is active (#10159); only the max-wait bound
+//! can fire mid-write.
 //! Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
 //! `a_deferred_rebuild_survives_a_reopen`,
-//! `rebuild_due_waits_for_quiet_or_max_wait` and
-//! `continuous_writes_still_rebuild_at_the_max_wait_cap` in
+//! `rebuild_due_waits_for_quiet_or_max_wait`,
+//! `continuous_writes_still_rebuild_at_the_max_wait_cap`,
+//! `a_quiet_rebuild_waits_while_a_write_is_embedding` and
+//! `a_serial_burst_of_slow_writes_rebuilds_at_most_once_per_max_wait` in
 //! `indexer::tests::file_lifecycle_8959`; the ticker by
 //! `graph_refresh_tick_rebuilds_a_stale_index_once`.
 
@@ -69,6 +74,10 @@ pub(crate) struct GraphRefresh {
     /// in-memory mark. A rebuild that starts while one is in flight may miss
     /// it, so it leaves the durable mark in place.
     inflight: AtomicU64,
+    /// #10159: single-file writes running now, embed phase included. Holds
+    /// back only the quiet rebuild; separate from `inflight`, so the #8959
+    /// clear rules do not change.
+    active_writes: AtomicU64,
 }
 
 /// What a full rebuild may clear once its graph is persisted (#8959).
@@ -94,6 +103,30 @@ impl Drop for GraphWriteGuard<'_> {
     }
 }
 
+/// A single-file write in progress, embed phase included (#10159).
+///
+/// Why: `index_file` embeds before it takes [`GraphWriteGuard`], so an embed
+/// longer than [`GRAPH_REFRESH_QUIET`] looked like a quiet index, and a serial
+/// burst of slow writes paid one full rebuild per write.
+/// What: the write counts as active until the guard drops. The drop, on
+/// success, error, panic or cancellation alike, restamps the last write and
+/// then uncounts the write, so the quiet window runs from the write's end.
+/// Test: `a_quiet_rebuild_waits_while_a_write_is_embedding`,
+/// `a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild`.
+pub(crate) struct ActiveWriteGuard<'a> {
+    refresh: &'a GraphRefresh,
+}
+
+impl Drop for ActiveWriteGuard<'_> {
+    fn drop(&mut self) {
+        // #10159: stamp before the decrement, so a ticker that reads zero
+        // active writes also reads this write's stamp.
+        let now = self.refresh.now_ms();
+        self.refresh.last_write_ms.store(now, Ordering::Release);
+        self.refresh.active_writes.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Default for GraphRefresh {
     fn default() -> Self {
         Self {
@@ -104,6 +137,7 @@ impl Default for GraphRefresh {
             full_rebuilds: AtomicU64::new(0),
             write_gen: AtomicU64::new(0),
             inflight: AtomicU64::new(0),
+            active_writes: AtomicU64::new(0),
         }
     }
 }
@@ -145,11 +179,18 @@ impl GraphRefresh {
     }
 
     fn is_due(&self, quiet: Duration, max_wait: Duration) -> bool {
+        // #10159: an active write means the index is not quiet, however long
+        // its embed runs; the max-wait bound still applies.
+        let quiet_ms = if self.active_writes.load(Ordering::SeqCst) > 0 {
+            u64::MAX
+        } else {
+            duration_ms(quiet)
+        };
         rebuild_due(
             self.stale_since_ms.load(Ordering::Acquire),
             self.last_write_ms.load(Ordering::Acquire),
             self.now_ms(),
-            duration_ms(quiet),
+            quiet_ms,
             duration_ms(max_wait),
         )
     }
@@ -186,6 +227,20 @@ impl CodeIndexer {
     /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
     pub(crate) fn mark_symbol_graph_stale(&self) {
         self.graph_refresh.mark_stale();
+    }
+
+    /// Count a single-file write as active for its whole run (#10159).
+    ///
+    /// What: `None` on a `skip_kg` index, whose graph a write never marks;
+    /// otherwise an [`ActiveWriteGuard`] the caller holds until the write ends.
+    /// Test: `a_skip_kg_write_is_not_counted_active`.
+    pub(crate) fn begin_active_write(&self) -> Option<ActiveWriteGuard<'_>> {
+        if self.skip_kg {
+            return None;
+        }
+        let refresh = &self.graph_refresh;
+        refresh.active_writes.fetch_add(1, Ordering::SeqCst);
+        Some(ActiveWriteGuard { refresh })
     }
 
     /// Start a single-file write that leaves the symbol graph stale (#8959).
