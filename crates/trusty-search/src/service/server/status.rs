@@ -435,7 +435,7 @@ pub(crate) async fn index_status_report(
     // #9235: BM25 corpus-cap truncation, distinct from `chunks_dropped_by_cap`
     // (the chunk cap) and from the search meta's `bm25_lane_degraded`.
     let bm25 = indexer.bm25_truncation().await;
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
         // #7434: the full root table, primary first — what a consumer such as
@@ -496,7 +496,18 @@ pub(crate) async fn index_status_report(
             // #7434: each root's own watch — `watching`, `degraded`, `failed`.
             "roots": state.watcher_manager.root_watch_states(&index_id).await,
         },
-    }))
+    });
+    // #9284: cumulative embed events cut at the embedder's input window since
+    // this indexer was built; a re-embed counts again. Inserted after the
+    // macro, which is at its recursion limit. `window: null` means either no
+    // embed pass has run yet, or the embedder reports none (nothing counted).
+    let embed_window = indexer.embed_window_stats();
+    body["embed_window"] = serde_json::json!({
+        "window": embed_window.window(),
+        "truncated": embed_window.truncated(),
+        "unmeasured": embed_window.unmeasured(),
+    });
+    Ok(body)
 }
 
 /// Optional query parameters for `GET /indexes/{id}/graph` (issue #128).

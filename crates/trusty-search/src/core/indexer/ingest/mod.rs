@@ -24,6 +24,8 @@ pub(crate) mod outcome;
 pub(crate) mod refusals;
 // #8959: replacing a file's prior chunks — fail-closed delete, per-path lock.
 pub(crate) mod supersede;
+// #9284: count and warn on chunks cut at the embedder's input window.
+pub(crate) mod truncation;
 
 use anyhow::{Context, Result};
 

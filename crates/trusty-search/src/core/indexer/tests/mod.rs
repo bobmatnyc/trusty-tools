@@ -104,6 +104,8 @@ mod chunk_cap;
 mod corpus_fault;
 mod deferred_commit_8761;
 mod embed_pool_routing;
+// #9284: chunks cut at the embedder window are counted and warned on.
+mod embed_window_9284;
 mod eviction_kg_paths;
 mod exact_match_floor;
 mod exact_match_perf;
