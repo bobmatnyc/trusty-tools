@@ -149,7 +149,7 @@ impl CodeEngine {
     /// ([`crate::serve::uds::socket_path`]).
     ///
     /// Why (#6637): this replaces `discover`, which raced a `TCODE_DAEMON_URL`
-    /// against an `http_addr` file and liveness-pinged whichever it found. The
+    /// against an address discovery file and liveness-pinged whichever it found. The
     /// socket path is derived from the data directory, so there is one answer
     /// and nothing to choose between. `project_path` is forwarded to
     /// `session.create` in `setup()` (mirrors `session::protocol::create`'s

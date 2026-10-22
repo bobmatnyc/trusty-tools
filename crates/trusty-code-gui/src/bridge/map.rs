@@ -8,7 +8,7 @@
 //!
 //! What: [`map_request`] turns a method, a path and a query string into one
 //! [`Call`]. The table is the daemon's REST route set one for one — every route
-//! `trusty_code::serve::http::build_axum_router` merges, mapped to the same
+//! the daemon's retired REST router (#6637) merged, mapped to the same
 //! JSON-RPC method and the same `params` its handler built. Covering the whole
 //! set rather than only today's `fetch()` sites is what makes PR 2c a deletion:
 //! nothing the webview could reach before stops resolving.

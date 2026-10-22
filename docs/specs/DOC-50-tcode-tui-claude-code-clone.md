@@ -269,7 +269,7 @@ pub use {run_tui, ReplStartup};
 
 **RESOLVED (Q7): HTTP Long-lived Daemon Transport**
 
-The CodeEngine communicates with a long-lived `tcode serve --http` daemon (default port 7881, per serve/mod.rs:70). Workstream awareness uses DOC-48 §5.3 SSE `WorkstreamActivationChanged` events.
+The CodeEngine communicates with a long-lived `tcode serve` daemon over its Unix socket (#6637 retired the loopback HTTP listener and its port). Workstream awareness uses DOC-48 §5.3 `WorkstreamActivationChanged` events, delivered by the `workstream.events` stream method.
 
 **Daemon Discovery Pattern (matching trusty-search/trusty-memory precedent):**
 
@@ -319,9 +319,13 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
 **RESOLVED (#4512):** this section previously carried an MVP known limitation —
 "tcode tui assumes a running `tcode serve --http` daemon on localhost:7881" with
 auto-spawn deferred to Phase 2. That limitation is GONE: `tcode tui` starts its
-own daemon when none is running (see §4.1). The port reference above was also
-stale — the implemented default is `serve::DEFAULT_HTTP_PORT` = **7882** (7881
-belongs to trusty-memory).
+own daemon when none is running (see §4.1).
+
+**SUPERSEDED (#6637):** the HTTP transport, the port, `TCODE_DAEMON_URL` and the
+discovery file described in this section are gone. The CodeEngine dials the
+daemon's Unix socket (`<data dir>/trusty-code/trusty-code.sock`, derived, never
+discovered), and since slice 2c `tcode serve` binds no TCP port at all —
+`--http` and `--port` are errors.
 
 ### 3.5 Step 5: Add widgets and render layer (trusty-code-tui)
 

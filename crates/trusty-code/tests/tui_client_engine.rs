@@ -7,8 +7,8 @@
 //! it calls, with what params, and how it turns the daemon's answers into
 //! `trusty_code_tui::ReplEvent`s — but that contract is now framed JSON-RPC
 //! over a `0600` Unix socket, so the fixture is a REAL daemon
-//! (`trusty_code::serve::uds::run_daemon_on`) with its HTTP listener switched
-//! off, plus a hand-rolled stub socket for the two scenarios that need a
+//! (`trusty_code::serve::uds::run_daemon_on`), which binds no TCP listener,
+//! plus a hand-rolled stub socket for the two scenarios that need a
 //! failure the real daemon never produces on purpose.
 //!
 //! What: `tui_engine_end_to_end_with_http_port_closed` is the load-bearing one
@@ -66,9 +66,8 @@ impl RealDaemon {
                 binding,
                 &serve_socket,
                 Some(&serve_data),
-                // The whole point: no TCP listener exists for anything to fall
-                // back to.
-                None,
+                // The whole point: the daemon binds no TCP listener (#6637), so
+                // nothing exists for a client to fall back to.
                 async move {
                     let _ = stopped.await;
                 },
@@ -174,9 +173,9 @@ fn drain(rx: &mut UnboundedReceiver<ReplEvent>) -> Vec<ReplEvent> {
 
 /// **The proof that no TUI path falls back to HTTP.**
 ///
-/// The daemon binds its socket and nothing else — `run_daemon_on` is called
-/// with `http_port: None`, so there is no loopback port in this process for a
-/// client to reach even by accident. The engine then drives a full session
+/// The daemon binds its socket and nothing else — `run_daemon_on` has no TCP
+/// listener at all since #6637, so there is no loopback port in this process
+/// for a client to reach even by accident. The engine then drives a full session
 /// through: `setup` creates one, a `session.send` writes into it, and the
 /// engine's own `session.events` stream tails it back with the ring-buffer
 /// replay. A regression that reintroduced an HTTP call anywhere on this path

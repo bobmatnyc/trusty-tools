@@ -665,23 +665,29 @@ The governing invariant is now [DOC-52 §2.1](./DOC-52-shared-workstream-definit
 
 ---
 
-## 12. Verification and curl examples
+## 12. Verification examples
 
 ### Setup
 
-Assume a tcode daemon is running on `localhost:7882` (default).
+Assume `tcode serve` is running. It answers on a Unix socket only (#6637 slice
+2c retired the `localhost:7882` HTTP listener these examples used to `curl`).
+Each request is one newline-terminated JSON frame, answered by one frame:
+
+```bash
+SOCK="<data dir>/trusty-code/trusty-code.sock"
+```
 
 ### Create a workstream
 
 ```bash
-curl -X POST http://localhost:7882/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
+jq -c . <<'JSON' | nc -U "$SOCK"
+{
     "jsonrpc": "2.0",
     "id": 1,
     "method": "workstream.create",
     "params": {"name": "Token rotation hardening"}
-  }'
+}
+JSON
 
 # Response:
 # {
@@ -696,14 +702,14 @@ curl -X POST http://localhost:7882/rpc \
 ### List workstreams
 
 ```bash
-curl -X POST http://localhost:7882/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
+jq -c . <<'JSON' | nc -U "$SOCK"
+{
     "jsonrpc": "2.0",
     "id": 2,
     "method": "workstream.list",
     "params": {}
-  }'
+}
+JSON
 
 # Response:
 # {
@@ -728,9 +734,8 @@ curl -X POST http://localhost:7882/rpc \
 ### Activate a workstream
 
 ```bash
-curl -X POST http://localhost:7882/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
+jq -c . <<'JSON' | nc -U "$SOCK"
+{
     "jsonrpc": "2.0",
     "id": 3,
     "method": "workstream.activate",
@@ -738,7 +743,8 @@ curl -X POST http://localhost:7882/rpc \
       "id": "a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b",
       "force": false
     }
-  }'
+}
+JSON
 
 # Response:
 # {
@@ -754,9 +760,8 @@ curl -X POST http://localhost:7882/rpc \
 ### Switch to a different workstream
 
 ```bash
-curl -X POST http://localhost:7882/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
+jq -c . <<'JSON' | nc -U "$SOCK"
+{
     "jsonrpc": "2.0",
     "id": 4,
     "method": "workstream.activate",
@@ -764,7 +769,8 @@ curl -X POST http://localhost:7882/rpc \
       "id": "b2c3d4e5-f6a1-4748-9a0b-1c2d3e4f5a6b",
       "force": true
     }
-  }'
+}
+JSON
 
 # Response (if another workstream was active):
 # {
@@ -795,5 +801,5 @@ curl -X POST http://localhost:7882/rpc \
 - [ ] Project scoping: all workstreams in daemon are project-scoped (daemon-local via ProjectBinding; no cross-project sessions).
 - [ ] AC-7: harness-agnostic transport interface is designed (generic session-id abstraction, event envelope, aggregation layer for multi-session logical units).
 - [ ] All ACs in §7 pass.
-- [ ] All curl examples in §12 succeed.
+- [ ] All §12 examples succeed.
 - [ ] **Grep check:** No mentions of `lease`, `heartbeat`, `TTL`, `.attach`, `.detach` except DOC-40 cross-references (verify each hit is intentional).

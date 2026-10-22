@@ -95,7 +95,7 @@ pub fn register(
 /// resolves at once per `TCODE_PERMISSION_MODE`. The mode is read from the
 /// daemon's environment, never from the request: the caller asking to run a
 /// task must not be able to widen its own permissions.
-/// Test: `serve::http_tests::*` (through `build_router`),
+/// Test: `serve::tests::build_router_wires_task_run` (through `build_router`),
 /// `permissions::tests::protocol_tests::respond_resolves_a_pending_request`.
 pub fn register_with_permissions(
     router: &mut Router,

@@ -6,7 +6,7 @@
 //! pane the CLI scrapes. This module is the whole vertical slice: the
 //! domain type, its in-memory registry + ring buffer + attach bookkeeping,
 //! and the `session.*` JSON-RPC methods built on top of the existing
-//! `crate::jsonrpc::Router` — reachable identically over STDIO and HTTP
+//! `crate::jsonrpc::Router` — reachable identically over STDIO and the socket
 //! (`crate::serve`), reusing the SAME method surface both transports
 //! dispatch through.
 //! What: [`model::Session`]/[`model::SessionStatus`] (the domain type),
@@ -32,7 +32,6 @@
 //! [`memory_sink::TurnMemorySink`]: crate::session::memory_sink::TurnMemorySink
 //! [`protocol::register`]: crate::session::protocol::register
 
-pub mod connector;
 /// (#6637) `session.events`: the socket transport's live tail of one session,
 /// standing in for the notification channel `session.attach` cannot have over
 /// a one-frame-in, one-frame-out connection.
@@ -55,7 +54,6 @@ pub mod transcript;
 #[path = "registry_context_floor.rs"]
 mod registry_context_floor;
 
-pub use connector::TcodeConnector;
 pub use memory_sink::{MemoryFailureCategory, PalaceCreation, TurnMemorySink};
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;

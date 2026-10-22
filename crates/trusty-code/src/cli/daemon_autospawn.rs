@@ -41,9 +41,9 @@
 //!   start fails, or another daemon answers first (two TUIs starting at once),
 //!   the shared socket is probed again and decided by the three rows above.
 //!
-//! A started daemon is `<current_exe> serve --http --port 0 [--project-socket]
-//! [--project <path>]`, a child in its own session; `--port 0` because a fixed
-//! port made the second project's daemon die on bind (#4600). The child handle
+//! A started daemon is `<current_exe> serve [--project-socket]
+//! [--project <path>]`, a child in its own session, which binds its socket and
+//! no TCP port (#6637 slice 2c dropped `--http --port 0`). The child handle
 //! is dropped once its socket answers AND reports this project; the daemon
 //! outlives this process, and a terminal hangup never reaches it.
 //!
@@ -52,9 +52,7 @@
 //! existed so a spawn could not silently ignore that instruction. A socket path
 //! is derived from the data directory, so `TRUSTY_DATA_DIR_OVERRIDE` already
 //! points both this client and a spawned daemon at the same place — there is no
-//! address to name and no instruction to contradict. `--http` stays on the
-//! spawn command line only because `trusty-code-gui`'s webview still needs the
-//! transient TCP listener; the socket binds either way.
+//! address to name and no instruction to contradict.
 //!
 //! The binary is resolved with [`super::tcode_exe::resolve`]
 //! (`std::env::current_exe()`), never a bare `tcode` PATH lookup, so a
@@ -364,8 +362,8 @@ fn unverified_shared_daemon(socket: &Path, wanted: Option<&Path>) -> anyhow::Err
          cannot tell whether it already serves {wanted_label}. It will not attach to \
          it, and will not start a second daemon for this project beside it. If it is \
          still starting up, run `tcode tui` again in a moment. If you know it serves \
-         another project, start this project's own daemon with `tcode serve --http \
-         --port 0 --project-socket{project_arg}`, then run `tcode tui` again.",
+         another project, start this project's own daemon with `tcode serve \
+         --project-socket{project_arg}`, then run `tcode tui` again.",
         socket = socket.display(),
     )
 }
@@ -560,20 +558,11 @@ enum Outcome {
     Exited(std::io::Result<String>),
 }
 
-/// Build and spawn `<tcode_exe> serve --http --port 0 [--project-socket]
-/// [--project <path>]`.
+/// Build and spawn `<tcode_exe> serve [--project-socket] [--project <path>]`.
 ///
-/// `--http` is unchanged from before #6637 and is not a contradiction: the
-/// persistent-daemon mode binds the socket first and fatally, and the flag now
-/// selects only whether the transient TCP listener comes up beside it. PR 2
-/// drops the flag with the listener.
-///
-/// `--port 0` (#4600): that listener used to take the fixed default port, so
-/// a second project's daemon — or any daemon while a stray test daemon held
-/// the port — died on bind even though its socket was free. No in-tree client
-/// dials the listener any more (`trusty-code-gui` bridges the socket), so an
-/// OS-assigned port costs nothing. `project_socket` adds `--project-socket`,
-/// which makes the daemon bind its project's own socket.
+/// #6637 slice 2c: no `--http --port 0` — the daemon's TCP listener is gone,
+/// and `tcode serve` now refuses both flags. `project_socket` adds
+/// `--project-socket`, which makes the daemon bind its project's own socket.
 ///
 /// There is deliberately no `kill_on_drop(true)`: the spawned daemon must
 /// survive this process, so the one thing the `Child` handle must NOT do is
@@ -591,7 +580,7 @@ fn spawn_daemon(
     log_path: Option<&Path>,
 ) -> Result<Child> {
     let mut cmd = std::process::Command::new(tcode_exe);
-    cmd.arg("serve").arg("--http").arg("--port").arg("0");
+    cmd.arg("serve");
     if project_socket {
         cmd.arg("--project-socket");
     }
@@ -610,7 +599,7 @@ fn spawn_daemon(
     trusty_common::daemon_guard::start_in_new_session(&mut cmd);
     Command::from(cmd).spawn().with_context(|| {
         format!(
-            "tcode tui: could not start a daemon with `{} serve --http`",
+            "tcode tui: could not start a daemon with `{} serve`",
             tcode_exe.display()
         )
     })
@@ -647,7 +636,7 @@ fn daemon_log_path() -> Option<PathBuf> {
 fn log_hint(log_path: Option<&Path>) -> String {
     match log_path {
         Some(path) => format!("see {} for the daemon's own output", path.display()),
-        None => "run `tcode serve --http` by hand to see why".to_string(),
+        None => "run `tcode serve` by hand to see why".to_string(),
     }
 }
 

@@ -63,14 +63,16 @@ without a project is also a first-class state, used for chat and planning
 before a project is chosen.
 
 Clients speak JSON-RPC 2.0 to it, over either NDJSON on stdio (`serve --stdio`)
-or loopback HTTP (`serve --http`, `POST /rpc` plus `GET /health`). Exactly one
-transport is selected per process. The method surface covers session lifecycle
+or the daemon's hardened Unix socket (`<data dir>/trusty-code/trusty-code.sock`,
+`0600` in a `0700` directory; the default for `tcode serve`). It binds no TCP
+port: `serve --http` and `--port` are errors (#6637). Exactly one transport is
+selected per process. The method surface covers session lifecycle
 (`session.create`, `session.status`, `session.send`, `session.cancel`,
 `session.get_transcript`), task execution (`task.run`), workstreams, and
 agent/skill/filesystem introspection. Session events reach an attached client
-as a `session.event` notification on the stdio transport, or as an SSE stream at
-`GET /sessions/{id}/events` — which replays a session's backlog before going
-live — on the HTTP transport.
+as a `session.event` notification on the stdio transport, or as the
+`session.events` stream method on the socket — which replays a session's
+backlog before going live. `workstream.events` is the workstream-level stream.
 
 **What it owns:**
 
@@ -209,7 +211,7 @@ re-exported by this crate.
 | **Binary** | `tcode` | `tm` (alias `trusty-mpm`) | `tagent` |
 | **Core loop** | PM main loop per project | Daemon + session manager + hook relay | PM main loop per persona |
 | **Agent model** | Coding sub-agents from `.claude/agents/*.md` | Deploys agents; oversees the runtime that runs them | Domain personas plus an MCP tool bridge |
-| **Transports** | JSON-RPC over stdio **or** loopback HTTP; TUI client | Loopback HTTP daemon; MCP stdio bridge; TUI; Telegram; Slack | REPL/CTRL; HTTP API with SSE; Slack; Telegram; MCP stdio |
+| **Transports** | JSON-RPC over stdio **or** a Unix socket (no TCP); TUI client | Loopback HTTP daemon; MCP stdio bridge; TUI; Telegram; Slack | REPL/CTRL; HTTP API with SSE; Slack; Telegram; MCP stdio |
 | **Delegates to** | Its own sub-agents | A runtime per managed session (`claude-code` or `tcode`) | `tcode` or `tm`, via `dispatch_task` |
 | **License** | MIT | MIT | MIT |
 
@@ -291,7 +293,7 @@ That principle holds in all three. The *unification* does not yet.
 | Harness | Bus | Payload type | External stream |
 |---|---|---|---|
 | **trusty-agents** | Process-global `tokio::sync::broadcast` (`src/events.rs`) | Its own `Event` enum | SSE over the HTTP API; UDS NDJSON `MessageBus` between projects (`src/bus/`) |
-| **trusty-code** | Process-global `tokio::sync::broadcast` (`src/events.rs`) | `SessionEventEnvelope` wrapping a tagged `Event`, with a per-session monotonic sequence number | `session.event` JSON-RPC notifications on stdio; SSE at `/sessions/{id}/events` on HTTP |
+| **trusty-code** | Process-global `tokio::sync::broadcast` (`src/events.rs`) | `SessionEventEnvelope` wrapping a tagged `Event`, with a per-session monotonic sequence number | `session.event` JSON-RPC notifications on stdio; `session.events` / `workstream.events` stream methods on the Unix socket |
 | **trusty-mpm** | Daemon-held `tokio::sync::broadcast` (`src/daemon/state/`) | Untyped `serde_json::Value` | SSE at `/events` and `/sessions/{id}/events`; a poll endpoint at `/events/poll` |
 
 trusty-agents and trusty-code each also relay events from a child process to

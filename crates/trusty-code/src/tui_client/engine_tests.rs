@@ -2,7 +2,7 @@
 //! `session_events.rs`, `workstream_subscription.rs`) — issue #3415.
 //!
 //! Why: kept as a sibling `_tests.rs` file (not inline in `engine.rs`), per
-//! this crate's established convention (`serve/http.rs` -> `http_tests.rs`,
+//! this crate's established convention (`serve/uds.rs` -> `uds_tests.rs`,
 //! `workstreams/sse.rs` -> `sse_tests.rs`) — a `_tests.rs` suffix is scored
 //! against the 1500-SLOC TEST cap (issue #610/#1131), not the 500-SLOC
 //! PRODUCTION cap, so splitting tests out of `engine.rs` is what keeps that

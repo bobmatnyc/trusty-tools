@@ -695,22 +695,19 @@ fn tui_help_documents_the_projectless_opt_out() {
 /// start one by hand — and that daemon must OUTLIVE the TUI, because it owns
 /// PM lifecycle and agent dispatch (owner directive, 2026-08-01).
 ///
-/// `TRUSTY_DATA_DIR_OVERRIDE` isolates the `http_addr` discovery file (and
-/// the spawned daemon's log) into a temp directory, so this stays a genuine
-/// "no daemon known" case on a developer machine that has one running.
-/// Evidence of the spawn is the daemon log file the auto-spawn path opens
-/// for the child. The launch itself still fails afterwards, because a test
-/// harness has no TTY for the alternate screen — that is expected and
-/// unrelated, and it is precisely the "the TUI exited" moment a teardown
-/// would have fired at.
+/// `TRUSTY_DATA_DIR_OVERRIDE` isolates the daemon's socket (and the spawned
+/// daemon's log) into a temp directory, so this stays a genuine "no daemon
+/// known" case on a developer machine that has one running. Evidence of the
+/// spawn is the daemon log file the auto-spawn path opens for the child. The
+/// launch itself still fails afterwards, because a test harness has no TTY for
+/// the alternate screen — that is expected and unrelated, and it is precisely
+/// the "the TUI exited" moment a teardown would have fired at.
 ///
-/// The survival half is CONDITIONAL on the child writing its `http_addr`.
-/// Before #4600 the spawned daemon took the fixed default port, so a foreign
-/// daemon holding it made ours die on bind; it now binds an OS-assigned port,
-/// and the guard stays only for an unwritable data directory. The isolated
-/// `http_addr` file is written only by OUR child, so its presence is the
-/// exact "our daemon came up" signal. This test kills the daemon it caused to
-/// start; nothing else will.
+/// Survival is read off the socket (#6637): the isolated socket is bound only
+/// by OUR child, so a `health` answer there after the TUI exited is the exact
+/// "our daemon came up and outlived it" signal. This test kills the daemon it
+/// caused to start; nothing else will. `daemon_no_tcp_6637` checks the same
+/// daemon holds no TCP listener.
 ///
 /// `--projectless` is passed explicitly since #8205: a bare `tcode tui` now
 /// homes on the repository enclosing its launch directory, which here is the
@@ -741,43 +738,20 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
         "must never bail with the old start-one-yourself message: {stderr}"
     );
 
-    let Some(addr) = std::fs::read_to_string(data_dir.path().join("trusty-code/http_addr"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
-        // No discovery file was written; see this test's docs.
-        return;
-    };
-
-    // #5439/#6472: an anonymous `/health` answers liveness alone, so this
-    // probe reads the credential the daemon wrote into the same isolated data
-    // directory. That the file is THERE, under the app data dir a client looks
-    // in, is itself part of what this asserts — a daemon that guarded its
-    // routes but stored the token somewhere else would lock every client out.
-    let token = std::fs::read_to_string(data_dir.path().join("trusty-code/auth_token"))
-        .expect("the daemon must write its credential where clients look")
-        .trim()
-        .to_string();
-    assert!(token.len() >= 32, "credential looks too weak: {token:?}");
-
-    let anonymous: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
+    // #6637: the daemon answers on its socket only — there is no address file,
+    // credential file or TCP port left to probe.
+    let socket = data_dir.path().join("trusty-code/trusty-code.sock");
+    let health = trusty_code::tui_client::uds_rpc::UdsRpcClient::new(&socket)
+        .call("health", serde_json::json!({}))
         .await
-        .expect("the spawned daemon must still be serving /health after the TUI exited")
-        .json()
-        .await
-        .expect("/health must return JSON");
-    assert_eq!(anonymous, serde_json::json!({"status": "ok"}));
-
-    let health: serde_json::Value = reqwest::Client::new()
-        .get(format!("http://{addr}/health"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .expect("credentialed /health must answer")
-        .json()
-        .await
-        .expect("/health must return JSON");
+        .expect("the spawned daemon must still answer on its socket after the TUI exited");
+    let pid = health["pid"].as_u64().expect("health must report a pid") as libc::pid_t;
+    // Stop the daemon before any assertion can strand it.
+    // SAFETY: `pid` was just reported by a live daemon this test caused to
+    // start; `kill` has no memory-safety effects.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
     assert_eq!(health["status"], "ok");
     assert_eq!(
         health["binding"]["state"], "projectless",
@@ -788,15 +762,8 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     assert_eq!(
         health["build"],
         trusty_code::build_info::GIT_HASH,
-        "/health must report the daemon's build sha: {health}"
+        "health must report the daemon's build sha: {health}"
     );
-
-    let pid = health["pid"].as_u64().expect("/health must report a pid") as libc::pid_t;
-    // SAFETY: `pid` was just reported by a live daemon this test caused to
-    // start; `kill` has no memory-safety effects.
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
 }
 
 /// A second project runs beside the first (#4600): `tcode tui --project B`
@@ -822,7 +789,7 @@ async fn tui_starts_its_own_daemon_beside_another_projects() {
     // #9139: bound so its isolation tree outlives the spawned daemon.
     let mut daemon_cmd = support::tcode_command();
     let mut daemon = daemon_cmd
-        .args(["serve", "--http", "--port", "0", "--project"])
+        .args(["serve", "--project"])
         .arg(their_project.path())
         .env("TRUSTY_DATA_DIR_OVERRIDE", shared_data.path())
         .stdout(std::process::Stdio::null())

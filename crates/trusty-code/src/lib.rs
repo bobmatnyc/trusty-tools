@@ -508,18 +508,19 @@ pub mod jsonrpc;
 /// Test: `mcp::tests`, `crates/trusty-code/tests/mcp_loader_e2e.rs`.
 pub mod mcp;
 
-/// `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life
-/// methods.
+/// `tcode serve` daemon: the Unix-socket and STDIO JSON-RPC transports plus
+/// proof-of-life methods.
 ///
 /// Why: the foundation of the M1 control-plane cut line (#2053) — proves the
 /// transport + router work end-to-end via `ping`/`health` before `session.*`
 /// (#2054), `task.*` (#2056), and `harness.describe` (#2066) land on top.
 /// Both transports dispatch through the same `Router`, so the method
-/// surface can never drift between `--stdio` and `--http`.
-/// What: `build_router`, `run_stdio`, `run_http`, `DEFAULT_HTTP_PORT`, and
-/// the `methods`/`transport`/`http` submodules.
+/// surface can never drift between `--stdio` and the socket. #6637: the
+/// loopback HTTP transport is gone.
+/// What: `build_router`, `run_stdio`, and the `methods`/`transport`/`uds`
+/// submodules.
 /// Test: `serve::tests::*`, `serve::methods::tests::*`,
-/// `serve::transport::tests::*`, `serve::http::tests::*`.
+/// `serve::transport::tests::*`, `serve::uds::uds_tests::*`.
 pub mod serve;
 
 /// Daemon-side directory inspection for the UI's project picker (UI Phase-1).
@@ -600,17 +601,6 @@ pub mod cli_client;
 /// setup/stream/cancel/workstream-activation flow against a real daemon socket
 /// in `tests/tui_client_engine.rs`.
 pub mod tui_client;
-
-/// The client-side credential for the daemon's transient HTTP listener
-/// (#5439, relocated in #6637).
-///
-/// Why its own module: it used to sit in `tui_client::discovery`, which #6637
-/// deleted along with the rest of the HTTP client. `session::connector`'s
-/// `TcodeConnector` still speaks HTTP until PR 2 moves the webview bridge into
-/// `trusty-code-gui`, so the credential half outlives the discovery half.
-/// What: `TCODE_DAEMON_TOKEN` and the loopback-gated resolver.
-/// Test: `http_credential::http_credential_tests`.
-pub mod http_credential;
 
 // ── Package-level re-exports ──
 

@@ -10,11 +10,9 @@
 //! returning, and it never crashes on malformed input — a `serde_json`
 //! parse failure becomes a `-32700 Parse error` JSON-RPC response instead of
 //! propagating and killing the process. Shutdown detection itself is the
-//! shared `trusty_common::shutdown_signal()` helper — the exact function
-//! `trusty-memory`'s `run_http_on` and `trusty-search`'s HTTP daemon install
-//! via `axum::serve(...).with_graceful_shutdown(...)` (see
-//! `crate::serve::http::run_http`) — rather than a second, STDIO-specific
-//! signal handler.
+//! shared `trusty_common::shutdown_signal()` helper — the exact function the
+//! socket daemon (`crate::serve::uds::run_daemon`) stops on — rather than a
+//! second, STDIO-specific signal handler.
 //!
 //! #2054 adds a THIRD `select!` arm: STDIO is a single long-lived
 //! connection for the whole process lifetime, so one

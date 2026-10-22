@@ -5,8 +5,8 @@
 //! `crate::jsonrpc::ConnectionContext::notify`, and a UDS connection served by
 //! [`trusty_common::uds::server`] reads one request frame and writes one
 //! response frame, so it is not a push channel. HTTP solved the same problem
-//! with a dedicated SSE route (`crate::serve::http::session_events_sse`);
-//! this is that route's transport-native twin, registered with
+//! with a dedicated SSE route, retired with the listener (#6637); this is
+//! that route's transport-native successor, registered with
 //! [`trusty_common::uds::server::RpcRouter::typed_stream`] so the answer is a
 //! sequence of frames instead of one.
 //!
