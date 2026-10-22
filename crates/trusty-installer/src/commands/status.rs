@@ -38,6 +38,11 @@ pub struct MemberStatus {
     pub health: String,
     /// Whether this member is a daemon (health is `n/a` otherwise).
     pub daemon: bool,
+    /// #10130: an internal member (see `StableMember::internal`). Not
+    /// serialized, so the `--json` schema is unchanged; read only by the
+    /// verdict, which does not count an absent internal member as missing.
+    #[serde(skip)]
+    pub internal: bool,
 }
 
 /// The aggregate status report.
@@ -59,12 +64,16 @@ impl StatusReport {
     /// Build a report and compute the overall verdict.
     ///
     /// Why: One place derives the verdict so the exit code + JSON agree.
-    /// What: `degraded` if any daemon is `down`; else `incomplete` if any member
-    /// is not installed; else `ready`.
-    /// Test: `tests::verdict_down_is_degraded`, `tests::verdict_missing_is_incomplete`.
+    /// What: `degraded` if any daemon is `down`; else `incomplete` if any
+    /// non-internal member is not installed (#10130: `tctl install` cannot
+    /// remedy an absent internal member); else `ready`.
+    /// Test: `tests::verdict_down_is_degraded`, `tests::verdict_missing_is_incomplete`,
+    /// `tests::internal_member_absent_does_not_make_verdict_incomplete`,
+    /// `tests::a_missing_non_internal_member_still_makes_it_incomplete`.
     fn build(members: Vec<MemberStatus>) -> Self {
         let any_down = members.iter().any(|m| m.daemon && m.health == "down");
-        let any_missing = members.iter().any(|m| m.installed.is_none());
+        // #10130: an absent internal member is not an incomplete install.
+        let any_missing = members.iter().any(|m| m.installed.is_none() && !m.internal);
         let verdict = if any_down {
             "degraded"
         } else if any_missing {
@@ -130,6 +139,7 @@ pub fn run(json: bool) -> i32 {
             installed,
             health,
             daemon,
+            internal: m.internal,
         });
     }
     let report = StatusReport::build(members);
@@ -170,6 +180,7 @@ mod tests {
             installed: installed.map(str::to_owned),
             health: health.to_owned(),
             daemon,
+            internal: false,
         }
     }
 
@@ -228,5 +239,43 @@ mod tests {
         let report = StatusReport::build(vec![ms("trusty-mpm", Some("0.9.0"), "unknown", true)]);
         assert_eq!(report.verdict, "ready");
         assert_eq!(report.exit_code(), 0);
+    }
+
+    /// Why (#10130): trusty-events is internal, so `tctl install` cannot place
+    /// it; counting it missing left every host `incomplete` forever.
+    /// What: a ready daemon beside an absent internal daemon reads `ready`,
+    /// exit 0, and the internal row still reports `not_installed` in JSON
+    /// with no `internal` key.
+    /// Test: This is the test.
+    #[test]
+    fn internal_member_absent_does_not_make_verdict_incomplete() {
+        let report = StatusReport::build(vec![
+            ms("trusty-search", Some("0.20.0"), "healthy", true),
+            MemberStatus {
+                internal: true,
+                ..ms("trusty-events", None, "not_installed", true)
+            },
+        ]);
+        assert_eq!(report.verdict, "ready");
+        assert_eq!(report.exit_code(), 0);
+        let v = serde_json::to_value(&report).expect("serialises");
+        assert_eq!(v["members"][1]["health"], "not_installed");
+        assert!(v["members"][1].get("internal").is_none(), "{v}");
+    }
+
+    /// Why (#10130): the internal exemption must not hide a real gap.
+    /// What: an absent non-internal member beside an absent internal one
+    /// still reads `incomplete`.
+    /// Test: This is the test.
+    #[test]
+    fn a_missing_non_internal_member_still_makes_it_incomplete() {
+        let report = StatusReport::build(vec![
+            ms("tga", None, "not_installed", false),
+            MemberStatus {
+                internal: true,
+                ..ms("trusty-events", None, "not_installed", true)
+            },
+        ]);
+        assert_eq!(report.verdict, "incomplete");
     }
 }
