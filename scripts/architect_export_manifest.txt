@@ -30,6 +30,17 @@ scripts/pm-digest.py
 scripts/pm-notify.sh
 scripts/pm_intake.py
 
+# Intent Ledger set (P3). datg.py stages whole; the subproject splits it into
+# datg_store/ops/log/read.py behind a datg.py facade (500-SLOC cap).
+scripts/architect-idle.py
+scripts/ctx-watch.py
+scripts/datg-hook.sh
+scripts/datg.py
+scripts/il-cron.py
+scripts/self-clear.sh
+scripts/state-archive.py
+docs/specs/SPEC-IL-01.md
+
 # Skills: .claude/skills/<name>/SKILL.md -> skills/<name>.md.
 .claude/skills/architect-completion-standard/SKILL.md	skills/architect-completion-standard.md
 .claude/skills/architect-github/SKILL.md	skills/architect-github.md

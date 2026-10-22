@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+"""datg.py: per-PM goals/decisions/asks/tasks store and hook logic (stdlib only).
+
+Why: pilot of the PM D/A/T/G design (local/briefs/2026-10-09-pm-datg-prototype-design.md,
+the owner D93, 2026-10-09 13:28Z): keep a PM on ranked goals. Only the PM writes, one call per turn.
+What: <project>/.trusty-mpm/datg/state.json (snapshot, replaced atomically: temp file +
+os.replace, under flock on .lock) and log.jsonl (append-only, one line per change).
+Verbs: init, add, update, close, batch, session set, prune, rotate, stamp (write); show,
+check-dispatch, digest, fresh, archive-show, hook (read-only apart from log lines).
+A write refuses (exit 2, files untouched) when state.json is malformed or a field is invalid.
+`hook` serves SessionStart (rules + digest), Stop (stamp) and PreToolUse(Agent|Task); every
+error path prints nothing, exit 0.
+Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is open:
+- Layout: legacy <project>/.trusty-mpm/datg/ keeps working. `--session NAME` (init forces it)
+  selects <project>/.trusty-mpm/datg/NAME/; $DATG_SESSION (set by datg-hook.sh) or the tmux
+  session of $TMUX_PANE selects it only when that directory already holds a state.json.
+- session record: `session set [--task T] [--next N] [--wait who:what ..] [--owe check=expect@ref ..]
+  [--agent id:goal:what ..] [--cron id=schedule=prompt ..] [--boundary] [--ctx-use A:S:CTX:keep] [--ref KEY=VALUE ..]`.
+  `--ref` pointers (the Google Doc, its source md, the relay marker) live in session.refs [{key, value}]: KEY
+  ^[a-z0-9][a-z0-9_.-]{0,31}$, VALUE one line <= 200 chars, <= 12 refs; an existing KEY is replaced, `none` clears.
+  The digest prints them first under POINTERS and cuts them after items. Omitted fields are kept; a repeatable flag replaces its list; value `none` states an empty list
+  (`--owe none` sets owed_none). Batch op: {"op":"session","task":..,"waiting_on":[{who,what}],
+  "owed":[{check,expect,ref}],"agents":[..],"crons":[..],"boundary":true,"ctx_use":{..}}.
+  Every commit stamps session.written_at (ISO minute) and written_epoch (int seconds).
+- close / `update --status done` / prune move D, A, T items to archive.jsonl in the same commit
+  (archive first, line {archived_at, closed_at, kind, item, cv}; cv = state v of the commit, a
+  line with cv > state v is an orphan of a failed commit and is dropped under the next lock).
+  `prune [--dry-run] [--answered-hours 24] [--require-outcome]` archives every done item/task and
+  every answered item older than 24 h (spec says "with outcome"; the pilot's 36 answered items
+  have none, so outcome is required only with --require-outcome). `archive-show ID` prints one line.
+- Size bar: state.json > 8 KB logs `size_warning` on crossing; a write that leaves it > 16 KB and
+  larger than before is refused (exit 2, largest items named) after one automatic prune attempt.
+- `rotate`: log lines older than 7 days go to log-<YYYYMMDD>.jsonl (rotation day). Both log shapes
+  (t/ev and ts/kind) are read.
+- `digest [--max-tokens 3000] [--no-log]`: bounded resume digest on stdout (tokens = chars/4);
+  appends a `digest` log line unless --no-log.
+- `fresh [--since ISO|EPOCH] [--max-age MIN]`: stdout one line; exit 0 fresh, 1 stale, 2 unreadable.
+  Fresh = written_at not before --since (default: the last unanswered change recorded by `stamp`,
+  none = fresh) and, with --max-age, not older than MIN minutes.
+- `stamp` (Stop hook; hook JSON on stdin with transcript_path): if the finished turn used a
+  state-changing tool (Edit/Write/Agent/Task/SendMessage/Cron*, or Bash git/gh mutations) and no
+  datg.py write followed, append {ts, session, kind: stale_il, n} to log.jsonl (n = consecutive
+  stale turns) and record stamp.json changed_epoch for `fresh`.
+Escalation: `update --esc architect` (or a batch op) also queues a `decision` through the D10
+intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD); a failure is logged, never fatal.
+A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
+Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
+dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
+("warn"|"block") overrides the date. No network, no secrets (locations only in items).
+Test: scripts/test_datg.py
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+DEFAULT_BLOCK_AFTER = "2026-10-12T13:30Z"
+PREFIXES = ("G", "D", "A", "T")
+STATUS = {
+    "G": ("active", "done", "parked"),
+    "D": ("open", "answered", "done"),
+    "A": ("open", "answered", "done"),
+    "T": ("open", "running", "done"),
+}
+EVENTS = ("open", "escalated", "answered", "done", "drift", "reprio", "update")
+CODE_RE = re.compile(r"^[a-z][a-z0-9]{1,7}$")
+ID_RE = re.compile(r"^([a-z][a-z0-9]{1,7})-([GDAT])([0-9a-f]{2})$")
+TITLE_MAX = 120
+SIZE_WARN = 8 * 1024
+SIZE_REFUSE = 16 * 1024
+SESSION_MAX = 2048
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+WHO = ("owner", "architect", "ci", "agent", "other")
+VAGUE = {"latest", "main", "master", "head", "current", "tbd", "unknown", "?", "n/a", "none", "-"}
+_SESSION = None  # set by --session; forces the per-PM directory
+
+RULES = (
+    "DATG rules (state: .trusty-mpm/datg/state.json). You are the only writer: one "
+    "`python3 {py} <verb>` call at the end of EVERY turn. "
+    "1) Every Agent dispatch prompt starts 'Goal: {code}-Gxx'; no goal id, no dispatch. "
+    "2) Handbacks end with: Goals (rank order), Open D/A (ids), Next. "
+    "3) Owner questions are D, owner actions are A (options, recommendation first); cite ids, never repeat. "
+    "4) Before dispatch: does it serve the top active goal? If none, record a D 'drift:'. "
+    "5) Unsettled D/A: set esc=architect and SendMessage tm-architect. "
+    "6) Relayed answer: write it in, act, close with a verified outcome. "
+    "Never change goal ranks. No secret values."
+)
+
+
+class DatgError(Exception):
+    """Invalid input or unwritable state; the CLI maps it to exit 2."""
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def parse_iso(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+
+
+def _tmux_session():
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    try:
+        r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def per_pm_session(project):
+    """The per-PM directory name in use, or None for the legacy single directory."""
+    base = os.path.join(project, ".trusty-mpm", "datg")
+    if _SESSION:
+        if not SESSION_RE.match(_SESSION):
+            raise DatgError(f"bad session name {_SESSION!r}")
+        return _SESSION
+    env = os.environ.get("DATG_SESSION")
+    if env and SESSION_RE.match(env) and os.path.isfile(os.path.join(base, env, "state.json")):
+        return env
+    try:
+        has_subs = any(os.path.isfile(os.path.join(base, e, "state.json")) for e in os.listdir(base)
+                       if os.path.isdir(os.path.join(base, e)))
+    except OSError:
+        return None
+    if has_subs:
+        t = _tmux_session()
+        if t and SESSION_RE.match(t) and os.path.isfile(os.path.join(base, t, "state.json")):
+            return t
+    return None
+
+
+def datg_dir(project):
+    base = os.path.join(project, ".trusty-mpm", "datg")
+    s = per_pm_session(project)
+    return os.path.join(base, s) if s else base
+
+
+def paths(project):
+    d = datg_dir(project)
+    return d, os.path.join(d, "state.json"), os.path.join(d, "log.jsonl")
+
+
+def load_state(project):
+    """Return the parsed state; raise DatgError when missing or malformed."""
+    _, sp, _ = paths(project)
+    try:
+        with open(sp, encoding="utf-8") as f:
+            st = json.load(f)
+    except FileNotFoundError:
+        raise DatgError("state.json missing; run init")
+    except (OSError, ValueError) as e:
+        raise DatgError(f"state.json malformed ({e}); refusing to write")
+    ok = (isinstance(st, dict) and CODE_RE.match(str(st.get("code", "")))
+          and isinstance(st.get("v"), int) and isinstance(st.get("next"), dict)
+          and all(isinstance(st.get(k), list) for k in ("goals", "items", "tasks"))
+          and isinstance(st.get("session", {}), dict))
+    if not ok:
+        raise DatgError("state.json malformed (bad shape); refusing to write")
+    return st
+
+
+def _atomic_write(path, text):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _dump(st):
+    return json.dumps(st, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _jl(rec):
+    return json.dumps(rec, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _largest(st, n=3):
+    objs = [(len(json.dumps(o, ensure_ascii=False).encode()), o.get("id", "?"))
+            for k in ("goals", "items", "tasks") for o in st[k]]
+    return ", ".join(f"{i} ({b} B)" for b, i in sorted(objs, reverse=True)[:n])
+
+
+def commit(project, st, events, archived=()):
+    """Bump v, stamp session.written_*, archive closed items, replace state.json, append log lines.
+
+    archived: [(kind, item)] already removed from st. Order: archive line(s) first, then the
+    state replace (a crash between leaves an orphan archive line, cv > state v, dropped later).
+    Refuses (DatgError, nothing written) when the result is > SIZE_REFUSE and bigger than before.
+    """
+    d, sp, lp = paths(project)
+    old = _size(sp)
+    archived = list(archived)
+    st["v"] += 1
+    ses = st.setdefault("session", {})
+    ses["written_at"] = now_iso()
+    ses["written_epoch"] = int(time.time())
+    text = _dump(st)
+    if len(text.encode()) > SIZE_REFUSE and len(text.encode()) > old:
+        archived += prune_state(st, answered_times(project))
+        text = _dump(st)
+        if len(text.encode()) > SIZE_REFUSE and len(text.encode()) > old:
+            raise DatgError(f"state.json would be {len(text.encode())} B (> {SIZE_REFUSE} B bar); "
+                            f"largest: {_largest(st)}; close or shorten items")
+    if archived:
+        t = now_iso()
+        buf = "".join(_jl({"archived_at": t, "closed_at": t, "kind": k, "item": o, "cv": st["v"]})
+                      for k, o in archived)
+        fd = os.open(os.path.join(d, "archive.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, buf.encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    _atomic_write(sp, text)
+    with open(lp, "a", encoding="utf-8") as f:
+        t = now_iso()
+        for ev in events:
+            rec = {"t": t, "id": ev["id"], "ev": ev["ev"]}
+            if ev.get("note"):
+                rec["note"] = ev["note"]
+            f.write(_jl(rec))
+        if len(text.encode()) > SIZE_WARN >= old:
+            f.write(_jl({"ts": t, "session": os.environ.get("DATG_SESSION", ""), "kind": "size_warning",
+                         "text": f"state.json {len(text.encode())} B > {SIZE_WARN} B bar; largest: {_largest(st)}"}))
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def reconcile_archive(project):
+    """Drop archive lines whose commit never landed (cv > state v). Caller holds the lock."""
+    d, sp, _ = paths(project)
+    ap = os.path.join(d, "archive.jsonl")
+    try:
+        with open(sp, encoding="utf-8") as f:
+            v = json.load(f)["v"]
+        with open(ap, encoding="utf-8") as f:
+            lines = f.readlines()
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    keep = []
+    for ln in lines:
+        try:
+            cv = json.loads(ln).get("cv")
+        except ValueError:
+            cv = None
+        if not (isinstance(cv, int) and cv > v):
+            keep.append(ln)
+    if len(keep) != len(lines):
+        _atomic_write(ap, "".join(keep))
+
+
+class Locked:
+    """flock on <datg>/.lock for the read-modify-write span; reconciles the archive on entry."""
+
+    def __init__(self, project):
+        self.project = project
+
+    def __enter__(self):
+        self.d = datg_dir(self.project)
+        os.makedirs(self.d, exist_ok=True)
+        self.f = open(os.path.join(self.d, ".lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        reconcile_archive(self.project)
+        return self
+
+    def __exit__(self, *a):
+        self.f.close()
+
+
+def _title(t):
+    t = (t or "").strip()
+    if not t or len(t) > TITLE_MAX or "\n" in t:
+        raise DatgError(f"title required, one line, <= {TITLE_MAX} chars")
+    return t
+
+
+def _lim(v, name, mx, req=False, ml=False):
+    v = ("" if v is None else str(v)).strip()
+    if (not ml and "\n" in v) or len(v) > mx or (req and not v):
+        raise DatgError(f"{name} must be {'' if ml else 'one line, '}<= {mx} chars" + (", non-empty" if req else ""))
+    return v
+
+
+def _find(st, full_id):
+    m = ID_RE.match(full_id or "")
+    if not m or m.group(1) != st["code"]:
+        raise DatgError(f"bad id {full_id!r}; expected {st['code']}-<G|D|A|T><hex2>")
+    pre = m.group(2)
+    bucket = {"G": "goals", "D": "items", "A": "items", "T": "tasks"}[pre]
+    for o in st[bucket]:
+        if o.get("id") == full_id:
+            return pre, o
+    raise DatgError(f"unknown id {full_id}")
+
+
+def _all_ids(st):
+    return {o.get("id") for k in ("goals", "items", "tasks") for o in st[k]}
+
+
+def _next_id(st, pre, explicit=None):
+    used = _all_ids(st)
+    if explicit:
+        m = ID_RE.match(explicit)
+        if not m or m.group(1) != st["code"] or m.group(2) != pre:
+            raise DatgError(f"bad id {explicit!r} for {pre}")
+        if explicit in used:
+            raise DatgError(f"id collision: {explicit} exists")
+        return explicit
+    n = int(st["next"].get(pre, "01"), 16)
+    while n <= 255 and f"{st['code']}-{pre}{n:02x}" in used:
+        n += 1
+    if n > 255:
+        raise DatgError(f"no free {pre} id (01-ff exhausted)")
+    st["next"][pre] = f"{n + 1:02x}" if n < 255 else "ff"
+    return f"{st['code']}-{pre}{n:02x}"
+
+
+def _check_goal(st, goal):
+    m = ID_RE.match(goal or "")
+    if not m or m.group(2) != "G" or goal not in {g["id"] for g in st["goals"]}:
+        raise DatgError(f"goal {goal!r} is not a goal of this project")
+    g = [g for g in st["goals"] if g["id"] == goal][0]
+    if g["status"] != "active":
+        raise DatgError(f"goal {goal} is {g['status']}, not active")
+
+
+def _opts(s):
+    out = []
+    for p in (s or "").split(","):
+        p = p.strip()
+        if p:
+            out.append({"l": p.rstrip("*"), "rec": p.endswith("*")})
+    return out
+
+
+def _check_opts(opts):
+    opts = opts or []
+    if len(opts) > 4 or any(len(o.get("l", "")) > 160 for o in opts):
+        raise DatgError("opts: at most 4 options, each label <= 160 chars")
+    return opts
+
+
+def op_init(project, code):
+    if not CODE_RE.match(code or ""):
+        raise DatgError("code must be 2-8 chars, lowercase letters/digits, letter first")
+    _, sp, _ = paths(project)
+    with Locked(project):
+        if os.path.exists(sp):
+            raise DatgError("state.json exists; init refuses to overwrite")
+        st = {"code": code, "v": 0, "config": {"block_after": DEFAULT_BLOCK_AFTER},
+              "goals": [], "items": [], "tasks": [],
+              "next": {p: "01" for p in PREFIXES}}
+        commit(project, st, [{"id": f"{code}-init", "ev": "open", "note": "init"}])
+    return f"initialised {code}"
+
+
+def apply_add(st, a):
+    pre = a["kind"]
+    if pre not in PREFIXES:
+        raise DatgError("kind must be G, D, A or T")
+    title = _title(a.get("title"))
+    new_id = _next_id(st, pre, a.get("id"))
+    if pre == "G":
+        rank = a.get("rank")
+        if rank is None:
+            rank = len(st["goals"]) + 1
+        if not isinstance(rank, int) or rank < 1:
+            raise DatgError("rank must be an integer >= 1")
+        obj = {"id": new_id, "rank": rank, "title": title, "finish": _lim(a.get("finish"), "finish", 160),
+               "status": "active", "maps": a.get("maps") or ""}
+        st["goals"].append(obj)
+    else:
+        _check_goal(st, a.get("goal"))
+        if pre == "T":
+            obj = {"id": new_id, "goal": a["goal"], "title": title, "status": a.get("status") or "open",
+                   "to": a.get("to") or "", "outcome": ""}
+            if obj["status"] not in STATUS["T"][:2]:
+                raise DatgError("new task status must be open or running")
+            st["tasks"].append(obj)
+        else:
+            obj = {"id": new_id, "kind": "question" if pre == "D" else "action", "status": "open",
+                   "goal": a["goal"], "title": title, "opts": _check_opts(a.get("opts")),
+                   "answer": "", "outcome": "", "esc": None}
+            st["items"].append(obj)
+    ev = "drift" if pre == "D" and title.lower().startswith("drift:") else "open"
+    return {"id": new_id, "ev": ev, "note": title}
+
+
+def apply_update(st, a):
+    pre, o = _find(st, a.get("id"))
+    evs = []
+    if a.get("title") is not None:
+        o["title"] = _title(a["title"])
+    if a.get("rank") is not None:
+        if pre != "G" or not isinstance(a["rank"], int) or a["rank"] < 1:
+            raise DatgError("rank applies to goals, integer >= 1")
+        o["rank"] = a["rank"]
+        evs.append("reprio")
+    if a.get("esc") is not None:
+        if pre not in "DA" or a["esc"] not in ("architect", ""):
+            raise DatgError("esc applies to D/A, value 'architect' or ''")
+        o["esc"] = a["esc"] or None
+        if a["esc"]:
+            evs.append("escalated")
+    if a.get("answer") is not None:
+        if pre not in "DA":
+            raise DatgError("answer applies to D/A")
+        o["answer"] = _lim(a["answer"], "answer", 300, ml=True)
+        o["status"] = "answered"
+        evs.append("answered")
+    if a.get("to") is not None:
+        if pre != "T":
+            raise DatgError("to applies to tasks")
+        o["to"] = a["to"]
+    if a.get("outcome") is not None:
+        if pre == "G":
+            raise DatgError("outcome does not apply to goals")
+        o["outcome"] = _lim(a["outcome"], "outcome", 300, ml=True)
+    if a.get("status") is not None:
+        if a["status"] not in STATUS[pre]:
+            raise DatgError(f"status for {pre} must be one of {STATUS[pre]}")
+        if a["status"] == "done" and pre != "G" and not o.get("outcome"):
+            raise DatgError("done needs a verified one-line outcome")
+        o["status"] = a["status"]
+        if a["status"] == "done":
+            evs.append("done")
+    return [{"id": o["id"], "ev": e, "note": a.get("note") or o.get("title", "")} for e in (evs or ["update"])]
+
+
+def _int(v, name, lo, hi):
+    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+        raise DatgError(f"{name} must be an integer {lo}-{hi}")
+    return v
+
+
+def _bad(msg):
+    raise DatgError(msg)
+
+
+def _rows(a, key, mx, name):
+    rows = a[key]
+    if not isinstance(rows, list) or len(rows) > mx or any(not isinstance(r, dict) for r in rows):
+        raise DatgError(f"{name}: a list of at most {mx} objects")
+    return rows
+
+
+REF_KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+REFS_MAX = 12
+
+
+def _merge_refs(old, new):
+    """Merge [{key, value}] into the stored refs: same key replaces; None/[] clears (session set --ref none)."""
+    if not new:
+        return []
+    refs = {r["key"]: r["value"] for r in old}
+    for r in _rows({"refs": new}, "refs", REFS_MAX, "refs"):
+        key = r.get("key")
+        if not isinstance(key, str) or not REF_KEY.match(key):
+            raise DatgError(f"refs.key must match {REF_KEY.pattern}")
+        val = _lim(r.get("value"), "refs.value", 200, True)
+        refs[key] = val
+    if len(refs) > REFS_MAX:
+        raise DatgError(f"refs: at most {REFS_MAX} refs")
+    return [{"key": k, "value": v} for k, v in refs.items()]
+
+
+def apply_session(st, a):
+    """Validate and merge a session-record op into st["session"]; raise DatgError on any violation."""
+    ses = dict(st.get("session") or {})
+    if a.get("task") is not None:
+        ses["task"] = _lim(a["task"], "task", 160, True)
+    if a.get("next") is not None:
+        ses["next"] = _lim(a["next"], "next", 200, True)
+    if "waiting_on" in a:
+        ses["waiting_on"] = [
+            {"who": r.get("who") if r.get("who") in WHO else _bad(f"waiting_on.who must be one of {WHO}"),
+             "what": _lim(r.get("what"), "waiting_on.what", 120, True),
+             "since": _lim(r.get("since") or now_iso(), "waiting_on.since", 20)}
+            for r in _rows(a, "waiting_on", 5, "waiting_on")]
+    if "owed" in a:
+        owed = []
+        for r in _rows(a, "owed", 8, "owed"):
+            exp = _lim(r.get("expect"), "owed.expect", 80, True)
+            if exp.lower() in VAGUE:
+                raise DatgError(f"owed.expect must be an exact value (SHA, run id, count), not {exp!r}")
+            owed.append({"check": _lim(r.get("check"), "owed.check", 80, True), "expect": exp,
+                         "ref": _lim(r.get("ref"), "owed.ref", 80)})
+        ses["owed"], ses["owed_none"] = owed, not owed
+    if "agents" in a:
+        ses["agents"] = [{"id": _lim(r.get("id"), "agents.id", 40, True),
+                          "goal": _lim(r.get("goal"), "agents.goal", 40),
+                          "what": _lim(r.get("what"), "agents.what", 80)}
+                         for r in _rows(a, "agents", 6, "agents")]
+    if "crons" in a:
+        ses["crons"] = [{"id": _lim(r.get("id"), "crons.id", 40, True),
+                         "schedule": _lim(r.get("schedule"), "crons.schedule", 40, True),
+                         "prompt": _lim(r.get("prompt"), "crons.prompt", 200, True)}
+                        for r in _rows(a, "crons", 4, "crons")]
+    if "refs" in a:
+        ses["refs"] = _merge_refs(ses.get("refs") or [], a["refs"])
+    if a.get("boundary"):
+        ses["boundary_at"] = now_iso()
+    if a.get("ctx_use") is not None:
+        c = a["ctx_use"]
+        if not isinstance(c, dict):
+            raise DatgError("ctx_use must be an object {active, stale, ctx, keep}")
+        ses["ctx_use"] = {"at": now_iso(), "active": _int(c.get("active"), "ctx_use.active", 0, 100),
+                          "stale": _int(c.get("stale"), "ctx_use.stale", 0, 100),
+                          "ctx": _int(c.get("ctx"), "ctx_use.ctx", 0, 10**9),
+                          "keep": _lim(c.get("keep"), "ctx_use.keep", 160)}
+    probe = dict(ses, written_at=now_iso(), written_epoch=int(time.time()))
+    n = len(json.dumps(probe, separators=(",", ":"), ensure_ascii=False).encode())
+    if n > SESSION_MAX:
+        raise DatgError(f"session record would be {n} B (> {SESSION_MAX} B limit)")
+    st["session"] = ses
+    return {"id": f"{st['code']}-session", "ev": "update", "note": ses.get("task", "")[:120]}
+
+
+def apply_op(st, a):
+    verb = a.get("op")
+    if verb == "add":
+        return [apply_add(st, a)]
+    if verb == "update":
+        return apply_update(st, a)
+    if verb == "session":
+        return [apply_session(st, a)]
+    if verb == "close":
+        if not a.get("outcome"):
+            raise DatgError("close needs --outcome")
+        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done"})
+    raise DatgError(f"unknown op {verb!r}")
+
+
+def collect_closed(st, evs):
+    """Remove items/tasks that a `done` event closed in this call; return [(kind, obj)] to archive."""
+    ids = {e["id"] for e in evs if e["ev"] == "done"}
+    out = []
+    for field, kind in (("items", "item"), ("tasks", "task")):
+        out += [(kind, o) for o in st[field] if o.get("id") in ids and o.get("status") == "done"]
+        st[field] = [o for o in st[field] if not (o.get("id") in ids and o.get("status") == "done")]
+    return out
+
+
+def write_ops_ev(project, ops):
+    """Apply ops to a copy of the state; commit once (all-or-nothing). Returns (events, state)."""
+    with Locked(project):
+        st = load_state(project)
+        evs = []
+        for a in ops:
+            if not isinstance(a, dict):
+                raise DatgError("each op must be an object")
+            evs.extend(apply_op(st, a))
+        commit(project, st, evs, collect_closed(st, evs))
+    return evs, st
+
+
+# ---- logs, archive, prune, rotate ------------------------------------------------
+
+def parse_ts(s):
+    """Tolerant timestamp parse (minute or second precision, Z suffix); None when unreadable."""
+    for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(str(s), fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def log_rec(line):
+    """Normalise both log shapes (t/ev and ts/kind): (datetime|None, kind, record) or None."""
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(r, dict):
+        return None
+    return parse_ts(r.get("t") or r.get("ts")), r.get("ev") or r.get("kind") or "", r
+
+
+def read_log(project, tail_bytes=None):
+    _, _, lp = paths(project)
+    try:
+        with open(lp, "rb") as f:
+            if tail_bytes and os.fstat(f.fileno()).st_size > tail_bytes:
+                f.seek(-tail_bytes, 2)
+                f.readline()
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    return [x for x in map(log_rec, data.splitlines()) if x]
+
+
+def answered_times(project):
+    """{id: datetime of the last answered event}; ids missing here are treated as old."""
+    out = {}
+    for t, kind, r in read_log(project):
+        if kind == "answered" and t and r.get("id"):
+            out[r["id"]] = t
+    return out
+
+
+def prune_state(st, times, hours=24, require_outcome=False, now=None):
+    """Remove done items/tasks and answered items older than `hours`; return [(kind, obj)]."""
+    now = now or datetime.now(timezone.utc)
+    out, keep = [], []
+    for o in st["items"]:
+        t = times.get(o.get("id"))
+        old = t is None or (now - t).total_seconds() >= hours * 3600
+        if o.get("status") == "done" or (o.get("status") == "answered" and old
+                                         and (o.get("outcome") or not require_outcome)):
+            out.append(("item", o))
+        else:
+            keep.append(o)
+    st["items"] = keep
+    out += [("task", o) for o in st["tasks"] if o.get("status") == "done"]
+    st["tasks"] = [o for o in st["tasks"] if o.get("status") != "done"]
+    return out
+
+
+def op_prune(project, dry_run=False, hours=24, require_outcome=False):
+    with Locked(project):
+        st = load_state(project)
+        before = _size(paths(project)[1])
+        gone = prune_state(st, answered_times(project), hours, require_outcome)
+        ids = [o["id"] for _, o in gone]
+        if not gone:
+            return "nothing to prune"
+        if dry_run:
+            return f"dry-run: would archive {len(ids)}: {', '.join(ids)}"
+        commit(project, st, [{"id": f"{st['code']}-prune", "ev": "update", "note": f"archived {len(ids)}"}], gone)
+        return f"archived {len(ids)} items; state.json {before} -> {_size(paths(project)[1])} B"
+
+
+def archive_lookup(project, item_id):
+    """Last valid archive line for item_id (orphans of failed commits, cv > state v, are skipped)."""
+    ap = os.path.join(paths(project)[0], "archive.jsonl")
+    try:
+        v = load_state(project)["v"]
+    except DatgError:
+        v = None
+    hit = None
+    try:
+        with open(ap, encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                cv = r.get("cv")
+                orphan = v is not None and isinstance(cv, int) and cv > v
+                if (r.get("item") or {}).get("id") == item_id and not orphan:
+                    hit = r
+    except OSError:
+        pass
+    if hit is None:
+        raise DatgError(f"{item_id} not in archive.jsonl")
+    return json.dumps(hit, ensure_ascii=False)
+
+
+def op_rotate(project, days=7, now=None):
+    """Move log lines older than `days` to log-<YYYYMMDD>.jsonl (rotation day); keep the rest."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now.timestamp() - days * 86400
+    with Locked(project):
+        d, _, lp = paths(project)
+        try:
+            with open(lp, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return "no log"
+        old, keep = [], []
+        for ln in lines:
+            r = log_rec(ln)
+            (old if r and r[0] and r[0].timestamp() < cutoff else keep).append(ln)
+        if not old:
+            return f"nothing to rotate ({_size(lp)} B, {len(lines)} lines)"
+        rp = os.path.join(d, f"log-{now:%Y%m%d}.jsonl")
+        prev = ""
+        if os.path.exists(rp):
+            with open(rp, encoding="utf-8") as f:
+                prev = f.read()
+        _atomic_write(rp, prev + "\n".join(old) + "\n")
+        _atomic_write(lp, "".join(x + "\n" for x in keep))
+        return f"rotated {len(old)} lines to {os.path.basename(rp)}; log.jsonl {len(keep)} lines"
+
+
+def write_ops(project, ops):
+    return ", ".join(e["id"] for e in write_ops_ev(project, ops)[0])
+
+
+def append_log(project, rec):
+    """Append one raw JSON line to log.jsonl (O_APPEND, one write)."""
+    line = (json.dumps(rec, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+    fd = os.open(paths(project)[2], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def pm_session(code):
+    """The sending PM's tmux session: $DATG_SESSION, else the TMUX_PANE session, else the project code."""
+    if os.environ.get("DATG_SESSION"):
+        return os.environ["DATG_SESSION"]
+    pane = os.environ.get("TMUX_PANE")
+    if pane:
+        try:
+            r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return code
+
+
+def notify_escalations(project, evs, st):
+    """Queue each `escalated` event as a D10 `decision`. A failure is logged and never raised."""
+    cmd = os.environ.get("DATG_NOTIFY_CMD") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "pm-notify.sh")
+    sess = pm_session(st["code"])
+    for ev in evs:
+        if ev["ev"] != "escalated":
+            continue
+        item = next((i for i in st["items"] if i.get("id") == ev["id"]), {})
+        opts = ", ".join(o["l"] + ("*" if o.get("rec") else "") for o in item.get("opts") or [])
+        text = f"{ev['id']} {item.get('title', '')}" + (f" [options: {opts}]" if opts else "")
+        try:
+            r = subprocess.run([cmd, "--kind", "decision", "--session", sess, text],
+                               capture_output=True, text=True, timeout=30)
+            err = "" if r.returncode == 0 else f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"
+        except (OSError, subprocess.SubprocessError) as e:
+            err = f"{type(e).__name__}: {e}"
+        if err:
+            print(f"datg: pm-notify failed for {ev['id']} ({err})", file=sys.stderr)
+            try:
+                append_log(project, {"ts": now_iso(), "session": sess, "kind": "notify_failure",
+                                     "text": f"{ev['id']} pm-notify failed: {err}"})
+            except OSError as e:
+                print(f"datg: log write failed ({e})", file=sys.stderr)
+
+
+# ---- read-only side -------------------------------------------------------------
+
+def summary(st):
+    goals = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])
+    openi = [i["id"] for i in st["items"] if i["status"] == "open"]
+    ans = [i["id"] for i in st["items"] if i["status"] == "answered"]
+    parts = []
+    if goals:
+        parts.append(f"TOP {goals[0]['id']} {goals[0]['title'][:60]}")
+    if openi:
+        parts.append("OPEN " + ",".join(openi[:6]))
+    if ans:
+        parts.append("ANSWERED " + ",".join(ans[:6]))
+    return "; ".join(parts)
+
+
+def dispatch_mode(st, now=None):
+    cfg = st.get("config") or {}
+    if cfg.get("mode") in ("warn", "block"):
+        return cfg["mode"]
+    try:
+        after = parse_iso(cfg.get("block_after") or DEFAULT_BLOCK_AFTER)
+    except ValueError:
+        after = parse_iso(DEFAULT_BLOCK_AFTER)
+    return "block" if (now or datetime.now(timezone.utc)) >= after else "warn"
+
+
+def check_dispatch(st, prompt, now=None):
+    """Return (decision, message); decision is allow|warn|block. Pure."""
+    active = {g["id"] for g in st["goals"] if g["status"] == "active"}
+    if not active:
+        return "allow", ""
+    code = st["code"]
+    m = re.search(rf"Goal:\s*({re.escape(code)}-G[0-9a-f]{{2}})\b", prompt or "")
+    if m and m.group(1) in active:
+        return "allow", ""
+    top = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])[0]
+    why = f"names non-active goal {m.group(1)}" if m else "names no goal id"
+    msg = f"DATG: dispatch {why}. Start the prompt with 'Goal: {top['id']}' (top) or another active goal."
+    return dispatch_mode(st, now), msg
+
+
+def log_hook_warning(project, msg):
+    """Append a warn-mode warning to log.jsonl; the hook stays fail open and writes no state."""
+    try:
+        append_log(project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""),
+                             "kind": "hook_warning", "text": msg})
+    except OSError:
+        pass
+
+
+# ---- freshness, stamp, digest ---------------------------------------------------
+
+MUTATING_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task", "SendMessage",
+                  "CronCreate", "CronDelete"}
+MUTATING_BASH = re.compile(
+    r"\bgit\s+(commit|push|merge|rebase|reset|tag|checkout|switch|cherry-pick|apply|am)\b"
+    r"|\bgh\s+(pr|issue|release|run)\s+(create|merge|close|reopen|edit|comment|review|rerun|cancel)\b"
+    r"|\bcargo\s+publish\b|\btmux\s+send-keys\b|(^|[;&|]\s*)(rm|mv)\s")
+
+
+def _stamp_path(project):
+    return os.path.join(paths(project)[0], "stamp.json")
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            r = json.load(f)
+        return r if isinstance(r, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _to_epoch(v):
+    """ISO minute/second string or integer epoch -> float epoch seconds; DatgError otherwise."""
+    if isinstance(v, (int, float)) or str(v).isdigit():
+        return float(v)
+    t = parse_ts(v)
+    if not t:
+        raise DatgError(f"bad time {v!r}; use ISO YYYY-MM-DDTHH:MMZ or epoch seconds")
+    return t.timestamp()
+
+
+def op_fresh(project, since=None, max_age=None, now=None):
+    """Return (exit_code, message): 0 fresh, 1 stale, 2 unreadable."""
+    now = now if now is not None else time.time()
+    try:
+        ses = load_state(project).get("session") or {}
+        stamp = _read_json(_stamp_path(project))
+        floor = _to_epoch(since) if since is not None else stamp.get("changed_epoch")
+        if since is None and isinstance(stamp.get("v"), int) and load_state(project)["v"] > stamp["v"]:
+            floor = None  # a write landed after the Stop that recorded the change
+    except DatgError as e:
+        return 2, f"unreadable: {e}"
+    w_at = parse_ts(ses.get("written_at"))
+    if not w_at:
+        return 1, "stale: no session write recorded"
+    w = ses.get("written_epoch") if isinstance(ses.get("written_epoch"), int) else w_at.timestamp()
+    exact = isinstance(ses.get("written_epoch"), int)
+    if not exact and floor is not None:
+        floor = floor - floor % 60  # written_at has minute precision
+    info = f"written_at={ses['written_at']}"
+    if floor is not None and (w <= floor if exact else w < floor):
+        return 1, f"stale: state changed after the last write; {info}"
+    if max_age is not None and now - w > max_age * 60:
+        return 1, f"stale: write older than {max_age} min; {info}"
+    return 0, f"fresh: {info}"
+
+
+def turn_tools(path, tail_bytes=2_000_000):
+    """tool_use blocks of the last assistant turn of a transcript jsonl; None when unreadable."""
+    try:
+        with open(path, "rb") as f:
+            if os.fstat(f.fileno()).st_size > tail_bytes:
+                f.seek(-tail_bytes, 2)
+                f.readline()
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    tools = []
+    for ln in reversed(lines):
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content") if isinstance(rec, dict) else None
+        if rec.get("type") == "user":
+            if isinstance(content, str) or (isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") != "tool_result" for b in content)):
+                break
+        elif rec.get("type") == "assistant" and isinstance(content, list):
+            tools += [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+    return tools
+
+
+def stamp_turn(project, payload, now=None):
+    """Stop hook: log `stale_il` when the finished turn changed state and no datg.py write followed."""
+    tools = turn_tools(payload["transcript_path"]) if payload.get("transcript_path") else None
+    cmds = [str((t.get("input") or {}).get("command", "")) for t in tools or [] if t.get("name") == "Bash"]
+    ours = any("datg.py" in c for c in cmds)
+    changed = any(t.get("name") in MUTATING_TOOLS for t in tools or []) or any(
+        MUTATING_BASH.search(c) for c in cmds if "datg.py" not in c)
+    with Locked(project):
+        st = load_state(project)
+        sp = _stamp_path(project)
+        prev = _read_json(sp)
+        wrote = ours or (isinstance(prev.get("v"), int) and st["v"] > prev["v"])
+        new = {"v": st["v"], "stale_turns": int(prev.get("stale_turns") or 0)}
+        if prev.get("changed_epoch"):
+            new["changed_epoch"] = prev["changed_epoch"]
+        if wrote:
+            new["stale_turns"] = 0
+            new.pop("changed_epoch", None)
+        elif changed:
+            new["stale_turns"] += 1
+            new["changed_epoch"] = int(now if now is not None else time.time())
+            try:
+                append_log(project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""),
+                                     "kind": "stale_il", "n": new["stale_turns"],
+                                     "text": f"turn changed state without an IL write ({new['stale_turns']} in a row)"})
+            except OSError as e:
+                print(f"datg: log write failed ({e})", file=sys.stderr)
+        _atomic_write(sp, _jl(new))
+    return new
+
+
+def _short(v, n):
+    v = " ".join(str(v or "").split())
+    return v if len(v) <= n else v[:n - 1] + "…"
+
+
+def _digest_sections(project, st):
+    ses = st.get("session") or {}
+    name = per_pm_session(project) or os.environ.get("DATG_SESSION") or st["code"]
+    code, msg = op_fresh(project)
+    fresh = {0: "fresh", 1: "STALE"}.get(code, "unknown")
+    ctx = (ses.get("ctx_use") or {}).get("ctx")
+    head = [f"IL DIGEST {name} ({st['code']}) v{st['v']} written_at={ses.get('written_at', 'never')} IL={fresh}"
+            + (f" ctx_before_clear={ctx // 1000}k" if isinstance(ctx, int) else "")]
+    size = _size(paths(project)[1])
+    if size > SIZE_WARN:
+        head.append(f"SIZE: state.json {size} B over the {SIZE_WARN} B bar; run datg.py prune")
+    sess = ["SESSION"]
+    if not ses.get("task") and not ses.get("next"):
+        sess.append("  none recorded")
+    for k in ("task", "next"):
+        if ses.get(k):
+            sess.append(f"  {k}: {ses[k]}")
+    for w in ses.get("waiting_on") or []:
+        sess.append(f"  waiting_on {w.get('who')}: {w.get('what')} (since {w.get('since')})")
+    if "owed" in ses:
+        for o in ses["owed"]:
+            sess.append(f"  owed: {o['check']} = {o['expect']} @ {o.get('ref', '')}")
+        if not ses["owed"]:
+            sess.append("  owed: none (stated)")
+    else:
+        sess.append("  owed: NOT RECORDED")
+    if "agents" in ses:
+        sess.append("  agents: " + ("; ".join(f"{a['id']} [{a.get('goal', '')}] {a.get('what', '')}"
+                                              for a in ses["agents"]) or "none"))
+    if "crons" in ses:
+        sess += [f"  cron {c['id']} [{c['schedule']}] {c['prompt']}" for c in ses["crons"]] or []
+        if not ses["crons"]:
+            sess.append("  crons: none")
+    if ses.get("boundary_at"):
+        sess.append(f"  boundary_at: {ses['boundary_at']}")
+    cu = ses.get("ctx_use")
+    if cu:
+        sess.append(f"  ctx_use: active {cu['active']}% stale {cu['stale']}% ctx {cu['ctx']} at {cu['at']} keep: {cu['keep']}")
+    goals = ["GOALS"] + [f"  {g['id']} r{g['rank']} {g['title']}" + (f" -> {g['finish']}" if g.get("finish") else "")
+                         for g in sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])]
+    items = ["ITEMS (open/answered)"]
+    for i in st["items"]:
+        if i["status"] in ("open", "answered"):
+            rec = next((o["l"] for o in i.get("opts") or [] if o.get("rec")), "")
+            items.append(f"  {i['id']} [{i['status']}]{' esc' if i.get('esc') else ''} {i['title']}"
+                         + (f" | answer: {i['answer']}" if i.get("answer") else "")
+                         + (f" | rec: {rec}" if rec and i["status"] == "open" else ""))
+    tasks = [f"  {t['id']} [{t['status']}] {t['goal']} {t['title']}" for t in st["tasks"] if t["status"] != "done"]
+    recent = [x for x in read_log(project, 262144) if x[1] in ("escalated", "answered", "done", "drift")][-10:]
+    log = ["RECENT"] + [f"  {r.get('t') or r.get('ts')} {r.get('id', '')} {k} {_short(r.get('note') or r.get('text'), 80)}"
+                        for _, k, r in recent]
+    briefs = sorted(set(re.findall(r"[\w./~-]*briefs?/[\w./-]+\.md", json.dumps(st, ensure_ascii=False))))
+    refs = [f"  ref {r['key']}: {r['value']}" for r in ses.get("refs") or []]
+    ptr = ["POINTERS"] + refs + [f"  archive: {os.path.join(paths(project)[0], 'archive.jsonl')}"] + [f"  brief: {b}" for b in briefs[:8]]
+    return head, sess, goals, items, tasks, log, ptr, (["POINTERS"] + refs if refs else [])
+
+
+def build_digest(project, max_tokens=3000):
+    """Bounded resume digest (tokens = chars / 4). Cut order: RECENT, oldest tasks, briefs+archive pointers, items, ref pointers, tail."""
+    st = load_state(project)
+    head, sess, goals, items, tasks, log, ptr, ptr_refs = _digest_sections(project, st)
+    limit = max(200, max_tokens * 4) - 60  # room for the TRUNCATED line
+
+    def render(tk, with_log, with_ptr, it):
+        parts = [head, sess, goals, it, (["TASKS (open/running)"] + tk) if tk else [], log if with_log else [],
+                 ptr if with_ptr is True else ptr_refs if with_ptr == "refs" else []]
+        return "\n".join(x for p in parts for x in p)
+
+    full = render(tasks, True, True, items)
+    if len(full) <= limit + 60:
+        return full
+    out, tk, it = None, list(tasks), list(items)
+    for step in ("log", "tasks", "ptr", "items", "cut"):
+        if step == "log":
+            out = render(tk, False, True, it)
+        elif step == "tasks":
+            while tk and len(render(tk, False, True, it)) > limit:
+                tk.pop(0)  # oldest first
+            out = render(tk, False, True, it)
+        elif step == "ptr":
+            out = render(tk, False, "refs", it)   # briefs and archive go first; refs stay until items are cut
+        elif step == "items":
+            while len(it) > 1 and len(render(tk, False, "refs", it)) > limit:
+                it.pop()
+            out = render(tk, False, "refs", it)
+            if len(out) > limit:
+                out = render(tk, False, False, it)
+        else:
+            out = out[:limit]
+        if len(out) <= limit:
+            break
+    return out + f"\nTRUNCATED: {len(full) - len(out)} bytes dropped"
+
+
+def hook_output(event, st, payload, project, now=None):
+    """Return the hook JSON dict for the event, or None for no output."""
+    if event == "SessionStart":
+        py = os.path.abspath(__file__)
+        pm = per_pm_session(project)
+        text = RULES.format(py=py + (f" --session {pm}" if pm else ""), code=st["code"])
+        s = summary(st)
+        try:
+            dig = "\n" + build_digest(project)
+        except Exception:
+            dig = ""  # fail open: rules and summary still go out
+        return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                       "additionalContext": text + (" " + s if s else "") + dig}}
+    if event == "Stop":
+        stamp_turn(project, payload)
+        return None
+    if event == "PreToolUse" and payload.get("tool_name") in ("Agent", "Task"):
+        ti = payload.get("tool_input") or {}
+        dec, msg = check_dispatch(st, ti.get("prompt") or "", now)
+        if dec == "block":
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "permissionDecision": "deny",
+                                           "permissionDecisionReason": msg}}
+        if dec == "warn":
+            log_hook_warning(project, msg)
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "additionalContext": msg + " (warn mode)"}}
+    return None
+
+
+def run_hook(stdin_text):
+    """Fail open: any problem returns "" (no output)."""
+    try:
+        payload = json.loads(stdin_text or "{}")
+        if not isinstance(payload, dict) or payload.get("agent_id"):
+            return ""
+        project = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
+        st = load_state(project)
+        out = hook_output(payload.get("hook_event_name"), st, payload, project)
+        return json.dumps(out, separators=(",", ":")) if out else ""
+    except Exception:
+        return ""
+
+
+def cmd_show(project, brief):
+    st = load_state(project)
+    if brief:
+        return summary(st) or "no open items"
+    return json.dumps(st, indent=1, ensure_ascii=False)
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="datg.py", description=__doc__.split("\n")[0])
+    p.add_argument("--project", default=os.getcwd(), help="project root (default: cwd)")
+    p.add_argument("--session", help="per-PM directory datg/<session>/ (shared project dirs)")
+    sub = p.add_subparsers(dest="verb", required=True)
+    s = sub.add_parser("init")
+    s.add_argument("--code", required=True)
+    s = sub.add_parser("add")
+    s.add_argument("kind", choices=PREFIXES)
+    s.add_argument("--title", required=True)
+    s.add_argument("--goal")
+    s.add_argument("--rank", type=int)
+    s.add_argument("--finish")
+    s.add_argument("--maps")
+    s.add_argument("--opts", help="comma list, trailing * marks the recommendation")
+    s.add_argument("--to")
+    s.add_argument("--id")
+    s = sub.add_parser("update")
+    s.add_argument("id")
+    for f in ("title", "status", "answer", "outcome", "esc", "to", "note"):
+        s.add_argument(f"--{f}")
+    s.add_argument("--rank", type=int)
+    s = sub.add_parser("close")
+    s.add_argument("id")
+    s.add_argument("--outcome", required=True)
+    s = sub.add_parser("batch", help="JSON list of ops on stdin: one write per turn")
+    s = sub.add_parser("show")
+    s.add_argument("--brief", action="store_true")
+    s = sub.add_parser("check-dispatch")
+    s.add_argument("--prompt", help="default: stdin")
+    sub.add_parser("hook", help="Claude Code hook entry; JSON on stdin")
+    s = sub.add_parser("session", help="set fields of the session record")
+    s.add_argument("action", choices=("set",))
+    s.add_argument("--task")
+    s.add_argument("--next")
+    s.add_argument("--wait", action="append", metavar="WHO:WHAT", help="repeatable; 'none' = empty list")
+    s.add_argument("--owe", action="append", metavar="CHECK=EXPECT@REF", help="repeatable; 'none' = nothing owed")
+    s.add_argument("--agent", action="append", metavar="ID:GOAL:WHAT", help="repeatable; 'none'")
+    s.add_argument("--cron", action="append", metavar="ID=SCHEDULE=PROMPT", help="repeatable; 'none'")
+    s.add_argument("--boundary", action="store_true")
+    s.add_argument("--ctx-use", metavar="ACTIVE:STALE:CTX:KEEP")
+    s.add_argument("--ref", action="append", metavar="KEY=VALUE", help="repeatable; same KEY replaces; 'none' clears")
+    s = sub.add_parser("prune", help="archive done items/tasks and answered items older than 24 h")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--answered-hours", type=float, default=24)
+    s.add_argument("--require-outcome", action="store_true")
+    sub.add_parser("rotate", help="move log lines older than 7 days to log-<YYYYMMDD>.jsonl")
+    s = sub.add_parser("archive-show")
+    s.add_argument("id")
+    s = sub.add_parser("digest", help="bounded resume digest")
+    s.add_argument("--max-tokens", type=int, default=3000)
+    s.add_argument("--no-log", action="store_true")
+    s = sub.add_parser("fresh", help="exit 0 fresh, 1 stale, 2 unreadable")
+    s.add_argument("--since", help="ISO YYYY-MM-DDTHH:MMZ or epoch seconds")
+    s.add_argument("--max-age", type=float, help="minutes")
+    sub.add_parser("stamp", help="Stop hook step; hook JSON on stdin")
+    return p
+
+
+def session_op(a):
+    """Build the batch-style `session` op from the CLI flags (strings parsed here, validated in apply_session)."""
+    op = {"op": "session", "task": a.task, "next": a.next, "boundary": a.boundary}
+
+    def lst(vals, parse):
+        return [] if vals == ["none"] else [parse(v) for v in vals]
+
+    def need(v, sep, n, fmt):
+        parts = v.split(sep, n - 1)
+        if len(parts) != n:
+            raise DatgError(f"expected {fmt}, got {v!r}")
+        return parts
+
+    if a.wait is not None:
+        op["waiting_on"] = lst(a.wait, lambda v: dict(zip(("who", "what"), need(v, ":", 2, "WHO:WHAT"))))
+    if a.owe is not None:
+        def owe(v):
+            check, expect_ref = need(v, "=", 2, "CHECK=EXPECT@REF")
+            expect, _, ref = expect_ref.partition("@")
+            return {"check": check, "expect": expect, "ref": ref}
+        op["owed"] = lst(a.owe, owe)
+    if a.agent is not None:
+        op["agents"] = lst(a.agent, lambda v: dict(zip(("id", "goal", "what"), need(v, ":", 3, "ID:GOAL:WHAT"))))
+    if a.cron is not None:
+        op["crons"] = lst(a.cron, lambda v: dict(zip(("id", "schedule", "prompt"), need(v, "=", 3, "ID=SCHEDULE=PROMPT"))))
+    if a.ref is not None:
+        op["refs"] = lst(a.ref, lambda v: dict(zip(("key", "value"), need(v, "=", 2, "KEY=VALUE"))))
+    if a.ctx_use:
+        act, stale, ctx, keep = need(a.ctx_use, ":", 4, "ACTIVE:STALE:CTX:KEEP")
+        try:
+            op["ctx_use"] = {"active": int(act), "stale": int(stale), "ctx": int(ctx), "keep": keep}
+        except ValueError:
+            raise DatgError("ctx-use: ACTIVE, STALE, CTX must be integers")
+    return op
+
+
+def main(argv=None):
+    global _SESSION
+    a = build_parser().parse_args(argv)
+    _SESSION = a.session
+    try:
+        if a.verb == "hook":
+            out = run_hook(sys.stdin.read())
+            if out:
+                print(out)
+            return 0
+        if a.verb == "fresh":
+            code, msg = op_fresh(a.project, a.since, a.max_age)
+            print(msg)
+            return code
+        if a.verb == "init":
+            print(op_init(a.project, a.code))
+        elif a.verb == "add":
+            op = {"op": "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
+                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id}
+            print(write_ops(a.project, [op]))
+        elif a.verb == "update":
+            op = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
+            op.update({"op": "update", "id": a.id})
+            evs, st = write_ops_ev(a.project, [op])
+            print(", ".join(e["id"] for e in evs))
+            notify_escalations(a.project, evs, st)
+        elif a.verb == "close":
+            print(write_ops(a.project, [{"op": "close", "id": a.id, "outcome": a.outcome}]))
+        elif a.verb == "batch":
+            try:
+                ops = json.loads(sys.stdin.read())
+            except ValueError as e:
+                raise DatgError(f"batch input is not JSON ({e})")
+            if not isinstance(ops, list):
+                raise DatgError("batch input must be a JSON list")
+            evs, st = write_ops_ev(a.project, ops)
+            print(", ".join(e["id"] for e in evs))
+            notify_escalations(a.project, evs, st)
+        elif a.verb == "session":
+            print(write_ops(a.project, [session_op(a)]))
+        elif a.verb == "prune":
+            print(op_prune(a.project, a.dry_run, a.answered_hours, a.require_outcome))
+        elif a.verb == "rotate":
+            print(op_rotate(a.project))
+        elif a.verb == "archive-show":
+            print(archive_lookup(a.project, a.id))
+        elif a.verb == "digest":
+            print(build_digest(a.project, a.max_tokens))
+            if not a.no_log:
+                try:
+                    append_log(a.project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""), "kind": "digest"})
+                except OSError as e:
+                    print(f"datg: log write failed ({e})", file=sys.stderr)
+        elif a.verb == "stamp":
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+            except ValueError:
+                payload = {}
+            stamp_turn(a.project, payload if isinstance(payload, dict) else {})
+        elif a.verb == "show":
+            print(cmd_show(a.project, a.brief))
+        elif a.verb == "check-dispatch":
+            prompt = a.prompt if a.prompt is not None else sys.stdin.read()
+            dec, msg = check_dispatch(load_state(a.project), prompt)
+            print(dec + (": " + msg if msg else ""))
+            return 2 if dec == "block" else 0
+    except DatgError as e:
+        print(f"datg: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
