@@ -7,6 +7,8 @@ import sys
 import time
 import calendar
 
+import pytest
+
 def _scripts_dir():
     """SCRIPTS env, else this directory if pm_intake.py is here, else ../scripts."""
     env = os.environ.get("SCRIPTS")
@@ -89,11 +91,21 @@ def test_held_since_skips_wake_and_old(tmp_path):
     assert [m["kind"] for m in got] == ["progress"] and got[0]["ts"].endswith("05:00:00Z")
 
 
-def test_parse_ts_is_utc_epoch_regardless_of_dst():
+@pytest.fixture
+def new_york_dst(monkeypatch):
+    """Pin TZ to a DST zone (CI runs UTC, where the old mktime bug is invisible)."""
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_parse_ts_is_utc_epoch_regardless_of_dst(new_york_dst):
     assert pd.parse_ts("2026-10-12T04:00:00Z") == calendar.timegm((2026, 10, 12, 4, 0, 0))
 
 
-def test_held_since_counts_recent_message_against_real_epoch_cutoff(tmp_path):
+def test_held_since_counts_recent_message_against_real_epoch_cutoff(tmp_path, new_york_dst):
     f = tmp_path / "m.jsonl"
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
     f.write_text(json.dumps(M("progress", ts=ts)) + "\n")
