@@ -651,9 +651,9 @@ impl SessionRegistry {
 
     /// Snapshot the ring buffer for a session without attaching to it.
     ///
-    /// Why: the HTTP SSE route (`crate::serve::http`) needs the same replay
-    /// burst `attach` returns, but subscribes to the live bus itself (one
-    /// `Stream` per SSE connection) rather than going through a
+    /// Why: the `session.events` stream (`crate::session::events_stream`)
+    /// needs the same replay burst `attach` returns, but subscribes to the
+    /// live bus itself (one `Stream` per connection) rather than going through a
     /// `NotifySender` forwarder — so it calls this directly instead of
     /// `attach`.
     /// What: same replay semantics as `attach` (full envelopes, `seq`

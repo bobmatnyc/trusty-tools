@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive a REAL `tcode serve --http` daemon through 200+ PM turns to soak-test
+"""Drive a REAL `tcode serve` daemon through 200+ PM turns to soak-test
 the #2346 cadence compressor, then score the resulting telemetry (issue
 #3869, epic #3866 Slice C).
 
@@ -11,7 +11,7 @@ calling into `trusty_code`'s Rust API directly), per the vision spec's
 Testability requirement the crate's own e2e suite (`crates/trusty-code/
 tests/*_e2e.rs`) already follows.
 
-What: spawns `tcode serve --http --port 0` rooted at a throwaway project
+What: spawns `tcode serve` (its Unix socket, #6637) rooted at a throwaway project
 fixture, with `TCODE_MOCK_LLM=echo-soak` (the deterministic, UNBOUNDED
 scripted PM client added in `crates/trusty-code/src/task/mock_llm_soak.rs`
 for exactly this soak — see that file's docs for why every OTHER mock-LLM
@@ -42,13 +42,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import urllib.request
+import socket
 from pathlib import Path
 
 # `SoakEchoLlmClient`'s fixed per-call script length
@@ -93,8 +92,13 @@ def spawn_daemon(
     mock_llm: str = "echo-soak",
     extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen, str]:
-    """Spawn `tcode serve --http --port 0` and discover its bound address
-    from stderr, mirroring `tests/support/mod.rs::spawn_http_daemon_with_env`.
+    """Spawn `tcode serve` and wait until its Unix socket answers, mirroring
+    `tests/support/mod.rs::spawn_socket_daemon_with_env` (#6637: the daemon's
+    HTTP listener is gone). Returns the process and the socket path, which is
+    what `rpc_call` dials.
+
+    The daemon's data directory is `<data_dir>/daemon-data`, never the
+    operator's: the shared socket there would collide with a live daemon.
 
     `mock_llm` selects the `TCODE_MOCK_LLM` scripted client (default
     `echo-soak`; `compression_load_soak.py` passes `echo-soak-load` — see
@@ -109,34 +113,33 @@ def spawn_daemon(
         "TCODE_TELEMETRY_DATA_DIR": str(data_dir),
         "PATH": _inherited_path(),
         "HOME": str(Path.home()),
+        "TRUSTY_DATA_DIR_OVERRIDE": str(data_dir / "daemon-data"),
     }
     if extra_env:
         env.update(extra_env)
     proc = subprocess.Popen(
-        [str(tcode_bin), "serve", "--project", str(project), "--http", "--port", "0"],
+        [str(tcode_bin), "serve", "--project", str(project)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
     assert proc.stderr is not None
-    base_url = None
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        line = proc.stderr.readline()
-        if not line:
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    f"tcode serve exited early (code {proc.returncode}) before reporting its address"
-                )
-            continue
-        match = re.search(r"listening on (http://\S+)", line)
-        if match:
-            base_url = match.group(1)
+    sock = str(data_dir / "daemon-data" / "trusty-code" / "trusty-code.sock")
+    deadline = time.monotonic() + 30
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"tcode serve exited early (code {proc.returncode}): {proc.stderr.read()}"
+            )
+        try:
+            rpc_call(sock, "ping", {})
             break
-    if base_url is None:
-        proc.kill()
-        raise RuntimeError("timed out waiting for tcode serve to report its bound address")
+        except (OSError, ValueError):
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise RuntimeError(f"timed out waiting for tcode serve to answer on {sock}")
+            time.sleep(0.1)
 
     # Keep draining stderr for the daemon's life so the pipe never fills and
     # blocks it (mirrors the Rust e2e helper's identical rationale).
@@ -146,7 +149,7 @@ def spawn_daemon(
                 break
 
     threading.Thread(target=_drain, daemon=True).start()
-    return proc, base_url
+    return proc, sock
 
 
 def _inherited_path() -> str:
@@ -159,21 +162,31 @@ class RpcError(RuntimeError):
     pass
 
 
-def rpc_call(base_url: str, method: str, params: dict, request_id: int = 1) -> dict:
+def rpc_call(sock: str, method: str, params: dict, request_id: int = 1) -> dict:
+    """One JSON-RPC call over the daemon's socket: one newline-terminated
+    frame each way, the write side half-closed after the request
+    (`trusty_common::uds::rpc`'s framing)."""
     body = json.dumps(
         {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
     ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}/rpc", data=body, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read())
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(30)
+        conn.connect(sock)
+        conn.sendall(body + b"\n")
+        conn.shutdown(socket.SHUT_WR)
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    payload = json.loads(data)
     if "error" in payload and payload["error"] is not None:
         raise RpcError(f"{method} failed: {payload['error']}")
     return payload["result"]
 
 
-def wait_for_terminal_status(base_url: str, session_id: str, timeout_s: float = 60) -> str:
+def wait_for_terminal_status(sock: str, session_id: str, timeout_s: float = 60) -> str:
     """Poll `session.status` until it leaves `running`/`created`.
 
     Why: `task.run` returns immediately (the run executes in the
@@ -185,7 +198,7 @@ def wait_for_terminal_status(base_url: str, session_id: str, timeout_s: float = 
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        status = rpc_call(base_url, "session.status", {"session_id": session_id})["status"]
+        status = rpc_call(sock, "session.status", {"session_id": session_id})["status"]
         if status not in ("running", "created"):
             return status
         time.sleep(0.1)
@@ -201,17 +214,17 @@ def run_soak(tcode_bin: Path, calls: int, out_dir: Path) -> dict:
         project = Path(project_dir)
         build_project_fixture(project)
 
-        proc, base_url = spawn_daemon(tcode_bin, project, data_dir)
+        proc, sock = spawn_daemon(tcode_bin, project, data_dir)
         budget_samples = []
         try:
-            created = rpc_call(base_url, "session.create", {"task": "compression soak turn 0"})
+            created = rpc_call(sock, "session.create", {"task": "compression soak turn 0"})
             session_id = created["id"]
             print(f"session_id={session_id}", file=sys.stderr)
 
             total_turns = 0
             for call_num in range(1, calls + 1):
                 rpc_call(
-                    base_url,
+                    sock,
                     "task.run",
                     {
                         "task_description": f"soak call {call_num}",
@@ -220,11 +233,11 @@ def run_soak(tcode_bin: Path, calls: int, out_dir: Path) -> dict:
                     },
                     request_id=call_num,
                 )
-                status = wait_for_terminal_status(base_url, session_id)
+                status = wait_for_terminal_status(sock, session_id)
                 total_turns += TURNS_PER_CALL
 
                 budget = rpc_call(
-                    base_url, "session.get_context_budget", {"session_id": session_id}
+                    sock, "session.get_context_budget", {"session_id": session_id}
                 )
                 budget_samples.append({"call": call_num, "turns": total_turns, **budget})
                 print(
@@ -233,7 +246,7 @@ def run_soak(tcode_bin: Path, calls: int, out_dir: Path) -> dict:
                     file=sys.stderr,
                 )
 
-            rpc_call(base_url, "session.cancel", {"session_id": session_id})
+            rpc_call(sock, "session.cancel", {"session_id": session_id})
         finally:
             proc.terminate()
             try:

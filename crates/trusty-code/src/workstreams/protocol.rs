@@ -7,8 +7,7 @@
 //! - [`SPEC-WS-07~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-07~draft)
 //!
 //! Why: mirrors `crate::session::protocol`'s role for `session.*` — the RPC
-//! surface the daemon exposes over `POST /rpc` (and, via
-//! `crate::serve::rest::workstreams`, the REST twin). #3293 (merged) built
+//! surface the daemon exposes over its socket and STDIO. #3293 (merged) built
 //! the domain model and the flat-JSON [`super::store::WorkstreamStore`], but
 //! left it unreachable from any transport. This file is where BOTH
 //! concurrent follow-up tickets against that foundation land: #3294's

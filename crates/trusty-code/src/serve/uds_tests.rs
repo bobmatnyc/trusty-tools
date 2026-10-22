@@ -29,7 +29,7 @@ use super::run_daemon_on;
 /// A generous per-call budget: these dial a socket in the same process.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A daemon serving a real router on a tempdir socket, with no HTTP listener.
+/// A daemon serving a real router on a tempdir socket.
 struct TestDaemon {
     socket: PathBuf,
     stop: Option<oneshot::Sender<()>>,
@@ -53,15 +53,9 @@ impl TestDaemon {
         let serve_socket = socket.clone();
         let serve_data = data.path().to_path_buf();
         let joined = tokio::spawn(async move {
-            run_daemon_on(
-                binding,
-                &serve_socket,
-                Some(&serve_data),
-                None,
-                async move {
-                    let _ = stopped.await;
-                },
-            )
+            run_daemon_on(binding, &serve_socket, Some(&serve_data), async move {
+                let _ = stopped.await;
+            })
             .await
         });
 
@@ -149,46 +143,175 @@ async fn open_stream(
 /// happened.
 const BIND_FAILURE_BUDGET: Duration = Duration::from_secs(10);
 
-/// A socket path already occupied by something that is not a dead socket must
-/// stop the daemon outright — never a silent degrade to HTTP only, which would
-/// leave every socket client reporting "no daemon" against a live process.
-#[tokio::test]
-async fn run_uds_socket_bind_failure_is_fatal() {
-    let dir = tempfile::tempdir().expect("socket tempdir");
+/// Run a daemon on `socket` with a shutdown signal that never fires, bounded by
+/// [`BIND_FAILURE_BUDGET`], and return the error it must stop with.
+async fn expect_refused(socket: &Path) -> anyhow::Error {
     let data = tempfile::tempdir().expect("data tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let socket = dir.path().join("tcode.sock");
-    // A regular file, not a stale socket: `bind_singleton_hardened` refuses a
-    // path holding anything that is not a socket and never unlinks it, so the
-    // bind below genuinely fails. #7312: that file-type check is what makes
-    // this true on Linux as well as macOS.
-    std::fs::write(&socket, b"not a socket").expect("occupy the socket path");
-
     let binding =
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
-    let err = timeout(
+    timeout(
         BIND_FAILURE_BUDGET,
-        run_daemon_on(
-            binding,
-            &socket,
-            Some(data.path()),
-            // A port is offered and must NOT be bound: the socket failed first.
-            Some(0),
-            std::future::pending(),
-        ),
+        run_daemon_on(binding, socket, Some(data.path()), std::future::pending()),
     )
     .await
     .expect("the daemon began serving instead of failing the bind — see #7312")
-    .expect_err("an unbindable socket must stop the daemon");
-    let rendered = format!("{err:#}");
+    .expect_err("an unbindable socket must stop the daemon")
+}
+
+/// A socket the kernel cannot bind stops the daemon outright (#6637 Fail-Open
+/// Check). With the TCP listener gone there is no other door, so a daemon that
+/// logged the failure and kept running would be a process nobody can reach.
+///
+/// What: a path longer than `sun_path` holds (104 bytes on macOS, 108 on
+/// Linux), so the bind itself fails rather than any pre-check on the path.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn run_uds_socket_bind_failure_is_fatal() {
+    let dir = tempfile::tempdir().expect("socket tempdir");
+    let socket = dir.path().join(format!("{}.sock", "s".repeat(120)));
+    let rendered = format!("{:#}", expect_refused(&socket).await);
     assert!(
         rendered.contains("bind the daemon socket"),
         "the failure must name the bind, got: {rendered}"
     );
+    assert!(!socket.exists(), "nothing may be left at the path");
+}
+
+/// Something at the socket path that is not a socket is refused and left
+/// alone (#7328) — never unlinked and replaced, which would let a daemon
+/// delete a file it did not create.
+///
+/// Why the bound: #7312 — on Linux `bind_singleton_hardened` once read this
+/// regular file as a dead socket, unlinked it, and served forever.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn run_daemon_refuses_a_non_socket_at_the_path() {
+    let dir = tempfile::tempdir().expect("socket tempdir");
+    let socket = dir.path().join("tcode.sock");
+    std::fs::write(&socket, b"not a socket").expect("occupy the socket path");
+    let rendered = format!("{:#}", expect_refused(&socket).await);
     assert!(
-        socket.is_file(),
-        "the occupying file must survive the refused bind"
+        rendered.contains("bind the daemon socket"),
+        "the failure must name the bind, got: {rendered}"
     );
+    assert_eq!(
+        std::fs::read(&socket).expect("the occupying file must survive"),
+        b"not a socket",
+        "the occupying file must survive the refused bind unchanged"
+    );
+}
+
+/// A socket directory left wider than `0700` is REPAIRED to `0700` before the
+/// socket is created, and the socket comes up `0600` (#6637 criterion 1).
+///
+/// Why repaired, not refused: every install before #5099 created this
+/// directory with `create_dir_all`, so it is `0755` on existing machines; the
+/// directory's owner is still checked, and a foreign-owned one is refused
+/// (`trusty_common::uds::dir::classify_existing_dir`).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn run_daemon_repairs_a_wide_socket_dir() {
+    let sockets = tempfile::tempdir().expect("socket tempdir");
+    let dir = sockets.path().join("wide");
+    std::fs::create_dir(&dir).expect("create the socket dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("widen");
+    let socket = dir.join("tcode.sock");
+    let data = tempfile::tempdir().expect("data tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let binding =
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
+
+    let (stop, stopped) = oneshot::channel::<()>();
+    let serve_socket = socket.clone();
+    let serve_data = data.path().to_path_buf();
+    let joined = tokio::spawn(async move {
+        run_daemon_on(binding, &serve_socket, Some(&serve_data), async move {
+            let _ = stopped.await;
+        })
+        .await
+    });
+    wait_until_serving(&socket).await;
+
+    let dir_mode = std::fs::metadata(&dir).expect("dir").permissions().mode() & 0o777;
+    let socket_mode = std::fs::metadata(&socket)
+        .expect("socket")
+        .permissions()
+        .mode()
+        & 0o777;
+    let _ = stop.send(());
+    timeout(Duration::from_secs(10), joined)
+        .await
+        .expect("the serve loop must return within the budget")
+        .expect("the serve task must not panic")
+        .expect("a requested shutdown is a clean stop");
+    assert_eq!(
+        dir_mode, 0o700,
+        "a wide socket dir must be narrowed to 0700"
+    );
+    assert_eq!(socket_mode, 0o600, "the socket must be owner-only");
+}
+
+/// #6637 Fail-Open Check: a serve task that panics ends the daemon with an
+/// error. Without this the panic payload dies with the `JoinHandle` and the
+/// process lingers with no listener.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_errors_when_the_loop_panics() {
+    let requested = std::sync::atomic::AtomicBool::new(false);
+    let task = tokio::spawn(async { panic!("the accept loop died") });
+    let err = super::join_serve_task(task, &requested)
+        .await
+        .expect_err("a panicked accept loop must not read as a clean stop");
+    assert!(
+        format!("{err:#}").contains("socket accept loop died"),
+        "the error names the dead loop: {err:#}"
+    );
+}
+
+/// #6637 Fail-Open Check: a loop that returns while no shutdown was asked for
+/// is an error, so the process exits non-zero instead of 0.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_errors_when_the_loop_ends_without_a_shutdown() {
+    let requested = std::sync::atomic::AtomicBool::new(false);
+    let task = tokio::spawn(async {});
+    let err = super::join_serve_task(task, &requested)
+        .await
+        .expect_err("an unrequested return must not read as a clean stop");
+    assert!(
+        format!("{err:#}").contains("without a shutdown signal"),
+        "the error says no shutdown was requested: {err:#}"
+    );
+}
+
+/// The ordinary stop: the shutdown was requested, then the loop returned.
+/// Proves the two error arms above are not an always-`Err` join.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn join_serve_task_is_ok_after_a_requested_shutdown() {
+    let requested = std::sync::atomic::AtomicBool::new(true);
+    let task = tokio::spawn(async {});
+    super::join_serve_task(task, &requested)
+        .await
+        .expect("a requested shutdown is a clean stop");
+}
+
+/// A second daemon on a socket a live daemon holds is refused, and the first
+/// keeps answering — the bind is the only duplicate guard (#6637).
+/// Test: this function IS the test; `tests/daemon_no_tcp_6637.rs` covers the
+/// real binary's exit status.
+#[tokio::test]
+async fn a_second_daemon_on_a_live_socket_is_refused() {
+    let daemon = TestDaemon::start().await;
+    let rendered = format!("{:#}", expect_refused(&daemon.socket).await);
+    assert!(
+        rendered.contains("bind the daemon socket"),
+        "the failure must name the bind, got: {rendered}"
+    );
+    let response = daemon.call("ping", json!({})).await;
+    assert!(response.error.is_none(), "the first daemon still answers");
+    daemon.shutdown().await.expect("clean shutdown");
 }
 
 /// Every method the JSON-RPC router registers must be reachable over the
@@ -273,8 +396,8 @@ async fn stream_names_win_over_the_fallback() {
     daemon.shutdown().await.expect("clean shutdown");
 }
 
-/// `workstream.events` must refuse an id no workstream carries, with the same
-/// `not_found` code the HTTP route answers as a `404`.
+/// `workstream.events` must refuse an id no workstream carries with
+/// `not_found` — the code the retired HTTP route answered as a `404`.
 #[tokio::test]
 async fn workstream_events_refuses_an_unknown_id() {
     let daemon = TestDaemon::start().await;

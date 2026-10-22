@@ -602,8 +602,10 @@ async fn a_second_project_starts_its_own_daemon_beside_the_first() {
         );
         let argv = stub.argv().await;
         assert!(
-            argv.contains("--project-socket") && argv.contains("--port 0"),
-            "the second project's daemon must bind its own socket and no fixed port: {argv}"
+            argv.contains("--project-socket")
+                && !argv.contains("--port")
+                && !argv.contains("--http"),
+            "the second project's daemon must bind its own socket and no TCP port: {argv}"
         );
         assert_eq!(
             argv.contains("--project "),
@@ -1110,14 +1112,11 @@ async fn spawns_a_daemon_when_none_is_running() {
     // #6231: the stub is a real child, and readiness came from the socket
     // rather than from it — so its argv has to be waited for, not assumed.
     let argv = stub.argv().await;
+    assert!(argv.contains("serve"), "must spawn `serve`: {argv}");
+    // #6637: no TCP listener of any kind, and the shared socket when it is free.
     assert!(
-        argv.contains("serve") && argv.contains("--http"),
-        "must spawn `serve --http`: {argv}"
-    );
-    // #4600: no fixed port, and the shared socket when it is free.
-    assert!(
-        argv.contains("--port 0") && !argv.contains("--project-socket"),
-        "must spawn on an OS-assigned port and the shared socket: {argv}"
+        !argv.contains("--http") && !argv.contains("--port") && !argv.contains("--project-socket"),
+        "must spawn the socket-only daemon on the shared socket: {argv}"
     );
     assert!(
         argv.contains("--project") && argv.contains(canonical.to_str().expect("utf8")),

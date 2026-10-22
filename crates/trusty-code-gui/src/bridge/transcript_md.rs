@@ -2,7 +2,7 @@
 //!
 //! Why this exists at all: every other row in [`crate::bridge::map`] is one path
 //! onto one JSON-RPC method, because the daemon's REST handler was. This one was
-//! not — `trusty_code::serve::rest::sessions`'s handler made TWO calls
+//! not — the daemon's REST `sessions` handler (retired, #6637) made TWO calls
 //! (`session.get_transcript` and `session.status`) and rendered Markdown from
 //! both, so the format lives in the HTTP layer rather than behind a method. The
 //! HTTP layer is what PR 2c deletes, so the rendering comes here with it: the
