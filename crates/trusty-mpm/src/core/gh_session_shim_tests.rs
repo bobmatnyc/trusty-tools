@@ -309,6 +309,111 @@ fn a_hung_token_lookup_is_killed_and_refused() {
     );
 }
 
+/// A forked child holding a write fd to one file, as a sibling test thread's
+/// child holds an inherited fd between its fork and its exec (#10176).
+#[cfg(unix)]
+struct ForkedWriter(libc::pid_t);
+
+#[cfg(unix)]
+impl ForkedWriter {
+    /// Open `path` for writing, fork a child that keeps the fd for 300 ms and
+    /// exits, then close this process's copy.
+    fn hold(path: &Path) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open for writing");
+        let pause = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 300_000_000,
+        };
+        // SAFETY: the child calls only `nanosleep` and `_exit`, both
+        // async-signal-safe, so forking a multi-threaded process is sound.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // SAFETY: as above.
+            unsafe {
+                libc::nanosleep(&pause, std::ptr::null_mut());
+                libc::_exit(0);
+            }
+        }
+        assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+        drop(file);
+        Self(pid)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkedWriter {
+    fn drop(&mut self) {
+        let mut status = 0;
+        // SAFETY: reaps the one child `hold` forked.
+        unsafe { libc::waitpid(self.0, &mut status, 0) };
+    }
+}
+
+/// 🔴 #10176: a sibling test thread that forks while `write_gh_shim` holds the
+/// shim open for writing gives its child a copy of that write fd, which the
+/// child keeps until it execs or exits. Exec'ing the shim in that window
+/// failed with ETXTBSY. This forces the window — a forked child holds the
+/// shim's write fd for 300 ms — and the shim must still run.
+///
+/// The body runs in a single-threaded child process of this test binary, so
+/// the fork copies no sibling test's write fd and cannot make it busy.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn a_shim_held_busy_by_a_forked_writer_still_runs() {
+    const CHILD_RUN: &str = "TM_TEST_10176_FORKED_WRITER";
+    if std::env::var_os(CHILD_RUN).is_none() {
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let name = format!("{module}::a_shim_held_busy_by_a_forked_writer_still_runs");
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                name.as_str(),
+                "--exact",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env(CHILD_RUN, "1")
+            .output()
+            .expect("re-run this test as a child process");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gh_dir = tmp.path().join("gh-config");
+    let real = tmp.path().join("bin").join("gh");
+    fake_gh(&real, &gh_dir, "echo \"tok-for-$4-$6\"; exit 0");
+    let dir =
+        write_gh_shim(tmp.path(), &verified("github.com", &gh_dir), &real, 5).expect("written");
+    let writer = ForkedWriter::hold(&dir.join("gh"));
+    // Linux refuses the exec while the child holds the fd; the window is armed.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        std::process::Command::new(dir.join("gh"))
+            .output()
+            .err()
+            .and_then(|e| e.raw_os_error()),
+        Some(libc::ETXTBSY),
+        "the forked writer must make the shim busy"
+    );
+    let out = run_shim(&dir);
+    drop(writer);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "GH_TOKEN=tok-for-github.com-octo GITHUB_TOKEN= ARGS=api user\n"
+    );
+}
+
 /// The launch seams over one migrated candidate dir under `root`, whose
 /// `--user octo` lookup answers the sentinel and whose `GET /user` answers `who`.
 fn launch_fixture(
