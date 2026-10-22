@@ -62,7 +62,7 @@ pub(crate) struct ChunkProgress {
 impl EmbedHealth {
     /// Chunk backfill progress derived from this health snapshot.
     /// Test: `progress_counts_done_over_total_for_a_half_backfilled_palace`.
-    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    #[cfg_attr(not(any(test, feature = "server")), allow(dead_code))] // #9735: the ticker calls it
     pub(crate) fn chunk_progress(&self) -> ChunkProgress {
         let needing: HashSet<Uuid> = self
             .missing_vector_ids
@@ -114,7 +114,7 @@ pub(crate) struct ChunkMarker {
     pub(crate) last_error: Option<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+#[cfg_attr(not(any(test, feature = "server")), allow(dead_code))] // #9735: the ticker calls it
 impl ChunkMarker {
     /// A marker for `progress` taken at `window`.
     pub(crate) fn from_progress(
