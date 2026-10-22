@@ -1,0 +1,34 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit se",
+  "answer_note": "lorem ipsum dol",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-08T19:34:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet\nelit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem \ndolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolo",
+  "due": null,
+  "goal": null,
+  "goal_legacy": "lorem ipsum dol",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor",
+      "label": "lorem ipsum dolor sit amet elit se",
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet ",
+      "label": "lorem ipsum dolor sit amet eli",
+      "recommended": false
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed t",
+      "label": "lorem ipsum do",
+      "recommended": false
+    }
+  ],
+  "rank": 2,
+  "session": "pm-12",
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit am",
+  "updated": "2026-10-08T19:49:42Z",
+  "version": 1
+}

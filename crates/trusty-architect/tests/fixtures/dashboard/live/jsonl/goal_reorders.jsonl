@@ -1,0 +1,5 @@
+{"data":{"at":"lorem ipsum dolor sit am","kind":"standing","moved":{"from":"lorem ip","goal":"G03","to":"lorem ip"},"order":["lor","lor","lor","lor","lor"],"status":"new"},"id":"doc-001","sv":1,"version":1}
+{"data":{"at":"lorem ipsum dolor sit am","kind":"directed","order":["lor","lor","lor","lor","lor","lor"],"status":"new"},"id":"doc-002","sv":1,"version":1}
+{"data":{"at":"lorem ipsum dolor sit am","kind":"standing","moved":{"from":"lorem ip","goal":"G04","to":"lorem ip"},"order":["lor","lor","lor","lor","lor","lor","lor"],"status":"new"},"id":"doc-003","sv":1,"version":1}
+{"data":{"at":"lorem ipsum dolor sit am","kind":"standing","moved":{"from":"lorem ip","goal":"G05","to":"lorem ip"},"order":["lor","lor","lor","lor","lor","lor"],"status":"new"},"id":"doc-004","sv":1,"version":1}
+{"data":{"at":"lorem ipsum dolor sit am","kind":"standing","order":["lor","lor","lor","lor","lor","lor","lor"],"status":"new"},"id":"doc-005","sv":1,"version":1}

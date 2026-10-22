@@ -1,0 +1,16 @@
+{
+  "created": "2026-10-01T00:00:00Z",
+  "goal": "G02",
+  "kind": "task",
+  "progress": {
+    "confidence": "lor",
+    "estimated_at": "2026-10-02T00:00:00Z",
+    "pct": 40
+  },
+  "rank": 6,
+  "session": "pm-1",
+  "status": "open",
+  "title": "lorem ip",
+  "updated": "2026-10-01T00:00:00Z",
+  "version": 1
+}

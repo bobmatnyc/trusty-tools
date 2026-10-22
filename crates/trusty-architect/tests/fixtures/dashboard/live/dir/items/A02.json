@@ -1,0 +1,82 @@
+{
+  "answer": "lore",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lore",
+  "answered_at": "lorem ipsum dolor sit am",
+  "blocks_session": true,
+  "created": "2026-10-08T19:53:08Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tem\nüber magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit",
+  "due": null,
+  "goal": "G01",
+  "goal_legacy": "lorem ipsum dolor ",
+  "kind": "action",
+  "options": [],
+  "plan": [
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem i",
+      "title": "lorem ipsum dolor sit amet elit se"
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempo",
+      "title": "lorem ipsum dolor sit amet elit"
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet el",
+      "title": "lorem ipsum dolor sit amet "
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ame",
+      "title": "lorem ipsum dolor sit amet elit sed"
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit s",
+      "title": "lorem ipsum do"
+    }
+  ],
+  "plan_title": "lorem ipsum dol",
+  "rank": 2,
+  "session": "pm-4",
+  "specs": [
+    {
+      "label": "lorem",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet "
+    }
+  ],
+  "status": "answered",
+  "steps": [
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über mag",
+      "id": "l",
+      "links": [
+        {
+          "label": "lorem ipsu",
+          "url": "lorem ipsum dolor sit amet elit sed tempor ü"
+        }
+      ],
+      "title": "lorem ipsum dolor sit amet el",
+      "values": []
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor ",
+      "id": "l",
+      "links": [
+        {
+          "label": "lorem ipsum dol",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über "
+        }
+      ],
+      "optional": true,
+      "title": "lorem ipsum dolor sit amet elit sed tem",
+      "values": []
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed ",
+      "id": "l",
+      "links": [],
+      "title": "lorem ipsum dolor ",
+      "values": []
+    }
+  ],
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

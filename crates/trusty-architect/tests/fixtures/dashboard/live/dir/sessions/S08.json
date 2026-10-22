@@ -1,0 +1,22 @@
+{
+  "details": {},
+  "name": "lorem ips",
+  "order": 22,
+  "progress": 0,
+  "state": "idle",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor ",
+  "updated": "2026-10-09T22:53:58Z",
+  "usage": {
+    "agents_active": 0,
+    "agents_parked": 0,
+    "ctx_k": 161.5,
+    "idle_min": 718,
+    "live_state": "idle",
+    "measured_at": "2026-10-22T05:16:20Z",
+    "out_tokens_1h": 3710,
+    "out_tokens_24h": 30234,
+    "units_24h": 12.3
+  },
+  "version": 1
+}

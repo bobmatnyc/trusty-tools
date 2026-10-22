@@ -1,0 +1,41 @@
+{
+  "created": "2026-10-11T04:00:00Z",
+  "due": "",
+  "goal": "lorem ipsum dolo",
+  "id": "D01",
+  "kind": "question",
+  "links": [
+    {
+      "label": "lo",
+      "url": "lorem ipsum dolor sit "
+    },
+    {
+      "item": "lor",
+      "label": "lore"
+    }
+  ],
+  "options": [
+    {
+      "desc": "lorem ipsum d",
+      "label": "lore",
+      "markers": {
+        "risk": -1,
+        "scope": 0,
+        "work": 1
+      },
+      "recommended": true
+    }
+  ],
+  "rank": 1,
+  "session": "pm-1",
+  "specs": [
+    {
+      "label": "lore",
+      "url": "lorem ipsum dolor sit"
+    }
+  ],
+  "status": "open",
+  "title": "lorem ipsum",
+  "updated": "2026-10-11T04:00:00Z",
+  "version": 1
+}

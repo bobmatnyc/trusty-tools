@@ -1,0 +1,30 @@
+{
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed",
+  "created": "2026-10-20T13:33:39Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+  "done_at": "2026-10-20T14:53:51Z",
+  "due": "",
+  "goal": "G01",
+  "kind": "action",
+  "options": [],
+  "outcome": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem",
+  "rank": 2,
+  "relayed": true,
+  "session": "pm-8",
+  "specs": [
+    {
+      "label": "lorem",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+    }
+  ],
+  "status": "done",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1,
+  "wont_do": {
+    "at": "lorem ipsum dolor sit am",
+    "attempts": 1,
+    "by": "lor",
+    "note": "lorem ipsum dolor sit amet elit sed t"
+  }
+}

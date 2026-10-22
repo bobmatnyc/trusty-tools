@@ -1,0 +1,25 @@
+{
+  "finish_line": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor s",
+  "kind": "directed",
+  "lifecycle": "parked",
+  "next_milestone": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed temp",
+  "park_ack": {
+    "at": "2026-10-15T16:09:00Z",
+    "by": "lorem ips",
+    "note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tem"
+  },
+  "parked": {
+    "at": "lorem ipsum dolor sit am",
+    "by": "lor",
+    "choice": "owner",
+    "until": null
+  },
+  "rank": 4,
+  "sessions": [
+    "lorem ipsum "
+  ],
+  "status_line": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum ",
+  "title": "lorem ipsum dolor sit amet elit sed t",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

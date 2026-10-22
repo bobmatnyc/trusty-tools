@@ -1,0 +1,37 @@
+{
+  "answer": "lore",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna ",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-09T12:30:47Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor",
+  "goal": null,
+  "kind": "action",
+  "rank": 3,
+  "session": "pm-5",
+  "status": "answered",
+  "steps": [
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lor",
+      "id": "l",
+      "title": "lorem ipsum dolor sit amet el"
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum d",
+      "id": "l",
+      "title": "lorem ipsum dolor sit amet elit sed tempor über magna lo"
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über",
+      "id": "l",
+      "title": "lorem ipsum dolor sit amet elit sed "
+    },
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor ",
+      "id": "l",
+      "title": "lorem ipsum dolor"
+    }
+  ],
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna",
+  "updated": "2026-10-09T12:45:44Z",
+  "version": 1
+}

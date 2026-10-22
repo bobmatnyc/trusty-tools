@@ -1,0 +1,34 @@
+{
+  "blocks_session": false,
+  "created": "2026-10-08T16:25:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit a\nelit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor si\namet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über",
+  "goal": "G01",
+  "kind": "action",
+  "parked": null,
+  "rank": 3,
+  "session": "pm-3",
+  "specs": [
+    {
+      "label": "lorem ipsum dolor sit amet elit sed temp",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tem"
+    }
+  ],
+  "status": "open",
+  "steps": [
+    {
+      "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ame",
+      "id": "l",
+      "links": [
+        {
+          "label": "lorem ipsum dolor ",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        }
+      ],
+      "title": "lorem ipsum dolor sit amet elit sed tempor über",
+      "values": []
+    }
+  ],
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ame",
+  "updated": "2026-10-21T08:40:28Z",
+  "version": 1
+}

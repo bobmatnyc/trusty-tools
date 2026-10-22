@@ -1,0 +1,23 @@
+{
+  "item": "lor",
+  "steps": {
+    "1": {
+      "done": true,
+      "done_at": "lorem ipsum dolor sit am"
+    },
+    "2": {
+      "done": true,
+      "done_at": "lorem ipsum dolor sit am",
+      "note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem i",
+      "note_at": "lorem ipsum dolor sit am"
+    },
+    "3": {
+      "done": true,
+      "done_at": "lorem ipsum dolor sit am",
+      "note": "lorem ipsum dol",
+      "note_at": "lorem ipsum dolor sit am"
+    }
+  },
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}
