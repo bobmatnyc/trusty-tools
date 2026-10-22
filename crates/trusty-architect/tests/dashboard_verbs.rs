@@ -81,6 +81,66 @@ fn dashboard_rpc_classes_fix_the_exit_codes() -> R {
     Ok(())
 }
 
+/// Every file under `root` with its bytes.
+fn snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// #10063: AC7 re-scoped to store lock (Arch df-Db7)
+#[test]
+fn dashboard_verb_store_refuses_a_second_writer_while_the_lock_is_held() -> R {
+    use std::os::fd::AsRawFd;
+    let tmp = tempfile::tempdir()?;
+    let store = sel(&tmp.path().join("store"));
+    let seed = WriteRequest {
+        store: store.clone(),
+        collection: "items".into(),
+        id: "D01".into(),
+        data: json!({"t": 1}),
+        if_version: None,
+    };
+    verbs::set(&env(), &seed)?;
+    let before = snapshot(tmp.path());
+    // The first writer: an exclusive flock on `<root>/.lock`, as `dashboard_store.py` takes.
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store.root.join(".lock"))?;
+    // SAFETY: the fd stays open for `held`'s life; flock touches nothing else.
+    let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(rc, 0, "the test could not take the lock");
+    // The second writer: the store the daemon and `tm architect dashboard`
+    // open for a write; a zero wait makes its flock one non-blocking attempt.
+    let writer = verbs::open(&store, &env(), true)?.with_lock_wait(std::time::Duration::ZERO);
+    let got = writer
+        .set("items", "D02", json!({}), Some(0))
+        .err()
+        .ok_or("written while the lock was held")?;
+    assert!(matches!(got, DashError::Unavailable(_)), "{got:?}");
+    assert_eq!(got.code(), RpcErrorCode::Unavailable);
+    assert_eq!(got.code().exit_code(), 3);
+    assert_eq!(
+        snapshot(tmp.path()),
+        before,
+        "a refused write changed bytes"
+    );
+    drop(held);
+    writer.set("items", "D02", json!({}), Some(0))?;
+    Ok(())
+}
+
 #[test]
 fn dashboard_verbs_render_the_prototype_shapes() -> R {
     let tmp = tempfile::tempdir()?;
