@@ -9,10 +9,11 @@
 //! encodings), [`ids`] (path-safe names and the recycled id space),
 //! [`derive`](mod@derive) and [`tally`](mod@tally) (the one count path and the footer), and
 //! [`schema_check`] (the schema hook and the keyword-subset validator).
-//! Not here yet: the change log, the prune archive's file, `fsck`,
-//! `validate` (PR 2); verbs, daemon methods, MCP and CLI (PR 3).
+//! PR 2 adds the change log, the prune log ([`PruneLog`]), [`Store::fsck`],
+//! [`Store::validate`], the secret refusal and the letter-case refusal.
+//! Not here yet: verbs, daemon methods, MCP and CLI (PR 3).
 //! Test: `tests/dashboard_golden.rs`, `tests/dashboard_store.rs`,
-//! `tests/dashboard_tally.rs`.
+//! `tests/dashboard_tally.rs`, `tests/dashboard_case.rs`, `tests/dashboard_log.rs`.
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
@@ -28,5 +29,8 @@ pub mod tally;
 
 pub use error::DashError;
 pub use schema_check::{SchemaDir, SchemaMode, SchemaSet};
-pub use store::{DeleteArchive, Doc, Format, ListQuery, Op, OpResult, Removed, Snapshot, Store};
+pub use store::{
+    DeleteArchive, Doc, Format, ListQuery, Op, OpResult, PruneLog, Removed, Snapshot, Store,
+    Validation,
+};
 pub use tally::{Footer, FooterLinks, Tally, footer, tally, tally_line};

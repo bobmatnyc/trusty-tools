@@ -21,6 +21,12 @@ use trusty_architect::dashboard::{
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+/// A test scanner: nothing is secret-shaped (#10063 PR 2: a store with no
+/// scan refuses writes).
+fn no_secret(_: &str) -> Option<String> {
+    None
+}
+
 /// 2026-10-21T10:00:00Z, the regen script's `NOW`.
 const NOW: f64 = 1_792_576_800.0;
 
@@ -34,7 +40,7 @@ fn corpus() -> Result<Vec<Value>, Box<dyn std::error::Error>> {
     Ok(v["cases"].as_array().ok_or("cases")?.clone())
 }
 
-/// Accepts every delete; the prune log's file is #10063 PR 2's.
+/// Accepts every delete; `PruneLog` is tested in `tests/dashboard_log.rs`.
 #[derive(Default)]
 struct Accept(Mutex<Vec<String>>);
 
@@ -60,7 +66,9 @@ fn class(result: &Result<Vec<trusty_architect::dashboard::OpResult>, DashError>)
     }
 }
 
-/// Every file under `root` (relative path to bytes), minus `.lock`.
+/// Every file under `root` (relative path to bytes), minus `.lock` and the
+/// change logs (the regen script leaves them out; `tests/dashboard_log.rs`
+/// covers them).
 fn tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
@@ -69,7 +77,10 @@ fn tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
             let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|n| n != ".lock") {
+            } else if path
+                .file_name()
+                .is_some_and(|n| n != ".lock" && !n.to_string_lossy().starts_with("changes"))
+            {
                 let rel = path.strip_prefix(root).map_err(std::io::Error::other)?;
                 out.insert(rel.to_string_lossy().into_owned(), fs::read(&path)?);
             }
@@ -86,7 +97,9 @@ fn dashboard_writer_matches_prototype_bytes() -> R {
         for (fmt, format) in [("dir", Format::Dir), ("jsonl", Format::Jsonl)] {
             let tmp = tempfile::tempdir()?;
             let root = tmp.path().join("store");
-            let store = Store::new(&root, format).with_archive(Box::new(Accept::default()));
+            let store = Store::new(&root, format)
+                .with_secret_scan(no_secret)
+                .with_archive(Box::new(Accept::default()));
             for (n, batch) in case["batches"]
                 .as_array()
                 .ok_or("batches")?
@@ -134,8 +147,10 @@ fn dashboard_writer_matches_prototype_bytes() -> R {
 
 #[test]
 fn other_format_refused_not_empty() -> R {
-    let dir_store = Store::new(fixtures().join("synthetic/dir"), Format::Jsonl);
-    let jsonl_store = Store::new(fixtures().join("synthetic/jsonl"), Format::Dir);
+    let dir_store =
+        Store::new(fixtures().join("synthetic/dir"), Format::Jsonl).with_secret_scan(no_secret);
+    let jsonl_store =
+        Store::new(fixtures().join("synthetic/jsonl"), Format::Dir).with_secret_scan(no_secret);
     for store in [&dir_store, &jsonl_store] {
         let at = format!("{:?}", store.format());
         assert!(

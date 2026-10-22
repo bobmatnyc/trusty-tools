@@ -10,16 +10,19 @@
 //! prototype raised as plain `StoreError` but a caller must treat apart: a
 //! store in the other format, a corrupt or partial file, a held lock, an I/O
 //! failure and a schema file the validator refuses, and a rollback that
-//! could not restore every file.
-//! Test: `stale_if_version_conflicts_and_leaves_bytes`,
+//! could not restore every file. PR 2 adds a secret refusal and a committed
+//! batch whose change-log lines were not written.
+//! Test: `secret_value_refused_and_not_logged`,
+//! `change_log_failure_is_unlogged_after_commit`,
+//! `stale_if_version_conflicts_and_leaves_bytes`,
 //! `other_format_refused_not_empty`, `lock_contention_is_unavailable_and_writes_nothing`,
 //! `failed_restore_names_the_torn_files`.
 
 use std::path::{Path, PathBuf};
 
 /// Why a dashboard store call did not complete. Nothing was written, except
-/// after [`DashError::RollbackIncomplete`]: rollback covers a failed write,
-/// not a crash.
+/// after [`DashError::RollbackIncomplete`] (rollback covers a failed write,
+/// not a crash) and [`DashError::Unlogged`] (the documents were written).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DashError {
@@ -63,6 +66,20 @@ pub enum DashError {
     /// The store lock was not granted within the wait.
     #[error("{0}")]
     Unavailable(String),
+    /// An op holds a secret-shaped value (LDG-2.3.5); the text names the
+    /// op and the shape, never the value (#10063 PR 2).
+    #[error("{0}")]
+    SecretRefused(String),
+    /// The batch was committed but its `changes.jsonl` lines were not
+    /// written (#10063 PR 2: never a silent success); `fsck` shows the gap.
+    #[error("{cause}; the batch was committed but its change-log lines were not written: run fsck")]
+    Unlogged {
+        /// What each op did; the documents hold these versions.
+        results: Vec<super::store::OpResult>,
+        /// Why the append failed.
+        #[source]
+        cause: Box<DashError>,
+    },
     /// A batch write failed and rollback could not restore every earlier
     /// file: the store is torn at `unrestored` (#10063 df-G01).
     #[error("{cause}; rollback did not restore {}", list(.unrestored))]

@@ -43,8 +43,10 @@ mod pyjson;
 mod pystr;
 pub mod quiet;
 mod scripted;
+mod secret;
 pub mod self_ctx;
 mod sha1;
+mod sha256;
 mod tmux;
 pub mod verbs;
 

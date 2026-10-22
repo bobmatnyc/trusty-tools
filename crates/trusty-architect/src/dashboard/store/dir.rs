@@ -5,12 +5,14 @@
 //! What: `<root>/<coll>/<id>.json` holds the body plus an integer `version`,
 //! written as [`super::super::canonical::pretty`] plus LF. [`load`] reads one
 //! (an old mirror file with no `version`, or a bad one, counts as version 1);
+//! [`load_exact`] reads one only when the directory lists its exact name;
 //! [`list`] reads a collection in id order; [`collections`] lists
 //! directories holding at least one visible `*.json`. A truncated or
 //! non-object file is corrupt, never absent.
 //! Test: `dir_old_mirror_file_reads_as_version_one`, `partial_dir_doc_is_corrupt`,
 //! `dashboard_writer_matches_prototype_bytes`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +56,33 @@ pub fn load(path: &Path) -> Result<Option<Versioned>, DashError> {
         .filter(|v| *v >= 1)
         .unwrap_or(1);
     Ok(Some((version, body)))
+}
+
+/// The doc ids `<root>/<coll>/` holds, exactly as the directory lists them;
+/// empty when it is absent.
+///
+/// # Errors
+/// [`DashError::Io`] when the directory exists but cannot be listed.
+pub fn ids(root: &Path, coll: &str) -> Result<BTreeSet<String>, DashError> {
+    Ok(super::list_names(&root.join(coll))?
+        .into_iter()
+        .filter(|n| !n.starts_with('.'))
+        .filter_map(|n| n.strip_suffix(".json").map(str::to_owned))
+        .collect())
+}
+
+/// `(version, body)` of `coll/id` when the directory lists exactly that name.
+///
+/// #10063 df-G01: on a case-insensitive filesystem opening `a01.json` opens
+/// `A01.json`, so presence is read from the listing, never from `open`.
+///
+/// # Errors
+/// [`ids`]' and [`load`]'s errors.
+pub fn load_exact(root: &Path, coll: &str, id: &str) -> Result<Option<Versioned>, DashError> {
+    if !ids(root, coll)?.contains(id) {
+        return Ok(None);
+    }
+    load(&doc_path(root, coll, id))
 }
 
 /// The documents of `<root>/<coll>/`, in id order; empty when it is absent.

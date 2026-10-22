@@ -11,6 +11,12 @@ use trusty_architect::dashboard::{
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+/// A test scanner: nothing is secret-shaped (#10063 PR 2: a store with no
+/// scan refuses writes).
+fn no_secret(_: &str) -> Option<String> {
+    None
+}
+
 /// 2026-10-21T10:00:00Z.
 const NOW: f64 = 1_792_576_800.0;
 
@@ -49,7 +55,7 @@ fn mixed(store: &Store) -> Result<(), DashError> {
 fn tally_counts_kinds_parked_running_and_waiting() -> R {
     for format in [Format::Dir, Format::Jsonl] {
         let tmp = tempfile::tempdir()?;
-        let store = Store::new(tmp.path(), format);
+        let store = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         mixed(&store)?;
         let t = tally(&store, NOW)?;
         assert_eq!(
@@ -57,7 +63,7 @@ fn tally_counts_kinds_parked_running_and_waiting() -> R {
             json!({"open": 3, "questions": 1, "actions": 1, "tasks": 1, "answered_unrelayed": 1,
                    "parked": 1, "running": 1, "answers_waiting": 2})
         );
-        let one = Store::new(tmp.path().join("one"), format);
+        let one = Store::new(tmp.path().join("one"), format).with_secret_scan(no_secret);
         one.set(
             "items",
             "A01",
@@ -78,7 +84,7 @@ fn tally_counts_kinds_parked_running_and_waiting() -> R {
 fn footer_equals_tally_line() -> R {
     for format in [Format::Dir, Format::Jsonl] {
         let tmp = tempfile::tempdir()?;
-        let store = Store::new(tmp.path(), format);
+        let store = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         mixed(&store)?;
         let f = footer(&store, NOW, &links())?;
         assert_eq!(
@@ -105,7 +111,7 @@ fn unreadable_store_is_error_not_zero() -> R {
 
     for format in [Format::Dir, Format::Jsonl] {
         let root = tmp.path().join(format.to_string());
-        let store = Store::new(&root, format);
+        let store = Store::new(&root, format).with_secret_scan(no_secret);
         mixed(&store)?;
         let path = match format {
             Format::Dir => root.join("items/D01.json"),
