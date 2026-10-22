@@ -23,6 +23,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/fleet-classify.py` | The poller's pure half: pane parsing and alert evaluation, with no tmux call or file I/O. `fleet-poll.py` loads it by path, so it ships beside it. |
 | `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
 | `scripts/self-ctx.py` | Measures the Architect's own context from its newest interactive Claude Code transcript. |
+| `scripts/alert_triage.py` | Sorts poller alerts into wake and log by fixed rules and the holds in `local/triage-rules.json`; the rest go to one batched Haiku call that fails open to wake. `--replay N` re-runs the gate over recent alerts. The shipped `fleet-poll.py` does not load it yet (#10161, P1b). |
+| `scripts/architect-watchdog.py` | Classifies the Architect session as dead, frozen, silent or ok and decides on a debounced relaunch. Pure logic, no I/O. The shipped `fleet-poll.py` does not load it yet (#10161, P1b). |
 | `scripts/quiet-sessions.py` | Reads the quiet-session list (idle alerts dropped) and matches throwaway test-fixture session names (`exited` alerts dropped). |
 | `scripts/start-fleet-poll.sh` | Starts the poller in its own tmux session unless it is already running. Arguments pass through. |
 | `scripts/relay.sh` | The two-step relay send: refuses unless the box is empty or a suggestion, types the text, and presses Enter only when the box starts with the Architect marker. |

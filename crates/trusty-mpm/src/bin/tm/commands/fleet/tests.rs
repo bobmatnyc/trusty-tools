@@ -1407,6 +1407,42 @@ fn every_template_asset_is_seeded() {
     );
 }
 
+/// #10161: every script asset is seeded byte-equal at `scripts/<name>`, so a
+/// script added under `src/assets/architect/scripts/` without an `embedded!`
+/// row fails, and every seeded script row has an asset.
+#[test]
+fn every_script_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/scripts");
+    let files = seeded_files();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        // Finder metadata and a local `__pycache__/`, skipped like the drift gate skips them.
+        if path.is_dir() || name == ".DS_Store" {
+            continue;
+        }
+        let dest = format!("scripts/{name}");
+        let seeded = files
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest}: a script asset tm fleet init does not seed"));
+        assert_eq!(
+            seeded.contents,
+            std::fs::read_to_string(&path).unwrap(),
+            "{dest}"
+        );
+        checked += 1;
+    }
+    let rows = files
+        .iter()
+        .filter(|f| f.dest.starts_with("scripts/"))
+        .count();
+    assert_eq!(checked, rows, "script assets {checked}, seeded rows {rows}");
+}
+
 /// #9997 AC5: a seed carrying one more skill writes it with no change to
 /// `seed.rs`; the table is built from the seed's skills.
 #[test]

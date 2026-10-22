@@ -22,7 +22,7 @@
 //! overwritten. The skills' bytes are the ones every Architect launch also
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
-//! `every_template_asset_is_seeded`,
+//! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `the_relay_scripts_and_the_voice_guide_are_seeded`,
@@ -109,6 +109,13 @@ const EMBEDDED: &[Embedded] = &[
         false
     ),
     embedded!("scripts/self-ctx.py", "scripts/self-ctx.py", false),
+    // See #10161: the poller's alert triage and Architect watchdog (P1b-0).
+    embedded!("scripts/alert_triage.py", "scripts/alert_triage.py", false),
+    embedded!(
+        "scripts/architect-watchdog.py",
+        "scripts/architect-watchdog.py",
+        false
+    ),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
