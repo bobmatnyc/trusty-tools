@@ -18,7 +18,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
 | `skills/architect-*.md` | The eight skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model). Seeded the same way. |
 | `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
-| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`). |
+| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`), and the `architect.json` config seed with no owner values. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
 | `scripts/fleet-classify.py` | The poller's pure half: pane parsing and alert evaluation, with no tmux call or file I/O. `fleet-poll.py` loads it by path, so it ships beside it. |
 | `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
@@ -27,6 +27,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/start-fleet-poll.sh` | Starts the poller in its own tmux session unless it is already running. Arguments pass through. |
 | `scripts/relay.sh` | The two-step relay send: refuses unless the box is empty or a suggestion, types the text, and presses Enter only when the box starts with the Architect marker. |
 | `scripts/posted.sh`, `scripts/relay-marker.py` | The double-post guard for a shared pane: lists relays sent since a time, or prints `NONE`. |
+| `scripts/architect_config.py` | Loads the instance settings in `local/architect.json` (see Configuration). Imported by sibling scripts; no command line. |
 | `tests/` | pytest suite for the scripts above. |
 
 ## Configuration
@@ -47,6 +48,29 @@ account or session name is built in.
 | `CONTEXT_WINDOW_TOKENS` | `1000000` | The window a pane's `ctx N%` is read against; keep it above the bar. |
 | `LOAD_FACTOR` | `1.5` | Load alert when the 5-minute average exceeds this many times the core count. |
 | `TMUX_SOCKET` | tmux's own default | Selects the tmux server. |
+
+### Instance settings: `local/architect.json`
+
+Settings that name the owner or the owner's repos live in the Architect
+project's own `local/architect.json`, never in a script (#10161).
+`tm fleet init` seeds it with empty values; the Architect fills it in.
+`scripts/architect_config.py` reads it: `architect_config.load()` returns the
+resolved settings. A variable beats the file, the file beats the default, and
+an empty variable counts as unset.
+
+| Key | Type | Default | Variable |
+| --- | --- | --- | --- |
+| `owner_name` | string | `""`: say "the owner" | `ARCHITECT_OWNER_NAME` |
+| `memory_palace` | string | `""`: derive it from the session or project | `ARCHITECT_MEMORY_PALACE` |
+| `dashboard_port` | integer, 1 to 65535 | `7890` | `DASHBOARD_PORT` |
+| `repos` | `{name: {slug, gh_config_dir, checkout}}`, `slug` required | `{}` | none |
+| `caps` | `{name: number}`; `builder_slots` an integer of 1 or more, `load_factor` above 0 | `{}`: each script's own constant | `LOAD_FACTOR` sets `caps.load_factor` |
+
+`ARCHITECT_CONFIG` names another file. A missing or blank file gives the
+defaults. Malformed JSON, a wrong type or an out-of-range value raises
+`ConfigError` naming the file and the key, never the value; nothing falls back
+to the defaults. An unknown key is ignored and listed in `Config.unknown`.
+Session names stay variables only.
 
 ## Tests
 

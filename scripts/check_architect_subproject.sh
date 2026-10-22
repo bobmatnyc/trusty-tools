@@ -79,6 +79,7 @@ TAB="$(printf '\t')"
 # one per line. P4 added what `tm fleet init` writes into the Architect;
 # #9997 moved the records templates to local/ and added the rest of local/,
 # then the architect-* skills, the relay scripts and the voice guide.
+# #10161: the config loader and its local/architect.json seed.
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -100,6 +101,7 @@ scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh
 scripts/relay-marker.py|crates/trusty-mpm/src/assets/architect/scripts/relay-marker.py
+scripts/architect_config.py|crates/trusty-mpm/src/assets/architect/scripts/architect_config.py
 docs/voice.md|crates/trusty-mpm/src/assets/architect/docs/voice.md
 templates/CLAUDE.md|content/instructions/architect/templates/CLAUDE.md
 templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
@@ -119,6 +121,7 @@ templates/local/owner/contradictions.md|crates/trusty-mpm/src/assets/architect/t
 templates/local/owner/dream-log.md|crates/trusty-mpm/src/assets/architect/templates/local/owner/dream-log.md
 templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templates/local/mandates/README.md
 templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
+templates/local/architect.json|crates/trusty-mpm/src/assets/architect/templates/local/architect.json
 "
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done

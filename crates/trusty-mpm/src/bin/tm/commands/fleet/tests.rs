@@ -563,6 +563,8 @@ const LOCAL_TEMPLATES: &[&str] = &[
     "local/owner/dream-log.md",
     "local/mandates/README.md",
     "local/mandates/example.toml",
+    // See #10161: the instance config seed.
+    "local/architect.json",
 ];
 
 /// The checkout's Architect seed, read from content once (#9132).
@@ -820,6 +822,33 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
     for rel in ["local/users", "local/briefs"] {
         assert!(dir.join(rel).is_dir(), "{rel} is not created");
     }
+}
+
+/// #10161: `tm fleet init` seeds the config loader beside the scripts and the
+/// `local/architect.json` seed, which parses and carries no owner values.
+#[test]
+fn the_architect_config_loader_and_seed_are_seeded() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let loader = std::fs::read_to_string(dir.join("scripts/architect_config.py"))
+        .expect("scripts/architect_config.py is seeded");
+    assert!(loader.contains("def load("), "not the config loader");
+    let meta = std::fs::metadata(dir.join("scripts/architect_config.py")).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o111,
+        0,
+        "a module, not a command"
+    );
+    let text = std::fs::read_to_string(dir.join("local/architect.json"))
+        .expect("local/architect.json is seeded");
+    let seed: serde_json::Value = serde_json::from_str(&text).expect("the seed is JSON");
+    assert_eq!(seed["owner_name"], "", "{text}");
+    assert_eq!(seed["memory_palace"], "", "{text}");
+    assert_eq!(seed["dashboard_port"], 7890, "{text}");
+    assert_eq!(seed["repos"], serde_json::json!({}), "{text}");
+    assert_eq!(seed["caps"], serde_json::json!({}), "{text}");
 }
 
 /// Acceptance 3: with no `events.jsonl` the pass is a full poll, and the
