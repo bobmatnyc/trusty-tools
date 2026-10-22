@@ -9,12 +9,16 @@
 //! actor `architect` by default, and for a write the [`PruneLog`] (the
 //! selection's path, else the prototype's default outside the root). One
 //! function per verb; a `set` without `if_version` on an existing document
-//! is a conflict, as `dashboard-db.py` (`check_set_new`). [`render`] prints
+//! is a conflict, as `dashboard-db.py` (`check_set_new`), checked under the
+//! store lock ([`Store::with_blind_set_refused`]). A prune log must be named
+//! `pruned.jsonl` ([`PruneLog::outside`]). [`render`] prints
 //! a reply as the prototype's CLI does: `json.dump(indent=2)` in its key
 //! order, `pruned` lines raw, `tally`/`footer` as their line unless JSON
 //! was asked for.
 //! Test: `dashboard_verbs_render_the_prototype_shapes`,
-//! `dashboard_rpc_classes_fix_the_exit_codes` (the trusty-mpm daemon, MCP and
+//! `dashboard_rpc_classes_fix_the_exit_codes`,
+//! `dashboard_concurrent_blind_sets_of_a_new_id_let_exactly_one_win`,
+//! `dashboard_prune_log_not_named_pruned_jsonl_is_refused` (the trusty-mpm daemon, MCP and
 //! CLI tests cover the surfaces).
 //!
 //! # Spec References
@@ -69,7 +73,8 @@ pub fn open(sel: &StoreSel, env: &Env, write: bool) -> Result<Store, DashError> 
         Some(path) => PruneLog::outside(&sel.root, path)?,
         None => PruneLog::default_for(&sel.root)?,
     };
-    Ok(store.with_archive(Box::new(prune)))
+    // #10063: the blind-set check runs under the lock, not before it.
+    Ok(store.with_archive(Box::new(prune)).with_blind_set_refused())
 }
 
 /// `get`.
@@ -94,27 +99,12 @@ pub fn list(env: &Env, r: &ListRequest) -> Result<Vec<Doc>, DashError> {
     open(&r.store, env, false)?.list(&r.collection, &query)
 }
 
-/// A conflict for a `set` with no `if_version` on a document that exists.
-fn refuse_blind_replace(store: &Store, coll: &str, id: &str) -> Result<(), DashError> {
-    match store.get(coll, id) {
-        Err(DashError::NotFound(_)) => Ok(()),
-        Err(e) => Err(e),
-        Ok(_) => Err(DashError::Conflict(format!(
-            "{coll}/{id} already exists; pass --if-version <v> to replace it, or `ids` for a new id"
-        ))),
-    }
-}
-
 /// `set`.
 ///
 /// # Errors
 /// As [`Store::batch`]; [`DashError::Conflict`] for a blind replace.
 pub fn set(env: &Env, r: &WriteRequest) -> Result<OpResult, DashError> {
-    let store = open(&r.store, env, true)?;
-    if r.if_version.is_none() {
-        refuse_blind_replace(&store, &r.collection, &r.id)?;
-    }
-    store.set(&r.collection, &r.id, r.data.clone(), r.if_version)
+    open(&r.store, env, true)?.set(&r.collection, &r.id, r.data.clone(), r.if_version)
 }
 
 /// `update`.
@@ -144,17 +134,6 @@ pub fn batch(env: &Env, r: &BatchRequest) -> Result<Vec<OpResult>, DashError> {
         .iter()
         .map(Op::from_json)
         .collect::<Result<Vec<_>, _>>()?;
-    for op in &ops {
-        if let Op::Set {
-            collection,
-            id,
-            if_version: None,
-            ..
-        } = op
-        {
-            refuse_blind_replace(&store, collection, id)?;
-        }
-    }
     store.batch(&ops)
 }
 

@@ -6,7 +6,9 @@
 //! two; restoring earlier files when a later write fails gives the rest.
 //! What: [`Op`] (`set`, `update`, `delete`, with `if_version`, 0 meaning
 //! "must not exist") and [`OpResult`]. [`Store::stage`] reads each target
-//! once under the lock, checks names, format, `if_version` and the body
+//! once under the lock, checks names, format, `if_version` (and, when the
+//! store refuses blind sets, a `set` with none on a document that existed
+//! before the batch) and the body
 //! (an object without `version`; minute timestamps under time keys gain
 //! `:00`), and chains later ops on one document. [`Store::commit`] writes
 //! every dirty target (`dir`: one file each; `jsonl`: each touched
@@ -14,6 +16,7 @@
 //! fails, restores the bytes of every earlier one; a restore that fails too
 //! is [`DashError::RollbackIncomplete`]. Rollback covers failures, not crashes.
 //! Test: `stale_if_version_conflicts_and_leaves_bytes`,
+//! `dashboard_concurrent_blind_sets_of_a_new_id_let_exactly_one_win`,
 //! `batch_rolls_back_on_midway_failure`, `failed_restore_names_the_torn_files`,
 //! `body_with_version_refused`,
 //! `dashboard_writer_matches_prototype_bytes`.
@@ -300,6 +303,19 @@ impl Store {
             }
         };
         let cur = &mut staged.slots[slot_at];
+        // #10063: read under the lock, so a racing blind `set` sees the winner.
+        let blind = matches!(
+            op,
+            Op::Set {
+                if_version: None,
+                ..
+            }
+        );
+        if self.refuse_blind_set && blind && cur.old.is_some() {
+            return Err(DashError::Conflict(format!(
+                "{coll}/{id} already exists; pass --if-version <v> to replace it, or `ids` for a new id"
+            )));
+        }
         let have = if cur.exists { cur.version } else { 0 };
         if let Some(want) = expected.filter(|w| *w != have) {
             return Err(DashError::Conflict(format!(
