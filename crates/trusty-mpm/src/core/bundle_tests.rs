@@ -1994,7 +1994,12 @@ fn output_styles_state_every_pm_prose_rule() {
     for style in pm_output_styles() {
         for heading in FLOOR_SECTIONS {
             assert!(
-                style.content(rc()).lines().any(|line| line == heading),
+                // The teacher and research styles qualify the directive's
+                // heading ("(still absolute)"), so a prefix match.
+                style
+                    .content(rc())
+                    .lines()
+                    .any(|line| line.starts_with(heading)),
                 "{} is missing the floor section `{heading}` (#2647, #8533)",
                 style.id
             );
