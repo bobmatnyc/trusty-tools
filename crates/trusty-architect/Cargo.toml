@@ -25,7 +25,9 @@ include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 # statvfs and the CPU count the host sensors read.
 libc = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# #10063: `float_roundtrip` parses every float exactly, so a dashboard
+# document re-renders to the prototype's bytes (no new dependency).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

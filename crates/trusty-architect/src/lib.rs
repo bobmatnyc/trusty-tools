@@ -20,6 +20,8 @@
 //! [`verbs`], the `tm architect` commands that replace the scripts (#9822).
 //! #9756 P0 adds [`ledger`], the PM Intent Ledger contract (types, ids,
 //! limits, store layout, `mpm.dbatg.*` request types), not yet wired into `tm`.
+//! #10063 adds [`dashboard`], the Architect dashboard store (formats, locking,
+//! versions, batches, tally), not yet wired into `tm`.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -28,6 +30,7 @@
 
 pub mod classify;
 mod clock;
+pub mod dashboard;
 mod decimal_table;
 mod error;
 mod fake;
