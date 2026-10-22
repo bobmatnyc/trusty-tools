@@ -161,7 +161,6 @@ crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_pagination_*
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_*
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
-crates/trusty-analyze/tests/stdio_harness.rs	precheck_search_up
 crates/trusty-code/src/agent_loop/cadence.rs	stays_under_budget_every_turn
 crates/trusty-code/src/agent_loop/mod.rs	sink_receives_tool_error_for_fatal_failures
 crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
@@ -847,8 +846,6 @@ crates/trusty-analyze/src/service/events.rs	deep_endpoint_requires_api_key
 crates/trusty-analyze/src/service/handlers/deep.rs	deep_endpoint_requires_api_key
 crates/trusty-analyze/src/service/rpc_tests.rs	a_daemon_side_deadline_is_a_timeout_not_a_rejection
 crates/trusty-analyze/src/webhook_listener.rs	listener_serves_a_delivery_and_cleans_up_its_socket
-crates/trusty-analyze/tests/stdio_harness.rs	binary_path_exists
-crates/trusty-analyze/tests/stdio_harness.rs	spawn_child
 crates/trusty-code/src/agent_loop/mod.rs	config_max_tokens_reaches_chat_request
 crates/trusty-code/src/intent/mod.rs	submit_task
 crates/trusty-code/src/perf/mod.rs	update_skill_usage
