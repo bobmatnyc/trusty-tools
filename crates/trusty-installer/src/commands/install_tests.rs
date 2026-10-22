@@ -1552,8 +1552,8 @@ fn install_dry_run_omits_internal_bus() {
 #[test]
 fn network_failure_never_skips_a_published_member() {
     // Pinned signature: no probe, no Outcome, no I/O argument.
-    let filter: fn(Vec<StableMember>) -> (Vec<StableMember>, Vec<String>) =
-        crate::commands::stable_set::split_internal;
+    type Split = (Vec<StableMember>, Vec<String>);
+    let filter: fn(Vec<StableMember>) -> Split = crate::commands::stable_set::split_internal;
     let (kept, skipped) = filter(stable_set());
     assert_eq!(skipped, vec!["trusty-events".to_owned()]);
     assert_eq!(kept.len(), stable_set().len() - 1);
