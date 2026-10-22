@@ -34,6 +34,13 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/relay.sh` | The two-step relay send: refuses unless the box is empty or a suggestion, types the text, and presses Enter only when the box starts with the Architect marker. |
 | `scripts/posted.sh`, `scripts/relay-marker.py` | The double-post guard for a shared pane: lists relays sent since a time, or prints `NONE`. |
 | `scripts/architect_config.py` | Loads the instance settings in `local/architect.json` (see Configuration). Imported by sibling scripts; no command line. |
+| `scripts/datg.py`, `scripts/datg_store.py`, `scripts/datg_ops.py`, `scripts/datg_log.py`, `scripts/datg_read.py`, `scripts/datg-hook.sh` | The Intent Ledger store (`docs/specs/SPEC-IL-01.md`): a PM's goals, decisions, asks, tasks and session record in `<project>/.trusty-mpm/datg/`, with the resume digest, `fresh` and the Stop-hook `stamp`. `datg.py` is the CLI and imports the four `datg_*` modules from its own directory, so the five ship together. `datg-hook.sh` is the SessionStart, Stop and PreToolUse hook wrapper and always exits 0. The shipped poller does not load them yet (#10161, P1b). |
+| `scripts/ctx-watch.py` | Evaluates the clear signals S1 to S5 per session from `local/il-schedule.json`, the IL session record and the session transcript, and prints the clear candidates. Sends no keys. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`, which lands in P4a; until then that job fails and alerts. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/self-clear.sh` | The Architect's gated self-refresh: refuses unless `datg.py fresh` passes and the IL session block is recorded, then, with `--live` only, waits for idle and sends `/clear` and a resume prompt. A dry run by default. Its idle test needs `turn-active.py` (P1b). The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/state-archive.py` | Moves old handoff sections out of `local/state.md` into `local/state-archive.md`, keeping the newest 3 and the `NEXT IDS` line. `--dry-run` writes nothing. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
+| `docs/specs/SPEC-IL-01.md` | The Intent Ledger spec the scripts above cite. A design record: trusty-mpm does not ship it. |
 | `tests/` | pytest suite for the scripts above. |
 
 ## Configuration
@@ -113,8 +120,8 @@ Checklist for a PR that brings exported files in:
 ## Deployment
 
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,
-`skills/`, `templates/` and `docs/`, and the drift check fails when one
-differs. `tm fleet init` writes them into the Architect project: `scripts/`,
+`skills/`, `templates/` and `docs/` except `docs/specs/`, and the drift check
+fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`,
 `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore`, `local/` and
 `docs/architect/voice.md`.
 It writes a file only when it is absent and reports an edited one as skipped.

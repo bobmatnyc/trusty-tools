@@ -81,7 +81,7 @@ TAB="$(printf '\t')"
 # then the architect-* skills, the relay scripts and the voice guide.
 # #10161: the config loader and its local/architect.json seed, then the
 # poller's alert triage and Architect watchdog (P1b-0), then PM intake, its
-# digest and the Notification hook pair (P2).
+# digest and the Notification hook pair (P2), then the Intent Ledger set (P3).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -105,6 +105,17 @@ scripts/pm_intake.py|crates/trusty-mpm/src/assets/architect/scripts/pm_intake.py
 scripts/pm-digest.py|crates/trusty-mpm/src/assets/architect/scripts/pm-digest.py
 scripts/pm-notify.sh|crates/trusty-mpm/src/assets/architect/scripts/pm-notify.sh
 scripts/notify-supervisor.sh|crates/trusty-mpm/src/assets/architect/scripts/notify-supervisor.sh
+scripts/datg.py|crates/trusty-mpm/src/assets/architect/scripts/datg.py
+scripts/datg_store.py|crates/trusty-mpm/src/assets/architect/scripts/datg_store.py
+scripts/datg_ops.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ops.py
+scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
+scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
+scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
+scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
+scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
+scripts/self-clear.sh|crates/trusty-mpm/src/assets/architect/scripts/self-clear.sh
+scripts/state-archive.py|crates/trusty-mpm/src/assets/architect/scripts/state-archive.py
+scripts/architect-idle.py|crates/trusty-mpm/src/assets/architect/scripts/architect-idle.py
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh

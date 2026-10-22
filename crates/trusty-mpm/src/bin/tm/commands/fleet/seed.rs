@@ -125,6 +125,23 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/notify-supervisor.sh",
         true
     ),
+    // See #10161: the Intent Ledger set (P3). datg.py imports its four
+    // datg_* modules from its own directory, so all five ship together.
+    embedded!("scripts/datg.py", "scripts/datg.py", true),
+    embedded!("scripts/datg_store.py", "scripts/datg_store.py", false),
+    embedded!("scripts/datg_ops.py", "scripts/datg_ops.py", false),
+    embedded!("scripts/datg_log.py", "scripts/datg_log.py", false),
+    embedded!("scripts/datg_read.py", "scripts/datg_read.py", false),
+    embedded!("scripts/datg-hook.sh", "scripts/datg-hook.sh", true),
+    embedded!("scripts/ctx-watch.py", "scripts/ctx-watch.py", false),
+    embedded!("scripts/il-cron.py", "scripts/il-cron.py", false),
+    embedded!("scripts/self-clear.sh", "scripts/self-clear.sh", true),
+    embedded!("scripts/state-archive.py", "scripts/state-archive.py", true),
+    embedded!(
+        "scripts/architect-idle.py",
+        "scripts/architect-idle.py",
+        true
+    ),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
