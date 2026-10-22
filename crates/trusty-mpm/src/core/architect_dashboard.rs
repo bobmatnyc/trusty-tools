@@ -4,7 +4,7 @@
 //! run the same `trusty_architect::dashboard::verbs` bodies with the same
 //! secret scan and clock (DOC-82 LDG-3.3, LDG-2.3.5); this crate owns the
 //! credential scanner, so it builds the [`Env`] once.
-//! What: [`env`] is the system clock and [`scan_for_credentials`]; [`call`]
+//! What: [`env()`] is the system clock and [`scan_for_credentials`]; [`call`]
 //! decodes a method's JSON params (unknown keys refused) and runs the verb
 //! named by its `mpm.architect.dashboard.*` suffix, returning the reply as
 //! JSON.

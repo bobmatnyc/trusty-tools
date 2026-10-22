@@ -3,13 +3,13 @@
 //!
 //! Why: the daemon hosts the dashboard store (owner ruling Dbc); the MCP
 //! tool and `tm architect dashboard` run the same bodies (DOC-82 LDG-3.3).
-//! What: [`register`] mounts each of
+//! What: [`register`](crate::daemon::rpc::architect_dashboard::register) mounts each of
 //! `trusty_architect::dashboard::rpc::METHODS`; a call decodes its params
 //! itself (so an unknown key is a refusal with exit 2, not a bare
 //! invalid-params frame) and runs [`crate::core::architect_dashboard::call`]
 //! on the blocking pool (the store lock and file I/O block). An error frame
-//! keeps the exit class: [`CODE_CONFLICT`] (exit 1), [`CODE_UNAVAILABLE`]
-//! (exit 3), [`CODE_UNPROCESSABLE`] (exit 2), with `data.exit`.
+//! keeps the exit class: [`CODE_CONFLICT`](crate::daemon::error::CODE_CONFLICT) (exit 1), [`CODE_UNAVAILABLE`](crate::daemon::error::CODE_UNAVAILABLE)
+//! (exit 3), [`CODE_UNPROCESSABLE`](crate::daemon::error::CODE_UNPROCESSABLE) (exit 2), with `data.exit`.
 //! Test: `architect_dashboard_methods_round_trip_over_the_daemon_socket`.
 
 use serde_json::{Value, json};
