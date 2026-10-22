@@ -34,10 +34,10 @@ mod fsck;
 pub mod jsonl;
 mod lock;
 pub mod pruned;
+mod sort;
 mod stage;
 mod validate;
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -48,13 +48,13 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use super::canonical::python_dumps;
 use super::error::DashError;
 use super::ids::check_name;
 use super::schema_check::{SchemaMode, SchemaSet};
 use crate::clock::{Clock, SystemClock};
 use crate::secret::{SecretScan, scan_strings};
 pub use pruned::PruneLog;
+use sort::sort_key;
 use stage::Staged;
 pub use stage::{Op, OpResult, normalize_timestamps};
 pub use validate::Validation;
@@ -575,62 +575,6 @@ impl Store {
             )
         })?;
         archive.record(&removed)
-    }
-}
-
-/// The prototype's list sort key: numbers, then strings, then containers (by
-/// their `json.dumps` text), then booleans and null (by Python's `str`).
-enum SortKey {
-    Number(f64),
-    Text(String),
-    Container(String),
-    Other(&'static str),
-}
-
-impl SortKey {
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Number(_) => 0,
-            Self::Text(_) => 1,
-            Self::Container(_) => 2,
-            Self::Other(_) => 3,
-        }
-    }
-}
-
-impl Ord for SortKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (Self::Number(a), Self::Number(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (Self::Text(a), Self::Text(b)) | (Self::Container(a), Self::Container(b)) => a.cmp(b),
-            (Self::Other(a), Self::Other(b)) => a.cmp(b),
-            _ => self.rank().cmp(&other.rank()),
-        }
-    }
-}
-
-impl PartialOrd for SortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for SortKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for SortKey {}
-
-fn sort_key(v: &Value) -> SortKey {
-    match v {
-        Value::Number(n) => SortKey::Number(n.as_f64().unwrap_or(0.0)),
-        Value::String(s) => SortKey::Text(s.clone()),
-        Value::Array(_) | Value::Object(_) => SortKey::Container(python_dumps(v, true)),
-        Value::Bool(true) => SortKey::Other("True"),
-        Value::Bool(false) => SortKey::Other("False"),
-        Value::Null => SortKey::Other("None"),
     }
 }
 
