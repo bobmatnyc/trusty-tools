@@ -5,11 +5,12 @@ installation. They must live in the instance's own file, never in a shipped
 script, so the shipped scripts carry no operator value (#9171, D77).
 What: `load()` reads `<root>/local/architect.json`, where `root` is the parent
 of this `scripts/` directory, and returns a frozen `Config`. `ARCHITECT_CONFIG`
-names another file. Precedence is environment, then file, then default; an
-empty variable counts as unset. A missing or blank file yields the defaults and
-writes nothing. Malformed JSON, a wrong type, an out-of-range value or an
-unreadable path raises `ConfigError`, which names the path and the key and never
-the value. Unknown keys are kept out of the config and listed in
+names another file, which must exist. Precedence is environment, then file,
+then default; an empty variable counts as unset. A missing or blank file at the
+default path yields the defaults and writes nothing. Malformed JSON, a wrong
+type, an out-of-range or non-finite value, a missing `ARCHITECT_CONFIG` file or
+an unreadable path raises `ConfigError`, which names the path and the key and
+never the value. Unknown keys are kept out of the config and listed in
 `Config.unknown`. Session names stay env-only (#8436). Standard library only,
 Python 3.9+; import it as `architect_config` from a sibling script.
 Test: tests/test_architect_config.py.
@@ -17,6 +18,7 @@ Test: tests/test_architect_config.py.
 # No `from __future__ import annotations`: a dataclass with string annotations
 # fails when a sibling loads this file by path without registering it.
 import json
+import math
 import os
 import types
 from dataclasses import dataclass, field
@@ -74,7 +76,7 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
     """Resolve the config; see the module doc for precedence and failures."""
     env = os.environ if environ is None else environ
     path = default_path(root, env)
-    data = _read(path)
+    data = _read(path, required=bool(env.get("ARCHITECT_CONFIG")))
     unknown = sorted(k for k in data if k not in _KNOWN)
     owner = _string(path, data, "owner_name")
     palace = _string(path, data, "memory_palace")
@@ -94,12 +96,15 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
                   unknown=tuple(sorted(unknown)))
 
 
-def _read(path: str) -> dict:
-    """The file's top-level object; `{}` when the file is absent or blank."""
+def _read(path: str, required: bool) -> dict:
+    """The file's top-level object; `{}` when blank, or absent and not `required`."""
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
+        if required:
+            # See #10161: a mistyped override must not silently yield the defaults.
+            raise ConfigError(f"{path}: named by ARCHITECT_CONFIG, but does not exist") from None
         return {}
     except (OSError, UnicodeDecodeError) as err:
         # See #10161: an unreadable file fails; it never falls back to defaults.
@@ -134,7 +139,9 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    # See #10161: NaN and Infinity (env text or JSON literals) are not numbers here.
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
 
 
 def _port(path: str, key: str, value: Any) -> int:

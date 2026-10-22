@@ -99,6 +99,14 @@ def test_architect_config_names_the_file(tmp_path):
     assert (cfg.owner_name, cfg.path) == ("alice", str(other))
 
 
+def test_a_missing_file_named_by_architect_config_fails(tmp_path):
+    # See #10161: a mistyped override must not silently yield the defaults.
+    missing = str(tmp_path / "typo.json")
+    with pytest.raises(ac.ConfigError) as info:
+        ac.load(root=str(tmp_path), environ={"ARCHITECT_CONFIG": missing})
+    assert missing in str(info.value) and "ARCHITECT_CONFIG" in str(info.value)
+
+
 def test_load_never_mutates_the_environment(tmp_path):
     env = {"ARCHITECT_OWNER_NAME": "carol"}
     ac.load(root=str(tmp_path), environ=env)
@@ -146,6 +154,11 @@ def test_a_bad_repo_entry_fails_and_names_the_key(tmp_path, repos, key):
     ({"builder_slots": 0}, "caps.builder_slots"),
     ({"builder_slots": 1.5}, "caps.builder_slots"),
     ({"load_factor": 0}, "caps.load_factor"),
+    # See #10161: json.loads accepts the NaN and Infinity literals.
+    ({"load_factor": float("nan")}, "caps.load_factor"),
+    ({"load_factor": float("inf")}, "caps.load_factor"),
+    ({"load_factor": float("-inf")}, "caps.load_factor"),
+    ({"other": float("nan")}, "caps.other"),
     ({"other": "x"}, "caps.other"),
     ({"other": False}, "caps.other"),
 ])
@@ -158,6 +171,9 @@ def test_a_bad_cap_fails_and_names_the_key(tmp_path, caps, key):
     ({"DASHBOARD_PORT": "70000"}, "DASHBOARD_PORT"),
     ({"LOAD_FACTOR": "fast"}, "LOAD_FACTOR"),
     ({"LOAD_FACTOR": "-1"}, "LOAD_FACTOR"),
+    ({"LOAD_FACTOR": "nan"}, "LOAD_FACTOR"),
+    ({"LOAD_FACTOR": "inf"}, "LOAD_FACTOR"),
+    ({"LOAD_FACTOR": "-inf"}, "LOAD_FACTOR"),
 ])
 def test_a_bad_variable_fails_and_names_it(tmp_path, env, name):
     with pytest.raises(ac.ConfigError) as info:
