@@ -18,7 +18,7 @@
 //! `body_with_version_refused`,
 //! `dashboard_writer_matches_prototype_bytes`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use super::super::error::DashError;
 use super::super::ids::check_name;
 use super::jsonl::{self, Docs};
-use super::{Format, Store, Versioned, dir};
+use super::{Format, Store, Versioned, case, dir};
 use crate::ledger::store::{sync_dir, write_atomic};
 use crate::pystr::py_repr;
 
@@ -118,6 +118,25 @@ impl Op {
         }
     }
 
+    /// `(collection, id, body)` for the secret scan.
+    pub(super) fn scan_parts(&self) -> (&str, &str, Option<&Value>) {
+        match self {
+            Self::Set {
+                collection,
+                id,
+                data,
+                ..
+            }
+            | Self::Update {
+                collection,
+                id,
+                data,
+                ..
+            } => (collection, id, Some(data)),
+            Self::Delete { collection, id, .. } => (collection, id, None),
+        }
+    }
+
     fn parts(&self) -> (&str, &str, Option<u64>) {
         match self {
             Self::Set {
@@ -182,6 +201,8 @@ pub(super) struct Slot {
     pub(super) data: Map<String, Value>,
     pub(super) dirty: bool,
     pub(super) old: Option<Versioned>,
+    /// The last op on this document, for its change-log line.
+    pub(super) op: &'static str,
 }
 
 /// Every slot a batch touched, in first-touch order, plus the `jsonl`
@@ -191,6 +212,8 @@ pub(super) struct Staged {
     pub(super) slots: Vec<Slot>,
     index: HashMap<(String, String), usize>,
     fresh: BTreeMap<String, Docs>,
+    /// The ids each touched collection holds on disk, as listed (#10063 df-G01).
+    listed: BTreeMap<String, BTreeSet<String>>,
 }
 
 const TS_KEYS: [&str; 8] = [
@@ -257,11 +280,14 @@ impl Store {
         check_name("collection", coll)?;
         check_name("doc id", id)?;
         self.guard(coll)?;
+        if !matches!(op, Op::Delete { .. }) {
+            self.refuse_case_variant(staged, coll, id)?;
+        }
         let key = (coll.to_owned(), id.to_owned());
         let slot_at = match staged.index.get(&key) {
             Some(i) => *i,
             None => {
-                let found = self.current(&mut staged.fresh, coll, id)?;
+                let found = self.current(staged, coll, id)?;
                 staged.slots.push(Slot {
                     coll: coll.to_owned(),
                     id: id.to_owned(),
@@ -270,6 +296,7 @@ impl Store {
                     data: found.as_ref().map(|f| f.1.clone()).unwrap_or_default(),
                     dirty: false,
                     old: found,
+                    op: "",
                 });
                 staged.index.insert(key.clone(), staged.slots.len() - 1);
                 staged.slots.len() - 1
@@ -289,6 +316,7 @@ impl Store {
             cur.exists = false;
             cur.data = Map::new();
             cur.dirty = true;
+            cur.op = "delete";
             return Ok(OpResult::Deleted {
                 collection: key.0,
                 id: key.1,
@@ -306,8 +334,10 @@ impl Store {
                 return Err(DashError::NotFound(format!("{coll}/{id} not found")));
             }
             cur.data.extend(body);
+            cur.op = "update";
         } else {
             cur.data = body;
+            cur.op = "set";
         }
         cur.exists = true;
         cur.dirty = true;
@@ -319,22 +349,64 @@ impl Store {
         })
     }
 
-    /// `(version, body)` of `coll/id` as of now; `jsonl` reads each collection
-    /// once per batch.
+    /// `(version, body)` of `coll/id` as of now: only an exactly listed
+    /// name counts (#10063 df-G01); each collection is read once per batch.
     fn current(
         &self,
-        fresh: &mut BTreeMap<String, Docs>,
+        staged: &mut Staged,
         coll: &str,
         id: &str,
     ) -> Result<Option<Versioned>, DashError> {
+        self.list_once(staged, coll)?;
+        if !staged.listed.get(coll).is_some_and(|ids| ids.contains(id)) {
+            return Ok(None);
+        }
         match self.format {
             Format::Dir => dir::load(&dir::doc_path(&self.root, coll, id)),
+            Format::Jsonl => Ok(staged.fresh.get(coll).and_then(|d| d.get(id)).cloned()),
+        }
+    }
+
+    /// Reads `coll`'s listing (and, for `jsonl`, its documents) once per batch.
+    fn list_once(&self, staged: &mut Staged, coll: &str) -> Result<(), DashError> {
+        if staged.listed.contains_key(coll) {
+            return Ok(());
+        }
+        let ids = match self.format {
+            Format::Dir => dir::ids(&self.root, coll)?,
             Format::Jsonl => {
-                if !fresh.contains_key(coll) {
-                    fresh.insert(coll.to_owned(), jsonl::read_coll(&self.root, coll)?);
-                }
-                Ok(fresh.get(coll).and_then(|docs| docs.get(id)).cloned())
+                let docs = jsonl::read_coll(&self.root, coll)?;
+                let ids = docs.keys().cloned().collect();
+                staged.fresh.insert(coll.to_owned(), docs);
+                ids
             }
+        };
+        staged.listed.insert(coll.to_owned(), ids);
+        Ok(())
+    }
+
+    /// Refuses a write of `coll/id` when the store, or an earlier op of this
+    /// batch, holds an id equal to it ignoring letter case but not exactly.
+    fn refuse_case_variant(
+        &self,
+        staged: &mut Staged,
+        coll: &str,
+        id: &str,
+    ) -> Result<(), DashError> {
+        self.list_once(staged, coll)?;
+        let on_disk = staged.listed.get(coll).into_iter().flatten();
+        let written = staged
+            .slots
+            .iter()
+            .filter(|s| s.coll == coll && s.exists)
+            .map(|s| &s.id);
+        match case::variant(id, on_disk.chain(written).map(String::as_str)) {
+            Some(other) => Err(case::refusal(
+                "doc",
+                &format!("{coll}/{id}"),
+                &format!("{coll}/{other}"),
+            )),
+            None => Ok(()),
         }
     }
 

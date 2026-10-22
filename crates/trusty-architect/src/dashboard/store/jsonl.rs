@@ -34,9 +34,12 @@ pub fn coll_path(root: &Path, coll: &str) -> PathBuf {
     root.join(format!("{coll}.jsonl"))
 }
 
-/// Whether `coll` names a change log (`changes` or `changes-YYYY-MM`).
+/// Whether `coll` names a change log (`changes` or `changes-YYYY-MM`), in
+/// any letter case (#10063 df-G01: `Changes.jsonl` is `changes.jsonl` on a
+/// case-insensitive filesystem).
 pub fn is_reserved(coll: &str) -> bool {
-    let Some(rest) = coll.strip_prefix("changes") else {
+    let lower = coll.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("changes") else {
         return false;
     };
     let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
@@ -161,6 +164,7 @@ mod tests {
         ));
         assert_eq!(parse_file(text.as_bytes(), Path::new("x.jsonl"))?, docs);
         assert!(is_reserved("changes") && is_reserved("changes-2026-10"));
+        assert!(is_reserved("Changes") && is_reserved("CHANGES-2026-10"));
         assert!(!is_reserved("changes-2026") && !is_reserved("changesx") && !is_reserved("items"));
         Ok(())
     }
