@@ -83,9 +83,8 @@ impl TickerConfig {
     /// The defaults with each env override applied.
     pub(crate) fn from_env() -> Self {
         let d = Self::default();
-        let secs = |name: &str, d: Duration| {
-            Duration::from_secs(env_u64(name, d.as_secs())).max(MIN_WAIT)
-        };
+        let secs =
+            |name: &str, d: Duration| Duration::from_secs(env_u64(name, d.as_secs())).max(MIN_WAIT);
         let tick_ms = u64::try_from(d.tick.as_millis()).unwrap_or(u64::MAX);
         Self {
             tick: Duration::from_millis(env_u64("TRUSTY_CHUNK_BACKFILL_TICK_MS", tick_ms))

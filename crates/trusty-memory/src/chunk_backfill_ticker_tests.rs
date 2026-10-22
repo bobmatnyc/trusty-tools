@@ -11,8 +11,8 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -507,9 +507,17 @@ async fn a_probe_reaches_the_model_every_time() {
         inner: Arc::clone(&inner),
         seen: Mutex::new(HashSet::new()),
     });
-    probe(&cached, Duration::from_secs(5)).await.expect("probe 1");
-    probe(&cached, Duration::from_secs(5)).await.expect("probe 2");
-    assert_eq!(inner.calls(), 2, "the second probe was served from the cache");
+    probe(&cached, Duration::from_secs(5))
+        .await
+        .expect("probe 1");
+    probe(&cached, Duration::from_secs(5))
+        .await
+        .expect("probe 2");
+    assert_eq!(
+        inner.calls(),
+        2,
+        "the second probe was served from the cache"
+    );
 }
 
 /// #9735: opening a palace rebuilds its index, so the ticker keeps a palace it
