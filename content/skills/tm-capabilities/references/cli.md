@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-69 top-level commands.
+70 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -41,6 +41,14 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `coordinator` — Send a message to the cross-session coordinator / session manager
   - `serve` — Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface)
 - `daemon` — Run the trusty-mpm daemon
+- `dbatg` — The PM ledger: `init`, `add`, `update`, `close`, `batch`, `prune`, `show`
+  - `add` — Add a goal (G), decision (D), ask (A) or task (T)
+  - `batch` — Apply a JSON list of ops, all or none: one write per turn
+  - `close` — Close a D, A or T with a verified outcome; it moves to `archive.jsonl`
+  - `init` — Create this session's store with an id code (2-8 chars)
+  - `prune` — Archive done items and tasks, and answered items older than 24 h
+  - `show` — Print the store, or with `--brief` the one-line summary
+  - `update` — Change a record
 - `divert` — Bulk-read diversion worker (issue #6887)
   - `bulk-read` — Read files on a cheap worker model and print only the answer
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
