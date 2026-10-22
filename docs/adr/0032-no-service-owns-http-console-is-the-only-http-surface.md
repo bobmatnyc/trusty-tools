@@ -19,7 +19,9 @@
   correction note in Consequences. A **Design Principle** section was added
   2026-08-25 (owner clarification, not a new ADR) restating this ADR's
   Decision in the owner's own words, for discoverability — see that section
-  below.
+  below. An **Addendum (2026-10-22)** names `trusty-code-gui`'s loopback
+  webview bridge as the desktop-companion exception, deferred to #10166 by
+  ruling Da5.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
@@ -304,6 +306,24 @@ carve-out this ADR does not close.
   ADR's text, now that its central open question (adopt UDS?) is settled.
   **Recommendation, not a unilateral rewrite:** this ADR does not change
   ADR-0031's Status field itself — see Related Decisions.
+
+## Addendum (2026-10-22): the desktop-companion exception
+
+`trusty-code` binds no TCP port since #6637 slice 2c (PR #10168): `tcode
+serve` serves its hardened Unix socket only. One loopback listener remains on
+the trusty-code side, and it is not a daemon's: `trusty-code-gui`'s webview
+bridge (`crates/trusty-code-gui/src/bridge/serve.rs`). A webview's `fetch()`
+and `EventSource` cannot dial a Unix socket, so the Tauri shell dials the
+daemon's socket and serves its own webview on `127.0.0.1:0`, an ephemeral
+port, behind a credential minted per launch.
+
+That bridge is the desktop-companion exception to "`trusty-console` is the
+only HTTP surface". It is reachable only from the local machine, serves one
+in-process webview, and has no fixed port. Bob's ruling Da5 (2026-10-22)
+defers its replacement with a non-TCP transport to
+[#10166](https://github.com/bobmatnyc/trusty-tools/issues/10166). Until #10166
+lands, `scripts/check_no_tcp_listeners.sh` carries it as an allowlisted row.
+The Decision above is otherwise unchanged.
 
 ## Related Decisions
 
