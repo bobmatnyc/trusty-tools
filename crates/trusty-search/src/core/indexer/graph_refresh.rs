@@ -365,8 +365,10 @@ impl CodeIndexer {
     /// What: returns `false` with no work when the graph is fresh or the index
     /// is deleted. Otherwise takes the flush lock, re-checks, and runs one
     /// full `rebuild_symbol_graph`, which clears the stale mark. Returns
-    /// whether it rebuilt.
-    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
+    /// whether it rebuilt; `false` when the rebuild was deferred or installed
+    /// nothing, with the stale mark kept (#10110).
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+    /// `a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110`.
     pub async fn flush_symbol_graph(&self) -> bool {
         if !self.graph_refresh.is_stale() || self.refuse_if_deleted().is_err() {
             return false;
@@ -375,8 +377,9 @@ impl CodeIndexer {
         if !self.graph_refresh.is_stale() {
             return false; // a concurrent flusher already rebuilt
         }
-        self.rebuild_symbol_graph().await;
-        true
+        // #10110: a rebuild deferred behind a still-running rehydrate leaves
+        // the mark set, so it reports `false` and the ticker retries.
+        self.rebuild_symbol_graph().await.merge_error.is_none()
     }
 
     /// The ticker's entry point: flush when the debounce window says so.

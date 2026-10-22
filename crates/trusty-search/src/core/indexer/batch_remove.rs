@@ -8,7 +8,12 @@
 //! redb key range (never `ensure_chunks_loaded`), stamps ONE durable dirty
 //! mark, then per slice of at most [`REMOVE_SLICE_IDS`] ids deletes the chunk
 //! and entity rows in ONE write transaction, drops them from memory, and
-//! removes their vectors. Transient memory is O(matched ids + one slice).
+//! removes their vectors. The removal path itself does not rehydrate chunks.
+//! Deleting vectors promotes a view-mode HNSW index to the heap
+//! (`UsearchStore::remove` calls `ensure_mutable`), which costs O(index
+//! size) until the write-cooldown demote (#10110). The ONE scheduled graph
+//! rebuild rehydrates the corpus; it defers, keeping the dirty mark, while a
+//! slow scan outlasts its bounded wait.
 //! [`CodeIndexer::count_files_matching`] is the read-only dry run.
 //! Test: `indexer::tests::batch_remove_10110`;
 //! `service::server::remove_files_tests`.
