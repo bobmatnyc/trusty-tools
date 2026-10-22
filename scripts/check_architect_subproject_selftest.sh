@@ -73,6 +73,11 @@ leak_text() { # $1 = kind
     org_cli) printf 'gh pr list -R realcorp/widgets\n' ;;
     org_pages) printf 'docs at realcorp.github.io\n' ;;
     org_gitlab) printf 'clone gitlab.com/realcorp/widgets\n' ;;
+    # #9171: a gh account config dir and a tailnet (CGNAT 100.64/10) address.
+    gh_config) printf 'cat ~/.config/gh-realacct/hosts.yml\n' ;;
+    # #10161: an allowed name as a prefix must not pass.
+    gh_config_long) printf 'cat ~/.config/gh-acmecorp-realname/hosts.yml\n' ;;
+    tailnet_ip) printf 'ssh 100.101.102.103\n' ;;
     # Binary and non-UTF-8 files must still be scanned (#9996 fix round).
     owner_nul) printf 'x\000y\nask masa\n' ;;
     owner_badutf8) printf '\377\376 ask masa\n' ;;
@@ -140,10 +145,11 @@ unpaired-skill${TAB}UNPAIRED
 empty${TAB}EMPTY"
 # #9996: every new class in the content tree and in the Python tree; the
 # assets copy gets a representative pair.
-for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_tailnet slack email; do
+for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_tailnet slack email gh_config gh_config_long tailnet_ip; do
   case "$kind" in
     owner_*) class=OWNER_NAME ;; org*) class=ORG ;; host_*) class=HOSTNAME ;;
     slack) class=SLACK_ID ;; email) class=EMAIL ;;
+    gh_config*) class=GH_CONFIG_DIR ;; tailnet_ip) class=TAILNET_IP ;;
   esac
   for tree in content python; do
     CASES="$CASES
@@ -222,7 +228,9 @@ for tree in content python; do
     'acme.github.io gitlab.com/example/x cp -R src/ dst' \
     'repo github.com/bobmatnyc/trusty-tools' \
     'localhost 127.0.0.1 .claude/settings.local.json' \
-    'TEMPLATES_REFRESH CONTEXTUALIZE U+1F600' >"$f"
+    'TEMPLATES_REFRESH CONTEXTUALIZE U+1F600' \
+    '~/.config/gh-<account> gh-example ~/.config/gh-example/hosts.yml ~/.config/gh-acme' \
+    '100.20.1.1 1.100.64.1 100.128.0.1 100.63.255.255' >"$f"
   rc=0
   out="$("$GATE" --root "$WORK/$name" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
