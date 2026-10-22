@@ -103,6 +103,9 @@ HTTP exception out of ADR-0032.
   can open a UDS, so #6637 needs a design round before it can be scheduled. The
   interim bearer auth stays in force until it lands and does not substitute for
   it.
+  *Amended 2026-10-22 (#6637 slice 2c):* landed. `trusty-code-gui` bridges the
+  daemon's socket (#7221), and `tcode serve` binds no TCP port; port 7882 and
+  the bearer auth are retired.
 - MPM integration work can proceed independently against a stable API contract;
   its implementation stays outside the `trusty-code` crate.
 

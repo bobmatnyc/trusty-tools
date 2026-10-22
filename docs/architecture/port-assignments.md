@@ -48,7 +48,6 @@ else's guard test too).
 |------|------------------|------------------------------|----------------------|
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
-| 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 
 Socket-only daemons hold no row above. `trusty-events` (the event bus,
@@ -57,15 +56,18 @@ TCP port and listens on `trusty_common::daemon_socket_path("trusty-events")`,
 `<data dir>/trusty-events/trusty-events.sock`. Its launchd job
 (`com.trusty.events`) ships with #10042. Console no longer binds an ingest
 socket (#9075). The `trusty-mpm` daemon is another: since #6288 S3a it
-serves `<data dir>/trusty-mpm/trusty-mpm.sock` only and binds no TCP port.
+serves `<data dir>/trusty-mpm/trusty-mpm.sock` only and binds no TCP port. So
+is `trusty-code`: since #6637 slice 2c `tcode serve` serves
+`<data dir>/trusty-code/trusty-code.sock` only, and `--http`/`--port` are
+errors.
 
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
-is **7892**. `7891`, `7890`, `7881`, `7880`, `7879` and `7070` are also free
+is **7892**. `7891`, `7890`, `7882`, `7881`, `7880`, `7879` and `7070` are also free
 again — #6277 moved `trusty-review` off TCP onto a Unix socket, #6287 did the
 same for `trusty-analyze`, #6286 for `trusty-memory`, #6288 S3a for the
-`trusty-mpm` daemon (7880), and #6288 and #6289 retired the `trusty-mpm`
+`trusty-mpm` daemon (7880), #6637 for `trusty-code` (7882), and #6288 and #6289 retired the `trusty-mpm`
 supervisor's and `trusty-embedderd`'s listeners outright — but prefer
 sequential allocation over reusing a released value, so a stale reference to
 any of them in an old log or script cannot resolve to a different daemon.
@@ -75,10 +77,11 @@ operators' scripts and bookmarks still name it.
 
 `7070` is the one to be most careful about: it was the workspace's
 longest-standing default, it is still named as a taken port by the
-`known_siblings` guard tests in `trusty-console/src/service.rs` and
-`trusty-code/src/serve/mod.rs`, and `trusty_memory::DEFAULT_HTTP_PORT` still
+`known_siblings` guard test in `trusty-console/src/service.rs` (the
+`trusty-code` twin went with its listener, #6637), and
+`trusty_memory::DEFAULT_HTTP_PORT` still
 exists as a compile-time stub for `trusty-agents`' unmigrated REST client. None
-of those bind it; all three go when that client migrates. Whatever you pick:
+of those bind it; both go when that client migrates. Whatever you pick:
 
 1. Check this table for the exact value.
 2. `grep -rn "78[0-9][0-9]\|79[0-9][0-9]" --include="*.rs"` across the
@@ -185,9 +188,11 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   answered `/health` with a generic `{"status":"ok"}`, so both `tcode`'s GUI
   client and ops health probes got a false-healthy signal while every real
   `tcode` route 404'd.
-  Fixed by moving `trusty-code::serve::DEFAULT_HTTP_PORT` to 7882 (in
+  Fixed by moving `trusty-code`'s default HTTP port to 7882 (in
   lockstep with `trusty-code-gui`'s hardcoded default) and adding this
-  table plus a collision-guard test to `trusty-code` itself.
+  table plus a collision-guard test to `trusty-code` itself. #6637 slice 2c
+  retired that listener, its constant and the guard: `tcode serve` binds no
+  TCP port.
 
 **Pattern across all three incidents:** a new default port was picked without
 consulting a single cross-cutting inventory, and the guard tests that did
