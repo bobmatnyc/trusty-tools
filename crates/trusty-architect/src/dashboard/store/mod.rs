@@ -323,7 +323,10 @@ impl Store {
     /// [`DashError::Invalid`] (bad op, body, name, or a delete with no
     /// archive), [`DashError::SchemaInvalid`] (enforce mode),
     /// [`DashError::Unavailable`] (lock wait passed), the archive's error, or
-    /// an I/O or corrupt-file error. Nothing is written on any error.
+    /// an I/O or corrupt-file error. Nothing is written on any of these. A
+    /// write that fails midway is rolled back; when a restore fails too the
+    /// error is [`DashError::RollbackIncomplete`], naming the torn files.
+    /// Rollback covers failures, not crashes.
     pub fn batch(&self, ops: &[Op]) -> Result<Vec<OpResult>, DashError> {
         if ops.is_empty() {
             return Err(DashError::Invalid(

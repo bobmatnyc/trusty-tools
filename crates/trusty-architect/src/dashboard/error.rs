@@ -9,13 +9,17 @@
 //! (`StoreError`, `NotFound`, `Conflict`, `SchemaInvalid`) plus the ones the
 //! prototype raised as plain `StoreError` but a caller must treat apart: a
 //! store in the other format, a corrupt or partial file, a held lock, an I/O
-//! failure and a schema file the validator refuses.
+//! failure and a schema file the validator refuses, and a rollback that
+//! could not restore every file.
 //! Test: `stale_if_version_conflicts_and_leaves_bytes`,
-//! `other_format_refused_not_empty`, `lock_contention_is_unavailable_and_writes_nothing`.
+//! `other_format_refused_not_empty`, `lock_contention_is_unavailable_and_writes_nothing`,
+//! `failed_restore_names_the_torn_files`.
 
 use std::path::{Path, PathBuf};
 
-/// Why a dashboard store call did not complete. Nothing was written.
+/// Why a dashboard store call did not complete. Nothing was written, except
+/// after [`DashError::RollbackIncomplete`]: rollback covers a failed write,
+/// not a crash.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DashError {
@@ -59,6 +63,25 @@ pub enum DashError {
     /// The store lock was not granted within the wait.
     #[error("{0}")]
     Unavailable(String),
+    /// A batch write failed and rollback could not restore every earlier
+    /// file: the store is torn at `unrestored` (#10063 df-G01).
+    #[error("{cause}; rollback did not restore {}", list(.unrestored))]
+    RollbackIncomplete {
+        /// The files left with the batch's bytes (or absence).
+        unrestored: Vec<PathBuf>,
+        /// The write failure that started the rollback.
+        #[source]
+        cause: Box<DashError>,
+    },
+}
+
+/// `a, b` of the paths' display forms.
+fn list(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl DashError {

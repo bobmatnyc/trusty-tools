@@ -194,6 +194,73 @@ fn batch_rolls_back_on_midway_failure() -> R {
     Ok(())
 }
 
+/// #10063 df-G01: the batch deletes `goals/G01`, then the `items` write
+/// fails; the restore of `goals/G01` is blocked too, so the error names the
+/// torn file instead of passing for a clean refusal.
+#[test]
+fn failed_restore_names_the_torn_files() -> R {
+    let pid = std::process::id();
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let store = seeded(tmp.path(), format)?;
+        let root = tmp.path();
+        // A directory where write_atomic puts its temporary file blocks it;
+        // the delete removes `goals` without one, its restore needs one.
+        let (torn, items, blockers) = match format {
+            Format::Dir => (
+                root.join("goals/G01.json"),
+                root.join("items/D01.json"),
+                [
+                    root.join(format!("goals/G01.tmp.{pid}")),
+                    root.join(format!("items/D01.tmp.{pid}")),
+                ],
+            ),
+            Format::Jsonl => (
+                root.join("goals.jsonl"),
+                root.join("items.jsonl"),
+                [
+                    root.join(format!("goals.tmp.{pid}")),
+                    root.join(format!("items.tmp.{pid}")),
+                ],
+            ),
+        };
+        for b in &blockers {
+            fs::create_dir_all(b)?;
+        }
+        let items_before = fs::read(&items)?;
+        let batch = [
+            Op::Delete {
+                collection: "goals".into(),
+                id: "G01".into(),
+                if_version: None,
+            },
+            Op::Update {
+                collection: "items".into(),
+                id: "D01".into(),
+                data: json!({"n": 1}),
+                if_version: None,
+            },
+        ];
+        let got = store.batch(&batch);
+        let Err(DashError::RollbackIncomplete { unrestored, cause }) = &got else {
+            return Err(format!("{format}: want RollbackIncomplete, got {got:?}").into());
+        };
+        assert_eq!(unrestored, &[torn.clone()], "{format}");
+        assert!(
+            matches!(**cause, DashError::Io { .. }),
+            "{format}: {cause:?}"
+        );
+        let text = got.map_err(|e| e.to_string()).err().unwrap_or_default();
+        assert!(
+            text.contains(&torn.display().to_string()),
+            "{format}: {text}"
+        );
+        assert!(!torn.exists(), "{format}: the torn file was restored");
+        assert_eq!(fs::read(items)?, items_before, "{format}");
+    }
+    Ok(())
+}
+
 #[test]
 fn delete_is_refused_without_an_archive_or_when_it_fails() -> R {
     for format in FORMATS {

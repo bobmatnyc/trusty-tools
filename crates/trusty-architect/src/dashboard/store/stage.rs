@@ -11,9 +11,11 @@
 //! `:00`), and chains later ops on one document. [`Store::commit`] writes
 //! every dirty target (`dir`: one file each; `jsonl`: each touched
 //! collection re-rendered whole, removed when empty) and, if any write
-//! fails, restores the bytes of every earlier one.
+//! fails, restores the bytes of every earlier one; a restore that fails too
+//! is [`DashError::RollbackIncomplete`]. Rollback covers failures, not crashes.
 //! Test: `stale_if_version_conflicts_and_leaves_bytes`,
-//! `batch_rolls_back_on_midway_failure`, `body_with_version_refused`,
+//! `batch_rolls_back_on_midway_failure`, `failed_restore_names_the_torn_files`,
+//! `body_with_version_refused`,
 //! `dashboard_writer_matches_prototype_bytes`.
 
 use std::collections::{BTreeMap, HashMap};
@@ -407,18 +409,40 @@ fn write(path: &Path, text: &str) -> Result<(), DashError> {
     write_atomic(path, text).map_err(DashError::from)
 }
 
-/// Restores `backups` newest first; a restore that fails is logged, and the
-/// original error is returned.
+/// Restores `backups` newest first. Returns `error` when every file is back,
+/// else [`DashError::RollbackIncomplete`] naming the files that are not
+/// (#10063 df-G01: a torn store is never reported as a plain write failure).
 fn rollback(backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashError {
+    let mut unrestored = Vec::new();
     for (path, old) in backups.iter().rev() {
-        let restored = match old {
-            None if path.exists() => fs::remove_file(path).map_err(DashError::io(path)),
-            None => Ok(()),
-            Some(bytes) => write_atomic(path, bytes).map_err(DashError::from),
-        };
-        if let Err(e) = restored {
+        if let Err(e) = restore(path, old.as_deref()) {
             tracing::error!(path = %path.display(), error = %e, "dashboard store: rollback could not restore a file");
+            unrestored.push((*path).clone());
         }
     }
-    error
+    if unrestored.is_empty() {
+        error
+    } else {
+        DashError::RollbackIncomplete {
+            unrestored,
+            cause: Box::new(error),
+        }
+    }
+}
+
+/// Puts `old` (bytes, or absence) back at `path`; a file that already holds
+/// them, such as the one whose write failed before its rename, is left alone.
+fn restore(path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
+    let unchanged = match (fs::read(path), old) {
+        (Ok(now), Some(old)) => now == old,
+        (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    };
+    match old {
+        _ if unchanged => Ok(()),
+        None => fs::remove_file(path)
+            .map_err(DashError::io(path))
+            .and_then(|()| sync_dir(path).map_err(DashError::from)),
+        Some(bytes) => write_atomic(path, bytes).map_err(DashError::from),
+    }
 }
