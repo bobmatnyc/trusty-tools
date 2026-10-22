@@ -1,0 +1,22 @@
+{
+  "details": {},
+  "name": "lorem ipsum do",
+  "order": 20,
+  "progress": 70,
+  "state": "idle",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet e",
+  "updated": "2026-10-09T22:53:58Z",
+  "usage": {
+    "agents_active": 1,
+    "agents_parked": 0,
+    "ctx_k": 199.0,
+    "idle_min": 0,
+    "live_state": "working",
+    "measured_at": "2026-10-22T05:29:17Z",
+    "out_tokens_1h": 22734,
+    "out_tokens_24h": 39206,
+    "units_24h": 13.74
+  },
+  "version": 1
+}

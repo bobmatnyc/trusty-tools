@@ -1,0 +1,86 @@
+{
+  "details": {
+    "ctx_k": 0,
+    "current": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über ma",
+    "gh_at": "2026-10-16T08:32:30Z",
+    "issues": {
+      "bugs": 30,
+      "bugs_p1": 6,
+      "merged_open": 36,
+      "open": 224,
+      "p1": 14,
+      "p2": 59,
+      "security": 4,
+      "top": [
+        {
+          "n": 8929,
+          "tag": "lorem ip",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        },
+        {
+          "n": 9057,
+          "tag": "lorem ip",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        },
+        {
+          "n": 9146,
+          "tag": "lorem ip",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        },
+        {
+          "n": 9847,
+          "tag": "lorem ip",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        },
+        {
+          "n": 9034,
+          "tag": "lorem ",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        },
+        {
+          "n": 9704,
+          "tag": "lorem ",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        }
+      ]
+    },
+    "last_relay": "lorem ipsum dolor sit amet elit sed tempor ü",
+    "next": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lor",
+    "notes": "lorem ipsum dolor sit amet elit se",
+    "pr_stats": {
+      "by_state": {},
+      "merged_24h": 7,
+      "merged_7d": 131,
+      "merged_7d_capped": false,
+      "open": 0
+    },
+    "waiting_on": "lo"
+  },
+  "goal": "lorem ipsum dolor si",
+  "name": "lorem ipsu",
+  "order": 1,
+  "progress": 60,
+  "project": "lorem ipsum ",
+  "state": "working",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed temp",
+  "updated": "2026-10-09T22:54:06Z",
+  "usage": {
+    "agents_active": 1,
+    "agents_parked": 1,
+    "ctx_k": 261.2,
+    "idle_min": 0,
+    "live_state": "working",
+    "measured_at": "2026-10-22T05:29:17Z",
+    "out_tokens_1h": 52508,
+    "out_tokens_24h": 130233,
+    "units_24h": 35.78
+  },
+  "version": 1
+}

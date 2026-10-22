@@ -1,0 +1,29 @@
+{
+  "details": {
+    "current": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lore",
+    "next": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über m",
+    "notes": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet ",
+    "waiting_on": "lorem ipsum dolor sit amet elit sed tempor"
+  },
+  "goal": "lorem ipsum dolor sit amet elit sed ",
+  "name": "lorem ipsum do",
+  "order": 2,
+  "progress": 35,
+  "project": "lorem ipsum dolor sit ",
+  "state": "idle",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed",
+  "updated": "2026-10-09T22:53:58Z",
+  "usage": {
+    "agents_active": 0,
+    "agents_parked": 0,
+    "ctx_k": 159.5,
+    "idle_min": 0,
+    "live_state": "working",
+    "measured_at": "2026-10-22T05:07:36Z",
+    "out_tokens_1h": 1239,
+    "out_tokens_24h": 40487,
+    "units_24h": 16.3
+  },
+  "version": 1
+}

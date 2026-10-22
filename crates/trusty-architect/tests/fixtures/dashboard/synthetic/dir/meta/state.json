@@ -1,0 +1,17 @@
+{
+  "fleet_usage": {
+    "agents_active": 1,
+    "agents_parked": 0,
+    "measured_at": "2026-10-11T04:00:00Z",
+    "out_tokens_1h": 1,
+    "out_tokens_24h": 2,
+    "units_24h": 3.25
+  },
+  "next_ids": {
+    "A": "03",
+    "D": "06"
+  },
+  "owner_name": "lor",
+  "updated": "2026-10-11T04:00:00Z",
+  "version": 1
+}

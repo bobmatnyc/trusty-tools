@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-16T08:32:30Z",
+  "bugs": 54,
+  "bugs_p1": 11,
+  "issues_open": 306,
+  "merged_24h": 40,
+  "merged_7d": 308,
+  "merged_7d_capped": false,
+  "merged_open": 74,
+  "p1": 19,
+  "p2": 73,
+  "prs_by_state": {
+    "hold": 2
+  },
+  "prs_cap": 15,
+  "prs_open": 2,
+  "repo": "lorem ipsum dolor sit ",
+  "security": 6,
+  "version": 1
+}

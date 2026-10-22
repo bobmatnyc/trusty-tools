@@ -1,0 +1,43 @@
+{
+  "details": {
+    "gh_at": "2026-10-16T08:32:30Z",
+    "issues": {
+      "bugs": 6,
+      "bugs_p1": 0,
+      "merged_open": 3,
+      "open": 25,
+      "p1": 0,
+      "p2": 0,
+      "security": 0,
+      "top": []
+    },
+    "pr_stats": {
+      "by_state": {},
+      "merged_24h": 0,
+      "merged_7d": 0,
+      "merged_7d_capped": false,
+      "open": 0
+    }
+  },
+  "goal": "lorem ipsum dolor sit amet e",
+  "name": "lorem ipsum ",
+  "order": 0,
+  "progress": null,
+  "project": "lorem ips",
+  "state": "working",
+  "status": "lorem ipsum dolor sit amet",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet e",
+  "updated": "2026-10-09T02:21:59Z",
+  "usage": {
+    "agents_active": 0,
+    "agents_parked": 0,
+    "ctx_k": 110.6,
+    "idle_min": 0,
+    "live_state": "unknown",
+    "measured_at": "2026-10-22T05:27:13Z",
+    "out_tokens_1h": 17073,
+    "out_tokens_24h": 17073,
+    "units_24h": 2.38
+  },
+  "version": 1
+}

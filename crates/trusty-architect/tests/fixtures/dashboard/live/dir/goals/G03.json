@@ -1,0 +1,20 @@
+{
+  "board": {
+    "label": "lorem ipsum dolor sit amet",
+    "url": "lorem ipsum dolor sit amet elit sed tempor über magna l"
+  },
+  "kind": "factory",
+  "lifecycle": "active",
+  "rank": 1,
+  "rank_set_at": "lorem ipsum dolor sit am",
+  "rank_set_by": "lorem",
+  "repo": "lorem ipsum dolor sit amet elit sed tempor über ma",
+  "sessions": [
+    "lorem i",
+    "lorem ipsum dolor"
+  ],
+  "status_line": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor üb",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem",
+  "updated": "2026-10-11T04:39:30Z",
+  "version": 1
+}

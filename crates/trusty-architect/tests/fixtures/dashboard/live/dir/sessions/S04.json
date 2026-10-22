@@ -1,0 +1,52 @@
+{
+  "details": {
+    "current": "lorem ipsum dol",
+    "gh_at": "2026-10-16T08:32:30Z",
+    "issues": {
+      "bugs": 1,
+      "bugs_p1": 0,
+      "merged_open": 0,
+      "open": 1,
+      "p1": 0,
+      "p2": 1,
+      "security": 0,
+      "top": [
+        {
+          "n": 6556,
+          "tag": "lorem ",
+          "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+          "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+        }
+      ]
+    },
+    "notes": "lorem ipsum dolor sit amet elit sed tempor ",
+    "pr_stats": {
+      "by_state": {},
+      "merged_24h": 0,
+      "merged_7d": 5,
+      "merged_7d_capped": false,
+      "open": 0
+    }
+  },
+  "goal": "lorem ipsum dolor si",
+  "name": "lorem ipsum ",
+  "order": 8,
+  "progress": 90,
+  "project": "lorem ipsum dolor sit amet e",
+  "state": "idle",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum do",
+  "updated": "2026-10-09T22:53:58Z",
+  "usage": {
+    "agents_active": 0,
+    "agents_parked": 0,
+    "ctx_k": 152.0,
+    "idle_min": 103,
+    "live_state": "idle",
+    "measured_at": "2026-10-21T17:00:49Z",
+    "out_tokens_1h": 0,
+    "out_tokens_24h": 26374,
+    "units_24h": 4.16
+  },
+  "version": 1
+}

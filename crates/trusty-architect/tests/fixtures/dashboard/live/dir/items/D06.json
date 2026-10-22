@@ -1,0 +1,58 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit s",
+  "answer_note": "lorem ipsum dolor sit amet elit",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-21T21:47:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet ",
+  "goal": "G08",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über mag",
+      "label": "lorem ipsum dolor sit amet elit s",
+      "markers": {
+        "risk": 0,
+        "scope": 0,
+        "work": -1
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit",
+      "label": "lorem ipsum dolor sit amet el",
+      "markers": {
+        "risk": 1,
+        "scope": 0,
+        "work": 0
+      },
+      "recommended": false
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor s",
+      "label": "lorem ipsum dolor sit amet elit sed tempo",
+      "markers": {
+        "risk": 0,
+        "scope": -1,
+        "work": -1
+      },
+      "recommended": false
+    }
+  ],
+  "rank": 8,
+  "relayed_at": "2026-10-22T05:12:00Z",
+  "session": "pm-7",
+  "specs": [
+    {
+      "label": "lorem ipsu",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über ma"
+    },
+    {
+      "label": "lorem i",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lor"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit ",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

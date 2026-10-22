@@ -1,0 +1,21 @@
+{
+  "created": "2026-10-14T20:19:57Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ips",
+  "due": null,
+  "goal": "G01",
+  "kind": "action",
+  "parked": null,
+  "rank": 3,
+  "relayed": "lorem ipsum dolor sit amet elit sed tempor ü",
+  "session": "pm-6",
+  "status": "wont_do",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ip",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1,
+  "wont_do": {
+    "at": "lorem ipsum dolor sit am",
+    "attempts": 1,
+    "by": "lor",
+    "note": "lorem ipsum dolor sit amet elit sed tempor über magna lore"
+  }
+}

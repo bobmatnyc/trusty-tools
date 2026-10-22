@@ -1,0 +1,59 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed te",
+  "answer_note": "",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-16T02:27:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magn",
+  "due": null,
+  "goal": "G0a",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed ",
+      "label": "lorem ipsum dolor sit amet elit sed t",
+      "markers": {
+        "risk": -1,
+        "scope": 0,
+        "work": 1
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über mag",
+      "label": "lorem ipsum dolor sit amet elit sed te",
+      "markers": {
+        "risk": 2,
+        "scope": 2,
+        "work": 1
+      }
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor ",
+      "label": "lorem ipsum dolor sit amet el",
+      "markers": {
+        "risk": -1,
+        "scope": -2,
+        "work": -2
+      }
+    }
+  ],
+  "outcome": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum d",
+  "rank": 5,
+  "relayed": "lorem ipsum dolor sit amet elit sed tempor ü",
+  "relayed_at": "2026-10-18T15:22:00Z",
+  "session": "pm-6",
+  "specs": [
+    {
+      "label": "lorem ipsum dolor sit amet e",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über"
+    },
+    {
+      "label": "lorem ipsum dolor sit amet eli",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ame"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lor",
+  "updated": "2026-10-16T06:59:00Z",
+  "version": 1
+}
