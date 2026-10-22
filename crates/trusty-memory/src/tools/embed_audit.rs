@@ -51,7 +51,8 @@ use crate::AppState;
 /// a palace. Sharing the judgement is what stops the sweep and the per-id check
 /// disagreeing about the same palace.
 /// What: `(drawer_count, vector_count, missing_ids, audit_state, key_rows,
-/// distinct_ids)`, plus the #9275 `short` count and `chunk_check` state. `key_rows`/`distinct_ids` are `None` — never `0` — when the
+/// distinct_ids)`, plus the #9275 `short` count and `chunk_check` state and the
+/// #9735 `chunk_backfill` progress. `key_rows`/`distinct_ids` are `None` — never `0` — when the
 /// audit could not run, because a zero standing in for "I could not tell" is the
 /// false all-clear #5005 documents.
 fn coverage(handle: &crate::engine::retrieval::PalaceHandle) -> Value {
@@ -72,6 +73,9 @@ fn coverage(handle: &crate::engine::retrieval::PalaceHandle) -> Value {
         "short": health.short_chunk_ids.len(),
         "chunk_check": chunk_state(&health.chunk_check),
         "chunk_check_error": health.chunk_check.unavailable_reason(),
+        // #9735: backfill progress (total/done/pending/failed/state), derived
+        // from the same health snapshot, never a stored counter.
+        "chunk_backfill": health.chunk_progress(),
         "healthy": health.is_healthy(),
     })
 }

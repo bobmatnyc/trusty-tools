@@ -738,7 +738,7 @@ trusty_memory::engine::retrieval::AliasRepairReport::outcome	field	NARROW	no con
 trusty_memory::engine::retrieval::AliasRepairReport::palace_id	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::AliasRepairReport::reembed_required	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::AliasRepairReport::unnameable_keys	field	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::CHUNK_MARKER_FILE	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::CHUNK_MARKER_FILE	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::ChunkCheck	enum	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::ChunkCheck::Ran	variant	KEEP	member of ChunkCheck	A4
 trusty_memory::engine::retrieval::ChunkCheck::Unavailable	variant	KEEP	member of ChunkCheck	A4
@@ -750,30 +750,30 @@ trusty_memory::engine::retrieval::ChunkCommitError::LockWait::waited	field	NARRO
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert	variant	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert::palace	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert::reason	field	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::ChunkMarker	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::from_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::last_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::needs_scan	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::read	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::updated_at	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::version	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::window	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkMarker::write	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress::done	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkProgress::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkState	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkState::Backfilling	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkState::Complete	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkState::CompleteWithFailures	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::ChunkState::Unknown	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::from_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::last_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::needs_scan	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::read	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::updated_at	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::version	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::window	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkMarker::write	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress::done	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkProgress::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkState	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkState::Backfilling	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkState::Complete	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkState::CompleteWithFailures	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::ChunkState::Unknown	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall	struct	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall::failed	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall::results	field	NARROW	no consumer outside the library	A4
@@ -784,7 +784,7 @@ trusty_memory::engine::retrieval::DEFAULT_RELEVANCE_FLOOR	const	NARROW	no consum
 trusty_memory::engine::retrieval::EmbedHealth	struct	KEEP	PalaceHandle::embed_health return type; tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::EmbedHealth::alias_audit	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::chunk_check	field	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::retrieval::EmbedHealth::chunk_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::EmbedHealth::chunk_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::EmbedHealth::drawer_count	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::embedder_ready	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::is_healthy	method	KEEP	tests/chunked_embed_9275.rs	A4
@@ -807,7 +807,7 @@ trusty_memory::engine::retrieval::L0Identity	struct	NARROW	removed: no caller an
 trusty_memory::engine::retrieval::L0Identity::content	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::retrieval::L1Essential	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::retrieval::L1Essential::drawers	field	NARROW	removed: no caller anywhere	A4
-trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::PalaceHandle	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::retrieval::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
@@ -839,7 +839,7 @@ trusty_memory::engine::retrieval::PalaceHandle::open_with_intent_purging	method	
 trusty_memory::engine::retrieval::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::recall_log	field	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
@@ -883,37 +883,37 @@ trusty_memory::engine::retrieval::RetryPolicy	struct	KEEP	VectorBackfillOptions:
 trusty_memory::engine::retrieval::RetryPolicy::attempts	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::RetryPolicy::base_delay	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::RetryPolicy::default	trait_method	KEEP	member of RetryPolicy (Default impl)	A4
-trusty_memory::engine::retrieval::SliceBounds	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::budget	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::default	trait_method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::embed_timeout	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::from_env	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::host_failures	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::ledger_backoff	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::lock_wait	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::max_chunks	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::max_drawers	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceBounds::min_age	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::attempted	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::chunks_embedded	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::host_failure	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::ledger_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::repaired	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::stale	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceReport::stop	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::Budget	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::ChunkCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::ChunkCheckUnavailable	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::DrawerCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::EmbedTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::HostFailure	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::LockTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::QueueEmpty	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::ReadOnly	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
-trusty_memory::engine::retrieval::SliceStop::StoreError	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::budget	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::default	trait_method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::embed_timeout	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::from_env	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::host_failures	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::ledger_backoff	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::lock_wait	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::max_chunks	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::max_drawers	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceBounds::min_age	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::attempted	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::chunks_embedded	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::host_failure	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::ledger_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::repaired	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::stale	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceReport::stop	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::Budget	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCheckUnavailable	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::DrawerCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::EmbedTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::HostFailure	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::LockTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::QueueEmpty	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::ReadOnly	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
+trusty_memory::engine::retrieval::SliceStop::StoreError	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); its caller is the server-only chunk backfill ticker (#9735 PR 2)	A4
 trusty_memory::engine::retrieval::TIER_C_DEFAULT_TTL_HOURS	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::TierCAdmission	enum	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::TierCAdmission::Admitted	variant	NARROW	no consumer outside the library	A4

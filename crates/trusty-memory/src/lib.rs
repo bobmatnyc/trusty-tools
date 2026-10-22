@@ -126,6 +126,11 @@ pub mod exit_runtime;
 pub mod fd_metrics;
 #[cfg(feature = "server")]
 pub mod idle_evict;
+// #9735 PR 2: the background caller of `PalaceHandle::reembed_slice`.
+#[cfg(feature = "server")]
+pub(crate) mod chunk_backfill_ticker;
+#[cfg(all(test, feature = "server"))]
+mod chunk_backfill_ticker_tests;
 #[cfg(feature = "server")]
 pub mod worker_liveness;
 // #4001: stall detection for handle locks whose holders never register.

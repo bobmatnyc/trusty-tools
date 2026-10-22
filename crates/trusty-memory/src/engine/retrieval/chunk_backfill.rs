@@ -81,7 +81,7 @@ impl SliceBounds {
     /// The defaults, each overridable by its env var; a malformed value keeps
     /// the default.
     /// Test: `slice_bounds_read_their_env_overrides`.
-    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    #[cfg_attr(not(any(test, feature = "server")), allow(dead_code))] // #9735: the ticker calls it
     pub(crate) fn from_env() -> Self {
         let d = Self::default();
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
@@ -211,7 +211,7 @@ impl PalaceHandle {
     /// Test: `chunk_backfill_tests` (e.g. `crash_midway_through_n_drawers_resumes_and_finishes`,
     /// `host_level_slice_failure_writes_no_ledger_rows`,
     /// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`).
-    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    #[cfg_attr(not(any(test, feature = "server")), allow(dead_code))] // #9735: the ticker calls it
     pub(crate) async fn reembed_slice(
         &self,
         embedder: &Arc<dyn Embedder + Send + Sync>,
