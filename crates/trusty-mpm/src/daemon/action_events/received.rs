@@ -23,7 +23,9 @@
 //! after the daemon started counts only arrivals stamped at or after that
 //! first hook (a daemon restart never replays an earlier arrival). The cost is
 //! that an arrival between a restart and the session's next hook is not
-//! recorded. A transcript that shrinks is skipped to its end.
+//! recorded. A transcript that shrinks is skipped to its end. Shutdown reads
+//! every tracked transcript once more before the final flush, so an arrival
+//! written before shutdown is not lost to that rule.
 //! Test: `received_tests.rs`.
 
 use std::collections::HashMap;
@@ -109,12 +111,16 @@ pub struct Scan {
 /// transcript for the same session never resets this one.
 /// What: bounded by [`MAX_TRANSCRIPTS`]; a dropped entry is a fresh first
 /// look when it comes back, which can miss arrivals but never repeats one.
+/// [`Self::close`] ends reading for good: once the final flush has begun, no
+/// offset moves and no job is handed out.
 /// Test: `a_received_message_is_one_received_event_with_no_body_9167`,
-/// `rescanning_and_a_restart_never_repeat_an_arrival_9167`.
+/// `rescanning_and_a_restart_never_repeat_an_arrival_9167`,
+/// `a_scan_that_outlives_shutdown_buffers_nothing_9167`.
 #[derive(Default)]
 pub struct Tails {
     by_path: HashMap<PathBuf, Tail>,
     tick: u64,
+    closed: bool,
 }
 
 impl Tails {
@@ -150,8 +156,25 @@ impl Tails {
         self.by_path.insert(path.to_path_buf(), tail);
     }
 
-    /// The due transcripts, which stop being due.
+    /// Mark every tracked transcript due: shutdown's last read, since no hook
+    /// follows an arrival that lands after the session's last one (#9167).
+    pub fn mark_all_due(&mut self) {
+        for tail in self.by_path.values_mut() {
+            tail.due = true;
+        }
+    }
+
+    /// Stop reading: [`Self::take_due`] returns nothing and
+    /// [`Self::finish`] refuses from now on (#9167).
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    /// The due transcripts, which stop being due; none once closed.
     pub fn take_due(&mut self) -> Vec<Job> {
+        if self.closed {
+            return Vec::new();
+        }
         self.by_path
             .iter_mut()
             .filter(|(_, t)| t.due)
@@ -169,12 +192,18 @@ impl Tails {
     }
 
     /// Record where `job`'s read stopped; due again when bytes were left.
-    pub fn finish(&mut self, job: &Job, read: &Scan) {
+    /// `false`, recording nothing, once closed: the caller must then buffer
+    /// none of the read's events (#9167).
+    pub fn finish(&mut self, job: &Job, read: &Scan) -> bool {
+        if self.closed {
+            return false;
+        }
         if let Some(tail) = self.by_path.get_mut(&job.path) {
             tail.offset = Some(read.offset);
             tail.mid_line = read.mid_line;
             tail.due |= read.more;
         }
+        true
     }
 }
 
