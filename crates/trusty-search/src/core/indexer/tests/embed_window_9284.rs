@@ -243,3 +243,66 @@ fn a_chunk_without_a_measure_counts_as_unmeasured() {
     assert_eq!(stats.unmeasured(), 1, "the unpaired chunk is not within");
     assert_eq!(stats.truncated(), 0);
 }
+
+/// Cumulative, not distinct: re-embedding a cut chunk counts it again.
+#[tokio::test]
+async fn a_second_embed_of_the_same_chunk_counts_again() {
+    let indexer = chunking_indexer();
+    let chunks = [raw("a", "src/a.rs", &words(20))];
+    embed(&indexer, &chunks).await;
+    embed(&indexer, &chunks).await;
+    assert_eq!(indexer.embed_window_stats().truncated(), 2);
+}
+
+/// A pass of `n` chunks where each is `marker` plus filler, for the seam.
+fn forced(marker: &str, n: usize) -> Vec<RawChunk> {
+    (0..n)
+        .map(|i| {
+            raw(
+                &format!("f{i}"),
+                &format!("src/f{i}.rs"),
+                &format!("{marker} {}", words(2)),
+            )
+        })
+        .collect()
+}
+
+/// Shared checks for both forced-failure arms.
+fn assert_all_unmeasured(indexer: &CodeIndexer, cap: &Capture, n: u64, cause: &str) {
+    let stats = indexer.embed_window_stats();
+    assert_eq!(
+        stats.unmeasured(),
+        n,
+        "every chunk of the pass is unmeasured"
+    );
+    assert_eq!(stats.truncated(), 0, "an uncounted chunk is not truncated");
+    let lines = cap.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains(&format!("unmeasured={n}")) && l.contains(cause)),
+        "the unmeasured WARN names the cause {cause:?}: {lines:#?}"
+    );
+}
+
+/// Error arm of `measure`: a failed token count is unmeasured, not within.
+#[tokio::test]
+async fn a_forced_count_failure_counts_every_chunk_as_unmeasured() {
+    use super::super::ingest::truncation::FORCE_COUNT_ERROR;
+    let (cap, _guard) = capture();
+    let indexer = chunking_indexer();
+    // `embed` also asserts every chunk got a vector: indexing completes.
+    embed(&indexer, &forced(FORCE_COUNT_ERROR, 3)).await;
+    assert_all_unmeasured(&indexer, &cap, 3, "forced count failure");
+}
+
+/// Error arm of `PendingMeasure::finish`: a panicking count task is
+/// unmeasured, and the panic does not reach the embed pass.
+#[tokio::test]
+async fn a_panicking_count_task_counts_every_chunk_as_unmeasured() {
+    use super::super::ingest::truncation::FORCE_COUNT_PANIC;
+    let (cap, _guard) = capture();
+    let indexer = chunking_indexer();
+    embed(&indexer, &forced(FORCE_COUNT_PANIC, 3)).await;
+    assert_all_unmeasured(&indexer, &cap, 3, "the token-count task failed");
+}
