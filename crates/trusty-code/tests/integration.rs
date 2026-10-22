@@ -23,6 +23,7 @@ mod bakeoff_gate_e2e;
 mod cli_e2e;
 mod config_mount;
 mod connector_e2e;
+mod daemon_no_tcp_6637;
 mod inference_shared_adapter_e2e;
 mod m1_cutline_e2e;
 mod mcp_loader_e2e;
