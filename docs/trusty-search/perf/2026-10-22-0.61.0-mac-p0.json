@@ -1,0 +1,213 @@
+{
+ "schema": 1,
+ "kind": "trusty-search-perf-pass",
+ "run_id": "p0-2026-10-22",
+ "utc": "2026-10-22T21:13:00Z",
+ "pass": "P0",
+ "version": "0.61.0",
+ "daemon_uptime_s_at_start": 502,
+ "host_load_1min": 3.91,
+ "run_solo": false,
+ "load_note": "load 3.1 to 5.0 during pass; below the 8 busy mark",
+ "daemon_rss_kb_start": 4961632,
+ "daemon_rss_kb_end": 4714960,
+ "sidecar_rss_kb": 460368,
+ "embedder": {
+  "active": "python",
+  "intended": "python",
+  "note": "python hot-swap landed 21:09:12Z; all 48 calls ran on python, not ort as the plan expected"
+ },
+ "env_confirmation": {
+  "var": "TRUSTY_CHUNKS_IDLE_EVICT_SECS",
+  "daemon_env_file_value": 14400,
+  "file_mtime_utc": "21:03:24Z",
+  "daemon_start_utc": "21:03:32Z",
+  "in_process_value": "not confirmed (launchd plist does not carry it; process environment not readable)",
+  "log_threshold_line": "none yet (no eviction since restart)",
+  "result": "file set before start; effect not proven until an eviction line shows N"
+ },
+ "indexes": {
+  "i01": {
+   "chunks": 140136,
+   "size_bytes": 2502433148,
+   "cold_probe_ms": 3230,
+   "cold_probe_wall_ms": 3784,
+   "cold_probe_state": "already warm (no evicted/rehydrated log line; 3230 ms is about 1.0-1.5x the warm semantic/hybrid band; last_used 21:04Z so first post-restart query was already consumed)",
+   "warm_per_mode": {
+    "lexical": {
+     "n": 4,
+     "values_ms": [
+      293,
+      79,
+      193,
+      298
+     ]
+    },
+    "semantic": {
+     "n": 4,
+     "values_ms": [
+      1849,
+      1651,
+      2227,
+      525
+     ]
+    },
+    "hybrid": {
+     "n": 3,
+     "values_ms": [
+      1262,
+      1454,
+      465
+     ]
+    },
+    "hybrid_rg_off": {
+     "n": 4,
+     "values_ms": [
+      230,
+      31,
+      61,
+      66
+     ]
+    }
+   },
+   "warm_pooled": {
+    "n": 15,
+    "p50_ms": 298,
+    "p90_ms": 1849,
+    "max_ms": 2227,
+    "note": "n<20, indicative only"
+   },
+   "fallback_ripgrep_calls": 3,
+   "timeouts": 0,
+   "vs_baseline": "baseline warm p50 87 / p90 547 ms (log mix); now pooled p50 298 / p90 1849 ms (n=15, probe set is semantic and hybrid heavy, not like for like), about 3.4x both, over the 1.3x/1.5x worse marks; cold probe 3.2 s vs baseline cold p50 7.4 s (already warm, not a cold match)"
+  },
+  "i02": {
+   "chunks": 136471,
+   "size_bytes": 1236205116,
+   "cold_probe_ms": 14162,
+   "cold_probe_wall_ms": 15483,
+   "cold_probe_state": "cold after restart (no query since restart, last_used predates it; 14162 ms; first two semantic calls also slow at 10887 and 7975 ms; no evicted/rehydrated log line so lazy load, not idle eviction)",
+   "warm_per_mode": {
+    "lexical": {
+     "n": 4,
+     "values_ms": [
+      3,
+      44,
+      352,
+      43
+     ]
+    },
+    "semantic": {
+     "n": 4,
+     "values_ms": [
+      10887,
+      7975,
+      3740,
+      1236
+     ]
+    },
+    "hybrid": {
+     "n": 3,
+     "values_ms": [
+      991,
+      1422,
+      2025
+     ]
+    },
+    "hybrid_rg_off": {
+     "n": 4,
+     "values_ms": [
+      290,
+      1005,
+      667,
+      815
+     ]
+    }
+   },
+   "warm_pooled": {
+    "n": 15,
+    "p50_ms": 991,
+    "p90_ms": 7975,
+    "max_ms": 10887,
+    "note": "n<20, indicative only"
+   },
+   "fallback_ripgrep_calls": 1,
+   "timeouts": 0,
+   "vs_baseline": "baseline warm 47 / 629 ms, cold 8.1 s; now pooled p50 991 / p90 7975 ms (n=15; semantic calls 1.2 to 10.9 s while the vector side loaded), cold probe 14.2 s is 1.75x the 8.1 s baseline, over the 1.25x worse mark"
+  },
+  "i03": {
+   "chunks": 662,
+   "size_bytes": 13843557,
+   "cold_probe_ms": 877,
+   "cold_probe_wall_ms": 1025,
+   "cold_probe_state": "already warm (query at 21:08Z consumed first-query; 877 ms vs warm band 2-507 ms)",
+   "warm_per_mode": {
+    "lexical": {
+     "n": 4,
+     "values_ms": [
+      45,
+      85,
+      4,
+      2
+     ]
+    },
+    "semantic": {
+     "n": 4,
+     "values_ms": [
+      41,
+      507,
+      369,
+      214
+     ]
+    },
+    "hybrid": {
+     "n": 3,
+     "values_ms": [
+      41,
+      304,
+      44
+     ]
+    },
+    "hybrid_rg_off": {
+     "n": 4,
+     "values_ms": [
+      13,
+      139,
+      43,
+      217
+     ]
+    }
+   },
+   "warm_pooled": {
+    "n": 15,
+    "p50_ms": 45,
+    "p90_ms": 369,
+    "max_ms": 507,
+    "note": "n<20, indicative only"
+   },
+   "fallback_ripgrep_calls": 3,
+   "timeouts": 0,
+   "vs_baseline": "baseline cold-after-eviction 1.39 s; now probe 877 ms (already warm, not comparable), pooled p50 45 / p90 369 ms (n=15)"
+  }
+ },
+ "calls_used": 48,
+ "timeouts": 0,
+ "client_errors": 0,
+ "fallbacks": {
+  "ripgrep_marked_calls": 7,
+  "ripgrep_off_calls_with_marker": 0,
+  "vector_unavailable": 0
+ },
+ "log_events_since_restart": {
+  "evicted": 0,
+  "rehydrated": 0,
+  "query_timeout": 0,
+  "demotion": 0,
+  "rehydrate_commit_skipped": 0,
+  "embedder_sidecar_started": 2,
+  "embedder_sidecar_exited": 3,
+  "idle_shutdown": 1,
+  "python_bootstrap_failed_attempts": 2,
+  "python_swap_succeeded": 1
+ }
+}
