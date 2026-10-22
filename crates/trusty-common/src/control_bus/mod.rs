@@ -15,7 +15,8 @@
 //!       subscriber-side predicate), the `ActionEvent` taxonomy and its
 //!       supporting types (`ActionMeta`, `Actor`, `ObjectRef`, `ObjectType`,
 //!       `PathRef`, and the five phase enums, issue #6847, DOC-73 §3.2), the
-//!       `MessageEvent` and `MessageChannel` of the `message` domain (#9167),
+//!       `MessageEvent`, `MessageChannel` and `MessageDirection` of the
+//!       `message` domain (#9167),
 //!       and
 //!       — behind the `uds` feature, unix only — `PushClient` (the buffered
 //!       producer-side transport to the trusty-events socket, DOC-73 §4).
@@ -74,7 +75,7 @@ pub use envelope::{HarnessEvent, HarnessPayload};
 pub use event_id::EventId;
 pub use filter::Filter;
 pub use lifecycle::{HarnessSource, LifecycleEvent};
-pub use message::{MessageChannel, MessageEvent};
+pub use message::{MessageChannel, MessageDirection, MessageEvent};
 #[cfg(all(unix, feature = "uds"))]
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 pub use subscribe::{

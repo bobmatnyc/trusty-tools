@@ -208,6 +208,7 @@ fn sample_message(channel: MessageChannel) -> MessageEvent {
     MessageEvent {
         at: chrono::Utc::now(),
         channel,
+        direction: MessageDirection::Sent,
         from: "7f3c0000-0000-4000-8000-000000000001".into(),
         to: "=dev-pm:".into(),
         relay: Some("[Ops Architect 22:2xZ]".into()),
@@ -259,6 +260,25 @@ fn message_event_omits_an_absent_body_and_relay_9167() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// A frame written before `direction` existed (PR1) reads as `sent`, and a
+/// `received` event round-trips with the lowercase wire string.
+#[test]
+fn a_frame_without_a_direction_reads_as_sent_9167() {
+    let pr1 = r#"{"domain":"message","event":{"at":"2026-10-21T08:00:00Z","channel":"sendmessage","from":"s","to":"t","bytes":0,"sha256":"e3b0"}}"#;
+    match serde_json::from_str::<HarnessPayload>(pr1).expect("a PR1 frame parses") {
+        HarnessPayload::Message(back) => assert_eq!(back.direction, MessageDirection::Sent),
+        other => panic!("{other:?}"),
+    }
+    let mut m = sample_message(MessageChannel::SendMessage);
+    m.direction = MessageDirection::Received;
+    let p = HarnessPayload::Message(m);
+    let s = serde_json::to_string(&p).expect("serialize");
+    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(v["event"]["direction"], "received", "{s}");
+    let back: HarnessPayload = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back, p);
 }
 
 /// A subscriber that matches on `domain` alone skips a `message` frame: an
