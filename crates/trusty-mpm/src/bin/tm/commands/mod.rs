@@ -20,6 +20,8 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+// #9167: the poller's wakes as trusty-events `message` events.
+pub(crate) mod architect_messages;
 pub(crate) mod auth;
 // #6274: `tm` in a plain directory initializes a repository there instead of
 // refusing; both the guided default and `tm launch` call it before detection.
