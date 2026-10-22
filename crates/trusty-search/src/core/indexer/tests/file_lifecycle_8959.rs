@@ -826,6 +826,14 @@ async fn a_serial_burst_of_slow_writes_rebuilds_at_most_once_per_max_wait() {
         "{during} rebuilds during a {}s burst; at most {bound} allowed",
         burst.as_secs()
     );
+    // #10159: a 120 s burst outlasts two max-wait periods, so the max-wait
+    // rule must still force at least one rebuild; suppressing all fails here.
+    assert!(
+        during >= 1,
+        "0 rebuilds during a {}s burst; the {}s max-wait rule must force at least one",
+        burst.as_secs(),
+        GRAPH_REFRESH_MAX_WAIT.as_secs()
+    );
 
     tokio::time::sleep(GRAPH_REFRESH_QUIET + tick * 2).await;
     assert_eq!(
