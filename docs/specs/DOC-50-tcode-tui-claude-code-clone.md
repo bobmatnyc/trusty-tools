@@ -269,7 +269,7 @@ pub use {run_tui, ReplStartup};
 
 **RESOLVED (Q7): HTTP Long-lived Daemon Transport**
 
-The CodeEngine communicates with a long-lived `tcode serve --http` daemon (default port 7881, per serve/mod.rs:70). Workstream awareness uses DOC-48 §5.3 SSE `WorkstreamActivationChanged` events.
+The CodeEngine communicates with a long-lived `tcode serve` daemon over its Unix socket (#6637 retired the loopback HTTP listener and its port). Workstream awareness uses DOC-48 §5.3 `WorkstreamActivationChanged` events, delivered by the `workstream.events` stream method.
 
 **Daemon Discovery Pattern (matching trusty-search/trusty-memory precedent):**
 

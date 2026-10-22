@@ -87,6 +87,75 @@ impl Drop for Daemon {
     }
 }
 
+/// Stops the daemon `tcode tui` autospawned, on every exit path.
+///
+/// Why: that daemon runs in its own session and is no child of the test (the
+/// TUI starts it detached by design), and it has no idle exit, so a panic
+/// before the explicit kill left it running after its `/tmp` sandbox was gone
+/// (#6637).
+/// What: on drop, uses the pid given to [`Self::learn`] or, when none, dials
+/// `health` on the sandbox socket for up to `FIND_BOUND` to learn it; sends
+/// SIGTERM, then SIGKILL after `TERM_BOUND`. The dial runs on its own thread
+/// and runtime because drop may run inside the test's tokio runtime.
+/// Test: `the_tui_autospawned_daemon_binds_no_tcp_listener` holds one.
+struct AutospawnReaper {
+    socket: PathBuf,
+    pid: Option<u32>,
+}
+
+impl AutospawnReaper {
+    const FIND_BOUND: Duration = Duration::from_secs(10);
+    const TERM_BOUND: Duration = Duration::from_secs(5);
+
+    fn new(socket: PathBuf) -> Self {
+        Self { socket, pid: None }
+    }
+
+    /// Record the daemon pid once `health` has reported it.
+    fn learn(&mut self, pid: u32) {
+        self.pid = Some(pid);
+    }
+}
+
+impl Drop for AutospawnReaper {
+    fn drop(&mut self) {
+        let socket = self.socket.clone();
+        let known = self.pid;
+        let _ = std::thread::spawn(move || {
+            let pid = known.or_else(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                let started = Instant::now();
+                while started.elapsed() < Self::FIND_BOUND {
+                    if let Some(p) = rt.block_on(health(&socket)).and_then(|v| v["pid"].as_u64()) {
+                        return Some(p as u32);
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                None
+            });
+            let Some(pid) = pid else { return };
+            let alive = |pid: u32| {
+                // SAFETY: signal 0 only probes existence.
+                unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+            };
+            // SAFETY: `pid` was reported by the daemon this test started.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            let started = Instant::now();
+            while alive(pid) && started.elapsed() < Self::TERM_BOUND {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if alive(pid) {
+                // SAFETY: as above.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+        })
+        .join();
+    }
+}
+
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
@@ -140,16 +209,36 @@ fn wait_exit(daemon: &mut Daemon, log: &Path) -> std::process::ExitStatus {
     }
 }
 
+/// Panic unless `pid` is a live process.
+///
+/// #6637: a pid that already exited has no sockets, so `lsof` (exit 1, empty
+/// output) and a missing `/proc/<pid>` both read as "no listener" — a vacuous
+/// pass. Every scan therefore proves its subject was alive.
+fn assert_alive(pid: u32, what: &str) {
+    // SAFETY: signal 0 only probes existence; it delivers nothing.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let err = std::io::Error::last_os_error();
+    assert!(
+        rc == 0 || err.raw_os_error() == Some(libc::EPERM),
+        "{what}: pid {pid} is not alive, so a listener scan of it proves nothing ({err})"
+    );
+}
+
 /// Every TCP socket `pid` holds in LISTEN state, one line each.
 ///
-/// macOS: `lsof`. A missing `lsof` panics, and a non-empty stderr fails the
-/// test, because a failing `lsof` prints nothing on stdout either and an empty
-/// listing is only evidence when the tool ran cleanly. Linux: the process's
-/// socket inodes matched against the LISTEN (`0A`) rows of its
-/// `/proc/<pid>/net/tcp{,6}` tables, so a CI runner without `lsof` still
-/// checks — the same split `trusty-mpm`'s `daemon_no_tcp_6288_s3` uses.
+/// Why: an empty list is evidence only when the scan demonstrably ran against
+/// a live process and could read its tables (#6637), so each failure to do so
+/// panics instead of returning empty.
+/// What: macOS uses `lsof` (a missing `lsof` or any stderr output fails the
+/// test); Linux matches the process's socket inodes against the LISTEN (`0A`)
+/// rows of `/proc/<pid>/net/tcp{,6}`, so a CI runner without `lsof` still
+/// checks — the same split `trusty-mpm`'s `daemon_no_tcp_6288_s3` uses. Both
+/// branches assert the pid is alive before and after the scan.
+/// Test: `the_listener_scan_finds_a_listener_this_process_holds` (positive
+/// control) and `the_listener_scan_refuses_a_dead_pid`.
 #[cfg(target_os = "macos")]
 fn tcp_listeners(pid: u32) -> Vec<String> {
+    assert_alive(pid, "before the scan");
     let out = std::process::Command::new("/usr/sbin/lsof")
         .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"])
         .output()
@@ -159,6 +248,7 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
         "lsof failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_alive(pid, "after the scan");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .skip(1) // the header
@@ -168,6 +258,7 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 fn tcp_listeners(pid: u32) -> Vec<String> {
+    assert_alive(pid, "before the scan");
     let mut inodes = std::collections::HashSet::new();
     let fd_dir = format!("/proc/{pid}/fd");
     for entry in std::fs::read_dir(&fd_dir).expect("read the daemon's fd table") {
@@ -184,7 +275,9 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
     }
     let mut listening = Vec::new();
     for table in ["tcp", "tcp6"] {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/net/{table}")).unwrap_or_default();
+        // #6637: an unreadable table is a failure, never an empty list.
+        let text = std::fs::read_to_string(format!("/proc/{pid}/net/{table}"))
+            .unwrap_or_else(|e| panic!("read /proc/{pid}/net/{table}: {e}"));
         for row in text.lines().skip(1) {
             let cols: Vec<&str> = row.split_whitespace().collect();
             // local_address is col 1, st col 3, inode col 9.
@@ -193,7 +286,44 @@ fn tcp_listeners(pid: u32) -> Vec<String> {
             }
         }
     }
+    assert_alive(pid, "after the scan");
     listening
+}
+
+/// Positive control: the scan reports a listener this very process holds.
+///
+/// Why: without it, a `tcp_listeners` that always returned empty would pass
+/// every "binds no TCP listener" test (#6637).
+/// Test: this function IS the test.
+#[test]
+fn the_listener_scan_finds_a_listener_this_process_holds() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a control listener");
+    let port = listener.local_addr().expect("local addr").port();
+    // lsof prints `127.0.0.1:<port> (LISTEN)`; /proc prints the port in hex.
+    let needle = if cfg!(target_os = "macos") {
+        format!(":{port} (LISTEN)")
+    } else {
+        format!(":{port:04X}")
+    };
+    let found = tcp_listeners(std::process::id());
+    assert!(
+        found.iter().any(|row| row.contains(&needle)),
+        "the scan must see this process's listener on port {port} ({needle}); got {found:?}"
+    );
+}
+
+/// A scan of a pid that already exited fails instead of reporting "none".
+///
+/// Test: this function IS the test.
+#[test]
+#[should_panic(expected = "is not alive")]
+fn the_listener_scan_refuses_a_dead_pid() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("reap");
+    let _ = tcp_listeners(pid);
 }
 
 fn mode_of(path: &Path) -> u32 {
@@ -294,6 +424,8 @@ async fn the_tui_autospawned_daemon_binds_no_tcp_listener() {
     drop(tui);
 
     let socket = sandbox.socket();
+    // #6637: armed before the health loop; stops the daemon on any exit path.
+    let mut reaper = AutospawnReaper::new(socket.clone());
     let started = Instant::now();
     let payload = loop {
         if let Some(payload) = health(&socket).await {
@@ -309,17 +441,8 @@ async fn the_tui_autospawned_daemon_binds_no_tcp_listener() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let pid = payload["pid"].as_u64().expect("health reports a pid") as u32;
-    let listeners = tcp_listeners(pid);
-    // Stop the daemon before any assertion can strand it.
-    // SAFETY: `pid` was just reported by the daemon this test caused to start.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
-    assert!(
-        listeners.is_empty(),
-        "the autospawned daemon (pid {pid}) must hold no TCP LISTEN socket, found:\n{}",
-        listeners.join("\n")
-    );
+    reaper.learn(pid);
+    assert_no_tcp_listener(pid, "the autospawned daemon", &log);
     assert_eq!(
         payload["binding"]["state"], "projectless",
         "a --projectless TUI must spawn a projectless daemon: {payload}"

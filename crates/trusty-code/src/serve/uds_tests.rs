@@ -570,3 +570,113 @@ async fn fallback_reports_an_unknown_method() {
 
     daemon.shutdown().await.expect("clean shutdown");
 }
+
+/// `workstream.events` must refuse an id that is not a UUID with
+/// `invalid_params` — the code the retired HTTP route answered as a `400`.
+///
+/// #6637: ported from `sse_tests::malformed_id_returns_400`; guards the
+/// `Uuid::parse_str` branch of `workstreams::events_stream::open`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn workstream_events_refuses_a_malformed_id() {
+    let daemon = TestDaemon::start().await;
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "workstream.events",
+        "params": {"workstream_id": "not-a-uuid"},
+        "stream": true,
+    });
+    let frame =
+        send_framed_request::<Value, RpcStreamFrame>(&daemon.socket, &request, CALL_TIMEOUT)
+            .await
+            .expect("a terminal error frame must be written");
+    let error = frame.error.expect("the terminal frame must carry an error");
+    assert_eq!(
+        error.code,
+        i64::from(crate::jsonrpc::RpcError::invalid_params("x").code),
+        "got: {}",
+        error.message
+    );
+
+    daemon.shutdown().await.expect("clean shutdown");
+}
+
+/// A `workstream.events` stream must deliver a live event published for a
+/// session bound to the workstream, tagged with that session and its type.
+///
+/// #6637: ported from `sse_tests::route_streams_live_tagged_event_for_bound_
+/// session`; the only end-to-end proof that the workstream fan-out reaches a
+/// transport. It publishes in a loop because the daemon subscribes to the bus
+/// when it handles the open, which this client cannot observe.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn workstream_events_streams_a_live_tagged_event_for_a_bound_session() {
+    let daemon = TestDaemon::start().await;
+    let created = daemon
+        .call("workstream.create", json!({"name": "fan-out"}))
+        .await;
+    let workstream_id = created
+        .result
+        .as_ref()
+        .and_then(|r| r.get("id"))
+        .and_then(Value::as_str)
+        .expect("workstream.create returns an id")
+        .to_string();
+    let session = daemon
+        .call(
+            "session.create",
+            json!({"task": "fan-out", "workstream_id": workstream_id}),
+        )
+        .await;
+    let session_id = session
+        .result
+        .as_ref()
+        .and_then(|r| r.get("id"))
+        .and_then(Value::as_str)
+        .expect("session.create returns an id")
+        .to_string();
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "workstream.events",
+        "params": {"workstream_id": workstream_id},
+        "stream": true,
+    });
+    let mut stream =
+        send_framed_stream_request::<Value, Value>(&daemon.socket, &request, CALL_TIMEOUT)
+            .await
+            .expect("the stream must open");
+
+    let publish = || {
+        crate::events::publish(SessionEventEnvelope::new(
+            session_id.clone(),
+            1,
+            chrono::Utc::now(),
+            crate::events::Event::SessionStarted {
+                session_id: session_id.clone(),
+                project: "p".to_string(),
+            },
+        ));
+    };
+    let frame = timeout(Duration::from_secs(10), async {
+        loop {
+            publish();
+            if let Ok(next) = timeout(Duration::from_millis(100), stream.next_frame()).await {
+                let frame = next
+                    .expect("the stream must stay open")
+                    .expect("the frame must not be a terminal error");
+                // `session.create` may have emitted its own event first.
+                if frame["session_id"] == session_id.as_str() {
+                    return frame;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a tagged frame for the bound session must arrive");
+    assert_eq!(frame["event_type"], "session_started", "got: {frame}");
+
+    daemon.shutdown().await.expect("clean shutdown");
+}

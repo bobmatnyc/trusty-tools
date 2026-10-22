@@ -41,7 +41,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,8 +99,11 @@ def spawn_daemon(
     HTTP listener is gone). Returns the process and the socket path, which is
     what `rpc_call` dials.
 
-    The daemon's data directory is `<data_dir>/daemon-data`, never the
-    operator's: the shared socket there would collide with a live daemon.
+    The daemon's data directory is a fresh directory under `/tmp`, never the
+    operator's (the shared socket there would collide with a live daemon) and
+    never under `data_dir`: #6637 — the socket path must fit `sun_path`
+    (104 bytes on macOS), and a tempdir `--out-dir` pushes it to ~131. The
+    directory is removed at interpreter exit; telemetry stays in `data_dir`.
 
     `mock_llm` selects the `TCODE_MOCK_LLM` scripted client (default
     `echo-soak`; `compression_load_soak.py` passes `echo-soak-load` — see
@@ -108,15 +113,19 @@ def spawn_daemon(
     `TCODE_SOAK_LOAD_PAYLOAD_BYTES` this way, rather than every future
     variant needing its own `spawn_daemon` parameter).
     """
+    daemon_data = Path(tempfile.mkdtemp(prefix="tc-soak-", dir="/tmp"))
+    atexit.register(shutil.rmtree, daemon_data, ignore_errors=True)
     env = {
         "TCODE_MOCK_LLM": mock_llm,
         "TCODE_TELEMETRY_DATA_DIR": str(data_dir),
         "PATH": _inherited_path(),
         "HOME": str(Path.home()),
-        "TRUSTY_DATA_DIR_OVERRIDE": str(data_dir / "daemon-data"),
+        "TRUSTY_DATA_DIR_OVERRIDE": str(daemon_data),
     }
     if extra_env:
         env.update(extra_env)
+    sock = str(daemon_data / "trusty-code" / "trusty-code.sock")
+    assert len(sock.encode()) < 100, f"socket path too long for sun_path: {sock}"
     proc = subprocess.Popen(
         [str(tcode_bin), "serve", "--project", str(project)],
         stdout=subprocess.DEVNULL,
@@ -125,7 +134,6 @@ def spawn_daemon(
         env=env,
     )
     assert proc.stderr is not None
-    sock = str(data_dir / "daemon-data" / "trusty-code" / "trusty-code.sock")
     deadline = time.monotonic() + 30
     while True:
         if proc.poll() is not None:
