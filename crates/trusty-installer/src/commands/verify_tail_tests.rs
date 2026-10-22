@@ -50,6 +50,7 @@ fn launchd_member(binary: &str) -> StableMember {
         manage: ManageStrategy::Launchd,
         required: true,
         soft: false,
+        internal: false,
     }
 }
 

@@ -186,12 +186,14 @@ pub fn extract_version_from_line(line: &str) -> Option<String> {
 /// baseline so any published version registers as an available update (install
 /// candidate). Returns the members that have a strictly-newer release.
 ///
+/// #10130: an internal member is never looked up — see [`lookup_targets`].
+///
 /// Test: Side-effecting (network + subprocess); the pure pieces it composes
-/// (`decide_apply`, `extract_version_from_line`, `check_crates_io`) are tested
-/// independently.
+/// (`decide_apply`, `extract_version_from_line`, `check_crates_io`,
+/// `lookup_targets`) are tested independently.
 pub async fn gather_candidates(members: &[StableMember]) -> Vec<UpdateCandidate> {
     let mut candidates = Vec::new();
-    for m in members {
+    for m in lookup_targets(members) {
         let installed = installed_version(&m.binary);
         let baseline = installed.clone().unwrap_or_else(|| "0.0.0".to_owned());
         if let Some(info) = trusty_common::update::check_crates_io(&m.crate_name, &baseline).await {
@@ -208,9 +210,36 @@ pub async fn gather_candidates(members: &[StableMember]) -> Vec<UpdateCandidate>
     candidates
 }
 
+/// The members [`gather_candidates`] asks crates.io about.
+///
+/// Why (#10130): an internal member is not published, so a lookup can only
+/// fail; `tctl upgrade` must make no request for it.
+/// What: `members` without its `internal` ones, in order.
+/// Test: `tests::gather_candidates_skips_internal_members`.
+fn lookup_targets(members: &[StableMember]) -> impl Iterator<Item = &StableMember> {
+    members.iter().filter(|m| !m.internal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#10130): `tctl upgrade` looked trusty-events up on crates.io,
+    /// a request that can only fail for an unpublished crate.
+    /// What: over the full stable set, the lookup list holds every member
+    /// except trusty-events — zero lookups for the internal one.
+    /// Test: This is the test.
+    #[test]
+    fn gather_candidates_skips_internal_members() {
+        let set = super::super::stable_set::stable_set();
+        let looked_up: Vec<&str> = lookup_targets(&set)
+            .map(|m| m.crate_name.as_str())
+            .collect();
+        assert!(!looked_up.contains(&"trusty-events"), "{looked_up:?}");
+        assert_eq!(looked_up.len(), set.len() - 1);
+        let internal_only: Vec<StableMember> = set.into_iter().filter(|m| m.internal).collect();
+        assert_eq!(lookup_targets(&internal_only).count(), 0);
+    }
 
     /// Why: No candidates must never be reported as "apply".
     /// What: Asserts `NothingToDo` when `has_candidates = false`, regardless of flags.

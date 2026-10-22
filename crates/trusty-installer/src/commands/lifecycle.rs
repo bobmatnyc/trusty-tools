@@ -282,6 +282,7 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
         manage,
         required: true,
         soft: false,
+        internal: false,
     };
     apply_to_member(Verb::Restart, &m)
 }
@@ -491,6 +492,7 @@ mod tests {
             manage,
             required: true,
             soft: false,
+            internal: false,
         }
     }
 

@@ -45,8 +45,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_progress::{Component, ComponentState, ComponentTracker, LiveChecklist, Mode};
 
-use super::bundles::{expand_bundles, keywords_hint};
-use super::dependency_graph::describe_added;
+use super::bundles::expand_bundles;
 use super::install_gate::{decide_install_gate, GateInputs, InstallGate};
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
@@ -59,7 +58,7 @@ use crate::output::render_json;
 mod install_report;
 use install_report::{
     plans_mpm_supervisor_bootstrap, plans_service_bootstrap, print_dry_run, print_human_summary,
-    report_with_content, InstallOutcome, InstallReport,
+    report_with_content, selection_error, selection_notes, InstallOutcome, InstallReport,
 };
 
 /// Handle `tctl install [<members>…]`.
@@ -116,7 +115,8 @@ pub fn run(
     // and not --dry-run (a preview must behave identically regardless of TTY).
     let members_override: Vec<String>;
     let members = if members.is_empty() && !json && !dry_run && super::progress_ui::is_tty() {
-        let all = super::stable_set::stable_set();
+        // #10130: the picker offers only members tctl can install.
+        let all = super::picker::pickable_members();
         match super::picker::prompt_picker(&all) {
             Ok(chosen) => {
                 if chosen.is_empty() {
@@ -139,10 +139,10 @@ pub fn run(
     // names before resolution, so the resolver's name contract is unchanged.
     let expanded = expand_bundles(members);
     let resolved = select_members_transitive(&expanded);
-    let (selected, unknown) = (resolved.members, resolved.unknown);
 
-    if !unknown.is_empty() {
-        let msg = unknown_members_message(&unknown);
+    // #10130: an unknown name, or one naming an internal (unpublished)
+    // member, exits 3 here — before any prompt, fetch or dry-run preview.
+    if let Some(msg) = selection_error(&resolved) {
         if json {
             if render_json(&serde_json::json!({
                 "command": "install",
@@ -162,12 +162,14 @@ pub fn run(
     // #2036: surface members pulled in transitively by a runtime dependency
     // (e.g. "adding trusty-memory, trusty-search (required by trusty-mpm)")
     // before the blast-radius confirmation, so the operator knows why the set
-    // grew beyond what they typed.
+    // grew beyond what they typed. #10130: plus one line per internal member
+    // the selection dropped.
     if !json {
-        for line in describe_added(&resolved.added) {
+        for line in selection_notes(&resolved) {
             eprintln!("tctl install: {line}");
         }
     }
+    let selected = resolved.members;
 
     // #2556: whether to bootstrap each daemon member's launchd plist after it
     // installs. Disabled by the `--no-service` flag or the env opt-out.
@@ -980,28 +982,6 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
 /// `tests::binary_size_is_zero_for_a_missing_path`.
 pub(super) fn binary_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|md| md.len()).unwrap_or(0)
-}
-
-/// The operator-facing text for a request naming something the stable set does
-/// not contain.
-///
-/// Why (#4714): the message used to be just the offending names, so a mistyped
-/// `cores` gave the operator nothing to correct it with — the bundle keywords
-/// were undiscoverable from the failure. Naming them here, off
-/// [`super::bundles::BUNDLE_KEYWORDS`], means the hint cannot go stale as
-/// keywords are added.
-///
-/// What: `"unknown member(s): <names> (bundle keywords: agents, core)"`. The
-/// exit code and the JSON envelope's shape are unchanged — only the `error`
-/// string grows.
-///
-/// Test: `tests::unknown_members_message_names_bundle_keywords`.
-fn unknown_members_message(unknown: &[String]) -> String {
-    format!(
-        "unknown member(s): {} ({})",
-        unknown.join(", "),
-        keywords_hint()
-    )
 }
 
 /// Resolve the cargo binary install directory.
