@@ -5,7 +5,8 @@
 //! `scripts/`, keeps its records in `local/` (#9997, superseding ruling C),
 //! and runs the Architect-only skills (`tm-fleet-check`, `tm-context-refresh`
 //! and, since #9997, the `architect-*` skills its manual indexes; rulings D,
-//! E). Without them a fresh Architect has instructions that point at files
+//! E), and reads its instance settings from `local/architect.json` (#10161).
+//! Without them a fresh Architect has instructions that point at files
 //! that do not exist.
 //! What: [`files`] lists each file in write order. The `CLAUDE.md` template
 //! and the skills come from an [`ArchitectSeed`] read from content at
@@ -26,6 +27,7 @@
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `the_relay_scripts_and_the_voice_guide_are_seeded`,
 //! `every_script_a_seeded_script_loads_by_path_is_seeded`,
+//! `the_architect_config_loader_and_seed_are_seeded`,
 //! `a_seed_that_does_not_resolve_writes_nothing`.
 
 use std::path::Path;
@@ -91,6 +93,8 @@ const EMBEDDED: &[Embedded] = &[
     template!("local/owner/dream-log.md"),
     template!("local/mandates/README.md"),
     template!("local/mandates/example.toml"),
+    // See #10161: the instance config `scripts/architect_config.py` reads.
+    template!("local/architect.json"),
     embedded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
     // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
     embedded!(
@@ -115,6 +119,12 @@ const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/posted.sh", "scripts/posted.sh", true),
     // posted.sh runs this sibling by path.
     embedded!("scripts/relay-marker.py", "scripts/relay-marker.py", false),
+    // See #10161: the `local/architect.json` loader; a module, not a command.
+    embedded!(
+        "scripts/architect_config.py",
+        "scripts/architect_config.py",
+        false
+    ),
     // #9997: the voice guide the manual and `architect-operating-rules` cite.
     embedded!("docs/architect/voice.md", "docs/voice.md", false),
 ];
