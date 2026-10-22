@@ -15,13 +15,14 @@ use super::tool;
 
 /// Build the `architect_dashboard` descriptor.
 pub(super) fn architect_dashboard_tools() -> Vec<Value> {
+    // #10063: the prune log must be named pruned.jsonl; say so to callers.
     let store = json!({
         "type": "object",
         "properties": {
             "root": {"type": "string", "description": "Absolute store root."},
             "format": {"type": "string", "enum": ["dir", "jsonl"]},
             "actor": {"type": "string", "description": "`by` of change and prune lines (default architect)."},
-            "prune_log": {"type": "string", "description": "Prune log outside the root (default <root>/../owner-queue-archive/pruned.jsonl)."}
+            "prune_log": {"type": "string", "description": "Prune log: a file named pruned.jsonl outside the root (default <root>/../owner-queue-archive/pruned.jsonl)."}
         },
         "required": ["root"],
         "additionalProperties": false

@@ -9,9 +9,12 @@
 //! entry of `depends_on` (or `depends-on`, as `il-archive.py` reads it) and
 //! of `links` (a string, or an object's `item`) against every id. Only a
 //! bare id (`^[A-Z][0-9a-f]{2}$`) is a reference: free text, URLs and
-//! qualified ids are not checked. A store `fsck` cannot read yields no
-//! line here; its file problems are already reported.
-//! Test: `fsck_reports_dangling_links_depends_on_and_goal`.
+//! qualified ids are not checked. When the id collections cannot be read
+//! (a case variant or the other format, which the file checks accept), the
+//! one line says the references were not checked, so `fsck` is never clean
+//! without the check (#10063).
+//! Test: `fsck_reports_dangling_links_depends_on_and_goal`,
+//! `fsck_reports_references_not_checked_when_the_snapshot_fails`.
 
 use std::collections::BTreeSet;
 
@@ -26,8 +29,10 @@ const ENDED: [&str; 4] = ["done", "wont_do", "cancelled", "removed"];
 
 /// One line per dangling reference, in collection and id order.
 pub(super) fn dangling(store: &Store) -> Vec<String> {
-    let Ok(snap) = store.snapshot(&ID_COLLECTIONS) else {
-        return Vec::new();
+    // #10063: a skipped check is a problem, never a clean result.
+    let snap = match store.snapshot(&ID_COLLECTIONS) {
+        Ok(snap) => snap,
+        Err(e) => return vec![format!("references not checked: {e}")],
     };
     let all: BTreeSet<&str> = snap.values().flatten().map(|d| d.id.as_str()).collect();
     let goals: BTreeSet<&str> = snap

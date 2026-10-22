@@ -171,6 +171,8 @@ pub struct Store {
     scan: Option<OwnedScan>,
     clock: Arc<dyn Clock + Send + Sync>,
     actor: String,
+    /// #10063: a `set` with no `if_version` on an existing document is a conflict.
+    refuse_blind_set: bool,
 }
 
 impl fmt::Debug for Store {
@@ -183,6 +185,7 @@ impl fmt::Debug for Store {
             .field("archive", &self.archive.is_some())
             .field("secret_scan", &self.scan.is_some())
             .field("actor", &self.actor)
+            .field("refuse_blind_set", &self.refuse_blind_set)
             .finish()
     }
 }
@@ -191,7 +194,8 @@ impl Store {
     /// A store at `root` (created on the first write) in `format`; no schema
     /// check, no delete archive, no secret scan (so it refuses writes), the
     /// system clock, actor `unknown` (the prototype's default), a
-    /// [`LOCK_WAIT`] lock wait.
+    /// [`LOCK_WAIT`] lock wait, and a `set` with no `if_version` replacing an
+    /// existing document (the prototype store's).
     pub fn new(root: impl Into<PathBuf>, format: Format) -> Self {
         Self {
             root: root.into(),
@@ -202,6 +206,7 @@ impl Store {
             scan: None,
             clock: Arc::new(SystemClock),
             actor: "unknown".into(),
+            refuse_blind_set: false,
         }
     }
 
@@ -227,6 +232,16 @@ impl Store {
     #[must_use]
     pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
         self.actor = actor.into();
+        self
+    }
+
+    /// Refuses a `set` with no `if_version` on a document that exists before
+    /// the batch, as `dashboard-db.py`'s `check_set_new` does, but checked
+    /// under the lock: two blind writers of one new id cannot both win
+    /// (#10063).
+    #[must_use]
+    pub fn with_blind_set_refused(mut self) -> Self {
+        self.refuse_blind_set = true;
         self
     }
 

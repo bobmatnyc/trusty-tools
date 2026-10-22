@@ -25,7 +25,9 @@ pub(crate) struct DashboardArgs {
     /// `architect`).
     #[arg(long, global = true)]
     pub actor: Option<String>,
-    /// The prune log (default: `<root>/../owner-queue-archive/pruned.jsonl`).
+    // #10063: any other file name is refused (exit 2).
+    /// The prune log, a file named `pruned.jsonl` outside the root (default:
+    /// `<root>/../owner-queue-archive/pruned.jsonl`).
     #[arg(long, global = true)]
     pub prune_log: Option<PathBuf>,
     /// The verb.

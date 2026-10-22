@@ -7,7 +7,9 @@
 //! the prototype's `<root>/../owner-queue-archive/pruned.jsonl`). Writing the
 //! trusty-memory note first is the `tm` verb's step (PR 3): this crate has no
 //! memory client.
-//! What: [`PruneLog`], a [`DeleteArchive`] at a path that must not lie under
+//! What: [`PruneLog`], a [`DeleteArchive`] at a path named [`FILE_NAME`]
+//! (as given and as resolved: a request names it, and a daemon or MCP caller
+//! must not append to or read any other file, #10063) that must not lie under
 //! the store root once symlinks are resolved; it keeps and writes the
 //! resolved path, never through a symlink at any component (a dangling one
 //! is refused up front, a late one, a parent directory included, fails the
@@ -20,7 +22,8 @@
 //! Test: `delete_refused_when_pruned_write_fails`, `pruned_by_id_returns_record`,
 //! `prune_log_inside_root_refused`, `prune_log_dangling_link_refused`,
 //! `prune_log_late_link_refuses_delete`, `pruned_reads_prototype_lines`,
-//! `delete_refuses_a_prune_log_whose_parent_became_a_symlink`.
+//! `delete_refuses_a_prune_log_whose_parent_became_a_symlink`,
+//! `dashboard_prune_log_not_named_pruned_jsonl_is_refused`.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -33,6 +36,9 @@ use super::super::error::DashError;
 use super::changes::append_durable;
 use super::{DeleteArchive, Removed, beneath};
 
+/// The only file name a prune log may have.
+pub const FILE_NAME: &str = "pruned.jsonl";
+
 /// An append-only `pruned.jsonl` outside a store's served root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneLog {
@@ -43,7 +49,8 @@ impl PruneLog {
     /// A prune log at `path` for the store served from `served_root`.
     ///
     /// # Errors
-    /// [`DashError::Invalid`] when `path` is the root or lies under it
+    /// [`DashError::Invalid`] when `path`, or what it resolves to, is not
+    /// named [`FILE_NAME`]; when `path` is the root or lies under it
     /// (symlinks resolved where the path exists), either path has a `..`
     /// below a directory that does not exist, or a part of either path is a
     /// dangling symlink; [`DashError::Io`] when the working directory is
@@ -52,6 +59,17 @@ impl PruneLog {
     pub fn outside(served_root: &Path, path: impl Into<PathBuf>) -> Result<Self, DashError> {
         let path = path.into();
         let (root, at) = (resolve(served_root)?, resolve(&path)?);
+        // #10063: a caller-named path is never an arbitrary append or read.
+        if [&path, &at]
+            .iter()
+            .any(|p| p.file_name() != Some(std::ffi::OsStr::new(FILE_NAME)))
+        {
+            return Err(DashError::Invalid(format!(
+                "prune log {} (resolved {}) must be a file named {FILE_NAME}",
+                path.display(),
+                at.display()
+            )));
+        }
         if at.starts_with(&root) {
             return Err(DashError::Invalid(format!(
                 "prune log {} (resolved {}) is inside the served root {}: put it outside",
