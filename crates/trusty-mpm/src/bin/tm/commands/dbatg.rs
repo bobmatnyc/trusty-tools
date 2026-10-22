@@ -7,13 +7,15 @@
 //! What: [`run`] resolves the store (`--project`, default the cwd, mapped to
 //! its launch directory; `--session`, default `$DBATG_SESSION` or the tmux
 //! session of `$TMUX_PANE`), builds the `mpm.dbatg.*` request and sends it.
-//! A transport failure (no daemon, or a dropped response) runs the same body
-//! in-process with the same `request_id`, so a batch the daemon already
-//! committed is answered from its log record, never applied twice. A read
-//! (`show`) falls back for any store; a write only for the store of this
-//! process's own, known session and launch directory, and `init` only when
-//! the daemon's code registry is this process's ([`fallback_registry`]).
-//! A refused fallback exits 3 and writes nothing.
+//! A write (`init`, a batch verb) to a store other than this process's own,
+//! known session and launch directory is refused with exit 2 before anything
+//! is sent (LDG-3.6), so the daemon being up or down changes nothing; a read
+//! (`show`) may name any store. A transport failure (no daemon, or a dropped
+//! response) runs the same body in-process with the same `request_id`, so a
+//! batch the daemon already committed is answered from its log record, never
+//! applied twice; `init` falls back only when the daemon's code registry is
+//! this process's ([`fallback_registry`]). Exit 3 means the outcome is not
+//! known: a batch's message names its request id to retry with.
 //! Test: `commands::dbatg::tests`.
 
 use std::io::{self, Read, Write};
@@ -30,7 +32,7 @@ use trusty_architect::ledger::rpc::{
 use trusty_architect::ledger::store::resolve_project;
 use trusty_architect::ledger::writer::{render_ids, render_prune};
 use trusty_common::uds::send_framed_request;
-use trusty_common::uds::server::{JSONRPC_VERSION, RpcResponse};
+use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, JSONRPC_VERSION, RpcResponse};
 use trusty_mpm::core::dbatg;
 
 use crate::cli::{DbatgArgs, DbatgVerb};
@@ -66,10 +68,7 @@ pub(crate) struct Ctx<'a> {
 /// Runs `args` for this process; returns the exit code.
 pub(crate) async fn run(args: DbatgArgs) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let own_session = std::env::var("DBATG_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(tmux_session);
+    let own_session = dbatg::own_session();
     let mut stdin = io::stdin().lock();
     let socket = trusty_common::mpm_rpc::mpm_socket();
     let registry = fallback_registry(
@@ -121,17 +120,6 @@ pub(crate) fn fallback_registry(
     registry.filter(|_| default_socket.as_deref() == Some(socket))
 }
 
-/// The tmux session of `$TMUX_PANE`, as the prototype's `_tmux_session`.
-fn tmux_session() -> Option<String> {
-    let pane = std::env::var("TMUX_PANE").ok()?;
-    let out = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "-t", &pane, "#{session_name}"])
-        .output()
-        .ok()?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (out.status.success() && !name.is_empty()).then_some(name)
-}
-
 type Failure = (i32, String);
 
 fn fail(e: &LedgerError) -> Failure {
@@ -164,22 +152,31 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
         })?;
     let project = args.project.unwrap_or_else(|| ctx.cwd.clone());
     let launch = resolve_project(&project).map_err(|e| fail(&e))?;
-    // #9758 fail-open check: an unknown own session proves no store is ours.
+    // #9758: LDG-3.6 — a write to a store not provably ours is refused before
+    // anything is sent; an unknown own session proves no store is ours.
     let own = resolve_project(&ctx.cwd).is_ok_and(|c| c == launch)
         && ctx.own_session.as_deref() == Some(session.as_str());
-    let not_own = (!own).then_some(NOT_OWN);
+    let own_store = || match own {
+        true => Ok(()),
+        false => Err(fail(&dbatg::foreign_store(
+            &launch,
+            &session,
+            ctx.own_session.as_deref(),
+        ))),
+    };
     let store = StoreRef {
         project: launch.clone(),
         session: session.clone(),
     };
     let ops = match args.verb {
         DbatgVerb::Init { code } => {
+            own_store()?;
             let req = InitRequest {
                 project: launch,
                 session,
                 code: code.clone(),
             };
-            let refusal = not_own.or(ctx.registry.is_none().then_some(OTHER_REGISTRY));
+            let refusal = ctx.registry.is_none().then_some(OTHER_REGISTRY);
             let local = || match &ctx.registry {
                 Some(registry) => dbatg::init_at(&req, registry),
                 None => Err(LedgerError::Unavailable(OTHER_REGISTRY.into())),
@@ -195,8 +192,14 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
             .await?;
             return Ok(out.text + "\n");
         }
-        DbatgVerb::Batch { file } => read_ops(file.as_deref(), ctx.stdin)?,
-        other => vec![one_op(other)?],
+        DbatgVerb::Batch { file } => {
+            own_store()?;
+            read_ops(file.as_deref(), ctx.stdin)?
+        }
+        other => {
+            own_store()?;
+            vec![one_op(other)?]
+        }
     };
     let prune = match ops.as_slice() {
         [Op::Prune(p)] => Some(p.dry_run),
@@ -212,10 +215,22 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
         if_v: None,
         ops,
     };
-    let resp: BatchResponse = call(&ctx.socket, "mpm.dbatg.batch", &req, not_own, || {
+    let resp: BatchResponse = call(&ctx.socket, "mpm.dbatg.batch", &req, None, || {
         dbatg::batch(&req)
     })
-    .await?;
+    .await
+    // #9758: exit 3 is an unknown outcome (the daemon may have committed and
+    // the reply been lost); a retry with the same id is applied at most once.
+    .map_err(|(code, msg)| match code {
+        3 => (
+            3,
+            format!(
+                "{msg}; outcome unknown, retry with --request-id {}",
+                req.request_id
+            ),
+        ),
+        _ => (code, msg),
+    })?;
     Ok(match prune {
         Some(dry_run) => render_prune(&resp, dry_run, before, size()),
         None => render_ids(&resp),
@@ -311,10 +326,6 @@ fn read_ops(file: Option<&Path>, stdin: &mut dyn Read) -> Result<Vec<Op>, Failur
     serde_json::from_value(value).map_err(|e| (2, format!("bad op: {e}")))
 }
 
-/// Why a write may not fall back: the store is not provably the caller's.
-const NOT_OWN: &str =
-    "the in-process fallback writes only this session's own store (set DBATG_SESSION)";
-
 /// Why an `init` may not fall back: the daemon's code registry is unknown.
 const OTHER_REGISTRY: &str = "the in-process init needs the daemon's code registry, and the \
      socket is not this process's default one (a TRUSTY_MPM_SOCKET pin)";
@@ -335,13 +346,23 @@ where
     let frame = json!({"jsonrpc": JSONRPC_VERSION, "id": 1, "method": method, "params": req});
     let transport = match send_framed_request::<_, RpcResponse>(socket, &frame, CALL_TIMEOUT).await
     {
+        // #9758: a daemon older than `tm dbatg` serves no `mpm.dbatg.*`.
+        Ok(RpcResponse { error: Some(e), .. }) if e.code == CODE_METHOD_NOT_FOUND => {
+            return Err((
+                3,
+                format!(
+                    "the running daemon predates `tm dbatg` ({method} not served); run `tm restart`"
+                ),
+            ));
+        }
         Ok(RpcResponse { error: Some(e), .. }) => {
             let exit = e
                 .data
                 .as_ref()
                 .and_then(|d| d["exit"].as_i64())
                 .and_then(|x| i32::try_from(x).ok());
-            return Err((exit.unwrap_or(2), e.message));
+            // #9758: no `data.exit` is no ledger verdict: unknown, as the MCP path.
+            return Err((exit.unwrap_or(3), e.message));
         }
         Ok(RpcResponse {
             result: Some(v), ..

@@ -42,6 +42,45 @@ pub fn registry_path() -> Result<PathBuf, LedgerError> {
     Ok(dir.join("dbatg").join("codes.json"))
 }
 
+/// This process's own PM session: `$DBATG_SESSION`, else the tmux session of
+/// `$TMUX_PANE` (the prototype's `_tmux_session`); `None` when neither is set.
+pub fn own_session() -> Option<String> {
+    if let Some(s) = std::env::var("DBATG_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s);
+    }
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    let out = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", &pane, "#{session_name}"])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (out.status.success() && !name.is_empty()).then_some(name)
+}
+
+/// The refusal of a write to a store that is not provably the caller's own.
+///
+/// Why: LDG-3.6 — a PM session writes only its own store. `tm dbatg` and the
+/// `dbatg` MCP bridge refuse before anything is sent or written, so the
+/// answer is the same whether the daemon is up or down (#9758).
+/// What: [`LedgerError::Invalid`] (exit 2: refused input, nothing written)
+/// naming the store and the caller's own session, or that it is unknown.
+/// Test: `a_pm_writing_another_sessions_store_is_refused_cli_daemon_up`,
+/// `a_pm_writing_another_sessions_store_is_refused_mcp`.
+pub fn foreign_store(project: &Path, session: &str, own: Option<&str>) -> LedgerError {
+    let own = own.map_or_else(
+        || "this session is unknown: set DBATG_SESSION".to_owned(),
+        |s| format!("this session is {s}"),
+    );
+    LedgerError::Invalid(format!(
+        "a PM writes only its own store (LDG-3.6): {session} in {} is not this \
+         session's ({own})",
+        project.display()
+    ))
+}
+
 /// A registered session is live while tmux has a session of that name.
 fn session_is_live(reg: &Registration) -> bool {
     std::process::Command::new("tmux")
