@@ -2130,3 +2130,32 @@ fn inplace_resume_command_refuses_when_the_prompt_file_cannot_be_written() {
         .expect_err("an in-place PM relaunch without its prompt must be refused");
     assert_refused(err, &not_a_dir, &fake);
 }
+
+/// #10127: the in-place relaunch of an Architect carries the production deny
+/// as ONE `--settings`, merged into the owner file; a PM relaunch keeps the
+/// owner file argv and its trim. Before the fix the Architect argv was the
+/// bare owner file.
+#[test]
+fn an_architect_inplace_relaunch_carries_the_lockdown() {
+    use crate::core::architect_lockdown::assert_production_deny;
+    use crate::core::session_profile::SessionProfile;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let carrier = tmp.path().join("owner.json");
+    std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+    for owner in [None, Some(carrier.as_path())] {
+        let args = super::inplace_tail_args(SessionProfile::Architect, owner).expect("argv");
+        assert_production_deny(&args);
+    }
+    let pm = super::inplace_tail_args(SessionProfile::Pm, Some(&carrier)).expect("argv");
+    assert_eq!(
+        pm,
+        [
+            "--settings",
+            &carrier.display().to_string(),
+            "--disallowedTools",
+            "Workflow,DesignSync"
+        ]
+    );
+    let missing = tmp.path().join("gone.json");
+    assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing)).is_err());
+}

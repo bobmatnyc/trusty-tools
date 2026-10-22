@@ -112,16 +112,20 @@ pub(crate) async fn start_session(
 /// carrying `prompt.file` as `--append-system-prompt-file` (#8286) and
 /// `prompt.stamp` as an assigned variable (#8453), with
 /// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`], plus the
-/// #8992 tool trim when that stamp names a PM.
+/// #8992 tool trim when that stamp names a PM, then the owner `carrier`
+/// `--settings` (#8988) — for an Architect merged with the #10127 lockdown
+/// deny, its chat tokens unset; a lockdown error refuses the launch.
 /// Test: `inplace_session_spec_follows_the_configured_renderer`,
 /// `inplace_session_spec_carries_the_prompt_file`,
 /// `inplace_session_spec_carries_the_profile_stamp`,
-/// `inplace_pm_session_spec_trims_the_unused_tools`.
+/// `inplace_pm_session_spec_trims_the_unused_tools`,
+/// `an_architect_inplace_session_spec_carries_the_lockdown`.
 pub(crate) fn inplace_session_spec(
     cwd: &std::path::Path,
     config_root: &std::path::Path,
     prompt: &InplacePrompt,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    carrier: Option<&std::path::Path>,
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     let mut spec = trusty_mpm::runtime::cli_launch::inplace_spec(
         cwd,
         &prompt.file,
@@ -136,7 +140,10 @@ pub(crate) fn inplace_session_spec(
         .extend(trusty_mpm::core::pm_tool_trim::trim_env(profile));
     spec.args
         .extend(trusty_mpm::core::pm_tool_trim::trim_args(profile));
-    spec
+    // #10127: the owner file and an Architect's deny as ONE `--settings`.
+    trusty_mpm::core::architect_lockdown::Lockdown::PRODUCTION
+        .apply_to_spec(profile, carrier, &mut spec)?;
+    Ok(spec)
 }
 
 /// The in-place start's PM prompt file and the profile stamp it was composed
@@ -300,6 +307,16 @@ async fn start_session_in_place(
     // like every other PM launch mode. Built before `POST /sessions`, so a
     // prompt that cannot be written refuses the launch with nothing registered.
     let prompt = inplace_prompt_file(path, &std::env::temp_dir())?;
+    // #8308: the launch travels in a spec under this launch's named root.
+    // #8405: the config under that root decides the renderer.
+    let root = fw.crate_config_root();
+    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
+    // #8992: the stamp's profile decides whether the skill and tool parts apply.
+    let profile =
+        trusty_mpm::core::pm_tool_trim::stamped_profile(std::slice::from_ref(&prompt.stamp));
+    let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
+    // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
+    let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
 
     #[derive(Deserialize)]
     struct Body {
@@ -349,19 +366,7 @@ async fn start_session_in_place(
             // `transcript_saving` doctor check. It used to be hand-built here as
             // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
             // launch line that silently saved no transcript.
-            // #8308: the launch travels in a spec under this launch's named root.
-            let root = fw.crate_config_root();
-            // #8405: the config under this launch's named root decides the renderer.
-            // #8286: `prompt` was written by `inplace_prompt_file` above.
-            let mut spec = inplace_session_spec(path, &root, &prompt);
-            // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
-            // #8992: the stamp's profile decides whether the skill and tool parts apply.
-            let profile = trusty_mpm::core::pm_tool_trim::stamped_profile(std::slice::from_ref(
-                &prompt.stamp,
-            ));
-            let settings =
-                trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
-            spec.args.extend(settings.argv());
+            // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
             let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
             match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
                 Ok(()) => {

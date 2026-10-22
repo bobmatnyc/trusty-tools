@@ -332,6 +332,33 @@ pub(crate) async fn launch(
     // write BEFORE `POST /sessions`, so a refusal leaves no session record.
     let prompt_path = launch_prompt_file(&std::env::temp_dir(), &cli.prompt, &managed_path)?;
 
+    // #2997: `tm launch` also creates a detached tmux session and types the
+    // `claude` line into it via send-keys, so the pane's `claude` is forked by
+    // the shared tmux server just like the daemon path — wrap it in the
+    // disclaim-exec so tccd blames Claude Code, not the tmux server. No-op off
+    // macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+    // #7422: compose this session's default-deny MCP config before the line
+    // that names it. Fatal — launching without `--mcp-config` would hand the
+    // pane the whole shared server map.
+    let files = launch_files(&managed_path, config_dir.as_deref(), home, cli.profile)?;
+    // #8308: the launch travels in a mode-0600 spec; the pane types a short
+    // line naming it, so no token or path is typed.
+    // #4181: `config_dir` selects `--setting-sources user,project,local` and
+    // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
+    // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
+    let claude_spec = launch_claude_spec(
+        &managed_path,
+        // #8405: the operator's config decides the renderer.
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        &pm_model,
+        Some(prompt_path.as_path()),
+        config_dir.as_deref(),
+        // #4181: the per-project MCP pins the shared user-scope declarations
+        // cannot carry as arguments; #8453: plus the profile stamp.
+        &cli.env,
+        &files,
+    )?;
+
     // 10. Register the session with the daemon. The tmux name is derived from
     //    the LIVE project folder so the human-readable name reflects the repo.
     //    `project`/`project_path` are the MANAGED clone path; `source_id` links
@@ -374,31 +401,6 @@ pub(crate) async fn launch(
         }
     };
 
-    // #2997: `tm launch` also creates a detached tmux session and types the
-    // `claude` line into it via send-keys, so the pane's `claude` is forked by
-    // the shared tmux server just like the daemon path — wrap it in the
-    // disclaim-exec so tccd blames Claude Code, not the tmux server. No-op off
-    // macOS / under TM_DISABLE_SPAWN_DISCLAIM.
-    // #7422: compose this session's default-deny MCP config before the line
-    // that names it. Fatal — launching without `--mcp-config` would hand the
-    // pane the whole shared server map.
-    let files = launch_files(&managed_path, config_dir.as_deref(), home, cli.profile)?;
-    // #8308: the launch travels in a mode-0600 spec; the pane types a short
-    // line naming it, so no token or path is typed.
-    // #4181: `config_dir` selects `--setting-sources user,project,local` and
-    // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
-    let claude_spec = launch_claude_spec(
-        &managed_path,
-        // #8405: the operator's config decides the renderer.
-        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        &pm_model,
-        Some(prompt_path.as_path()),
-        config_dir.as_deref(),
-        // #4181: the per-project MCP pins the shared user-scope declarations
-        // cannot carry as arguments; #8453: plus the profile stamp.
-        &cli.env,
-        &files,
-    );
     let spec_dir = launch_spec_dir(home)?;
 
     // 11. Print the full-screen robot splash then the rich info panel.
@@ -684,7 +686,7 @@ pub(crate) async fn connect(
             &files,
             // #8405: the operator's config decides the renderer.
             trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-        );
+        )?;
         let spec_dir = launch_spec_dir(home)?;
         let sent =
             trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
@@ -778,7 +780,7 @@ pub(crate) fn connect_claude_spec(
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     isolated_claude_spec(
         cwd,
         None,
@@ -805,7 +807,7 @@ pub(crate) fn launch_claude_spec(
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     isolated_claude_spec(
         cwd,
         Some(pm_model),
@@ -831,9 +833,10 @@ fn isolated_claude_spec(
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
-) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     let token = config_dir.and_then(|_| trusty_mpm::core::oauth_token::resolve_oauth_token());
-    trusty_mpm::runtime::cli_launch::isolated_spec(
+    // #10127: an Architect lockdown error refuses the launch.
+    Ok(trusty_mpm::runtime::cli_launch::isolated_spec(
         cwd,
         &trusty_mpm::runtime::cli_launch::CliLaunch {
             model,
@@ -847,7 +850,7 @@ fn isolated_claude_spec(
                 config_root,
             ),
         },
-    )
+    )?)
 }
 
 /// Where a CLI launch under `home` writes its spec (#8308).

@@ -227,7 +227,7 @@ pub(super) fn relaunch_spec(
     claude_session_id: Option<&str>,
     effective_id: Option<&str>,
     probe: impl FnOnce() -> Result<String, String>,
-) -> LaunchSpec {
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
     // #6863: no stored id means no registry lookup — the probe must not run.
     let attach_id = match claude_session_id.map(|id| (id, probe())) {
         Some((id, Ok(json))) => attach_id_in_registry(&json, id),
@@ -246,8 +246,9 @@ pub(super) fn relaunch_spec(
                 attach_id = %short_id,
                 "stored claude_session_id is a live background session; attaching (#6863)"
             );
-            managed_launch::attach_spec(launch, &short_id)
+            Ok(managed_launch::attach_spec(launch, &short_id))
         }
+        // #10127: a lockdown error refuses the relaunch.
         None => managed_launch::resume_spec(launch, effective_id),
     }
 }

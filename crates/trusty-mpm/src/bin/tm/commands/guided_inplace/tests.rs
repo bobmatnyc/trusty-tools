@@ -1393,3 +1393,25 @@ fn inplace_pm_relaunch_trims_the_unused_tools() {
         real.args
     );
 }
+
+/// #10127: the in-place exec of an Architect removes every chat token, even
+/// one its MCP pins assigned; a PM exec keeps an assigned one. Before the fix
+/// the Architect child inherited them.
+#[test]
+fn an_architect_inplace_exec_drops_the_chat_tokens() {
+    use trusty_mpm::core::architect_lockdown::ARCHITECT_ENV_UNSET;
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let cwd = std::path::Path::new("/fake/cwd");
+    let mut resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    resume.mcp_env = vec![("SLACK_BOT_TOKEN".to_owned(), "xoxb-test".to_owned())];
+    let pm = env_of(&build_inplace_exec_command(&resume, cwd, &no_gh(), false));
+    assert!(
+        pm.contains(&("SLACK_BOT_TOKEN".to_owned(), Some("xoxb-test".to_owned()))),
+        "{pm:?}"
+    );
+    resume.profile = SessionProfile::Architect;
+    let env = env_of(&build_inplace_exec_command(&resume, cwd, &no_gh(), false));
+    for name in ARCHITECT_ENV_UNSET {
+        assert!(env.contains(&((*name).to_owned(), None)), "{name}: {env:?}");
+    }
+}

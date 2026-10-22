@@ -140,12 +140,7 @@ fn relaunch_command(
     effective_id: Option<&str>,
     probe: impl FnOnce() -> Result<String, String>,
 ) -> String {
-    argv(&relaunch_spec(
-        launch,
-        claude_session_id,
-        effective_id,
-        probe,
-    ))
+    argv(&relaunch_spec(launch, claude_session_id, effective_id, probe).expect("spec"))
 }
 
 /// Why (#6863): this is the whole defect. A `claude_session_id` Claude Code is
@@ -459,7 +454,8 @@ fn attach_command_carries_the_resume_prefixes() {
     let cwd = Path::new(TEST_CWD);
     let launch = inputs(cwd);
     let attach = attach_spec(&launch, LIVE_SHORT);
-    let resume = super::super::super::managed_launch::resume_spec(&launch, Some(LIVE_UUID));
+    let resume =
+        super::super::super::managed_launch::resume_spec(&launch, Some(LIVE_UUID)).expect("spec");
 
     assert_eq!(attach.cwd, cwd, "rooted at the workspace");
     assert_eq!(attach.session_id, TEST_SESSION_ID);

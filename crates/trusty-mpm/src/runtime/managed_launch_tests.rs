@@ -251,7 +251,7 @@ fn spawn_argv_matches_the_shell_line_it_replaces() {
     // permission mode, in that order.
     let w = Worst::new();
     let launch = w.launch();
-    let spec = spawn_spec(&launch);
+    let spec = spawn_spec(&launch).expect("spec");
 
     let mut expected = vec![
         "--append-system-prompt-file".to_owned(),
@@ -286,7 +286,10 @@ fn spawn_and_resume_carry_the_owner_settings_after_the_mcp_config() {
         settings: Some(settings),
         ..w.launch()
     };
-    for spec in [spawn_spec(&launch), resume_spec(&launch, Some("id"))] {
+    for spec in [
+        spawn_spec(&launch).expect("spec"),
+        resume_spec(&launch, Some("id")).expect("spec"),
+    ] {
         let at = spec
             .args
             .iter()
@@ -309,7 +312,10 @@ fn a_pm_spawn_disables_artifacts_and_denies_the_optional_built_ins() {
         profile: crate::core::session_profile::SessionProfile::Pm,
         ..w.launch()
     };
-    for spec in [spawn_spec(&launch), resume_spec(&launch, Some("conv"))] {
+    for spec in [
+        spawn_spec(&launch).expect("spec"),
+        resume_spec(&launch, Some("conv")).expect("spec"),
+    ] {
         let at = spec
             .args
             .iter()
@@ -340,7 +346,7 @@ fn an_architect_spawn_keeps_every_tool() {
         profile: crate::core::session_profile::SessionProfile::Architect,
         ..w.launch()
     };
-    let spec = spawn_spec(&launch);
+    let spec = spawn_spec(&launch).expect("spec");
     assert!(!spec.args.iter().any(|a| a == "--disallowedTools"));
     assert_eq!(
         value_of(&spec.env_set, "CLAUDE_CODE_DISABLE_ARTIFACT"),
@@ -348,12 +354,70 @@ fn an_architect_spawn_keeps_every_tool() {
     );
 }
 
+/// #10127: the daemon's managed spawn and resume of an Architect carry the
+/// production deny as ONE `--settings` — merged into the owner file when one
+/// was provisioned — and every path, attach included, loses the chat tokens
+/// even when the launch assigned one. A PM spawn carries neither.
+#[test]
+fn every_architect_spec_seam_carries_the_lockdown() {
+    use crate::core::architect_lockdown::{assert_chat_tokens_unset, assert_production_deny};
+    let w = Worst::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let carrier = tmp.path().join("owner.json");
+    std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+    let slack = vec![("SLACK_BOT_TOKEN".to_owned(), "xoxb-test".to_owned())];
+    for settings in [None, Some(carrier.as_path())] {
+        let launch = ManagedLaunch {
+            profile: crate::core::session_profile::SessionProfile::Architect,
+            settings,
+            mcp_env: &slack,
+            ..w.launch()
+        };
+        for spec in [
+            spawn_spec(&launch).expect("spec"),
+            resume_spec(&launch, Some("conv")).expect("spec"),
+        ] {
+            assert_production_deny(&spec.args);
+            assert_chat_tokens_unset(&spec.env_unset);
+            assert!(
+                !spec
+                    .args
+                    .iter()
+                    .any(|a| a == &carrier.display().to_string())
+            );
+            assert_eq!(value_of(&spec.env_set, "SLACK_BOT_TOKEN"), None);
+        }
+        assert_chat_tokens_unset(&attach_spec(&launch, "ab12").env_unset);
+    }
+    let pm = spawn_spec(&w.launch()).expect("spec");
+    assert!(!pm.args.iter().any(|a| a == "--settings"), "{:?}", pm.args);
+    assert!(!pm.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
+}
+
+/// #10127 Fail-Open Check: an owner file the Architect deny cannot merge into
+/// refuses the managed spawn; launching with the bare owner file (the
+/// pre-#10127 argv) would drop the deny, and this fails.
+#[test]
+fn an_unreadable_owner_file_refuses_the_managed_architect_spawn() {
+    let w = Worst::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("gone.json");
+    let launch = ManagedLaunch {
+        profile: crate::core::session_profile::SessionProfile::Architect,
+        settings: Some(&missing),
+        ..w.launch()
+    };
+    let err = spawn_spec(&launch).expect_err("an unreadable owner file refuses");
+    assert!(err.to_string().contains("refusing the launch"), "{err}");
+    assert!(resume_spec(&launch, None).is_err());
+}
+
 #[test]
 fn spawn_argv_quotes_nothing() {
     // These tokens reach execv with no shell in between, so a single-quoted path
     // would name a file `claude` cannot open.
     let w = Worst::new();
-    let spec = spawn_spec(&w.launch());
+    let spec = spawn_spec(&w.launch()).expect("spec");
     assert!(
         spec.args.iter().all(|a| !a.contains('\'')),
         "argv tokens must be bare, not shell-quoted: {:?}",
@@ -366,7 +430,7 @@ fn spawn_spec_roots_the_child_at_the_workspace() {
     // #2250: the launch must be rooted at the workspace regardless of where the
     // pane shell actually started. The `cd` prefix became the child's own cwd.
     let w = Worst::new();
-    let spec = spawn_spec(&w.launch());
+    let spec = spawn_spec(&w.launch()).expect("spec");
     assert_eq!(spec.cwd, w.cwd);
     assert_eq!(
         spec.program,
@@ -378,7 +442,7 @@ fn spawn_spec_roots_the_child_at_the_workspace() {
 fn resume_spec_appends_the_resume_flag() {
     let cwd = PathBuf::from("/w");
     let launch = bare_launch(&cwd, &[]);
-    let spec = resume_spec(&launch, Some("conv-123"));
+    let spec = resume_spec(&launch, Some("conv-123")).expect("spec");
     let tail = &spec.args[spec.args.len() - 2..];
     assert_eq!(tail, ["--resume".to_owned(), "conv-123".to_owned()]);
 }
@@ -388,9 +452,13 @@ fn resume_spec_without_an_id_is_a_plain_spawn() {
     // #6765: no `--continue` fallback — anything but a usable id launches fresh.
     let cwd = PathBuf::from("/w");
     let launch = bare_launch(&cwd, &[]);
-    assert_eq!(resume_spec(&launch, None).args, spawn_spec(&launch).args);
+    assert_eq!(
+        resume_spec(&launch, None).expect("spec").args,
+        spawn_spec(&launch).expect("spec").args
+    );
     assert!(
         !resume_spec(&launch, None)
+            .expect("spec")
             .args
             .iter()
             .any(|a| a == "--continue")
@@ -412,7 +480,7 @@ fn attach_and_resume_share_an_identical_environment() {
     let w = Worst::new();
     let launch = w.launch();
     let attach = attach_spec(&launch, "short1");
-    let resume = resume_spec(&launch, Some("conv"));
+    let resume = resume_spec(&launch, Some("conv")).expect("spec");
     assert_eq!(attach.env_unset, resume.env_unset);
     assert_eq!(attach.env_set, resume.env_set);
     assert_eq!(attach.cwd, resume.cwd);
@@ -431,8 +499,8 @@ fn every_launch_path_carries_the_configured_fullscreen_renderer() {
     let w = Worst::new();
     let launch = w.launch();
     for spec in [
-        spawn_spec(&launch),
-        resume_spec(&launch, Some("conv")),
+        spawn_spec(&launch).expect("spec"),
+        resume_spec(&launch, Some("conv")).expect("spec"),
         attach_spec(&launch, "short1"),
     ] {
         assert_eq!(
@@ -457,7 +525,10 @@ fn every_launch_path_carries_the_configured_fullscreen_renderer() {
 fn every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off() {
     let cwd = PathBuf::from("/work");
     let launch = bare_launch(&cwd, &[]);
-    for spec in [spawn_spec(&launch), attach_spec(&launch, "short1")] {
+    for spec in [
+        spawn_spec(&launch).expect("spec"),
+        attach_spec(&launch, "short1"),
+    ] {
         assert_eq!(
             value_of(&spec.env_set, crate::core::alt_screen::ALT_SCREEN_ENV_VAR),
             Some(crate::core::alt_screen::ALT_SCREEN_DEFAULT)
@@ -500,7 +571,7 @@ fn pane_line_is_short_for_the_worst_case_launch() {
     // material the line used to carry, and a line that stayed short because the
     // parameters vanished would be a different bug.
     let w = Worst::new();
-    let spec = spawn_spec(&w.launch());
+    let spec = spawn_spec(&w.launch()).expect("spec");
     let spec_json = serde_json::to_string(&spec).expect("spec serialises");
     assert!(
         spec_json.len() > 1_024,
@@ -720,7 +791,7 @@ impl ManagedTmuxDriver for Recorder {
 fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
     let dir = tempfile::tempdir().expect("tempdir");
     let w = Worst::new();
-    let spec = spawn_spec(&w.launch());
+    let spec = spawn_spec(&w.launch()).expect("spec");
     let tmux = Recorder::new(0);
 
     deliver_in(&tmux, "tm-sess", None, &spec, dir.path()).expect("deliver");
@@ -758,7 +829,7 @@ fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
 fn deliver_resets_the_pane_before_typing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     let tmux = Recorder::wedged();
 
     deliver_in(&tmux, "tm-sess", None, &spec, dir.path()).expect("deliver");
@@ -791,7 +862,7 @@ fn deliver_resets_the_pane_before_typing() {
 fn deliver_resets_the_named_pane_when_one_is_known() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     let tmux = Recorder::wedged();
 
     deliver_in(&tmux, "tm-sess", Some("%9"), &spec, dir.path()).expect("deliver");
@@ -821,7 +892,7 @@ fn deliver_resets_the_named_pane_when_one_is_known() {
 fn deliver_clears_a_stale_started_sentinel() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     std::fs::create_dir_all(dir.path()).expect("mkdir");
     // An earlier launch of this same session ran and left its sentinel behind.
     let stale_launch_id = "0000staleaaaabbbbccccddddeeee1111";
@@ -852,7 +923,7 @@ fn deliver_announces_a_refused_line_in_the_pane() {
     // errored on — never a silent pane.
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     let tmux = Recorder::new(1);
 
     let err = deliver_in(&tmux, "tm-sess", None, &spec, dir.path())
@@ -894,7 +965,7 @@ fn deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable() {
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).expect("chmod");
 
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     let tmux = Recorder::new(0);
     let err = deliver_in(&tmux, "tm-sess", None, &spec, &blocked.join("nested"))
         .expect_err("an unwritable spec dir must error");
@@ -926,7 +997,7 @@ fn deliver_errors_and_cleans_up_when_the_spec_dir_is_unwritable() {
 fn deliver_refuses_a_wedged_pane_and_writes_no_spec() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = PathBuf::from("/w");
-    let spec = spawn_spec(&bare_launch(&cwd, &[]));
+    let spec = spawn_spec(&bare_launch(&cwd, &[])).expect("spec");
     let tmux = Recorder::wedged_forever();
 
     let err = deliver_in(&tmux, "tm-sess", None, &spec, dir.path())

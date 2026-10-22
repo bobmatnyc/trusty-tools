@@ -189,3 +189,24 @@ impl FamilyTable {
         Classification::Unrelated
     }
 }
+
+#[cfg(test)]
+mod lockdown_tests {
+    use super::{GWORKSPACE, GWORKSPACE_MESSAGING, SERVER_FAMILIES};
+    use trusty_mpm::core::architect_lockdown::ARCHITECT_DENY_GLOBS;
+
+    /// #10127: the Architect's launch deny names every family this hook
+    /// denies, so a family added here and not there fails. The hook's
+    /// separator-blind spellings (`google_workspace`, `gsuite`) are hook-only.
+    #[test]
+    fn the_architect_deny_covers_every_egress_family() {
+        for family in SERVER_FAMILIES {
+            let glob = format!("mcp__*{family}*");
+            assert!(ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
+        }
+        for word in GWORKSPACE_MESSAGING {
+            let glob = format!("mcp__*{GWORKSPACE}*__*{word}*");
+            assert!(ARCHITECT_DENY_GLOBS.contains(&glob.as_str()), "{glob}");
+        }
+    }
+}
