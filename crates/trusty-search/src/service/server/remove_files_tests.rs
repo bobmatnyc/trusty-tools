@@ -153,6 +153,7 @@ impl<T: PartialEq + Clone + 'static> Drop for Armed<T> {
 /// counts, keeps the rows and every hash, writes no stamp, and a retry
 /// removes the files, forgets the selected hashes and stamps.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_remove_fails_closed_on_a_refused_slice_and_a_retry_finishes() {
     let fx = Fixture::new("remove-files-f1").await;
     let refused = {
@@ -189,6 +190,7 @@ async fn batch_remove_fails_closed_on_a_refused_slice_and_a_retry_finishes() {
 /// after the rows are gone; the retry matches no chunk and still clears every
 /// selected hash, including one whose file had no chunk.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_remove_reports_a_failed_hash_forget_and_a_retry_clears_it() {
     let fx = Fixture::new("remove-files-f2").await;
     let refused = {
@@ -227,6 +229,7 @@ async fn batch_remove_reports_a_failed_hash_forget_and_a_retry_clears_it() {
 /// F7: a prefix matching nothing answers 200 with zeros and writes no dirty
 /// mark and no stamp.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_prefix_matching_nothing_answers_zeros_and_writes_no_mark_or_stamp() {
     let fx = Fixture::new("remove-files-f7").await;
     let corpus = fx.corpus().await;
@@ -256,6 +259,7 @@ async fn a_prefix_matching_nothing_answers_zeros_and_writes_no_mark_or_stamp() {
 
 /// Q5: every unsafe or malformed selection is a 400 and removes nothing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn remove_files_refuses_an_unsafe_selection() {
     let fx = Fixture::new("remove-files-q5").await;
     let root = fx.root.to_string_lossy().into_owned();
