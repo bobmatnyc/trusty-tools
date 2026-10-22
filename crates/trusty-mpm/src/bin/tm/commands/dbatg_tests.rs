@@ -149,3 +149,26 @@ async fn dbatg_cli_fallback_refuses_another_sessions_store() {
     let out = offline(&root, None, &["add", "G", "--title", "x"], "").await;
     assert_eq!(out.error.map(|e| e.0), Some(2), "no session is refused");
 }
+
+/// Fail-open check (#9758): a process whose own session is unknown cannot
+/// prove `--session` names its own store, so the daemon-down fallback
+/// refuses the write (exit 3, nothing written) and reports no success; a
+/// read still answers.
+#[tokio::test]
+async fn dbatg_cli_fallback_refuses_a_write_when_its_own_session_is_unknown() {
+    let (_dir, root) = project();
+    let before = std::fs::read(root.join(".trusty-mpm/dbatg/pm-a/state.json")).expect("state");
+    let argv = ["--session", "pm-a", "add", "G", "--title", "x"];
+    let out = offline(&root, None, &argv, "").await;
+    assert_eq!(out.stdout, "", "a refused write printed an id");
+    let (code, msg) = out
+        .error
+        .expect("an unprovable store was written in-process");
+    assert_eq!(code, 3, "{msg}");
+    assert!(msg.contains("own store"), "{msg}");
+    let after = std::fs::read(root.join(".trusty-mpm/dbatg/pm-a/state.json")).expect("state");
+    assert_eq!(after, before);
+    assert!(!root.join(".trusty-mpm/dbatg/pm-a/outbox.jsonl").exists());
+    let out = offline(&root, None, &["--session", "pm-a", "show", "--brief"], "").await;
+    assert_eq!(out.stdout, "no open items\n");
+}
