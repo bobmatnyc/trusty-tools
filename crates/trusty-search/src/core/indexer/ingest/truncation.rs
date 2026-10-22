@@ -290,8 +290,8 @@ impl PassTally {
             }
             self.files_named += 1;
             tracing::warn!(
-                index_id,
-                file,
+                index_id = %index_id,
+                file = %file,
                 chunks,
                 tokens,
                 window,
@@ -305,7 +305,7 @@ impl PassTally {
         let window = self.window;
         if self.truncated > 0 {
             tracing::warn!(
-                index_id,
+                index_id = %index_id,
                 truncated = self.truncated,
                 files = self.files.len(),
                 files_unnamed = self.files.len() - self.files_named,
@@ -316,10 +316,10 @@ impl PassTally {
         }
         if self.unmeasured > 0 {
             tracing::warn!(
-                index_id,
+                index_id = %index_id,
                 unmeasured = self.unmeasured,
                 window,
-                reason = self.first_reason.as_deref().unwrap_or("unknown"),
+                reason = %self.first_reason.as_deref().unwrap_or("unknown"),
                 "embed pass could not count chunks against the embedder window (#9284)",
             );
         }
