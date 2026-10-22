@@ -21,13 +21,17 @@ use trusty_common::control_bus::{
     HarnessEvent, HarnessPayload, MessageChannel, MessageDirection, MessageEvent,
 };
 
-use super::ActionPublisher;
 use super::message::messages;
 use super::received::{Job, Tails, arrival, read, received_event};
+use super::{ActionPublisher, start_with};
 use crate::core::hook::{HookEvent, HookEventRecord};
 use crate::core::session::SessionId;
+use crate::daemon::DaemonState;
 
 const FROM: &str = "uds:/tmp/cc-socks/77772.sock";
+
+/// A flush interval no test outlives: the task exists but never drains.
+const NO_TICK: Duration = Duration::from_secs(3600);
 
 fn sha(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -124,6 +128,35 @@ fn messages_in(frames: &[HarnessEvent]) -> Vec<(&HarnessEvent, &MessageEvent)> {
             HarnessPayload::Message(m) => Some((e, m)),
             _ => None,
         })
+        .collect()
+}
+
+/// Read every bus connection on `sock` until one carries a `received`
+/// message; returns all frames read. The caller bounds the wait.
+fn until_received(sock: &Path) -> tokio::task::JoinHandle<Vec<HarnessEvent>> {
+    let listener = trusty_common::uds::bind_hardened(sock).expect("bind");
+    tokio::spawn(async move {
+        let mut frames: Vec<HarnessEvent> = Vec::new();
+        while !messages_in(&frames)
+            .iter()
+            .any(|(_, m)| m.direction == MessageDirection::Received)
+        {
+            let (mut conn, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).await.expect("read");
+            let text = String::from_utf8_lossy(&buf);
+            frames.extend(text.lines().map(|l| serde_json::from_str(l).expect("frame")));
+        }
+        frames
+    })
+}
+
+/// The `received` digests among `frames`.
+fn received_digests(frames: &[HarnessEvent]) -> Vec<String> {
+    messages_in(frames)
+        .iter()
+        .filter(|(_, m)| m.direction == MessageDirection::Received)
+        .map(|(_, m)| m.sha256.clone())
         .collect()
 }
 
@@ -350,4 +383,75 @@ async fn n_messages_between_two_sessions_are_n_sent_and_n_received_9167() {
     assert_eq!(sent.len(), N, "{got:?}");
     assert_eq!(received.len(), N, "{got:?}");
     assert_eq!(sent, received, "every received message matches a sent one");
+}
+
+/// The daemon's own flush task carries a received message to the bus: the
+/// scan runs on the task's tick, with no test calling `collect_received`.
+#[tokio::test]
+async fn the_flush_task_carries_a_received_message_to_the_bus_9167() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript = dir.path().join("b.jsonl");
+    let sock = dir.path().join("bus.sock");
+    let bus = until_received(&sock);
+    let state = DaemonState::new();
+    assert!(start_with(&state, true, Duration::from_millis(20), || Ok(
+        sock.clone()
+    )));
+    let b = SessionId::new();
+    let text = "[Global Architect 01:10Z] the flush task delivers this";
+    append(
+        &transcript,
+        &arrival_lines(
+            &b.0.to_string(),
+            text,
+            Utc::now() + chrono::Duration::seconds(1),
+        ),
+    );
+    state.push_hook_event(hook(b, HookEvent::PreToolUse, &transcript));
+    // No shutdown before the bus sees it: only the task's tick can scan.
+    let frames = tokio::time::timeout(Duration::from_secs(5), bus)
+        .await
+        .expect("the flush task sent no received message within 5 s")
+        .expect("join");
+    assert_eq!(received_digests(&frames), [sha(text)], "{frames:?}");
+    state.action_events().shutdown().await;
+}
+
+/// Fail-Open Check: an arrival written after the session's last hook and
+/// still unread at shutdown is sent by shutdown's last scan, and a restarted
+/// daemon does not send it again. Exactly once, never zero times.
+#[tokio::test]
+async fn an_arrival_unread_at_shutdown_is_sent_exactly_once_9167() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript = dir.path().join("b.jsonl");
+    append(&transcript, "");
+    let sock = dir.path().join("bus.sock");
+    let bus = until_received(&sock);
+    let state = DaemonState::new();
+    assert!(start_with(&state, true, NO_TICK, || Ok(sock.clone())));
+    let b = SessionId::new();
+    state.push_hook_event(hook(b, HookEvent::PreToolUse, &transcript));
+    let publisher = Arc::clone(state.action_events().publisher().expect("attached"));
+    assert_eq!(publisher.collect_received().await, 0, "read to the end");
+    // The arrival lands after the last hook, and no hook follows it.
+    let text = "[Ops Architect 02:20Z] pending at shutdown";
+    append(
+        &transcript,
+        &arrival_lines(&b.0.to_string(), text, Utc::now()),
+    );
+    state.action_events().shutdown().await;
+    let frames = tokio::time::timeout(Duration::from_secs(5), bus)
+        .await
+        .expect("shutdown sent no received message within 5 s")
+        .expect("join");
+    assert_eq!(received_digests(&frames), [sha(text)], "{frames:?}");
+
+    // A restart: its first hook for the session comes after the arrival.
+    let restarted = Arc::new(ActionPublisher::new(dir.path().join("bus2.sock")));
+    let later = HookEventRecord {
+        at: Utc::now() + chrono::Duration::seconds(1),
+        ..hook(b, HookEvent::Stop, &transcript)
+    };
+    restarted.publish(&later);
+    assert_eq!(restarted.collect_received().await, 0, "never sent twice");
 }
