@@ -24,6 +24,7 @@ use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
 use trusty_memory::engine::retrieval::{
     PalaceHandle, RememberOptions, seed_shared_embedder_with, shared_embedder,
 };
+use trusty_memory::engine::store::VectorStore;
 use uuid::Uuid;
 
 const WINDOW: usize = 32;
