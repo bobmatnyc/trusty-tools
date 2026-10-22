@@ -518,3 +518,86 @@ async fn a_refused_later_slice_reports_what_committed_and_keeps_the_rest() {
     assert_eq!(retry.removed_files, 1);
     assert!(row_ids_under(&idx, "vendor/acme").is_empty());
 }
+
+/// #10110 review F1: a graph rebuild that outlasts the bounded rehydrate
+/// wait must not run on an empty corpus.
+///
+/// Why: the batch leaves the corpus evicted and the graph stale; the ticker's
+/// rebuild waits at most the rehydrate budget, and a large cold scan outlasts
+/// it. Building from the empty maps persisted an empty graph, cleared the
+/// durable mark and survived a restart.
+/// What: evict, slow the scan past a tiny wait budget, batch-remove, tick.
+/// The tick must build nothing (surviving symbol still resolves, mark still
+/// set, graph still stale); a later tick, after the scan lands, rebuilds.
+/// Test: this function.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (idx, _) = indexer("batch-10110-slow-rehydrate", &dir.path().join("index.redb"));
+    seed(&idx).await;
+    assert!(idx.reclaim_memory_now().await > 0, "setup: eviction");
+    let corpus = idx.corpus_store().expect("corpus");
+
+    // SAFETY: serialized against every other reader/writer of this var by
+    // `#[serial_test::serial]` on this test.
+    unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", "25") };
+    super::super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(400, Ordering::Relaxed);
+
+    idx.remove_files_matching(&prefix("vendor/acme"))
+        .await
+        .expect("removal");
+    assert!(
+        idx.corpus_evicted(),
+        "setup: the removal does not rehydrate"
+    );
+    let first = idx
+        .refresh_symbol_graph_if_due(Duration::ZERO, Duration::MAX)
+        .await;
+    let mark_after_first = corpus.kg_graph_dirty().expect("read mark");
+    let stale_after_first = idx.symbol_graph_is_stale();
+    let graph_after_first = idx.snapshot_symbol_graph().await;
+    let kept_after_first = graph_after_first.resolve_symbol("keeper_delta_q10110");
+
+    // The scan is detached; let it land, then tick again.
+    let landed = idx.begin_corpus_rehydrate();
+    if let Some(notify) = landed {
+        notify.notified().await;
+    }
+    super::super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe { std::env::remove_var("TRUSTY_REHYDRATE_WAIT_MS") };
+    let second = idx
+        .refresh_symbol_graph_if_due(Duration::ZERO, Duration::MAX)
+        .await;
+
+    assert!(
+        !first,
+        "a rebuild on an evicted corpus must not report done"
+    );
+    assert!(
+        mark_after_first.is_some(),
+        "the durable dirty mark was cleared by a rebuild from empty maps"
+    );
+    assert!(stale_after_first, "the graph must stay stale for the retry");
+    assert_ne!(
+        kept_after_first,
+        SymbolMatch::NotFound,
+        "an empty graph was installed over the serving one"
+    );
+    assert!(
+        second,
+        "the later tick must rebuild once the corpus is back"
+    );
+    assert_eq!(corpus.kg_graph_dirty().expect("read mark"), None);
+    assert!(!idx.symbol_graph_is_stale());
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_ne!(
+        graph.resolve_symbol("keeper_delta_q10110"),
+        SymbolMatch::NotFound
+    );
+    assert_eq!(
+        graph.resolve_symbol("acme_beta_q10110"),
+        SymbolMatch::NotFound
+    );
+}
