@@ -138,3 +138,31 @@ fn case_variant_collection_refused() -> R {
     }
     Ok(())
 }
+
+#[test]
+fn case_variant_collections_in_one_batch_refused() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let s = store(tmp.path(), format);
+        let set = |coll: &str, id: &str| Op::Set {
+            collection: coll.into(),
+            id: id.into(),
+            data: json!({"t": format!("{coll}/{id}")}),
+            if_version: None,
+        };
+        // #10063 df-G01: on APFS `Items.jsonl` and `items.jsonl` are one file,
+        // so this batch lost A01 while reporting it written.
+        let got = s.batch(&[set("Items", "A01"), set("items", "B01")]);
+        assert!(is_case_refusal(&got, "Items"), "{format}: {got:?}");
+        assert!(snapshot(tmp.path()).is_empty(), "{format}: wrote a file");
+        let del = Op::Delete {
+            collection: "items".into(),
+            id: "B01".into(),
+            if_version: None,
+        };
+        let got = s.batch(&[set("Items", "A01"), del]);
+        assert!(is_case_refusal(&got, "Items"), "{format}: {got:?}");
+        assert!(snapshot(tmp.path()).is_empty(), "{format}: wrote a file");
+    }
+    Ok(())
+}

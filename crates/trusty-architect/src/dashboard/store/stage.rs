@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use super::super::error::DashError;
 use super::super::ids::check_name;
 use super::jsonl::{self, Docs};
-use super::{Format, Store, Versioned, case, dir};
+use super::{Format, Store, Versioned, dir};
 use crate::ledger::store::{sync_dir, write_atomic};
 use crate::pystr::py_repr;
 
@@ -213,7 +213,7 @@ pub(super) struct Staged {
     index: HashMap<(String, String), usize>,
     fresh: BTreeMap<String, Docs>,
     /// The ids each touched collection holds on disk, as listed (#10063 df-G01).
-    listed: BTreeMap<String, BTreeSet<String>>,
+    pub(super) listed: BTreeMap<String, BTreeSet<String>>,
 }
 
 const TS_KEYS: [&str; 8] = [
@@ -280,9 +280,7 @@ impl Store {
         check_name("collection", coll)?;
         check_name("doc id", id)?;
         self.guard(coll)?;
-        if !matches!(op, Op::Delete { .. }) {
-            self.refuse_case_variant(staged, coll, id)?;
-        }
+        self.refuse_case_variants(staged, coll, id, !matches!(op, Op::Delete { .. }))?;
         let key = (coll.to_owned(), id.to_owned());
         let slot_at = match staged.index.get(&key) {
             Some(i) => *i,
@@ -368,7 +366,7 @@ impl Store {
     }
 
     /// Reads `coll`'s listing (and, for `jsonl`, its documents) once per batch.
-    fn list_once(&self, staged: &mut Staged, coll: &str) -> Result<(), DashError> {
+    pub(super) fn list_once(&self, staged: &mut Staged, coll: &str) -> Result<(), DashError> {
         if staged.listed.contains_key(coll) {
             return Ok(());
         }
@@ -383,31 +381,6 @@ impl Store {
         };
         staged.listed.insert(coll.to_owned(), ids);
         Ok(())
-    }
-
-    /// Refuses a write of `coll/id` when the store, or an earlier op of this
-    /// batch, holds an id equal to it ignoring letter case but not exactly.
-    fn refuse_case_variant(
-        &self,
-        staged: &mut Staged,
-        coll: &str,
-        id: &str,
-    ) -> Result<(), DashError> {
-        self.list_once(staged, coll)?;
-        let on_disk = staged.listed.get(coll).into_iter().flatten();
-        let written = staged
-            .slots
-            .iter()
-            .filter(|s| s.coll == coll && s.exists)
-            .map(|s| &s.id);
-        match case::variant(id, on_disk.chain(written).map(String::as_str)) {
-            Some(other) => Err(case::refusal(
-                "doc",
-                &format!("{coll}/{id}"),
-                &format!("{coll}/{other}"),
-            )),
-            None => Ok(()),
-        }
     }
 
     /// Writes every dirty slot; on a failure restores every earlier file.
