@@ -33,9 +33,11 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        // Under `/tmp`, not `$TMPDIR`: the per-project socket path must fit
+        // `sun_path` (108 bytes on Linux), and a CI or macOS `$TMPDIR` is long.
         let root = tempfile::Builder::new()
             .prefix("tc6637-")
-            .tempdir()
+            .tempdir_in("/tmp")
             .expect("scratch root");
         std::fs::create_dir(root.path().join("data")).expect("data dir");
         Self { root }
