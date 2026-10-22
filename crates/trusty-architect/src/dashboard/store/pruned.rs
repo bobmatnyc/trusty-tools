@@ -9,8 +9,9 @@
 //! memory client.
 //! What: [`PruneLog`], a [`DeleteArchive`] at a path that must not lie under
 //! the store root once symlinks are resolved; it keeps and writes the
-//! resolved path, never through a symlink at its last component (a dangling
-//! one is refused up front, a late one fails the open).
+//! resolved path, never through a symlink at any component (a dangling one
+//! is refused up front, a late one, a parent directory included, fails the
+//! write: #10063 PR 3).
 //! [`DeleteArchive::record`] appends one canonical line per removed document,
 //! `{by, collection, data, deleted_at, id, version}` (the AC's shape, owner
 //! ruling D34), then fsyncs; [`PruneLog::lines`] returns the
@@ -18,7 +19,8 @@
 //! shape or the prototype's (`pruned_at`, `actor`).
 //! Test: `delete_refused_when_pruned_write_fails`, `pruned_by_id_returns_record`,
 //! `prune_log_inside_root_refused`, `prune_log_dangling_link_refused`,
-//! `prune_log_late_link_refuses_delete`, `pruned_reads_prototype_lines`.
+//! `prune_log_late_link_refuses_delete`, `pruned_reads_prototype_lines`,
+//! `delete_refuses_a_prune_log_whose_parent_became_a_symlink`.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -28,8 +30,8 @@ use serde_json::{Value, json};
 
 use super::super::canonical::compact;
 use super::super::error::DashError;
-use super::changes::append_durable_nofollow;
-use super::{DeleteArchive, Removed};
+use super::changes::append_durable;
+use super::{DeleteArchive, Removed, beneath};
 
 /// An append-only `pruned.jsonl` outside a store's served root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +141,10 @@ impl DeleteArchive for PruneLog {
                 compact(&rec) + "\n"
             })
             .collect();
-        append_durable_nofollow(&self.path, &text)
+        // #10063 PR 3: no directory of the resolved path is followed through
+        // a symlink planted after `outside` checked it.
+        let (anchor, rel) = beneath::from_root(&self.path)?;
+        append_durable(anchor, rel, &text)
     }
 }
 
