@@ -194,6 +194,20 @@ class HookCase(Base):
                            env=dict(os.environ, CLAUDE_PROJECT_DIR=self.p))
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
+    @unittest.skipUnless(sys.version_info >= (3, 11), "-P / PYTHONSAFEPATH need Python 3.11")
+    def test_safe_path_mode_still_imports_the_split_modules(self):
+        # #10161: under -P the script dir is not on sys.path; the hook must still deny, not fail open.
+        r = subprocess.run([sys.executable, "-P", os.path.join(SCRIPTS, "datg.py"), "--help"],
+                           capture_output=True, text=True, cwd=self.p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.state()
+        st["config"]["mode"] = "block"
+        with open(self.sp, "w") as f:
+            json.dump(st, f)
+        r = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task", "tool_input": {"prompt": "no goal"}},
+                      env={"PYTHONSAFEPATH": "1"})
+        self.assertEqual(json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+
 
 class SessionFilterCase(Base):
     """datg-hook.sh <session>: output only when the TMUX_PANE session is exactly that name."""
