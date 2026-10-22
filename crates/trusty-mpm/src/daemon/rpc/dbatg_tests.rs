@@ -42,7 +42,7 @@ async fn fixture() -> Fixture {
     )
     .expect("init");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(
-        &root.join("fw"),
+        root.join("fw"),
     )));
     let socket = root.join("sock").join("trusty-mpm.sock");
     let bound = crate::daemon::socket::bind(&socket).await.expect("bind");
