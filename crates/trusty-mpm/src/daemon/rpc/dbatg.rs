@@ -5,8 +5,10 @@
 //! `tm dbatg` and the `dbatg` MCP tool reach the same bodies.
 //! What: each method runs its [`crate::core::dbatg`] body on the blocking
 //! pool (the store lock and file I/O block). A ledger error answers an error
-//! frame whose code keeps the prototype's exit class — [`CODE_CONFLICT`]
-//! (exit 1), [`CODE_UNAVAILABLE`] (exit 3), [`CODE_UNPROCESSABLE`] (exit 2) —
+//! frame whose code keeps the prototype's exit class:
+//! [`CODE_CONFLICT`](crate::daemon::error::CODE_CONFLICT) (exit 1),
+//! [`CODE_UNAVAILABLE`](crate::daemon::error::CODE_UNAVAILABLE) (exit 3),
+//! [`CODE_UNPROCESSABLE`](crate::daemon::error::CODE_UNPROCESSABLE) (exit 2),
 //! and whose `data.exit` carries the exit code.
 //! Test: `dbatg_methods_round_trip_over_the_daemon_socket`.
 
