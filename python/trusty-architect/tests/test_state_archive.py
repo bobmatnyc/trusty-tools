@@ -5,7 +5,9 @@ Test: scripts/test_state_archive.py
 import importlib.util
 import os
 
-spec = importlib.util.spec_from_file_location("sa", os.path.join(os.path.dirname(__file__), "state-archive.py"))
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+spec = importlib.util.spec_from_file_location("sa", os.path.join(SCRIPTS, "state-archive.py"))
 sa = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sa)
 

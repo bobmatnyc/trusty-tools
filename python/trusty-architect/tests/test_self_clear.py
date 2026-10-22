@@ -6,7 +6,9 @@ import subprocess
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, "self-clear.sh")
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+SCRIPT = os.path.join(SCRIPTS, "self-clear.sh")
 
 
 def _fake_datg(fresh_code, digest):

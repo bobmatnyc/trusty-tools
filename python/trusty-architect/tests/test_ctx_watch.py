@@ -6,7 +6,9 @@ import os
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("ctx_watch", os.path.join(HERE, "ctx-watch.py"))
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+_spec = importlib.util.spec_from_file_location("ctx_watch", os.path.join(SCRIPTS, "ctx-watch.py"))
 cw = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cw)
 

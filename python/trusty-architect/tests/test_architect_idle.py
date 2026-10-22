@@ -4,7 +4,9 @@ import json
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("architect_idle", os.path.join(HERE, "architect-idle.py"))
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+_spec = importlib.util.spec_from_file_location("architect_idle", os.path.join(SCRIPTS, "architect-idle.py"))
 ai = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ai)
 

@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+sys.path.insert(0, SCRIPTS)
 import datg  # noqa: E402
 
-HOOK = os.path.join(HERE, "datg-hook.sh")
+HOOK = os.path.join(SCRIPTS, "datg-hook.sh")
 BEFORE = datetime(2026, 10, 10, tzinfo=timezone.utc)
 AFTER = datetime(2026, 10, 13, tzinfo=timezone.utc)
 
@@ -111,7 +113,7 @@ class WriteCase(Base):
         self.assertEqual(before, (open(self.sp).read(), open(self.lp).read()))
 
     def test_cli_exit_codes(self):
-        r = subprocess.run([sys.executable, os.path.join(HERE, "datg.py"), "--project", self.p,
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "datg.py"), "--project", self.p,
                             "add", "T", "--title", "t", "--goal", "th-G09"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
@@ -254,7 +256,7 @@ class EscalationNotifyCase(Base):
         return dict(os.environ, DATG_NOTIFY_CMD=self.stub, DATG_SESSION="tm-pilot")
 
     def run_datg(self, args, env, stdin=None):
-        return subprocess.run([sys.executable, os.path.join(HERE, "datg.py"), "--project", self.p] + args,
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "datg.py"), "--project", self.p] + args,
                               input=stdin, capture_output=True, text=True, env=env)
 
     def test_esc_update_queues_decision_with_id_and_title(self):
@@ -319,7 +321,7 @@ class HookWarningLogCase(Base):
     def test_warn_is_logged_with_session_and_text(self):
         self.set_mode("warn")
         n = len(self.log())
-        r = subprocess.run([sys.executable, os.path.join(HERE, "datg.py"), "hook"], input=json.dumps(self.PAYLOAD),
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "datg.py"), "hook"], input=json.dumps(self.PAYLOAD),
                            capture_output=True, text=True,
                            env=dict(os.environ, CLAUDE_PROJECT_DIR=self.p, DATG_SESSION="tm-pilot"))
         self.assertEqual(r.returncode, 0)
@@ -356,7 +358,7 @@ class HookWarningLogCase(Base):
 
 
 def run_cli(project, args, stdin=None, env=None, session=None):
-    cmd = [sys.executable, os.path.join(HERE, "datg.py"), "--project", project] + (["--session", session] if session else [])
+    cmd = [sys.executable, os.path.join(SCRIPTS, "datg.py"), "--project", project] + (["--session", session] if session else [])
     return subprocess.run(cmd + args, input=stdin, capture_output=True, text=True,
                           env=dict(os.environ, **(env or {})))
 

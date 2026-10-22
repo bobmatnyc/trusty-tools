@@ -7,7 +7,9 @@ import sys
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("il_cron", os.path.join(HERE, "il-cron.py"))
+# #10161: the shipped layout keeps the modules in ../scripts, the tests in tests/.
+SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+_spec = importlib.util.spec_from_file_location("il_cron", os.path.join(SCRIPTS, "il-cron.py"))
 ic = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ic)
 
