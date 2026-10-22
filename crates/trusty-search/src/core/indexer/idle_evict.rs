@@ -804,6 +804,7 @@ impl CodeIndexer {
         // to the log only, leaving every lane to answer from empty maps.
         let corpus_read_fault = Arc::clone(&self.corpus_read_fault);
         let last_rehydrate_cost_ms = Arc::clone(&self.last_rehydrate_cost_ms);
+        let scan_gate = Arc::clone(&self.corpus_scan_gate);
 
         tokio::spawn(async move {
             // Finding 1: constructed BEFORE any fallible work. Its `Drop`
@@ -816,6 +817,9 @@ impl CodeIndexer {
                 gate: inflight_gate,
                 notify,
             };
+            // #10110: scan and publish under the read side, so a batch removal
+            // (write side) never deletes rows this scan already read.
+            let _scan_gate = scan_gate.read().await;
 
             // Issue #3683 slice 2: wall-clock the scan itself (not the whole
             // detached task, which also includes lock acquisition + map

@@ -489,6 +489,20 @@ pub trait VectorStore: Send + Sync {
         out
     }
 
+    /// Ids this store holds that `keep` accepts (#10110).
+    ///
+    /// Why: a batch removal whose vector delete failed after its redb rows
+    /// went has no row left to name those ids; the retry finds them here.
+    /// What: default `Ok(vec![])` for a store that cannot list its ids;
+    /// `UsearchStore` overrides with one read-lock pass over `id_to_key`.
+    /// Test: `a_failed_vector_removal_is_an_error_and_a_retry_removes_the_orphans`.
+    async fn ids_where(
+        &self,
+        _keep: &(dyn for<'a> Fn(&'a str) -> bool + Send + Sync),
+    ) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Scalar-precision label the LIVE store actually holds (issue #6822).
     ///
     /// Why: `GET /indexes/:id/status` must report the precision of the index

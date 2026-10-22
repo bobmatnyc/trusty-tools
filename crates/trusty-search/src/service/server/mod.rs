@@ -59,6 +59,10 @@ mod project_park;
 mod project_park_tests;
 mod quantize_handlers;
 mod reindex_handlers;
+// #10110: `search.index.files.remove`, the batch removal by prefix or list.
+mod remove_files;
+#[cfg(test)]
+mod remove_files_tests;
 // #9236: maps a remove-file path onto the stored index-relative key.
 mod remove_path;
 mod residency_sweep;
@@ -339,6 +343,7 @@ pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+pub(crate) use remove_files::{remove_files_report, RemoveFilesRequest};
 // #7434: the `search.index.roots.add` socket method.
 pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.

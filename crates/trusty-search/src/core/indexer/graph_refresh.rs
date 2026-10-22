@@ -39,6 +39,12 @@ use tokio::time::Instant;
 
 use crate::core::symbol_graph::SymbolGraph;
 
+/// #10110 test seam: the durable dirty-mark stamp fails for each index id
+/// listed here, so a caller's fail-before-mutation path can be proven.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_DIRTY_MARK: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 use super::CodeIndexer;
 
 /// Quiet window after the last write before the ticker rebuilds (#8959).
@@ -259,6 +265,13 @@ impl CodeIndexer {
         refresh.inflight.fetch_add(1, Ordering::SeqCst);
         let guard = GraphWriteGuard { refresh };
         let generation = refresh.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        #[cfg(test)]
+        if TEST_FAIL_DIRTY_MARK
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected symbol-graph dirty mark failure (#10110 test seam)");
+        }
         if let Some(corpus) = self.corpus.clone() {
             tokio::task::spawn_blocking(move || corpus.mark_kg_graph_dirty(generation))
                 .await
