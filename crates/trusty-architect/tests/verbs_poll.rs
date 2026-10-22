@@ -302,6 +302,7 @@ fn a_configured_supervisor_is_skipped_and_the_only_pane_woken() -> TestResult {
         clock: &clock,
         alerts: &alerts,
         dry_run: true,
+        messages: &trusty_architect::poller::NoMessages,
     };
     let phrase = waker.dispatch_as(
         &config.supervisor,
@@ -336,7 +337,8 @@ fn a_bad_interval_is_a_usage_error() -> TestResult {
             interval: interval.to_owned(),
             dry_run: false,
         };
-        let err = verbs::poll(&args, &env.config).expect_err(interval);
+        let err = verbs::poll(&args, &env.config, &trusty_architect::poller::NoMessages)
+            .expect_err(interval);
         assert_eq!(err.exit_code(), 2, "{interval}: {err}");
     }
     Ok(())

@@ -100,6 +100,7 @@ pub fn waker<'a>(
         clock,
         alerts: Path::new(alerts),
         dry_run: false,
+        messages: &trusty_architect::poller::NoMessages,
     }
 }
 

@@ -32,6 +32,7 @@ use super::config::Config;
 use super::cycle::{Sensors, Stopped, collect};
 use super::host::HostProbe;
 use super::lock::PollLock;
+use super::messages::MessageSink;
 use super::pyfmt::py_int;
 use super::session::PollSession;
 use super::sink::{append_alerts, append_log};
@@ -136,6 +137,8 @@ pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     pub usage_probe: &'a dyn ProbeLauncher,
     /// Shows the macOS notification for `architect_*` alerts (#9801).
     pub notifier: &'a dyn Notifier,
+    /// Records each submitted wake (#9167).
+    pub messages: &'a dyn MessageSink,
     /// One cycle that writes nothing and sends nothing.
     pub dry_run: bool,
 }
@@ -247,6 +250,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             clock: self.clock,
             alerts: &alerts,
             dry_run: self.dry_run,
+            messages: self.messages,
         };
         let wake = waker.dispatch_as(
             &self.config.supervisor,

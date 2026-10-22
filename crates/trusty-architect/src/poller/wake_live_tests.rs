@@ -142,6 +142,7 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
         clock: &clock,
         alerts: Path::new("/tmp/a3b1-alerts.jsonl"),
         dry_run: false,
+        messages: &crate::poller::NoMessages,
     };
     let panes = [Pane {
         session: SESSION.to_owned(),
@@ -294,6 +295,7 @@ fn live_wake_keys_reach_only_the_target_pane() -> Result<(), Box<dyn std::error:
         clock: &clock,
         alerts: Path::new("/tmp/a3b1-two-alerts.jsonl"),
         dry_run: false,
+        messages: &crate::poller::NoMessages,
     };
     let panes = [listed(NAME, &first, "01"), listed(NAME, &second, "01")];
     let sent = waker.wake_as(NAME, &panes, 1, None)?;
@@ -378,6 +380,7 @@ fn live_wake_reads_a_wide_dim_suggestion_row() -> Result<(), Box<dyn std::error:
         clock: &clock,
         alerts: Path::new("/tmp/a3b1-wide-alerts.jsonl"),
         dry_run: true,
+        messages: &crate::poller::NoMessages,
     };
     let verdict = waker.wake_as(NAME, &[listed(NAME, &pane, "11")], 1, None)?;
     println!("wake -> {verdict}");
