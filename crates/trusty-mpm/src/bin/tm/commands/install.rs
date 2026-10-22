@@ -337,7 +337,7 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 /// `Notification` entry through
 /// [`trusty_mpm::core::standalone::hooks::notification::apply_notification_hook`].
 /// Test: see [`install_claude_hooks`]'s test list, plus
-/// `opt_in_off_installs_exactly_the_six_lifecycle_events` and
+/// `opt_in_off_installs_exactly_the_seven_lifecycle_events` and
 /// `opt_in_on_installs_one_notification_entry_idempotently`.
 #[cfg_attr(not(test), allow(dead_code))]
 fn install_claude_hooks_at(

@@ -10,7 +10,8 @@
 //! own session; `tm fleet init --session` sets both. [`poll`] runs the
 //! loop on the real tmux, clock and host: `--once` and `--dry-run` run one
 //! cycle through [`Runner::run_single`], which fails where the script logs
-//! and exits 0.
+//! and exits 0. #9167: each submitted wake is recorded through the caller's
+//! [`MessageSink`] (`tm` passes its trusty-events producer).
 //! Test: `poll_config_reads_the_shipped_names`,
 //! `run_single_fails_closed_when_tmux_cannot_list_panes` (tests/verbs_poll.rs).
 
@@ -21,7 +22,7 @@ use crate::clock::SystemClock;
 use crate::error::RunError;
 use crate::poller::steps::notify_macos::Osascript;
 use crate::poller::steps::usage::ScriptProbe;
-use crate::poller::{Config, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
+use crate::poller::{Config, MessageSink, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
 use crate::tmux::SystemTmux;
 
 /// `fleet-poll.py`'s arguments.
@@ -74,13 +75,14 @@ pub fn poll_config(
     Ok(config)
 }
 
-/// Runs the poller as `fleet-poll.py` would with `args`; see the module doc.
+/// Runs the poller as `fleet-poll.py` would with `args`, recording each
+/// submitted wake through `messages`; see the module doc.
 ///
 /// # Errors
 /// [`VerbError::Usage`] for an interval that is not a positive whole number;
 /// [`VerbError::Failed`] when another poller holds the lock, the inbox cannot
 /// be written, or a single run's cycle fails or is incomplete.
-pub fn poll(args: &PollArgs, config: &Config) -> Result<(), VerbError> {
+pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Result<(), VerbError> {
     let tmux = config
         .tmux_socket
         .as_ref()
@@ -95,6 +97,7 @@ pub fn poll(args: &PollArgs, config: &Config) -> Result<(), VerbError> {
         config,
         usage_probe: &usage_probe,
         notifier: &Osascript::default(),
+        messages,
         dry_run: args.dry_run,
     };
     let result = if args.once || args.dry_run {

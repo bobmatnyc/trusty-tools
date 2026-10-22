@@ -23,6 +23,8 @@ mod catalog;
 // #8378 PR-C: `tm content install|update|status` (ADR-0064).
 mod content;
 mod coordinator;
+// #9758: `tm dbatg` — the PM ledger writer.
+mod dbatg;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
@@ -61,6 +63,7 @@ pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
 pub(crate) use content::ContentAction;
 pub(crate) use coordinator::CoordinatorAction;
+pub(crate) use dbatg::{DbatgArgs, DbatgVerb};
 pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
     MilestonesAction,

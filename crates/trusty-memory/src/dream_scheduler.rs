@@ -325,12 +325,12 @@ fn dream_is_due(data_dir: &Path) -> bool {
 /// idle-evict ticker rides the SAME `watch` receiver as the dream loops so both
 /// stop cleanly on SIGTERM/SIGINT.
 /// What: clones `dream_shutdown_rx` for the idle-evict ticker, spawns the
-/// per-palace dream loops, spawns the idle-evict ticker
-/// (`TRUSTY_MEMORY_IDLE_EVICT_SECS`-gated), then spawns the shutdown bridge on
+/// per-palace dream loops, the chunk backfill ticker (#9735), the idle-evict
+/// ticker (`TRUSTY_MEMORY_IDLE_EVICT_SECS`-gated), then spawns the shutdown bridge on
 /// `dtx`. Returns the number of dream loops spawned (for the caller's log line).
 /// `after_cycle` goes to every dreamer (#8246).
-/// Test: exercised end-to-end by the daemon startup path; the ticker and
-/// scheduler are unit-tested in their own modules.
+/// Test: `background_maintenance_reembeds_pre_chunking_drawers`; the tickers
+/// and scheduler are unit-tested in their own modules.
 pub fn spawn_background_maintenance(
     registry: &Arc<PalaceRegistry>,
     dream_shutdown_rx: watch::Receiver<bool>,
@@ -348,6 +348,8 @@ pub fn spawn_background_maintenance(
         gate.clone(),
         idle_evict_rx.clone(),
     );
+    // #9735 PR 2: re-embed pre-chunking drawers; stops on the same watch.
+    crate::chunk_backfill_ticker::spawn_chunk_backfill_ticker(registry, idle_evict_rx.clone());
     crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), gate, idle_evict_rx);
     // Bridge is spawned AFTER the loops exist (see #1529 ordering note).
     spawn_shutdown_bridge(dtx);

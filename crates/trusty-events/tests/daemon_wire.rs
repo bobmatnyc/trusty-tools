@@ -10,8 +10,8 @@ use common::{
     subscribe,
 };
 use trusty_common::control_bus::{
-    HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageEvent, SubscribeFilter,
-    SubscribeItem, SubscribeParams,
+    HarnessEvent, HarnessPayload, HarnessSource, MessageChannel, MessageDirection, MessageEvent,
+    SubscribeFilter, SubscribeItem, SubscribeParams,
 };
 use trusty_common::uds::UdsRpcError;
 use trusty_common::uds::server::CODE_INVALID_PARAMS;
@@ -277,6 +277,7 @@ async fn a_message_event_round_trips_through_the_daemon_9167() {
     let message = MessageEvent {
         at: chrono::Utc::now(),
         channel: MessageChannel::Tmux,
+        direction: MessageDirection::Received,
         from: "s1".to_string(),
         to: "=dev-pm:".to_string(),
         relay: Some("[Ops Architect 08:0xZ]".to_string()),

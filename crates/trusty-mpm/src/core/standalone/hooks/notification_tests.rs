@@ -14,7 +14,7 @@ fn read(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// A settings file holding the six lifecycle groups plus the user's own hooks:
+/// A settings file holding the seven lifecycle groups plus the user's own hooks:
 /// a foreign `Notification` group and a foreign `PreToolUse` group.
 fn seeded_settings(path: &Path) -> Value {
     let lifecycle = super::super::mpm_hook_additions_with_exe(exe()).unwrap();
@@ -84,7 +84,7 @@ fn an_unset_target_is_unset_and_a_relative_one_is_refused() {
 /// With the opt-in off, the writer leaves the lifecycle-only file exactly as
 /// it is and creates no file where there was none.
 #[test]
-fn opt_in_off_installs_exactly_the_six_lifecycle_events() {
+fn opt_in_off_installs_exactly_the_seven_lifecycle_events() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("settings.json");
     assert!(!apply_notification_hook(&path, exe(), false).unwrap());

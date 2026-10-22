@@ -274,7 +274,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "hooks_missing_tm_group",
-        "Warns when a tm-provisioned project `.claude/settings*.json` carries NO tm hook group for one of the six lifecycle events, naming the file and each missing event. Only `prepare_session` wrote those groups and no resume or in-place relaunch reached it, so a project provisioned before an event existed never gained it — a missing `SessionStart` means `tm hook` never fires, no savings row is written under the live Claude session id, and the 💸 statusline segment stays hidden. `tm doctor --fix` previews merging the groups back in and `--yes` applies it, preserving every other entry and snapshotting the file first (issue #7490).",
+        "Warns when a tm-provisioned project `.claude/settings*.json` carries NO tm hook group for one of the seven lifecycle events, naming the file and each missing event. Only `prepare_session` wrote those groups and no resume or in-place relaunch reached it, so a project provisioned before an event existed never gained it — a missing `SessionStart` means `tm hook` never fires, no savings row is written under the live Claude session id, and the 💸 statusline segment stays hidden. `tm doctor --fix` previews merging the groups back in and `--yes` applies it, preserving every other entry and snapshotting the file first (issue #7490).",
     ),
     (
         "egress_guard",

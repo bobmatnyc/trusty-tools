@@ -136,6 +136,7 @@ impl Env {
             usage_probe: &self.probe,
             notifier: &self.notifier,
             dry_run: false,
+            messages: &trusty_architect::poller::NoMessages,
         }
     }
 }

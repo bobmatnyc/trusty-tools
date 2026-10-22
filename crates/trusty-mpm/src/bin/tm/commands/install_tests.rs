@@ -146,10 +146,11 @@ fn installed_events(config_dir: &std::path::Path) -> Vec<String> {
     events
 }
 
-/// #8392: with the opt-in off (the default) `tm install` writes exactly the six
-/// lifecycle events — no `Notification` key at all.
+/// #8392: with the opt-in off (the default) `tm install` writes exactly the seven
+/// lifecycle events — no `Notification` key at all. #10095 adds
+/// `PostToolUseFailure`.
 #[test]
-fn opt_in_off_installs_exactly_the_six_lifecycle_events() {
+fn opt_in_off_installs_exactly_the_seven_lifecycle_events() {
     let tmp = tempfile::tempdir().unwrap();
     let exe = Some(std::path::PathBuf::from(
         crate::test_support::STABLE_HOOK_EXE,
@@ -157,6 +158,7 @@ fn opt_in_off_installs_exactly_the_six_lifecycle_events() {
     install_claude_hooks_at(tmp.path(), exe, false).unwrap();
     let mut expected = vec![
         "PostToolUse",
+        "PostToolUseFailure",
         "PreToolUse",
         "SessionEnd",
         "SessionStart",

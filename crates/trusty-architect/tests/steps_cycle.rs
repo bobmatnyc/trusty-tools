@@ -143,6 +143,7 @@ fn a_failing_usage_probe_never_stops_the_cycle() -> TestResult {
         usage_probe: &probe,
         notifier: &notifier,
         dry_run: false,
+        messages: &trusty_architect::poller::NoMessages,
     };
     let (mut session, _) = PollSession::load(&env.config, false, clock.now_unix());
     let summary = runner.run_once(&mut session)?;

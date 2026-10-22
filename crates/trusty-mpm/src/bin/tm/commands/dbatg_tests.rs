@@ -1,0 +1,334 @@
+//! Tests for `tm dbatg`: parsing, the daemon-down fallback and its
+//! own-store rule, and the prototype's stdout.
+
+use std::path::{Path, PathBuf};
+
+use clap::Parser;
+use serde_json::Value;
+use trusty_architect::ledger::init_store;
+
+use super::{Ctx, Outcome, execute, fallback_registry};
+use crate::cli::{Cli, Command, DbatgArgs, DbatgVerb};
+
+/// A project with store `pm-a` (code `th`) and goal `th-G01`.
+fn project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    init_store(
+        &root.join("codes.json"),
+        &root,
+        "pm-a",
+        "th",
+        "2026-10-21T09:00Z",
+        &|_| true,
+    )
+    .expect("init");
+    (dir, root)
+}
+
+fn args(argv: &[&str]) -> DbatgArgs {
+    let full: Vec<&str> = ["tm", "dbatg"].iter().chain(argv).copied().collect();
+    match Cli::try_parse_from(full).expect("parse").command {
+        Some(Command::Dbatg(a)) => a,
+        other => panic!("not dbatg: {other:?}"),
+    }
+}
+
+/// Runs `argv` with no daemon at the socket, as session `own`, with the
+/// daemon's code registry at `root/codes.json`.
+async fn offline(root: &Path, own: Option<&str>, argv: &[&str], stdin: &str) -> Outcome {
+    offline_with(root, own, Some(root.join("codes.json")), argv, stdin).await
+}
+
+/// [`offline`] with an explicit fallback registry.
+async fn offline_with(
+    root: &Path,
+    own: Option<&str>,
+    registry: Option<PathBuf>,
+    argv: &[&str],
+    stdin: &str,
+) -> Outcome {
+    let mut input = stdin.as_bytes();
+    let ctx = Ctx {
+        socket: root.join("no-daemon.sock"),
+        cwd: root.to_path_buf(),
+        own_session: own.map(str::to_owned),
+        registry,
+        stdin: &mut input,
+    };
+    execute(args(argv), ctx).await
+}
+
+fn state(root: &Path) -> Value {
+    let text =
+        std::fs::read_to_string(root.join(".trusty-mpm/dbatg/pm-a/state.json")).expect("state");
+    serde_json::from_str(&text).expect("json")
+}
+
+#[test]
+fn cli_parses_every_dbatg_verb() {
+    let cases: [&[&str]; 7] = [
+        &["init", "--code", "th"],
+        &["add", "T", "--title", "t", "--goal", "th-G01"],
+        &["update", "th-T01", "--status", "running", "--rank", "2"],
+        &["close", "th-T01", "--outcome", "merged"],
+        &["--session", "pm-a", "batch", "--file", "ops.json"],
+        &["prune", "--dry-run", "--answered-hours", "48"],
+        &["show", "--brief"],
+    ];
+    for argv in cases {
+        let a = args(argv);
+        let ok = matches!(
+            a.verb,
+            DbatgVerb::Init { .. }
+                | DbatgVerb::Add { .. }
+                | DbatgVerb::Update { .. }
+                | DbatgVerb::Close { .. }
+                | DbatgVerb::Batch { .. }
+                | DbatgVerb::Prune { .. }
+                | DbatgVerb::Show { .. }
+        );
+        assert!(ok, "{argv:?}");
+    }
+}
+
+/// The amendment: with no daemon, `add` writes once, in-process, and prints
+/// the prototype's stdout; each verb keeps its exit code.
+#[tokio::test]
+async fn dbatg_cli_falls_back_in_process_when_the_daemon_is_down() {
+    let (_dir, root) = project();
+    let own = Some("pm-a");
+    let out = offline(&root, own, &["add", "G", "--title", "lorem"], "").await;
+    assert_eq!((out.stdout.as_str(), out.error), ("th-G01\n", None));
+    let out = offline(
+        &root,
+        own,
+        &[
+            "add", "D", "--title", "q", "--goal", "th-G01", "--opts", "a*,b",
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(out.stdout, "th-D01\n");
+    assert_eq!(
+        state(&root)["items"][0]["opts"],
+        serde_json::json!([{"l": "a", "rec": true}, {"l": "b", "rec": false}])
+    );
+    let out = offline(&root, own, &["batch"], r#"[{"op":"update","id":"th-D01","answer":"a"},{"op":"close","id":"th-D01","outcome":"done"}]"#).await;
+    assert_eq!(out.stdout, "th-D01, th-D01\n");
+    let out = offline(&root, own, &["prune"], "").await;
+    assert_eq!(out.stdout, "nothing to prune\n");
+    let out = offline(&root, own, &["show", "--brief"], "").await;
+    assert_eq!(out.stdout, "TOP th-G01 lorem\n");
+    let out = offline(
+        &root,
+        own,
+        &["add", "T", "--title", "t", "--goal", "th-G09"],
+        "",
+    )
+    .await;
+    assert_eq!((out.stdout.as_str(), out.error.map(|e| e.0)), ("", Some(2)));
+    let out = offline(&root, own, &["batch"], "not json").await;
+    assert_eq!(out.error.map(|e| e.0), Some(2));
+    assert_eq!(state(&root)["v"], 3);
+}
+
+/// The fallback writes only the caller's own store: another session's name
+/// is refused with exit 2 (LDG-3.6, #9758) and nothing written, while a read
+/// still answers.
+#[tokio::test]
+async fn dbatg_cli_fallback_refuses_another_sessions_store() {
+    let (_dir, root) = project();
+    let before = state(&root);
+    let out = offline(
+        &root,
+        Some("pm-b"),
+        &["--session", "pm-a", "add", "G", "--title", "x"],
+        "",
+    )
+    .await;
+    let (code, msg) = out.error.expect("refused");
+    assert_eq!(code, 2, "{msg}");
+    assert!(msg.contains("own store"), "{msg}");
+    assert_eq!(state(&root), before);
+    let out = offline(
+        &root,
+        Some("pm-b"),
+        &["--session", "pm-a", "show", "--brief"],
+        "",
+    )
+    .await;
+    assert_eq!(out.stdout, "no open items\n");
+    let out = offline(&root, None, &["add", "G", "--title", "x"], "").await;
+    assert_eq!(out.error.map(|e| e.0), Some(2), "no session is refused");
+}
+
+/// Fail-open check (#9758): a process whose own session is unknown cannot
+/// prove `--session` names its own store, so the write is refused (exit 2,
+/// nothing written) and reports no success; a read still answers.
+#[tokio::test]
+async fn dbatg_cli_fallback_refuses_a_write_when_its_own_session_is_unknown() {
+    let (_dir, root) = project();
+    let before = std::fs::read(root.join(".trusty-mpm/dbatg/pm-a/state.json")).expect("state");
+    let argv = ["--session", "pm-a", "add", "G", "--title", "x"];
+    let out = offline(&root, None, &argv, "").await;
+    assert_eq!(out.stdout, "", "a refused write printed an id");
+    let (code, msg) = out
+        .error
+        .expect("an unprovable store was written in-process");
+    assert_eq!(code, 2, "{msg}");
+    assert!(msg.contains("own store"), "{msg}");
+    let after = std::fs::read(root.join(".trusty-mpm/dbatg/pm-a/state.json")).expect("state");
+    assert_eq!(after, before);
+    assert!(!root.join(".trusty-mpm/dbatg/pm-a/outbox.jsonl").exists());
+    let out = offline(&root, None, &["--session", "pm-a", "show", "--brief"], "").await;
+    assert_eq!(out.stdout, "no open items\n");
+}
+
+/// Fail-open check (#9758): an in-process `init` registers its code only in
+/// the daemon's registry. With that registry unknown it exits 3 and creates
+/// neither the store nor a registry; with it known, it writes there.
+#[tokio::test]
+async fn dbatg_cli_fallback_init_writes_only_the_daemons_registry() {
+    let (_dir, root) = project();
+    let init = ["--session", "pm-c", "init", "--code", "tc"];
+    let out = offline_with(&root, Some("pm-c"), None, &init, "").await;
+    let (code, msg) = out.error.expect("init fell back to an unknown registry");
+    assert_eq!((code, out.stdout.as_str()), (3, ""), "{msg}");
+    assert!(msg.contains("code registry"), "{msg}");
+    assert!(!root.join(".trusty-mpm/dbatg/pm-c").exists());
+    let daemons = root.join("daemon-data").join("codes.json");
+    let out = offline_with(&root, Some("pm-c"), Some(daemons.clone()), &init, "").await;
+    assert_eq!((out.stdout.as_str(), out.error), ("initialised tc\n", None));
+    let registry = std::fs::read_to_string(&daemons).expect("registry");
+    assert!(registry.contains("\"tc\""), "{registry}");
+    assert!(root.join(".trusty-mpm/dbatg/pm-c/state.json").exists());
+}
+
+/// The fallback registry is this process's only for its own default socket.
+#[test]
+fn dbatg_cli_fallback_registry_is_the_daemons_or_none() {
+    let sock = PathBuf::from("/d/trusty-mpm/trusty-mpm.sock");
+    let reg = PathBuf::from("/d/trusty-mpm/dbatg/codes.json");
+    let pinned = PathBuf::from("/sandbox/data/trusty-mpm/trusty-mpm.sock");
+    let cases = [
+        (
+            &sock,
+            Some(sock.clone()),
+            Some(reg.clone()),
+            Some(reg.clone()),
+        ),
+        (&pinned, Some(sock.clone()), Some(reg.clone()), None),
+        (&sock, None, Some(reg.clone()), None),
+        (&sock, Some(sock.clone()), None, None),
+    ];
+    for (socket, default, registry, want) in cases {
+        assert_eq!(
+            fallback_registry(socket, default.clone(), registry.clone()),
+            want,
+            "{socket:?} {default:?} {registry:?}"
+        );
+    }
+}
+
+/// Runs `argv` against the daemon at `socket`, as session `own`.
+async fn online(root: &Path, socket: PathBuf, own: Option<&str>, argv: &[&str]) -> Outcome {
+    let mut input: &[u8] = b"";
+    let ctx = Ctx {
+        socket,
+        cwd: root.to_path_buf(),
+        own_session: own.map(str::to_owned),
+        registry: Some(root.join("codes.json")),
+        stdin: &mut input,
+    };
+    execute(args(argv), ctx).await
+}
+
+/// A real daemon serving its socket under `root`; dropping the sender stops it.
+async fn daemon(root: &Path) -> (PathBuf, tokio::sync::oneshot::Sender<()>) {
+    use std::sync::Arc;
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::daemon::state::DaemonState;
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(
+        root.join("fw"),
+    )));
+    let socket = root.join("sock").join("trusty-mpm.sock");
+    let bound = trusty_mpm::daemon::socket::bind(&socket)
+        .await
+        .expect("bind");
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(trusty_mpm::daemon::socket::serve_until_shutdown(
+        bound,
+        state,
+        async {
+            let _ = shutdown.await;
+        },
+    ));
+    for _ in 0..200 {
+        let wait = std::time::Duration::from_millis(50);
+        if trusty_common::uds::socket_is_serving(&socket, wait).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    (socket, stop)
+}
+
+/// LDG-3.6 check (#9758): a PM writing another session's store is refused
+/// with the daemon up, before anything is sent, with the same exit code and
+/// message as with the daemon down; its own store still writes.
+#[tokio::test]
+async fn a_pm_writing_another_sessions_store_is_refused_cli_daemon_up() {
+    let (_dir, root) = project();
+    let path = root.join(".trusty-mpm/dbatg/pm-a/state.json");
+    let before = std::fs::read(&path).expect("state");
+    let (socket, _stop) = daemon(&root).await;
+    let argv = ["--session", "pm-a", "add", "G", "--title", "x"];
+    let up = online(&root, socket.clone(), Some("pm-b"), &argv).await;
+    assert_eq!(up.stdout, "", "a refused write printed an id");
+    let (code, msg) = up.error.expect("the daemon wrote another session's store");
+    assert_eq!(code, 2, "{msg}");
+    assert!(msg.contains("own store"), "{msg}");
+    let down = offline(&root, Some("pm-b"), &argv, "").await;
+    assert_eq!(down.error, Some((code, msg)), "daemon down answers alike");
+    let unknown = online(&root, socket.clone(), None, &argv).await;
+    assert_eq!(unknown.error.map(|e| e.0), Some(2), "unknown own session");
+    assert_eq!(std::fs::read(&path).expect("state"), before);
+    let own = online(&root, socket, Some("pm-a"), &["add", "G", "--title", "y"]).await;
+    assert_eq!((own.stdout.as_str(), own.error), ("th-G01\n", None));
+}
+
+/// #9758: a daemon older than `tm dbatg` answers method-not-found with no
+/// `data.exit`. The CLI exits 3 (not 2, "refused input") with one line that
+/// names `tm restart` and the request id, and no method list.
+#[tokio::test]
+async fn dbatg_cli_reports_a_daemon_predating_dbatg_as_exit_3() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use trusty_common::uds::server::RpcError;
+    let (_dir, root) = project();
+    // The client dials only a 0600 socket in a 0700 directory.
+    let dir = root.join("old");
+    std::fs::create_dir(&dir).expect("socket dir");
+    std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o700)).expect("chmod dir");
+    let socket = dir.join("trusty-mpm.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+    std::fs::set_permissions(&socket, PermissionsExt::from_mode(0o600)).expect("chmod sock");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            let _ = BufReader::new(read).read_line(&mut line).await;
+            let err = RpcError::method_not_found("mpm.dbatg.batch", &["mpm.ping", "mpm.status"]);
+            let frame = serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": err});
+            let _ = write.write_all(format!("{frame}\n").as_bytes()).await;
+        }
+    });
+    let argv = ["--request-id", "r-old", "add", "G", "--title", "x"];
+    let out = online(&root, socket, Some("pm-a"), &argv).await;
+    let (code, msg) = out.error.expect("an old daemon answered success");
+    assert_eq!(code, 3, "{msg}");
+    assert!(msg.contains("tm restart"), "{msg}");
+    assert!(msg.contains("r-old"), "{msg}");
+    assert!(!msg.contains("mpm.ping") && !msg.contains('\n'), "{msg}");
+}

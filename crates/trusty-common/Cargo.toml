@@ -162,7 +162,8 @@ name = "trusty-common"
 # 0.63.0 (Refs #9722, #9719): minor — accepted 0.x break: PalaceHandle::l1_drawers becomes Arc<RwLock<Vec<Drawer>>> and refresh_l1 takes &self; 0.61.0 is live on crates.io.
 # 0.63.1 (Refs #9282): patch — additive PalaceHandle::snapshot / restore_palace_snapshot and snapshot types; three items narrowed to crate-private; 0.63.0 is live on crates.io.
 # 0.64.0 (Refs #9271): minor — breaking: the `memory_core` module moves to trusty-memory as `trusty_memory::engine`; `memory-core` becomes a no-op feature; `memory-core-test-support` is removed; hnsw_rs, git2, postcard, dashmap and unicode-normalization leave the dependency graph; adds `test-support`; subsumes the unpublished 0.63.1 (0.63.0 is live on crates.io).
-version = "0.64.0"
+# 0.65.0 (Refs #9167): minor — breaking: `MessageEvent` gains a public `direction` field (`MessageDirection`), so a struct-literal construction no longer compiles; 0.64.0 is live on crates.io.
+version = "0.65.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
