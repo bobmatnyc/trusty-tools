@@ -47,34 +47,33 @@ A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, sess
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
 ("warn"|"block") overrides the date. No network, no secrets (locations only in items).
+Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
+lives in datg_store.py (state files, commit, lock; `_SESSION`), datg_ops.py (write ops),
+datg_log.py (prune, archive, rotate, notices) and datg_read.py (digest, freshness, stamp);
+every name they define stays importable as datg.<name>. Ship all five side by side.
 Test: scripts/test_datg.py
 """
 import argparse
-import fcntl
 import json
 import os
-import re
-import subprocess
 import sys
-import time
-from datetime import datetime, timezone
 
-import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION)
-from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
+import datg_store  # #10161: main() sets datg_store._SESSION, which per_pm_session reads
+from datg_store import (  # noqa: F401  (#10161: re-exported for callers and tests)
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
     _tmux_session, answered_times, commit, datg_dir, load_state, log_rec, now_iso, parse_iso, parse_ts, paths,
     per_pm_session, prune_state, read_log, reconcile_archive,
 )
-from datg_ops import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
+from datg_ops import (  # noqa: F401  (#10161: re-exported for callers and tests)
     REFS_MAX, REF_KEY, _all_ids, _bad, _check_goal, _check_opts, _find, _int, _lim, _merge_refs, _next_id,
     _opts, _rows, _title, apply_add, apply_op, apply_session, apply_update, collect_closed, op_init,
     write_ops_ev,
 )
-from datg_log import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
+from datg_log import (  # noqa: F401  (#10161: re-exported for callers and tests)
     append_log, archive_lookup, notify_escalations, op_prune, op_rotate, pm_session, write_ops,
 )
-from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
+from datg_read import (  # noqa: F401  (#10161: re-exported for callers and tests)
     MUTATING_BASH, MUTATING_TOOLS, _digest_sections, _read_json, _short, _stamp_path, _to_epoch, build_digest,
     check_dispatch, dispatch_mode, log_hook_warning, op_fresh, stamp_turn, summary, turn_tools,
 )
