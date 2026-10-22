@@ -7,7 +7,7 @@
 //! What: [`store`] (the [`Store`] in the `dir` and `jsonl` formats, locking,
 //! versions, all-or-nothing batches), [`canonical`] (the two byte
 //! encodings), [`ids`] (path-safe names and the recycled id space),
-//! [`derive`] and [`tally`] (the one count path and the footer), and
+//! [`derive`](mod@derive) and [`tally`](mod@tally) (the one count path and the footer), and
 //! [`schema_check`] (the schema hook and the keyword-subset validator).
 //! Not here yet: the change log, the prune archive's file, `fsck`,
 //! `validate` (PR 2); verbs, daemon methods, MCP and CLI (PR 3).
