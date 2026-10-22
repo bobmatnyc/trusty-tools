@@ -33,9 +33,9 @@ fn needle() -> Vec<String> {
     (0..20).map(|i| format!("zq{i}needle")).collect()
 }
 
-/// 1000 distinct filler words, then the needle sentence.
+/// 990 filler words (33 whole chunks), then the needle sentence.
 fn long_text() -> String {
-    let mut words: Vec<String> = (0..1000).map(|i| format!("filler{i}")).collect();
+    let mut words: Vec<String> = (0..990).map(|i| format!("filler{i}")).collect();
     words.extend(needle());
     words.join(" ")
 }
