@@ -224,11 +224,11 @@ impl CodeIndexer {
             counts.removed_chunks += slice.ids.len();
             counts.removed_files += slice.files;
             self.drop_slice_from_memory(slice).await;
-            self.remove_vectors(&slice.ids)
+            self.try_remove_vectors(&slice.ids)
                 .await
                 .map_err(|e| fail(counts, e))?;
         }
-        self.remove_vectors(&plan.orphan_vectors)
+        self.try_remove_vectors(&plan.orphan_vectors)
             .await
             .map_err(|e| fail(counts, e))?;
         Ok(counts)
@@ -356,7 +356,7 @@ impl CodeIndexer {
 
     /// Delete `ids` from the vector store; every id is tried, and the first
     /// failure is returned with the count that failed (#10110 fix-bar 1).
-    async fn remove_vectors(&self, ids: &[String]) -> Result<()> {
+    async fn try_remove_vectors(&self, ids: &[String]) -> Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
