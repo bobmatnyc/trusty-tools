@@ -65,9 +65,11 @@ impl HnswStore {
     /// must index them the same way.
     /// What: marks a re-upserted id shadowed (#5171), inserts the point under
     /// the bounded insert gate and graph lock (#9487, #9187), and records it —
-    /// and any point the insert evicted from a neighbour list — for an exact
-    /// scan if a search for its own vector does not reach it (#9174).
+    /// and any point the insert evicted from a neighbour list, or left
+    /// reachable only through one (#10186) — for an exact scan if a search for
+    /// its own vector does not reach it (#9174).
     /// Test: `upsert_and_search_round_trips`,
+    /// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
     /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`,
     /// `upsert_chunks_replaces_the_group_and_shrinks`.
     pub(super) fn index_point(
@@ -100,6 +102,7 @@ impl HnswStore {
             .map_err(HnswStoreError::StdoutGuard)?;
         // #9174: a point its own search misses is scanned exactly instead —
         // the new one, and every one this insert evicted from a list.
+        // #10186: and every point behind an evicted one that its search misses.
         if !stranded::reachable(&index, vector, vector_id) {
             stranded::add_stranded(&mut self.stranded.write(), vector, vector_id);
         }
