@@ -202,6 +202,66 @@ mod tests {
         }
     }
 
+    /// #10063: every `dashboard` verb parses with the prototype's
+    /// arguments; a missing argument is clap's exit-2 refusal.
+    #[test]
+    fn cli_parses_architect_dashboard_verbs() {
+        let ok: &[&[&str]] = &[
+            &["dashboard", "get", "items", "D01"],
+            &["dashboard", "list", "items", "--status", "open"],
+            &[
+                "dashboard",
+                "set",
+                "items",
+                "D01",
+                "--json",
+                "{}",
+                "--if-version",
+                "0",
+            ],
+            &["dashboard", "update", "items", "D01", "--json", "-"],
+            &["dashboard", "delete", "items", "D01", "--if-version", "2"],
+            &["dashboard", "batch", "ops.json"],
+            &[
+                "dashboard",
+                "pruned",
+                "--id",
+                "D01",
+                "--collection",
+                "items",
+            ],
+            &["dashboard", "validate", "--schemas", "/s"],
+            &["dashboard", "fsck"],
+            &["dashboard", "tally", "--json"],
+            &["dashboard", "footer", "--tailnet", "https://t/"],
+            &["dashboard", "ids", "D"],
+            &[
+                "dashboard",
+                "--root",
+                "/r",
+                "--format",
+                "jsonl",
+                "--actor",
+                "a",
+                "fsck",
+            ],
+        ];
+        for args in ok {
+            let mut argv = vec!["tm", "architect"];
+            argv.extend_from_slice(args);
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{args:?}");
+        }
+        for bad in [
+            &["dashboard", "get", "items"][..],
+            &["dashboard", "set", "items", "D01"],
+        ] {
+            let mut argv = vec!["tm", "architect"];
+            argv.extend_from_slice(bad);
+            let err = Cli::try_parse_from(argv).expect_err("refused");
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+        }
+    }
+
     #[test]
     fn classify_reads_stdin_and_fails_closed_on_an_empty_capture() {
         let get = |_: &str| None;

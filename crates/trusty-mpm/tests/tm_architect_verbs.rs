@@ -282,3 +282,41 @@ fn self_ctx_binary_prints_tokens_and_fails_closed() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert_eq!(stdout(&out), "30\n");
 }
+
+/// #10063: `tm architect dashboard` writes the store in-process; a stale
+/// `--if-version` exits 1 (owner ruling D34) and leaves the bytes, and a
+/// read prints the document as `dashboard-db.py get` does.
+#[test]
+fn dashboard_binary_conflict_exits_1_and_writes_nothing() {
+    let env = VerbEnv::new();
+    let root = env.architect.path().join("store");
+    let root_arg = root.display().to_string();
+    let dash = |args: &[&str]| {
+        let mut cmd = env.command(&panes(), &["dashboard", "--root", &root_arg]);
+        for key in ["DASHBOARD_ROOT", "DASHBOARD_FORMAT", "DASHBOARD_ACTOR"] {
+            cmd.env_remove(key);
+        }
+        cmd.args(args).output().expect("run tm")
+    };
+    let set = dash(&["set", "items", "D01", "--json", r#"{"title": "é"}"#]);
+    assert_eq!(set.status.code(), Some(0), "{}", text(&set));
+    let doc = root.join("items").join("D01.json");
+    let before = std::fs::read(&doc).expect("written");
+    let stale = dash(&[
+        "set",
+        "items",
+        "D01",
+        "--json",
+        r#"{"title": "x"}"#,
+        "--if-version",
+        "7",
+    ]);
+    assert_eq!(stale.status.code(), Some(1), "{}", text(&stale));
+    assert_eq!(std::fs::read(&doc).expect("kept"), before, "bytes changed");
+    let get = dash(&["get", "items", "D01"]);
+    assert_eq!(get.status.code(), Some(0), "{}", text(&get));
+    assert_eq!(
+        stdout(&get),
+        "{\n  \"id\": \"D01\",\n  \"version\": 1,\n  \"data\": {\n    \"title\": \"é\"\n  }\n}\n"
+    );
+}
