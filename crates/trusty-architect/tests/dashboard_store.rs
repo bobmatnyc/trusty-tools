@@ -13,6 +13,12 @@ use trusty_architect::dashboard::{
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+/// A test scanner: nothing is secret-shaped (#10063 PR 2: a store with no
+/// scan refuses writes).
+fn no_secret(_: &str) -> Option<String> {
+    None
+}
+
 const FORMATS: [Format; 2] = [Format::Dir, Format::Jsonl];
 
 struct Accept;
@@ -53,7 +59,9 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 fn seeded(root: &Path, format: Format) -> Result<Store, DashError> {
-    let store = Store::new(root, format).with_archive(Box::new(Accept));
+    let store = Store::new(root, format)
+        .with_secret_scan(no_secret)
+        .with_archive(Box::new(Accept));
     store.set(
         "items",
         "D01",
@@ -267,7 +275,7 @@ fn delete_is_refused_without_an_archive_or_when_it_fails() -> R {
         let tmp = tempfile::tempdir()?;
         seeded(tmp.path(), format)?;
         let before = snapshot(tmp.path());
-        let bare = Store::new(tmp.path(), format);
+        let bare = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         assert!(
             matches!(
                 bare.delete("items", "D01", None),
@@ -275,7 +283,9 @@ fn delete_is_refused_without_an_archive_or_when_it_fails() -> R {
             ),
             "{format}"
         );
-        let failing = Store::new(tmp.path(), format).with_archive(Box::new(Refuse));
+        let failing = Store::new(tmp.path(), format)
+            .with_secret_scan(no_secret)
+            .with_archive(Box::new(Refuse));
         let got = failing.delete("goals", "G01", Some(1));
         assert_eq!(
             got.map_err(|e| e.to_string()).err().as_deref(),
@@ -320,7 +330,9 @@ fn lock_contention_is_unavailable_and_writes_nothing() -> R {
             .open(tmp.path().join(".lock"))?;
         // SAFETY: the fd stays open for `held`'s life; flock touches nothing else.
         assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
-        let store = Store::new(tmp.path(), format).with_lock_wait(Duration::from_millis(150));
+        let store = Store::new(tmp.path(), format)
+            .with_secret_scan(no_secret)
+            .with_lock_wait(Duration::from_millis(150));
         let start = Instant::now();
         let got = store.set("items", "D02", json!({}), None);
         assert!(
@@ -387,10 +399,12 @@ fn schema_enforce_refuses_and_warn_writes() -> R {
     fs::write(schemas.path().join("items.schema.json"), items.to_string())?;
     for format in FORMATS {
         let tmp = tempfile::tempdir()?;
-        let enforce = Store::new(tmp.path(), format).with_schemas(
-            Box::new(SchemaDir::load(schemas.path())?),
-            SchemaMode::Enforce,
-        );
+        let enforce = Store::new(tmp.path(), format)
+            .with_secret_scan(no_secret)
+            .with_schemas(
+                Box::new(SchemaDir::load(schemas.path())?),
+                SchemaMode::Enforce,
+            );
         let got = enforce.set("items", "D01", json!({"status": "nope"}), None);
         let Err(DashError::SchemaInvalid(errors)) = got else {
             return Err(format!("{format}: want SchemaInvalid, got {got:?}").into());
@@ -405,6 +419,7 @@ fn schema_enforce_refuses_and_warn_writes() -> R {
         );
         enforce.set("items", "D01", json!({"status": "open"}), None)?;
         let warn = Store::new(tmp.path(), format)
+            .with_secret_scan(no_secret)
             .with_schemas(Box::new(SchemaDir::load(schemas.path())?), SchemaMode::Warn);
         warn.update("items", "D01", json!({"status": "nope"}), None)?;
         assert_eq!(warn.get("items", "D01")?.data["status"], json!("nope"));
@@ -416,7 +431,7 @@ fn schema_enforce_refuses_and_warn_writes() -> R {
 fn list_filters_orders_and_limits_like_the_prototype() -> R {
     for format in FORMATS {
         let tmp = tempfile::tempdir()?;
-        let store = Store::new(tmp.path(), format);
+        let store = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         let docs = [
             ("a", json!({"rank": 3, "status": "open"})),
             ("b", json!({"rank": "x", "status": "open"})),

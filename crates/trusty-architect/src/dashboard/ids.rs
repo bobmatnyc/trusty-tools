@@ -12,7 +12,7 @@
 //! `done_at`, then `updated`, then `created`). The bare id grammar is
 //! [`crate::ledger::is_bare_id`], defined once (LDG-1.1). Pure: no clock, no
 //! filesystem.
-//! Test: `ids_next_wraps_past_ff_to_lowest_free`,
+//! Test: `ids_next_wraps_past_ff_to_lowest_free`, `ids_next_counts_media_ids`,
 //! `ids_retire_oldest_done_until_keep_free`, `ids_names_are_path_safe`.
 
 use std::collections::BTreeSet;
@@ -25,7 +25,15 @@ use crate::ledger::is_bare_id;
 use crate::pystr::py_repr;
 
 /// Collections whose doc ids share the per-prefix id space.
-pub const ID_COLLECTIONS: [&str; 5] = ["items", "goals", "priorities", "sessions", "questions"];
+// #10063 PR 2: `media` as in `dashboard_derive.py:17`.
+pub const ID_COLLECTIONS: [&str; 6] = [
+    "items",
+    "goals",
+    "priorities",
+    "sessions",
+    "questions",
+    "media",
+];
 /// Ids per prefix (`00`..`ff`).
 pub const SPACE: usize = 256;
 /// Free ids [`retire_candidates`] keeps by default (LDG-2.2.4).
@@ -172,6 +180,19 @@ mod tests {
             .collect();
         let refs: Vec<(&str, Value)> = all.iter().map(|(i, v)| (i.as_str(), v.clone())).collect();
         assert_eq!(next_id(&snap(&refs), 'T'), None);
+    }
+
+    // #10063 PR 2: `media` docs use the same per-prefix id space.
+    #[test]
+    fn ids_next_counts_media_ids() {
+        let mut s = Snapshot::new();
+        s.entry("media".to_owned()).or_default().push(Doc {
+            id: "B00".to_owned(),
+            version: 1,
+            data: serde_json::Map::new(),
+        });
+        assert_eq!(next_id(&s, 'B').as_deref(), Some("B01"));
+        assert_eq!(free_count(&s, 'B'), SPACE - 1);
     }
 
     #[test]

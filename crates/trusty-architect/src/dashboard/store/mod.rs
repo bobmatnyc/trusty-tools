@@ -10,39 +10,56 @@
 //! [`Store::list`], [`Store::collections`], [`Store::snapshot`]) take no
 //! lock: every replace is atomic. [`Store::batch`] takes `<root>/.lock`
 //! with a bounded wait, stages every [`Op`], runs the optional schema check
-//! ([`SchemaSet`], [`SchemaMode`]), hands each removed document to the
-//! [`DeleteArchive`] before anything is deleted, then commits. A delete with
-//! no archive configured is refused: the prune log's path and record shape
-//! are #10063 PR 2's (Q4, Q5), and a delete must never lose its record
-//! (LDG-2.8.4). No change log yet (PR 2).
+//! ([`SchemaSet`], [`SchemaMode`]), checks the change log can take the
+//! batch, hands each removed document to the [`DeleteArchive`] (in
+//! production a [`PruneLog`]) before anything is deleted, commits, then
+//! appends the change log (LDG-2.8.3). A delete with
+//! no archive and any batch with no secret scan are refused: a delete must
+//! never lose its record (LDG-2.8.4) and a secret must never be written
+//! (LDG-2.3.5). Names that differ only in letter case from an existing one,
+//! or from one earlier in the batch, are refused in both formats (#10063
+//! df-G01). [`Store::fsck`] and
+//! [`Store::validate`] check a whole store.
 //! Test: `tests/dashboard_golden.rs` (prototype bytes and outcomes),
-//! `tests/dashboard_store.rs` (conflict, rollback, refusals, lock, corrupt files).
+//! `tests/dashboard_store.rs` (conflict, rollback, refusals, lock, corrupt files),
+//! `tests/dashboard_case.rs` (case variants), `tests/dashboard_log.rs`
+//! (change log, prune log, fsck, validate, secrets).
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
 //! - [`SPEC-LEDGER-03~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-03~draft)
 
+mod case;
+mod changes;
 pub mod dir;
+mod fsck;
 pub mod jsonl;
 mod lock;
+pub mod pruned;
+mod sort;
 mod stage;
+mod validate;
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use super::canonical::python_dumps;
 use super::error::DashError;
 use super::ids::check_name;
 use super::schema_check::{SchemaMode, SchemaSet};
+use crate::clock::{Clock, SystemClock};
+use crate::secret::{SecretScan, scan_strings};
+pub use pruned::PruneLog;
+use sort::sort_key;
 use stage::Staged;
 pub use stage::{Op, OpResult, normalize_timestamps};
+pub use validate::Validation;
 
 /// How long a write waits for the store lock by default.
 pub const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -120,6 +137,10 @@ pub struct Removed<'a> {
     pub version: u64,
     /// Its full body.
     pub data: &'a Map<String, Value>,
+    /// When the batch ran, `YYYY-MM-DDTHH:MM:SSZ` (#10063 PR 2).
+    pub deleted_at: &'a str,
+    /// Who ran it: the store's actor.
+    pub by: &'a str,
 }
 
 /// Where deleted documents are recorded before they are removed (LDG-2.8.4).
@@ -132,6 +153,9 @@ pub trait DeleteArchive: Send + Sync {
     fn record(&self, removed: &[Removed<'_>]) -> Result<(), DashError>;
 }
 
+/// An owned secret-shape scanner (see [`crate::ledger::writer::SecretScan`]).
+type OwnedScan = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// A dashboard store at `root` in one [`Format`].
 pub struct Store {
     root: PathBuf,
@@ -139,6 +163,9 @@ pub struct Store {
     lock_wait: Duration,
     schemas: Option<(Box<dyn SchemaSet>, SchemaMode)>,
     archive: Option<Box<dyn DeleteArchive>>,
+    scan: Option<OwnedScan>,
+    clock: Arc<dyn Clock + Send + Sync>,
+    actor: String,
 }
 
 impl fmt::Debug for Store {
@@ -149,13 +176,17 @@ impl fmt::Debug for Store {
             .field("lock_wait", &self.lock_wait)
             .field("schema_mode", &self.schemas.as_ref().map(|s| s.1))
             .field("archive", &self.archive.is_some())
+            .field("secret_scan", &self.scan.is_some())
+            .field("actor", &self.actor)
             .finish()
     }
 }
 
 impl Store {
     /// A store at `root` (created on the first write) in `format`; no schema
-    /// check, no delete archive, a [`LOCK_WAIT`] lock wait.
+    /// check, no delete archive, no secret scan (so it refuses writes), the
+    /// system clock, actor `unknown` (the prototype's default), a
+    /// [`LOCK_WAIT`] lock wait.
     pub fn new(root: impl Into<PathBuf>, format: Format) -> Self {
         Self {
             root: root.into(),
@@ -163,7 +194,35 @@ impl Store {
             lock_wait: LOCK_WAIT,
             schemas: None,
             archive: None,
+            scan: None,
+            clock: Arc::new(SystemClock),
+            actor: "unknown".into(),
         }
+    }
+
+    /// Refuses any op holding a string (key or value, collection or id) that
+    /// `scan` flags; `scan` returns a shape name, never the value (LDG-2.3.5).
+    #[must_use]
+    pub fn with_secret_scan(
+        mut self,
+        scan: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.scan = Some(Box::new(scan));
+        self
+    }
+
+    /// The clock change-log and prune-log times come from.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The `by` of change-log and prune-log lines.
+    #[must_use]
+    pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
+        self.actor = actor.into();
+        self
     }
 
     /// Bounds the wait for the store lock.
@@ -197,18 +256,32 @@ impl Store {
         self.format
     }
 
-    /// Refuses `coll` when the store holds it in the other format.
+    /// Refuses `coll` when it is reserved, differs from an existing
+    /// collection only in letter case, or the store holds it in the other
+    /// format.
     fn guard(&self, coll: &str) -> Result<(), DashError> {
         check_name("collection", coll)?;
+        // #10063 PR 2: the change log is in both formats, so its name is
+        // reserved in both.
+        if jsonl::is_reserved(coll) {
+            return Err(DashError::Invalid(format!(
+                "collection name {} is reserved for the change log",
+                crate::pystr::py_repr(coll)
+            )));
+        }
+        let names = list_names(&self.root)?;
+        let stems = names
+            .iter()
+            .filter(|n| !n.starts_with('.'))
+            .map(|n| n.strip_suffix(".jsonl").unwrap_or(n));
+        if let Some(other) = case::variant(coll, stems) {
+            return Err(case::refusal("collection", coll, other));
+        }
         let has_jsonl = jsonl::coll_path(&self.root, coll).exists();
         match self.format {
             Format::Dir if has_jsonl => Err(DashError::WrongFormat(format!(
                 "{} holds {coll}.jsonl: open it as a jsonl store",
                 self.root.display()
-            ))),
-            Format::Jsonl if jsonl::is_reserved(coll) => Err(DashError::Invalid(format!(
-                "collection name {} is reserved for the change log",
-                crate::pystr::py_repr(coll)
             ))),
             Format::Jsonl if !has_jsonl && dir::has_docs(&self.root, coll)? => {
                 Err(DashError::WrongFormat(format!(
@@ -230,7 +303,7 @@ impl Store {
         check_name("doc id", id)?;
         self.guard(coll)?;
         let found = match self.format {
-            Format::Dir => dir::load(&dir::doc_path(&self.root, coll, id))?,
+            Format::Dir => dir::load_exact(&self.root, coll, id)?,
             Format::Jsonl => jsonl::read_coll(&self.root, coll)?.remove(id),
         };
         let (version, data) =
@@ -320,19 +393,24 @@ impl Store {
     ///
     /// # Errors
     /// [`DashError::Conflict`] (stale `if_version`), [`DashError::NotFound`],
-    /// [`DashError::Invalid`] (bad op, body, name, or a delete with no
-    /// archive), [`DashError::SchemaInvalid`] (enforce mode),
-    /// [`DashError::Unavailable`] (lock wait passed), the archive's error, or
-    /// an I/O or corrupt-file error. Nothing is written on any of these. A
-    /// write that fails midway is rolled back; when a restore fails too the
-    /// error is [`DashError::RollbackIncomplete`], naming the torn files.
-    /// Rollback covers failures, not crashes.
+    /// [`DashError::Invalid`] (bad op, body, name, a case variant of an
+    /// existing name, a delete with no archive, a batch with no secret
+    /// scan), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
+    /// (enforce mode), [`DashError::Unavailable`] (lock wait passed), the
+    /// archive's error, or an I/O or corrupt-file error, a torn or
+    /// unrotatable change log included. Nothing is written on
+    /// any of these. A write that fails midway is rolled back; when a restore
+    /// fails too the error is [`DashError::RollbackIncomplete`], naming the
+    /// torn files. Rollback covers failures, not crashes. A committed batch
+    /// whose durable change-log append fails is [`DashError::Unlogged`].
     pub fn batch(&self, ops: &[Op]) -> Result<Vec<OpResult>, DashError> {
         if ops.is_empty() {
             return Err(DashError::Invalid(
                 "batch needs a non-empty list of ops".into(),
             ));
         }
+        // #10063 PR 2: before the lock and before any message can quote a value.
+        self.refuse_secrets(ops)?;
         let _lock = lock::acquire(&self.root, self.lock_wait)?;
         let mut staged = Staged::default();
         let results = ops
@@ -340,9 +418,48 @@ impl Store {
             .map(|op| self.stage(&mut staged, op))
             .collect::<Result<Vec<_>, _>>()?;
         self.check_schemas(&staged)?;
-        self.archive_removed(&staged)?;
+        let now = crate::classify::alerts::iso(self.clock.now_unix());
+        // #10063 df-G01: the log's checks refuse the batch before any write.
+        let seq = changes::prepare(&self.root, &now)?;
+        self.archive_removed(&staged, &now)?;
         self.commit(&staged)?;
+        // #10063 PR 2: after the commit; a failure is reported, never dropped.
+        if let Err(cause) = changes::append(self, &staged, &now, seq) {
+            tracing::error!(error = %cause, "dashboard store: change log not written");
+            return Err(DashError::Unlogged {
+                results,
+                cause: Box::new(cause),
+            });
+        }
         Ok(results)
+    }
+
+    /// The first secret-shaped op, refused with its shape only; every batch
+    /// is refused when no scan is configured (fail closed, as a delete with
+    /// no archive is).
+    fn refuse_secrets(&self, ops: &[Op]) -> Result<(), DashError> {
+        let scan: SecretScan<'_> = match &self.scan {
+            Some(scan) => &**scan,
+            None => {
+                return Err(DashError::Invalid(
+                    "write refused: no secret scan is configured for this store".into(),
+                ));
+            }
+        };
+        for (i, op) in ops.iter().enumerate() {
+            let (coll, id, data) = op.scan_parts();
+            let shape = scan(coll)
+                .or_else(|| scan(id))
+                .or_else(|| data.and_then(|d| scan_strings(d, scan)));
+            if let Some(shape) = shape {
+                let n = i + 1;
+                tracing::warn!(op = n, shape = %shape, "dashboard store: secret-shaped value refused");
+                return Err(DashError::SecretRefused(format!(
+                    "op {n} refused: secret-shaped value ({shape}); write a location, never a value"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// `set` one document.
@@ -437,7 +554,7 @@ impl Store {
         Ok(())
     }
 
-    fn archive_removed(&self, staged: &Staged) -> Result<(), DashError> {
+    fn archive_removed(&self, staged: &Staged, now: &str) -> Result<(), DashError> {
         let removed: Vec<Removed<'_>> = staged
             .slots
             .iter()
@@ -448,6 +565,8 @@ impl Store {
                     id: &s.id,
                     version: *version,
                     data,
+                    deleted_at: now,
+                    by: &self.actor,
                 })
             })
             .collect();
@@ -461,62 +580,6 @@ impl Store {
             )
         })?;
         archive.record(&removed)
-    }
-}
-
-/// The prototype's list sort key: numbers, then strings, then containers (by
-/// their `json.dumps` text), then booleans and null (by Python's `str`).
-enum SortKey {
-    Number(f64),
-    Text(String),
-    Container(String),
-    Other(&'static str),
-}
-
-impl SortKey {
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Number(_) => 0,
-            Self::Text(_) => 1,
-            Self::Container(_) => 2,
-            Self::Other(_) => 3,
-        }
-    }
-}
-
-impl Ord for SortKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (Self::Number(a), Self::Number(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-            (Self::Text(a), Self::Text(b)) | (Self::Container(a), Self::Container(b)) => a.cmp(b),
-            (Self::Other(a), Self::Other(b)) => a.cmp(b),
-            _ => self.rank().cmp(&other.rank()),
-        }
-    }
-}
-
-impl PartialOrd for SortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for SortKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for SortKey {}
-
-fn sort_key(v: &Value) -> SortKey {
-    match v {
-        Value::Number(n) => SortKey::Number(n.as_f64().unwrap_or(0.0)),
-        Value::String(s) => SortKey::Text(s.clone()),
-        Value::Array(_) | Value::Object(_) => SortKey::Container(python_dumps(v, true)),
-        Value::Bool(true) => SortKey::Other("True"),
-        Value::Bool(false) => SortKey::Other("False"),
-        Value::Null => SortKey::Other("None"),
     }
 }
 
