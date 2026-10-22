@@ -83,7 +83,11 @@ pub fn foreign_store(project: &Path, session: &str, own: Option<&str>) -> Ledger
 /// A registered session is live while tmux has a session of that name.
 fn session_is_live(reg: &Registration) -> bool {
     std::process::Command::new("tmux")
-        .args(["has-session", "-t", &format!("={}", reg.session)])
+        .args([
+            "has-session",
+            "-t",
+            &trusty_common::tmux::exact_session_target(&reg.session),
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
