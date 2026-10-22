@@ -12,6 +12,7 @@ capped, joined with ` | `. Pure, no model call.
 Test: scripts/test_pm_digest.py
 """
 import argparse
+import calendar
 import importlib.util
 import json
 import os
@@ -26,7 +27,7 @@ MAX_LINES, MAX_WIDTH = 20, 110
 
 
 def parse_ts(text):
-    return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 def build(msgs, since_label, show_all=False):

@@ -89,6 +89,7 @@ def test_read_new_offset_dedup_and_partial_line(tmp_path):
 
 def test_poll_step_wakes_and_logs_held(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPERVISOR_INBOX_DIR", str(tmp_path))
+    monkeypatch.setenv("ARCHITECT_INBOX_DIR", str(tmp_path))
     _write(pi.messages_path(), M("blocker"), M("progress"), M("done", pr=3), M("done", pr=3))
     mk = lambda kind, fp, detail, session, pane, now: {"kind": kind, "fingerprint": fp, "detail": detail}
     out = tmp_path / "triage.jsonl"
@@ -101,6 +102,7 @@ def test_poll_step_wakes_and_logs_held(tmp_path, monkeypatch):
 
 def test_poll_step_dry_run_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPERVISOR_INBOX_DIR", str(tmp_path))
+    monkeypatch.setenv("ARCHITECT_INBOX_DIR", str(tmp_path))
     _write(pi.messages_path(), M("ack"))
     out = tmp_path / "triage.jsonl"
     pi.poll_step({}, None, NOW, str(out), dry_run=True)
@@ -108,7 +110,7 @@ def test_poll_step_dry_run_writes_nothing(tmp_path, monkeypatch):
 
 
 def test_pm_notify_appends_one_valid_line(tmp_path):
-    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path)}
+    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path), "ARCHITECT_INBOX_DIR": str(tmp_path)}
     r = subprocess.run([os.path.join(HERE, "pm-notify.sh"), "--kind", "head", "--session", "tm-a",
                         "--pr", "7", "--head", "abcdef1", "ready", "for", "review"],
                        capture_output=True, text=True, env=env)
@@ -119,7 +121,7 @@ def test_pm_notify_appends_one_valid_line(tmp_path):
 
 
 def test_pm_notify_requires_kind(tmp_path):
-    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path)}
+    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path), "ARCHITECT_INBOX_DIR": str(tmp_path)}
     r = subprocess.run([os.path.join(HERE, "pm-notify.sh"), "--session", "s", "x"],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 2 and not (tmp_path / "pm-messages.jsonl").exists()
@@ -134,6 +136,7 @@ def test_different_decision_texts_from_one_session_both_wake(tmp_path):
 
 def test_poll_step_returns_alerts_when_triage_write_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPERVISOR_INBOX_DIR", str(tmp_path))
+    monkeypatch.setenv("ARCHITECT_INBOX_DIR", str(tmp_path))
     _write(pi.messages_path(), M("blocker"), M("progress"))
     mk = lambda kind, fp, detail, session, pane, now: {"kind": kind, "fingerprint": fp, "detail": detail}
     bad = tmp_path / "no-such-dir" / "triage.jsonl"

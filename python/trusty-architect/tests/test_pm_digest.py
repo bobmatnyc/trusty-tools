@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+import calendar
 
 def _scripts_dir():
     """SCRIPTS env, else this directory if pm_intake.py is here, else ../scripts."""
@@ -44,7 +46,7 @@ def test_cap_is_20_lines_and_all_lifts_it():
 
 
 def _run(tmp_path, *args):
-    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path)}
+    env = {**os.environ, "SUPERVISOR_INBOX_DIR": str(tmp_path), "ARCHITECT_INBOX_DIR": str(tmp_path)}
     return subprocess.run([sys.executable, os.path.join(HERE, "pm-digest.py"), *args],
                           capture_output=True, text=True, env=env)
 
@@ -83,5 +85,16 @@ def test_held_since_skips_wake_and_old(tmp_path):
     rows = [M("progress", ts="2026-10-12T03:00:00Z"), M("progress", ts="2026-10-12T05:00:00Z"),
             M("decision", ts="2026-10-12T05:00:00Z")]
     f.write_text("\n".join(json.dumps(r) for r in rows))
-    got = pd.held_since(pd.parse_ts("2026-10-12T04:00:00Z"), str(f))
+    got = pd.held_since(calendar.timegm((2026, 10, 12, 4, 0, 0)), str(f))
     assert [m["kind"] for m in got] == ["progress"] and got[0]["ts"].endswith("05:00:00Z")
+
+
+def test_parse_ts_is_utc_epoch_regardless_of_dst():
+    assert pd.parse_ts("2026-10-12T04:00:00Z") == calendar.timegm((2026, 10, 12, 4, 0, 0))
+
+
+def test_held_since_counts_recent_message_against_real_epoch_cutoff(tmp_path):
+    f = tmp_path / "m.jsonl"
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
+    f.write_text(json.dumps(M("progress", ts=ts)) + "\n")
+    assert len(pd.held_since(time.time() - 600, str(f))) == 1
