@@ -360,6 +360,7 @@ impl ManagedTmuxDriver for RealTmuxDriver {
 
     /// #10127: the owned pane's pid through this driver's tmux, then the
     /// tri-state walk; an unreadable pid is `Unknown`.
+    /// Test: `a_harness_in_a_pane_holds_it_only_in_the_foreground`.
     fn pane_harness(
         &self,
         _name: &str,
@@ -367,7 +368,8 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         harness: &str,
     ) -> crate::core::process::PaneClaude {
         match self.driver.pane_pid(pane_id) {
-            Ok(pid) => crate::core::process::harness_under_pane(pid, harness),
+            // #10136: a stopped or background harness does not hold the pane.
+            Ok(pid) => crate::core::pane_foreground::harness_holds_pane(pid, harness),
             Err(_) => crate::core::process::PaneClaude::Unknown,
         }
     }

@@ -276,6 +276,10 @@ pub mod overseer_config;
 // #4058: single canonical source for the crate's own `[[bin]]` names, so
 // discovery/hooks/statusline/daemon-PID lists can't drift out of sync again.
 pub mod own_binary_names;
+// #10136: whether a pane's harness holds its tty foreground — the pane write gate.
+pub mod pane_foreground;
+#[cfg(test)]
+pub(crate) mod pane_foreground_tests;
 pub mod paths;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.

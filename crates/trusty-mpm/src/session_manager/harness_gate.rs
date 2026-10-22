@@ -30,10 +30,12 @@ impl SessionManager {
     /// refused as well as one that runs no harness.
     /// What: one [`super::ManagedTmuxDriver::pane_harness`] probe of the
     /// pane `owned_pane` proved. `Absent` → [`ManagedError::NoLiveHarness`]
-    /// led by `no_live_harness:`; `Unknown` → the same variant led by
-    /// `harness_unconfirmed:`. Both say nothing was typed.
+    /// led by `no_live_harness:`; `Unknown` (including a stopped or background
+    /// harness, #10136) → the same variant led by `harness_unconfirmed:`. Both
+    /// say nothing was typed.
     /// Test: `inbound_send_into_an_exited_harness_pane_types_nothing`,
-    /// `inject_probes_the_owned_pane_for_the_runtime_binary`.
+    /// `inject_probes_the_owned_pane_for_the_runtime_binary`,
+    /// `a_harness_in_a_pane_holds_it_only_in_the_foreground`.
     pub(super) fn require_live_harness(
         &self,
         record: &SessionRecord,
@@ -47,11 +49,17 @@ impl SessionManager {
                 "no_live_harness: session {name} pane {pane} runs no {harness}; \
                  nothing was typed — relaunch the session first"
             ),
+            // #10136: also a stopped or background harness, which does not
+            // hold the pane's tty; typed text would reach the shell.
             PaneClaude::Unknown => format!(
                 "harness_unconfirmed: session {name} pane {pane}: could not confirm \
-                 {harness} runs there; nothing was typed"
+                 {harness} runs there in the foreground; nothing was typed"
             ),
         };
         Err(ManagedError::NoLiveHarness(why))
     }
 }
+
+#[cfg(test)]
+#[path = "harness_gate_tests.rs"]
+mod tests;

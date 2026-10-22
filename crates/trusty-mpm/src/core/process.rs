@@ -147,7 +147,9 @@ pub enum PaneClaude {
     Present,
     /// Proven: no process in the pane is named `claude`.
     Absent,
-    /// The pane pid, a child list or a process name could not be read.
+    /// The pane pid, a child list or a process name could not be read; from
+    /// [`super::pane_foreground::harness_holds_pane`], also a harness that is
+    /// stopped or does not hold the pane's tty foreground (#10136).
     Unknown,
 }
 
@@ -174,19 +176,33 @@ pub fn pane_claude(session_name: &str) -> PaneClaude {
 ///
 /// What: the pane process, its children, and a #2997 disclaim wrapper's
 /// children; a case-insensitive substring match on the process name.
-/// `Present` on the first match; `Unknown` when a name or child list cannot
-/// be read; else `Absent`.
+/// `Present` on any match; `Unknown` when a name or child list cannot be
+/// read; else `Absent`. Existence only: a stopped or background harness reads
+/// `Present`, so a pane write gate uses
+/// [`super::pane_foreground::harness_holds_pane`] instead (#10136).
 /// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
 /// `a_pane_running_no_harness_reads_absent`.
 pub fn harness_under_pane(pane_pid: u32, harness: &str) -> PaneClaude {
+    match harness_pids_under_pane(pane_pid, harness) {
+        (pids, _) if !pids.is_empty() => PaneClaude::Present,
+        (_, true) => PaneClaude::Unknown,
+        (_, false) => PaneClaude::Absent,
+    }
+}
+
+/// Every process named `harness` in [`harness_under_pane`]'s walk, plus
+/// whether any name or child list could not be read (#10136: the foreground
+/// probe needs the pids, not only the verdict).
+pub(crate) fn harness_pids_under_pane(pane_pid: u32, harness: &str) -> (Vec<u32>, bool) {
     let mut level = vec![pane_pid];
+    let mut found = Vec::new();
     let mut unknown = false;
     // Depth 0: the pane process; 1: its children; 2: a wrapper's children.
     for depth in 0..3 {
         let mut next = Vec::new();
         for pid in level {
             match process_name_matches(pid, harness) {
-                Some(true) => return PaneClaude::Present,
+                Some(true) => found.push(pid),
                 Some(false) => {}
                 None => unknown = true,
             }
@@ -199,11 +215,7 @@ pub fn harness_under_pane(pane_pid: u32, harness: &str) -> PaneClaude {
         }
         level = next;
     }
-    if unknown {
-        PaneClaude::Unknown
-    } else {
-        PaneClaude::Absent
-    }
+    (found, unknown)
 }
 
 /// The direct children of `pid`, read from the process table (#8938).
