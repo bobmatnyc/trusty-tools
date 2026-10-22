@@ -1,0 +1,4 @@
+{"data":{"kind":"standing","rank":3,"removed_at":"2026-10-11T04:00:00Z","sessions":["lore"],"status":"removed","title":"lor","updated":"2026-10-11T04:00:00Z"},"id":"G01","sv":1,"version":1}
+{"data":{"finish_line":"lore","kind":"directed","rank":1,"rank_set_at":"2026-10-11T04:00:00Z","rank_set_by":"lor","sessions":["lore"],"status":"lorem ipsum do","title":"lore","updated":"2026-10-11T04:00:00Z"},"id":"G02","sv":1,"version":1}
+{"data":{"kind":"standing","park_ack":null,"parked":{"at":"2026-10-11T04:00:00Z","by":"lor","choice":"owner","until":null},"rank":2,"sessions":["lore"],"status":"lorem ipsum dolor s","title":"lorem ipsu","updated":"2026-10-11T04:00:00Z"},"id":"G03","sv":1,"version":1}
+{"data":{"board":{"label":"lorem","url":"lorem ipsum dolor sit amet elit sed "},"kind":"factory","rank":4,"repo":"lorem ip","sessions":["lore"],"status":"lorem ipsum d","title":"lorem i","updated":"2026-10-11T04:00:00Z"},"id":"G04","sv":1,"version":1}

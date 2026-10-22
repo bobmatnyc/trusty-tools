@@ -1,0 +1,3 @@
+{"data":{"map":{"D01":"lorem ipsum dolor s"},"updated":"2026-10-11T04:00:00Z"},"id":"seen","sv":1,"version":1}
+{"data":{"sleep_auto_on":"lorem ipsu","sleep_end":"lorem","sleep_start":"lorem","tz":"lorem ipsum","user_state":"remote","user_state_at":"2026-10-11T04:00:00Z","user_state_by":"lor"},"id":"settings","sv":1,"version":1}
+{"data":{"fleet_usage":{"agents_active":1,"agents_parked":0,"measured_at":"2026-10-11T04:00:00Z","out_tokens_1h":1,"out_tokens_24h":2,"units_24h":3.25},"next_ids":{"A":"03","D":"06"},"owner_name":"lor","updated":"2026-10-11T04:00:00Z"},"id":"state","sv":1,"version":1}

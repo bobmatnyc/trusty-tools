@@ -1,0 +1,47 @@
+{
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor ",
+  "created": "2026-10-09T13:17:19Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über",
+  "goal": "G01",
+  "goal_legacy": "lorem ipsum dolor sit amet e",
+  "kind": "task",
+  "parked": null,
+  "progress": {
+    "basis": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lore",
+    "confidence": "lorem ",
+    "estimated_at": "2026-10-09T14:45:17Z",
+    "eta": "2026-10-14T13:30:00Z",
+    "pct": 10
+  },
+  "rank": 2,
+  "session": "pm-11",
+  "specs": [
+    {
+      "label": "lorem ipsum dolor sit amet elit sed",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit se"
+    },
+    {
+      "label": "lorem ipsum dolor sit amet elit",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet eli"
+    },
+    {
+      "label": "lorem ipsum dolor sit amet elit se",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit s"
+    }
+  ],
+  "status": "open",
+  "status_at": "2026-10-11T04:04:50Z",
+  "status_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed te",
+  "status_request": null,
+  "steer_requests": [
+    {
+      "at": "lorem ipsum dolor sit am",
+      "by": "lor",
+      "relayed_at": "2026-10-11T04:02:11Z",
+      "text": "lorem ipsum dolor sit a"
+    }
+  ],
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor",
+  "updated": "2026-10-19T07:36:32Z",
+  "version": 1
+}

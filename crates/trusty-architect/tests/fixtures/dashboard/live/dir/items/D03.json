@@ -1,0 +1,54 @@
+{
+  "answer": "lorem ipsum dolor sit a",
+  "answer_note": "lorem ipsum dolor sit amet elit se",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-12T02:57:00Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor",
+  "due": null,
+  "goal": "G01",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+      "label": "lorem ipsum dolor sit a",
+      "markers": {
+        "risk": -1,
+        "scope": 0,
+        "work": 0
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna l",
+      "label": "lorem ipsum dolor sit amet elit sed tempor ",
+      "markers": {
+        "risk": -2,
+        "scope": -1,
+        "work": 0
+      },
+      "recommended": false
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lor",
+      "label": "lorem ipsum dolor sit amet elit sed tempor üb",
+      "markers": {
+        "risk": 2,
+        "scope": 1,
+        "work": 0
+      },
+      "recommended": false
+    }
+  ],
+  "rank": 1,
+  "session": "pm-3",
+  "specs": [
+    {
+      "label": "lorem ip",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum ",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

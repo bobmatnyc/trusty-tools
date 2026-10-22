@@ -1,0 +1,36 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed ",
+  "answer_note": "lorem ipsum dolor sit amet el",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-11T06:14:45Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet",
+  "due": null,
+  "goal": "G0d",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lor",
+      "label": "lorem ipsum dolor sit amet elit sed ",
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit a",
+      "label": "lorem ipsum dolor sit amet elit sed"
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über",
+      "label": "lorem ipsum dolor sit"
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lor",
+      "label": "lorem ipsum dolor sit a"
+    }
+  ],
+  "rank": 8,
+  "session": "pm-10",
+  "specs": [],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magn",
+  "updated": "lorem ipsum dolor sit am",
+  "version": 1
+}

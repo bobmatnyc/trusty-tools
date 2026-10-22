@@ -1,0 +1,51 @@
+{
+  "answer": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit am",
+  "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor üb",
+  "answered_at": "lorem ipsum dolor sit am",
+  "created": "2026-10-21T10:32:31Z",
+  "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ",
+  "goal": "G01",
+  "kind": "question",
+  "options": [
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor si",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed ",
+      "markers": {
+        "risk": -1,
+        "scope": 1,
+        "work": 1
+      },
+      "recommended": true
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsu",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum d",
+      "markers": {
+        "risk": 1,
+        "scope": 0,
+        "work": -1
+      }
+    },
+    {
+      "desc": "lorem ipsum dolor sit amet elit sed tempor über magna l",
+      "label": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit am",
+      "markers": {
+        "risk": 2,
+        "scope": 0,
+        "work": -1
+      }
+    }
+  ],
+  "rank": 2,
+  "session": "pm-10",
+  "specs": [
+    {
+      "label": "lorem",
+      "url": "lorem ipsum dolor sit amet elit sed tempor über magna"
+    }
+  ],
+  "status": "answered",
+  "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ",
+  "updated": "2026-10-21T11:16:00Z",
+  "version": 1
+}

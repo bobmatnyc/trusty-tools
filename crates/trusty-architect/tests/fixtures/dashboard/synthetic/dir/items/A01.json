@@ -1,0 +1,32 @@
+{
+  "answer": "Hold",
+  "created": "2026-10-11T04:00:00Z",
+  "goal": "G03",
+  "kind": "action",
+  "rank": 5,
+  "resume_request": {
+    "at": "2026-10-11T04:00:00Z",
+    "by": "lor"
+  },
+  "session": "pm-1",
+  "status": "open",
+  "status_request": null,
+  "steer_requests": [
+    {
+      "at": "2026-10-11T04:00:00Z",
+      "by": "lor",
+      "text": "lo"
+    }
+  ],
+  "steps": [
+    {
+      "done": false,
+      "id": "lo",
+      "title": "lorem"
+    }
+  ],
+  "title": "lorem",
+  "updated": "2026-10-12T03:46:00Z",
+  "version": 2,
+  "wont_do_attempts": null
+}

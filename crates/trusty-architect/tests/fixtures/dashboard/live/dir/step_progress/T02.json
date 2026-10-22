@@ -1,0 +1,32 @@
+{
+  "item": "lor",
+  "steps": {
+    "s1": {
+      "done": true,
+      "done_at": "2026-10-08T21:24:00Z"
+    },
+    "s2": {
+      "done": true,
+      "done_at": "2026-10-08T21:33:36Z"
+    },
+    "s3": {
+      "done": true,
+      "done_at": "2026-10-08T21:45:00Z"
+    },
+    "s4": {
+      "done": true,
+      "done_at": "2026-10-08T22:28:00Z"
+    },
+    "s5": {
+      "done": true,
+      "done_at": "2026-10-08T22:28:00Z"
+    },
+    "s6": {
+      "done": true,
+      "done_at": "2026-10-08T23:50:00Z",
+      "note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed temp"
+    }
+  },
+  "updated": "2026-10-08T23:50:00Z",
+  "version": 1
+}

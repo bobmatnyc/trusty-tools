@@ -1,0 +1,58 @@
+{
+  "details": {
+    "gh_at": "2026-10-16T08:32:30Z",
+    "issues": {
+      "bugs": 2,
+      "bugs_p1": 0,
+      "merged_open": 8,
+      "open": 10,
+      "p1": 0,
+      "p2": 2,
+      "security": 0,
+      "top": []
+    },
+    "next": "lorem ipsum dolor sit amet elit sed tempor ü",
+    "pr_stats": {
+      "by_state": {
+        "hold": 2
+      },
+      "merged_24h": 2,
+      "merged_7d": 33,
+      "merged_7d_capped": false,
+      "open": 2
+    },
+    "prs": [
+      {
+        "n": 9838,
+        "state": "hold",
+        "url": "lorem ipsum dolor sit amet elit sed tempor über mag"
+      },
+      {
+        "n": 9927,
+        "state": "hold",
+        "url": "lorem ipsum dolor sit amet elit sed tempor über mag"
+      }
+    ]
+  },
+  "goal": "lorem ipsum dolor si",
+  "name": "lorem ipsum d",
+  "order": 10,
+  "progress": 0,
+  "project": "lorem ipsum dolor sit amet el",
+  "state": "working",
+  "status": "lorem ipsum dolor sit amet elit ",
+  "summary": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über",
+  "updated": "2026-10-21T08:40:28Z",
+  "usage": {
+    "agents_active": 0,
+    "agents_parked": 0,
+    "ctx_k": 106.9,
+    "idle_min": 97,
+    "live_state": "idle",
+    "measured_at": "2026-10-21T15:02:12Z",
+    "out_tokens_1h": 0,
+    "out_tokens_24h": 6519,
+    "units_24h": 1.99
+  },
+  "version": 1
+}
