@@ -1042,13 +1042,15 @@ unchanged.
   "matched_chunks", "removed_files", "removed_chunks" }`. A dry run answers the
   counts with `removed_*: 0` and changes nothing; the real run then removes
   what it counted.
-- **Memory bound**: the selected rows are read by redb key range, so the
-  removal path does not rehydrate chunks. Deleting vectors promotes a
-  view-mode HNSW index to the heap (`UsearchStore::remove` calls
-  `ensure_mutable`): O(index size) until the write-cooldown demote. The one
-  scheduled graph rebuild rehydrates the corpus; if the scan outlasts its
-  bounded wait the rebuild is deferred, the durable mark stays set and the
-  ticker retries (#10110). Chunk and entity rows leave in one write transaction per slice of
+- **Memory bound**: peak memory is baseline plus ONE copy of the vector
+  index per batch call, not per file. The copy comes from a view-mode HNSW
+  index promoted to the heap (`UsearchStore::remove` calls `ensure_mutable`)
+  and is released at the write-cooldown demote. The host needs free memory
+  for one copy of the vector index. The selected rows are read by redb key
+  range, so the removal path itself rehydrates no chunks; the one scheduled
+  graph rebuild rehydrates the corpus, and if the scan outlasts its bounded
+  wait the rebuild is deferred, the durable mark stays set and the ticker
+  retries (#10110). Chunk and entity rows leave in one write transaction per slice of
   500 ids; the call stamps one durable graph-dirty mark, so the symbol graph
   rebuilds once. A committed delete stamps `reindexed_unix` (#9230); the
   selected content hashes are forgotten, so the next reindex indexes the files

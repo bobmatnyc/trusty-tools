@@ -101,7 +101,8 @@ pub const METHOD_INDEX_FILE_PUT: &str = "search.index.file.put";
 /// `POST /indexes/{id}/remove-file` — drop one file's chunks from an index.
 pub const METHOD_INDEX_FILE_REMOVE: &str = "search.index.file.remove";
 /// Remove every file under a prefix, or in a list, in one call (#10110).
-/// Socket-only — it has no HTTP twin.
+/// Socket-only — it has no HTTP twin. The host needs free memory for one copy
+/// of the vector index per call.
 pub const METHOD_INDEX_FILES_REMOVE: &str = "search.index.files.remove";
 /// `POST /indexes/{id}/reindex` — queue a full reindex. The trigger only.
 pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
