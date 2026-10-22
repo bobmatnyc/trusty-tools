@@ -57,6 +57,29 @@ cd python/trusty-architect && python3 -m pytest
 The tests need pytest and nothing else. CI runs them, plus the drift check's
 selftest, only when this directory or the check changes.
 
+## Export and scrub (maintainers)
+
+Files reach this directory from the Architect checkout through the repository
+root's `scripts/architect_export.py`, never by hand copy (#9171). It copies only
+the paths in `scripts/architect_export_manifest.txt`, refuses instance paths
+(`local/`, `owner/`, `records/`, `inbox/`, `docs/briefs/`, `.env*`,
+`.mcp.json`) and symlinks even when listed, applies an out-of-tree rewrite
+table, and exits non-zero on any leak residue. It requires an out-of-tree deny
+file and writes nothing unless the result is clean.
+
+```sh
+python3 scripts/architect_export.py --source <architect checkout> \
+  --staging <empty dir outside this repo> --deny-file <deny file> \
+  --rewrite-file <rewrite file> --dry-run
+```
+
+Checklist for a PR that brings exported files in:
+
+- [ ] Staged with `scripts/architect_export.py`, gate clean, then copied in.
+- [ ] Ran `ARCHITECT_LEAK_DENY_FILE=<out-of-tree file> bash scripts/check_architect_subproject.sh` on the final tree.
+- [ ] Ran the deny list over `git log -p origin/main..HEAD`.
+- [ ] Opened the diff of every `*.json` and `*.jsonl` fixture.
+
 ## Deployment
 
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,

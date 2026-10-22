@@ -57,6 +57,9 @@ it crossed the threshold).
       `scripts/check_changelog_fragment.sh`. Docs-only, CI-only, and test-only
       PRs are exempt.
 - [ ] Public API docs / reference / runbook updated, or not applicable.
+- [ ] Architect export (files brought in from the Architect checkout): staged with
+      `scripts/architect_export.py`, then `ARCHITECT_LEAK_DENY_FILE=<out-of-tree file>
+      bash scripts/check_architect_subproject.sh` run on the final tree, or not applicable.
 
 ## Checklist
 

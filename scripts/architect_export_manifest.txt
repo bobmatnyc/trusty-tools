@@ -1,0 +1,47 @@
+# architect_export_manifest.txt — the allow-list scripts/architect_export.py stages (#9171).
+#
+# Line: SRC_REL[<TAB>DEST_REL]. SRC_REL is relative to --source (the Architect
+# checkout), DEST_REL to --staging, laid out like python/trusty-architect/.
+# DEST_REL defaults to SRC_REL. A SRC_REL ending in /** copies every file under
+# that directory, and DEST_REL is then a directory. Lines starting with # and
+# blank lines are skipped.
+#
+# Starter set: exactly what python/trusty-architect/ ships today. Each later
+# export PR adds the rows it ships, reviewed with its content. Instance paths
+# (local/, owner/, records/, inbox/, docs/briefs/, .env*, .mcp.json, ...) are
+# refused by the tool even when listed here. Never add an instance-* skill or
+# any path that names an account, host or person.
+
+# Poller and pane helpers.
+scripts/fleet-poll.py
+scripts/input-state.py
+scripts/posted.sh
+scripts/quiet-sessions.py
+scripts/relay-marker.py
+scripts/relay.sh
+scripts/self-ctx.py
+scripts/start-fleet-poll.sh
+
+# Skills: .claude/skills/<name>/SKILL.md -> skills/<name>.md.
+.claude/skills/architect-completion-standard/SKILL.md	skills/architect-completion-standard.md
+.claude/skills/architect-github/SKILL.md	skills/architect-github.md
+.claude/skills/architect-operating-rules/SKILL.md	skills/architect-operating-rules.md
+.claude/skills/architect-owner-model/SKILL.md	skills/architect-owner-model.md
+.claude/skills/architect-search-memory/SKILL.md	skills/architect-search-memory.md
+.claude/skills/architect-strategy/SKILL.md	skills/architect-strategy.md
+.claude/skills/architect-tmux-ops/SKILL.md	skills/architect-tmux-ops.md
+.claude/skills/architect-workflow/SKILL.md	skills/architect-workflow.md
+.claude/skills/tm-context-refresh/SKILL.md	skills/tm-context-refresh.md
+.claude/skills/tm-fleet-check/SKILL.md	skills/tm-fleet-check.md
+
+# Voice guide.
+docs/architect/voice.md	docs/voice.md
+
+# Instance templates: templates/<f> -> templates/local/<f>.
+templates/actions.md	templates/local/actions.md
+templates/goals.md	templates/local/goals.md
+templates/state.md	templates/local/state.md
+templates/user.md	templates/local/user.md
+templates/mandates/**	templates/local/mandates
+templates/owner/**	templates/local/owner
+templates/projects/**	templates/local/projects

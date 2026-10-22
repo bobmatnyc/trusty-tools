@@ -346,14 +346,14 @@ LEAK_ROOT_REL = "content/instructions/architect"
 LEAK_SKIP_DIRS = {"inbox", "__pycache__", ".pytest_cache"}
 
 
-def load_leak_rules(path):
+def load_leak_rules(path, deny=None):
     """Rules from the shared pattern file, the one scripts/check_architect_subproject.sh reads.
 
     Why: the two Architect leak gates must not drift (#9996), and a missing,
       malformed or empty pattern must fail the gate, never pass it vacuously.
     What: parses `CLASS<TAB>FLAGS<TAB>MATCH[<TAB>ALLOW]`; each regex is compiled
       here so an engine-rejected pattern fails too. Optional private names come
-      from the file named by ARCHITECT_LEAK_DENY_FILE (unset = skipped).
+      from `deny`, else the file named by ARCHITECT_LEAK_DENY_FILE (unset = skipped).
     Test: selftest cases leaks-patterns-missing, leaks-empty-regex, leaks-bad-regex.
     """
     if not path.is_file():
@@ -375,7 +375,7 @@ def load_leak_rules(path):
             rules.append((fields[0], re.compile(fields[2], flags), allow))
         except re.error as err:
             errors.append(f"GREP_ERROR: {fields[0]}: regex rejected at {path}:{num}: {err}")
-    deny = os.environ.get("ARCHITECT_LEAK_DENY_FILE", "")
+    deny = os.environ.get("ARCHITECT_LEAK_DENY_FILE", "") if deny is None else str(deny)  # See #9171
     if deny:
         names = []
         try:
@@ -401,19 +401,16 @@ def load_leak_rules(path):
     return rules
 
 
-def cmd_leaks(root):
-    """Apply the shared leak patterns to content/instructions/architect/** (#9996)."""
-    top = root / LEAK_ROOT_REL
-    if not top.is_dir():
-        raise Fail(f"SCAN_ROOT: {LEAK_ROOT_REL} does not exist, so it was not scanned")
-    default = Path(__file__).resolve().parent / "architect_leak_patterns.txt"
-    rules = load_leak_rules(Path(os.environ.get("ARCHITECT_LEAK_PATTERNS") or default))
-    errors, scanned = [], 0
-    for path in sorted(p for p in top.rglob("*") if p.is_file() and not LEAK_SKIP_DIRS & set(p.relative_to(top).parts)):
-        # Bytes, not text: a NUL or an invalid UTF-8 byte must not hide a leak.
-        data = path.read_bytes()
-        scanned += 1
-        rel = path.relative_to(root).as_posix()
+def leak_findings(files, rules):
+    """`(class, rel, line, shown)` per leak hit in `files`, an iterable of `(rel, bytes)`.
+
+    Why: cmd_leaks and scripts/architect_export.py share this loop, so they cannot drift (#9171).
+    What: bytes, not text, so a NUL or invalid UTF-8 byte cannot hide a leak; `shown`
+      is "(redacted)" on a SECRET line and ***@domain for an EMAIL.
+    Test: selftest leaks-* cases; scripts/tests/test_architect_export.py.
+    """
+    found = []
+    for rel, data in files:
         for num, raw in enumerate(data.split(b"\n"), 1):
             line = raw.decode("latin-1")
             secret_line = any(c == "SECRET" and rx.search(line) for c, rx, _ in rules)
@@ -425,12 +422,25 @@ def cmd_leaks(root):
                             shown = "(redacted)"
                         elif cls == "EMAIL":
                             shown = "***@" + shown.rsplit("@", 1)[-1]
-                        errors.append(f"{cls}: {rel}:{num}: {shown}")
-    if scanned == 0:
+                        found.append((cls, rel, num, shown))
+    return found
+
+
+def cmd_leaks(root):
+    """Apply the shared leak patterns to content/instructions/architect/** (#9996)."""
+    top = root / LEAK_ROOT_REL
+    if not top.is_dir():
+        raise Fail(f"SCAN_ROOT: {LEAK_ROOT_REL} does not exist, so it was not scanned")
+    default = Path(__file__).resolve().parent / "architect_leak_patterns.txt"
+    rules = load_leak_rules(Path(os.environ.get("ARCHITECT_LEAK_PATTERNS") or default))
+    paths = sorted(p for p in top.rglob("*") if p.is_file() and not LEAK_SKIP_DIRS & set(p.relative_to(top).parts))
+    files = ((p.relative_to(root).as_posix(), p.read_bytes()) for p in paths)
+    errors = [f"{cls}: {rel}:{num}: {shown}" for cls, rel, num, shown in leak_findings(files, rules)]
+    if not paths:
         errors.append(f"SCAN_ROOT: {LEAK_ROOT_REL} holds no files")
     if errors:
         raise Fail("\n".join(errors))
-    print(f"check_content leaks: {scanned} file(s) scanned — OK")
+    print(f"check_content leaks: {len(paths)} file(s) scanned — OK")
 
 
 def cmd_sync(root):
