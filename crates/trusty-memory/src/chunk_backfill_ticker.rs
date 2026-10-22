@@ -216,7 +216,8 @@ impl Ticker {
     /// until the probe succeeds. It then lists the palaces, takes the first
     /// from the cursor whose marker [`ChunkMarker::needs_scan`] and that is
     /// not fruitless this pass, and visits it. A closed palace is opened
-    /// through the LRU and released after. No recall runs, so no drawer
+    /// through the LRU, stays open while the cursor stays on it, and is released
+    /// when the cursor leaves it or the ticker stops. No recall runs, so no drawer
     /// access is recorded (#9881).
     /// Test: `chunk_backfill_ticker_tests` (e.g.
     /// `ticker_resumes_from_the_marker_after_a_restart`,
