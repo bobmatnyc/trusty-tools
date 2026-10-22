@@ -590,7 +590,21 @@ pub fn split_internal(members: Vec<StableMember>) -> (Vec<StableMember>, Vec<Str
 /// `tests::soft_internal_member_is_dropped_from_the_selection`,
 /// `tests::explicit_internal_member_is_reported_unavailable`.
 pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
-    let all = stable_set();
+    select_members_transitive_in(stable_set(), names)
+}
+
+/// [`select_members_transitive`] over a caller-supplied member list.
+///
+/// Why (#10130): the only soft target in the shipped set is internal, so no
+/// test through the public entry point can observe a soft, kept member. Tests
+/// pass the shipped set with the internal flag cleared.
+/// What: the whole body of the public function; it takes `all` where that
+/// function passes [`stable_set`].
+/// Test: `tests::a_softly_pulled_member_is_soft_and_a_named_one_is_not`.
+pub(crate) fn select_members_transitive_in(
+    all: Vec<StableMember>,
+    names: &[String],
+) -> TransitiveSelection {
     if names.is_empty() {
         // #10130: the full set never fetches an internal member either.
         let (members, internal_skipped) = split_internal(all);
@@ -665,6 +679,21 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
     }
 }
 
+/// The shipped set with trusty-events published (`internal` cleared).
+///
+/// Why (#10130): gives tests a soft member that survives [`split_internal`],
+/// so the #10042 soft handling is observable again.
+/// What: [`stable_set`] with the one `internal` flag cleared; nothing else.
+/// Test: `tests::a_softly_pulled_member_is_soft_and_a_named_one_is_not`.
+#[cfg(test)]
+pub(crate) fn stable_set_with_published_bus() -> Vec<StableMember> {
+    let mut set = stable_set();
+    for m in set.iter_mut().filter(|m| m.internal) {
+        m.internal = false;
+    }
+    set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +756,98 @@ mod tests {
         let (kept, skipped) = split_internal(vec![published_soft.clone()]);
         assert_eq!(kept, vec![published_soft], "only `internal` drops a member");
         assert!(skipped.is_empty());
+    }
+
+    /// Why (#10042): a producer's bus is the operator's optional extra, so the
+    /// resolver marks it soft and not required, while a bus the operator
+    /// named is an ordinary member. The shipped bus is internal and dropped,
+    /// so this runs on the set with the bus published.
+    /// What: selecting trusty-mpm keeps trusty-events with `soft: true` and
+    /// `required: false`; selecting trusty-events itself keeps it `soft:
+    /// false`; no other member is ever soft.
+    /// Test: This is the test.
+    #[test]
+    fn a_softly_pulled_member_is_soft_and_a_named_one_is_not() {
+        let via_producer = select_members_transitive_in(
+            stable_set_with_published_bus(),
+            &["trusty-mpm".to_owned()],
+        );
+        let bus = via_producer
+            .members
+            .iter()
+            .find(|m| m.crate_name == "trusty-events")
+            .expect("a published soft bus is kept");
+        assert!(bus.soft && !bus.required, "{bus:?}");
+        assert!(via_producer.internal_skipped.is_empty());
+        assert!(
+            via_producer
+                .members
+                .iter()
+                .filter(|m| m.crate_name != "trusty-events")
+                .all(|m| !m.soft),
+            "only the soft edge's target is soft: {via_producer:?}"
+        );
+
+        let named = select_members_transitive_in(
+            stable_set_with_published_bus(),
+            &["trusty-events".to_owned()],
+        );
+        let bus = named
+            .members
+            .iter()
+            .find(|m| m.crate_name == "trusty-events")
+            .expect("a named bus is selected");
+        assert!(!bus.soft, "a named member is never soft: {bus:?}");
+    }
+
+    /// Why (#10130): the skip must come from the static `internal` flag and
+    /// nothing else, so no input can drop a published member.
+    /// What: for every subset of the stable set (2^n names; a subset naming an
+    /// internal member is refused and skipped here): `internal_skipped` is a
+    /// subset of the internal members, and `members` plus `internal_skipped`
+    /// equals the hard closure plus the soft additions. The empty subset is
+    /// the full set.
+    /// Test: This is the test.
+    #[test]
+    fn only_the_internal_flag_removes_a_member_from_any_selection() {
+        let all = stable_set();
+        let internal: Vec<String> = all
+            .iter()
+            .filter(|m| m.internal)
+            .map(|m| m.crate_name.clone())
+            .collect();
+        let n = all.len();
+        for mask in 0u32..(1 << n) {
+            let names: Vec<String> = (0..n)
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| all[i].crate_name.clone())
+                .collect();
+            if names.iter().any(|x| internal.contains(x)) {
+                continue;
+            }
+            let sel = select_members_transitive(&names);
+            assert!(
+                sel.internal_skipped.iter().all(|s| internal.contains(s)),
+                "{names:?}: {sel:?}"
+            );
+            let mut got: Vec<String> = sel
+                .members
+                .iter()
+                .map(|m| m.crate_name.clone())
+                .chain(sel.internal_skipped.iter().cloned())
+                .collect();
+            got.sort();
+            let want: Vec<String> = if names.is_empty() {
+                all.iter().map(|m| m.crate_name.clone()).collect()
+            } else {
+                let closure = super::super::dependency_graph::transitive_closure(&names);
+                let soft = super::super::dependency_graph::soft_additions(&closure);
+                closure.union(&soft).cloned().collect()
+            };
+            let mut want = want;
+            want.sort();
+            assert_eq!(got, want, "{names:?}");
+        }
     }
 
     /// Why (#10130): the flag is a hand-set constant. Pin which members carry

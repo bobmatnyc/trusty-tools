@@ -1450,21 +1450,34 @@ fn the_picker_round_trip_never_names_the_internal_bus() {
     assert_eq!(sel.internal_skipped, vec!["trusty-events".to_owned()]);
 }
 
-/// Why (#10130): naming the bus is the operator's request; it cannot be
-/// installed, so the request is refused rather than dropped.
-/// What: the picker's first pass over `[trusty-analyze, trusty-events]`
-/// reports the bus as unavailable and selects nothing, so no member list
-/// carrying the bus can reach the round trip's second pass.
+/// Why (#10042): `override_names` must hand a soft member back to the
+/// resolver as an implicit pull, not a name. Named, the bus would turn
+/// `soft: false` and gate an optional producer's run.
+/// What: with the bus published, the round trip from `[trusty-mpm]` keeps
+/// trusty-events soft and not required, and `override_names` omits it while
+/// keeping a member that is not soft.
 /// Test: This is the test.
 #[test]
-fn a_named_bus_is_refused_through_the_round_trip() {
-    let names = ["trusty-analyze".to_owned(), "trusty-events".to_owned()];
-    let first = select_members_transitive(&names);
-    assert_eq!(first.unavailable, vec!["trusty-events".to_owned()]);
-    assert!(first.members.is_empty(), "{first:?}");
+fn the_picker_round_trip_keeps_a_soft_member_soft() {
+    let first = crate::commands::stable_set::select_members_transitive_in(
+        crate::commands::stable_set::stable_set_with_published_bus(),
+        &["trusty-mpm".to_owned()],
+    );
+    let names = crate::commands::picker::override_names(&first.members);
+    assert!(!names.contains(&"trusty-events".to_owned()), "{names:?}");
+    assert!(names.contains(&"trusty-mpm".to_owned()), "{names:?}");
+    let second = crate::commands::stable_set::select_members_transitive_in(
+        crate::commands::stable_set::stable_set_with_published_bus(),
+        &names,
+    );
+    let bus = second
+        .members
+        .iter()
+        .find(|m| m.crate_name == "trusty-events")
+        .expect("the bus is pulled in again");
     assert!(
-        crate::commands::picker::override_names(&first.members).is_empty(),
-        "nothing is handed back to `run`"
+        bus.soft && !bus.required,
+        "promoted to a named member: {bus:?}"
     );
 }
 
@@ -1546,15 +1559,15 @@ fn install_dry_run_omits_internal_bus() {
 }
 
 /// Why (#10130): the skip must read only the static flag. A crates.io probe
-/// answers `None` for a network error and for a 404 alike, so a filter that
-/// read a probe or an install `Outcome` would drop a PUBLISHED member on a
-/// flaky network.
-/// What: every lookup fails with a connect error. trusty-search and
-/// trusty-analyze are still attempted, and their failed rows go through the
-/// existing paths — search (required) as an error, analyze (optional) as a
-/// "no prebuilt" skip — never as an internal skip. The filter's signature is
-/// pinned to take nothing but the members.
-/// Test: This is the test.
+/// answers `None` for a network error and a 404 alike, so a filter that read
+/// a probe or an install `Outcome` would drop a PUBLISHED member on a flaky
+/// network.
+/// What: no lookup runs. It pins the filter's signature to take nothing but
+/// the members, then feeds connect-error rows through the report: a failed
+/// required member (trusty-search) is an error, a failed optional one
+/// (trusty-analyze) is a "no prebuilt" skip, never an internal skip.
+/// Test: This is the test; the subset property is
+/// `stable_set::tests::only_the_internal_flag_removes_a_member_from_any_selection`.
 #[test]
 fn network_failure_never_skips_a_published_member() {
     // Pinned signature: no probe, no Outcome, no I/O argument.

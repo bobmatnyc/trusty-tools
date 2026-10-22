@@ -190,7 +190,7 @@ fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
 /// #10130: the bus is now internal, so the resolver drops it instead; a
 /// round trip must still never name it, or the re-resolution exits 3.
 /// Test: `install::tests::the_picker_round_trip_never_names_the_internal_bus`,
-/// `install::tests::a_named_bus_is_refused_through_the_round_trip`.
+/// `install::tests::the_picker_round_trip_keeps_a_soft_member_soft`.
 pub fn override_names(chosen: &[StableMember]) -> Vec<String> {
     chosen
         .iter()
