@@ -28,7 +28,8 @@
 //! [`crate::session::events_stream`], and the workstream fan-out by
 //! [`crate::workstreams::events_stream`]; both are registered as STREAM
 //! methods, which the router checks before the fallback, so the names win over
-//! the pass-through.
+//! the pass-through. `session.attach` itself is refused by name on the socket
+//! ([`attach_refusal`]); it stays served over `tcode serve --stdio`.
 //!
 //! #6637 slice 2c retired the loopback HTTP/SSE listener that used to run
 //! beside the socket; nothing in this daemon binds a TCP port.
@@ -125,7 +126,8 @@ fn throwaway_ctx() -> ConnectionContext {
 /// onto the response frame, so the one supplied here would only be
 /// overwritten. The context is [`throwaway_ctx`]'s, because a one-frame-in,
 /// one-frame-out connection has nowhere to push a notification to; the one
-/// handler that would try is served as a stream instead.
+/// handler that would try is refused before it reaches here
+/// ([`attach_refusal`]).
 /// Test: `uds_tests::fallback_dispatches_every_jsonrpc_router_method`,
 /// `uds_tests::fallback_reports_an_unknown_method`.
 pub struct JsonRpcFallback {
@@ -154,23 +156,61 @@ impl RpcFallback for JsonRpcFallback {
     }
 }
 
-/// Assemble the socket router: two stream methods plus the whole JSON-RPC
-/// table behind them.
+/// The method [`attach_refusal`] answers for on the socket.
+const ATTACH_METHOD: &str = "session.attach";
+
+/// The socket's answer to `session.attach`: a refusal naming `session.events`.
+///
+/// Why (#6637): through the fallback, `session.attach` answered success with
+/// the replay burst and a `stream_url` for the retired HTTP route, then pushed
+/// nothing — its forwarder writes to [`throwaway_ctx`]'s dropped channel. A
+/// caller read that as attached and waited for events that never came.
+/// What: `-32601`, which JSON-RPC 2.0 defines as "method does not exist / is
+/// not available", with a message and `data` naming the stream method to open
+/// instead. Answered for every params value, before any session lookup, so a
+/// bad id never hides where the live path is. `tcode serve --stdio` still
+/// serves `session.attach`; its connection can carry notifications.
+/// Test: `uds_tests::session_attach_over_the_socket_is_refused_naming_session_events`.
+fn attach_refusal() -> RpcError {
+    RpcError::new(
+        trusty_common::uds::server::CODE_METHOD_NOT_FOUND,
+        format!(
+            "{ATTACH_METHOD} is not available on the socket: a socket connection cannot carry \
+             its live notifications. Open {} with \"stream\": true for the replay and the live \
+             tail; {ATTACH_METHOD} remains on `tcode serve --stdio`.",
+            events_stream::METHOD
+        ),
+    )
+    .with_data(serde_json::json!({
+        "error_type": "transport_unsupported",
+        "use_stream": events_stream::METHOD,
+    }))
+}
+
+/// Assemble the socket router: two stream methods, one refusal, and the whole
+/// JSON-RPC table behind them.
 ///
 /// Why: kept separate from [`run_daemon_on`] so a test can dispatch against it
 /// without binding a socket.
 /// What: registers [`crate::session::events_stream::METHOD`] and
 /// [`crate::workstreams::events_stream::METHOD`] with
-/// [`RpcRouter::typed_stream`], then mounts [`JsonRpcFallback`]. Neither
-/// stream is marked with `RpcRouter::mark_liveness`: an open tail is real work
-/// and must hold the connection, not be discounted as a monitor's poll.
-/// Test: `uds_tests::stream_names_win_over_the_fallback`.
+/// [`RpcRouter::typed_stream`], registers `session.attach` as
+/// [`attach_refusal`], then mounts [`JsonRpcFallback`]. A registered name wins
+/// over the fallback. Neither stream is marked with
+/// `RpcRouter::mark_liveness`: an open tail is real work and must hold the
+/// connection, not be discounted as a monitor's poll.
+/// Test: `uds_tests::stream_names_win_over_the_fallback`,
+/// `uds_tests::session_attach_over_the_socket_is_refused_naming_session_events`.
 pub fn build_rpc_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
 ) -> RpcRouter {
     RpcRouter::new()
+        // #6637: refused by name, so the fallback never answers it.
+        .typed(ATTACH_METHOD, |_params: Value| async {
+            Err::<Value, _>(attach_refusal())
+        })
         .typed_stream(events_stream::METHOD, move |params: SessionEventsParams| {
             let sessions = sessions.clone();
             async move { events_stream::open(sessions, params).await }

@@ -1,0 +1,2 @@
+Documentation
+- The README and the bridge's module docs no longer describe a `tcode serve --http` daemon on `127.0.0.1:7882`. They describe the bridge as it runs: it dials the daemon's Unix socket and serves the webview on an ephemeral loopback port, which [#10166](https://github.com/bobmatnyc/trusty-tools/issues/10166) tracks replacing ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))

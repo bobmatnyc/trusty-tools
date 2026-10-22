@@ -1,8 +1,9 @@
 //! The per-app local-client credential a loopback daemon and its clients
 //! share through a `0600` file (#5439).
 //!
-//! Why: `trusty-code serve --http` binds loopback and merged its routes with
-//! no caller check at all, so any process on the machine could read sessions
+//! Why: `trusty-code serve --http`, retired by #6637, bound loopback and
+//! merged its routes with no caller check at all, so any process on the
+//! machine could read sessions
 //! and transcripts and drive mutation routes. A loopback bind limits *remote*
 //! reach; it establishes no identity among LOCAL callers, and a page the
 //! operator has open in a browser reaches `127.0.0.1` from inside that

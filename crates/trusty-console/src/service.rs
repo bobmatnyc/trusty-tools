@@ -327,7 +327,8 @@ mod tests {
     /// real source constant, so a future edit here that reintroduces a
     /// collision fails this test instead of shipping a crash-loop. #2573
     /// extended this table to cover trusty-embedderd's `--http` mode default
-    /// too; #6289 removed that row again when ADR-0032 retired the listener.
+    /// too; #6289 removed that row again when ADR-0032 retired the listener,
+    /// and #6637 removed trusty-code's for the same reason.
     /// What: asserts `crate::DEFAULT_PORT` is absent from the known-sibling
     /// ports list.
     /// Test: this is the test.
@@ -364,15 +365,12 @@ mod tests {
             // 7881 for a `/metrics` + `/health` listener nothing read and
             // publishes to `~/.trusty-mpm/supervisor-metrics.json` instead, so
             // 7881 is not reserved by anything and listing it would forbid a
-            // future daemon a free port. #3364 (below) is why the row existed.
-            (
-                // #3364: trusty-code's own default HTTP port, which previously
-                // reused 7881 and collided with the supervisor's listener,
-                // since retired.
-                "trusty-code",
-                7882,
-                "trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT",
-            ),
+            // future daemon a free port. #3364 is why the row existed.
+            //
+            // #6637: trusty-code has NO ROW. `tcode serve` binds no TCP port
+            // and `DEFAULT_HTTP_PORT` is gone. trusty-code-gui's webview
+            // bridge binds `127.0.0.1:0`, an ephemeral port, so there is no
+            // fixed port to reserve (#10166 tracks that listener).
         ];
         for (binary, port, source) in known_siblings {
             assert_ne!(

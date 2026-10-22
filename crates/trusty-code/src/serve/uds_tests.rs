@@ -336,6 +336,18 @@ async fn fallback_dispatches_every_jsonrpc_router_method() {
 
     for method in names {
         let response = daemon.call(method, json!({})).await;
+        // #6637: the one name the socket refuses on purpose. Its own test,
+        // `session_attach_over_the_socket_is_refused_naming_session_events`,
+        // pins the refusal; here it must at least be that refusal.
+        if method == "session.attach" {
+            let error = response.error.expect("session.attach must be refused");
+            assert!(
+                error.message.contains("session.events"),
+                "session.attach's refusal must name session.events, got: {}",
+                error.message
+            );
+            continue;
+        }
         // Bare `{}` params are wrong for most of these — what matters is that
         // the name RESOLVED. `method_not_found` is the one answer that proves
         // the fallback did not reach the dispatcher.
@@ -347,6 +359,62 @@ async fn fallback_dispatches_every_jsonrpc_router_method() {
                 error.message
             );
         }
+    }
+
+    daemon.shutdown().await.expect("clean shutdown");
+}
+
+/// `session.attach` over the socket is refused with an error naming
+/// `session.events` (#6637), for a real session and for an unknown id alike.
+///
+/// Why: through the fallback it answered success with the replay and then
+/// pushed nothing, because a socket connection is one frame in, one frame out.
+/// A caller took that as attached and waited forever. On the pre-fix daemon
+/// the first call below returns a `result`, so this fails there.
+/// What: creates a real session, then sends `session.attach` for it and for an
+/// id no session carries, through the real socket of a real daemon.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn session_attach_over_the_socket_is_refused_naming_session_events() {
+    let daemon = TestDaemon::start().await;
+    let created = daemon
+        .call("session.create", json!({"task": "attach-refusal"}))
+        .await;
+    let session_id = created
+        .result
+        .as_ref()
+        .and_then(|r| r.get("id"))
+        .and_then(Value::as_str)
+        .expect("session.create returns an id")
+        .to_string();
+
+    for id in [session_id.as_str(), "no-such-session-6637"] {
+        let response = daemon
+            .call("session.attach", json!({"session_id": id}))
+            .await;
+        assert!(
+            response.result.is_none(),
+            "session.attach({id}) must not answer success over the socket, got: {:?}",
+            response.result
+        );
+        let error = response.error.expect("session.attach must be refused");
+        assert_eq!(
+            error.code,
+            trusty_common::uds::server::CODE_METHOD_NOT_FOUND,
+            "got: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("session.events"),
+            "the refusal must name the stream to open instead, got: {}",
+            error.message
+        );
+        assert_eq!(
+            error.data.as_ref().and_then(|d| d.get("use_stream")),
+            Some(&json!("session.events")),
+            "the refusal's data must name the stream, got: {:?}",
+            error.data
+        );
     }
 
     daemon.shutdown().await.expect("clean shutdown");

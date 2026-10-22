@@ -443,12 +443,12 @@ async fn send(
 /// What: over STDIO, `ctx.notify` is the long-lived per-process channel —
 /// live events are pushed on the SAME connection as
 /// `{"jsonrpc":"2.0","method":"session.event","params":{...}}` lines,
-/// interleaved with ordinary responses. Over the socket, `ctx.notify` is a
-/// throwaway per-request channel (the forwarder self-terminates once the
-/// response is written); the socket's live path is the `session.events`
-/// stream method (`crate::session::events_stream`, #6637). `stream_url`
-/// stays on the wire: `trusty-code-gui`'s HTTP bridge serves that path to
-/// its webview, and STDIO clients ignore it.
+/// interleaved with ordinary responses. The socket never reaches this
+/// handler: `crate::serve::uds` refuses `session.attach` by name and points
+/// the caller at the `session.events` stream method
+/// (`crate::session::events_stream`, #6637). `stream_url` stays on the wire:
+/// `trusty-code-gui`'s HTTP bridge serves that path to its webview, and STDIO
+/// clients ignore it.
 /// `-32007 session_not_found` if `session_id` is unknown.
 /// Test: `protocol::tests::attach_unknown_session_maps_to_session_not_found`;
 /// the streaming behaviour itself is covered by

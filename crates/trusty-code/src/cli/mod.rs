@@ -19,8 +19,8 @@
 //! [`workstream::activate`]/[`workstream::deactivate`]/[`workstream::close`].
 //! (#4424) [`tui::run`] is one of two members that are NOT
 //! JSON-RPC-over-stdio translators: it is the launch point for the
-//! interactive TUI REPL, which talks to a long-lived `tcode serve --http`
-//! daemon instead. It lives here anyway because it is the same KIND of thing
+//! interactive TUI REPL, which talks to a long-lived `tcode serve` daemon
+//! over its Unix socket instead (#6637). It lives here anyway because it is the same KIND of thing
 //! — argument-shaped setup plus a handoff, with every decision made
 //! elsewhere (see its module docs) — with the one exception of
 //! [`daemon_autospawn`] (#4512), the policy module `tui::run` delegates to

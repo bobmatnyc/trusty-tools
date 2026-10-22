@@ -3,7 +3,7 @@
 //! Why: the owner ruling on #6637 is that trusty-code speaks UDS natively and a
 //! separate UI crate answers the HTTP a webview needs. Before this module the
 //! webview `fetch()`ed the daemon's own TCP listener directly, which is the
-//! listener PR 2c deletes. A webview cannot dial a Unix socket, so something in
+//! listener PR 2c deleted. A webview cannot dial a Unix socket, so something in
 //! this process has to; this module is that something, and it lives here rather
 //! than in trusty-console because ADR-0032 scopes "console is the only HTTP
 //! surface" to the trusty-* DAEMONS — a desktop shell serving its own webview is
@@ -16,11 +16,13 @@
 //! [`crate::bridge::routes`] owns the axum side, and
 //! [`crate::bridge::serve`] binds the listener.
 //!
-//! **There is no HTTP fallback to the daemon.** The daemon's TCP listener is
-//! transient (PR 1 kept it only until this bridge existed), and a fallback that
-//! resolves `127.0.0.1:7882` is not a safety net — it is a way to report
-//! whatever now holds that port as a healthy `tcode`. A daemon with no socket
-//! reads as unreachable, which is what it is.
+//! **There is no HTTP fallback to the daemon.** The daemon binds no TCP port
+//! (#6637 slice 2c retired its listener), so a fallback that dials the old
+//! fixed port is not a safety net — it is a way to report whatever now holds
+//! that port as a healthy `tcode`. A daemon with no socket reads as
+//! unreachable, which is what it is. This bridge's own loopback listener
+//! (`serve.rs`) is the one TCP port left on the trusty-code side; #10166
+//! tracks replacing it.
 //!
 //! Test: `status_matches_the_retired_rest_mapping`,
 //! `socket_app_name_matches_the_daemon_resolver`,
