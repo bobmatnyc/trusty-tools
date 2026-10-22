@@ -11,7 +11,9 @@
 //! in-process with the same `request_id`, so a batch the daemon already
 //! committed is answered from its log record, never applied twice. A read
 //! (`show`) falls back for any store; a write only for the store of this
-//! process's own session and launch directory.
+//! process's own, known session and launch directory, and `init` only when
+//! the daemon's code registry is this process's ([`fallback_registry`]).
+//! A refused fallback exits 3 and writes nothing.
 //! Test: `commands::dbatg::tests`.
 
 use std::io::{self, Read, Write};
@@ -54,6 +56,9 @@ pub(crate) struct Ctx<'a> {
     pub cwd: PathBuf,
     /// This process's own session name, from the environment or tmux.
     pub own_session: Option<String>,
+    /// The code registry an in-process `init` may write: the daemon's, or
+    /// `None` when that cannot be shown (see [`fallback_registry`]).
+    pub registry: Option<PathBuf>,
     /// Batch input when no `--file` is given.
     pub stdin: &'a mut dyn Read,
 }
@@ -67,12 +72,18 @@ pub(crate) async fn run(args: DbatgArgs) -> i32 {
         .or_else(tmux_session);
     let mut stdin = io::stdin().lock();
     let socket = trusty_common::mpm_rpc::mpm_socket();
+    let registry = fallback_registry(
+        &socket,
+        trusty_common::daemon_socket_path("trusty-mpm").ok(),
+        dbatg::registry_path().ok(),
+    );
     let out = execute(
         args,
         Ctx {
             socket,
             cwd,
             own_session,
+            registry,
             stdin: &mut stdin,
         },
     )
@@ -92,6 +103,22 @@ pub(crate) async fn run(args: DbatgArgs) -> i32 {
             code
         }
     }
+}
+
+/// The registry an in-process `init` may write: this process's own, but only
+/// when `socket` is the default socket of this process's data directory, so
+/// the daemon that did not answer keeps its registry beside it.
+///
+/// #9758 fail-open check: a `TRUSTY_MPM_SOCKET` pin (a sandbox daemon) with
+/// no matching data-dir override would otherwise register the code in a
+/// registry that daemon never reads.
+/// Test: `dbatg_cli_fallback_registry_is_the_daemons_or_none`.
+pub(crate) fn fallback_registry(
+    socket: &Path,
+    default_socket: Option<PathBuf>,
+    registry: Option<PathBuf>,
+) -> Option<PathBuf> {
+    registry.filter(|_| default_socket.as_deref() == Some(socket))
 }
 
 /// The tmux session of `$TMUX_PANE`, as the prototype's `_tmux_session`.
@@ -137,8 +164,10 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
         })?;
     let project = args.project.unwrap_or_else(|| ctx.cwd.clone());
     let launch = resolve_project(&project).map_err(|e| fail(&e))?;
+    // #9758 fail-open check: an unknown own session proves no store is ours.
     let own = resolve_project(&ctx.cwd).is_ok_and(|c| c == launch)
-        && ctx.own_session.as_deref().is_none_or(|o| o == session);
+        && ctx.own_session.as_deref() == Some(session.as_str());
+    let not_own = (!own).then_some(NOT_OWN);
     let store = StoreRef {
         project: launch.clone(),
         session: session.clone(),
@@ -150,15 +179,17 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
                 session,
                 code: code.clone(),
             };
-            let _: InitResponse = call(&ctx.socket, "mpm.dbatg.init", &req, own, || {
-                dbatg::init(&req)
-            })
-            .await?;
+            let refusal = not_own.or(ctx.registry.is_none().then_some(OTHER_REGISTRY));
+            let local = || match &ctx.registry {
+                Some(registry) => dbatg::init_at(&req, registry),
+                None => Err(LedgerError::Unavailable(OTHER_REGISTRY.into())),
+            };
+            let _: InitResponse = call(&ctx.socket, "mpm.dbatg.init", &req, refusal, local).await?;
             return Ok(format!("initialised {code}\n"));
         }
         DbatgVerb::Show { brief } => {
             let req = ShowRequest { store, brief };
-            let out: TextResponse = call(&ctx.socket, "mpm.dbatg.show", &req, true, || {
+            let out: TextResponse = call(&ctx.socket, "mpm.dbatg.show", &req, None, || {
                 dbatg::show(&req)
             })
             .await?;
@@ -181,7 +212,7 @@ async fn verb(args: DbatgArgs, ctx: Ctx<'_>) -> Result<String, Failure> {
         if_v: None,
         ops,
     };
-    let resp: BatchResponse = call(&ctx.socket, "mpm.dbatg.batch", &req, own, || {
+    let resp: BatchResponse = call(&ctx.socket, "mpm.dbatg.batch", &req, not_own, || {
         dbatg::batch(&req)
     })
     .await?;
@@ -280,13 +311,21 @@ fn read_ops(file: Option<&Path>, stdin: &mut dyn Read) -> Result<Vec<Op>, Failur
     serde_json::from_value(value).map_err(|e| (2, format!("bad op: {e}")))
 }
 
-/// Sends `method` to the daemon; on a transport failure runs `local` when
-/// `fallback` allows it (see the module doc).
+/// Why a write may not fall back: the store is not provably the caller's.
+const NOT_OWN: &str =
+    "the in-process fallback writes only this session's own store (set DBATG_SESSION)";
+
+/// Why an `init` may not fall back: the daemon's code registry is unknown.
+const OTHER_REGISTRY: &str = "the in-process init needs the daemon's code registry, and the \
+     socket is not this process's default one (a TRUSTY_MPM_SOCKET pin)";
+
+/// Sends `method` to the daemon; on a transport failure runs `local`, unless
+/// `refusal` names why it may not (see the module doc).
 async fn call<Req, Resp>(
     socket: &Path,
     method: &str,
     req: &Req,
-    fallback: bool,
+    refusal: Option<&str>,
     local: impl FnOnce() -> Result<Resp, LedgerError>,
 ) -> Result<Resp, Failure>
 where
@@ -312,13 +351,8 @@ where
         Ok(_) => format!("{method}: empty reply"),
         Err(e) => e.to_string(),
     };
-    if !fallback {
-        return Err((
-            3,
-            format!(
-                "daemon unreachable ({transport}); the in-process fallback writes only this session's own store"
-            ),
-        ));
+    if let Some(why) = refusal {
+        return Err((3, format!("daemon unreachable ({transport}); {why}")));
     }
     local().map_err(|e| fail(&e))
 }

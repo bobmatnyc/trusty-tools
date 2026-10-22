@@ -17,7 +17,7 @@
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use trusty_architect::SystemClock;
 use trusty_architect::ledger::rpc::{
@@ -58,13 +58,24 @@ fn session_is_live(reg: &Registration) -> bool {
 /// # Errors
 /// As [`init_store`]; a code a live session holds is refused.
 pub fn init(req: &InitRequest) -> Result<InitResponse, LedgerError> {
+    init_at(req, &registry_path()?)
+}
+
+/// [`init`] against the code registry at `registry`.
+///
+/// #9758: `tm dbatg`'s in-process fallback passes the registry the daemon
+/// would use, never one it merely resolved for itself.
+///
+/// # Errors
+/// As [`init`].
+pub fn init_at(req: &InitRequest, registry: &Path) -> Result<InitResponse, LedgerError> {
     let launch = resolve_project(&req.project)?;
     // Refuse bad input before the host registry is touched.
     Code::parse(&req.code)?;
     StorePaths::new(&launch, &req.session)?;
     let now = writer::minute(&SystemClock);
     let paths = init_store(
-        &registry_path()?,
+        registry,
         &launch,
         &req.session,
         &req.code,

@@ -7,7 +7,7 @@ use clap::Parser;
 use serde_json::Value;
 use trusty_architect::ledger::init_store;
 
-use super::{Ctx, Outcome, execute};
+use super::{Ctx, Outcome, execute, fallback_registry};
 use crate::cli::{Cli, Command, DbatgArgs, DbatgVerb};
 
 /// A project with store `pm-a` (code `th`) and goal `th-G01`.
@@ -34,13 +34,26 @@ fn args(argv: &[&str]) -> DbatgArgs {
     }
 }
 
-/// Runs `argv` with no daemon at the socket, as session `own`.
+/// Runs `argv` with no daemon at the socket, as session `own`, with the
+/// daemon's code registry at `root/codes.json`.
 async fn offline(root: &Path, own: Option<&str>, argv: &[&str], stdin: &str) -> Outcome {
+    offline_with(root, own, Some(root.join("codes.json")), argv, stdin).await
+}
+
+/// [`offline`] with an explicit fallback registry.
+async fn offline_with(
+    root: &Path,
+    own: Option<&str>,
+    registry: Option<PathBuf>,
+    argv: &[&str],
+    stdin: &str,
+) -> Outcome {
     let mut input = stdin.as_bytes();
     let ctx = Ctx {
         socket: root.join("no-daemon.sock"),
         cwd: root.to_path_buf(),
         own_session: own.map(str::to_owned),
+        registry,
         stdin: &mut input,
     };
     execute(args(argv), ctx).await
@@ -171,4 +184,50 @@ async fn dbatg_cli_fallback_refuses_a_write_when_its_own_session_is_unknown() {
     assert!(!root.join(".trusty-mpm/dbatg/pm-a/outbox.jsonl").exists());
     let out = offline(&root, None, &["--session", "pm-a", "show", "--brief"], "").await;
     assert_eq!(out.stdout, "no open items\n");
+}
+
+/// Fail-open check (#9758): an in-process `init` registers its code only in
+/// the daemon's registry. With that registry unknown it exits 3 and creates
+/// neither the store nor a registry; with it known, it writes there.
+#[tokio::test]
+async fn dbatg_cli_fallback_init_writes_only_the_daemons_registry() {
+    let (_dir, root) = project();
+    let init = ["--session", "pm-c", "init", "--code", "tc"];
+    let out = offline_with(&root, Some("pm-c"), None, &init, "").await;
+    let (code, msg) = out.error.expect("init fell back to an unknown registry");
+    assert_eq!((code, out.stdout.as_str()), (3, ""), "{msg}");
+    assert!(msg.contains("code registry"), "{msg}");
+    assert!(!root.join(".trusty-mpm/dbatg/pm-c").exists());
+    let daemons = root.join("daemon-data").join("codes.json");
+    let out = offline_with(&root, Some("pm-c"), Some(daemons.clone()), &init, "").await;
+    assert_eq!((out.stdout.as_str(), out.error), ("initialised tc\n", None));
+    let registry = std::fs::read_to_string(&daemons).expect("registry");
+    assert!(registry.contains("\"tc\""), "{registry}");
+    assert!(root.join(".trusty-mpm/dbatg/pm-c/state.json").exists());
+}
+
+/// The fallback registry is this process's only for its own default socket.
+#[test]
+fn dbatg_cli_fallback_registry_is_the_daemons_or_none() {
+    let sock = PathBuf::from("/d/trusty-mpm/trusty-mpm.sock");
+    let reg = PathBuf::from("/d/trusty-mpm/dbatg/codes.json");
+    let pinned = PathBuf::from("/sandbox/data/trusty-mpm/trusty-mpm.sock");
+    let cases = [
+        (
+            &sock,
+            Some(sock.clone()),
+            Some(reg.clone()),
+            Some(reg.clone()),
+        ),
+        (&pinned, Some(sock.clone()), Some(reg.clone()), None),
+        (&sock, None, Some(reg.clone()), None),
+        (&sock, Some(sock.clone()), None, None),
+    ];
+    for (socket, default, registry, want) in cases {
+        assert_eq!(
+            fallback_registry(socket, default.clone(), registry.clone()),
+            want,
+            "{socket:?} {default:?} {registry:?}"
+        );
+    }
 }
