@@ -52,6 +52,8 @@ mod idle_evict;
 // #9450: the idle persist, detached from the indexer lock.
 pub use idle_evict::WriteCooldownPersist;
 mod ingest;
+// #9284: named in `embed_window_stats`, read by the status report.
+pub(crate) use ingest::truncation::EmbedWindowStats;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
@@ -518,6 +520,11 @@ pub struct CodeIndexer {
     /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 
+    /// #9284: chunks this indexer's embed passes sent past the embedder's
+    /// input window. In memory only; `GET /indexes/:id/status` reports it.
+    /// `Arc` because an embed pass runs on a detached [`ingest::embed::EmbedContext`].
+    pub(super) embed_window: Arc<EmbedWindowStats>,
+
     /// #7920: `true` once any durable corpus has been wired on this indexer.
     ///
     /// Why: a staged swap takes the corpus out (`take_corpus_store`) and a
@@ -804,6 +811,7 @@ impl CodeIndexer {
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             corpus_open_failure: None,
+            embed_window: Arc::default(),
             corpus_ever_wired: false,
             deleted: false,
             closed_for_shutdown: false,
@@ -838,6 +846,12 @@ impl CodeIndexer {
     /// This index's chunk cap. See [`Self::chunk_cap`].
     pub(crate) fn chunk_cap(&self) -> usize {
         self.chunk_cap
+    }
+
+    /// #9284: this index's embed-window truncation counters.
+    /// Test: `a_chunk_over_the_window_counts_exactly_once`.
+    pub(crate) fn embed_window_stats(&self) -> &EmbedWindowStats {
+        &self.embed_window
     }
 
     /// Record that this index was just queried or ingested.

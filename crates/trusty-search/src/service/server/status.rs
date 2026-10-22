@@ -435,6 +435,9 @@ pub(crate) async fn index_status_report(
     // #9235: BM25 corpus-cap truncation, distinct from `chunks_dropped_by_cap`
     // (the chunk cap) and from the search meta's `bm25_lane_degraded`.
     let bm25 = indexer.bm25_truncation().await;
+    // #9284: chunks cut at the embedder's input window, since this indexer
+    // was built. `embed_window: null` means the counters cannot see any.
+    let embed_window = indexer.embed_window_stats();
     Ok(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -479,6 +482,9 @@ pub(crate) async fn index_status_report(
         "bm25_corpus_cap": bm25.map(|b| b.corpus_cap),
         "bm25_truncation_unavailable_reason":
             bm25.is_none().then_some(crate::core::bm25::Bm25Truncation::UNAVAILABLE_REASON),
+        "embed_window": embed_window.window(),
+        "embed_window_truncated": embed_window.truncated(),
+        "embed_window_unmeasured": embed_window.unmeasured(),
         // Issue #280: walk diagnostic fields.
         "last_walk_started_at": walk_diag.last_walk_started_at,
         "last_walk_files_seen": walk_diag.last_walk_files_seen,

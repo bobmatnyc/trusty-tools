@@ -581,4 +581,21 @@ mod tests {
              must still be observable, layered on top of the new backend"
         );
     }
+
+    /// #9284: the embed pass reads the window through this wrapper, so it
+    /// must forward the installed backend's window and tokenizer.
+    #[tokio::test]
+    async fn switchable_forwards_the_backend_window_and_tokenizer() {
+        let backend: Arc<dyn Embedder> = Arc::new(
+            crate::core::embed::MockEmbedder::new(trusty_common::embedder::EMBED_DIM)
+                .with_chunking(16),
+        );
+        let sw = SwitchableEmbedder::new(backend, test_active(BackendKind::Ort));
+        assert_eq!(sw.input_window(), Some(16));
+        assert!(matches!(sw.chunking_tokenizer(), Ok(Some(_))));
+
+        let windowless: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new());
+        sw.swap_to(windowless, test_active(BackendKind::Python));
+        assert_eq!(sw.input_window(), None, "a swap installs the new window");
+    }
 }

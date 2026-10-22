@@ -99,6 +99,34 @@ pub trait Embedder: Send + Sync {
     fn supervisor_gave_up(&self) -> bool {
         false
     }
+
+    /// Longest input, in tokens including special tokens, this embedder
+    /// encodes before it truncates (#9284).
+    ///
+    /// Why: the embed pass counts chunks cut at the window; only the backend
+    /// knows its window.
+    /// What: default `None`. The blanket adapter below forwards the shared
+    /// trait's `input_window`. Sidecar adapters keep `None`: no window crosses
+    /// the wire (See #9284), so their chunks go uncounted.
+    /// Test: `a_chunk_over_the_window_counts_exactly_once`.
+    fn input_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// Tokenizer that counts tokens the way this embedder truncates (#9284).
+    ///
+    /// Why/What: forwards the shared trait's `chunking_tokenizer`; default
+    /// `Ok(None)`. A load failure is `Err`, which the embed pass counts as
+    /// unmeasured, never as within the window.
+    /// Test: `a_tokenizer_error_counts_as_unmeasured_not_within`.
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<
+        Option<std::sync::Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
+        Ok(None)
+    }
 }
 
 /// Adapter: every shared `trusty_common::embedder::Embedder` automatically implements
