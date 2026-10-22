@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.65.0] — 2026-10-22
+
+### Breaking
+
+- A `message` event says which end recorded it: `MessageEvent` has a new `direction` field (`sent` or `received`, the new `MessageDirection`). A frame written without one reads as `sent`. Code that builds a `MessageEvent` with a struct literal must set the field (#9167).
+
 ## [0.64.0] — 2026-10-21
 
 ### Breaking
