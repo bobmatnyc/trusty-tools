@@ -60,7 +60,9 @@ name = "trusty-search"
 # public `DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`,
 # `write_http_addr_file` and `DaemonHandle` are removed. crates.io is at
 # 0.57.3; 0.58.0 is unpublished on main and the Architect set 0.59.0.
-version = "0.61.0"
+# 0.61.1 (Refs #10159): patch — 0.61.0 is live on crates.io and this change
+# touches src/** (quiet graph-refresh rebuild).
+version = "0.61.1"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

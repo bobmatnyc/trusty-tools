@@ -7,11 +7,15 @@
 //! `CodeIndexer::refresh_symbol_graph_if_due`, which rebuilds once the index
 //! has been quiet for `GRAPH_REFRESH_QUIET` or stale for
 //! `GRAPH_REFRESH_MAX_WAIT`. The rebuild persists to redb, so it runs under
-//! the #3049 teardown read guard, like every other write.
-//! Test: `graph_refresh_tick_rebuilds_a_stale_index_once`.
+//! the #3049 teardown read guard, like every other write. A tick that rebuilt
+//! trims the heap afterwards, at most once per `GRAPH_REFRESH_MAX_WAIT`
+//! (#10159).
+//! Test: `graph_refresh_tick_rebuilds_a_stale_index_once`,
+//! `only_a_tick_that_rebuilt_trims_the_heap`,
+//! `post_rebuild_trim_is_limited_to_once_per_window`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::state::SearchAppState;
 use crate::core::indexer::graph_refresh::{GRAPH_REFRESH_MAX_WAIT, GRAPH_REFRESH_QUIET};
@@ -26,12 +30,29 @@ pub(super) fn spawn_graph_refresh_ticker(state: Arc<SearchAppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(TICK);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_trim: Option<Instant> = None;
         loop {
             interval.tick().await;
             let Some(state) = weak.upgrade() else {
                 break;
             };
-            run_graph_refresh_tick(&state, GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT).await;
+            let rebuilt =
+                run_graph_refresh_tick(&state, GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT).await;
+            drop(state);
+            // #10159: a rebuild frees its snapshot and old graph; hand the pages
+            // back, but at most once per window: malloc_trim(0) on a multi-GB
+            // heap can stall allocating threads.
+            if rebuilt > 0 {
+                let now = Instant::now();
+                if post_rebuild_trim_due(last_trim, now, GRAPH_REFRESH_MAX_WAIT) {
+                    last_trim = Some(now);
+                    trim_heap_after_rebuild(rebuilt).await;
+                } else {
+                    tracing::debug!(
+                        "graph-refresh: post-rebuild heap trim skipped (rate limit, #10159)"
+                    );
+                }
+            }
         }
     });
 }
@@ -70,6 +91,58 @@ pub(super) async fn run_graph_refresh_tick(
     rebuilt
 }
 
+/// Whether a rebuild tick at `now` may trim the heap (#10159).
+///
+/// Why: `malloc_trim(0)` on a multi-GB glibc heap can stall allocating
+/// threads, and a rebuild tick can recur every second.
+/// What: true for the first trim (`last_trim` is `None`) and once `window`
+/// has elapsed since the last one; false inside the window.
+/// Test: `post_rebuild_trim_is_limited_to_once_per_window`.
+pub(super) fn post_rebuild_trim_due(
+    last_trim: Option<Instant>,
+    now: Instant,
+    window: Duration,
+) -> bool {
+    last_trim.is_none_or(|last| now.saturating_duration_since(last) >= window)
+}
+
+/// Return the heap a deferred rebuild freed to the OS (#10159).
+///
+/// Why: a full rebuild clones the corpus snapshot and builds the new graph
+/// beside the old one. glibc keeps the freed pages, so RSS grew with the
+/// rebuild count; `trim_heap` ran only after idle eviction or a pressure sweep.
+/// What: a no-op when nothing rebuilt. Otherwise runs `trim_heap` on the
+/// blocking pool, as the idle-eviction sweep does, samples RSS just before
+/// and after it in the same closure, and logs both at info. A failed blocking
+/// task is logged at warn and the ticker goes on. Returns whether it trimmed.
+/// Test: `only_a_tick_that_rebuilt_trims_the_heap`.
+pub(super) async fn trim_heap_after_rebuild(rebuilt: usize) -> bool {
+    if rebuilt == 0 {
+        return false;
+    }
+    let sampled = tokio::task::spawn_blocking(|| {
+        let before = crate::core::memguard::current_rss_mb();
+        crate::core::memguard::trim_heap();
+        (before, crate::core::memguard::current_rss_mb())
+    })
+    .await;
+    match sampled {
+        Ok((rss_before, rss_after)) => {
+            tracing::info!(
+                rebuilt,
+                rss_before_mb = rss_before,
+                rss_after_mb = rss_after,
+                "graph-refresh: heap trimmed after deferred rebuild (#10159)"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!("graph-refresh: heap trim task failed ({e}); ticker continues (#10159)");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -77,7 +150,7 @@ mod tests {
 
     use tokio::sync::RwLock;
 
-    use super::run_graph_refresh_tick;
+    use super::{post_rebuild_trim_due, run_graph_refresh_tick, trim_heap_after_rebuild};
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
     use crate::service::server::state::SearchAppState;
@@ -116,5 +189,30 @@ mod tests {
 
         let second = run_graph_refresh_tick(&state, Duration::ZERO, Duration::MAX).await;
         assert_eq!(second, 0, "a fresh graph is not rebuilt again");
+    }
+
+    /// #10159: a tick that rebuilt trims the heap; an idle tick does not.
+    #[tokio::test]
+    async fn only_a_tick_that_rebuilt_trims_the_heap() {
+        assert!(!trim_heap_after_rebuild(0).await, "nothing rebuilt");
+        assert!(trim_heap_after_rebuild(1).await, "a rebuild is trimmed");
+    }
+
+    /// #10159: the first rebuild trims, one inside the window does not, one
+    /// at or after the window does. Fails with the limit removed (the second
+    /// case would be true).
+    #[test]
+    fn post_rebuild_trim_is_limited_to_once_per_window() {
+        let window = Duration::from_secs(60);
+        let t0 = std::time::Instant::now();
+        assert!(
+            post_rebuild_trim_due(None, t0, window),
+            "first rebuild trims"
+        );
+        let at = |s| t0 + Duration::from_secs(s);
+        assert!(!post_rebuild_trim_due(Some(t0), at(1), window));
+        assert!(!post_rebuild_trim_due(Some(t0), at(59), window));
+        assert!(post_rebuild_trim_due(Some(t0), at(60), window));
+        assert!(post_rebuild_trim_due(Some(t0), at(61), window));
     }
 }
