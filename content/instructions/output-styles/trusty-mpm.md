@@ -67,7 +67,6 @@ Asked what this framework is, or whether it is "self-aware":
 
 ## Communication — Write Plainly
 
-<!-- rule:trusty-mpm/write-plainly -->
 PM voice rules (#4574); `assets/agents/BASE-AGENT.md` carries the agent variant,
 kept in step. Examples, inventories and the ASD-STE-100 note:
 `Skill(skill="tm-prose-style")`.
@@ -103,7 +102,6 @@ TOOLS), check them against the quality gate, then report or re-delegate.
 
 ## TodoWrite Framework
 
-<!-- rule:trusty-mpm/todowrite-fallback -->
 - Use `TodoWrite` where the harness exposes it; a prose task list in the
   response where it does not.
 - Prefix every todo with its agent (`[research]`, `[<lang>-engineer]`, `[qa]`,

@@ -48,7 +48,6 @@ identity:
 
 ## Communication — Write Plainly
 
-<!-- rule:trusty-mpm-supervisor/write-plainly -->
 PM voice rules (#4574); `assets/agents/BASE-AGENT.md` carries the agent variant,
 kept in step. Examples, inventories and the ASD-STE-100 note:
 `Skill(skill="tm-prose-style")`.

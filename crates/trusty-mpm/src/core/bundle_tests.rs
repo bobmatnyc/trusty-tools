@@ -726,8 +726,9 @@ fn output_styles_carry_identity_protocol_and_load_marker() {
     // `<!-- trusty-mpm-instructions-loaded: v1 -->` must be the literal first
     // line of that section (so a stale/degraded style is greppably distinct
     // from one carrying the current floor).
-    // #10058: the load marker is the section's id; the heading's wording and
-    // the forbidden-probe list are not pinned (the probes are #10061 evals).
+    // #10058: the load marker is the section's id, so the heading's wording is
+    // not pinned. The probe commands stay pinned until their #10061 eval lands:
+    // an output style carries no rule-id markers.
     const MARKER: &str = "<!-- trusty-mpm-instructions-loaded: v1 -->";
     for style in OUTPUT_STYLES {
         let body = style.content(rc());
@@ -743,6 +744,9 @@ fn output_styles_carry_identity_protocol_and_load_marker() {
             "{}: the load marker must immediately precede its section heading",
             style.id
         );
+        // Forbidden shell-probe list must be greppable for regressions.
+        assert!(body.contains("pip3 show"));
+        assert!(body.contains("which claude-mpm"));
     }
 }
 
@@ -1973,50 +1977,28 @@ fn output_styles_keep_claude_code_coding_instructions() {
     assert!(frontmatter(architect).contains("keep-coding-instructions: false"));
 }
 
-/// The "Communication — Write Plainly" marker of each bundled output style.
-///
-/// Why: #2647 makes the output style the only channel that survives a manual
-/// `claude` launch, so its prose section must exist; #10058 pins the section
-/// by id and leaves each rule's wording, and whether the model follows it, to
-/// the #10061 evals.
-/// What: `(style id, rule id)`, one row per [`OUTPUT_STYLES`] entry.
-/// Test: `output_styles_state_every_pm_prose_rule`.
-const STYLE_WRITE_PLAINLY_RULES: &[(&str, &str)] = &[
-    ("trusty-mpm", "trusty-mpm/write-plainly"),
-    ("trusty-mpm-teacher", "trusty-mpm-teacher/write-plainly"),
-    ("trusty-mpm-research", "trusty-mpm-research/write-plainly"),
-    (
-        "trusty-mpm-supervisor",
-        "trusty-mpm-supervisor/write-plainly",
-    ),
-];
-
-/// The rule id `table` lists for `style`, panicking when the style has none.
-fn style_rule(table: &[(&'static str, &'static str)], style: &BundledStyle) -> &'static str {
-    table
-        .iter()
-        .find(|(id, _)| *id == style.id)
-        .map(|(_, rule)| *rule)
-        .unwrap_or_else(|| panic!("no rule listed for style {} (#10058)", style.id))
-}
-
 #[test]
 fn output_styles_state_every_pm_prose_rule() {
     // #2647: the output style is the only channel that survives a manual
     // `claude` launch with no tm-appended system prompt, so every PM prose rule
     // is stated RESIDENT here rather than referenced. #7423 kept the rules and
     // moved their examples behind `Skill(skill="tm-prose-style")`.
-    // #10058: every style's section carries its marker; the rules inside it
-    // are model behaviour, listed for the #10061 evals.
-    for style in OUTPUT_STYLES {
-        let rule = style_rule(STYLE_WRITE_PLAINLY_RULES, style);
-        assert!(
-            has_rule(style.content(rc()), rule),
-            "{} is missing its Write Plainly section `{rule}` (#2647)",
-            style.id
-        );
-    }
+    // #10058: a style is delivered verbatim on every PM turn and the floor is
+    // cut from it, so it carries no rule-id markers. Each PM style must carry
+    // the floor sections the production cut names (`FLOOR_SECTIONS`); the
+    // rules inside are model behaviour, listed for the #10061 evals. The
+    // supervisor's section is pinned by
+    // `the_architect_style_carries_write_plainly_verbatim`.
+    use crate::core::output_style::FLOOR_SECTIONS;
+
     for style in pm_output_styles() {
+        for heading in FLOOR_SECTIONS {
+            assert!(
+                style.content(rc()).lines().any(|line| line == heading),
+                "{} is missing the floor section `{heading}` (#2647, #8533)",
+                style.id
+            );
+        }
         // The superseded lighter rule set must be FOLDED IN, not left alongside
         // the mirrored rules as a second overlapping statement of the same thing.
         assert!(
@@ -2126,24 +2108,18 @@ fn output_styles_name_the_todowrite_fallback() {
     // its own tracking. The section must state the CONDITION and the fallback;
     // pinning both halves keeps a future trim from dropping one of them.
     // #8453: a PM section; the supervisor style carries no TodoWrite mandate.
-    // #10058: the condition and the fallback are pinned by the bullet's marker.
-    const TODOWRITE_RULES: &[(&str, &str)] = &[
-        ("trusty-mpm", "trusty-mpm/todowrite-fallback"),
-        (
-            "trusty-mpm-teacher",
-            "trusty-mpm-teacher/todowrite-fallback",
-        ),
-        (
-            "trusty-mpm-research",
-            "trusty-mpm-research/todowrite-fallback",
-        ),
-    ];
+    // #10058: an output style carries no rule-id markers (it is delivered
+    // verbatim every PM turn), so these two pins stay until the #10061 eval
+    // that replaces them lands.
     for style in pm_output_styles() {
-        let rule = style_rule(TODOWRITE_RULES, style);
         assert!(
-            has_rule(style.content(rc()), rule),
-            "{}: the TodoWrite section must make the tool conditional and name \
-             the prose fallback (#2799)",
+            style.content(rc()).contains("where the harness exposes it"),
+            "{}: the TodoWrite section must make the tool conditional (#2799)",
+            style.id
+        );
+        assert!(
+            style.content(rc()).contains("prose task list"),
+            "{}: the TodoWrite section must name the prose fallback (#2799)",
             style.id
         );
     }

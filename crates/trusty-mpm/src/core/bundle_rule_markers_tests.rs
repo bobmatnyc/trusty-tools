@@ -86,28 +86,6 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         &["what-is-trusty-mpm/not-claude-mpm"],
     ),
     (
-        "content/instructions/output-styles/trusty-mpm.md",
-        &["trusty-mpm/write-plainly", "trusty-mpm/todowrite-fallback"],
-    ),
-    (
-        "content/instructions/output-styles/trusty-mpm-teacher.md",
-        &[
-            "trusty-mpm-teacher/write-plainly",
-            "trusty-mpm-teacher/todowrite-fallback",
-        ],
-    ),
-    (
-        "content/instructions/output-styles/trusty-mpm-research.md",
-        &[
-            "trusty-mpm-research/write-plainly",
-            "trusty-mpm-research/todowrite-fallback",
-        ],
-    ),
-    (
-        "content/instructions/output-styles/trusty-mpm-supervisor.md",
-        &["trusty-mpm-supervisor/write-plainly"],
-    ),
-    (
         "content/instructions/sections/subagent-re-engagement.md",
         &["subagent-re-engagement/resume-via-pm-re-engagement"],
     ),
