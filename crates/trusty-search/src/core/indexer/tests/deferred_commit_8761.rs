@@ -62,10 +62,23 @@ impl VectorStore for GatedStore {
         self.inner.search(query, top_k).await
     }
     async fn remove(&self, id: &str) -> anyhow::Result<()> {
-        let fail = self
-            .fail_removes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
+        // #9964: `fetch_update` is deprecated on 1.99 and its replacement
+        // `try_update` needs 1.95 (MSRV is 1.94), so spell out its CAS loop.
+        let mut n = self.fail_removes.load(Ordering::SeqCst);
+        let fail = loop {
+            let Some(next) = n.checked_sub(1) else {
+                break false;
+            };
+            match self.fail_removes.compare_exchange_weak(
+                n,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(actual) => n = actual,
+            }
+        };
         if fail {
             anyhow::bail!("injected remove failure");
         }
