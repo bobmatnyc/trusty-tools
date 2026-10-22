@@ -183,7 +183,7 @@ One downstream project is copying the prototype now. Decided ([§8](#SPEC-LEDGER
 
 **ID:** SPEC-LEDGER-07~draft
 
-These 16 gaps MUST close before the port removes the prototype. Closure rule, **LDG-7.1**: each gap is closed by a PR that updates the schema, the Rust crate and a test, and the gap row is removed. A CI job fails when a code constant (enum, regex, limit) differs from the schema file.
+These 17 gaps MUST close before the port removes the prototype. Closure rule, **LDG-7.1**: each gap is closed by a PR that updates the schema, the Rust crate and a test, and the gap row is removed. A CI job fails when a code constant (enum, regex, limit) differs from the schema file.
 
 | # | Gap | Proposed fix |
 |---|---|---|
@@ -203,6 +203,7 @@ These 16 gaps MUST close before the port removes the prototype. Closure rule, **
 | G14 | `sessions.name` is a bare tmux name and `items.session` is a free string; neither carries the code. | `code` field on sessions rows and on ingested items (LDG-5.3). |
 | G15 | Schema validation mode is configuration (off/warn/enforce, default off for the `dir` format), so an invalid document can be stored. | Rust store: enforce always; `warn` only during migration. |
 | G16 | Field limits (title 120 and the others) are enforced in prototype code only; the schema has `minLength` only. | Add `maxLength` (LDG-2.3.4). |
+| G17 | LDG-3.6 is enforced on the CLI only ([#9758](https://github.com/bobmatnyc/trusty-tools/issues/9758)): `tm dbatg` refuses a write to another session's store, but the `dbatg` MCP path runs in the shared daemon and is not bound to the calling session. | Check the caller's session in the `serve --stdio` bridge, plus a project check and an end-to-end test through the daemon path ([#10153](https://github.com/bobmatnyc/trusty-tools/issues/10153)). |
 
 ---
 
