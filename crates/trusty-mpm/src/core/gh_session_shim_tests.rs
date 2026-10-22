@@ -52,12 +52,50 @@ fn assert_no_token_value(vars: &[(String, String)]) {
 }
 
 /// Write an executable script.
+///
+/// A child `cp` writes the executable, so no thread of this process ever holds
+/// it open for writing.
 #[cfg(unix)]
 fn write_script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-    std::fs::write(path, body).expect("script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let parent = path.parent().expect("parent");
+    std::fs::create_dir_all(parent).expect("dir");
+    let name = path.file_name().expect("file name").to_string_lossy();
+    let staged = parent.join(format!(".{name}.src"));
+    std::fs::write(&staged, body).expect("stage the script");
+    // #10176: a sibling test thread's fork inherits any write fd this process
+    // holds and keeps it until that child execs, so exec'ing a script written
+    // here can fail with ETXTBSY. Same pattern as #9718.
+    let installed = std::process::Command::new("/bin/sh")
+        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
+        .arg(&staged)
+        .arg(path)
+        .status()
+        .expect("install the script");
+    assert!(installed.success(), "install the script: {installed}");
+    std::fs::remove_file(&staged).expect("remove the staged script");
+}
+
+/// `cmd.output()`, retried while the exec fails with ETXTBSY: every 20 ms, at
+/// most 100 times.
+///
+/// Why: `write_gh_shim` writes the shim in this process. A sibling test
+/// thread that forks during that write hands its child a copy of the write fd,
+/// and the kernel refuses to exec the shim until that child execs or exits.
+/// No test can stop that fork, so the exec is retried within a bound.
+#[cfg(unix)]
+fn output_past_etxtbsy(cmd: &mut std::process::Command) -> std::process::Output {
+    for _ in 0..100 {
+        match cmd.output() {
+            // #10176: a sibling test's forked child holds the shim's write fd
+            // only until it execs; ETXTBSY comes from the exec alone, so a
+            // retry never re-runs a command that started.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.expect("the shim runs"),
+        }
+    }
+    panic!("the shim stayed busy (ETXTBSY) for 2 s");
 }
 
 /// #9750: a shim credential sets no token variable — only the shim dir — and
@@ -239,12 +277,12 @@ fn fake_gh(path: &Path, dir: &Path, token_step: &str) {
 /// Run `<shim_dir>/gh api user` with a stale inherited token.
 #[cfg(unix)]
 fn run_shim(shim_dir: &Path) -> std::process::Output {
-    std::process::Command::new(shim_dir.join("gh"))
-        .args(["api", "user"])
+    let mut cmd = std::process::Command::new(shim_dir.join("gh"));
+    cmd.args(["api", "user"])
         .env("GH_TOKEN", "stale-inherited")
-        .env("GITHUB_TOKEN", "stale-inherited")
-        .output()
-        .expect("the shim runs")
+        .env("GITHUB_TOKEN", "stale-inherited");
+    // #10176: the shim is written in this process; see `output_past_etxtbsy`.
+    output_past_etxtbsy(&mut cmd)
 }
 
 /// 🔴 #9750: run for real against a fake gh, the shim asks for the pinned
@@ -674,7 +712,8 @@ fn a_global_tier_gh_call_in_a_pinned_session_resolves_through_the_shim() {
         shim_root: shim_root(tmp.path()),
     };
     apply_gh_path_with(&mut cmd, tiered.vars(), tiered.unset_vars(), &session);
-    let out = cmd.output().expect("gh runs");
+    // #10176: PATH resolves `gh` to the shim this process wrote.
+    let out = output_past_etxtbsy(&mut cmd);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
