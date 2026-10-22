@@ -497,9 +497,10 @@ pub(crate) async fn index_status_report(
             "roots": state.watcher_manager.root_watch_states(&index_id).await,
         },
     });
-    // #9284: chunks cut at the embedder's input window since this indexer was
-    // built. Inserted after the macro, which is at its recursion limit.
-    // `window: null` means the embedder reports none, so nothing is counted.
+    // #9284: cumulative embed events cut at the embedder's input window since
+    // this indexer was built; a re-embed counts again. Inserted after the
+    // macro, which is at its recursion limit. `window: null` means either no
+    // embed pass has run yet, or the embedder reports none (nothing counted).
     let embed_window = indexer.embed_window_stats();
     body["embed_window"] = serde_json::json!({
         "window": embed_window.window(),

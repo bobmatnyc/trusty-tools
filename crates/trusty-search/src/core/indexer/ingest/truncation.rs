@@ -28,14 +28,18 @@ pub(crate) const MAX_FILE_WARNINGS_PER_PASS: usize = 8;
 
 /// Per-index embed-window counters since this indexer was built (#9284).
 ///
-/// Why: an operator needs to see how much of the vector lane describes cut
-/// text, without reading daemon logs.
-/// What: `truncated` counts embedded chunks whose token count, special tokens
-/// included, exceeded the window. `unmeasured` counts embedded chunks the
+/// Why: an operator needs to see how often the vector lane embedded cut
+/// text, without reading daemon logs. The counters are cumulative embed
+/// events, not a count of distinct cut chunks: a forced reindex, or a retry
+/// after a stall, embeds a chunk again and counts it again.
+/// What: `truncated` counts embed events whose chunk token count, special
+/// tokens included, exceeded the window. `unmeasured` counts embed events the
 /// window applied to but whose length could not be counted. `window` is the
-/// window of the latest embed pass, `0` when that embedder reports none.
+/// window of the latest embed pass, `0` when that embedder reports none, and
+/// stays `0` until a pass runs since the indexer was built.
 /// Test: `a_chunk_over_the_window_counts_exactly_once`,
-/// `a_chunk_within_the_window_does_not_count`.
+/// `a_chunk_within_the_window_does_not_count`,
+/// `a_second_embed_of_the_same_chunk_counts_again`.
 #[derive(Debug, Default)]
 pub struct EmbedWindowStats {
     truncated: AtomicU64,
@@ -54,8 +58,8 @@ impl EmbedWindowStats {
         self.unmeasured.load(Ordering::Relaxed)
     }
 
-    /// The latest pass's window; `None` when the embedder reports none, so
-    /// the two counters cannot see truncation (#9284).
+    /// The latest pass's window; `None` before any pass has run, or when the
+    /// embedder reports none, so the two counters cannot see truncation (#9284).
     pub fn window(&self) -> Option<usize> {
         match self.window.load(Ordering::Relaxed) {
             0 => None,
@@ -171,9 +175,43 @@ impl WindowProbe {
     }
 }
 
+/// Chunk text that makes the test-build token count fail (#9284).
+#[cfg(test)]
+pub(crate) const FORCE_COUNT_ERROR: &str = "\u{1}force-count-error";
+/// Chunk text that makes the test-build token count panic (#9284).
+#[cfg(test)]
+pub(crate) const FORCE_COUNT_PANIC: &str = "\u{1}force-count-panic";
+
+/// Count `text`'s tokens; the one call the error arms below guard.
+///
+/// Why: `ChunkTokenizer` almost never fails to encode, so the failure arms of
+/// [`measure`] and [`PendingMeasure::finish`] had no way to run in a test.
+/// What: production builds call `count_tokens` directly. Test builds first
+/// honour the marker texts above, so a test forces a failure or a panic in
+/// the real count path. The markers do not exist outside `cfg(test)`.
+/// Test: `a_forced_count_failure_counts_every_chunk_as_unmeasured`,
+/// `a_panicking_count_task_counts_every_chunk_as_unmeasured`.
+fn count(
+    tokenizer: &ChunkTokenizer,
+    text: &str,
+) -> Result<usize, trusty_common::embedder::ChunkError> {
+    #[cfg(test)]
+    {
+        if text.contains(FORCE_COUNT_ERROR) {
+            return Err(trusty_common::embedder::ChunkError::Encode(
+                "forced count failure".to_string(),
+            ));
+        }
+        if text.contains(FORCE_COUNT_PANIC) {
+            panic!("forced count panic");
+        }
+    }
+    tokenizer.count_tokens(text)
+}
+
 /// Count `text` against `window`, special tokens included.
 fn measure(tokenizer: &ChunkTokenizer, window: usize, text: &str) -> Measure {
-    match tokenizer.count_tokens(text) {
+    match count(tokenizer, text) {
         Ok(count) => {
             let tokens = count.saturating_add(tokenizer.special_overhead());
             if tokens > window {
