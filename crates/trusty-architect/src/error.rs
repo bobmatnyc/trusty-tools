@@ -292,6 +292,13 @@ pub enum NotifyError {
     },
 }
 
+/// Why a [`crate::poller::MessageSink`] did not record a message (#9167).
+///
+/// The sink is the caller's, so its reason is the caller's text.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct MessageSinkError(pub String);
+
 /// Why a PM ledger read, check, init or write failed (#9756 P0, #9758).
 /// [`LedgerError::code`] maps each to the `mpm.dbatg.*` error class and so
 /// to the prototype's exit code: a conflict is 1, an unreadable or locked

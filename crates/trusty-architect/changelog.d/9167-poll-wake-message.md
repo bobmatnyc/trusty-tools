@@ -1,0 +1,2 @@
+Added
+- The poller reports each wake it submits to the caller's `MessageSink`: one `PaneMessage` (kind `PollWake`, the session, the pane, the exact text typed), recorded after the Enter. A skipped, dry-run, unconfirmed or erased pointer is not recorded. A sink error never stops the wake; it is appended to the logged phrase as `(message event not recorded: <reason>)` ([#9167](https://github.com/bobmatnyc/trusty-tools/issues/9167))

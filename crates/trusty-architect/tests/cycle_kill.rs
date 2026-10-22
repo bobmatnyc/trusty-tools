@@ -37,6 +37,7 @@ fn child(root: &Path) -> TestResult {
         usage_probe: &RecordingProbe::default(),
         notifier: &RecordingNotifier::default(),
         dry_run: false,
+        messages: &trusty_architect::poller::NoMessages,
     };
     let (mut session, _) = PollSession::load(&config, false, clock.now_unix());
     let sentinel = root.join("appended");

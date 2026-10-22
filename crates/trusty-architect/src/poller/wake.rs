@@ -14,8 +14,11 @@
 //! equality, never on a substring (A3 Q3, rule 4); an empty box after typing
 //! sends nothing (A3b Q1); the skip phrase names the send reading, which can
 //! be stricter than `parse_pane`'s `box`.
+//! #9167: a submitted pointer is recorded once through the waker's
+//! [`MessageSink`]; a sink error is a note on the phrase, never a failed wake.
 //! Test: `tests/wake_ported.rs` (the prototype's tests, by name),
-//! `tests/wake_send_path.rs` (AC5-7), `tests/parity_wake.rs` (goldens).
+//! `tests/wake_send_path.rs` (AC5-7), `tests/parity_wake.rs` (goldens),
+//! `tests/wake_messages.rs` (#9167).
 
 use std::path::Path;
 use std::time::Duration;
@@ -23,6 +26,7 @@ use std::time::Duration;
 use super::SUPERVISOR;
 use super::box_text::{box_full_text, own_pointer};
 use super::listing::{Pane, capture};
+use super::messages::{MessageSink, PaneMessage, PaneMessageKind};
 use super::state::{PollState, StoredCount};
 use crate::classify::{input_state_for_send, parse_pane};
 use crate::clock::Clock;
@@ -42,8 +46,7 @@ const AFTER_ENTER: Duration = Duration::from_secs(1);
 const AFTER_ERASE: Duration = Duration::from_millis(300);
 
 /// What one wake needs: tmux, a clock, the `alerts.jsonl` path the pointer
-/// names, and whether this is a dry run.
-#[derive(Debug)]
+/// names, whether this is a dry run, and where a submitted wake is recorded.
 pub struct Waker<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     /// The tmux server holding the Architect's pane.
     pub tmux: &'a T,
@@ -53,6 +56,8 @@ pub struct Waker<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     pub alerts: &'a Path,
     /// When true, report what would be sent and send nothing.
     pub dry_run: bool,
+    /// Records each submitted pointer (#9167).
+    pub messages: &'a dyn MessageSink,
 }
 
 impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
@@ -67,9 +72,12 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
     /// "need you" form when `logged` is set), waits, re-reads the box, and
     /// either re-checks the owner and presses Enter (`sent to %N`), or, when
     /// the box ends with the pointer, re-checks the owner and erases it
-    /// (`failed: ...`), or sends nothing more ([`BOX_CHANGED`]).
+    /// (`failed: ...`), or sends nothing more ([`BOX_CHANGED`]). #9167: once
+    /// Enter is sent, the pointer is recorded through `messages`; only then,
+    /// so a skipped, unconfirmed or erased pointer is never recorded.
     /// Test: `wake_refuses_table`, `wake_enter_only_when_box_equals_message`,
-    /// `wake_rechecks_owner_before_every_send`, `wake_matches_python_goldens`.
+    /// `wake_rechecks_owner_before_every_send`, `wake_matches_python_goldens`,
+    /// `a_submitted_wake_is_recorded_once_with_the_typed_text_9167`.
     ///
     /// # Errors
     /// [`WakeError::NotOwner`] when the pane's live session is not
@@ -123,6 +131,8 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         match typed.confirm(&box_full_text(&after)) {
             Confirmation::Confirmed(confirmed) => {
                 confirmed.submit(self.tmux, verify_owner(self.tmux, target, owner)?)?;
+                // #9167: the pointer is delivered; record it, never undo it.
+                let note = self.record(owner, target, &msg);
                 self.clock.sleep(AFTER_ENTER);
                 let (_, left) = classify_input(&capture(self.tmux, target)?);
                 let head: String = msg.chars().take(40).collect();
@@ -131,7 +141,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
                 } else {
                     ""
                 };
-                Ok(format!("sent to {target}{still}"))
+                Ok(format!("sent to {target}{still}{note}"))
             }
             // #9171 A3b Q1 / A3 rule 4: not ours to erase, so send nothing.
             Confirmation::Mismatch(m) if !m.ours_at_end() => Ok(BOX_CHANGED.to_owned()),
@@ -146,6 +156,31 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
                 } else {
                     format!("{NOT_CONFIRMED}; cleanup left box non-empty")
                 })
+            }
+        }
+    }
+
+    /// Records the submitted pointer `text`; returns the phrase's suffix.
+    ///
+    /// Why: #9167 — the sink belongs to the caller and may fail; the wake it
+    /// describes already happened, so a failure must neither undo it nor be
+    /// lost. `poll.log` is the poller's log, so the reason rides the phrase.
+    /// What: one [`MessageSink::record`] call; `""` when it succeeds, else
+    /// `" (message event not recorded: <reason>)"`, which keeps the phrase's
+    /// `sent` prefix so [`dispatch_wake`] still clears the count.
+    /// Test: `a_sink_error_never_stops_the_wake_and_is_logged_9167`.
+    fn record(&self, owner: &str, target: &PaneId, text: &str) -> String {
+        let message = PaneMessage {
+            kind: PaneMessageKind::PollWake,
+            session: owner,
+            pane: target.as_target(),
+            text,
+        };
+        match self.messages.record(&message) {
+            Ok(()) => String::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, pane = %target, "wake message event not recorded");
+                format!(" (message event not recorded: {e})")
             }
         }
     }
@@ -275,6 +310,7 @@ mod live_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poller::NoMessages;
     use crate::{FakeClock, ScriptedTmux};
 
     #[test]
@@ -303,6 +339,7 @@ mod tests {
             clock: &clock,
             alerts: Path::new("/a"),
             dry_run: false,
+            messages: &NoMessages,
         };
         let panes = [Pane {
             session: SUPERVISOR.to_owned(),
