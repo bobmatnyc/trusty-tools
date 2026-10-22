@@ -24,6 +24,12 @@ scripts/relay.sh
 scripts/self-ctx.py
 scripts/start-fleet-poll.sh
 
+# PM intake, its digest and the Notification hook pair.
+scripts/notify-supervisor.sh
+scripts/pm-digest.py
+scripts/pm-notify.sh
+scripts/pm_intake.py
+
 # Skills: .claude/skills/<name>/SKILL.md -> skills/<name>.md.
 .claude/skills/architect-completion-standard/SKILL.md	skills/architect-completion-standard.md
 .claude/skills/architect-github/SKILL.md	skills/architect-github.md

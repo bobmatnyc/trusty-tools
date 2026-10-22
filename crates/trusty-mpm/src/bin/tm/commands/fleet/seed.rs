@@ -116,6 +116,15 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/architect-watchdog.py",
         false
     ),
+    // See #10161: PM intake, its digest and the Notification hook pair (P2).
+    embedded!("scripts/pm_intake.py", "scripts/pm_intake.py", false),
+    embedded!("scripts/pm-digest.py", "scripts/pm-digest.py", true),
+    embedded!("scripts/pm-notify.sh", "scripts/pm-notify.sh", true),
+    embedded!(
+        "scripts/notify-supervisor.sh",
+        "scripts/notify-supervisor.sh",
+        true
+    ),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",
