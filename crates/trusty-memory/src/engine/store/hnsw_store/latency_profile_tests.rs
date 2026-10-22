@@ -10,13 +10,18 @@
 //! (whichever arm the threshold selects), the exact scan alone, and the graph
 //! arm alone (`graph_nearest` plus the stranded merge). Prints p50/p95 per
 //! row, and how many queries' top 10 differ between two opens. #9174: also
-//! times `upsert` and, alone, the evicted-point re-check it now runs. A no-op unless `TRUSTY_HNSW_LATENCY_PROFILE` is set; run it in release:
+//! times `upsert` and, alone, the evicted-point re-check it now runs. #10186:
+//! above the threshold, also times `upsert` of exact copies into a clump of
+//! [`CLUMP`] identical vectors, the case where one search returns a single
+//! copy of N. A no-op unless `TRUSTY_HNSW_LATENCY_PROFILE` is set; run it in release:
 //! `TRUSTY_HNSW_LATENCY_PROFILE=1 cargo test -p trusty-memory --release --lib
 //! hnsw_latency_profile -- --nocapture`. `TRUSTY_HNSW_LATENCY_SIZES` overrides
 //! the size list (comma-separated row counts).
 //! Test: this file is the profile; it asserts nothing about timing.
 
 use std::time::{Duration, Instant};
+
+use hnsw_rs::prelude::Neighbour;
 
 use super::*;
 
@@ -35,6 +40,11 @@ const DIM: usize = 384;
 const K: usize = 30;
 
 const QUERIES: u64 = 300;
+
+/// #10186: identical vectors in the duplicate-cluster row's pool, and the
+/// upserts timed into it.
+const CLUMP: usize = 1_000;
+const CLUMP_UPSERTS: usize = 100;
 
 /// A unit vector near one of 48 seeded centres: cosine to its centre ~0.7,
 /// the spread of one topic in a real palace.
@@ -70,6 +80,10 @@ fn time_queries(queries: &[Vec<f32>], mut f: impl FnMut(&[f32])) -> (u128, u128)
 }
 
 fn load_average() -> String {
+    // #10186: Linux has no `sysctl vm.loadavg`; `/proc/loadavg` is the same figure.
+    if let Ok(proc) = std::fs::read_to_string("/proc/loadavg") {
+        return proc.trim().to_string();
+    }
     std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
@@ -165,6 +179,86 @@ fn hnsw_latency_profile() {
             recheck.0,
             recheck.1
         );
+        if n > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS {
+            clump_row(n);
+        }
     }
     println!("load_after=[{}]", load_average());
+}
+
+/// #10186: the duplicate-cluster row. A pool of `n` rows whose last [`CLUMP`]
+/// are one vector, then [`CLUMP_UPSERTS`] more exact copies, timed per upsert.
+///
+/// Why: an exact duplicate evicts an arbitrary copy from a neighbour list, and
+/// a `k = 1` search returns one copy of N, so the other N-1 look unreachable.
+/// `clustered_vec` gives every point its own noise and never takes this path.
+fn clump_row(n: usize) {
+    let copy = clustered_vec(77_000_000);
+    let mut pool: Vec<Vec<f32>> = (0..(n - CLUMP) as u64).map(clustered_vec).collect();
+    pool.extend(std::iter::repeat_n(copy.clone(), CLUMP));
+    let (_dir, seed) = open_store(DIM);
+    seed_rows(&seed.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seed.db), DIM).expect("reopen");
+    let ids = |s: &HnswStore| s.stranded.read().iter().map(|g| g.1.len()).sum::<usize>();
+    let before = ids(&store);
+    let copies = vec![copy.clone(); CLUMP_UPSERTS];
+    let mut upserted = 0u64;
+    let mut samples: Vec<Duration> = copies
+        .iter()
+        .map(|c| {
+            upserted += 1;
+            let start = Instant::now();
+            store
+                .upsert(&format!("clump-{upserted}"), c)
+                .expect("upsert");
+            start.elapsed()
+        })
+        .collect();
+    let (p50, p95) = percentiles(&mut samples);
+    println!(
+        "clump {n} rows ({CLUMP} copies) | upsert p50/p95 us | {p50}/{p95} | \
+         stranded ids {before} -> {}",
+        ids(&store)
+    );
+    // The upserts above evict nothing (exact copies tie at distance 0), so
+    // price the worst case directly: one copy reported evicted from another's
+    // list, which sends the re-check through the clump.
+    let index = store.index.read();
+    let points: Vec<_> = index
+        .get_point_indexation()
+        .get_layer_iterator(0)
+        .filter(|p| p.get_v() == copy.as_slice())
+        .collect();
+    let at = points[0].clone();
+    let listed: Vec<_> = at.get_neighborhood_id().swap_remove(0);
+    let other = points
+        .iter()
+        .find(|p| {
+            !listed.iter().any(|l| l.p_id == p.get_point_id())
+                && p.get_point_id() != at.get_point_id()
+        })
+        .expect("a copy outside the first one's list");
+    let gone = Neighbour::new(other.get_origin_id(), 0.0, other.get_point_id());
+    let mut walks: Vec<Duration> = (0..5)
+        .map(|_| {
+            let start = Instant::now();
+            stranded::restrand_evicted(
+                &index,
+                vec![(at.clone(), vec![gone])],
+                u64::MAX,
+                &store.stranded,
+            );
+            start.elapsed()
+        })
+        .collect();
+    println!(
+        "clump worst case: one copy evicted | re-check ms (5 runs, median) | {} | stranded ids {}",
+        percentiles(&mut walks).0 / 1000,
+        store
+            .stranded
+            .read()
+            .iter()
+            .map(|g| g.1.len())
+            .sum::<usize>()
+    );
 }
