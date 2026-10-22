@@ -9,8 +9,9 @@
 //! whose mode a test flips between ok, fail, fail-on-`BAD` and hang.
 //! Test: this file IS the tests.
 
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use uuid::Uuid;
 
 use crate::chunk_backfill_ticker::{
-    DISABLED_ENV, Source, Tick, Ticker, TickerConfig, Verdict, judge, run,
+    DISABLED_ENV, MIN_WAIT, Source, Tick, Ticker, TickerConfig, Verdict, judge, probe, run,
     spawn_chunk_backfill_ticker,
 };
 use crate::engine::embed::Embedder;
@@ -469,4 +470,100 @@ async fn ticker_config_reads_its_env_overrides() {
     );
     assert_eq!(c.idle, Duration::from_secs(9));
     assert!(disabled.is_none(), "{DISABLED_ENV} starts no task");
+}
+
+/// A text-keyed cache in front of `Switch`, like `FastEmbedder`'s LRU: a text
+/// seen before is answered without reaching the inner embedder.
+struct Cached {
+    inner: Arc<Switch>,
+    seen: Mutex<HashSet<String>>,
+}
+
+#[async_trait]
+impl Embedder for Cached {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let hit = {
+            let mut seen = self.seen.lock().expect("cache lock");
+            let hit = texts.iter().all(|t| seen.contains(t));
+            seen.extend(texts.iter().cloned());
+            hit
+        };
+        if hit {
+            return Ok(texts.iter().map(|_| vec![0.0; DIM]).collect());
+        }
+        self.inner.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        DIM
+    }
+}
+
+/// #9735: a probe answered from the embedder's cache proves nothing about the
+/// model, so each probe must carry text no earlier probe used.
+#[tokio::test]
+async fn a_probe_reaches_the_model_every_time() {
+    let inner = Switch::new(OK);
+    let cached: Arc<dyn Embedder + Send + Sync> = Arc::new(Cached {
+        inner: Arc::clone(&inner),
+        seen: Mutex::new(HashSet::new()),
+    });
+    probe(&cached, Duration::from_secs(5)).await.expect("probe 1");
+    probe(&cached, Duration::from_secs(5)).await.expect("probe 2");
+    assert_eq!(inner.calls(), 2, "the second probe was served from the cache");
+}
+
+/// #9735: opening a palace rebuilds its index, so the ticker keeps a palace it
+/// opened for as long as the cursor stays on it, and closes it after.
+#[tokio::test]
+async fn a_closed_palace_stays_open_while_the_cursor_is_on_it() {
+    let root = tempfile::tempdir().unwrap();
+    let reg = registry(root.path());
+    let pid = PalaceId::new("ticker");
+    let (h, ids) = palace(&reg, root.path(), &legacy_texts(3)).await;
+    drop(h);
+    assert!(reg.release_if_unreferenced(&pid), "start with it closed");
+    let e = Switch::new(OK);
+    let mut t = ticker(&reg, root.path(), &e, one_drawer());
+
+    assert_eq!(t.tick().await, Tick::Worked);
+    let first = Arc::as_ptr(&reg.peek(&pid).expect("open after slice 1"));
+    assert_eq!(t.tick().await, Tick::Worked);
+    let second = Arc::as_ptr(&reg.peek(&pid).expect("open after slice 2"));
+    assert_eq!(first, second, "one open serves both slices");
+
+    // Shutdown path: releasing closes it; the next slice reopens it.
+    t.release_opened();
+    assert!(reg.peek(&pid).is_none(), "release_opened closes it");
+    let seen = until_idle(&mut t, 8).await;
+    assert_eq!(seen.last(), Some(&Tick::Idle), "{seen:?}");
+    assert!(reg.peek(&pid).is_none(), "closed once the cursor left");
+    let h = reg.open_palace(root.path(), &pid).expect("reopen");
+    assert!(ids.iter().all(|id| rows(&h, *id) > 1));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_zero_wait_env_is_floored() {
+    let _env = crate::commands::env_test_lock().lock().await;
+    let names = [
+        "TRUSTY_CHUNK_BACKFILL_TICK_MS",
+        "TRUSTY_CHUNK_BACKFILL_BUSY_SECS",
+        "TRUSTY_CHUNK_BACKFILL_ERROR_BACKOFF_SECS",
+        "TRUSTY_CHUNK_BACKFILL_IDLE_SECS",
+        "TRUSTY_CHUNK_BACKFILL_PROBE_SECS",
+    ];
+    // SAFETY: serialised by `env_test_lock()`, held for the whole test.
+    unsafe {
+        for k in names {
+            std::env::set_var(k, "0");
+        }
+    }
+    let c = TickerConfig::from_env();
+    unsafe {
+        for k in names {
+            std::env::remove_var(k);
+        }
+    }
+    let waits = [c.tick, c.busy, c.backoff, c.idle, c.probe_timeout];
+    assert!(waits.iter().all(|w| *w == MIN_WAIT), "{waits:?}");
 }

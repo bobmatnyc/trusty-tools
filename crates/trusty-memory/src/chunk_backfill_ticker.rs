@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -33,15 +34,23 @@ type Emb = Arc<dyn Embedder + Send + Sync>;
 /// Set to any non-empty value to keep the ticker from starting.
 pub(crate) const DISABLED_ENV: &str = "TRUSTY_CHUNK_BACKFILL_DISABLED";
 
-/// Text of the probe embed run after a slice embed timed out.
+/// Prefix of the probe embed text; [`probe_text`] appends a nonce.
 const PROBE_TEXT: &str = "chunk backfill probe";
+
+/// Shortest wait the env overrides may set, so `0` cannot make a tight loop.
+// #9735: a zero wait spun the ticker; every wait is floored here.
+pub(crate) const MIN_WAIT: Duration = Duration::from_millis(100);
+
+/// Distinguishes two probes started in the same clock tick.
+static PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// How long the ticker waits after each kind of tick.
 ///
 /// Why: the backfill must yield to foreground work and must not hammer a
 /// failing embedder or a busy palace.
 /// What: one delay per [`Tick`] kind, each overridable by its env var; a
-/// malformed value keeps the default. `probe_timeout` bounds the probe embed.
+/// malformed value keeps the default, and none may be under [`MIN_WAIT`].
+/// `probe_timeout` bounds the probe embed.
 /// Test: `ticker_config_reads_its_env_overrides`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TickerConfig {
@@ -74,10 +83,13 @@ impl TickerConfig {
     /// The defaults with each env override applied.
     pub(crate) fn from_env() -> Self {
         let d = Self::default();
-        let secs = |name: &str, d: Duration| Duration::from_secs(env_u64(name, d.as_secs()));
+        let secs = |name: &str, d: Duration| {
+            Duration::from_secs(env_u64(name, d.as_secs())).max(MIN_WAIT)
+        };
         let tick_ms = u64::try_from(d.tick.as_millis()).unwrap_or(u64::MAX);
         Self {
-            tick: Duration::from_millis(env_u64("TRUSTY_CHUNK_BACKFILL_TICK_MS", tick_ms)),
+            tick: Duration::from_millis(env_u64("TRUSTY_CHUNK_BACKFILL_TICK_MS", tick_ms))
+                .max(MIN_WAIT),
             busy: secs("TRUSTY_CHUNK_BACKFILL_BUSY_SECS", d.busy),
             backoff: secs("TRUSTY_CHUNK_BACKFILL_ERROR_BACKOFF_SECS", d.backoff),
             idle: secs("TRUSTY_CHUNK_BACKFILL_IDLE_SECS", d.idle),
@@ -144,6 +156,8 @@ pub(crate) struct Ticker {
     cursor: usize,
     pub(crate) probe_pending: bool,
     fruitless: HashSet<PalaceId>,
+    /// The palace this ticker opened and keeps open while the cursor stays.
+    opened: Option<PalaceId>,
 }
 
 /// What [`judge`] decided about one visited palace.
@@ -176,6 +190,19 @@ impl Ticker {
             cursor: 0,
             probe_pending: false,
             fruitless: HashSet::new(),
+            opened: None,
+        }
+    }
+
+    /// Release the palace this ticker opened, if nothing else holds it.
+    ///
+    /// Why (#9735): opening rebuilds HNSW from every row, so a palace stays
+    /// open while the cursor is on it and closes when the cursor leaves.
+    /// What: drops the LRU's handle when no other reference exists.
+    /// Test: `a_closed_palace_stays_open_while_the_cursor_is_on_it`.
+    pub(crate) fn release_opened(&mut self) {
+        if let Some(id) = self.opened.take() {
+            self.registry.release_if_unreferenced(&id);
         }
     }
 
@@ -221,15 +248,22 @@ impl Ticker {
         });
         let Some(due) = next else {
             self.fruitless.clear();
+            self.release_opened();
             return Tick::Idle;
         };
         let palace = &palaces[due].0;
+        if self.opened.as_ref().is_some_and(|o| *o != palace.id) {
+            self.release_opened();
+        }
         let verdict = self.visit(palace, &embedder, window).await;
         self.probe_pending |= verdict.probe;
         if verdict.fruitless {
             self.fruitless.insert(palace.id.clone());
         }
         self.cursor = if verdict.stay { due } else { due + 1 };
+        if !verdict.stay {
+            self.release_opened();
+        }
         verdict.tick
     }
 
@@ -243,7 +277,7 @@ impl Ticker {
     }
 
     /// One slice on `palace`, then its marker from fresh progress.
-    async fn visit(&self, palace: &Palace, embedder: &Emb, window: Option<usize>) -> Verdict {
+    async fn visit(&mut self, palace: &Palace, embedder: &Emb, window: Option<usize>) -> Verdict {
         let id = &palace.id;
         let (handle, opened_here) = match self.handle(id).await {
             Ok(h) => h,
@@ -252,15 +286,32 @@ impl Ticker {
                 return verdict(Tick::Worked, false, true);
             }
         };
+        // #9735: a palace opened here stays open while the cursor stays on it;
+        // `tick` and `run` release it when the cursor leaves or on shutdown.
+        if opened_here {
+            self.opened = Some(id.clone());
+        }
         let judged = if handle.is_compacting() {
             verdict(Tick::Busy, true, false)
         } else {
             let report = handle.reembed_slice(embedder, &self.bounds).await;
             // #9735 C2: progress is recomputed from the index, never counted,
             // so a failed slice cannot move the marker past unprocessed drawers.
-            let progress = handle
-                .embed_health_with(Some(embedder.as_ref()))
-                .chunk_progress();
+            // #9735: the health scan holds the `drawers` read lock and walks
+            // every row, so it runs off the async worker.
+            let (scan, emb) = (Arc::clone(&handle), Arc::clone(embedder));
+            let scanned = tokio::task::spawn_blocking(move || {
+                scan.embed_health_with(Some(emb.as_ref())).chunk_progress()
+            })
+            .await;
+            let Ok(progress) = scanned else {
+                warn!(palace = %id, "#9735: chunk progress scan task failed");
+                return verdict(
+                    Tick::Backoff("chunk progress scan task failed".to_string()),
+                    true,
+                    false,
+                );
+            };
             let marker =
                 ChunkMarker::from_progress(&progress, window, last_error(&report), Utc::now());
             write_marker(&palace.data_dir, marker).await;
@@ -268,9 +319,6 @@ impl Ticker {
             judge(&report, progress.pending > 0)
         };
         drop(handle);
-        if opened_here {
-            self.registry.release_if_unreferenced(id);
-        }
         judged
     }
 
@@ -413,14 +461,26 @@ async fn write_marker(dir: &Path, marker: ChunkMarker) {
 /// slice and park one more blocking thread behind it.
 /// What: `Ok` only when one vector comes back within `timeout`.
 /// Test: `a_failed_probe_starts_no_slice_until_it_succeeds`.
-async fn probe(embedder: &Emb, timeout: Duration) -> Result<(), String> {
-    let input = [PROBE_TEXT.to_string()];
+pub(crate) async fn probe(embedder: &Emb, timeout: Duration) -> Result<(), String> {
+    let input = [probe_text()];
     match tokio::time::timeout(timeout, embedder.embed_batch(&input)).await {
         Ok(Ok(v)) if v.len() == 1 => Ok(()),
         Ok(Ok(v)) => Err(format!("{} vectors for one input", v.len())),
         Ok(Err(e)) => Err(format!("{e:#}")),
         Err(_) => Err(format!("timed out after {timeout:?}")),
     }
+}
+
+/// A probe text no earlier probe used.
+///
+/// Why (#9735): `FastEmbedder` serves repeated text from its cache without
+/// taking the model lock, so a constant probe passes while the model hangs.
+/// What: [`PROBE_TEXT`] plus the clock and a process-wide counter.
+/// Test: `a_probe_reaches_the_model_every_time`.
+fn probe_text() -> String {
+    let seq = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    format!("{PROBE_TEXT} {nanos}-{seq}")
 }
 
 /// Resolve when `shutdown` reads `true` or its sender is gone.
@@ -460,6 +520,7 @@ pub(crate) async fn run(
             () = tokio::time::sleep(config.delay(&tick)) => {}
         }
     }
+    ticker.release_opened();
     info!("#9735: chunk backfill ticker shutting down");
 }
 
