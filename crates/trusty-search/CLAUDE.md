@@ -1021,11 +1021,47 @@ graph stale; the daemon rebuilds it once the index has been quiet for 2 s, or
 after 60 s under a continuous write stream. Search reads the last built graph
 in the meantime; `GET /graph`, `call_chain` and `graph/neighbors` flush pending
 writes first. There is
-currently no HTTP/MCP-exposed batch variant (the internal
+currently no HTTP/MCP-exposed batch variant of `index-file` (the internal
 `index_files_batch_no_rebuild` fast path is only used by the full-reindex
-pipeline); a consumer that needs to apply a LARGE batch of per-file changes at
+pipeline); removal has one, `search.index.files.remove` below (#10110). A consumer that needs to apply a LARGE batch of per-file changes at
 once (e.g. after pulling hundreds of commits) should prefer
 `POST /indexes/:id/reindex` over looping many single-file `index-file` calls.
+
+##### `search.index.files.remove` (#10110)
+
+Remove every file under a path prefix, or every file in a list, in one call.
+Socket-only (no HTTP twin); MCP tool `remove_files`. `remove-file` is
+unchanged.
+
+- **Request body**: exactly one of `path_prefix` (string) or `paths` (array of
+  at most 10,000 strings), plus `dry_run` (bool, default `false`). Each path is
+  index-relative or absolute under a root, mapped with the `remove-file` rules
+  (#9236). A prefix matches at a path-segment boundary: `vendor/foo` never
+  selects `vendor/foobar/`.
+- **Response 200**: `{ "index_id", "dry_run", "matched_files",
+  "matched_chunks", "removed_files", "removed_chunks" }`. A dry run answers the
+  counts with `removed_*: 0` and changes nothing; the real run then removes
+  what it counted.
+- **Memory bound**: the selected rows are read by redb key range, so an
+  idle-evicted index is not rehydrated. Transient memory is O(matched ids +
+  one slice). Chunk and entity rows leave in one write transaction per slice of
+  500 ids; the call stamps one durable graph-dirty mark, so the symbol graph
+  rebuilds once. A committed delete stamps `reindexed_unix` (#9230); the
+  selected content hashes are forgotten, so the next reindex indexes the files
+  again unless `exclude_globs` excludes them. A reindex that is already
+  running and has already scanned a file can add it back. The call is allowed
+  while a reindex runs.
+- **Response 400** `remove_files_invalid_request`: neither or both selectors,
+  an empty list, or more than 10,000 paths. `remove_files_path_outside_root`:
+  a path that is empty, `.`, the root (or a whole `@root<n>` root), outside the
+  roots, or holds a `..` segment. Nothing is removed.
+- **Response 503** `remove_files_busy` (`retryable: true`): a corpus
+  rehydrate or another batch removal holds the index. Nothing changed.
+- **Response 500** `remove_files_failed` / `hash_forget_failed`
+  (`retryable: true`): carries `partial` and the `matched_*` / `removed_*`
+  counts committed before the failure. The socket error's `data` is this body.
+  A retry finishes the job, including vectors whose rows the failed call
+  already deleted and hashes it did not forget.
 
 ##### `POST /indexes/:id/reindex`
 
@@ -1198,7 +1234,7 @@ server or `OPENROUTER_API_KEY` in the daemon's environment.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1216,6 +1252,7 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
+| `remove_files` | `index_id`, `dry_run?`, `path_prefix?`, `paths?` | Remove every file under a path prefix, or in a file list, from an index in one call. |
 | `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |

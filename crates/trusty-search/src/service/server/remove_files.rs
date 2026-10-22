@@ -10,12 +10,15 @@
 //! forgets the selected content hashes.
 //! Test: `service::server::remove_files_tests`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use serde::Deserialize;
 
 use super::state::SearchAppState;
+use crate::core::index_roots::IndexRoots;
+use crate::core::indexer::{BatchRemoveCounts, BatchRemoveError};
 use crate::core::path_selection::PathSelection;
 use crate::core::registry::IndexId;
 
@@ -63,11 +66,176 @@ pub(crate) async fn remove_files_report(
     id: &str,
     req: RemoveFilesRequest,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    let _ = (state, req);
-    Err((
+    let index_id = IndexId::new(id);
+    check_shape(&index_id.0, &req)?;
+    let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
+        .await
+        .map_err(|(status, body)| (status, body.0))?;
+    let selection = selection_for(&index_id.0, &handle.roots(), &req)?;
+    // #3049: a concurrent DELETE must not remove_dir_all mid-removal.
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
+    let indexer = handle.indexer.read().await;
+    let body = |counts: BatchRemoveCounts| {
+        serde_json::json!({
+            "index_id": index_id.0,
+            "dry_run": req.dry_run,
+            "matched_files": counts.matched_files,
+            "matched_chunks": counts.matched_chunks,
+            "removed_files": counts.removed_files,
+            "removed_chunks": counts.removed_chunks,
+        })
+    };
+    if req.dry_run {
+        let counts = indexer
+            .count_files_matching(&selection)
+            .await
+            .map_err(|e| failed(&index_id.0, "remove_files_failed", None, &e))?;
+        return Ok(body(counts));
+    }
+    let counts = match indexer.remove_files_matching(&selection).await {
+        Ok(counts) => counts,
+        Err(BatchRemoveError::Busy) => return Err(busy(&index_id.0)),
+        Err(BatchRemoveError::Failed { counts, source }) => {
+            return Err(failed(
+                &index_id.0,
+                "remove_files_failed",
+                Some(counts),
+                &source,
+            ));
+        }
+    };
+    // #9230: only a delete whose rows left redb moves `reindexed_unix`.
+    if counts.removed_chunks > 0 {
+        indexer.record_incremental_commit("remove_files").await;
+    }
+    // #10110 fix-bar 2: forget by selection, so a retry that matches no chunk
+    // still clears the hashes a failed forget left behind.
+    indexer
+        .forget_file_hashes_matching(&index_id, &selection)
+        .await
+        .map_err(|e| failed(&index_id.0, "hash_forget_failed", Some(counts), &e))?;
+    Ok(body(counts))
+}
+
+/// 400 unless exactly one non-empty selector within the cap was sent.
+fn check_shape(
+    index_id: &str,
+    req: &RemoveFilesRequest,
+) -> Result<(), (StatusCode, serde_json::Value)> {
+    let problem = match (&req.path_prefix, &req.paths) {
+        (Some(_), Some(_)) => Some("send `path_prefix` or `paths`, not both".to_string()),
+        (None, None) => Some("send one of `path_prefix` or `paths`".to_string()),
+        (None, Some(paths)) if paths.is_empty() => Some("`paths` is empty".to_string()),
+        (None, Some(paths)) if paths.len() > MAX_REMOVE_PATHS => Some(format!(
+            "`paths` holds {} entries; the limit is {MAX_REMOVE_PATHS}",
+            paths.len()
+        )),
+        _ => None,
+    };
+    match problem {
+        None => Ok(()),
+        Some(message) => Err(bad_request(
+            index_id,
+            "remove_files_invalid_request",
+            message,
+        )),
+    }
+}
+
+/// Map the request's paths to stored keys with the `remove-file` rules.
+///
+/// What: [`super::remove_path::remove_keys`] refuses an empty path, `.`, a
+/// `..` segment, the root, and a path outside every root; a prefix naming a
+/// whole additional root (`@root<n>`) is refused here too. An absolute path
+/// selects its stored key and its verbatim pre-#9510 key.
+fn selection_for(
+    index_id: &str,
+    roots: &IndexRoots,
+    req: &RemoveFilesRequest,
+) -> Result<PathSelection, (StatusCode, serde_json::Value)> {
+    let keys_of = |path: &str| {
+        super::remove_path::remove_keys(index_id, roots, path).map_err(|(_, refused)| {
+            let message = refused["message"]
+                .as_str()
+                .unwrap_or("the path names no file under the index root")
+                .replace("remove-file", "remove_files");
+            bad_request(index_id, "remove_files_path_outside_root", message)
+        })
+    };
+    if let Some(prefix) = &req.path_prefix {
+        let keys = keys_of(prefix)?;
+        if keys.iter().any(|k| names_a_whole_root(k)) {
+            return Err(bad_request(
+                index_id,
+                "remove_files_path_outside_root",
+                format!("`{prefix}` names a whole index root; remove_files never removes a root"),
+            ));
+        }
+        return Ok(PathSelection::Prefix(keys.into_iter().collect()));
+    }
+    let mut files = BTreeSet::new();
+    for path in req.paths.iter().flatten() {
+        files.extend(keys_of(path)?);
+    }
+    Ok(PathSelection::Files(files))
+}
+
+/// True for `@root<n>` or `@root<n>/`, the stored key of an additional root.
+fn names_a_whole_root(key: &str) -> bool {
+    key.trim_end_matches('/')
+        .strip_prefix("@root")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn bad_request(index_id: &str, error: &str, message: String) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({
+            "error": error,
+            "index_id": index_id,
+            "removed_chunks": 0,
+            "retryable": false,
+            "message": message,
+        }),
+    )
+}
+
+fn busy(index_id: &str) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "remove_files_busy",
+            "index_id": index_id,
+            "retryable": true,
+            "retry_after_secs": 5,
+            "removed_chunks": 0,
+            "message": BatchRemoveError::Busy.to_string(),
+        }),
+    )
+}
+
+fn failed(
+    index_id: &str,
+    error: &str,
+    counts: Option<BatchRemoveCounts>,
+    e: &dyn std::fmt::Display,
+) -> (StatusCode, serde_json::Value) {
+    let counts = counts.unwrap_or_default();
+    tracing::warn!(index_id, error, "remove_files failed: {e:#}");
+    (
         StatusCode::INTERNAL_SERVER_ERROR,
-        serde_json::json!({ "error": "not_implemented", "index_id": id }),
-    ))
+        serde_json::json!({
+            "error": error,
+            "index_id": index_id,
+            "retryable": true,
+            "partial": counts.removed_chunks > 0,
+            "matched_files": counts.matched_files,
+            "matched_chunks": counts.matched_chunks,
+            "removed_files": counts.removed_files,
+            "removed_chunks": counts.removed_chunks,
+            "message": format!("{e:#}"),
+        }),
+    )
 }
 
 impl crate::core::CodeIndexer {
@@ -85,6 +253,21 @@ impl crate::core::CodeIndexer {
         index_id: &IndexId,
         sel: &PathSelection,
     ) -> anyhow::Result<usize> {
-        anyhow::bail!("#10110: batch removal is not implemented yet")
+        crate::service::reindex::hash::hashes_for(index_id)
+            .retain(|key, _| !sel.selects_file(&key.to_string_lossy()));
+        let Some(corpus) = self.corpus_store() else {
+            return Ok(0);
+        };
+        #[cfg(test)]
+        if crate::service::reindex::hash::TEST_FAIL_FORGET_HASH
+            .lock()
+            .is_ok_and(|f| f.contains(&index_id.0))
+        {
+            anyhow::bail!("injected file-hash delete failure (#10110 test seam)");
+        }
+        let owned = sel.clone();
+        tokio::task::spawn_blocking(move || corpus.delete_file_hashes_under(&owned))
+            .await
+            .map_err(|e| anyhow::anyhow!("file-hash delete task did not complete: {e}"))?
     }
 }

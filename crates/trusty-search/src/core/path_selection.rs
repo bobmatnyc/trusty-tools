@@ -12,7 +12,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::core::chunk_id::ChunkIdShapes;
+use crate::core::chunk_id::{is_valid_suffix, ChunkIdShapes};
+use crate::core::store::path_match::matches_file;
 
 /// Stored file keys one batch removal selects (#10110).
 ///
@@ -38,8 +39,10 @@ impl PathSelection {
 
     /// True when the stored file key `file` is selected.
     pub(crate) fn selects_file(&self, file: &str) -> bool {
-        let _ = (self, file);
-        false
+        match self {
+            Self::Prefix(prefixes) => prefixes.iter().any(|p| matches_file(file, Some(p), &[])),
+            Self::Files(files) => files.contains(file),
+        }
     }
 
     /// True when `id` is a chunk id of a selected file.
@@ -47,8 +50,14 @@ impl PathSelection {
     /// What: a chunk id is `{file}{suffix}`; for `Files` each `:` is tried as
     /// the split point, so a file key holding `:` still matches its own ids.
     pub(crate) fn selects_chunk_id(&self, id: &str, shapes: ChunkIdShapes) -> bool {
-        let _ = (self, id, shapes);
-        false
+        match self {
+            Self::Prefix(prefixes) => prefixes.iter().any(|p| {
+                crate::core::store::path_match::matches_chunk_id(id, Some(p), &[], shapes)
+            }),
+            Self::Files(files) => id
+                .match_indices(':')
+                .any(|(at, _)| files.contains(&id[..at]) && is_valid_suffix(&id[at..], shapes)),
+        }
     }
 }
 

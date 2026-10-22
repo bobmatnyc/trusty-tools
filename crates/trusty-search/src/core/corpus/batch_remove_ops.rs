@@ -13,9 +13,11 @@
 //! Test: `rows_under_reads_a_range_and_spares_a_sibling` below; the callers by
 //! `indexer::tests::batch_remove_10110`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use redb::{ReadableDatabase, ReadableTable};
 
 use super::store_impl::CorpusStore;
+use super::tables::{CHUNKS_TABLE, ENTITIES_TABLE, FILE_HASHES_TABLE};
 use crate::core::path_selection::PathSelection;
 
 /// The durable rows one selection names (#10110).
@@ -43,8 +45,42 @@ impl CorpusStore {
     /// row whose `file` cannot be decoded is an error: a removal must not
     /// skip a row it cannot read and then report success.
     pub(crate) fn rows_under(&self, sel: &PathSelection) -> Result<SelectedRows> {
-        let _ = self;
-        anyhow::bail!("#10110: batch removal is not implemented yet")
+        let txn = self
+            .db
+            .begin_read()
+            .context("begin batch-remove read txn")?;
+        let chunks = txn.open_table(CHUNKS_TABLE)?;
+        let entities = txn.open_table(ENTITIES_TABLE)?;
+        let mut rows = SelectedRows::default();
+        for start in sel.scan_starts() {
+            for entry in chunks.range::<&str>(start..).context("range chunks")? {
+                let (key, value) = entry.context("read chunk row")?;
+                if !key.value().starts_with(start) {
+                    break;
+                }
+                let row: FileField<'_> = serde_json::from_slice(value.value())
+                    .with_context(|| format!("decode chunk row '{}'", key.value()))?;
+                if sel.selects_file(&row.file) {
+                    rows.chunks
+                        .push((key.value().to_string(), row.file.into_owned()));
+                }
+            }
+            for entry in entities.range::<&str>(start..).context("range entities")? {
+                let (key, _) = entry.context("read entity row")?;
+                if !key.value().starts_with(start) {
+                    break;
+                }
+                if sel.selects_file(key.value()) {
+                    rows.entity_files.push(key.value().to_string());
+                }
+            }
+        }
+        // Overlapping scan starts (`a` and `a/b`) can read a row twice.
+        rows.chunks.sort();
+        rows.chunks.dedup();
+        rows.entity_files.sort();
+        rows.entity_files.dedup();
+        Ok(rows)
     }
 
     /// Delete chunk `ids` and the entity rows of `entity_files` in ONE write
@@ -56,8 +92,26 @@ impl CorpusStore {
         ids: &[String],
         entity_files: &[String],
     ) -> Result<()> {
-        let _ = self;
-        anyhow::bail!("#10110: batch removal is not implemented yet")
+        if ids.is_empty() && entity_files.is_empty() {
+            return Ok(());
+        }
+        let txn = self.db.begin_write().context("begin batch-remove txn")?;
+        {
+            let mut chunks = txn.open_table(CHUNKS_TABLE)?;
+            for id in ids {
+                chunks
+                    .remove(id.as_str())
+                    .with_context(|| format!("delete chunk {id}"))?;
+            }
+            let mut entities = txn.open_table(ENTITIES_TABLE)?;
+            for file in entity_files {
+                entities
+                    .remove(file.as_str())
+                    .with_context(|| format!("delete entities for {file}"))?;
+            }
+        }
+        txn.commit().context("commit batch-remove txn")?;
+        Ok(())
     }
 
     /// Delete every content-hash row `sel` names, in one write transaction.
@@ -68,8 +122,32 @@ impl CorpusStore {
     /// What: ranges `FILE_HASHES_TABLE` from each scan start; aborts without
     /// a commit when nothing matched. Returns the rows deleted.
     pub(crate) fn delete_file_hashes_under(&self, sel: &PathSelection) -> Result<usize> {
-        let _ = self;
-        anyhow::bail!("#10110: batch removal is not implemented yet")
+        let txn = self.db.begin_write().context("begin hash delete txn")?;
+        let mut doomed: Vec<String> = Vec::new();
+        {
+            let mut tbl = txn.open_table(FILE_HASHES_TABLE)?;
+            for start in sel.scan_starts() {
+                for entry in tbl.range::<&str>(start..).context("range hashes")? {
+                    let (key, _) = entry.context("read hash row")?;
+                    if !key.value().starts_with(start) {
+                        break;
+                    }
+                    if sel.selects_file(key.value()) {
+                        doomed.push(key.value().to_string());
+                    }
+                }
+            }
+            for key in &doomed {
+                tbl.remove(key.as_str())
+                    .with_context(|| format!("delete file hash entry for {key}"))?;
+            }
+        }
+        if doomed.is_empty() {
+            txn.abort().context("abort empty hash delete txn")?;
+            return Ok(0);
+        }
+        txn.commit().context("commit hash delete txn")?;
+        Ok(doomed.len())
     }
 }
 
