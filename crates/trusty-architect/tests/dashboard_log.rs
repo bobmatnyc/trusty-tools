@@ -551,12 +551,18 @@ fn pruned_by_id_returns_record() -> R {
 fn prune_log_inside_root_refused() -> R {
     let tmp = tempfile::tempdir()?;
     let root = tmp.path().join("store");
-    fs::create_dir_all(&root)?;
+    fs::create_dir_all(root.join("sub"))?;
+    fs::create_dir_all(tmp.path().join("outside"))?;
+    std::os::unix::fs::symlink(root.join("sub"), tmp.path().join("outside/lnk"))?;
+    let looped = tmp.path().join("outside/loop");
+    std::os::unix::fs::symlink(&looped, &looped)?;
     for inside in [
         root.join("pruned.jsonl"),
         root.join(".archive/pruned.jsonl"),
         root.clone(),
         tmp.path().join("x/../store/p.jsonl"),
+        // #10063 df-G01: `..` is taken after the symlink, as the OS opens it.
+        tmp.path().join("outside/lnk/../pruned.jsonl"),
     ] {
         let got = PruneLog::outside(&root, &inside);
         assert!(
@@ -568,7 +574,18 @@ fn prune_log_inside_root_refused() -> R {
     let sibling = PruneLog::default_for(&root)?;
     assert!(sibling.path().ends_with("owner-queue-archive/pruned.jsonl"));
     assert!(!sibling.path().starts_with(fs::canonicalize(&root)?));
-    assert!(PruneLog::outside(&root, tmp.path().join("store-archive/p.jsonl")).is_ok());
+    let unresolvable = PruneLog::outside(&root, looped.join("p.jsonl"));
+    assert!(
+        matches!(unresolvable, Err(DashError::Io { .. })),
+        "{unresolvable:?}"
+    );
+    let outside = PruneLog::outside(&root, tmp.path().join("store-archive/./p.jsonl"))?;
+    let resolved = fs::canonicalize(tmp.path())?.join("store-archive/p.jsonl");
+    assert_eq!(
+        outside.path(),
+        resolved,
+        "the resolved path is the one written"
+    );
     Ok(())
 }
 

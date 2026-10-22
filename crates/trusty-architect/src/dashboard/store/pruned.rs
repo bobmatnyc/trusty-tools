@@ -8,7 +8,8 @@
 //! trusty-memory note first is the `tm` verb's step (PR 3): this crate has no
 //! memory client.
 //! What: [`PruneLog`], a [`DeleteArchive`] at a path that must not lie under
-//! the store root. [`DeleteArchive::record`] appends one canonical line per
+//! the store root once symlinks are resolved; it keeps and writes the
+//! resolved path. [`DeleteArchive::record`] appends one canonical line per
 //! removed document, `{by, collection, data, deleted_at, id, version}` (the
 //! AC's shape, owner ruling D34), then fsyncs; [`PruneLog::lines`] returns the
 //! raw lines matching an id and collection, oldest first, in either this
@@ -17,6 +18,7 @@
 //! `prune_log_inside_root_refused`, `pruned_reads_prototype_lines`.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -37,19 +39,23 @@ impl PruneLog {
     ///
     /// # Errors
     /// [`DashError::Invalid`] when `path` is the root or lies under it
-    /// (symlinks resolved where the path exists); [`DashError::Io`] when the
-    /// working directory is needed and unreadable.
+    /// (symlinks resolved where the path exists), or either path has a `..`
+    /// below a directory that does not exist; [`DashError::Io`] when the
+    /// working directory is needed and unreadable, or an existing part of
+    /// either path cannot be resolved.
     pub fn outside(served_root: &Path, path: impl Into<PathBuf>) -> Result<Self, DashError> {
         let path = path.into();
         let (root, at) = (resolve(served_root)?, resolve(&path)?);
         if at.starts_with(&root) {
             return Err(DashError::Invalid(format!(
-                "prune log {} is inside the served root {}: put it outside",
+                "prune log {} (resolved {}) is inside the served root {}: put it outside",
                 path.display(),
+                at.display(),
                 served_root.display()
             )));
         }
-        Ok(Self { path })
+        // #10063 df-G01: the checked path is the one written.
+        Ok(Self { path: at })
     }
 
     /// The prototype's default, `<root>/../owner-queue-archive/pruned.jsonl`.
@@ -133,8 +139,15 @@ impl DeleteArchive for PruneLog {
     }
 }
 
-/// `path` made absolute and `..`-free, with its deepest existing ancestor
-/// canonicalized (so `/tmp` and `/private/tmp` compare equal on macOS).
+/// `path` as the OS opens it: made absolute, its deepest existing ancestor
+/// canonicalized (symlinks resolved before `..`, so `/tmp` and
+/// `/private/tmp` compare equal on macOS), the rest appended.
+///
+/// # Errors
+/// [`DashError::Invalid`] for a `..` in the part that does not exist (it
+/// cannot be resolved before the directory is made); [`DashError::Io`] when
+/// the working directory or an existing ancestor cannot be resolved, never a
+/// fallback to the unresolved path (#10063 df-G01).
 fn resolve(path: &Path) -> Result<PathBuf, DashError> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -143,28 +156,33 @@ fn resolve(path: &Path) -> Result<PathBuf, DashError> {
             .map_err(DashError::io(Path::new(".")))?
             .join(path)
     };
-    let mut lexical = PathBuf::new();
-    for c in joined.components() {
-        match c {
-            Component::ParentDir => {
-                lexical.pop();
+    let parts: Vec<Component<'_>> = joined.components().collect();
+    for n in (1..=parts.len()).rev() {
+        let base: PathBuf = parts[..n].iter().collect();
+        let mut out = match fs::canonicalize(&base) {
+            Ok(out) => out,
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                continue;
             }
-            Component::CurDir => {}
-            other => lexical.push(other),
-        }
-    }
-    let mut base = lexical.clone();
-    let mut rest = Vec::new();
-    while !base.exists() {
-        match (base.file_name().map(ToOwned::to_owned), base.parent()) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                base = parent.to_path_buf();
+            Err(e) => return Err(DashError::io(&base)(e)),
+        };
+        for part in &parts[n..] {
+            match part {
+                Component::Normal(name) => out.push(name),
+                Component::CurDir => {}
+                _ => {
+                    return Err(DashError::Invalid(format!(
+                        "{} has `..` below {}, which does not exist",
+                        path.display(),
+                        base.display()
+                    )));
+                }
             }
-            _ => return Ok(lexical),
         }
+        return Ok(out);
     }
-    let mut out = fs::canonicalize(&base).unwrap_or(base);
-    out.extend(rest.iter().rev());
-    Ok(out)
+    Err(DashError::Invalid(format!(
+        "{} has no existing ancestor",
+        path.display()
+    )))
 }
