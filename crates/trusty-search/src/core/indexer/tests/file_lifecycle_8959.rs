@@ -891,3 +891,16 @@ async fn a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild() {
         );
     }
 }
+
+/// #10159: a `skip_kg` write never counts as active, since it never marks
+/// the graph; every other write does.
+#[test]
+fn a_skip_kg_write_is_not_counted_active() {
+    let mut idx = crate::core::indexer::CodeIndexer::new("lifecycle-10159-skip", "/tmp/l-10159");
+    assert!(
+        idx.begin_active_write().is_some(),
+        "a KG index counts the write"
+    );
+    idx.set_skip_kg(true);
+    assert!(idx.begin_active_write().is_none(), "skip_kg counts nothing");
+}

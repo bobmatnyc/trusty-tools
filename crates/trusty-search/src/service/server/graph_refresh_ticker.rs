@@ -7,8 +7,10 @@
 //! `CodeIndexer::refresh_symbol_graph_if_due`, which rebuilds once the index
 //! has been quiet for `GRAPH_REFRESH_QUIET` or stale for
 //! `GRAPH_REFRESH_MAX_WAIT`. The rebuild persists to redb, so it runs under
-//! the #3049 teardown read guard, like every other write.
-//! Test: `graph_refresh_tick_rebuilds_a_stale_index_once`.
+//! the #3049 teardown read guard, like every other write. A tick that rebuilt
+//! trims the heap afterwards (#10159).
+//! Test: `graph_refresh_tick_rebuilds_a_stale_index_once`,
+//! `only_a_tick_that_rebuilt_trims_the_heap`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +33,11 @@ pub(super) fn spawn_graph_refresh_ticker(state: Arc<SearchAppState>) {
             let Some(state) = weak.upgrade() else {
                 break;
             };
-            run_graph_refresh_tick(&state, GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT).await;
+            let rebuilt =
+                run_graph_refresh_tick(&state, GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT).await;
+            drop(state);
+            // #10159: a rebuild frees its snapshot and old graph; hand the pages back.
+            trim_heap_after_rebuild(rebuilt).await;
         }
     });
 }
@@ -70,6 +76,43 @@ pub(super) async fn run_graph_refresh_tick(
     rebuilt
 }
 
+/// Return the heap a deferred rebuild freed to the OS (#10159).
+///
+/// Why: a full rebuild clones the corpus snapshot and builds the new graph
+/// beside the old one. glibc keeps the freed pages, so RSS grew with the
+/// rebuild count; `trim_heap` ran only after idle eviction or a pressure sweep.
+/// What: a no-op when nothing rebuilt. Otherwise runs `trim_heap` on the
+/// blocking pool, as the idle-eviction sweep does, samples RSS just before
+/// and after it in the same closure, and logs both at info. A failed blocking
+/// task is logged at warn and the ticker goes on. Returns whether it trimmed.
+/// Test: `only_a_tick_that_rebuilt_trims_the_heap`.
+pub(super) async fn trim_heap_after_rebuild(rebuilt: usize) -> bool {
+    if rebuilt == 0 {
+        return false;
+    }
+    let sampled = tokio::task::spawn_blocking(|| {
+        let before = crate::core::memguard::current_rss_mb();
+        crate::core::memguard::trim_heap();
+        (before, crate::core::memguard::current_rss_mb())
+    })
+    .await;
+    match sampled {
+        Ok((rss_before, rss_after)) => {
+            tracing::info!(
+                rebuilt,
+                rss_before_mb = rss_before,
+                rss_after_mb = rss_after,
+                "graph-refresh: heap trimmed after deferred rebuild (#10159)"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!("graph-refresh: heap trim task failed ({e}); ticker continues (#10159)");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -77,7 +120,7 @@ mod tests {
 
     use tokio::sync::RwLock;
 
-    use super::run_graph_refresh_tick;
+    use super::{run_graph_refresh_tick, trim_heap_after_rebuild};
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
     use crate::service::server::state::SearchAppState;
@@ -116,5 +159,12 @@ mod tests {
 
         let second = run_graph_refresh_tick(&state, Duration::ZERO, Duration::MAX).await;
         assert_eq!(second, 0, "a fresh graph is not rebuilt again");
+    }
+
+    /// #10159: a tick that rebuilt trims the heap; an idle tick does not.
+    #[tokio::test]
+    async fn only_a_tick_that_rebuilt_trims_the_heap() {
+        assert!(!trim_heap_after_rebuild(0).await, "nothing rebuilt");
+        assert!(trim_heap_after_rebuild(1).await, "a rebuild is trimmed");
     }
 }

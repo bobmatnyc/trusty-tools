@@ -388,6 +388,9 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10159: active from here, embed included, so the ticker's quiet
+        // rebuild cannot fire mid-write. Declared first, so it drops last.
+        let _active_write = self.begin_active_write();
         // #8959: one write per path at a time, from the superseded-id snapshot
         // below through the commit; otherwise two writes each removed only
         // the ids they saw and both versions stayed indexed.
