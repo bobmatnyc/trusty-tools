@@ -1733,6 +1733,29 @@ async fn shared_tree_dispatch_route_names_each_blocking_record_8257() {
     );
 }
 
+// #6556: a documents-only commit's answer carries the records behind its names,
+// scoped as the names are — the caller's own record is not one of them.
+#[tokio::test]
+async fn commit_query_names_each_blocking_record_6556() {
+    let (state, _dir, other) = hermetic();
+    let caller = SessionId::new();
+    for (session, agent_id) in [(other, "a5fc57c090963f0ee"), (caller, "aown0000000000000")] {
+        let mut d = Delegation::observed(session, "version-control", "task", None);
+        d.cwd = Some(PathBuf::from("/repo"));
+        d.agent_id = Some(agent_id.to_string());
+        state.upsert_delegation(d);
+    }
+
+    let body = call(&state, caller, commit_query("/repo")).await;
+
+    assert_eq!(writer_names(&body), vec!["version-control"], "{body:?}");
+    assert_eq!(body.records.len(), 1, "{body:?}");
+    assert_eq!(
+        body.records[0].agent_id.as_deref(),
+        Some("a5fc57c090963f0ee")
+    );
+}
+
 // #8257: the read-only listing names the record the dispatch deny blocks on.
 #[tokio::test]
 async fn list_route_names_the_blocking_record_8257() {

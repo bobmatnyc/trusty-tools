@@ -4122,6 +4122,44 @@ fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
 }
 
 #[test]
+fn pm_guard_docs_commit_deny_names_the_blocking_record_6556() {
+    // #6556: a record whose stop never arrived blocked docs commits for hours,
+    // and the deny named only an agent type. It must name the record's agent
+    // id and age, the 6 h sweep that clears it, and the listing command.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    // One line: the mock socket frames are newline-delimited.
+    let url = spawn_writers_mock(concat!(
+        r#"{"agents":[{"agent":"version-control","count":1}],"total":1,"records":[{"#,
+        r#""delegation_id":"64237d1c-0aa4-4090-bd14-d3c273da7e95","agent":"version-control","#,
+        r#""agent_id":"a5fc57c090963f0ee","owner":"session `tm-other`","status":"running","#,
+        r#""age_secs":2520,"repair_command":"tm repair delegation a5fc57c090963f0ee"}]}"#,
+    ));
+    let stdout = run_pm_guard_at(
+        &commit_payload("git commit -m 'docs: x'", &repo, ""),
+        &url,
+        &repo,
+    );
+
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    for part in [
+        "agent id a5fc57c090963f0ee",
+        "age 42m",
+        "clears it once it is 6 h old",
+        "tm repair delegation --list",
+    ] {
+        assert!(reason.contains(part), "missing `{part}`: {reason}");
+    }
+}
+
+#[test]
 fn pm_guard_keys_a_subdirectory_commit_query_by_the_checkout_root() {
     // #5788 review, MEDIUM 4. `cd <subdir> && git commit` resolves the
     // subdirectory, but `tm hook` stamps a delegation record from its own

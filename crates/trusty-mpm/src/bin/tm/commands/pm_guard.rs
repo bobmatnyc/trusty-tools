@@ -557,12 +557,12 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             }
             Some(CommitVerdict::DocsOnly { root, dirs }) => {
                 let keys: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
-                let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                let (live, records) = pm_guard_dispatch::live_shared_tree_writers_in(
                     url, session_id, &keys, &payload,
                 )
                 .await;
                 if !live.is_empty() {
-                    let reason = docs_commit_deny_reason(&root, &live);
+                    let reason = docs_commit_deny_reason(&root, &live, &records);
                     audit_denied_tool(&refused, "docs-commit", &reason).await;
                     println!("{}", build_pm_guard_deny_response(&reason));
                     return Ok(());
