@@ -460,7 +460,7 @@ impl EmbedContext {
                     &self.index_id,
                     &self.embed_window,
                     &chunks[wave_start..wave_start + filled],
-                    &measures[..filled.min(measures.len())],
+                    &measures,
                 );
             }
             if stalled.is_some() {

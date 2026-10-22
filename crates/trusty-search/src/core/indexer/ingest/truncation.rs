@@ -251,7 +251,8 @@ impl PassTally {
         }
     }
 
-    /// Count the embedded `chunks`, paired 1:1 with `measures`.
+    /// Count the embedded `chunks`; `measures[i]` measures `chunks[i]`, and a
+    /// chunk with no measure counts as unmeasured, never as within.
     pub(crate) fn record(
         &mut self,
         index_id: &str,
@@ -259,11 +260,13 @@ impl PassTally {
         chunks: &[RawChunk],
         measures: &[Measure],
     ) {
-        debug_assert_eq!(chunks.len(), measures.len(), "one measure per chunk");
         let mut per_file: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
         let (mut truncated, mut unmeasured) = (0_u64, 0_u64);
-        for (chunk, m) in chunks.iter().zip(measures) {
-            match m {
+        let missing = Measure::Unmeasured {
+            reason: "no token count was produced for this chunk".to_string(),
+        };
+        for (i, chunk) in chunks.iter().enumerate() {
+            match measures.get(i).unwrap_or(&missing) {
                 Measure::Within => {}
                 Measure::Truncated { tokens } => {
                     truncated += 1;

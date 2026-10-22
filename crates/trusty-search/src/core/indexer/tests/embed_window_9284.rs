@@ -231,3 +231,15 @@ async fn counting_leaves_the_vectors_unchanged() {
         .expect("embed pass");
     assert_eq!(out[0].as_deref(), Some(expected.as_slice()));
 }
+
+/// Fail-open check: a chunk the wave produced no measure for is unmeasured.
+#[test]
+fn a_chunk_without_a_measure_counts_as_unmeasured() {
+    use super::super::ingest::truncation::{Measure, PassTally};
+    let stats = EmbedWindowStats::default();
+    let mut tally = PassTally::new(Some(WINDOW));
+    let chunks = [raw("a", "src/a.rs", "x"), raw("b", "src/b.rs", "y")];
+    tally.record("w9284", &stats, &chunks, &[Measure::Within]);
+    assert_eq!(stats.unmeasured(), 1, "the unpaired chunk is not within");
+    assert_eq!(stats.truncated(), 0);
+}
