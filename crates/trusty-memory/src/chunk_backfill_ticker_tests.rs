@@ -440,7 +440,7 @@ async fn ticker_config_reads_its_env_overrides() {
     // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
     let _env = crate::commands::env_test_lock().lock().await;
     let vars = [
-        ("TRUSTY_CHUNK_BACKFILL_TICK_MS", "50"),
+        ("TRUSTY_CHUNK_BACKFILL_TICK_MS", "250"),
         ("TRUSTY_CHUNK_BACKFILL_BUSY_SECS", "7"),
         ("TRUSTY_CHUNK_BACKFILL_ERROR_BACKOFF_SECS", "nope"),
         ("TRUSTY_CHUNK_BACKFILL_IDLE_SECS", "9"),
@@ -461,7 +461,7 @@ async fn ticker_config_reads_its_env_overrides() {
             std::env::remove_var(k);
         }
     }
-    assert_eq!(c.tick, Duration::from_millis(50));
+    assert_eq!(c.tick, Duration::from_millis(250));
     assert_eq!(c.busy, Duration::from_secs(7));
     assert_eq!(
         c.backoff,
