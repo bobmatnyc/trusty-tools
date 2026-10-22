@@ -1452,14 +1452,20 @@ fn the_picker_round_trip_never_names_the_internal_bus() {
 
 /// Why (#10130): naming the bus is the operator's request; it cannot be
 /// installed, so the request is refused rather than dropped.
-/// What: a round trip from `[trusty-analyze, trusty-events]` reports the bus
-/// as unavailable and selects nothing.
+/// What: the picker's first pass over `[trusty-analyze, trusty-events]`
+/// reports the bus as unavailable and selects nothing, so no member list
+/// carrying the bus can reach the round trip's second pass.
 /// Test: This is the test.
 #[test]
 fn a_named_bus_is_refused_through_the_round_trip() {
-    let sel = picker_round_trip(&["trusty-analyze", "trusty-events"]);
-    assert_eq!(sel.unavailable, vec!["trusty-events".to_owned()]);
-    assert!(sel.members.is_empty(), "{sel:?}");
+    let names = ["trusty-analyze".to_owned(), "trusty-events".to_owned()];
+    let first = select_members_transitive(&names);
+    assert_eq!(first.unavailable, vec!["trusty-events".to_owned()]);
+    assert!(first.members.is_empty(), "{first:?}");
+    assert!(
+        crate::commands::picker::override_names(&first.members).is_empty(),
+        "nothing is handed back to `run`"
+    );
 }
 
 /// Why (#10130): a producer's install fetched the internal bus from the
