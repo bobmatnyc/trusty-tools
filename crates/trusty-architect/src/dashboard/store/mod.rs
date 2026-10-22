@@ -10,13 +10,15 @@
 //! [`Store::list`], [`Store::collections`], [`Store::snapshot`]) take no
 //! lock: every replace is atomic. [`Store::batch`] takes `<root>/.lock`
 //! with a bounded wait, stages every [`Op`], runs the optional schema check
-//! ([`SchemaSet`], [`SchemaMode`]), hands each removed document to the
-//! [`DeleteArchive`] (in production a [`PruneLog`]) before anything is
-//! deleted, commits, then appends the change log (LDG-2.8.3). A delete with
+//! ([`SchemaSet`], [`SchemaMode`]), checks the change log can take the
+//! batch, hands each removed document to the [`DeleteArchive`] (in
+//! production a [`PruneLog`]) before anything is deleted, commits, then
+//! appends the change log (LDG-2.8.3). A delete with
 //! no archive and any batch with no secret scan are refused: a delete must
 //! never lose its record (LDG-2.8.4) and a secret must never be written
-//! (LDG-2.3.5). Names that differ from an existing one only in letter case
-//! are refused in both formats (#10063 df-G01). [`Store::fsck`] and
+//! (LDG-2.3.5). Names that differ only in letter case from an existing one,
+//! or from one earlier in the batch, are refused in both formats (#10063
+//! df-G01). [`Store::fsck`] and
 //! [`Store::validate`] check a whole store.
 //! Test: `tests/dashboard_golden.rs` (prototype bytes and outcomes),
 //! `tests/dashboard_store.rs` (conflict, rollback, refusals, lock, corrupt files),
@@ -395,11 +397,12 @@ impl Store {
     /// existing name, a delete with no archive, a batch with no secret
     /// scan), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
     /// (enforce mode), [`DashError::Unavailable`] (lock wait passed), the
-    /// archive's error, or an I/O or corrupt-file error. Nothing is written on
+    /// archive's error, or an I/O or corrupt-file error, a torn or
+    /// unrotatable change log included. Nothing is written on
     /// any of these. A write that fails midway is rolled back; when a restore
     /// fails too the error is [`DashError::RollbackIncomplete`], naming the
     /// torn files. Rollback covers failures, not crashes. A committed batch
-    /// whose change-log append fails is [`DashError::Unlogged`].
+    /// whose durable change-log append fails is [`DashError::Unlogged`].
     pub fn batch(&self, ops: &[Op]) -> Result<Vec<OpResult>, DashError> {
         if ops.is_empty() {
             return Err(DashError::Invalid(
@@ -416,10 +419,12 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         self.check_schemas(&staged)?;
         let now = crate::classify::alerts::iso(self.clock.now_unix());
+        // #10063 df-G01: the log's checks refuse the batch before any write.
+        let seq = changes::prepare(&self.root, &now)?;
         self.archive_removed(&staged, &now)?;
         self.commit(&staged)?;
         // #10063 PR 2: after the commit; a failure is reported, never dropped.
-        if let Err(cause) = changes::append(self, &staged, &now) {
+        if let Err(cause) = changes::append(self, &staged, &now, seq) {
             tracing::error!(error = %cause, "dashboard store: change log not written");
             return Err(DashError::Unlogged {
                 results,

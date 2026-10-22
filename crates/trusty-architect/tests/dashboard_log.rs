@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
-use trusty_architect::dashboard::{DashError, Format, Op, OpResult, PruneLog, SchemaSet, Store};
+use trusty_architect::dashboard::{
+    DashError, DeleteArchive, Format, Op, PruneLog, Removed, SchemaSet, Store,
+};
 use trusty_architect::{Clock, FakeClock};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -78,6 +80,72 @@ impl Fixture {
             Format::Jsonl => self.root.join(format!("{coll}.jsonl")),
         }
     }
+}
+
+/// Every file under `root` with its bytes, `.lock` excluded.
+fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n != ".lock") {
+                out.push((path.clone(), fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A prune log that, once it has recorded a batch's deletes, puts a
+/// directory where `changes.jsonl` was: the log checks have passed, so the
+/// commit runs and the append after it fails.
+struct BreakLogAfterPrune {
+    prune: PruneLog,
+    log: PathBuf,
+}
+
+impl DeleteArchive for BreakLogAfterPrune {
+    fn record(&self, removed: &[Removed<'_>]) -> Result<(), DashError> {
+        self.prune.record(removed)?;
+        let broke = fs::remove_file(&self.log).and_then(|()| fs::create_dir(&self.log));
+        broke.map_err(|e| DashError::Invalid(format!("test could not break the log: {e}")))
+    }
+}
+
+/// Writes `items/A01`, then commits `[delete items/A01, set items/B01]`
+/// with the change-log append failing; returns the store, the batch's
+/// error and the log's bytes before the batch.
+fn commit_unlogged(f: &Fixture) -> Result<(Store, DashError, Vec<u8>), Box<dyn std::error::Error>> {
+    f.store().set("items", "A01", json!({"n": 1}), None)?;
+    let log = f.root.join("changes.jsonl");
+    let kept = fs::read(&log)?;
+    let s = Store::new(&f.root, f.format)
+        .with_secret_scan(no_secret)
+        .with_archive(Box::new(BreakLogAfterPrune {
+            prune: f.prune.clone(),
+            log: log.clone(),
+        }))
+        .with_clock(f.clock.clone())
+        .with_actor("architect");
+    let got = s.batch(&[
+        Op::Delete {
+            collection: "items".into(),
+            id: "A01".into(),
+            if_version: None,
+        },
+        Op::Set {
+            collection: "items".into(),
+            id: "B01".into(),
+            data: json!({"n": 2}),
+            if_version: None,
+        },
+    ]);
+    let err = got.err().ok_or("batch succeeded with no change log")?;
+    Ok((s, err, kept))
 }
 
 fn seqs(lines: &[Value]) -> Vec<u64> {
@@ -178,20 +246,14 @@ fn rotation_never_overwrites_a_rotated_file() -> R {
         let kept = f.log("changes.jsonl");
         fs::write(f.root.join("changes-2026-10.jsonl"), &kept)?;
         f.clock.sleep(Duration::from_secs(20 * 86_400));
+        let before = snapshot(&f.root);
         let got = s.update("items", "A01", json!({"n": 2}), Some(1));
-        let Err(DashError::Unlogged { results, cause }) = got else {
+        let Err(DashError::Corrupt { reason, .. }) = &got else {
             return Err(format!("{format}: {got:?}").into());
         };
-        assert!(cause.to_string().contains("never overwritten"), "{cause}");
-        assert_eq!(
-            results,
-            [OpResult::Written {
-                collection: "items".into(),
-                id: "A01".into(),
-                version: 2
-            }]
-        );
-        assert_eq!(s.get("items", "A01")?.version, 2, "{format}: committed");
+        assert!(reason.contains("never overwritten"), "{reason}");
+        assert_eq!(snapshot(&f.root), before, "{format}: bytes changed");
+        assert_eq!(s.get("items", "A01")?.version, 1, "{format}: committed");
         assert_eq!(f.log("changes-2026-10.jsonl"), kept, "{format}");
         assert_eq!(f.log("changes.jsonl"), kept, "{format}");
     }
@@ -202,16 +264,15 @@ fn rotation_never_overwrites_a_rotated_file() -> R {
 fn change_log_failure_is_unlogged_after_commit() -> R {
     for format in FORMATS {
         let f = Fixture::new(format)?;
-        let s = f.store();
-        fs::create_dir_all(f.root.join("changes.jsonl"))?;
-        let got = s.set("items", "A01", json!({"n": 1}), None);
-        assert!(
-            matches!(&got, Err(DashError::Unlogged { results, .. }) if results.len() == 1),
-            "{format}: {got:?}"
-        );
-        let msg = got.err().map(|e| e.to_string()).unwrap_or_default();
+        let (s, err, _) = commit_unlogged(&f)?;
+        let DashError::Unlogged { results, .. } = &err else {
+            return Err(format!("{format}: {err:?}").into());
+        };
+        assert_eq!(results.len(), 2, "{format}");
+        let msg = err.to_string();
         assert!(msg.contains("committed") && msg.contains("fsck"), "{msg}");
-        assert_eq!(s.get("items", "A01")?.data["n"], 1, "{format}");
+        assert_eq!(s.get("items", "B01")?.data["n"], 2, "{format}");
+        assert!(matches!(s.get("items", "A01"), Err(DashError::NotFound(_))));
     }
     Ok(())
 }
@@ -323,16 +384,90 @@ fn fsck_reports_torn_change_line() -> R {
         let problems = s.fsck()?;
         let want = format!("{}:2: torn last line (no newline)", log.display());
         assert!(problems.contains(&want), "{format}: {problems:?}");
+        let before = snapshot(&f.root);
         let got = s.update("items", "A01", json!({"n": 2}), None);
         assert!(
-            matches!(got, Err(DashError::Unlogged { .. })),
+            matches!(got, Err(DashError::Corrupt { .. })),
             "{format}: {got:?}"
         );
         assert_eq!(
-            f.log("changes.jsonl"),
-            torn,
-            "{format}: appended past a torn line"
+            snapshot(&f.root),
+            before,
+            "{format}: wrote past a torn line"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn change_log_preconditions_refuse_the_batch() -> R {
+    let line =
+        |ts: &str| format!("{{\"collection\":\"items\",\"id\":\"A01\",\"seq\":1,\"ts\":{ts}}}");
+    for format in FORMATS {
+        for (case, log) in [
+            (
+                "torn",
+                format!("{}\n{{\"seq\":2", line("\"2026-10-21T10:00:00Z\"")),
+            ),
+            (
+                "no seq",
+                "{\"collection\":\"items\",\"id\":\"A01\"}\n".to_owned(),
+            ),
+            ("bad ts", format!("{}\n", line("5"))),
+        ] {
+            let f = Fixture::new(format)?;
+            let s = f.store();
+            s.set("items", "A01", json!({"n": 1}), None)?;
+            fs::write(f.root.join("changes.jsonl"), &log)?;
+            let before = snapshot(&f.root);
+            let got = s.batch(&[Op::Set {
+                collection: "items".into(),
+                id: "B01".into(),
+                data: json!({"n": 2}),
+                if_version: None,
+            }]);
+            assert!(
+                matches!(got, Err(DashError::Corrupt { .. })),
+                "{format} {case}: {got:?}"
+            );
+            assert_eq!(snapshot(&f.root), before, "{format} {case}: bytes changed");
+        }
+        let f = Fixture::new(format)?;
+        let s = f.store();
+        s.set("items", "A01", json!({"n": 1}), None)?;
+        let log = f.root.join("changes.jsonl");
+        fs::remove_file(&log)?;
+        fs::create_dir(&log)?;
+        let before = snapshot(&f.root);
+        let got = s.delete("items", "A01", None);
+        assert!(
+            matches!(got, Err(DashError::Io { .. })),
+            "{format}: {got:?}"
+        );
+        assert_eq!(snapshot(&f.root), before, "{format}: bytes changed");
+        assert!(f.prune.lines(None, None)?.is_empty(), "{format}: pruned");
+    }
+    Ok(())
+}
+
+#[test]
+fn fsck_reports_documents_with_no_change_line() -> R {
+    for format in FORMATS {
+        let f = Fixture::new(format)?;
+        let (s, err, kept) = commit_unlogged(&f)?;
+        assert!(
+            matches!(err, DashError::Unlogged { .. }),
+            "{format}: {err:?}"
+        );
+        // The operator restores the log and runs fsck, as `Unlogged` says.
+        let log = f.root.join("changes.jsonl");
+        fs::remove_dir(&log)?;
+        fs::write(&log, &kept)?;
+        let want = [
+            "items/A01: logged at version 1 (seq 1) but missing",
+            "items/B01: present but no change line",
+        ];
+        assert_eq!(s.fsck()?, want, "{format}");
     }
     Ok(())
 }

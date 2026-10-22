@@ -8,15 +8,18 @@
 //! document or collection file, a `jsonl` file whose bytes are not
 //! canonical, the change log's own problems (torn or unreadable lines, a
 //! `seq` gap or reversal), and per document whose last change line
-//! disagrees with the store: logged deleted but present, a version that
-//! differs, or a hash that differs from the bytes on disk. Messages the
-//! prototype also prints keep its words. `dir` files are not checked for
-//! canonical bytes: the page's mirror writes them too.
+//! disagrees with the store: logged deleted but present, logged but missing,
+//! a version that differs, or a hash that differs from the bytes on disk.
+//! Once a change log exists, a document on disk that no line names is
+//! reported too: it was written while the log was not (#10063 df-G01, the
+//! `Unlogged` error says "run fsck"). Messages the prototype also prints
+//! keep its words. `dir` files are not checked for canonical bytes: the
+//! page's mirror writes them too.
 //! Test: `fsck_reports_gap`, `fsck_reports_version_mismatch`,
 //! `fsck_clean_after_writes`, `fsck_reports_torn_change_line`,
-//! `fsck_missing_root_is_an_error`.
+//! `fsck_reports_documents_with_no_change_line`, `fsck_missing_root_is_an_error`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -45,24 +48,10 @@ impl Store {
         }
         let (last, log_problems) = changes::read_all(&self.root)?;
         problems.extend(log_problems);
-        for ((coll, id), e) in &last {
-            let have = disk.get(&(coll.clone(), id.clone()));
-            let seq = e.seq;
-            let problem = match have {
-                Some(_) if e.op == "delete" => Some(format!(
-                    "{coll}/{id}: logged deleted (seq {seq}) but present in the file"
-                )),
-                _ if e.op == "delete" => None,
-                Some((version, _)) if *version != e.version => Some(format!(
-                    "{coll}/{id}: version {version} differs from last logged version {} (seq {seq})",
-                    e.version
-                )),
-                Some((_, sha)) if e.sha256.as_deref() == Some(sha) => None,
-                _ => Some(format!(
-                    "{coll}/{id}: file line hash differs from last logged hash (seq {seq})"
-                )),
-            };
-            problems.extend(problem);
+        let logged = !changes::logs(&self.root)?.is_empty();
+        let keys: BTreeSet<&(String, String)> = disk.keys().chain(last.keys()).collect();
+        for key in keys {
+            problems.extend(doc_problem(key, disk.get(key), last.get(key), logged));
         }
         Ok(problems)
     }
@@ -114,6 +103,40 @@ impl Store {
             }
         }
         Ok(())
+    }
+}
+
+/// The problem with `coll/id`, given its `(version, sha256)` on disk and its
+/// last change line; `logged` says a change log exists.
+fn doc_problem(
+    (coll, id): &(String, String),
+    have: Option<&(u64, String)>,
+    entry: Option<&changes::Entry>,
+    logged: bool,
+) -> Option<String> {
+    let Some(e) = entry else {
+        // #10063 df-G01: a document no line names was written unlogged.
+        return (logged && have.is_some())
+            .then(|| format!("{coll}/{id}: present but no change line"));
+    };
+    let seq = e.seq;
+    match have {
+        Some(_) if e.op == "delete" => Some(format!(
+            "{coll}/{id}: logged deleted (seq {seq}) but present in the file"
+        )),
+        None if e.op == "delete" => None,
+        None => Some(format!(
+            "{coll}/{id}: logged at version {} (seq {seq}) but missing",
+            e.version
+        )),
+        Some((version, _)) if *version != e.version => Some(format!(
+            "{coll}/{id}: version {version} differs from last logged version {} (seq {seq})",
+            e.version
+        )),
+        Some((_, sha)) if e.sha256.as_deref() == Some(sha) => None,
+        Some(_) => Some(format!(
+            "{coll}/{id}: file line hash differs from last logged hash (seq {seq})"
+        )),
     }
 }
 

@@ -4,19 +4,24 @@
 //! a strictly increasing `seq`, rotated by month with rotated files kept, so
 //! `fsck` can find a lost line or a hand edit (#10063 AC 4). The log is not
 //! the source of truth (`dashboard_jsonl.py`), so it is appended after the
-//! commit, under the same lock.
-//! What: [`append`] writes one canonical line per dirty document of a batch,
-//! in `(collection, id)` byte order: `{by, collection, id, keys, op, seq,
+//! commit, under the same lock. Every check that can fail without an I/O
+//! fault runs before the commit, so a torn log refuses writes instead of
+//! letting each one commit unlogged (#10063 df-G01).
+//! What: [`prepare`], before anything is written, reads the last `seq` and
+//! refuses a torn or corrupt last line, then rotates a log whose first line
+//! is from an earlier month to `changes-YYYY-MM.jsonl`, refusing a bad `ts`
+//! and an existing target (never overwritten). [`append`], after the commit,
+//! writes one canonical line per dirty document of the batch, in
+//! `(collection, id)` byte order: `{by, collection, id, keys, op, seq,
 //! sha256, ts, version}`, where `sha256` hashes the bytes written (the
 //! `jsonl` line or the `dir` file) and is null for a delete, and `keys` are
-//! the top-level keys whose value changed. Before appending it rotates a log
-//! whose first line is from an earlier month to `changes-YYYY-MM.jsonl`,
-//! never over an existing one, and it refuses to append after a torn last
-//! line. [`read_all`] reads every log (rotated first) for `fsck`, accepting
-//! the prototype's `coll` key too. [`append_durable`] is the fsynced append
-//! the prune log shares.
+//! the top-level keys whose value changed; only its durable append can fail.
+//! [`read_all`] reads every log (rotated first) for `fsck`, accepting the
+//! prototype's `coll` key too. [`append_durable`] is the fsynced append the
+//! prune log shares.
 //! Test: `changes_seq_strictly_increases_across_rotation`,
 //! `change_line_hashes_the_written_bytes`, `rotation_never_overwrites_a_rotated_file`,
+//! `change_log_preconditions_refuse_the_batch`,
 //! `change_log_failure_is_unlogged_after_commit`, `fsck_reports_torn_change_line`.
 
 use std::collections::BTreeMap;
@@ -39,16 +44,36 @@ pub const CHANGES: &str = "changes.jsonl";
 /// How much of a log's end is read to find its last line.
 const TAIL: u64 = 64 * 1024;
 
-/// Appends the change lines of `staged` (committed at `now`).
-pub(super) fn append(store: &Store, staged: &Staged, now: &str) -> Result<(), DashError> {
+/// Checks, under the lock and before anything is written, that the log
+/// can take a batch committed at `now`, and rotates it when its month has
+/// passed; returns the newest `seq` (0 when there is none).
+///
+/// # Errors
+/// [`DashError::Corrupt`] for a torn or `seq`-less last line, a bad
+/// first-line `ts` or an existing rotation target; [`DashError::Io`] when a
+/// log cannot be read or renamed. The batch is refused on any of these.
+pub(super) fn prepare(root: &Path, now: &str) -> Result<u64, DashError> {
+    // #10063 df-G01: these failures are deterministic, so they refuse the
+    // batch; after the commit they made every later write `Unlogged`.
+    let seq = last_seq(root)?;
+    rotate(root, &root.join(CHANGES), now)?;
+    Ok(seq)
+}
+
+/// Appends the change lines of `staged` (committed at `now`), numbered
+/// after `seq`, the value [`prepare`] returned.
+pub(super) fn append(
+    store: &Store,
+    staged: &Staged,
+    now: &str,
+    mut seq: u64,
+) -> Result<(), DashError> {
     let mut dirty: Vec<&Slot> = staged.slots.iter().filter(|s| s.dirty).collect();
     if dirty.is_empty() {
         return Ok(());
     }
     dirty.sort_by(|a, b| (&a.coll, &a.id).cmp(&(&b.coll, &b.id)));
     let path = store.root.join(CHANGES);
-    let mut seq = last_seq(&store.root)?;
-    rotate(&store.root, &path, now)?;
     let mut text = String::new();
     for slot in dirty {
         seq += 1;
@@ -161,7 +186,7 @@ fn last_line(path: &Path) -> Result<Option<String>, DashError> {
         if *last != b'\n' {
             return Err(DashError::corrupt(
                 path,
-                "torn last line (no newline): fix it before the next write is logged",
+                "torn last line (no newline): fix it before the next write",
             ));
         }
         let start = match body.iter().rposition(|b| *b == b'\n') {
