@@ -11,18 +11,17 @@
 //! with the terminal `SessionDone`. The second request's `after_seq` is
 //! captured and asserted.
 
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::timeout;
 use trusty_code_tui::ReplEvent;
+use trusty_common::uds::test_support::bind_hardened_stub;
 
 use super::EngineState;
 use crate::tui_client::uds_rpc::UdsRpcClient;
@@ -50,15 +49,11 @@ fn item_frame(id: &Value, seq: u64, event: Value) -> String {
 /// Why hand-rolled rather than the real daemon: the property under test is a
 /// mid-stream hang-up, which the real server never does on purpose. Writing the
 /// frames directly is the only way to produce one deterministically.
-async fn spawn_truncating_daemon(socket: PathBuf, seen: SeenCursors) {
-    let dir = socket.parent().expect("the socket has a parent");
+async fn spawn_truncating_daemon(dir: &Path, seen: SeenCursors) -> PathBuf {
     // `connect_hardened` verifies the bits before it writes a byte, so a stub
-    // that skipped this would be refused by the client rather than exercised.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .expect("harden the stub socket directory");
-    let listener = UnixListener::bind(&socket).expect("bind the stub socket");
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the stub socket");
+    // that skipped them would be refused by the client rather than exercised.
+    // #7215: the shared stub bind sets them.
+    let (listener, socket) = bind_hardened_stub(dir).expect("bind the stub socket");
     tokio::spawn(async move {
         let mut answered = 0u32;
         loop {
@@ -123,6 +118,7 @@ async fn spawn_truncating_daemon(socket: PathBuf, seen: SeenCursors) {
             });
         }
     });
+    socket
 }
 
 /// A truncated tail must reconnect and resume above the last forwarded `seq`,
@@ -130,9 +126,8 @@ async fn spawn_truncating_daemon(socket: PathBuf, seen: SeenCursors) {
 #[tokio::test]
 async fn stream_client_reconnects_after_a_truncated_tail() {
     let dir = tempfile::tempdir().expect("socket tempdir");
-    let socket = dir.path().join("stub.sock");
     let seen: SeenCursors = Arc::new(Mutex::new(Vec::new()));
-    spawn_truncating_daemon(socket.clone(), seen.clone()).await;
+    let socket = spawn_truncating_daemon(dir.path(), seen.clone()).await;
 
     let state = EngineState::new(UdsRpcClient::new(socket), None, false);
     let (tx, mut rx) = unbounded_channel();
@@ -176,12 +171,7 @@ async fn stream_client_reconnects_after_a_truncated_tail() {
 #[tokio::test]
 async fn session_stream_silence_is_bounded_not_infinite() {
     let dir = tempfile::tempdir().expect("socket tempdir");
-    let socket = dir.path().join("silent.sock");
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("harden the silent socket directory");
-    let listener = UnixListener::bind(&socket).expect("bind the silent socket");
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the silent socket");
+    let (listener, socket) = bind_hardened_stub(dir.path()).expect("bind the silent socket");
 
     let accept_task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
@@ -219,4 +209,37 @@ async fn session_stream_silence_is_bounded_not_infinite() {
     );
 
     accept_task.abort();
+}
+
+/// #7216: opening a stream is bounded by the unary call budget, not by the
+/// per-frame budget. The frame budget is an hour here, so only a separate open
+/// budget can end a write the daemon never drains. The paused clock waits out
+/// the budget; the socket write itself stays real.
+#[tokio::test(start_paused = true)]
+async fn stream_open_is_bounded_by_the_call_timeout_not_the_frame_budget() {
+    let dir = tempfile::tempdir().expect("socket tempdir");
+    // Bound and never accepted: a request larger than the socket buffers
+    // blocks its write, the wedged-daemon shape for the open step.
+    let (_listener, socket) = bind_hardened_stub(dir.path()).expect("bind the unread stub");
+    let client = UdsRpcClient::new(socket).with_stream_frame_timeout(Duration::from_secs(3600));
+    let pad = "x".repeat(32 * 1024 * 1024);
+
+    let opened = timeout(
+        Duration::from_secs(60),
+        client.open_stream::<Value>("session.events", json!({ "pad": pad })),
+    )
+    .await
+    .expect("the open must be bounded by the call budget, not the hour-long frame budget");
+
+    match opened {
+        Err(crate::tui_client::error::EngineError::Transport { source, .. }) => assert!(
+            matches!(
+                *source,
+                trusty_common::uds::UdsRpcError::Timeout { timeout, .. }
+                    if timeout == crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT
+            ),
+            "expected a Timeout at DEFAULT_CALL_TIMEOUT, got {source:?}"
+        ),
+        other => panic!("expected a transport Timeout, got {other:?}"),
+    }
 }

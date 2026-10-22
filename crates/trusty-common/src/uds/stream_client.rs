@@ -56,7 +56,8 @@ use super::server::{RpcResponse, RpcStreamFrame, StreamPhase};
 /// write, and then each individual frame read. It deliberately does NOT bound
 /// the stream's total duration: a token stream runs as long as the model does,
 /// and a total budget would cut off a working answer. A caller that wants a
-/// wall-clock ceiling wraps its own consumption loop.
+/// wall-clock ceiling wraps its own consumption loop. A caller that wants a
+/// short open and a long frame budget uses [`send_framed_stream_request_with`].
 ///
 /// # Errors
 ///
@@ -104,12 +105,61 @@ where
     Req: Serialize + ?Sized,
     T: DeserializeOwned,
 {
-    let stream = match tokio::time::timeout(timeout, dial_and_send(path, request)).await {
+    // #7216: the one-figure form passes the same value to both budgets.
+    open_framed_stream(path, request, timeout, timeout, max_frame_bytes).await
+}
+
+/// [`send_framed_stream_request`] with the open and per-frame budgets split
+/// (#7216).
+///
+/// Why: a long-lived stream needs a per-frame budget measured in minutes or
+/// hours, because the server sends nothing between frames. The one-figure forms
+/// apply that same figure to the dial and the request write, so a peer that
+/// stops reading holds the caller for the whole frame budget. trusty-code had
+/// to set fifteen minutes on both for that reason.
+/// What: `open_timeout` bounds the dial and the request write;
+/// `frame_timeout` bounds each frame read after that, exactly as the single
+/// figure did. The frame budget is [`MAX_FRAME_BYTES`].
+///
+/// # Errors
+///
+/// The same set as [`send_framed_stream_request`]. An open that overruns
+/// reports [`UdsRpcError::Timeout`] carrying `open_timeout`; a frame read that
+/// overruns reports it carrying `frame_timeout`.
+///
+/// Test: `stream_open_timeout_bounds_the_dial_and_write_not_the_frame_budget`,
+/// `stream_frame_timeout_bounds_each_read_not_the_open_budget`.
+pub async fn send_framed_stream_request_with<Req, T>(
+    path: &Path,
+    request: &Req,
+    open_timeout: Duration,
+    frame_timeout: Duration,
+) -> Result<FramedStream<T>, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    T: DeserializeOwned,
+{
+    open_framed_stream(path, request, open_timeout, frame_timeout, MAX_FRAME_BYTES).await
+}
+
+/// The shared body of every `send_framed_stream_request*` form.
+async fn open_framed_stream<Req, T>(
+    path: &Path,
+    request: &Req,
+    open_timeout: Duration,
+    frame_timeout: Duration,
+    max_frame_bytes: u64,
+) -> Result<FramedStream<T>, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    T: DeserializeOwned,
+{
+    let stream = match tokio::time::timeout(open_timeout, dial_and_send(path, request)).await {
         Ok(result) => result?,
         Err(_) => {
             return Err(UdsRpcError::Timeout {
                 path: path.to_path_buf(),
-                timeout,
+                timeout: open_timeout,
             });
         }
     };
@@ -118,7 +168,7 @@ where
         reader: BufReader::new(stream),
         path: path.to_path_buf(),
         max_frame_bytes,
-        frame_timeout: timeout,
+        frame_timeout,
         finished: false,
         _item: PhantomData,
     })
@@ -486,6 +536,75 @@ mod tests {
             .await;
 
         assert_eq!(items, vec!["a".to_string()]);
+    }
+
+    /// A request larger than both ends' socket buffers, so writing it blocks
+    /// until the peer reads — the open step's stall, made deterministic.
+    fn oversized_request() -> serde_json::Value {
+        json!({ "stream": true, "pad": "x".repeat(32 * 1024 * 1024) })
+    }
+
+    #[tokio::test]
+    async fn stream_open_timeout_bounds_the_dial_and_write_not_the_frame_budget() {
+        // #7216: a peer that never reads stalls the request write. The open
+        // budget must end that, not the hour-long per-frame budget.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("unread.sock");
+        // Bound and never accepted: the kernel queues the connection and the
+        // write fills the buffers, then blocks.
+        let _listener = bind_hardened(&sock).expect("bind");
+        let request = oversized_request();
+
+        let open = send_framed_stream_request_with::<_, String>(
+            &sock,
+            &request,
+            Duration::from_millis(200),
+            Duration::from_secs(3600),
+        );
+        let err = tokio::time::timeout(Duration::from_secs(20), open)
+            .await
+            .expect("the open budget, not the frame budget, must end a stalled write")
+            .expect_err("a write the peer never drains cannot open a stream");
+        assert!(
+            matches!(err, UdsRpcError::Timeout { timeout, .. } if timeout == Duration::from_millis(200)),
+            "expected Timeout at the 200ms open budget, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_frame_timeout_bounds_each_read_not_the_open_budget() {
+        // #7216: the open budget is an hour here, so only the per-frame budget
+        // can end a stream whose server reads the request and then says nothing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("silent.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind");
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut sink = Vec::new();
+            let _ = conn.read_to_end(&mut sink).await;
+            // Held open, never written to.
+            std::future::pending::<()>().await;
+        });
+
+        let mut stream = send_framed_stream_request_with::<_, String>(
+            &sock,
+            &json!({ "stream": true }),
+            Duration::from_secs(3600),
+            Duration::from_millis(200),
+        )
+        .await
+        .expect("open");
+        let err = tokio::time::timeout(Duration::from_secs(20), stream.next_frame())
+            .await
+            .expect("the frame budget must end a silent stream")
+            .expect("a report")
+            .expect_err("silence is not a frame");
+        assert!(
+            matches!(err, UdsRpcError::Timeout { timeout, .. } if timeout == Duration::from_millis(200)),
+            "expected Timeout at the 200ms frame budget, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -233,4 +233,5 @@ serial_test = { workspace = true }
 # #9123: the shared credential test sandbox. Dev-only because it mutates the
 # process environment; it must never reach a normal build. #6637: `axum-server`
 # is dev-only too — it now serves only `MockInferenceServer`, a test double.
-trusty-common = { workspace = true, features = ["credential-test-sandbox", "axum-server"] }
+# #7215: `uds-test-support` gives the UDS test stubs their hardened bind.
+trusty-common = { workspace = true, features = ["credential-test-sandbox", "axum-server", "uds-test-support"] }

@@ -18,14 +18,12 @@
 //! reconnect-exhaustion failure surface, and the workstream-activation wire
 //! field names.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -354,14 +352,10 @@ impl StubDaemon {
 
     fn start_inner(answers: Value, stream_frames: Vec<Value>, serve_claim: bool) -> Self {
         let dir = tempfile::tempdir().expect("socket tempdir");
-        let socket = dir.path().join("stub.sock");
-        // `connect_hardened` refuses a socket whose containing directory is
-        // wider than `0700`, and `tempfile` creates one at the process umask.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("harden the stub socket directory");
-        let listener = UnixListener::bind(&socket).expect("bind the stub socket");
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-            .expect("harden the stub socket");
+        // #7215: `connect_hardened` refuses anything but a 0700 dir and a 0600
+        // socket; the shared stub bind produces exactly that.
+        let (listener, socket) = trusty_common::uds::test_support::bind_hardened_stub(dir.path())
+            .expect("bind the hardened stub socket");
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
         let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
