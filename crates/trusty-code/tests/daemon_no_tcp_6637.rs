@@ -97,7 +97,8 @@ impl Drop for Daemon {
 /// `health` on the sandbox socket for up to `FIND_BOUND` to learn it; sends
 /// SIGTERM, then SIGKILL after `TERM_BOUND`. The dial runs on its own thread
 /// and runtime because drop may run inside the test's tokio runtime.
-/// Test: `the_tui_autospawned_daemon_binds_no_tcp_listener` holds one.
+/// Test: `the_reaper_stops_an_autospawned_daemon_with_no_learned_pid`;
+/// `the_tui_autospawned_daemon_binds_no_tcp_listener` holds one.
 struct AutospawnReaper {
     socket: PathBuf,
     pid: Option<u32>,
@@ -446,6 +447,31 @@ async fn the_tui_autospawned_daemon_binds_no_tcp_listener() {
     assert_eq!(
         payload["binding"]["state"], "projectless",
         "a --projectless TUI must spawn a projectless daemon: {payload}"
+    );
+}
+
+/// The reaper stops an autospawned daemon even when no pid was ever learned,
+/// which is the state a panic in the health loop leaves it in.
+///
+/// Why: the autospawned daemon is no child of the test, so only the reaper
+/// stands between a failing run and a daemon that outlives its sandbox
+/// (#6637).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn the_reaper_stops_an_autospawned_daemon_with_no_learned_pid() {
+    let sandbox = Sandbox::new();
+    let log = sandbox.log("tui");
+    let mut tui = sandbox.spawn(&["tui", "--projectless"], &log);
+    wait_exit(&mut tui, &log);
+    drop(tui);
+
+    let socket = sandbox.socket();
+    drop(AutospawnReaper::new(socket.clone()));
+    assert!(
+        health(&socket).await.is_none(),
+        "the reaper must have stopped the daemon answering on {}\nstderr:\n{}",
+        socket.display(),
+        read(&log)
     );
 }
 
