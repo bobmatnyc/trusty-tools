@@ -39,6 +39,12 @@ use tokio::time::Instant;
 
 use crate::core::symbol_graph::SymbolGraph;
 
+/// #10110 test seam: the durable dirty-mark stamp fails for each index id
+/// listed here, so a caller's fail-before-mutation path can be proven.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_DIRTY_MARK: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 use super::CodeIndexer;
 
 /// Quiet window after the last write before the ticker rebuilds (#8959).
@@ -259,6 +265,13 @@ impl CodeIndexer {
         refresh.inflight.fetch_add(1, Ordering::SeqCst);
         let guard = GraphWriteGuard { refresh };
         let generation = refresh.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        #[cfg(test)]
+        if TEST_FAIL_DIRTY_MARK
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected symbol-graph dirty mark failure (#10110 test seam)");
+        }
         if let Some(corpus) = self.corpus.clone() {
             tokio::task::spawn_blocking(move || corpus.mark_kg_graph_dirty(generation))
                 .await
@@ -352,8 +365,10 @@ impl CodeIndexer {
     /// What: returns `false` with no work when the graph is fresh or the index
     /// is deleted. Otherwise takes the flush lock, re-checks, and runs one
     /// full `rebuild_symbol_graph`, which clears the stale mark. Returns
-    /// whether it rebuilt.
-    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
+    /// whether it rebuilt; `false` when the rebuild was deferred or installed
+    /// nothing, with the stale mark kept (#10110).
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+    /// `a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries_10110`.
     pub async fn flush_symbol_graph(&self) -> bool {
         if !self.graph_refresh.is_stale() || self.refuse_if_deleted().is_err() {
             return false;
@@ -362,8 +377,9 @@ impl CodeIndexer {
         if !self.graph_refresh.is_stale() {
             return false; // a concurrent flusher already rebuilt
         }
-        self.rebuild_symbol_graph().await;
-        true
+        // #10110: a rebuild deferred behind a still-running rehydrate leaves
+        // the mark set, so it reports `false` and the ticker retries.
+        self.rebuild_symbol_graph().await.merge_error.is_none()
     }
 
     /// The ticker's entry point: flush when the debounce window says so.

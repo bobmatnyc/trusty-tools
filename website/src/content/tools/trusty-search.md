@@ -73,7 +73,7 @@ directories such as `.ssh`, `.aws`, `.gnupg` and `.kube`, paths carrying secret
 markers, and the top level of your home directory. Those are refused with the
 matched pattern named in the error, not silently skipped.
 
-## 21 tools over MCP
+## 22 tools over MCP
 
 The MCP server speaks stdio and HTTP/SSE and exposes each retrieval lane
 separately, so an agent can pick the one that fits the question instead of

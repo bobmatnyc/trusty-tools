@@ -23,6 +23,8 @@ pub mod memory_policy;
 pub mod migration;
 pub mod mmr;
 pub mod ner;
+// #10110: the stored keys one batch removal selects.
+pub(crate) mod path_selection;
 pub mod project_config;
 // #9169: the canonical project→index map, `project-map.toml`.
 pub mod project_map;

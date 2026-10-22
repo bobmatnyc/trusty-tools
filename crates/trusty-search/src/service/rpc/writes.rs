@@ -19,6 +19,7 @@
 //! | `search.index.roots.add` | `POST /indexes/{id}/roots` | free |
 //! | `search.index.file.put` | `POST /indexes/{id}/index-file` | bulk |
 //! | `search.index.file.remove` | `POST /indexes/{id}/remove-file` | bulk |
+//! | `search.index.files.remove` | none (socket-only, #10110) | bulk |
 //! | `search.index.reindex` | `POST /indexes/{id}/reindex` | bulk |
 //! | `search.graph.ingest` | `POST /indexes/{id}/graph` | bulk |
 //! | `search.index.quantize` | `POST /indexes/{id}/quantize` | bulk |
@@ -78,7 +79,8 @@ use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::service::server::{
     AddRootsRequest, CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest,
-    QuantizeRequest, ReindexRequest, RelocateIndexRequest, RemoveFileRequest, SearchAppState,
+    QuantizeRequest, ReindexRequest, RelocateIndexRequest, RemoveFileRequest, RemoveFilesRequest,
+    SearchAppState,
 };
 
 use super::as_http_body;
@@ -98,6 +100,10 @@ pub const METHOD_INDEX_RELOCATE: &str = "search.index.relocate";
 pub const METHOD_INDEX_FILE_PUT: &str = "search.index.file.put";
 /// `POST /indexes/{id}/remove-file` — drop one file's chunks from an index.
 pub const METHOD_INDEX_FILE_REMOVE: &str = "search.index.file.remove";
+/// Remove every file under a prefix, or in a list, in one call (#10110).
+/// Socket-only — it has no HTTP twin. The host needs free memory for one copy
+/// of the vector index per call.
+pub const METHOD_INDEX_FILES_REMOVE: &str = "search.index.files.remove";
 /// `POST /indexes/{id}/reindex` — queue a full reindex. The trigger only.
 pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// `POST /indexes/{id}/graph` — ingest one producer's contributed graph.
@@ -131,6 +137,8 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_RELOCATE,
     METHOD_INDEX_FILE_PUT,
     METHOD_INDEX_FILE_REMOVE,
+    // #10110 — the batch removal.
+    METHOD_INDEX_FILES_REMOVE,
     METHOD_INDEX_REINDEX,
     METHOD_GRAPH_INGEST,
     // #6524 — the embedding pause pair.
@@ -242,6 +250,28 @@ where
         .map_err(|(status, refusal)| rpc_error_from_http(status, &refusal))
 }
 
+/// [`bulk_guarded`], with the refusal body attached as the error's `data`.
+///
+/// Why (#10110): `rpc_error_from_http` attaches `data` to a 503 only, so a
+/// partial `remove_files_failed` 500 would reach the caller without the
+/// counts that say what already committed.
+/// Test: `remove_files_over_the_socket_carries_the_refusal_body`.
+async fn bulk_guarded_with_data<F>(
+    state: &Arc<SearchAppState>,
+    body: F,
+) -> Result<serde_json::Value, RpcError>
+where
+    F: std::future::Future<
+        Output = Result<serde_json::Value, (axum::http::StatusCode, serde_json::Value)>,
+    >,
+{
+    let _permit = crate::service::concurrency::admit(&state.query_limiter)
+        .await
+        .map_err(|(status, refusal)| rpc_error_from_http(status, &refusal))?;
+    body.await
+        .map_err(|(status, refusal)| rpc_error_from_http(status, &refusal).with_data(refusal))
+}
+
 /// Run one registry-level write with no limiter and no deadline.
 ///
 /// Why: create, delete and relocate were the retired router's `free` group —
@@ -296,7 +326,7 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     use crate::service::server::{
         add_index_roots_report, create_index_report, delete_index_report, index_file_report,
         ingest_graph_report, pause_embedding_report, quantize_report, reindex_report,
-        relocate_index_report, remove_file_report, resume_embedding_report,
+        relocate_index_report, remove_file_report, remove_files_report, resume_embedding_report,
     };
 
     let r = router;
@@ -351,6 +381,19 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         IndexBody<RemoveFileRequest>,
         |s, p| remove_file_report(&s, &p.index_id, p.body).await
     );
+
+    // #10110: the batch removal; a refusal carries its body as `data`.
+    let held = Arc::clone(state);
+    let r =
+        r.typed::<IndexBody<RemoveFilesRequest>, serde_json::Value, _, _>(
+            METHOD_INDEX_FILES_REMOVE,
+            move |p| {
+                let s = Arc::clone(&held);
+                async move {
+                    bulk_guarded_with_data(&s, remove_files_report(&s, &p.index_id, p.body)).await
+                }
+            },
+        );
 
     // ---- reindex trigger (the SSE stream is slice 5) ------------------------
     let r = bulk_write!(r, METHOD_INDEX_REINDEX, ReindexParams, |s, p| {
