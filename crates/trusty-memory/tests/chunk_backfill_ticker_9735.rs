@@ -102,7 +102,10 @@ async fn background_maintenance_reembeds_pre_chunking_drawers() {
     let long = remember(&handle, &text).await;
     // The pre-chunking shape: one row, the window-truncated vector.
     let embedder = shared_embedder().await.expect("embedder");
-    let truncated = embedder.embed_batch(&[text.clone()]).await.expect("embed");
+    let truncated = embedder
+        .embed_batch(std::slice::from_ref(&text))
+        .await
+        .expect("embed");
     handle
         .vector_store
         .upsert_chunks(long, truncated)
