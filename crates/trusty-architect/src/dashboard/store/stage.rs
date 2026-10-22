@@ -28,8 +28,7 @@ use serde_json::{Map, Value};
 use super::super::error::DashError;
 use super::super::ids::check_name;
 use super::jsonl::{self, Docs};
-use super::{Format, Store, Versioned, dir};
-use crate::ledger::store::{sync_dir, write_atomic};
+use super::{Format, Store, Versioned, beneath, dir};
 use crate::pystr::py_repr;
 
 /// One write in a batch.
@@ -417,50 +416,49 @@ impl Store {
                     .collect()
             }
         };
-        apply(&plan)
+        apply(&self.root, &plan)
     }
 }
 
-/// Writes `(path, bytes | None = remove)` in order; on any failure restores
-/// every earlier path's previous bytes (or absence) and returns the failure.
-fn apply(plan: &[(PathBuf, Option<String>)]) -> Result<(), DashError> {
+/// Writes `(path, bytes | None = remove)` in order, each under `root`
+/// without following a symlinked parent (#10063 PR 3); on any failure
+/// restores every earlier path's previous bytes (or absence) and returns the
+/// failure.
+fn apply(root: &Path, plan: &[(PathBuf, Option<String>)]) -> Result<(), DashError> {
     let mut backups: Vec<(&PathBuf, Option<Vec<u8>>)> = Vec::new();
     for (path, payload) in plan {
         let old = match fs::read(path) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(rollback(&backups, DashError::io(path)(e))),
+            Err(e) => return Err(rollback(root, &backups, DashError::io(path)(e))),
         };
         let existed = old.is_some();
         backups.push((path, old));
         let step = match payload {
-            None if existed => fs::remove_file(path)
-                .map_err(DashError::io(path))
-                .and_then(|()| sync_dir(path).map_err(DashError::from)),
+            None if existed => beneath::remove(root, rel(root, path)?),
             None => Ok(()),
-            Some(text) => write(path, text),
+            Some(text) => beneath::write_atomic(root, rel(root, path)?, text.as_bytes()),
         };
         if let Err(e) = step {
-            return Err(rollback(&backups, e));
+            return Err(rollback(root, &backups, e));
         }
     }
     Ok(())
 }
 
-fn write(path: &Path, text: &str) -> Result<(), DashError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(DashError::io(parent))?;
-    }
-    write_atomic(path, text).map_err(DashError::from)
+/// `path` relative to the store `root` it was built from.
+fn rel<'a>(root: &Path, path: &'a Path) -> Result<&'a Path, DashError> {
+    path.strip_prefix(root)
+        .map_err(|_| DashError::Invalid(format!("{} is outside the store", path.display())))
 }
 
 /// Restores `backups` newest first. Returns `error` when every file is back,
 /// else [`DashError::RollbackIncomplete`] naming the files that are not
 /// (#10063 df-G01: a torn store is never reported as a plain write failure).
-fn rollback(backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashError {
+fn rollback(root: &Path, backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashError {
     let mut unrestored = Vec::new();
     for (path, old) in backups.iter().rev() {
-        if let Err(e) = restore(path, old.as_deref()) {
+        if let Err(e) = restore(root, path, old.as_deref()) {
             tracing::error!(path = %path.display(), error = %e, "dashboard store: rollback could not restore a file");
             unrestored.push((*path).clone());
         }
@@ -477,7 +475,7 @@ fn rollback(backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashEr
 
 /// Puts `old` (bytes, or absence) back at `path`; a file that already holds
 /// them, such as the one whose write failed before its rename, is left alone.
-fn restore(path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
+fn restore(root: &Path, path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
     let unchanged = match (fs::read(path), old) {
         (Ok(now), Some(old)) => now == old,
         (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
@@ -485,9 +483,7 @@ fn restore(path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
     };
     match old {
         _ if unchanged => Ok(()),
-        None => fs::remove_file(path)
-            .map_err(DashError::io(path))
-            .and_then(|()| sync_dir(path).map_err(DashError::from)),
-        Some(bytes) => write_atomic(path, bytes).map_err(DashError::from),
+        None => beneath::remove(root, rel(root, path)?),
+        Some(bytes) => beneath::write_atomic(root, rel(root, path)?, bytes),
     }
 }
