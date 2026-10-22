@@ -646,7 +646,8 @@ async fn index_status_reports_the_embed_window_counters() {
     )
     .await
     .expect("status 200");
-    assert_eq!(body["embed_window"], 8);
-    assert_eq!(body["embed_window_truncated"], 1);
-    assert_eq!(body["embed_window_unmeasured"], 0);
+    let window = &body["embed_window"];
+    assert_eq!(window["window"], 8);
+    assert_eq!(window["truncated"], 1);
+    assert_eq!(window["unmeasured"], 0);
 }
