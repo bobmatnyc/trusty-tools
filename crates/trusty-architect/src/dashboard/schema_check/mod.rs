@@ -13,7 +13,8 @@
 //! an error, as in the prototype.
 //! Test: `walk_reports_each_keyword_like_the_prototype`,
 //! `walk_refuses_unknown_keywords_and_refs`, `goal_invariants_are_checked`,
-//! `schema_enforce_refuses_and_warn_writes`, `prototype_schemas_load_and_fixtures_validate`.
+//! `schema_enforce_refuses_and_warn_writes`, `prototype_schemas_load_and_fixtures_validate`,
+//! `media_is_a_known_collection`.
 
 mod pattern;
 mod walk;
@@ -30,7 +31,7 @@ pub use pattern::Pattern;
 use walk::Patterns;
 
 /// Collections with a schema of the same name.
-pub const COLLECTIONS: [&str; 11] = [
+pub const COLLECTIONS: [&str; 12] = [
     "items",
     "sessions",
     "goals",
@@ -42,6 +43,8 @@ pub const COLLECTIONS: [&str; 11] = [
     "il_steers",
     "briefs",
     "questions",
+    // #10063 df-G01: the prototype lists it and `dashboard_media.py` writes it.
+    "media",
 ];
 /// `meta` doc ids with a `meta-<id>` schema.
 pub const META_IDS: [&str; 4] = ["state", "settings", "seen", "gh_track"];

@@ -8,15 +8,40 @@
 //! ranges, `\` before punctuation, `^`, `$`, groups `(...)` / `(?:...)` with
 //! `|`, and the quantifiers `?`, `*`, `+`, `{n}`, `{n,}`, `{n,m}`; anything
 //! else (`\d`, look-around, backreferences, lazy quantifiers) is refused.
-//! [`Pattern::search`] is Python's `re.search` over code points with a
-//! backtracking matcher: `.` skips `\n`, `$` also matches before one final
-//! `\n`.
-//! Test: `pattern_matches_like_python_re_search`, `pattern_refuses_unsupported_syntax`.
+//! The parse is compiled to a Thompson NFA; a repeat count above
+//! [`MAX_COUNT`] or a program past [`MAX_PROGRAM`] steps is refused.
+//! [`Pattern::search`] answers Python's `re.search` over code points with a
+//! Pike VM (two thread lists, no recursion), so stack use does not depend on
+//! the input and time is O(input × program) (#10063 df-G01): `.` skips `\n`,
+//! `$` also matches before one final `\n`.
+//! Test: `pattern_matches_like_python_re_search`, `pattern_refuses_unsupported_syntax`,
+//! `shipped_patterns_match_a_megabyte_on_a_small_stack`.
+
+/// The largest `{n}` / `{n,m}` count a pattern may use.
+pub const MAX_COUNT: usize = 1000;
+/// The most compile steps (and so instructions) one pattern may expand to.
+pub const MAX_PROGRAM: usize = 10_000;
 
 /// A compiled pattern.
 #[derive(Debug, Clone)]
 pub struct Pattern {
-    alts: Vec<Vec<Node>>,
+    prog: Vec<Inst>,
+}
+
+/// One NFA instruction; a consuming one advances to the next pc.
+#[derive(Debug, Clone)]
+enum Inst {
+    Char(char),
+    Any,
+    Class {
+        negate: bool,
+        ranges: Vec<(char, char)>,
+    },
+    Start,
+    End,
+    Split(usize, usize),
+    Jmp(usize),
+    Match,
 }
 
 #[derive(Debug, Clone)]
@@ -58,13 +83,196 @@ impl Pattern {
         if p.pos != p.chars.len() {
             return Err(p.fail("unbalanced ')'"));
         }
-        Ok(Self { alts })
+        let mut emit = Emitter {
+            prog: Vec::new(),
+            budget: MAX_PROGRAM,
+        };
+        emit.alts(&alts)
+            .and_then(|()| emit.push(Inst::Match))
+            .map_err(|()| format!("pattern {source:?}: expands past {MAX_PROGRAM} steps"))?;
+        Ok(Self { prog: emit.prog })
     }
 
     /// Whether the pattern matches anywhere in `text` (`re.search`).
     pub fn search(&self, text: &str) -> bool {
         let s: Vec<char> = text.chars().collect();
-        (0..=s.len()).any(|start| alts(&self.alts, start, &s, &mut |_| true))
+        let mut cur = Threads::new(self.prog.len());
+        let mut next = Threads::new(self.prog.len());
+        let mut stack = Vec::new();
+        for i in 0..=s.len() {
+            // A thread starting at `i` joins those carried from `i - 1`.
+            if self.closure(0, i, &s, &mut cur, &mut stack) {
+                return true;
+            }
+            let Some(&ch) = s.get(i) else { break };
+            for idx in 0..cur.dense.len() {
+                let pc = cur.dense[idx];
+                if self.accepts(pc, ch) && self.closure(pc + 1, i + 1, &s, &mut next, &mut stack) {
+                    return true;
+                }
+            }
+            cur.clear();
+            std::mem::swap(&mut cur, &mut next);
+        }
+        false
+    }
+
+    /// Adds `pc` and every pc reachable from it without consuming at
+    /// position `i` to `list`; true when `Match` is reached.
+    fn closure(
+        &self,
+        pc: usize,
+        i: usize,
+        s: &[char],
+        list: &mut Threads,
+        stack: &mut Vec<usize>,
+    ) -> bool {
+        stack.clear();
+        stack.push(pc);
+        while let Some(pc) = stack.pop() {
+            if !list.insert(pc) {
+                continue;
+            }
+            match self.prog[pc] {
+                Inst::Match => return true,
+                Inst::Jmp(x) => stack.push(x),
+                Inst::Split(x, y) => stack.extend([y, x]),
+                Inst::Start if i == 0 => stack.push(pc + 1),
+                Inst::End if i == s.len() || (i + 1 == s.len() && s[i] == '\n') => {
+                    stack.push(pc + 1);
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether the instruction at `pc` consumes `ch`.
+    fn accepts(&self, pc: usize, ch: char) -> bool {
+        match &self.prog[pc] {
+            Inst::Char(c) => *c == ch,
+            Inst::Any => ch != '\n',
+            Inst::Class { negate, ranges } => {
+                ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&ch)) != *negate
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A set of pcs in insertion order, cleared in O(len).
+struct Threads {
+    dense: Vec<usize>,
+    seen: Vec<bool>,
+}
+
+impl Threads {
+    fn new(len: usize) -> Self {
+        Self {
+            dense: Vec::with_capacity(len),
+            seen: vec![false; len],
+        }
+    }
+
+    fn insert(&mut self, pc: usize) -> bool {
+        let fresh = !self.seen[pc];
+        if fresh {
+            self.seen[pc] = true;
+            self.dense.push(pc);
+        }
+        fresh
+    }
+
+    fn clear(&mut self) {
+        for pc in self.dense.drain(..) {
+            self.seen[pc] = false;
+        }
+    }
+}
+
+/// Lowers the parse to [`Inst`]s; every node and instruction spends one
+/// unit of `budget`, so no pattern compiles in more than [`MAX_PROGRAM`] steps.
+struct Emitter {
+    prog: Vec<Inst>,
+    budget: usize,
+}
+
+impl Emitter {
+    fn spend(&mut self) -> Result<(), ()> {
+        self.budget = self.budget.checked_sub(1).ok_or(())?;
+        Ok(())
+    }
+
+    fn push(&mut self, inst: Inst) -> Result<usize, ()> {
+        self.spend()?;
+        self.prog.push(inst);
+        Ok(self.prog.len() - 1)
+    }
+
+    /// `a|b`: `Split(a, next)`, `a`, `Jmp(end)`, `next: b`.
+    fn alts(&mut self, alts: &[Vec<Node>]) -> Result<(), ()> {
+        let mut jumps = Vec::new();
+        for (n, seq) in alts.iter().enumerate() {
+            let split = (n + 1 < alts.len())
+                .then(|| self.push(Inst::Split(0, 0)))
+                .transpose()?;
+            for node in seq {
+                self.node(node)?;
+            }
+            if let Some(split) = split {
+                jumps.push(self.push(Inst::Jmp(0))?);
+                self.prog[split] = Inst::Split(split + 1, self.prog.len());
+            }
+        }
+        let end = self.prog.len();
+        for j in jumps {
+            self.prog[j] = Inst::Jmp(end);
+        }
+        Ok(())
+    }
+
+    fn node(&mut self, node: &Node) -> Result<(), ()> {
+        self.spend()?;
+        match node {
+            Node::Char(c) => self.push(Inst::Char(*c)).map(drop),
+            Node::Any => self.push(Inst::Any).map(drop),
+            Node::Class { negate, ranges } => self
+                .push(Inst::Class {
+                    negate: *negate,
+                    ranges: ranges.clone(),
+                })
+                .map(drop),
+            Node::Start => self.push(Inst::Start).map(drop),
+            Node::End => self.push(Inst::End).map(drop),
+            Node::Group(inner) => self.alts(inner),
+            Node::Repeat { node, min, max } => {
+                for _ in 0..*min {
+                    self.node(node)?;
+                }
+                let mut splits = Vec::new();
+                match max {
+                    // `L: Split(body, end)`, body, `Jmp(L)`.
+                    None => {
+                        let split = self.push(Inst::Split(0, 0))?;
+                        self.node(node)?;
+                        self.push(Inst::Jmp(split))?;
+                        splits.push(split);
+                    }
+                    // `max - min` nested optional copies, each skipping to the end.
+                    Some(max) => {
+                        for _ in *min..*max {
+                            splits.push(self.push(Inst::Split(0, 0))?);
+                            self.node(node)?;
+                        }
+                    }
+                }
+                let end = self.prog.len();
+                for s in splits {
+                    self.prog[s] = Inst::Split(s + 1, end);
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -204,61 +412,15 @@ impl Parser<'_> {
         if max.is_some_and(|m| m < min) {
             return Err(self.fail("bad {n,m}"));
         }
+        if min.max(max.unwrap_or(0)) > MAX_COUNT {
+            return Err(self.fail(&format!("repeat count above {MAX_COUNT}")));
+        }
         Ok(Node::Repeat {
             node: Box::new(node),
             min,
             max,
         })
     }
-}
-
-type Cont<'a> = &'a mut dyn FnMut(usize) -> bool;
-
-fn alts(alts: &[Vec<Node>], i: usize, s: &[char], k: Cont<'_>) -> bool {
-    alts.iter().any(|seq| sequence(seq, i, s, k))
-}
-
-fn sequence(seq: &[Node], i: usize, s: &[char], k: Cont<'_>) -> bool {
-    match seq.split_first() {
-        None => k(i),
-        Some((node, rest)) => one(node, i, s, &mut |j| sequence(rest, j, s, k)),
-    }
-}
-
-fn one(node: &Node, i: usize, s: &[char], k: Cont<'_>) -> bool {
-    match node {
-        Node::Char(c) => s.get(i) == Some(c) && k(i + 1),
-        Node::Any => s.get(i).is_some_and(|c| *c != '\n') && k(i + 1),
-        Node::Class { negate, ranges } => {
-            let hit = |c: &char| ranges.iter().any(|(lo, hi)| (lo..=hi).contains(&c));
-            s.get(i).is_some_and(|c| hit(c) != *negate) && k(i + 1)
-        }
-        Node::Start => i == 0 && k(i),
-        Node::End => (i == s.len() || (i + 1 == s.len() && s[i] == '\n')) && k(i),
-        Node::Group(inner) => alts(inner, i, s, k),
-        Node::Repeat { node, min, max } => repeat(node, *min, *max, 0, i, s, k),
-    }
-}
-
-/// Greedy repetition with backtracking; an empty iteration past `min` stops.
-fn repeat(
-    node: &Node,
-    min: usize,
-    max: Option<usize>,
-    count: usize,
-    i: usize,
-    s: &[char],
-    k: Cont<'_>,
-) -> bool {
-    if max.is_none_or(|m| count < m) {
-        let more = one(node, i, s, &mut |j| {
-            (j != i || count < min) && repeat(node, min, max, count + 1, j, s, k)
-        });
-        if more {
-            return true;
-        }
-    }
-    count >= min && k(i)
 }
 
 #[cfg(test)]
@@ -301,9 +463,23 @@ mod tests {
     #[test]
     fn pattern_refuses_unsupported_syntax() {
         for bad in [
-            "\\d+", "(?=x)", "a*?", "a{2", "(a", "a)", "[a", "*a", "[z-a]", "\\1",
+            "\\d+",
+            "(?=x)",
+            "a*?",
+            "a{2",
+            "(a",
+            "a)",
+            "[a",
+            "*a",
+            "[z-a]",
+            "\\1",
+            "a{1001}",
+            "a{2,1001}",
+            "(a{1000}){1000}",
+            "((){1000}){1000}",
         ] {
             assert!(Pattern::compile(bad).is_err(), "{bad}");
         }
+        assert!(Pattern::compile("a{1000}").is_ok());
     }
 }

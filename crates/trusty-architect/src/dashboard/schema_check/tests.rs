@@ -115,3 +115,92 @@ fn goal_invariants_are_checked() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn media_is_a_known_collection() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    fs::write(
+        tmp.path().join("media.schema.json"),
+        "{\"type\": \"object\", \"required\": [\"project\"]}",
+    )?;
+    let set = SchemaDir::load(tmp.path())?;
+    assert_eq!(schema_name("media", "B01").as_deref(), Some("media"));
+    assert_eq!(
+        set.validate("media", "B01", &Map::new())?,
+        ["media/B01: /project: required property is missing"]
+    );
+    Ok(())
+}
+
+/// The distinct `pattern`s of the prototype's `schemas/dashboard/*.schema.json`.
+const SHIPPED: [&str; 12] = [
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
+    "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
+    "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?Z)?$",
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+    "^[0-9]{2}:[0-9]{2}$",
+    "^G[0-9a-f]{2}$",
+    "^S[0-9a-f]{2}$",
+    "^[^/ ,]+/[^/ ,]+(, [^/ ,]+/[^/ ,]+)*$",
+    "^[^/]+/docs/briefs/.+[.]md$",
+    "^docs/briefs/[^/].*[.]md$",
+    "^https?://",
+];
+
+/// Every `pattern` value under `v`.
+fn patterns_in(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(o) => o.iter().for_each(|(k, x)| match (k.as_str(), x) {
+            ("pattern", Value::String(s)) => out.push(s.clone()),
+            _ => patterns_in(x, out),
+        }),
+        Value::Array(a) => a.iter().for_each(|x| patterns_in(x, out)),
+        _ => {}
+    }
+}
+
+/// #10063 df-G01: a 1 MiB value against every shipped pattern on a 256 KiB
+/// stack; the backtracking matcher took one frame per repeated character.
+#[test]
+fn shipped_patterns_match_a_megabyte_on_a_small_stack() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(proto) = std::env::var_os("DASHBOARD_PROTO_DIR") {
+        let mut found = Vec::new();
+        let dir = std::path::Path::new(&proto).join("schemas/dashboard");
+        for entry in fs::read_dir(dir)? {
+            let text = fs::read_to_string(entry?.path())?;
+            patterns_in(&serde_json::from_str(&text)?, &mut found);
+        }
+        for p in found {
+            assert!(SHIPPED.contains(&p.as_str()), "unlisted pattern {p:?}");
+        }
+    }
+    let run = || -> Result<(), String> {
+        let mb = 1 << 20;
+        let x = "x".repeat(mb);
+        let digits = "0".repeat(mb);
+        let repos = format!("a/b{}", ", c/d".repeat(mb / 5));
+        let brief = format!("{x}/docs/briefs/{x}.md");
+        let rel = format!("docs/briefs/{x}.md");
+        let url = format!("https://{x}");
+        for (source, text, want) in SHIPPED[..8].iter().map(|p| (*p, &digits, false)).chain([
+            (SHIPPED[8], &repos, true),
+            (SHIPPED[9], &brief, true),
+            (SHIPPED[10], &rel, true),
+            (SHIPPED[11], &url, true),
+            (SHIPPED[9], &x, false),
+        ]) {
+            let got = Pattern::compile(source)?.search(text);
+            if got != want {
+                return Err(format!("{source}: got {got}, want {want}"));
+            }
+        }
+        Ok(())
+    };
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(run)?
+        .join()
+        .map_err(|_| "the matcher thread panicked")??;
+    Ok(())
+}
