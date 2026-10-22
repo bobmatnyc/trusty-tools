@@ -25,8 +25,9 @@ pub(super) fn channels_tools() -> Vec<Value> {
          recipient must be a Slack user id (`U…`) that a channel route names; \
          a channel or group-DM id is refused. Returns `{ question_id, route, \
          dm_channel_id, thread_ts }` once the question is posted and recorded; \
-         an answer binds to `question_id`. `options` (2 to 6 labels) are \
-         posted numbered from 1 and echoed in the result. Every refusal \
+         the owner answers by picking one of the given `options` (2 to 6 \
+         labels, posted numbered from 1 and echoed in the result); free text \
+         is not delivered back to the caller. Every refusal \
          sends nothing and names its rule (`asker_unproven`, \
          `recipient_not_user_id`, `options_invalid`, \
          `no_route`, `snapshot_stale`, `user_token_refused`, \
