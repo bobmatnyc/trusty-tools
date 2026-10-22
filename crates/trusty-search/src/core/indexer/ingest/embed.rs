@@ -15,6 +15,7 @@ use crate::core::chunker::RawChunk;
 use crate::service::embed_pool::RequestPriority;
 
 use super::super::{embed_batch_size, CodeIndexer};
+use super::truncation::{PassTally, WindowProbe};
 use super::PROGRESS_CHUNK_INTERVAL;
 
 /// `(chunk_start_index, expected_count, embed_result)` — alias to satisfy clippy.
@@ -192,6 +193,8 @@ pub(crate) struct EmbedContext {
     embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
     created_at: std::time::Instant,
     last_activity_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// #9284: the index's embed-window counters.
+    embed_window: Arc<super::super::EmbedWindowStats>,
 }
 
 impl CodeIndexer {
@@ -215,6 +218,7 @@ impl CodeIndexer {
             embed_pool,
             created_at: self.created_at,
             last_activity_ms: Arc::clone(&self.last_activity_ms),
+            embed_window: Arc::clone(&self.embed_window),
         }
     }
 
@@ -296,6 +300,10 @@ impl EmbedContext {
             });
         };
         let chunk_total = chunks.len();
+        // #9284: count each embedded chunk against the embedder's window.
+        let probe = WindowProbe::from_embedder(embedder.as_ref());
+        self.embed_window.set_window(probe.window());
+        let mut tally = PassTally::new(probe.window());
         // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
         // kills the daemon.
         let is_coreml = matches!(
@@ -360,6 +368,8 @@ impl EmbedContext {
                 wave_sub_batches.push((wave_pos, sub));
                 wave_pos = end;
             }
+            // #9284: tokenize alongside the embed call, off the runtime.
+            let measuring = probe.start(&chunks[wave_start..wave_pos]);
 
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
             let wave_embed_start = std::time::Instant::now();
@@ -439,6 +449,20 @@ impl EmbedContext {
                     embeddings[start_pos + offset] = Some(vec);
                 }
             }
+            // #9284: count only the chunks this wave actually embedded — the
+            // filled prefix, since a failed sub-batch ends the wave.
+            if let Some(measures) = measuring.finish().await {
+                let filled = embeddings[wave_start..wave_pos]
+                    .iter()
+                    .take_while(|e| e.is_some())
+                    .count();
+                tally.record(
+                    &self.index_id,
+                    &self.embed_window,
+                    &chunks[wave_start..wave_start + filled],
+                    &measures,
+                );
+            }
             if stalled.is_some() {
                 break;
             }
@@ -480,6 +504,7 @@ impl EmbedContext {
         }
         // #8761: the last wave's duration must not count as idle either.
         self.touch_activity();
+        tally.finish(&self.index_id);
         Ok(EmbedRun {
             embeddings,
             stalled,

@@ -591,3 +591,63 @@ fn registry_remove_and_get_returns_none_for_missing_id() {
         "remove_and_get must return None for unknown id"
     );
 }
+
+/// #9284: `GET /indexes/:id/status` reports the embed-window counters.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn index_status_reports_the_embed_window_counters() {
+    use crate::core::{
+        chunker::{ChunkType, RawChunk},
+        embed::MockEmbedder,
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId},
+        store::{UsearchStore, VectorStore},
+    };
+    use tokio::sync::RwLock;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(32).with_chunking(8));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(32).expect("usearch"));
+    let indexer = CodeIndexer::new("window-status", tmp.path()).with_components(embedder, store);
+    let long = RawChunk {
+        id: "a".into(),
+        file: "src/a.rs".into(),
+        start_line: 1,
+        end_line: 1,
+        content: "one two three four five six seven".into(),
+        function_name: None,
+        language: None,
+        chunk_type: ChunkType::Code,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    };
+    indexer
+        .embed_chunks_in_batches(&[long], None, None)
+        .await
+        .expect("embed pass");
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("window-status"),
+        Arc::new(RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+    let Json(body) = index_status_handler(
+        State(state),
+        axum::extract::Path("window-status".to_string()),
+    )
+    .await
+    .expect("status 200");
+    let window = &body["embed_window"];
+    assert_eq!(window["window"], 8);
+    assert_eq!(window["truncated"], 1);
+    assert_eq!(window["unmeasured"], 0);
+}
