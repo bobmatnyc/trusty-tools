@@ -89,7 +89,7 @@ The output includes the installed semantic version and build provenance.
 ## Status
 
 `tcode` is an active per-project orchestration harness. Its daemon supports
-stdio and HTTP JSON-RPC transports; the CLI drives task, session, transcript,
+stdio and Unix-socket JSON-RPC transports (no TCP listener); the CLI drives task, session, transcript,
 workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 
 ## Binaries
@@ -102,8 +102,8 @@ workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 
 | Subcommand | Description |
 |------------|-------------|
-| `tcode serve [--project <PATH>] --stdio\|--http` | Start a project-bound or projectless orchestration server |
-| `tcode tui [--project <PATH>]` | Launch the interactive TUI and attach to or start an HTTP daemon |
+| `tcode serve [--project <PATH>] [--stdio]` | Start a project-bound or projectless orchestration server. With no transport flag it is the persistent daemon on its Unix socket (`<data dir>/trusty-code/trusty-code.sock`, `0600` in a `0700` directory); `--stdio` serves NDJSON on stdio. `--http` and `--port` are errors |
+| `tcode tui [--project <PATH>]` | Launch the interactive TUI and attach to or start the daemon on its Unix socket |
 | `tcode run-task <agent> <task>` | Run a task through a daemon-owned session. `--pm-model <SLUG>` pins the top-level agent's model, `--engineer-model <SLUG>` the delegated engineer's, and `--max-turns <N>` the top-level loop's turn cap |
 | `tcode session …` | List, inspect, and create sessions |
 | `tcode attach`, `cancel`, `transcript` | Operate on an existing session |

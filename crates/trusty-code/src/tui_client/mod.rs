@@ -11,7 +11,7 @@
 //! module most callers want).
 //!
 //! `discovery`, `rpc` and `sse` are gone (#6637). Discovery answered "which
-//! `TCODE_DAEMON_URL` or `http_addr` file names a live daemon"; the socket path
+//! `TCODE_DAEMON_URL` or discovery file names a live daemon"; the socket path
 //! is derived from the data directory, so there is nothing to discover. `rpc`
 //! and `sse` were the HTTP and Server-Sent-Events halves, replaced by
 //! [`uds_rpc::UdsRpcClient::call`] and [`uds_rpc::UdsRpcClient::open_stream`].

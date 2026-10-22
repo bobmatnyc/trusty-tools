@@ -1,8 +1,8 @@
 //! `agents.*` JSON-RPC methods — the daemon's full-tier AGENT CATALOG
 //! surface (issue #3449), backing the Foundry GUI's Agents management tab.
 //!
-//! Why: distinct from `session.get_agents` (`crate::serve::rest::agents` /
-//! `crate::session::protocol_agents`), which answers "who is running (or
+//! Why: distinct from `session.get_agents`
+//! (`crate::session::protocol_agents`), which answers "who is running (or
 //! ran) inside one existing session" — this module answers "what agents
 //! could I dispatch?", independent of any session. The GUI's Agents tab
 //! needs to list every agent across BOTH tiers `resolve_agent` already
@@ -402,8 +402,8 @@ pub(crate) fn validate_agent_name(name: &str) -> Result<(), RpcError> {
 /// `agents.create` -> write `<dir>/<name>.md` from `content`.
 ///
 /// Why: the GUI's Agents tab add-flow — creates a new disk-tier agent.
-/// What: `201`-shaped success `{"name", "tier"}` (REST layer maps this to
-/// `201 Created`, see `serve::rest::agent_catalog::create`). Errors: invalid
+/// What: `201`-shaped success `{"name", "tier"}` (an HTTP bridge maps this
+/// to `201 Created`). Errors: invalid
 /// `name` (`-32602`/`-32003`), `name` collides with an embedded agent
 /// (`-32001 permission_denied`, 403 — embedded is read-only), an existing
 /// disk file of the same name (`-32009 already_exists`, 409, use

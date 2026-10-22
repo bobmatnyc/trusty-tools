@@ -181,8 +181,8 @@ impl RpcError {
     /// would make the two semantically different conflicts
     /// indistinguishable to a client matching on code (code-critic PR #3465
     /// review, LOW). `-32009` is the next free slot after it.
-    /// What: `data.error_type = "already_exists"`. The REST layer maps this
-    /// to `409 Conflict` (`serve::rest::rpc_error_to_status`), same HTTP
+    /// What: `data.error_type = "already_exists"`. `trusty-code-gui`'s bridge
+    /// maps this to `409 Conflict`, same HTTP
     /// status as `active_conflict` — the distinction lives in the JSON-RPC
     /// code/`error_type`, where protocol clients look.
     /// Test: `rpc_error_already_exists_sets_code_and_type`.
@@ -203,9 +203,9 @@ impl RpcError {
     /// What: `data.error_type = "cancel_unconfirmed"`. `-32010` is the next
     /// free slot after [`Self::already_exists`]'s `-32009`.
     ///
-    /// The three consumers in this repo: `crate::serve::rest::rpc_error_to_status`
-    /// and `trusty_code_gui::bridge::BridgeError::status` map it to HTTP 503 —
-    /// "not yet, retry", distinct from the 500 both used to send — and
+    /// The two consumers in this repo (#6637 retired the daemon's own REST
+    /// mapping): `trusty_code_gui::bridge::BridgeError::status` maps it to
+    /// HTTP 503 — "not yet, retry", distinct from the 500 it used to send — and
     /// `crate::tui_client::CodeEngine::cancel_session_outcome` returns it as
     /// `CancelOutcome::StillCancelling`. The TUI's own "still cancelling…" render
     /// on top of that outcome is `trusty-code-tui`'s, and is not in this crate.

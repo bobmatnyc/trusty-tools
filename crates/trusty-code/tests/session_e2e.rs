@@ -8,29 +8,27 @@
 //! the actual wire protocol — never by calling into `trusty_code`'s Rust API
 //! directly. This file is a genuine black-box driver: it spawns the
 //! compiled `tcode` binary as a subprocess and speaks raw JSON-RPC 2.0 over
-//! its real stdin/stdout (and, for the HTTP half, real TCP + HTTP).
+//! its real stdin/stdout (and, for the socket half, its real Unix socket).
 //! What: [`session_lifecycle_over_stdio`] drives
 //! create -> attach -> send -> receive a streamed event -> detach -> status
 //! -> re-attach -> cancel entirely over STDIO NDJSON, asserting (#2055)
 //! that every envelope carries `session_id`/`seq`/`at`/`kind`/`event`, that
 //! every kind in the lifecycle taxonomy appears, and that `seq` is
 //! gap-free and strictly increasing across the WHOLE session (replay ->
-//! live -> re-attach's replay -> live again). [`session_lifecycle_over_http_with_sse`]
-//! drives the same lifecycle over `POST /rpc` plus a SINGLE
-//! `GET /sessions/{id}/events` SSE connection read in two stages (replay,
-//! then a live event on the SAME connection), proving replay -> live
-//! continuity over HTTP too.
+//! live -> re-attach's replay -> live again). [`session_lifecycle_over_the_socket`]
+//! drives the same lifecycle over the daemon's socket plus a SINGLE
+//! `session.events` stream read in stages (replay, then live events on the
+//! SAME connection), proving replay -> live continuity there too (#6637
+//! ported it from the retired HTTP/SSE transport).
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared by both scenarios.
 
 use crate::support;
 
-use std::time::Duration;
-
 use serde_json::json;
 use support::{
-    StdioSession, assert_envelopes_contiguous, find_response, find_session_event, open_sse,
-    parse_sse_frames, read_sse_until, spawn_http_daemon,
+    StdioSession, assert_envelopes_contiguous, find_response, find_session_event, kind_is,
+    read_stream_until, spawn_socket_daemon,
 };
 
 /// create -> attach -> send -> receive a streamed event -> detach -> status
@@ -202,110 +200,73 @@ async fn session_lifecycle_over_stdio() {
     daemon.shutdown_via_eof_and_assert_clean_exit().await;
 }
 
-/// The same lifecycle, driven over `POST /rpc` + a SINGLE
-/// `GET /sessions/{id}/events` SSE connection read in two stages — proves
-/// replay -> live seq continuity over HTTP too, not just STDIO.
+/// The same lifecycle, driven over the daemon's socket + a SINGLE
+/// `session.events` stream read in stages — proves replay -> live seq
+/// continuity over the persistent daemon's transport, not just STDIO.
+/// #6637: ported from `session_lifecycle_over_http_with_sse`.
 #[tokio::test]
-async fn session_lifecycle_over_http_with_sse() {
-    let daemon = spawn_http_daemon().await;
-    let client = daemon.client();
-    let rpc_url = format!("{}/rpc", daemon.base_url);
+async fn session_lifecycle_over_the_socket() {
+    let daemon = spawn_socket_daemon().await;
 
     // 1. session.create
-    let create_resp: serde_json::Value = client
-        .post(&rpc_url)
-        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "session.create", "params": {"task": "e2e http task"}}))
-        .send()
-        .await
-        .expect("POST session.create")
-        .json()
-        .await
-        .expect("parse session.create response");
+    let create_resp = daemon
+        .call(1, "session.create", json!({"task": "e2e socket task"}))
+        .await;
     assert!(
         create_resp["error"].is_null(),
         "create failed: {create_resp}"
     );
     let session_id = create_resp["result"]["id"].as_str().unwrap().to_string();
 
-    // 2. Open ONE SSE connection and read the replay burst from it.
-    let events_url = format!("{}/sessions/{session_id}/events", daemon.base_url);
-    let mut sse = open_sse(&client, &events_url).await;
-    let mut buffer = Vec::new();
-    read_sse_until(
-        &mut sse,
-        &mut buffer,
-        "session_status_changed",
-        Duration::from_secs(5),
-    )
-    .await;
-    let replay_frames = parse_sse_frames(&String::from_utf8_lossy(&buffer));
-    let (first_seq, last_seq) = assert_envelopes_contiguous(&replay_frames);
+    // 2. Open ONE stream and read the replay burst from it.
+    let mut stream = daemon.open_events(&session_id).await;
+    let mut frames = Vec::new();
+    read_stream_until(&mut stream, &mut frames, kind_is("session_status_changed")).await;
+    let (first_seq, last_seq) = assert_envelopes_contiguous(&frames);
     assert_eq!(first_seq, 1);
     assert_eq!(last_seq, 2);
-    let kinds: Vec<&str> = replay_frames
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap())
-        .collect();
+    let kinds: Vec<&str> = frames.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, vec!["session_started", "session_status_changed"]);
 
-    // 3. session.send over POST /rpc, while the SAME SSE connection is open.
-    let send_resp: serde_json::Value = client
-        .post(&rpc_url)
-        .json(&json!({"jsonrpc": "2.0", "id": 2, "method": "session.send", "params": {"session_id": session_id, "input": "hello-http"}}))
-        .send()
-        .await
-        .expect("POST session.send")
-        .json()
-        .await
-        .expect("parse session.send response");
+    // 3. session.send on its own connection, while the SAME stream is open.
+    let send_resp = daemon
+        .call(
+            2,
+            "session.send",
+            json!({"session_id": session_id, "input": "hello-socket"}),
+        )
+        .await;
     assert!(send_resp["error"].is_null(), "send failed: {send_resp}");
     assert_eq!(send_resp["result"]["acknowledged"], true);
 
-    // 4. Continue reading the SAME SSE connection for the live event —
-    // this is the replay -> live continuity proof over HTTP.
-    read_sse_until(&mut sse, &mut buffer, "hello-http", Duration::from_secs(5)).await;
-    let all_frames = parse_sse_frames(&String::from_utf8_lossy(&buffer));
-    let (full_first, full_last) = assert_envelopes_contiguous(&all_frames);
+    // 4. Continue reading the SAME stream for the live event — this is the
+    // replay -> live continuity proof.
+    read_stream_until(&mut stream, &mut frames, kind_is("session_input")).await;
+    let (full_first, full_last) = assert_envelopes_contiguous(&frames);
     assert_eq!(full_first, 1);
     assert_eq!(
         full_last, 3,
         "the live event must continue the replay's seq with no gap"
     );
-    assert_eq!(all_frames.last().unwrap()["kind"], "session_input");
-    assert_eq!(all_frames.last().unwrap()["event"]["input"], "hello-http");
+    assert_eq!(frames.last().unwrap()["kind"], "session_input");
+    assert_eq!(frames.last().unwrap()["event"]["input"], "hello-socket");
 
-    // 5. session.cancel over POST /rpc.
-    let cancel_resp: serde_json::Value = client
-        .post(&rpc_url)
-        .json(&json!({"jsonrpc": "2.0", "id": 3, "method": "session.cancel", "params": {"session_id": session_id}}))
-        .send()
-        .await
-        .expect("POST session.cancel")
-        .json()
-        .await
-        .expect("parse session.cancel response");
+    // 5. session.cancel.
+    let cancel_resp = daemon
+        .call(3, "session.cancel", json!({"session_id": session_id}))
+        .await;
     assert!(
         cancel_resp["error"].is_null(),
         "cancel failed: {cancel_resp}"
     );
     assert_eq!(cancel_resp["result"]["status"], "cancelled");
 
-    // 6. The SAME SSE connection must observe the cancel-triggered events
-    // too, continuing the seq with no gap.
-    read_sse_until(
-        &mut sse,
-        &mut buffer,
-        "session_done",
-        Duration::from_secs(5),
-    )
-    .await;
-    let final_frames = parse_sse_frames(&String::from_utf8_lossy(&buffer));
-    let (_, cancel_last) = assert_envelopes_contiguous(&final_frames);
+    // 6. The SAME stream must observe the cancel-triggered events too,
+    // continuing the seq with no gap.
+    read_stream_until(&mut stream, &mut frames, kind_is("session_done")).await;
+    let (_, cancel_last) = assert_envelopes_contiguous(&frames);
     assert_eq!(cancel_last, 6);
-    let final_kinds: Vec<&str> = final_frames
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap())
-        .collect();
+    let final_kinds: Vec<&str> = frames.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(
         final_kinds,
         vec![
@@ -318,9 +279,8 @@ async fn session_lifecycle_over_http_with_sse() {
         ]
     );
 
-    // Graceful shutdown drains in-flight requests before exiting (issue
-    // #534); an open SSE connection never "completes" on its own, so the
-    // client must close it first or the daemon would wait for it forever.
-    drop(sse);
+    // Graceful shutdown drains in-flight connections before exiting (issue
+    // #534, #6601); an open tail never completes on its own, so close it first.
+    drop(stream);
     daemon.shutdown_via_sigterm_and_assert_clean_exit().await;
 }

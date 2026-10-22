@@ -22,7 +22,7 @@
 //! whatever now holds that port as a healthy `tcode`. A daemon with no socket
 //! reads as unreachable, which is what it is.
 //!
-//! Test: `status_matches_the_daemons_own_rest_mapping`,
+//! Test: `status_matches_the_retired_rest_mapping`,
 //! `socket_app_name_matches_the_daemon_resolver`,
 //! `call_reports_a_dead_socket_as_unreachable`,
 //! `call_reports_a_jsonrpc_error_with_the_http_status_it_came_from`,
@@ -92,11 +92,11 @@ pub const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ─── the codes the daemon's refusals carry ───────────────────────────────────
 //
-// `crates/trusty-code/src/serve/rest/mod.rs`'s `rpc_error_to_status` is the
-// mapping the webview has been reading since #2983; [`BridgeError::status`]
-// below is that table, copied. It is a copy rather than an import for the same
-// reason `SOCKET_APP_NAME` is, and `status_matches_the_daemons_own_rest_mapping`
-// pins the two together for as long as both exist — PR 2c deletes the daemon's.
+// The daemon's REST `rpc_error_to_status` was the mapping the webview has been
+// reading since #2983; [`BridgeError::status`] below is that table, copied.
+// #6637 slice 2c deleted the original, so
+// `status_matches_the_retired_rest_mapping` pins the copy to its written-out
+// rows.
 
 /// HTTP 404 — `RpcError::not_found`.
 const CODE_NOT_FOUND: i64 = -32002;
@@ -123,7 +123,7 @@ const CODE_INVALID_PARAMS: i64 = -32602;
 /// not running" and "the daemon said no" the same way, and neither may render
 /// as an empty success — the fail-open branch this whole module exists to
 /// close.
-/// Test: `status_matches_the_daemons_own_rest_mapping`, and the `call_reports_*`
+/// Test: `status_matches_the_retired_rest_mapping`, and the `call_reports_*`
 /// tests below.
 #[derive(Debug)]
 pub enum BridgeError {
@@ -150,10 +150,10 @@ impl BridgeError {
     /// treats a `404` as "this session is gone" and anything else as an error
     /// line — so a refusal has to arrive as the status the daemon's REST route
     /// sent for the same condition.
-    /// What: the arms of `trusty_code::serve::rest::rpc_error_to_status`, plus
-    /// `502` for the three arms that are this bridge's own observation. An
-    /// unmapped code is `500`, never a `200` with an error body.
-    /// Test: `status_matches_the_daemons_own_rest_mapping`.
+    /// What: the mapping the daemon's own REST layer used until #6637 retired
+    /// it, plus `502` for the three arms that are this bridge's own
+    /// observation. An unmapped code is `500`, never a `200` with an error body.
+    /// Test: `status_matches_the_retired_rest_mapping`.
     #[must_use]
     pub fn status(&self) -> StatusCode {
         match self {
@@ -377,43 +377,47 @@ mod tests {
         socket
     }
 
-    /// Why: this table is a COPY of the daemon's, and a copy that drifts sends
-    /// the webview a `500` where it used to read a `404` — which its poller
-    /// renders as an error line instead of "the session is gone". Pinning it
-    /// against the original is what makes the copy safe for the window before
-    /// PR 2c deletes the original.
+    /// Why: the webview's poller reads a `404` as "this session is gone" and
+    /// anything else as an error line, so each daemon refusal must keep the
+    /// status the daemon's REST layer sent for it. #6637 deleted that layer
+    /// (`rpc_error_to_status`), so the table it was pinned against is written
+    /// out here instead.
     /// Test: this is the test.
     #[test]
-    fn status_matches_the_daemons_own_rest_mapping() {
+    fn status_matches_the_retired_rest_mapping() {
         use trusty_code::jsonrpc::RpcError;
-        use trusty_code::serve::rest::rpc_error_to_status;
 
         let cases = [
-            RpcError::not_found("x"),
-            RpcError::session_not_found("s-1"),
-            RpcError::permission_denied("x"),
-            RpcError::invalid_argument("x"),
-            RpcError::invalid_params("x"),
-            RpcError::internal("x"),
-            RpcError::active_conflict("ws-1"),
-            RpcError::already_exists("dup"),
+            (RpcError::not_found("x"), StatusCode::NOT_FOUND),
+            (RpcError::session_not_found("s-1"), StatusCode::NOT_FOUND),
+            (RpcError::permission_denied("x"), StatusCode::FORBIDDEN),
+            (RpcError::invalid_argument("x"), StatusCode::BAD_REQUEST),
+            (RpcError::invalid_params("x"), StatusCode::BAD_REQUEST),
+            (RpcError::internal("x"), StatusCode::INTERNAL_SERVER_ERROR),
+            (RpcError::active_conflict("ws-1"), StatusCode::CONFLICT),
+            (RpcError::already_exists("dup"), StatusCode::CONFLICT),
             // #8207: the newest arm, and the one whose whole point is NOT being
             // flattened into a 500.
-            RpcError::cancel_unconfirmed("s-1: still cancelling"),
-            RpcError::new(-1, "custom"),
+            (
+                RpcError::cancel_unconfirmed("s-1: still cancelling"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                RpcError::new(-1, "custom"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ];
-        for err in cases {
+        for (err, want) in cases {
             // The daemon's `RpcError` carries an `i32`; the socket envelope
-            // widens it to `i64`. Widening here is what compares the same code
-            // through both tables.
+            // widens it to `i64`.
             let mine = BridgeError::Refused {
                 code: i64::from(err.code),
                 message: err.message.clone(),
             };
             assert_eq!(
                 mine.status(),
-                rpc_error_to_status(&err),
-                "code {} must map the same way the daemon's REST layer maps it",
+                want,
+                "code {} must map the way the daemon's REST layer mapped it",
                 err.code
             );
         }

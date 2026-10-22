@@ -260,7 +260,7 @@ uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 # url: WHATWG URL parsing. #5439 needs it to answer "does this URL target
 # loopback" the way the HTTP client that will dial it answers — an Origin-header
 # parser splits the authority at the first `:` and reads
-# `http://127.0.0.1:7882@attacker.example` as loopback. Already in the lock via
+# `http://127.0.0.1:1234@attacker.example` as loopback. Already in the lock via
 # reqwest, so this adds no new tree.
 url = "2"
 sha2 = "0.10"

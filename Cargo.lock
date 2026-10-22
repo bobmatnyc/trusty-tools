@@ -11196,7 +11196,6 @@ version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -11216,7 +11215,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
- "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

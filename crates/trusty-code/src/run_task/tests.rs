@@ -113,7 +113,7 @@ fn isolate_ambient_daemons() {
         // An empty, dedicated, never-reused directory: `resolve_data_dir`
         // will create `<this>/trusty-search/` (and `<this>/trusty-memory/`
         // for any code path that falls through to discovery instead of the
-        // env override above) with no `http_addr` file inside, so
+        // env override above) with no discovery file inside, so
         // `resolve_daemon_base_url` always resolves to `None` — the daemon
         // is treated as "never started" rather than guessing/reaching a
         // real port.
