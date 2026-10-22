@@ -1830,9 +1830,9 @@ fn in_edges(index: &Hnsw<'static, f32, DistCosine>, id: u64) -> Vec<u64> {
 /// `count` unit vectors at cosine distance about `delta^2 / 2` from `centre`,
 /// along `+-` an orthonormal basis of the complement of `centre` and `avoid`.
 /// Each is nearer `centre` than `centre`'s existing neighbours are, and
-/// farther from `avoid` than `centre` is, so an insert of one picks `centre`
-/// and prunes `avoid` (`hnsw.rs:1361-1363`).
-fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f32>> {
+/// farther from every `avoid` vector than `centre` is, so an insert of one
+/// picks `centre` and prunes each `avoid` vector (`hnsw.rs:1361-1363`).
+fn around(centre: &[f32], avoid: &[&[f32]], delta: f32, count: usize) -> Vec<Vec<f32>> {
     let dim = centre.len();
     let mut span: Vec<Vec<f32>> = Vec::new();
     let mut excluded = 0;
@@ -1841,8 +1841,8 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
         v[axis] = 1.0;
         v
     });
-    for (i, mut v) in [centre.to_vec(), avoid.to_vec()]
-        .into_iter()
+    for (i, mut v) in std::iter::once(centre.to_vec())
+        .chain(avoid.iter().map(|a| a.to_vec()))
         .chain(axes)
         .enumerate()
     {
@@ -1853,7 +1853,7 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 1e-3 {
             span.push(v.into_iter().map(|x| x / norm).collect());
-            if i < 2 {
+            if i <= avoid.len() {
                 excluded += 1;
             }
         }
@@ -1872,6 +1872,16 @@ fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f3
             raw.into_iter().map(|x| x / norm).collect()
         })
         .collect()
+}
+
+/// Whether the graph alone, with no stranded-point scan, puts `id` in the top
+/// 10 for `v`.
+fn graph_reaches(store: &HnswStore, id: u64, v: &[f32]) -> bool {
+    let live = store.keys.get(&store.db).expect("keys").reverse.len();
+    let index = store.index.read();
+    graph_nearest(&index, v, &Default::default(), 10, live)
+        .iter()
+        .any(|(hit, _)| *hit == id)
 }
 
 /// Whether `store` records `id` for the exact scan.
@@ -1918,13 +1928,7 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
     let (_dir, store) = open_store(dim);
     seed_rows(&store.db, &pool);
     let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
-    let graph_finds = |id: u64, v: &[f32]| {
-        let live = reopened.keys.get(&reopened.db).expect("keys").reverse.len();
-        let index = reopened.index.read();
-        graph_nearest(&index, v, &Default::default(), 10, live)
-            .iter()
-            .any(|(hit, _)| *hit == id)
-    };
+    let graph_finds = |id: u64, v: &[f32]| graph_reaches(&reopened, id, v);
 
     let mut probe = entry.clone();
     probe[dim - 1] = 0.1;
@@ -1942,7 +1946,7 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
         vec![1],
         "precondition: row 0, the entry point, is the probe's one in-neighbour"
     );
-    for (j, v) in around(&entry, &probe, 0.02, 2 * HNSW_MAX_NB_CONNECTION)
+    for (j, v) in around(&entry, &[&probe], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
         .iter()
         .enumerate()
     {
@@ -1959,6 +1963,108 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
         hit_uuids(&reopened, &probe, 10).contains(&uuid),
         "{uuid}, stranded by a later upsert, is missing from its own top 10 \
          with no reopen"
+    );
+}
+
+/// A store over `pool`'s rows, ids from 1 in row order, whose graph is built
+/// one insert at a time, so no neighbour list depends on thread scheduling.
+fn open_serial(dim: usize, pool: &[Vec<f32>]) -> (tempfile::TempDir, HnswStore) {
+    let (dir, store) = open_store(dim);
+    seed_rows(&store.db, pool);
+    set_seq(&store, pool.len() as u64 + 1);
+    {
+        let index = store.index.read();
+        for (i, v) in pool.iter().enumerate() {
+            quiet_insert::insert_quietly(&index, v, i + 1).expect("serial insert");
+        }
+        *store.stranded.write() = stranded::stranded_points(&index);
+    }
+    (dir, store)
+}
+
+/// `from` moved 0.1 along `axis`, where it is 0, and re-normalised.
+fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
+    let mut v = from.to_vec();
+    v[axis] = 0.1;
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    v.into_iter().map(|x| x / norm).collect()
+}
+
+/// Why (#10186): an upsert re-tested the points it evicted from a neighbour
+/// list, but not the points reachable only through one of them. Those stayed
+/// unscanned until the next open, so a drawer went missing from its own search
+/// after an upsert elsewhere in the graph.
+/// What: the graph is built serially. Every row has two zero trailing
+/// coordinates and a non-negative cosine to row 0, the entry point. `first`
+/// sits one step off row 0 along the last axis and `behind` one step off
+/// `first` along the second-last, so each insert keeps one out-edge — row 0,
+/// then `first` — and `first` holds `behind`'s only in-edge. Then 32 drawers
+/// around row 0 evict `first` from row 0's list. Asserts the graph alone
+/// reaches neither, that `first` is recorded as stranded and `behind` still has
+/// its one in-edge (the transitive case), and that `behind` is in its own top
+/// 10 with no reopen.
+/// Test: this test itself is the verification.
+#[test]
+fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
+    let dim = 20;
+    let flat = |seed: u64| {
+        let mut v = spread_vec(dim - 2, seed);
+        v.extend([0.0, 0.0]);
+        v
+    };
+    let entry = flat(424_242);
+    let mut pool = vec![entry.clone()];
+    // #9280: sized from the threshold so the graph arm stays selected.
+    pool.extend((0..exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160).map(|i| {
+        let v = flat(700_000 + i as u64);
+        let dot: f32 = v.iter().zip(&entry).map(|(a, b)| a * b).sum();
+        let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+        v.into_iter().map(|x| sign * x).collect()
+    }));
+    let (_dir, store) = open_serial(dim, &pool);
+
+    let first = step_off(&entry, dim - 1);
+    let behind = step_off(&first, dim - 2);
+    let first_id = store.upsert("first", &first).expect("upsert first");
+    let behind_id = store.upsert("behind", &behind).expect("upsert behind");
+    assert_eq!(
+        (
+            in_edges(&store.index.read(), first_id),
+            in_edges(&store.index.read(), behind_id)
+        ),
+        (vec![1, behind_id], vec![first_id]),
+        "precondition: row 0 -> first -> behind is the only path to behind"
+    );
+    assert!(
+        graph_reaches(&store, behind_id, &behind) && !is_stranded(&store, behind_id),
+        "precondition: the graph reaches behind and the store did not record it"
+    );
+    for (j, v) in around(&entry, &[&first, &behind], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
+        .iter()
+        .enumerate()
+    {
+        store.upsert(&format!("near-{j}"), v).expect("upsert");
+    }
+
+    assert!(
+        in_edges(&store.index.read(), first_id)
+            .iter()
+            .all(|e| *e == behind_id)
+            && in_edges(&store.index.read(), behind_id) == vec![first_id],
+        "precondition: the upserts must evict first from row 0's list and leave \
+         behind's one in-edge; first's in-neighbours: {:?}",
+        in_edges(&store.index.read(), first_id)
+    );
+    assert!(
+        !graph_reaches(&store, first_id, &first)
+            && !graph_reaches(&store, behind_id, &behind)
+            && is_stranded(&store, first_id),
+        "precondition: the graph reaches neither, and the evicted first is stranded"
+    );
+    assert!(
+        hit_uuids(&store, &behind, 10).contains(&"behind".to_string()),
+        "behind, stranded transitively by a later upsert, is missing from its \
+         own top 10 with no reopen"
     );
 }
 
