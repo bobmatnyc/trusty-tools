@@ -3008,6 +3008,25 @@ fn base_agent_prose_rules_survive_composition() {
 
     for (fact, rule) in [
         ("the Write Plainly section", "base-agent/write-plainly"),
+        ("a Write Plainly bullet", "base-agent/concrete-referent"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/cut-hedges-and-aphorisms",
+        ),
+        ("a Write Plainly bullet", "base-agent/do-not-embellish"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/dont-justify-restraint",
+        ),
+        ("a Write Plainly bullet", "base-agent/no-praise"),
+        ("a Write Plainly bullet", "base-agent/worth-is-implied"),
+        ("a Write Plainly bullet", "base-agent/honest-ban"),
+        ("a Write Plainly bullet", "base-agent/borrowed-metaphor-ban"),
+        ("a Write Plainly bullet", "base-agent/asd-ste-100-spirit"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/ticket-pr-bodies-sparse",
+        ),
         (
             "the graduated-verbosity rule",
             "base-agent/verbosity-scales",
