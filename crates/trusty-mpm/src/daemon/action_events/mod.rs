@@ -207,7 +207,7 @@ impl ActionPublisher {
     ///
     /// Why: the arrival is visible only in the receiving transcript, and
     /// reading it is file I/O, which the hook path must never do.
-    /// What: runs [`Self::scan_received`] on the blocking pool. A failed
+    /// What: runs `scan_received` on the blocking pool. A failed
     /// read is logged at debug and retried on the session's next hook.
     /// Test: `a_received_message_is_one_received_event_with_no_body_9167`,
     /// `n_messages_between_two_sessions_are_n_sent_and_n_received_9167`.
