@@ -1966,22 +1966,6 @@ fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
     );
 }
 
-/// A store over `pool`'s rows, ids from 1 in row order, whose graph is built
-/// one insert at a time, so no neighbour list depends on thread scheduling.
-fn open_serial(dim: usize, pool: &[Vec<f32>]) -> (tempfile::TempDir, HnswStore) {
-    let (dir, store) = open_store(dim);
-    seed_rows(&store.db, pool);
-    set_seq(&store, pool.len() as u64 + 1);
-    {
-        let index = store.index.read();
-        for (i, v) in pool.iter().enumerate() {
-            quiet_insert::insert_quietly(&index, v, i + 1).expect("serial insert");
-        }
-        *store.stranded.write() = stranded::stranded_points(&index);
-    }
-    (dir, store)
-}
-
 /// `from` moved 0.1 along `axis`, where it is 0, and re-normalised.
 fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
     let mut v = from.to_vec();
@@ -1994,11 +1978,13 @@ fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
 /// list, but not the points reachable only through one of them. Those stayed
 /// unscanned until the next open, so a drawer went missing from its own search
 /// after an upsert elsewhere in the graph.
-/// What: the graph is built serially. Every row has two zero trailing
+/// What: the graph is built by the parallel replay (#10186: a serial build of
+/// 24.7k points took over a minute). Every row has two zero trailing
 /// coordinates and a non-negative cosine to row 0, the entry point. `first`
 /// sits one step off row 0 along the last axis and `behind` one step off
 /// `first` along the second-last, so each insert keeps one out-edge — row 0,
-/// then `first` — and `first` holds `behind`'s only in-edge. Then 32 drawers
+/// then `first` — and `first` holds `behind`'s only in-edge, whatever order the
+/// replay built the rest in (the preconditions assert it). Then 32 drawers
 /// around row 0 evict `first` from row 0's list. Asserts the graph alone
 /// reaches neither, that `first` is recorded as stranded and `behind` still has
 /// its one in-edge (the transitive case), and that `behind` is in its own top
@@ -2021,7 +2007,9 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
         let sign = if dot < 0.0 { -1.0 } else { 1.0 };
         v.into_iter().map(|x| sign * x).collect()
     }));
-    let (_dir, store) = open_serial(dim, &pool);
+    let (_dir, seeded) = open_store(dim);
+    seed_rows(&seeded.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seeded.db), dim).expect("reopen");
 
     let first = step_off(&entry, dim - 1);
     let behind = step_off(&first, dim - 2);
