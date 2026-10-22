@@ -19,7 +19,7 @@ _spec = importlib.util.spec_from_file_location(
     "self_ctx", os.path.join(os.path.dirname(os.path.abspath(__file__)), "self-ctx.py"))
 self_ctx = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(self_ctx)
-PROJ = self_ctx.DEFAULT_DIR
+PROJ = self_ctx.default_dir()
 MIN_AGE = 20
 TAIL = 64 * 1024
 
