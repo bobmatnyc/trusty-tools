@@ -3,7 +3,7 @@ name: tm-secrets
 description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. The tm secrets CLI does not ship yet.
 user-invocable: true
 metadata:
-  version: "1.3.0"
+  version: "1.3.1"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -23,8 +23,7 @@ secrets page, the file backend
 trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)),
 `secrets.resolve` and exec grants
 ([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)), and the
-language clients ([#9071](https://github.com/bobmatnyc/trusty-tools/issues/9071),
-[#9072](https://github.com/bobmatnyc/trusty-tools/issues/9072)). Run `tm --help`
+language client ([#9071](https://github.com/bobmatnyc/trusty-tools/issues/9071)). Run `tm --help`
 before you plan around any of them.
 
 What ships: the `trusty-common` credential store the daemon reads, and the
@@ -188,3 +187,21 @@ is consumed inside the command that needs it: pipe it to a stdin reader
 read stdin, `$(…)` in the one argument that needs it. The expanded value is
 visible to `ps` while that command runs, so prefer a short-lived token. Never
 assign it to a variable first (#8596, #8248).
+
+### `tm secrets resolve <key>`
+
+A program that `tm secrets exec` started, in any language, reads one granted
+value with `tm secrets resolve <key>`. It reads the grant token from the fd
+named by `TRUSTY_SECRETS_TOKEN_FD`, which `exec` sets, and asks the running
+trusty-secrets server for `<key>`. Stdout holds the value and nothing else,
+with no trailing newline. It never starts a server and never grants.
+
+```sh
+tm secrets resolve <key> | some-cli --token-stdin   # inside the exec grant only
+```
+
+Failure exits 1 with one fixed line on stderr and nothing on stdout. The line
+carries no key, value or path. The cases: no grant (not under `exec`), an
+unreadable or malformed token, a key the server refuses, an invalid key name,
+and a server that is not running or does not answer. Never run it as a bare
+command: the value would print into the transcript (rule 9).
