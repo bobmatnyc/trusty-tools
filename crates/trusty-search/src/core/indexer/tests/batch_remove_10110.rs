@@ -229,7 +229,12 @@ async fn prefix_removal_clears_every_store_and_spares_a_sibling() {
         .await
         .iter()
         .all(|id| !id.starts_with("vendor/acme/")));
-    assert_eq!(hit_ids(&idx, "keeper_delta_q10110").await, unrelated_before);
+    // A3: the hits outside the prefix keep their order.
+    let outside: Vec<String> = unrelated_before
+        .into_iter()
+        .filter(|id| !id.starts_with("vendor/acme/"))
+        .collect();
+    assert_eq!(hit_ids(&idx, "keeper_delta_q10110").await, outside);
     drop(idx);
 
     let (reopened, _) = indexer("batch-10110-a1", &redb);
