@@ -278,6 +278,7 @@ async fn list_removal_removes_exactly_the_named_files() {
 /// rehydrate scan starts and the map stays evicted; the call stamps exactly
 /// one durable dirty mark, and the graph rebuilds once.
 #[tokio::test]
+#[serial_test::serial]
 async fn removal_on_an_evicted_index_does_not_rehydrate_and_stamps_one_mark() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (idx, _) = indexer("batch-10110-evicted", &dir.path().join("index.redb"));
@@ -421,6 +422,7 @@ async fn batch_remove_refuses_when_the_dirty_mark_cannot_be_stamped() {
 /// A4 / F5: the dry run changes nothing — rows, eviction, durable mark,
 /// reindex stamp — and its counts equal what the real run then removes.
 #[tokio::test]
+#[serial_test::serial]
 async fn dry_run_mutates_nothing_and_matches_the_real_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (idx, _) = indexer("batch-10110-dry", &dir.path().join("index.redb"));
