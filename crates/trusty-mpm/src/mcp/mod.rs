@@ -7,8 +7,8 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-eight
-//! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-nine
+//! tools; #9758 adds `dbatg`) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
 //! `session_resume`, `session_decommission`, `session_activity`, `session_send`,
@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_mcp::{Request, Response, error_codes};
 
+pub mod dbatg_dispatch;
 pub mod project_dispatch;
 pub mod proxy_dispatch;
 pub mod session_dispatch;
@@ -834,7 +835,11 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 // own sibling module, keeping this match and `mod.rs` small.
                 None => match proxy_dispatch::try_dispatch(backend, other, &args).await {
                     Some(result) => result,
-                    None => Err(format!("unknown tool: {other}")),
+                    // #9758: the PM ledger tool; no backend, the ledger is files.
+                    None => match dbatg_dispatch::try_dispatch(other, &args).await {
+                        Some(result) => result,
+                        None => Err(format!("unknown tool: {other}")),
+                    },
                 },
             },
         },

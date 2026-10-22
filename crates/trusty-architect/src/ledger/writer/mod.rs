@@ -10,17 +10,18 @@
 //! its `log.jsonl` record, refuses secret-shaped input (logged without the
 //! value), checks `if_v`, applies every op to a copy, archives what closed,
 //! prunes once when the result would pass the 16 KB bar, and commits:
-//! journal (fsync), `v` re-read (a change logs `tamper`), archive lines, log
-//! lines, `state.json` replace and directory fsync, journal removed
+//! journal (fsync), `v` re-read (a change logs `tamper`), archive lines,
+//! outbox lines (LDG-4.4), log lines, `state.json` replace and directory fsync, journal removed
 //! (LDG-2.8.2). Only a missing file reads as empty (#9758). [`show`] reads.
 //! Test: `tests/ledger_writer.rs`, `ledger_writer_matches_prototype_bytes`.
 //!
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
 
-// #9758: the journal and the read-only side are split out to keep each file
-// under the SLOC cap.
+// #9758: the journal, the outbox lines and the read-only side are split out
+// to keep each file under the SLOC cap.
 mod journal;
+mod outbox;
 mod show;
 
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use outbox::OutboxLine;
 pub use show::{minute, render_ids, render_prune, show};
 
 use self::journal::{
@@ -103,6 +105,11 @@ struct Journal {
     v: u64,
     archive_at: u64,
     archive: String,
+    // #9758 F3: absent in a journal a PR A writer left.
+    #[serde(default)]
+    outbox_at: u64,
+    #[serde(default)]
+    outbox: String,
     log_at: u64,
     log: String,
     state: String,
@@ -327,6 +334,12 @@ impl Commit<'_> {
             log += &(notice(now, self.session, "size_warning", &warning)? + "\n");
             warnings.push(warning);
         }
+        let rev = outbox::Rev {
+            code: st.code.as_str(),
+            v: st.v,
+            now,
+        };
+        let outbox = outbox::lines(self.paths, &rev, &events, &gone)?;
         let archived = gone.iter().map(|a| archived_id(a).to_owned()).collect();
         let result = BatchResponse {
             v: st.v,
@@ -351,6 +364,8 @@ impl Commit<'_> {
             v: st.v,
             archive_at: file_len(&self.paths.archive),
             archive,
+            outbox_at: file_len(&self.paths.outbox),
+            outbox,
             log_at: file_len(&self.paths.log),
             log,
             state: text,

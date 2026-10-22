@@ -81,6 +81,8 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::mcp::register(router, state);
     // #6288 client cutover: the last routes an in-repo client reached on HTTP.
     let router = rpc::client_cutover::register(router, state);
+    // #9758: the PM ledger writer.
+    let router = rpc::dbatg::register(router);
     rpc::coordinator::register(router, state)
 }
 

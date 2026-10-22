@@ -30,6 +30,8 @@ pub(super) fn complete(
     faults: &dyn Faults,
 ) -> Result<(), LedgerError> {
     redo(&paths.archive, j.archive_at, &j.archive)?;
+    // #9758 F3: the outbox line lands before `state.json`, like the log.
+    redo(&paths.outbox, j.outbox_at, &j.outbox)?;
     redo(&paths.log, j.log_at, &j.log)?;
     faults
         .at(CommitStep::Logged, paths)

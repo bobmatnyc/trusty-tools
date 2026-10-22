@@ -454,7 +454,8 @@ async fn dispatch_tools_list_returns_full_catalog() {
     // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
     // two PM pause/resume context tools `session_context_catchup` /
     // `session_context_pause` + the #6927 Disk survey `disk_survey` + the
-    // #7522 `secrets_get_ref` + the #9856 `ask_owner` + the #9979 `sessions_chat`).
+    // #7522 `secrets_get_ref` + the #9856 `ask_owner` + the #9979 `sessions_chat`
+    // + the #9758 `dbatg`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -463,7 +464,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 38);
+    assert_eq!(tools.as_array().unwrap().len(), 39);
     assert!(
         tools
             .as_array()

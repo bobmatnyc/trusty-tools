@@ -52,3 +52,6 @@ pub mod client_cutover;
 
 /// #6288 step 2a: the coordinator's context snapshot and chat turn.
 pub mod coordinator;
+
+/// #9758: the PM ledger writer, `mpm.dbatg.init`, `batch` and `show`.
+pub mod dbatg;

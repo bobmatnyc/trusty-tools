@@ -147,6 +147,8 @@ pub mod content_source;
 pub mod context_usage;
 // #9012: skills, instructions, output styles and SM instructions from content.
 pub mod daemon_identity;
+// #9758: the `mpm.dbatg.*` bodies the daemon, the MCP tool and `tm dbatg` share.
+pub mod dbatg;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;

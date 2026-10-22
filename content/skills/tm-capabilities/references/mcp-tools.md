@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-38 tools.
+39 tools.
 
 ## `session_list`
 
@@ -354,6 +354,22 @@ Send one chat turn to the session coordinator, the same turn as the daemon's `mp
 | `conv_id` | `string` | no |
 | `history` | `array` | no |
 | `message` | `string` | yes |
+
+## `dbatg`
+
+Write or read this PM session's Intent Ledger (goals G, decisions D, asks A, tasks T) in `<project>/.trusty-mpm/dbatg/<session>/`. `op` picks the method: `init` (`project`, `session`, `code`: create the store; same code and session again is a no-op), `batch` (`store`, `request_id`, optional `if_v`, `ops`: apply every op or none; a `request_id` sent again returns the first result and applies nothing), `show` (`store`, optional `brief`). Batch ops, tagged by `op`: `add` {kind G|D|A|T, title, goal, rank, finish, maps, status, to, opts [{l, rec}], id}, `update` {id, title, rank, esc, answer, to, outcome, status, note}, `close` {id, outcome}, `session` {task, next, waiting_on, owed, agents, crons, refs, boundary, ctx_use}, `prune` {dry_run, answered_hours, require_outcome}. Returns `init` {store, v}, `batch` {v, events [{id, ev, note}], archived [ids], warnings}, `show` {text}. Errors end with the CLI exit code: 1 conflict (`if_v`, tamper), 2 refused input (limits, secret-shaped values, unknown ids), 3 store unavailable. Never put a secret value in a field.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `brief` | `boolean` | no |
+| `code` | `string` | no |
+| `if_v` | `integer` | no |
+| `op` | `string` | yes |
+| `ops` | `array` | no |
+| `project` | `string` | no |
+| `request_id` | `string` | no |
+| `session` | `string` | no |
+| `store` | `object` | no |
 
 ## Sibling Daemon MCP Surfaces
 

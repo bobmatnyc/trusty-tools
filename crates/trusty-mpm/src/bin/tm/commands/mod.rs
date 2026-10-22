@@ -35,6 +35,8 @@ pub(crate) mod daemon_sandbox;
 // #9695: an address whose connect fails in the kernel, on every host.
 #[cfg(test)]
 pub(crate) mod dead_addr;
+// #9758: `tm dbatg` — the PM ledger writer, daemon first, in-process fallback.
+pub(crate) mod dbatg;
 // #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
 #[cfg(test)]
