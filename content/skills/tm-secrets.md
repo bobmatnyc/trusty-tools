@@ -1,6 +1,6 @@
 ---
 name: tm-secrets
-description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. The tm secrets CLI does not ship yet.
+description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release.
 user-invocable: true
 metadata:
   version: "1.4.0"
@@ -11,20 +11,17 @@ effort: medium
 
 # tm secrets — Credential Handling
 
-🔴 **No agent-callable secrets client ships.** These are designed in
-[DOC-74](../../docs/specs/DOC-74-secrets-integration.md) §15 and are not in
-any binary yet: the `tm secrets` CLI
-([#7521](https://github.com/bobmatnyc/trusty-tools/issues/7521)), `tm secrets
-exec` ([#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)), the
+🔴 **Which `tm secrets` verbs ship depends on the release.** In trusty-mpm
+1.8.x: `set`, `list`, `remove`, `import`, `copy` and `doctor`. `exec` and
+`resolve` land in trusty-mpm 1.9.0 ([DOC-74](../../docs/specs/DOC-74-secrets-integration.md)
+§15.8). Run `tm secrets --help` before you plan around either.
+
+These are designed in DOC-74 §15 and are not in any binary yet: the
 `secrets_get_ref` MCP tool
 ([#7522](https://github.com/bobmatnyc/trusty-tools/issues/7522)), the console
 secrets page, the file backend
-([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)), the audit
-trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)),
-`secrets.resolve` and exec grants
-([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)), and the
-language client ([#9071](https://github.com/bobmatnyc/trusty-tools/issues/9071)). Run `tm --help`
-before you plan around any of them.
+([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)) and the audit
+trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)).
 
 What ships: the `trusty-common` credential store the daemon reads, and the
 `trusty-secrets` 0.1.0 crate — a Keychain backend, a names-only index and an
@@ -176,9 +173,10 @@ dialog once from a terminal.
 
 ## Handing a Secret to a Subprocess
 
-Nothing injects a vault value into a child process yet. A credential reaches a
-child the way it reaches the daemon: through the environment the operator set,
-or the store. Do not invent a substitute: `export KEY=$(something)` parks the
+In trusty-mpm 1.9.0 and later, `tm secrets exec` injects granted vault values
+into a child process. Before that, nothing does: a credential reaches a child
+the way it reaches the daemon, through the environment the operator set, or
+the store. Do not invent a substitute: `export KEY=$(something)` parks the
 value where your turn can echo it.
 
 A credential CLI's output (`security … -w`, `gcloud auth print-access-token`)
@@ -190,8 +188,9 @@ assign it to a variable first (#8596, #8248).
 
 ### `tm secrets resolve <key>`
 
-A program that `tm secrets exec` started, in any language, reads one granted
-value with `tm secrets resolve <key>`. It reads the grant token from the fd
+Ships in trusty-mpm 1.9.0. It is the only `tm secrets` verb that prints a
+value, and only inside an `exec` grant. A program that `tm secrets exec`
+started, in any language, reads one granted value with `tm secrets resolve <key>`. It reads the grant token from the fd
 named by `TRUSTY_SECRETS_TOKEN_FD`, which `exec` sets, and asks the running
 trusty-secrets server for `<key>`. Stdout holds the value and nothing else,
 with no trailing newline. It never starts a server and never grants.
