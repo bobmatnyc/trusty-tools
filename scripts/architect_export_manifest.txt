@@ -13,6 +13,8 @@
 # any path that names an account, host or person.
 
 # Poller and pane helpers.
+scripts/alert_triage.py
+scripts/architect-watchdog.py
 scripts/fleet-poll.py
 scripts/input-state.py
 scripts/posted.sh
