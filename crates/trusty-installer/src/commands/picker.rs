@@ -17,7 +17,7 @@
 //! manually.
 
 use crate::commands::dependency_graph::describe_added;
-use crate::commands::stable_set::{select_members_transitive, StableMember};
+use crate::commands::stable_set::{select_members_transitive, stable_set, StableMember};
 
 /// A short human-readable description for each stable-set member.
 ///
@@ -138,6 +138,16 @@ pub fn prompt_picker(components: &[StableMember]) -> anyhow::Result<Vec<StableMe
     Ok(expand_with_dependencies(chosen))
 }
 
+/// The members the picker offers, in install order.
+///
+/// Why (#10130): `tctl install` refuses an internal member with exit 3, so
+/// offering one in the menu would hand the operator a choice that fails.
+/// What: [`stable_set`] without its [`StableMember::internal`] members.
+/// Test: `tests::picker_hides_internal_members`.
+pub fn pickable_members() -> Vec<StableMember> {
+    stable_set().into_iter().filter(|m| !m.internal).collect()
+}
+
 /// Expand a picker choice to include its runtime dependencies (#2036).
 ///
 /// Why: A picker that lets the operator select `trusty-mpm` alone but not its
@@ -177,8 +187,10 @@ fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
 /// picked; passing it back by name made it explicit and `soft: false`, so a
 /// failed bus gated an optional producer's run. Left out, the resolver adds it
 /// again, softly. A bus the operator picked is `soft: false` and stays.
-/// Test: `install::tests::the_picker_round_trip_keeps_the_bus_soft`,
-/// `install::tests::a_picked_bus_stays_explicit_through_the_round_trip`.
+/// #10130: the bus is now internal, so the resolver drops it instead; a
+/// round trip must still never name it, or the re-resolution exits 3.
+/// Test: `install::tests::the_picker_round_trip_never_names_the_internal_bus`,
+/// `install::tests::a_named_bus_is_refused_through_the_round_trip`.
 pub fn override_names(chosen: &[StableMember]) -> Vec<String> {
     chosen
         .iter()
@@ -229,7 +241,6 @@ fn read_line() -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::stable_set::stable_set;
 
     // ── parse_selection ──────────────────────────────────────────────────────
 
@@ -373,7 +384,7 @@ mod tests {
     /// deps, same as the non-interactive `tctl install trusty-mpm` path.
     /// What: Chooses only the trusty-mpm `StableMember`; asserts the expanded
     /// result also contains trusty-memory and trusty-search, in stable-set order,
-    /// and trusty-events as a soft member (#10042).
+    /// and not the internal bus it softly uses (#10130).
     /// Test: This is the test.
     #[test]
     fn expand_with_dependencies_pulls_in_mpm_deps() {
@@ -383,16 +394,26 @@ mod tests {
             .expect("trusty-mpm in stable set");
         let expanded = expand_with_dependencies(vec![mpm]);
         let names: Vec<String> = expanded.into_iter().map(|m| m.crate_name).collect();
-        // #10042: plus the bus, softly (ADR-0065 decision 4).
-        assert_eq!(
-            names,
-            vec![
-                "trusty-search",
-                "trusty-memory",
-                "trusty-events",
-                "trusty-mpm"
-            ]
-        );
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+    }
+
+    /// Why (#10130): picking an internal member would hand `tctl install` a
+    /// name it refuses with exit 3.
+    /// What: the menu is the stable set minus trusty-events, in order, and
+    /// every other member is still offered.
+    /// Test: This is the test.
+    #[test]
+    fn picker_hides_internal_members() {
+        let offered: Vec<String> = pickable_members()
+            .into_iter()
+            .map(|m| m.crate_name)
+            .collect();
+        let expected: Vec<String> = stable_set()
+            .into_iter()
+            .map(|m| m.crate_name)
+            .filter(|c| c != "trusty-events")
+            .collect();
+        assert_eq!(offered, expected);
     }
 
     /// Why: An empty picker choice ("none"/empty input) means "install

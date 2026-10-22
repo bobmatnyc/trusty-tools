@@ -1,0 +1,4 @@
+Fixed
+- `tctl install` no longer tries to fetch trusty-events, which is internal and not published to crates.io (#10130). A producer selection (trusty-mpm, trusty-analyze, the `agents` bundle) or a full-set install drops it with one info line, `trusty-events: internal (not published), not installed`, instead of a registry fetch and a "skipped (optional, no prebuilt for this platform)" line. The run verdict is unchanged.
+- `tctl install trusty-events`, including `--dry-run`, exits 3 with a plain reason on stderr (or an `error` field under `--json`) and makes no network call.
+- `tctl status` no longer reports `incomplete` only because trusty-events is absent; a missing published member still does. `tctl upgrade` makes no crates.io lookup for it, and the interactive picker no longer lists it.
