@@ -27,12 +27,10 @@
 //! env var itself. `TRUSTY_DATA_DIR_OVERRIDE` is still set, for the
 //! spawned-daemon log path alone.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 
 use super::*;
 
@@ -108,17 +106,13 @@ fn stub_daemon_full(
     version: &'static str,
     fail_health: bool,
 ) {
-    let dir = socket.parent().expect("a socket path has a parent");
-    // `connect_hardened` refuses a socket whose containing directory is wider
-    // than `0700`, and `tempfile` creates one at the process umask.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .expect("harden the stub socket directory");
     if socket.exists() {
         std::fs::remove_file(socket).expect("clear the stale stub socket");
     }
-    let listener = UnixListener::bind(socket).expect("bind the stub socket");
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the stub socket");
+    // `connect_hardened` refuses anything but a 0700 dir and a 0600 socket.
+    // #7215: the code under test names this path, so the stub binds it through
+    // the production `bind_hardened` rather than `bind_hardened_stub`.
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the stub socket");
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let binding = binding.clone();
@@ -368,12 +362,8 @@ fn bind_once_argv_has(
 /// A daemon whose `health` fails: it accepts each connection and drops it, so
 /// `socket_is_serving` sees it live but the `health` call reads EOF (#4600).
 fn mute_daemon_at(socket: &Path) {
-    let dir = socket.parent().expect("a socket path has a parent");
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .expect("harden the stub socket directory");
-    let listener = UnixListener::bind(socket).expect("bind the mute socket");
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
-        .expect("harden the mute socket");
+    // #7215: hardened by the production bind, as `stub_daemon_full` is.
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the mute socket");
     tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 }
 

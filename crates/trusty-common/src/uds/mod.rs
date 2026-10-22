@@ -88,6 +88,10 @@ pub mod sse;
 // #6286: the reading half of a multi-frame response, so a token stream has one
 // definition of what terminates it rather than one per consumer.
 pub mod stream_client;
+// #7215: one hardened stub bind for test servers, in place of a chmod pair
+// copied into each consumer's tests. Compiled for this crate's own tests too.
+#[cfg(any(test, feature = "uds-test-support"))]
+pub mod test_support;
 
 /// On-demand supervision of a UDS-serving child process (#5089 step 2).
 ///
@@ -136,6 +140,7 @@ pub use sockbuf::{
 };
 pub use stream_client::{
     FramedStream, send_framed_stream_request, send_framed_stream_request_capped,
+    send_framed_stream_request_with,
 };
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{

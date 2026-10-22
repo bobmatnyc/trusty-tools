@@ -213,6 +213,9 @@ lanes = [
         "monitor-tui",
         "search-index",
         "uds-supervisor",
+        # #7215: the feature form of `uds::test_support`; the unit tests
+        # already compile it under `cfg(test)`.
+        "uds-test-support",
         "webhook-relay",
         "bm25",
         "migrations",
@@ -684,6 +687,10 @@ migrations = []
 # Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace
 # deps already required — adds no new dependencies to the lockfile.
 uds = ["dep:thiserror"]
+# #7215: `uds::test_support::bind_hardened_stub`, the hardened bind a
+# consumer's test stub uses so `connect_hardened` accepts it. Test-only: a
+# consumer names it under `[dev-dependencies]`, never `[dependencies]`.
+uds-test-support = ["uds"]
 # Enables the `uds::supervisor` module: the generic on-demand spawn supervisor
 # (`UdsServiceSupervisor`) promoted from trusty-memory's `Bm25Supervisor`
 # (issue #5089 step 2, ADR-0034 §1). Implies `uds` — it verifies an adopted

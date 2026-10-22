@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use trusty_common::uds::{FramedStream, send_framed_request, send_framed_stream_request};
+use trusty_common::uds::{FramedStream, send_framed_request, send_framed_stream_request_with};
 use trusty_mcp::Response;
 
 use super::error::EngineError;
@@ -63,6 +63,9 @@ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// `session_events_tests::session_stream_silence_is_bounded_not_infinite`
 /// asserts. Timing out is cheap on both streams: `session.events` reconnects
 /// with `after_seq` and loses nothing, `workstream.events` re-subscribes bare.
+///
+/// It bounds frame reads only. The open — dial and request write — takes
+/// [`DEFAULT_CALL_TIMEOUT`] (#7216).
 pub const STREAM_FRAME_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// See module docs.
@@ -148,16 +151,19 @@ impl UdsRpcClient {
     /// What: sets the `"stream": true` flag
     /// `trusty_common::uds::server`'s wire contract negotiates on, and hands
     /// back a [`FramedStream`] whose per-frame budget is
-    /// [`STREAM_FRAME_TIMEOUT`]. A method that does not stream answers one
-    /// ordinary response frame, which the reader reports as
+    /// [`STREAM_FRAME_TIMEOUT`]. The dial and the request write are bounded by
+    /// [`DEFAULT_CALL_TIMEOUT`] instead (#7216). A method that does not stream
+    /// answers one ordinary response frame, which the reader reports as
     /// `UdsRpcError::NotAStream` rather than decoding as an item.
     ///
     /// # Errors
     ///
-    /// [`EngineError::Transport`] for a dial or write failure. Everything after
-    /// the stream opens is reported per frame, by the reader.
+    /// [`EngineError::Transport`] for a dial or write failure, or an open that
+    /// overruns [`DEFAULT_CALL_TIMEOUT`]. Everything after the stream opens is
+    /// reported per frame, by the reader.
     ///
-    /// Test: `tests/tui_client_engine.rs::tui_engine_end_to_end_with_http_port_closed`.
+    /// Test: `tests/tui_client_engine.rs::tui_engine_end_to_end_with_http_port_closed`,
+    /// `session_events_tests::stream_open_is_bounded_by_the_call_timeout_not_the_frame_budget`.
     pub async fn open_stream<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -170,11 +176,19 @@ impl UdsRpcClient {
             "params": params,
             "stream": true,
         });
-        send_framed_stream_request(&self.socket, &request, self.stream_frame_timeout)
-            .await
-            .map_err(|source| EngineError::Transport {
-                socket: self.socket.clone(),
-                source: Box::new(source),
-            })
+        // #7216: the dial and write take the unary budget; only the frame
+        // reads take the long one, so a daemon that stops reading cannot hold
+        // the open for fifteen minutes.
+        send_framed_stream_request_with(
+            &self.socket,
+            &request,
+            DEFAULT_CALL_TIMEOUT,
+            self.stream_frame_timeout,
+        )
+        .await
+        .map_err(|source| EngineError::Transport {
+            socket: self.socket.clone(),
+            source: Box::new(source),
+        })
     }
 }

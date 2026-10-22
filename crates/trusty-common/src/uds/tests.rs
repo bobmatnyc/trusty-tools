@@ -1532,3 +1532,51 @@ async fn hardened_sockets_hold_far_more_in_flight_than_the_platform_default() {
         round_trips(sized)
     );
 }
+
+#[tokio::test]
+async fn bind_hardened_stub_hardens_a_umask_wide_tempdir_for_connect_hardened() {
+    // #7215: the shape every hand-rolled test stub hit — a directory at the
+    // umask mode, which `connect_hardened` refuses as "mode 0755, not 0700".
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("widen the tempdir to the umask mode");
+
+    let (listener, sock) =
+        test_support::bind_hardened_stub(tmp.path()).expect("bind the hardened stub");
+
+    assert_eq!(sock, tmp.path().join(test_support::STUB_SOCKET_NAME));
+    assert_eq!(
+        mode_of(tmp.path()),
+        SOCKET_DIR_MODE,
+        "stub dir must be 0700"
+    );
+    assert_eq!(mode_of(&sock), SOCKET_MODE, "stub socket must be 0600");
+    let client = connect_hardened(&sock)
+        .await
+        .expect("connect_hardened must accept the stub");
+    let (accepted, _) = listener.accept().await.expect("accept");
+    ensure_peer_is_self(&accepted).expect("peer is us");
+    drop(client);
+}
+
+#[tokio::test]
+async fn bind_hardened_stub_reports_a_symlinked_directory_rather_than_binding() {
+    // #7215: the stub is the production bind, so a directory it must not
+    // trust is an error the test sees, never a socket bound through a link.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real");
+    std::fs::create_dir(&real).expect("real dir");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let err = test_support::bind_hardened_stub(&link).expect_err("a symlinked dir is refused");
+
+    assert!(
+        matches!(err, UdsSecurityError::SymlinkDir { .. }),
+        "expected SymlinkDir, got {err:?}"
+    );
+    assert!(
+        !real.join(test_support::STUB_SOCKET_NAME).exists(),
+        "nothing may be bound through the link"
+    );
+}
