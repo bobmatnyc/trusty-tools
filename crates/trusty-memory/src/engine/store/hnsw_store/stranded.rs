@@ -33,14 +33,15 @@
 //! list; [`merge_stranded`] scores the points those searches missed exactly,
 //! on every graph-arm query. Points are grouped by vector, so the scan costs
 //! one distance per distinct vector; most were copies of a few vectors.
-//! Only the evicted point itself is re-tested. A point that a later upsert
-//! strands transitively — one still in every list it was in, whose only path
-//! from the entry point ran through a point that upsert evicted — stays
-//! unscanned until the next open.
+//! #10186: the re-test also walks on from each evicted point its search
+//! misses, so a point stranded transitively — one still in every list it was
+//! in, whose only path from the entry point ran through the evicted one — is
+//! scanned too.
 //! Test: `search_finds_drawers_the_graph_cannot_reach`,
-//! `an_upsert_that_strands_an_existing_drawer_still_finds_it`.
+//! `an_upsert_that_strands_an_existing_drawer_still_finds_it`,
+//! `a_drawer_reachable_only_through_a_stranded_one_is_still_found`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use hnsw_rs::prelude::{DistCosine, Distance, Hnsw, Neighbour, Point, PointId};
@@ -165,22 +166,31 @@ pub(super) fn neighbourhoods_before_insert(
         .collect()
 }
 
-/// Re-test each point the insert of `new_id` evicted from a list in `before`;
-/// record the ones a search for their own vector no longer finds.
+/// Re-test each point the insert of `new_id` evicted from a list in `before`,
+/// and every point reachable only through one; record the ones a search for
+/// their own vector no longer finds.
 ///
 /// Why (#9174): an upsert that evicted a point's last in-edge left it
-/// unscanned until the palace was reopened.
+/// unscanned until the palace was reopened. #10186: so did every point whose
+/// only path from the entry point ran through the evicted one.
 /// What: a point is evicted when a list in `before` names it and the same
-/// point's list no longer does. Each evicted point gets one [`reachable`]
-/// test; a miss is added to `groups`. Returns how many points were evicted.
-/// Test: `an_upsert_that_strands_an_existing_drawer_still_finds_it`.
+/// point's list no longer does. An insert removes no other edge, so a point
+/// that lost its path lies behind an evicted point, on a path of points that
+/// all lost theirs. The walk starts at the evicted points and gives each one
+/// [`reachable`] test. A miss is added to `groups` and its out-neighbours join
+/// the walk; a hit ends that branch, because a point the search found is
+/// reachable and so is everything it links to. A point stored under `new_id`
+/// — the new one, or a stale copy of it (#5171) — is not tested, and the walk
+/// goes on through it. Returns how many points were evicted.
+/// Test: `an_upsert_that_strands_an_existing_drawer_still_finds_it`,
+/// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`.
 pub(super) fn restrand_evicted(
     index: &Hnsw<'static, f32, DistCosine>,
     before: Neighbourhoods,
     new_id: u64,
     groups: &RwLock<Vec<StrandedGroup>>,
 ) -> usize {
-    let mut evicted: Vec<Neighbour> = Vec::new();
+    let mut walk: VecDeque<Neighbour> = VecDeque::new();
     let mut seen: HashSet<PointId> = HashSet::new();
     for (point, old) in before {
         let now: HashSet<PointId> = point
@@ -190,21 +200,39 @@ pub(super) fn restrand_evicted(
             .map(|n| n.p_id)
             .collect();
         for n in old {
-            if n.d_id as u64 != new_id && !now.contains(&n.p_id) && seen.insert(n.p_id) {
-                evicted.push(n);
+            if !now.contains(&n.p_id) && seen.insert(n.p_id) {
+                walk.push_back(n);
             }
         }
     }
-    for n in &evicted {
-        let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
-            continue;
-        };
+    let evicted = walk.len();
+    // #10186: layer 0 by `PointId` position, read only once a test misses.
+    let mut layer: Option<Vec<Arc<Point<'static, f32>>>> = None;
+    while let Some(n) = walk.pop_front() {
         let id = n.d_id as u64;
-        if !reachable(index, &vector, id) {
+        if id != new_id {
+            let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
+                continue;
+            };
+            if reachable(index, &vector, id) {
+                continue;
+            }
             add_stranded(&mut groups.write(), &vector, id);
         }
+        // #10186: a miss may have held the only path to its out-neighbours.
+        let points = layer
+            .get_or_insert_with(|| index.get_point_indexation().get_layer_iterator(0).collect());
+        let point = usize::try_from(n.p_id.1)
+            .ok()
+            .and_then(|at| points.get(at))
+            .filter(|p| p.get_point_id() == n.p_id);
+        for next in point.map_or_else(Vec::new, |p| p.get_neighborhood_id().swap_remove(0)) {
+            if seen.insert(next.p_id) {
+                walk.push_back(next);
+            }
+        }
     }
-    evicted.len()
+    evicted
 }
 
 /// Add every live stranded point to a graph arm's candidates, scored exactly.
