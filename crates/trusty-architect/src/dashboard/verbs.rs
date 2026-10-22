@@ -163,11 +163,12 @@ pub fn batch(env: &Env, r: &BatchRequest) -> Result<Vec<OpResult>, DashError> {
 /// # Errors
 /// As [`PruneLog::lines`].
 pub fn pruned(env: &Env, r: &PrunedRequest) -> Result<PrunedResponse, DashError> {
+    // The root is checked absolute before the prune path is resolved from it.
+    open(&r.store, env, false)?;
     let prune = match &r.store.prune_log {
         Some(path) => PruneLog::outside(&r.store.root, path)?,
         None => PruneLog::default_for(&r.store.root)?,
     };
-    open(&r.store, env, false)?;
     let lines = prune.lines(r.id.as_deref(), r.collection.as_deref())?;
     Ok(PrunedResponse { lines })
 }
