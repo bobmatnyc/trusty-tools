@@ -678,5 +678,7 @@ async fn workstream_events_streams_a_live_tagged_event_for_a_bound_session() {
     .expect("a tagged frame for the bound session must arrive");
     assert_eq!(frame["event_type"], "session_started", "got: {frame}");
 
+    // An open stream holds the serve loop's connection task; close it first.
+    drop(stream);
     daemon.shutdown().await.expect("clean shutdown");
 }
