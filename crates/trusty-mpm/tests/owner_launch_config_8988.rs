@@ -280,6 +280,36 @@ fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
     )
 }
 
+/// #10127: an Architect's ONE `--settings` is inline JSON — the owner file's
+/// `[mcp]` part merged with the lockdown deny and the connector switch.
+fn assert_architect_payload(args: &[String]) {
+    use trusty_mpm::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, capitalised};
+    let values: Vec<&String> = args
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "one --settings: {args:?}");
+    let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(
+        body["deniedMcpServers"],
+        serde_json::json!([{"serverName": "heygen"}])
+    );
+    assert_eq!(body["disableClaudeAiConnectors"], true);
+    assert!(body.get("skillOverrides").is_none(), "{body}");
+    let mut want: Vec<String> = ARCHITECT_DENY_GLOBS
+        .iter()
+        .flat_map(|g| [(*g).to_owned(), capitalised(g)])
+        .collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(
+        body["permissions"]["deny"],
+        serde_json::json!(want),
+        "{body}"
+    );
+}
+
 /// #8988 closure condition: the owner's `allow` decides which user-scope
 /// servers load; every other non-floor server is denied, and the floor
 /// (`trusty-search`) is never named.
@@ -467,11 +497,8 @@ fn an_architect_spawn_gets_the_mcp_part_but_no_tools_or_skills() {
     fx.make_architect();
     fx.owner_file(ALL_TABLES);
     let args = fx.spawn_args();
-    let (_, settings) = settings_file(&args);
-    assert_eq!(
-        settings,
-        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
-    );
+    // #10127: plus the Architect lockdown, in the same payload.
+    assert_architect_payload(&args);
     assert!(disallowed_tools(&args).is_empty(), "{args:?}");
 }
 
@@ -501,11 +528,8 @@ fn an_architect_resume_gets_the_mcp_part_only() {
     let fx = Fixture::new();
     fx.make_architect();
     fx.owner_file(ALL_TABLES);
-    let (_, settings) = settings_file(&fx.resume_args());
-    assert_eq!(
-        settings,
-        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
-    );
+    // #10127: plus the Architect lockdown, in the same payload.
+    assert_architect_payload(&fx.resume_args());
 }
 
 /// #8992: the in-place relaunch is the third caller; a PM relaunch carries
@@ -535,9 +559,6 @@ fn an_inplace_architect_relaunch_gets_the_mcp_part_only() {
     let fx = Fixture::new();
     fx.make_architect();
     fx.owner_file(ALL_TABLES);
-    let (_, settings) = settings_file(&fx.inplace_args());
-    assert_eq!(
-        settings,
-        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
-    );
+    // #10127: plus the Architect lockdown, in the same payload.
+    assert_architect_payload(&fx.inplace_args());
 }

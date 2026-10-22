@@ -207,7 +207,8 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
             &[],
             &Default::default(),
             None,
-        );
+        )
+        .expect("a PM spec builds");
         crate::test_support::spec_text(&spec)
     };
     let fallback = spec(None);
@@ -2436,7 +2437,8 @@ fn connect_claude_spec_follows_the_configured_renderer() {
             &[],
             &Default::default(),
             Some(root.path()),
-        );
+        )
+        .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
@@ -2457,7 +2459,8 @@ fn launch_claude_spec_follows_the_configured_renderer() {
             None,
             &[],
             &Default::default(),
-        );
+        )
+        .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");

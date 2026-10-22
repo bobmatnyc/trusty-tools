@@ -833,7 +833,8 @@ pub(crate) fn inplace_exec_command_for(
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`,
 /// `inplace_exec_command_assigns_the_configured_renderer`,
 /// `inplace_exec_command_defaults_the_mouse_capture_off`,
-/// `inplace_pm_relaunch_trims_the_unused_tools`.
+/// `inplace_pm_relaunch_trims_the_unused_tools`,
+/// `an_architect_inplace_exec_drops_the_chat_tokens`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
@@ -870,6 +871,11 @@ pub(crate) fn build_inplace_exec_command(
     cmd.env(name, value);
     // #8992: the same profile decides the tool trim's variable.
     cmd.envs(trusty_mpm::core::pm_tool_trim::trim_env(resume.profile));
+    // #10127: an Architect relaunch inherits none of the chat tokens.
+    for name in trusty_mpm::core::architect_lockdown::Lockdown::PRODUCTION.env_unset(resume.profile)
+    {
+        cmd.env_remove(name);
+    }
     // #6495/#8405: the config-decided renderer, whatever this pane exports.
     trusty_mpm::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd

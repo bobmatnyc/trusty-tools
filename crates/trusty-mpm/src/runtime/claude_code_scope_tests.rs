@@ -96,7 +96,9 @@ fn inplace_expected_path() -> String {
 #[test]
 #[serial_test::serial]
 fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
-    let args = spawn_spec(&scope_launch(Some(Path::new(SCOPE_CONFIG_DIR)))).args;
+    let args = spawn_spec(&scope_launch(Some(Path::new(SCOPE_CONFIG_DIR))))
+        .expect("spec")
+        .args;
     let cmd = args.join(" ");
     // #7892: additive, never strict — the operator's user-scope servers load
     // beside tm's builtins.
@@ -113,7 +115,10 @@ fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
 #[test]
 #[serial_test::serial]
 fn spawn_command_omits_the_mcp_config_flag_without_a_config_dir() {
-    let cmd = spawn_spec(&scope_launch(None)).args.join(" ");
+    let cmd = spawn_spec(&scope_launch(None))
+        .expect("spec")
+        .args
+        .join(" ");
     assert!(
         !cmd.contains("--mcp-config"),
         "a spawn reading the operator's own ~/.claude.json is not tm's to scope: {cmd}"
@@ -127,6 +132,7 @@ fn resume_command_carries_the_mcp_config_flag_and_not_strict() {
         &scope_launch(Some(Path::new(SCOPE_CONFIG_DIR))),
         Some("abc-123"),
     )
+    .expect("spec")
     .args;
     let cmd = args.join(" ");
     assert!(
@@ -143,6 +149,7 @@ fn resume_command_carries_the_mcp_config_flag_and_not_strict() {
 #[serial_test::serial]
 fn resume_command_omits_the_mcp_config_flag_without_a_config_dir() {
     let cmd = resume_spec(&scope_launch(None), Some("abc-123"))
+        .expect("spec")
         .args
         .join(" ");
     assert!(!cmd.contains("--mcp-config"), "{cmd}");

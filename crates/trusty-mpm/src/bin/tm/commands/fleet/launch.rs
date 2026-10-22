@@ -274,6 +274,7 @@ impl Prepared {
             cli.profile,
         )?;
         // #8308: the launch travels in a spec under `home`; the pane types a short line.
+        // #10127: the Architect lockdown rides in that spec; its error refuses the launch.
         let mut claude_spec = crate::commands::launch::launch_claude_spec(
             dir,
             trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
@@ -282,7 +283,7 @@ impl Prepared {
             config_dir.as_deref(),
             &cli.env,
             &files,
-        );
+        )?;
         // #8981: the conversation id comes from tm's own record, which outlives
         // the daemon's session record.
         let root = home.join(".trusty-mpm");

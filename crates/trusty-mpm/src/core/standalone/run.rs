@@ -157,24 +157,27 @@ pub fn build_launch_command_with_prompt(
 /// What: [`build_launch_command_with_prompt`] with
 /// [`crate::core::alt_screen::configured_alternate_screen_in`], then the
 /// `profile` stamp (#8453, assigned after the builder's scrub so it wins) and
-/// the #8992 tool trim for that profile.
+/// the #8992 tool trim for that profile, then the owner `files.settings`
+/// (#8988) — for an Architect merged with the #10127 lockdown deny, its chat
+/// tokens removed; a lockdown error refuses the run.
 /// Test: `run_launch_command_follows_the_configured_renderer`,
 /// `run_launch_command_carries_the_prompt_file`,
-/// `run_launch_command_trims_a_pm_and_not_an_architect`.
+/// `run_launch_command_trims_a_pm_and_not_an_architect`,
+/// `run_launch_command_carries_the_architect_lockdown`.
 fn run_launch_command(
     config_root: Option<&Path>,
     repo_path: &Path,
     claude_config_dir: &Path,
     api_key: Option<&str>,
-    mcp_config: Option<&Path>,
+    files: &crate::core::launch_policy::LaunchFiles,
     prompt_file: &Path,
     profile: crate::core::session_profile::SessionProfile,
-) -> Command {
+) -> Result<Command, crate::core::architect_lockdown::LockdownError> {
     let mut cmd = build_launch_command_with_prompt(
         repo_path,
         claude_config_dir,
         api_key,
-        mcp_config,
+        files.mcp_config.as_deref(),
         prompt_file,
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     );
@@ -183,7 +186,13 @@ fn run_launch_command(
     // #8992: `tm run` resolves its profile; a PM drops the unused tools.
     cmd.envs(crate::core::pm_tool_trim::trim_env(profile));
     cmd.args(crate::core::pm_tool_trim::trim_args(profile));
-    cmd
+    // #10127: the owner file and an Architect's deny as ONE `--settings`.
+    crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_command(
+        profile,
+        files.settings.as_deref(),
+        &mut cmd,
+    )?;
+    Ok(cmd)
 }
 
 /// The 1.7.0 shape of [`build_launch_command_configured`] (#8405).
@@ -358,24 +367,29 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         "run",
     )?;
 
+    // #8988: the owner MCP policy for the `.claude.json` this launch reads;
+    // #8992: `cli.profile` decides whether the skill and tool parts apply.
+    let config_dir = Some(claude_config_dir);
+    let files = crate::core::launch_policy::LaunchFiles {
+        mcp_config: Some(mcp_config),
+        settings: crate::core::launch_policy::provision_settings_default(
+            &repo_path,
+            config_dir,
+            cli.profile,
+        )
+        .file,
+    };
     let mut cmd = run_launch_command(
         // #8405: the operator's config decides the renderer.
         crate::core::alt_screen::operator_config_root().as_deref(),
         &repo_path,
         claude_config_dir,
         api_key.as_deref(),
-        Some(&mcp_config),
+        &files,
         &prompt_file,
         // #8286: the stamp and the #8992 trim follow this one resolution.
         cli.profile,
-    );
-    // #8988: the owner MCP policy for the `.claude.json` this launch reads;
-    // #8992: `cli.profile` decides whether the skill and tool parts apply.
-    let config_dir = Some(claude_config_dir);
-    cmd.args(
-        crate::core::launch_policy::provision_settings_default(&repo_path, config_dir, cli.profile)
-            .argv(),
-    );
+    )?;
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
     // the child, so mis-attributed consent prompts (media library, App-Data,
@@ -664,10 +678,11 @@ mod tests {
             &tmp.path().join("repo"),
             &tmp.path().join("cfg"),
             None,
-            None,
+            &Default::default(),
             &prompt,
             Default::default(),
-        );
+        )
+        .expect("a PM command builds");
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -702,10 +717,11 @@ mod tests {
                 &tmp.path().join("repo"),
                 &tmp.path().join("cfg"),
                 None,
-                None,
+                &Default::default(),
                 &tmp.path().join("p.txt"),
                 Default::default(),
-            );
+            )
+            .expect("a PM command builds");
             let carried = cmd
                 .get_envs()
                 .find(|(k, _)| *k == ALT_SCREEN_ENV_VAR)
