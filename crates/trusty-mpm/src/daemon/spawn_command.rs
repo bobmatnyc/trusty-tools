@@ -318,10 +318,13 @@ mod tests {
             assert!(unset < line.find(" TRUSTY_MPM_SESSION_PROFILE=").expect("stamp"));
             let settings = format!(" '--settings' '{}.lockdown.json'", file.display());
             assert!(line.ends_with(&settings), "{line}");
-            let (deny, body) = payload(&file.with_file_name("p.txt.lockdown.json"));
+            let out = file.with_file_name("p.txt.lockdown.json");
+            let (deny, body) = payload(&out);
             assert!(deny.contains(&"mcp__*slack*".to_owned()), "{deny:?}");
             assert!(deny.contains(&"mcp__*Slack*".to_owned()), "{deny:?}");
             assert_eq!(body["disableClaudeAiConnectors"], true);
+            // #10127: the payload file is created new, so the next line needs its path free.
+            std::fs::remove_file(&out).expect("remove the payload");
         }
         let pm = ("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into());
         let line = gui_spawn_command_with(&file, &pm, &lockdown).expect("a PM line");
@@ -378,6 +381,45 @@ mod tests {
             err.to_string().contains("cannot write the --settings file"),
             "{err}"
         );
+    }
+
+    /// Assert a supervisor GUI line for prompt `file` under a non-empty
+    /// lockdown is refused with the payload write error.
+    fn assert_architect_line_refused(file: &std::path::Path) {
+        let stamp = ("TRUSTY_MPM_SESSION_PROFILE".into(), "supervisor".into());
+        let lockdown = Lockdown::new(&["mcp__*slack*"], &[]);
+        let err = gui_spawn_command_with(file, &stamp, &lockdown)
+            .expect_err("a planted payload path refuses the line");
+        assert!(
+            err.to_string().contains("cannot write the --settings file"),
+            "{err}"
+        );
+    }
+
+    /// #10127: a file already at the payload path refuses the Architect line
+    /// and keeps its bytes. At de81bbab63 it was truncated and reused.
+    #[test]
+    fn a_planted_lockdown_file_refuses_the_gui_architect_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("p.txt");
+        let out = super::lockdown_settings_file(&file);
+        std::fs::write(&out, "planted").expect("plant");
+        assert_architect_line_refused(&file);
+        assert_eq!(std::fs::read_to_string(&out).expect("planted"), "planted");
+    }
+
+    /// #10127: a symlink at the payload path refuses the Architect line and
+    /// leaves its target untouched. At de81bbab63 the write followed it.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_lockdown_symlink_refuses_the_gui_architect_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("p.txt");
+        let target = tmp.path().join("target");
+        std::fs::write(&target, "target").expect("target");
+        std::os::unix::fs::symlink(&target, super::lockdown_settings_file(&file)).expect("symlink");
+        assert_architect_line_refused(&file);
+        assert_eq!(std::fs::read_to_string(&target).expect("target"), "target");
     }
 
     /// #10127 Q2 Fail-Open Check: a line over the pane limit would lose its
