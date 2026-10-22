@@ -367,6 +367,13 @@ w "$leak" 'clone github.com/realcorp/widgets'
 leaks leaks-org 1 "FAIL ORG: $leak:1"
 w "$leak" 'ssh studio.local'
 leaks leaks-host 1 "FAIL HOSTNAME: $leak:1"
+# #10161: a host needs a boundary after it; `.local`/`.lan` inside an
+# identifier is not one, and a <name>.local mid-line still is.
+w "$leak" 'curl http://studio.local:8080/'
+leaks leaks-host-port 1 "FAIL HOSTNAME: $leak:1"
+w "$leak" 'window.localStorage a.localeCompare(b) code.language-mermaid db.LOCAL_URL' \
+  'threading.local() self.local.cache = 1'
+leaks leaks-host-identifier-near-miss 0 "OK"
 w "$leak" 'notify U01ABC23DEF'
 leaks leaks-slack 1 "FAIL SLACK_ID: $leak:1"
 w "$leak" 'mail someone@corp.io'

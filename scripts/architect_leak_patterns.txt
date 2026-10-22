@@ -28,7 +28,9 @@ ORG	i	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:][A-Za-z0-9_.-
 ORG	i	--repo[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	--repo[ =]+(example|acme|bobmatnyc)/
 ORG	-	(^|[^A-Za-z0-9_-])gh [^|;&]*-R[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	.*-R[ =]+(example|acme|bobmatnyc)/
 ORG	i	[A-Za-z0-9][A-Za-z0-9-]*\.github\.io	(example|acme|bobmatnyc)\.github\.io
-HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?	.*\.local\.[A-Za-z0-9]+|threading\.local
+# #10161: a host ends at a non-identifier char, so localStorage, language-x and
+# LOCAL_URL are no hit; ALLOW's trailing .? takes that boundary char.
+HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?([^A-Za-z0-9_]|$)	.*\.local\.[A-Za-z0-9]+.?|threading\.local.?
 SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
 EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*example\.(com|org|net)
 GH_CONFIG_DIR	-	\.config/gh-[A-Za-z0-9_.-]+	\.config/gh-(example|acme)
