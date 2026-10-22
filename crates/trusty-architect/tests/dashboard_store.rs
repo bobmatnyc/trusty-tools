@@ -245,7 +245,7 @@ fn failed_restore_names_the_torn_files() -> R {
         let Err(DashError::RollbackIncomplete { unrestored, cause }) = &got else {
             return Err(format!("{format}: want RollbackIncomplete, got {got:?}").into());
         };
-        assert_eq!(unrestored, &[torn.clone()], "{format}");
+        assert_eq!(unrestored, std::slice::from_ref(&torn), "{format}");
         assert!(
             matches!(**cause, DashError::Io { .. }),
             "{format}: {cause:?}"
