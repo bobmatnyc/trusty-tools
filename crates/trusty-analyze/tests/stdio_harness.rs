@@ -55,22 +55,62 @@ fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trusty-analyze"))
 }
 
+/// What the preflight probe found at the trusty-search socket.
+#[derive(Debug, PartialEq)]
+enum Probe {
+    /// The daemon answered `search.health` with a result.
+    Up,
+    /// No daemon is there to test against; the reason omits the socket path,
+    /// which [`report_skip`] prints once.
+    Skip(&'static str),
+    /// A daemon is there and is broken; the message names the socket.
+    Fail(String),
+}
+
 /// Ask trusty-search at `socket` for `search.health`.
 ///
 /// Why: the analyzer refuses to start without trusty-search, so the suite
-/// skips with a message naming the socket instead of failing on a child exit 1.
-/// What: `Ok(())` when the daemon answers with a result — the same contract as
-/// the analyzer's own startup gate; otherwise `Err` with a one-line reason that
-/// names the socket path. Bounded by [`PROBE_TIMEOUT`].
-/// Test: `search_probe_names_an_absent_socket`, `search_probe_and_index_pick_speak_the_socket`.
-fn probe_search(socket: &Path) -> std::result::Result<(), String> {
+/// skips instead of failing on a child exit 1 — but only when no daemon is
+/// there. A daemon that answers with an error is broken, and skipping on it
+/// would report a pass that tested nothing (#10086, fail-closed).
+/// What: [`Probe::Up`] on a result — the analyzer's own startup-gate contract.
+/// [`Probe::Skip`] for exactly three cases, each with its own reason: no socket
+/// file, connection refused (a stale socket file), and no answer within
+/// [`PROBE_TIMEOUT`]. Every other failure, a JSON-RPC error included, is
+/// [`Probe::Fail`].
+/// Test: `search_probe_skips_an_absent_socket`, `search_probe_skips_a_socket_nobody_listens_on`,
+/// `search_probe_fails_on_a_health_rpc_error`, `search_probe_and_index_pick_speak_the_socket`.
+fn probe_search(socket: &Path) -> Probe {
     // #10086: trusty-search serves its Unix socket only; the TCP 7878 probe is gone.
     if !socket.exists() {
-        return Err(format!("no socket at {}", socket.display()));
+        return Probe::Skip("no socket file");
     }
-    search_rpc::call_blocking(socket, search_rpc::METHOD_HEALTH, json!({}), PROBE_TIMEOUT)
-        .map(|_| ())
-        .map_err(|e| format!("{e:#}"))
+    let Err(e) =
+        search_rpc::call_blocking(socket, search_rpc::METHOD_HEALTH, json!({}), PROBE_TIMEOUT)
+    else {
+        return Probe::Up;
+    };
+    // #10086: classify by the typed cause, never by message text.
+    let refused = e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    });
+    if refused {
+        return Probe::Skip("connection refused: a stale socket file with no listener");
+    }
+    let timed_out = e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<trusty_common::uds::UdsRpcError>(),
+            Some(trusty_common::uds::UdsRpcError::Timeout { .. })
+        )
+    });
+    if timed_out {
+        return Probe::Skip("no answer within the probe timeout");
+    }
+    Probe::Fail(format!(
+        "trusty-search at {} did not answer search.health cleanly: {e:#}",
+        socket.display()
+    ))
 }
 
 /// Report a skipped suite where a passing run still shows it.
@@ -309,15 +349,51 @@ fn pick_index_returns_something() {
     assert_eq!(idx, TEST_INDEX_PREFERRED, "fallback when nothing answers");
 }
 
-/// #10086: an absent socket is a skip reason that names the path, not a hang.
+/// #10086: an absent socket skips with its own reason, not a hang.
 #[test]
-fn search_probe_names_an_absent_socket() {
+fn search_probe_skips_an_absent_socket() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("absent.sock");
-    let reason = probe_search(&socket).expect_err("no daemon at this path");
+    let probe = probe_search(&dir.path().join("absent.sock"));
+    assert_eq!(probe, Probe::Skip("no socket file"));
+}
+
+/// #10086: a socket file nobody listens on (a daemon that died) skips with
+/// the connection-refused reason, distinct from the absent-file one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_probe_skips_a_socket_nobody_listens_on() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("stale.sock");
+    // Dropping the listener closes it but leaves the socket file behind.
+    drop(trusty_common::uds::bind_hardened(&socket).expect("bind the stale socket"));
+    assert!(socket.exists(), "the stale socket file must remain");
+    let probe = tokio::task::spawn_blocking(move || probe_search(&socket))
+        .await
+        .expect("join the probe");
+    assert_eq!(
+        probe,
+        Probe::Skip("connection refused: a stale socket file with no listener")
+    );
+}
+
+/// #10086: a daemon that answers `search.health` with a JSON-RPC error is
+/// broken, not absent, so the suite must fail rather than skip (fail-closed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_probe_fails_on_a_health_rpc_error() {
+    let search =
+        fake_search::FakeSearchSocket::serve(|_, _| Err((-32000, "embedder wedged".into())));
+    let socket = search.path().to_path_buf();
+    let probe_socket = socket.clone();
+    let probe = tokio::task::spawn_blocking(move || probe_search(&probe_socket))
+        .await
+        .expect("join the probe");
+    let Probe::Fail(message) = probe else {
+        panic!("an RPC error from search.health must fail the suite, got {probe:?}");
+    };
     assert!(
-        reason.contains(&socket.display().to_string()),
-        "the skip reason must name the socket: {reason}"
+        message.contains(&socket.display().to_string())
+            && message.contains("-32000")
+            && message.contains("embedder wedged"),
+        "the failure must name the socket and the daemon's error: {message}"
     );
 }
 
@@ -338,7 +414,7 @@ async fn search_probe_and_index_pick_speak_the_socket() {
         tokio::task::spawn_blocking(move || (probe_search(&socket), pick_index(&socket)))
             .await
             .expect("join the probe");
-    assert_eq!(probe, Ok(()), "a socket answering search.health is up");
+    assert_eq!(probe, Probe::Up, "a socket answering search.health is up");
     assert_eq!(picked, TEST_INDEX_PREFERRED);
 }
 
@@ -347,12 +423,16 @@ async fn search_probe_and_index_pick_speak_the_socket() {
 #[ignore = "requires a running trusty-search daemon on its Unix socket"]
 fn full_stdio_suite() -> Result<()> {
     // -------- Preflight -----------------------------------------------------
-    // #10086: probe the Unix socket the analyzer itself resolves; skip, naming
-    // the path, when it is absent or does not answer.
+    // #10086: probe the Unix socket the analyzer itself resolves; skip only
+    // when no daemon is there, fail when one is there and broken.
     let socket = search_rpc::search_socket().context("resolve the trusty-search socket path")?;
-    if let Err(reason) = probe_search(&socket) {
-        report_skip(&socket, &reason);
-        return Ok(());
+    match probe_search(&socket) {
+        Probe::Up => {}
+        Probe::Skip(reason) => {
+            report_skip(&socket, reason);
+            return Ok(());
+        }
+        Probe::Fail(message) => bail!(message),
     }
     println!("=== trusty-search answering at {} ===", socket.display());
     let index_id = pick_index(&socket);
