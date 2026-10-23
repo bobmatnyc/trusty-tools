@@ -23,9 +23,9 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::core::build_lease::config::BuildLeaseConfig;
-use crate::core::build_lease::deps_rotate;
 use crate::core::build_lease::evict::{SweepOutcome, effective_evict_pct, sweep};
 use crate::core::build_lease::slots::SlotDir;
+use crate::core::build_lease::{deps_repair, deps_rotate};
 use crate::core::disk_usage_guard;
 use crate::daemon::state::DaemonState;
 
@@ -187,7 +187,10 @@ pub(crate) fn evict_in(home: &Path, cancelled: &dyn Fn() -> bool) -> TickLog {
     let shared = home
         .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
         .join(crate::core::build_env::CARGO_TARGET_SUBDIR);
-    deps_rotate::log_reclaim(&pool, &deps_rotate::reclaim_everywhere(&shared, &pool));
+    deps_rotate::log_reclaim(
+        &pool,
+        &deps_repair::reclaim_everywhere(&shared, &pool, cancelled),
+    );
     evict_measured(
         &pool,
         home,

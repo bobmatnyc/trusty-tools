@@ -1808,8 +1808,12 @@ pub struct DoctorFlags {
     /// shared dir (Architect ruling Q3a).
     /// What: for each shared target and builder slot the `deps_budget` row
     /// warns on, renames `debug/` aside while no build holds a cargo lock in
-    /// that target, and deletes the old tree; a held lock is refused and named.
-    /// Cargo rebuilds the profile cold. No other repair runs.
+    /// that target, and waits while the old tree is deleted; a held lock is
+    /// refused and named. A builder slot is also rotated only while this pass
+    /// holds its `tm build-lease` lease. A shared target has no lease, so only
+    /// its cargo locks guard it: run this when no unleased build is between
+    /// two cargo commands there. Cargo rebuilds the profile cold. No other
+    /// repair runs.
     #[arg(long)]
     pub rotate_deps: bool,
 

@@ -96,6 +96,8 @@ pub mod config;
 pub mod deps_budget;
 // #10212: rotate an over-line `debug/` aside, never while a build holds it.
 pub mod deps_rotate;
+// #10212: `tm doctor --rotate-deps` and the daemon reclaim of aside trees.
+pub mod deps_repair;
 // #8451: the daemon's percent-of-volume sweep over the slot pool.
 pub mod evict;
 pub mod orphan;

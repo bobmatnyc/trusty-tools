@@ -2,6 +2,7 @@
 //!
 //! Every test works in a temp dir; none touches a real cargo target.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -10,10 +11,10 @@ use std::time::{Duration, Instant};
 use super::*;
 
 /// A pid no process can hold: it does not fit a positive `pid_t`.
-const DEAD_PID: u32 = 4_294_967_294;
+pub(crate) const DEAD_PID: u32 = 4_294_967_294;
 
 /// A target whose `debug/deps` holds `n` empty files.
-fn target_with(root: &Path, n: usize) -> PathBuf {
+pub(crate) fn target_with(root: &Path, n: usize) -> PathBuf {
     let deps = root.join(PROFILE).join("deps");
     std::fs::create_dir_all(&deps).expect("deps");
     for i in 0..n {
@@ -23,16 +24,24 @@ fn target_with(root: &Path, n: usize) -> PathBuf {
 }
 
 /// Hold `<target>/debug/.cargo-lock` as a running cargo does.
-fn hold_cargo_lock(target: &Path) -> File {
+pub(crate) fn hold_cargo_lock(target: &Path) -> File {
     let lock = File::create(target.join(PROFILE).join(".cargo-lock")).expect("lock file");
     lock.try_lock().expect("hold cargo's lock");
     lock
 }
 
-fn deps_len(target: &Path) -> usize {
+pub(crate) fn deps_len(target: &Path) -> usize {
     std::fs::read_dir(target.join(PROFILE).join("deps"))
         .map(Iterator::count)
         .unwrap_or(0)
+}
+
+/// An aside tree named for `pid` in `dir`, with one file in it.
+pub(crate) fn aside_in(dir: &Path, pid: u32, nanos: u32) -> PathBuf {
+    let tree = dir.join(format!(".slot-x{EVICTING_INFIX}{pid}.{nanos}"));
+    std::fs::create_dir_all(tree.join("deps")).expect("aside");
+    std::fs::write(tree.join("deps/f"), b"").expect("file");
+    tree
 }
 
 /// Wait, bounded, until `path` is gone.
@@ -52,9 +61,10 @@ fn a_target_over_the_line_is_rotated_aside() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let target = target_with(tmp.path(), 6);
     let rotation = rotate_if_over(&target, 5, true);
-    let Rotation::Rotated { aside } = rotation else {
+    let Rotation::Rotated { aside, deleted } = rotation else {
         panic!("expected a rotation, got {rotation:?}");
     };
+    assert!(!deleted, "the lease path deletes in the background");
     assert!(!target.join(PROFILE).exists(), "debug/ was moved aside");
     assert_eq!(aside.parent(), Some(target.as_path()), "renamed in place");
     let name = aside.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -93,7 +103,13 @@ fn a_dir_under_the_line_is_left_alone() {
 fn a_failed_rename_is_reported_and_leaves_the_live_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let target = target_with(tmp.path(), 6);
-    let rotation = rotate_with(&target, 5, true, |_| Err(std::io::Error::other("EXDEV")));
+    let rotation = rotate_with(
+        &target,
+        5,
+        true,
+        || Ok(()),
+        |_| Err(std::io::Error::other("EXDEV")),
+    );
     assert_eq!(rotation, Rotation::Failed("EXDEV".into()));
     assert!(rotation.is_failure());
     assert_eq!(deps_len(&target), 6, "the live deps dir is untouched");
@@ -124,12 +140,8 @@ fn a_dry_run_moves_nothing() {
 #[test]
 fn a_dead_deleters_aside_tree_is_reclaimed() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tree = tmp
-        .path()
-        .join(format!(".slot-x{EVICTING_INFIX}{DEAD_PID}.1"));
-    std::fs::create_dir_all(tree.join("deps")).expect("aside");
-    std::fs::write(tree.join("deps/f"), b"").expect("file");
-    let reclaim = reclaim_aside(tmp.path());
+    let tree = aside_in(tmp.path(), DEAD_PID, 1);
+    let reclaim = reclaim_aside(tmp.path(), &|| false);
     assert_eq!(reclaim.removed, 1, "{reclaim:?}");
     assert!(!tree.exists());
 }
@@ -137,15 +149,10 @@ fn a_dead_deleters_aside_tree_is_reclaimed() {
 #[test]
 fn a_live_deleters_aside_tree_is_left_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mine = tmp
-        .path()
-        .join(format!(".slot-x{EVICTING_INFIX}{}.1", std::process::id()));
-    let init = tmp.path().join(format!(".slot-x{EVICTING_INFIX}1.1"));
-    for tree in [&mine, &init] {
-        std::fs::create_dir_all(tree).expect("aside");
-    }
+    let mine = aside_in(tmp.path(), std::process::id(), 1);
+    let init = aside_in(tmp.path(), 1, 1);
     assert!(stale_aside(tmp.path()).is_empty());
-    assert_eq!(reclaim_aside(tmp.path()), Reclaim::default());
+    assert_eq!(reclaim_aside(tmp.path(), &|| false), Reclaim::default());
     assert!(mine.exists() && init.exists());
 }
 
@@ -154,80 +161,32 @@ fn a_live_deleters_aside_tree_is_left_alone() {
 #[test]
 fn a_failed_reclaim_is_reported_and_left() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let tree = tmp
-        .path()
-        .join(format!(".slot-x{EVICTING_INFIX}{DEAD_PID}.1"));
-    std::fs::create_dir_all(&tree).expect("aside");
-    let reclaim = reclaim_with(tmp.path(), |_| Err(std::io::Error::other("EBUSY")));
+    let tree = aside_in(tmp.path(), DEAD_PID, 1);
+    let reclaim = reclaim_with(tmp.path(), &|| false, |_| {
+        Err(std::io::Error::other("EBUSY"))
+    });
     assert_eq!(reclaim.removed, 0);
     assert_eq!(reclaim.failed, vec![(tree.clone(), "EBUSY".to_string())]);
     assert!(tree.exists());
 }
 
-/// A shared root and a pool root: one shared target with `shared_n` deps
-/// entries and one slot with `slot_n`.
-fn roots(shared_n: usize, slot_n: usize) -> (tempfile::TempDir, PathBuf, PathBuf) {
+/// #10212 round 1: a shutdown must not wait for every dead tree to be deleted.
+/// The cancel flips after the first tree; the second is never touched.
+#[test]
+fn a_cancel_stops_the_reclaim_before_the_next_tree() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let shared = tmp.path().join("cargo-target");
-    let pool = tmp.path().join("pool");
-    target_with(&shared.join("o/r"), shared_n);
-    target_with(&pool.join("o/r/slot-0"), slot_n);
-    (tmp, shared, pool)
-}
-
-#[test]
-fn the_repair_rotates_an_over_line_target() {
-    let (_tmp, shared, pool) = roots(6, 2);
-    let rows = rotate_all(&shared, &pool, 5, true);
-    let shared_target = shared.join("o/r");
-    let slot = pool.join("o/r/slot-0");
-    assert!(
-        rows.iter()
-            .any(|(t, r)| *t == shared_target && matches!(r, Rotation::Rotated { .. })),
-        "{rows:?}"
-    );
-    assert!(
-        rows.contains(&(slot.clone(), Rotation::NotNeeded(DepsCount::Under(2)))),
-        "{rows:?}"
-    );
-    assert!(!shared_target.join(PROFILE).exists());
-    assert_eq!(deps_len(&slot), 2);
-}
-
-#[test]
-fn the_repair_refuses_a_target_whose_cargo_lock_is_held() {
-    let (_tmp, shared, pool) = roots(6, 0);
-    let shared_target = shared.join("o/r");
-    let _held = hold_cargo_lock(&shared_target);
-    let rows = rotate_all(&shared, &pool, 5, true);
-    assert!(
-        rows.iter()
-            .any(|(t, r)| *t == shared_target && matches!(r, Rotation::Busy(_))),
-        "{rows:?}"
-    );
-    assert_eq!(deps_len(&shared_target), 6);
-}
-
-/// Fail-Open Check: the repair reports an aside tree it could not delete.
-#[test]
-fn the_repair_reports_an_aside_tree_it_cannot_delete() {
-    let (_tmp, shared, pool) = roots(0, 0);
-    let slot = pool.join("o/r/slot-0");
-    let tree = slot.join(format!(".slot-x{EVICTING_INFIX}{DEAD_PID}.1"));
-    std::fs::create_dir_all(tree.join("deps")).expect("aside");
-    std::fs::write(tree.join("deps/f"), b"").expect("file");
-    let locked = tree.join("deps");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    let rows = rotate_all(&shared, &pool, 5, true);
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    assert!(
-        rows.iter().any(
-            |(_, r)| matches!(r, Rotation::DeleteFailed { tree: t, .. } if *t == tree)
-                && r.is_failure()
-        ),
-        "{rows:?}"
-    );
-    assert!(tree.exists(), "left for the next pass");
+    let first = aside_in(tmp.path(), DEAD_PID, 1);
+    let second = aside_in(tmp.path(), DEAD_PID, 2);
+    let polls = Cell::new(0);
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 1
+    };
+    let reclaim = reclaim_aside(tmp.path(), &cancelled);
+    assert_eq!(reclaim.removed, 1, "{reclaim:?}");
+    assert!(reclaim.cancelled, "{reclaim:?}");
+    assert!(!first.exists(), "the first tree went before the cancel");
+    assert!(second.exists(), "the tree after the cancel is left");
 }
 
 #[test]

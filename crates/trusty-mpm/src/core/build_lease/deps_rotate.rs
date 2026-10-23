@@ -9,15 +9,15 @@
 //! with [`discard`] (one rename, deletion on a background thread) while
 //! holding every cargo lock of the target — a build that holds one is never
 //! rotated. [`reclaim_aside`] deletes aside trees whose deleter died.
-//! [`seed_refusal`] tells a seed not to clone an over-line source.
-//! [`rotate_all`] is the `tm doctor --rotate-deps` pass over the shared targets
-//! and the slot pool. Nothing here lists `deps/` beyond the line.
+//! [`seed_refusal`] tells a seed not to clone an over-line source. The
+//! operator's repair and the daemon's reclaim live in `deps_repair`. Nothing
+//! here lists `deps/` beyond the line.
 //! Test: `deps_rotate_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 use super::deps_budget::{DEPS_ROTATE_ENTRIES, DEPS_WARN_ENTRIES, DepsCount, count_deps};
-use super::evict::{EVICTING_INFIX, list_pool_slots};
+use super::evict::EVICTING_INFIX;
 use super::stale_guard::cargo_lock_held;
 use crate::core::builder_slot_pool::hold_idle_build_locks;
 use crate::core::builder_slot_pool::staging::{Discarded, discard};
@@ -35,19 +35,22 @@ pub enum Rotation {
     NotNeeded(DepsCount),
     /// Over the line; a dry run, so nothing was moved.
     WouldRotate,
-    /// `debug/` was renamed to `aside`; its deletion runs in the background.
+    /// `debug/` was renamed to `aside`.
     Rotated {
-        /// Where the old tree now lives until it is deleted.
+        /// Where the old tree was moved.
         aside: PathBuf,
+        /// `true` once the aside tree is deleted; `false` while a background
+        /// thread deletes it.
+        deleted: bool,
     },
-    /// A build holds, or may hold, one of the target's cargo locks.
-    Busy(PathBuf),
+    /// A build holds, or may hold, the target: this names what holds it.
+    Busy(String),
     /// `deps/` could not be counted, so nothing was moved.
     Unknown(String),
     /// The rename failed; the live directory is where it was.
     Failed(String),
-    /// An earlier rotation's aside tree could not be deleted; the next pass
-    /// retries. The live directory is not involved.
+    /// A rotated-aside tree could not be deleted; the next pass retries. The
+    /// live directory is not involved.
     DeleteFailed {
         /// The aside tree still on disk.
         tree: PathBuf,
@@ -70,16 +73,19 @@ impl Rotation {
                 "{}: deps is over the line; would rename it aside (dry run)",
                 profile.display()
             ),
-            Self::Rotated { aside } => format!(
-                "{}: deps was over the line; renamed aside to {} and deleting it in the \
-                 background (#10212)",
+            Self::Rotated { aside, deleted } => format!(
+                "{}: deps was over the line; renamed aside to {} and {} (#10212)",
                 profile.display(),
-                aside.display()
+                aside.display(),
+                if *deleted {
+                    "deleted it"
+                } else {
+                    "deleting it in the background"
+                }
             ),
-            Self::Busy(lock) => format!(
-                "{}: deps is over the line but NOT rotated — a build holds {}",
-                profile.display(),
-                lock.display()
+            Self::Busy(holder) => format!(
+                "{}: deps is over the line but NOT rotated — held by {holder}",
+                profile.display()
             ),
             Self::Unknown(err) => format!(
                 "{}: NOT rotated — deps could not be counted ({err})",
@@ -116,20 +122,27 @@ impl Rotation {
 /// meanwhile blocks instead of writing into the moved tree. A dry run
 /// (`apply == false`) stops before the locks. The rename is the only
 /// synchronous step; the moved tree is deleted on a background thread.
+/// The caller must already hold the slot's build lease when `target` is a slot.
+/// Residual window: a cargo that opens `.cargo-lock` between the busy check and
+/// the lock grab is caught by the grab; one that starts after the rename builds
+/// cold into a fresh `debug/`.
 /// Test: `a_target_over_the_line_is_rotated_aside`,
 /// `a_held_cargo_lock_spares_the_rotation`, `a_dir_under_the_line_is_left_alone`,
 /// `a_failed_rename_is_reported_and_leaves_the_live_dir`,
 /// `an_uncountable_deps_dir_is_not_rotated`.
 #[must_use]
 pub fn rotate_if_over(target: &Path, line: usize, apply: bool) -> Rotation {
-    rotate_with(target, line, apply, discard)
+    rotate_with(target, line, apply, || Ok(()), discard)
 }
 
-/// [`rotate_if_over`] with the rename as a seam, so a test can fail it.
-pub(crate) fn rotate_with(
+/// [`rotate_if_over`] with two seams: `hold` takes any extra guard (a slot's
+/// build lease) after the count and keeps it across the rename, and `mover`
+/// does the rename, so a test can fail it.
+pub(crate) fn rotate_with<G>(
     target: &Path,
     line: usize,
     apply: bool,
+    hold: impl FnOnce() -> Result<G, String>,
     mover: impl FnOnce(&Path) -> std::io::Result<Discarded>,
 ) -> Rotation {
     let profile = target.join(PROFILE);
@@ -138,9 +151,14 @@ pub(crate) fn rotate_with(
         DepsCount::Unreadable(err) => return Rotation::Unknown(err),
         other => return Rotation::NotNeeded(other),
     }
+    // #10212 round 1: a leased slot is spared between its cargo commands too.
+    let _guard = match hold() {
+        Ok(guard) => guard,
+        Err(holder) => return Rotation::Busy(holder),
+    };
     // #10212: a hand-pointed or orphaned build is spared, lease or no lease.
     if cargo_lock_held(target) {
-        return Rotation::Busy(profile.join(".cargo-lock"));
+        return Rotation::Busy(format!("a cargo lock under {}", target.display()));
     }
     if !apply {
         return Rotation::WouldRotate;
@@ -148,12 +166,15 @@ pub(crate) fn rotate_with(
     // #10212: held until the rename is done, so no build starts mid-move.
     let _locks = match hold_idle_build_locks(target) {
         Ok(locks) => locks,
-        Err(lock) => return Rotation::Busy(lock),
+        Err(lock) => return Rotation::Busy(lock.display().to_string()),
     };
     match mover(&profile) {
         Ok(moved) => {
             tracing::info!(profile = %profile.display(), aside = %moved.path.display(), "rotated an oversized cargo profile aside (#10212)");
-            Rotation::Rotated { aside: moved.path }
+            Rotation::Rotated {
+                aside: moved.path,
+                deleted: false,
+            }
         }
         Err(err) => {
             tracing::warn!(profile = %profile.display(), "could not rotate an oversized cargo profile aside (#10212): {err}");
@@ -174,7 +195,7 @@ pub fn rotate_before_build(target: &Path) -> Rotation {
     drop(
         std::thread::Builder::new()
             .name("deps-reclaim".to_string())
-            .spawn(move || log_reclaim(&dir, &reclaim_aside(&dir))),
+            .spawn(move || log_reclaim(&dir, &reclaim_aside(&dir, &|| false))),
     );
     rotate_if_over(target, DEPS_ROTATE_ENTRIES, true)
 }
@@ -205,6 +226,8 @@ pub struct Reclaim {
     pub removed: usize,
     /// Aside trees that could not be deleted, with the error; left for next time.
     pub failed: Vec<(PathBuf, String)>,
+    /// The pass stopped at a cancel before every tree was tried.
+    pub cancelled: bool,
 }
 
 /// Delete the aside trees in `target` whose deleting process is gone.
@@ -214,21 +237,30 @@ pub struct Reclaim {
 /// pass finishes it (#10212).
 /// What: lists `target` itself (a handful of profile entries, never `deps/`)
 /// for `.slot-<n>.evicting.<pid>.<nanos>` names whose pid is dead. This
-/// process's own and a live process's trees are left to them.
+/// process's own and a live process's trees are left to them. `cancelled` is
+/// polled before each tree.
 /// Test: `a_dead_deleters_aside_tree_is_reclaimed`,
-/// `a_failed_reclaim_is_reported_and_left`.
+/// `a_failed_reclaim_is_reported_and_left`, `a_cancel_stops_the_reclaim_before_the_next_tree`.
 #[must_use]
-pub fn reclaim_aside(target: &Path) -> Reclaim {
-    reclaim_with(target, |tree: &Path| std::fs::remove_dir_all(tree))
+pub fn reclaim_aside(target: &Path, cancelled: &dyn Fn() -> bool) -> Reclaim {
+    reclaim_with(target, cancelled, |tree: &Path| {
+        std::fs::remove_dir_all(tree)
+    })
 }
 
 /// [`reclaim_aside`] with the deletion as a seam.
 pub(crate) fn reclaim_with(
     target: &Path,
+    cancelled: &dyn Fn() -> bool,
     remove: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Reclaim {
     let mut report = Reclaim::default();
     for tree in stale_aside(target) {
+        // #10212 round 1: a shutdown stops before the next tree, as evict does.
+        if cancelled() {
+            report.cancelled = true;
+            break;
+        }
         match remove(&tree) {
             Ok(()) => report.removed += 1,
             Err(err) => report.failed.push((tree, err.to_string())),
@@ -237,10 +269,21 @@ pub(crate) fn reclaim_with(
     report
 }
 
+/// Whether `name` is an aside tree name: `.slot-<n>.evicting.<pid>.<nanos>`.
+fn aside_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(".slot-")?
+        .split_once(EVICTING_INFIX)?
+        .1
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// The aside trees directly in `target` whose deleting process is gone.
 ///
-/// What: `.slot-<n>.evicting.<pid>.<nanos>` names (what [`discard`] mints)
-/// whose pid is neither this process nor a live one. Lists `target` only.
+/// What: aside names (what [`discard`] mints) whose pid is neither this
+/// process nor a live one. Lists `target` only.
 /// Test: `a_dead_deleters_aside_tree_is_reclaimed`,
 /// `a_live_deleters_aside_tree_is_left_alone`.
 #[must_use]
@@ -254,9 +297,7 @@ pub fn stale_aside(target: &Path) -> Vec<PathBuf> {
             entry
                 .file_name()
                 .to_str()
-                .filter(|n| n.starts_with(".slot-"))
-                .and_then(|n| n.split_once(EVICTING_INFIX))
-                .and_then(|(_, rest)| rest.split('.').next()?.parse::<u32>().ok())
+                .and_then(aside_pid)
                 .is_some_and(|pid| {
                     pid != std::process::id() && !crate::core::process::is_process_alive(pid)
                 })
@@ -283,10 +324,27 @@ pub fn log_reclaim(target: &Path, reclaim: &Reclaim) {
 /// `deps/` was cloned into every new slot (#10212). The shared dir is not the
 /// seed's to rotate (unleased builds use it, Q3a), so the seed starts cold.
 /// What: `Some(detail)` when `<src>/debug/deps` is at or over `line`, or
-/// cannot be counted — an unknown size is never cloned.
-/// Test: `seeding_does_not_clone_an_oversized_shared_deps`.
+/// cannot be counted — an unknown size is never cloned — or when `src` holds
+/// an aside tree of any owner, which `cp -c -R` would clone whole.
+/// Test: `seeding_does_not_clone_an_oversized_shared_deps`,
+/// `an_uncountable_shared_deps_seeds_cold`,
+/// `a_shared_target_holding_an_aside_tree_seeds_cold`.
 #[must_use]
 pub fn seed_refusal(src: &Path, line: usize) -> Option<String> {
+    // #10212 round 1: a killed `tm doctor` leaves its aside tree in `src`.
+    let aside = std::fs::read_dir(src).ok().and_then(|entries| {
+        entries
+            .flatten()
+            .find(|e| e.file_name().to_str().and_then(aside_pid).is_some())
+    });
+    if let Some(entry) = aside {
+        return Some(format!(
+            "{} holds the rotated-aside tree {}, so it is not cloned (#10212); the slot \
+             starts cold",
+            src.display(),
+            entry.path().display()
+        ));
+    }
     let deps = src.join(PROFILE).join("deps");
     match count_deps(&deps, line) {
         DepsCount::AtLeast(n) => Some(format!(
@@ -301,103 +359,6 @@ pub fn seed_refusal(src: &Path, line: usize) -> Option<String> {
     }
 }
 
-/// The `<owner>/<repo>` target directories under the shared root.
-///
-/// What: two directory levels, the layout `default_cargo_target_dir_at`
-/// writes. A missing root is no targets; an owner that cannot be listed is
-/// an error, so a hidden target is never reported as healthy.
-/// Test: `deps_budget_warns_over_the_line` (the doctor row reads it).
-///
-/// # Errors
-///
-/// The root or an owner directory cannot be listed.
-pub fn shared_targets(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let owners = match std::fs::read_dir(root) {
-        Ok(owners) => owners,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut targets = Vec::new();
-    for owner in owners {
-        let owner = owner?.path();
-        if !owner.is_dir() {
-            continue;
-        }
-        for repo in std::fs::read_dir(&owner)? {
-            let repo = repo?.path();
-            if repo.is_dir() {
-                targets.push(repo);
-            }
-        }
-    }
-    targets.sort();
-    Ok(targets)
-}
-
-/// The operator's repair: check and rotate every shared target and slot.
-///
-/// Why (#10212, Q3a): builds outside the lease grow the shared dir, and only an
-/// explicit operator act may rotate it. The doctor row warns at `line`, so the
-/// repair acts on exactly the directories the operator saw warned.
-/// What: one [`rotate_if_over`] per target; a root that cannot be listed is
-/// one [`Rotation::Unknown`] row for that root. A dry run unless `apply`.
-/// Then [`reclaim_aside`] on each target, whose failures are returned too.
-/// Test: `the_repair_rotates_an_over_line_target`,
-/// `the_repair_refuses_a_target_whose_cargo_lock_is_held`.
-#[must_use]
-pub fn rotate_all(
-    shared_root: &Path,
-    pool_root: &Path,
-    line: usize,
-    apply: bool,
-) -> Vec<(PathBuf, Rotation)> {
-    let mut rows = Vec::new();
-    let mut targets = Vec::new();
-    match shared_targets(shared_root) {
-        Ok(found) => targets.extend(found),
-        Err(err) => rows.push((
-            shared_root.to_path_buf(),
-            Rotation::Unknown(err.to_string()),
-        )),
-    }
-    match list_pool_slots(pool_root) {
-        Ok(slots) => targets.extend(slots.into_iter().map(|s| s.path)),
-        Err(err) => rows.push((pool_root.to_path_buf(), Rotation::Unknown(err.to_string()))),
-    }
-    for target in targets {
-        let rotation = rotate_if_over(&target, line, apply);
-        if apply {
-            for (tree, error) in reclaim_aside(&target).failed {
-                rows.push((target.clone(), Rotation::DeleteFailed { tree, error }));
-            }
-        }
-        rows.push((target, rotation));
-    }
-    rows
-}
-
-/// The daemon tick's half: delete dead deleters' aside trees in every slot
-/// and shared target (#10212). Returns every failure.
-///
-/// Test: `a_dead_deleters_aside_tree_is_reclaimed` covers the per-target pass.
-#[must_use]
-pub fn reclaim_everywhere(shared_root: &Path, pool_root: &Path) -> Reclaim {
-    let mut all = Reclaim::default();
-    let mut targets = shared_targets(shared_root).unwrap_or_default();
-    targets.extend(
-        list_pool_slots(pool_root)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.path),
-    );
-    for target in targets {
-        let one = reclaim_aside(&target);
-        all.removed += one.removed;
-        all.failed.extend(one.failed);
-    }
-    all
-}
-
 #[cfg(test)]
 #[path = "deps_rotate_tests.rs"]
-mod tests;
+pub(crate) mod tests;
