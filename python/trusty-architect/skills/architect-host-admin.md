@@ -128,7 +128,7 @@ by `df` before and after.
 
 <!-- rule:r-115 -->
 **Backing up secret-bearing files.** An Architect backup of a secret-bearing
-file (the environment file, tfvars) goes under `~/backups/` (dir 700, file
+file (a project env file, tfvars) goes under `~/backups/` (dir 700, file
 600), never beside the original inside a repo, where a broad `git add` could
 commit it; check `git check-ignore` if a backup must stay in place.
 
