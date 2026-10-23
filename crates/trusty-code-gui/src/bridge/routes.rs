@@ -15,12 +15,12 @@
 //!
 //! The daemon's bearer token existed to authenticate a TCP peer that could be
 //! anyone; a UDS peer is authenticated by `SO_PEERCRED` instead, which is why
-//! #6637 retires the daemon's copy. This listener is TCP again — it has to be,
-//! a webview cannot dial a socket — so the same reasoning that put a credential
-//! on the daemon's port puts one on this one. What changed is where the token
-//! comes from: [`crate::bridge::serve`] mints a fresh one per launch and hands
-//! it to the webview over Tauri IPC, so there is no `0600` file for anything on
-//! this machine to read.
+//! #6637 retires the daemon's copy. This router served a loopback TCP port
+//! until #10166 and kept a credential for the same reason. It now answers only
+//! the app's own webview, through a custom URI scheme and an IPC channel, and
+//! the credential stays as defence in depth (owner ruling Q3, 2026-10-23):
+//! [`crate::bridge::serve`] mints a fresh one per launch and hands it to the
+//! webview over Tauri IPC, so there is no `0600` file for anything to read.
 //!
 //! ## The SSE bridge, frame for frame
 //!
@@ -126,9 +126,10 @@ pub fn build_router(state: BridgeState) -> axum::Router {
         .route("/{*path}", any(bridge_handler))
         .with_state(state);
     let authed = app.layer(axum::middleware::from_fn_with_state(auth, require_bearer));
-    // The bridge binds loopback only (`crate::bridge::serve`), so the guard
-    // needs no bind-derived allowlist — `SelfOrigins::default()` trusts loopback
-    // and the three Tauri webview origins, and nothing else.
+    // #10166: the bridge binds nothing, so the guard needs no bind-derived
+    // allowlist — `SelfOrigins::default()` trusts loopback-host origins
+    // (`tauri://localhost` among them) and the Tauri webview origins, and
+    // nothing else.
     trusty_common::server::with_guarded_middleware_same_origin_cors(authed, SelfOrigins::default())
 }
 
@@ -205,9 +206,10 @@ async fn bridge_handler(
 /// `POST /auth/sse-ticket` — exchange the bridge credential for a ticket.
 ///
 /// Why the bridge answers this itself rather than proxying it: the ticket is
-/// redeemable against THIS listener's [`DaemonAuth`], and the daemon has no idea
-/// this listener exists. `EventSource` cannot send a header, which is the whole
-/// reason a ticket exists at all.
+/// redeemable against THIS router's [`DaemonAuth`], and the daemon has no idea
+/// this router exists. The ticket began as `EventSource`'s substitute for a
+/// header; since #10166 the stream is opened by the `open_daemon_stream` IPC
+/// command, which presents it the same way (owner ruling Q3 keeps it).
 /// What: refuses a path that is not one of the two event streams, then mints a
 /// ticket bound to that exact path. The route is not public, so an anonymous
 /// `POST` is `401`ed by the guard before this function runs — a ticket is never
@@ -269,8 +271,8 @@ fn path_is_ticketable(path: &str) -> bool {
 /// until the first event happens, or until the open budget runs out. Measured on
 /// a real `tcode serve`: `curl` on a freshly created workstream received zero
 /// bytes and no status line, and would have waited out
-/// [`super::STREAM_OPEN_TIMEOUT`]'s minute. The webview's `EventSource` reads
-/// that as a connection that never opened and reconnect-loops.
+/// [`super::STREAM_OPEN_TIMEOUT`]'s minute. The webview's stream open would
+/// wait that long for a stream that is healthy.
 ///
 /// A short peek window is not the fix. `FramedStream::next_frame` is not
 /// cancel-safe — a cancelled read discards the bytes of a line already taken off
@@ -280,14 +282,14 @@ fn path_is_ticketable(path: &str) -> bool {
 /// What the refusal costs instead: it arrives as
 /// [`trusty_common::uds::sse::sse_tail`]'s terminal `{"type":"error"}` event on a
 /// `200`, plus its `warn!`. That is not a downgrade for THIS consumer —
-/// `EventSource` cannot read a non-2xx body, so `openDaemonEventStream` fires
-/// `onerror` and re-mints on its backoff whichever way the refusal is spelled.
+/// `openDaemonEventStream` receives the error event and then the channel's
+/// `end`, and re-mints on its backoff whichever way the refusal is spelled.
 /// The event and the log line are strictly more than the discarded `404` body
 /// was.
 ///
 /// `open_timeout` bounds the dial and the request write. The parameter exists so
 /// a test need not wait the production minute.
-/// Test: `a_healthy_but_silent_stream_gets_its_head_immediately` and
+/// Test: `a_healthy_but_silent_stream_opens_immediately` and
 /// `a_stream_refusal_at_open_becomes_a_terminal_error_event` in
 /// `tests/bridge_uds.rs`, plus
 /// `a_socket_that_never_answers_is_a_prompt_bad_gateway` below.

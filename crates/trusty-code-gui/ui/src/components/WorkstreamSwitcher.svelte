@@ -14,13 +14,13 @@
   // `$effect`/`AbortController`/`setInterval` shape `StatusBar.svelte`/
   // `WorkstreamActivity.svelte` already establish — one controller for the
   // whole mounted lifetime, `signal.aborted` re-checked after every
-  // `await`). A second `$effect` opens an `EventSource` on
+  // `await`). A second `$effect` opens a stream (`openDaemonEventStream`) on
   // `/workstreams/{active_id}/events` whenever the polled
   // `active_workstream_id` changes (DOC-48 §5.3) and calls `refresh()`
   // immediately on any `workstream_activation_changed`/
   // `workstream_state_inferred` frame (`lib/workstreams.ts::isActivationSignal`)
   // for a low-latency update between poll ticks; it no-ops (falls back to
-  // the `POLL_MS` cadence alone) when `EventSource` is unavailable or no
+  // the `POLL_MS` cadence alone) when no stream can be opened or no
   // workstream is active — there is no daemon-wide "any workstream changed"
   // push channel today (a real API gap: DOC-39 §2.1 C-2 — per-workstream SSE
   // requires already knowing which workstream to subscribe to), so polling
@@ -167,7 +167,7 @@
   // to a FRESHLY-PARSED object on every poll tick — Svelte 5 invalidates on
   // reference inequality of the `$state` source itself, so an effect
   // reading `list?.active_workstream_id` directly re-ran (closing +
-  // reopening the `EventSource`) on EVERY poll tick, not only when the
+  // reopening the stream) on EVERY poll tick, not only when the
   // active id actually changed: ~360 reconnects/active-half-hour, dropping
   // any event landing in the close->reopen gap, and needlessly loading the
   // daemon — directly contradicting this comment's own original claim.
@@ -179,17 +179,16 @@
 
   $effect(() => {
     const activeId = activeWorkstreamId;
-    if (!activeId || typeof EventSource === 'undefined') return;
+    if (!activeId) return;
 
     let source: DaemonEventStream | null = null;
     let cancelled = false;
 
     void (async () => {
-      // #5439: EventSource cannot send a header, so this exchanges the
-      // daemon credential for a single-use ticket first; a null result means
-      // no credential is available and the poll cadence alone carries this.
-      // The subscription re-mints on its own when the stream drops — a bare
-      // EventSource would retry the spent ticket and die on a 401.
+      // #5439/#10166: the stream opens over an IPC channel with a single-use
+      // ticket minted from the daemon credential; a null result means no
+      // stream could be opened and the poll cadence alone carries this. The
+      // subscription re-mints on its own when the stream drops.
       try {
         source = await openDaemonEventStream(
           `/workstreams/${activeId}/events`,
