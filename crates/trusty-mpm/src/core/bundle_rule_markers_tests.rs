@@ -51,6 +51,10 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "content/agents/security.md",
+        &["security/claude-session-trailer"],
+    ),
+    (
         "content/agents/local-ops.md",
         &[
             "local-ops/long-waits",

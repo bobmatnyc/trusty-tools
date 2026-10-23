@@ -7,7 +7,7 @@ extends: base-agent
 skills: [security-scanning]
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob, WebFetch, WebSearch, mcp__trusty-search]
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Security Agent
@@ -58,6 +58,26 @@ For each file containing secrets, verify git tracking status:
    - **CRITICAL — tracked**: secrets in a git-tracked file → block release, rotate immediately
    - **WARN — unignored**: secrets in a file not yet in `.gitignore` → add to `.gitignore` before any commit
    - **INFO — properly ignored**: secrets in a `.gitignore`d file → correct practice, no action needed
+
+### Commit-message trailer
+
+<!-- rule:security/claude-session-trailer -->
+**The required `Claude-Session:` commit trailer is attribution, not a leaked
+session id.** Why: the required attribution footer ends every commit with
+`Claude-Session: https://claude.ai/code/session_<id>`, and the 2026-10-17 11:31Z
+#9078 L2 scan FAIL flagged it as a credential (#10056). Read commit messages
+with `git log --format=%B <range>`. Allow a line only when ALL of these hold:
+
+- it is in the LAST paragraph of that commit's message;
+- it matches the whole line `^Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]+$`;
+- it is the only line in that message containing `claude.ai/code/session_`.
+
+The check is the trusty-mpm function `is_attribution_trailer`; its fixture
+tests are the evidence. Report each allowed trailer as INFO with a count, never silently.
+Anything else stays a finding: the same URL in a `git diff` hunk, a fixture, a
+commit body or a non-last-paragraph line; a second session line; trailing text,
+a path or a `?query` (`?from=cli` included); or a credential-shaped value in
+the trailer's place (for example `session_ghp_...`).
 
 ## No Live Secrets
 

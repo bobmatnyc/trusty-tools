@@ -3292,6 +3292,40 @@ fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
     );
 }
 
+/// #10056: the security agent's credential scan flagged the required
+/// `Claude-Session:` attribution trailer as a leaked session id.
+/// The shipped rule must name the checker and quote the whole-line pattern
+/// that checker enforces, so the agent's allowance and the code agree.
+#[test]
+fn security_allows_only_the_claude_session_attribution_trailer_10056() {
+    use crate::core::commit_trailers::is_attribution_trailer;
+    const ID: &str = "security/claude-session-trailer";
+    const PATTERN: &str = r"^Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]+$";
+    let body = agent("security.md");
+    assert!(
+        has_rule(body, ID),
+        "security.md is missing the #10056 rule `{ID}`"
+    );
+    assert_eq!(rule_section(body, ID), Some("Commit-message trailer"));
+    // The rule's text runs from its marker to the next `## ` heading.
+    let after = body
+        .split_once(&format!("<!-- rule:{ID} -->"))
+        .map(|(_, rest)| rest)
+        .expect("the rule's marker");
+    let rule = after.split("\n## ").next().unwrap_or(after);
+    for needle in ["is_attribution_trailer", PATTERN, "INFO"] {
+        assert!(
+            rule.contains(needle),
+            "the `{ID}` rule must name `{needle}`"
+        );
+    }
+    let trailer = "Claude-Session: https://claude.ai/code/session_01AbC";
+    assert!(is_attribution_trailer(&format!("subject\n\n{trailer}")));
+    assert!(!is_attribution_trailer(&format!(
+        "subject\n\n{trailer}?from=cli"
+    )));
+}
+
 /// #8027: local-ops ignored a diagnose-only brief's restrictions and cited a
 /// stale log (last written before the incident window) as root cause.
 #[test]
