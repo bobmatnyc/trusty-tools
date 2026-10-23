@@ -81,10 +81,10 @@
   // `signal.aborted` re-checked after every `await` before any state
   // write). A second, independent `$effect` ticks a local `now` every
   // second purely for elapsed-time redisplay — no network call, own
-  // teardown. A THIRD `$effect` opens an `EventSource` on
+  // teardown. A THIRD `$effect` opens a stream (`openDaemonEventStream`) on
   // `/workstreams/{id}/events` whenever the active workstream's id changes,
   // mirroring `WorkstreamSwitcher.svelte`'s identical pattern; it no-ops
-  // when `EventSource` is unavailable or no workstream is active. A FOURTH
+  // when no stream can be opened or no workstream is active. A FOURTH
   // `$effect` (issue #3446, new) auto-scrolls the stream container to its
   // newest entry whenever `chatEntries` changes, unless `userScrolledUp`.
   // Renders one of four phases (`connecting`/`daemon-unreachable`/
@@ -99,7 +99,7 @@
   //
   // **Live delta streaming (tcode streaming epic #3696, Slice 3), gated
   // behind `SSE_ENABLED` (`VITE_TCODE_SSE`, default OFF).** A FIFTH `$effect`
-  // opens a SESSION-scoped `EventSource` on `GET /sessions/{id}/events` (a
+  // opens a SESSION-scoped stream on `GET /sessions/{id}/events` (a
   // different route than the workstream-level nudge stream above — this one
   // carries full event payloads, not just an "arrived" ping) whenever the
   // bound session's id changes, folding every `agent_message_delta` envelope
@@ -402,7 +402,7 @@
   // `refresh()` reassigns `activeWorkstream` to a FRESHLY-PARSED object on
   // every poll tick even when the active id is unchanged, an effect that
   // reads `activeWorkstream?.id` directly re-runs (close + reopen the
-  // `EventSource`) on every tick — ~360 reconnects/active-half-hour,
+  // stream) on every tick — ~360 reconnects/active-half-hour,
   // dropping any event landing in the close->reopen gap, and needlessly
   // loading the daemon. `activeWorkstreamId` below is a `$derived` PRIMITIVE
   // — Svelte 5 suppresses a dependent's re-run when a `$derived` recomputes
@@ -417,21 +417,20 @@
   // Why block above for why this component does not need to inspect
   // payloads) triggers an immediate `refresh()` — a latency optimization
   // over the POLL_MS cadence, never the authoritative source; it no-ops
-  // (falls back to polling alone) when `EventSource` is unavailable or no
+  // (falls back to polling alone) when no stream can be opened or no
   // workstream is active.
   $effect(() => {
     const id = activeWorkstreamId;
-    if (!id || typeof EventSource === 'undefined') return;
+    if (!id) return;
 
     let source: DaemonEventStream | null = null;
     let cancelled = false;
 
     void (async () => {
-      // #5439: EventSource cannot send a header, so this exchanges the
-      // daemon credential for a single-use ticket first; a null result means
-      // no credential is available and the poll cadence alone carries this.
-      // The subscription re-mints on its own when the stream drops — a bare
-      // EventSource would retry the spent ticket and die on a 401.
+      // #5439/#10166: the stream opens over an IPC channel with a single-use
+      // ticket minted from the daemon credential; a null result means no
+      // stream could be opened and the poll cadence alone carries this. The
+      // subscription re-mints on its own when the stream drops.
       try {
         source = await openDaemonEventStream(`/workstreams/${id}/events`, () => {
           if (pollController) void refresh(pollController.signal);
@@ -459,8 +458,8 @@
   let sessionId = $derived(session?.id ?? null);
 
   // Live delta stream (tcode streaming epic #3696, Slice 3) — gated behind
-  // `SSE_ENABLED` (default OFF, see that const's doc). When enabled, opens an
-  // `EventSource` on the SESSION-scoped `GET /sessions/{id}/events` route
+  // `SSE_ENABLED` (default OFF, see that const's doc). When enabled, opens a
+  // stream on the SESSION-scoped `GET /sessions/{id}/events` route
   // (distinct from the WORKSTREAM-scoped nudge route above) and folds every
   // `agent_message_delta` envelope through `applyDelta` so in-progress turns
   // render incrementally rather than waiting for the next `POLL_MS` transcript
@@ -479,17 +478,16 @@
   $effect(() => {
     const id = sessionId;
     streamBubbles = [];
-    if (!SSE_ENABLED || !id || typeof EventSource === 'undefined') return;
+    if (!SSE_ENABLED || !id) return;
 
     let source: DaemonEventStream | null = null;
     let cancelled = false;
 
     void (async () => {
-      // #5439: EventSource cannot send a header, so this exchanges the
-      // daemon credential for a single-use ticket first; a null result means
-      // no credential is available and the poll cadence alone carries this.
-      // The subscription re-mints on its own when the stream drops — a bare
-      // EventSource would retry the spent ticket and die on a 401.
+      // #5439/#10166: the stream opens over an IPC channel with a single-use
+      // ticket minted from the daemon credential; a null result means no
+      // stream could be opened and the poll cadence alone carries this. The
+      // subscription re-mints on its own when the stream drops.
       try {
         source = await openDaemonEventStream(`/sessions/${id}/events`, (e: MessageEvent) => {
         if (cancelled) return;

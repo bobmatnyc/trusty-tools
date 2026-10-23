@@ -12,10 +12,15 @@
 // the right URL called".
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TOKEN_STORAGE_KEY, resetDaemonTokenCache } from '../lib/daemon-auth';
+import { resetDaemonTokenCache } from '../lib/daemon-auth';
+import { enterTauri, fakeTauri, leaveTauri } from '../lib/tauri-fake';
 import { flushSync, mount, unmount } from 'svelte';
 import WorkstreamSwitcher from './WorkstreamSwitcher.svelte';
 import type { Workstream } from '../lib/workstreams';
+
+// #10166: the event stream opens through the Rust side's IPC channel; the
+// stream case below runs in Tauri mode against this stand-in.
+vi.mock('@tauri-apps/api/core', () => import('../lib/tauri-fake'));
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -97,10 +102,7 @@ function fakeDaemon(initial: Workstream[], activeId: string | null = null) {
       return { ok: true, status: 200, json: async () => record } as Response;
     }
 
-    // #5439: the SSE routes are opened through a single-use ticket minted
-
-    // here, because EventSource cannot carry an Authorization header.
-
+    // #5439/#10166: a stream is opened with a single-use ticket minted here.
     if (url.includes('/auth/sse-ticket') && method === 'POST') {
 
       return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as Response;
@@ -118,12 +120,10 @@ function fakeDaemon(initial: Workstream[], activeId: string | null = null) {
   };
 }
 
-// #5439: every daemon request now carries a credential, and the SSE routes
-// take a ticket minted with it. Seeding the plain-browser override (jsdom has
-// no Tauri runtime) is what keeps these component tests exercising the real
-// transport rather than the no-credential fallback.
+// #10166: outside Tauri no stream can be opened, so most cases here are
+// poll-only; the stream case calls `enterTauri()` and reads `fakeTauri.streams`.
 beforeEach(() => {
-  localStorage.setItem(TOKEN_STORAGE_KEY, 'a'.repeat(64));
+  fakeTauri.reset();
   resetDaemonTokenCache();
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -135,6 +135,7 @@ afterEach(() => {
     instance = null;
   }
   target.remove();
+  leaveTauri();
   vi.unstubAllGlobals();
 });
 
@@ -426,26 +427,12 @@ describe('WorkstreamSwitcher out-of-order refresh guard (code-critic MEDIUM 1)',
 // `EventSource`) on EVERY poll tick, not only when the active id actually
 // changed. Fixed by routing the effect through `activeWorkstreamId`, a
 // `$derived` PRIMITIVE (Svelte 5 suppresses a dependent's re-run when a
-// `$derived` recomputes to the SAME primitive value). jsdom has no real
-// `EventSource`, so this stubs a minimal fake on `globalThis` and counts
-// constructions across several same-active-id poll ticks.
+// `$derived` recomputes to the SAME primitive value). Since #10166 the stream
+// opens through the shell's IPC channel, so this runs in Tauri mode and counts
+// `open_daemon_stream` calls across several same-active-id poll ticks.
 describe('WorkstreamSwitcher SSE subscription reactivity (code-critic PR #3392 review, HIGH)', () => {
-  class FakeEventSource {
-    static instances: FakeEventSource[] = [];
-    url: string;
-    onmessage: ((e: MessageEvent) => void) | null = null;
-    constructor(url: string) {
-      this.url = url;
-      FakeEventSource.instances.push(this);
-    }
-    close() {
-      /* no-op */
-    }
-  }
-
-  it('does not reopen the EventSource on repeated poll ticks that report the SAME active workstream id', async () => {
-    FakeEventSource.instances = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
+  it('does not reopen the stream on repeated poll ticks that report the SAME active workstream id', async () => {
+    enterTauri();
     vi.useFakeTimers();
     try {
       const { fetchMock } = fakeDaemon([ws('ws-stable', 'Token rotation', 'idle')], 'ws-stable');
@@ -453,11 +440,11 @@ describe('WorkstreamSwitcher SSE subscription reactivity (code-critic PR #3392 r
 
       instance = mount(WorkstreamSwitcher, { target }) as unknown as Record<string, unknown>;
 
-      // Flush the initial mount tick and let the SSE effect's own async IIFE
-      // (apiBase() -> new EventSource()) settle.
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(FakeEventSource.instances.length).toBe(1);
+      // Flush the initial mount tick and let the stream effect's own async
+      // IIFE (mint -> open_daemon_stream) settle.
+      for (let i = 0; i < 5; i += 1) await vi.advanceTimersByTimeAsync(0);
+      expect(fakeTauri.streams.length).toBe(1);
+      expect(fakeTauri.streams[0].path).toBe('/workstreams/ws-stable/events');
 
       // Three more poll ticks (POLL_MS = 5000), each returning a BRAND NEW
       // `list` object with the identical active id — the exact
@@ -467,7 +454,7 @@ describe('WorkstreamSwitcher SSE subscription reactivity (code-critic PR #3392 r
         await vi.advanceTimersByTimeAsync(0);
       }
 
-      expect(FakeEventSource.instances.length).toBe(1);
+      expect(fakeTauri.streams.length).toBe(1);
     } finally {
       vi.useRealTimers();
     }
