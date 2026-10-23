@@ -225,46 +225,74 @@ fn stable_stub_root() -> PathBuf {
 /// first launch, and a fresh stub per test is one more scan per test. A body
 /// that names no per-test path is the same file for every test and every run.
 /// What: the path is `<temp>/trusty-test-stubs-<uid>/<sha256(name, body)>/<name>`.
-/// An existing file there is returned untouched. Otherwise [`write_stub`] fills
+/// An existing file there is reused untouched. Otherwise [`write_stub`] fills
 /// a staging name unique to this process and call, and a `rename` publishes it.
 /// Two racing writers each rename a complete file of the same content, so the
-/// path only ever names a closed executable (#6231). The root is created 0700
-/// and must belong to this user. A body with a per-test path must use
-/// [`stub_binary`] instead, or this root grows by one file per test.
+/// path only ever names a closed executable (#6231). On EVERY call, reuse
+/// included, the root, the key dir and the stub must be this user's, no
+/// symlink, and not group- or world-writable, and the stub must hold exactly
+/// this body; anything else panics (#10212: on Linux the root sits in the
+/// shared `/tmp`, so another user could plant it). A body with a per-test path
+/// must use [`stub_binary`] instead, or this root grows by one file per test.
 /// Test: `a_stable_stub_is_written_once_and_reused`,
-/// `racing_stable_stub_writers_both_get_an_executable`.
+/// `racing_stable_stub_writers_both_get_an_executable`,
+/// `a_planted_stable_stub_is_refused_not_reused`.
 fn stable_stub(name: &str, body: &str) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    let script = stable_stub_path(name, body);
+    let dir = script.parent().expect("stub dir").to_path_buf();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("create the stable stub dir");
+    assert_private(&stable_stub_root());
+    assert_private(&dir);
+    if std::fs::symlink_metadata(&script).is_err() {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let staging = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+        write_stub(&staging, body);
+        std::fs::rename(&staging, &script).expect("publish the stable stub");
+    }
+    assert_private(&script);
+    let text = std::fs::read_to_string(&script).expect("read the stable stub");
+    assert_eq!(
+        text,
+        format!("#!/bin/sh\n{body}\n"),
+        "{script:?} does not hold the stub body; refusing to run it"
+    );
+    script
+}
+
+/// Where [`stable_stub`] keeps `name` with `body`.
+fn stable_stub_path(name: &str, body: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
     let digest = Sha256::new()
         .chain_update(name)
         .chain_update([0u8])
         .chain_update(body)
         .finalize();
     let key: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
-    let root = stable_stub_root();
-    let dir = root.join(key);
-    let script = dir.join(name);
-    if script.is_file() {
-        return script;
-    }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .expect("create the stable stub dir");
+    stable_stub_root().join(key).join(name)
+}
+
+/// Panic unless `path` is this user's, not a symlink, and not group- or
+/// world-writable (#10212).
+fn assert_private(path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).expect("stat a stable stub path");
     // SAFETY: `getuid` takes no arguments and cannot fail.
     let uid = unsafe { libc::getuid() };
-    let owner = std::fs::metadata(&root).expect("stat the stub root").uid();
-    assert_eq!(owner, uid, "{root:?} belongs to another user");
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let staging = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
-    write_stub(&staging, body);
-    std::fs::rename(&staging, &script).expect("publish the stable stub");
-    script
+    assert!(!meta.file_type().is_symlink(), "{path:?} is a symlink");
+    assert_eq!(meta.uid(), uid, "{path:?} belongs to another user");
+    assert_eq!(
+        meta.mode() & 0o022,
+        0,
+        "{path:?} is group- or world-writable"
+    );
 }
 
 /// A stub that records its own pid and the argv it was called with, then
@@ -1502,6 +1530,35 @@ fn racing_stable_stub_writers_both_get_an_executable() {
             assert!(status.success(), "round {round}: stub failed: {status}");
         }
         assert_eq!(leftovers, 1, "round {round}: a staging file was left");
+    }
+}
+
+/// Why (#10212): the stable path is predictable, so a file already there may
+/// not be this suite's stub; reusing it would run someone else's script.
+/// What: plants a file at the hashed path, once with another body and once
+/// with the right body but world-writable, and requires [`stable_stub`] to
+/// panic rather than return it. Another uid cannot be faked here; the owner
+/// check shares the code path.
+/// Test: this test.
+#[test]
+fn a_planted_stable_stub_is_refused_not_reused() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    for (case, wrong_body, mode) in [("body", true, 0o755), ("mode", false, 0o777)] {
+        let body = fresh_body(&format!("planted-{case}"));
+        let script = stable_stub_path("tcode-planted", &body);
+        let dir = script.parent().expect("stub dir").to_path_buf();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("create the planted dir");
+        let planted = if wrong_body { "exit 7" } else { body.as_str() };
+        std::fs::write(&script, format!("#!/bin/sh\n{planted}\n")).expect("plant");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode))
+            .expect("chmod the planted stub");
+        let reused = std::panic::catch_unwind(|| stable_stub("tcode-planted", &body));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(reused.is_err(), "{case}: a planted stub was reused");
     }
 }
 
