@@ -92,6 +92,8 @@ pub mod admission;
 pub mod census;
 pub mod census_detail;
 pub mod config;
+// #10212: a bounded entry count for a profile's `deps/`, never a full readdir.
+pub mod deps_budget;
 // #8451: the daemon's percent-of-volume sweep over the slot pool.
 pub mod evict;
 pub mod orphan;

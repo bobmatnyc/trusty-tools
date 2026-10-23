@@ -70,6 +70,8 @@ pub(crate) mod doctor_channels;
 pub(crate) mod doctor_channels_egress;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;
+// #10212: a bounded entry count of each shared target's and slot's debug/deps.
+pub(crate) mod doctor_deps_budget;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
