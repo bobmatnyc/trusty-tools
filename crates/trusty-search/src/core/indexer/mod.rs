@@ -465,8 +465,8 @@ pub struct CodeIndexer {
     pub(super) corpus_read_fault: Arc<corpus_fault::CorpusReadFault>,
 
     /// Most recently MEASURED wall-clock cost (milliseconds) of this index's
-    /// corpus rehydrate scan (issue #3683 slice 2 — cost-scaled idle-eviction
-    /// window). `0` until the first rehydrate completes in this process's
+    /// whole corpus rehydrate — scan through commit, #10192 (issue #3683
+    /// slice 2 — cost-scaled idle-eviction window). `0` until the first rehydrate completes in this process's
     /// lifetime; [`Self::rehydrate_cost_estimate_ms`] in `idle_evict.rs` falls
     /// back to an ESTIMATE from the durable corpus's on-disk chunk count
     /// until then.
@@ -477,9 +477,10 @@ pub struct CodeIndexer {
     /// evicting the expensive one on every idle tick. Recording the actual
     /// measured cost lets the idle-eviction window scale to how expensive
     /// THIS index really is to rehydrate, rather than a fixed guess.
-    /// What: set by `idle_evict::spawn_detached_rehydrate` immediately after
-    /// its `spawn_blocking` redb scan completes successfully.
-    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated` in
+    /// What: set by `idle_evict::spawn_detached_rehydrate` once, at the end of
+    /// a successful rehydrate; a failed or panicked one leaves it unchanged.
+    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated`,
+    /// `rehydrate_cost_covers_post_scan_phases_and_raises_threshold` in
     /// `indexer::cost_scaled_threshold_tests`.
     pub(super) last_rehydrate_cost_ms: Arc<AtomicU64>,
 
