@@ -62,6 +62,8 @@ pub mod staging;
 
 use staging::{CloneError, Cloner, clone_directory};
 
+use crate::core::build_lease::deps_rotate;
+
 /// The seed bound [`SlotPool::seed`] applies (#9239): the longest lease wait.
 ///
 /// Why: no seed is unbounded any more; a caller with its own budget passes it
@@ -218,6 +220,8 @@ pub struct SlotPool {
     ceiling: u32,
     /// #9239: builds the clone command; `cp -c -R` outside tests.
     cloner: Cloner,
+    /// #10212: a clone source whose `debug/deps` reaches this is not cloned.
+    deps_line: usize,
 }
 
 impl SlotPool {
@@ -238,6 +242,7 @@ impl SlotPool {
             checkout: None,
             ceiling: ceiling.max(1),
             cloner: staging::cp_clone,
+            deps_line: crate::core::build_lease::deps_budget::DEPS_ROTATE_ENTRIES,
         }
     }
 
@@ -246,6 +251,14 @@ impl SlotPool {
     #[must_use]
     pub(crate) fn with_cloner(mut self, cloner: Cloner) -> Self {
         self.cloner = cloner;
+        self
+    }
+
+    /// Lower the clone-source line, so a test needs no 300k-entry dir (#10212).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_deps_line(mut self, line: usize) -> Self {
+        self.deps_line = line;
         self
     }
 
@@ -382,8 +395,9 @@ impl SlotPool {
     /// What: first sweeps every dead owner's staging tree beside the slots
     /// (any index, non-blocking), then seeds as [`Self::seed`] does, except
     /// that a clone still running at `wait` is killed and the slot is committed
-    /// as a cold [`SeedKind::ColdDirectory`] naming the bound. The returned
-    /// path always reads as committed; every error grants no directory.
+    /// as a cold [`SeedKind::ColdDirectory`] naming the bound. A source whose
+    /// `debug/deps` reaches the rotate line is not cloned at all (#10212). The
+    /// returned path always reads as committed; every error grants no directory.
     ///
     /// # Errors
     ///
@@ -391,6 +405,7 @@ impl SlotPool {
     /// cannot be retired is [`SlotPoolError::SeedFailed`], never a grant.
     ///
     /// Test: `a_clone_past_its_deadline_is_killed_and_discarded`,
+    /// `seeding_does_not_clone_an_oversized_shared_deps`,
     /// `a_dead_owners_staging_under_another_index_is_swept`,
     /// `a_marker_that_cannot_be_retired_is_never_committed`.
     pub fn seed_within(
@@ -413,7 +428,7 @@ impl SlotPool {
         // so how often seeding refuses or fails is measurable there.
         let repo = format!("{}/{}", self.identity.owner, self.identity.repo);
         tracing::info!(slot = %path.display(), %repo, "builder slot seed: replace attempt");
-        let result = seed_unmarked(&path, clone_from, self.cloner, deadline);
+        let result = seed_unmarked(&path, clone_from, self.cloner, deadline, self.deps_line);
         match &result {
             Ok(kind) => {
                 tracing::info!(slot = %path.display(), %repo, outcome = "seeded", seed = ?kind, "builder slot seed: outcome");
@@ -438,6 +453,7 @@ fn seed_unmarked(
     clone_from: Option<&Path>,
     cloner: Cloner,
     deadline: Instant,
+    deps_line: usize,
 ) -> Result<SeedKind, SlotPoolError> {
     // #8794: an unseeded slot can still hold a live build — a builder given
     // this directory by hand, or one admitted while the seed was pending. It is
@@ -445,7 +461,13 @@ fn seed_unmarked(
     // costs no clone.
     refuse_active_build(path)?;
     retire_unseeded_marker(path);
-    let seed = match clone_from.filter(|src| src.is_dir()) {
+    let src = clone_from.filter(|src| src.is_dir());
+    // #10212: an over-line shared `deps/` is never cloned into a new slot.
+    if let Some(detail) = src.and_then(|s| deps_rotate::seed_refusal(s, deps_line)) {
+        replace_with_cold(path)?;
+        return publish_marker(path, SeedKind::ColdDirectory(detail));
+    }
+    let seed = match src {
         Some(src) => match clone_directory(src, path, cloner, deadline) {
             Ok(()) => SeedKind::ClonedFromShared,
             // #9239: the clone missed its bound and was killed; start cold.
@@ -637,7 +659,8 @@ fn refuse_active_build(path: &Path) -> Result<(), SlotPoolError> {
 /// a live build is the outcome this guard exists to rule out (ADR-0045).
 /// Test: `a_slot_with_a_held_cargo_lock_is_not_replaced`,
 /// `a_stale_unheld_cargo_lock_does_not_block_seeding`.
-fn hold_idle_build_locks(path: &Path) -> Result<Vec<std::fs::File>, PathBuf> {
+// #10212: also held by `build_lease::deps_rotate` across its rename.
+pub(crate) fn hold_idle_build_locks(path: &Path) -> Result<Vec<std::fs::File>, PathBuf> {
     let mut dirs = vec![path.to_path_buf()];
     for child in subdirectories(path) {
         dirs.extend(subdirectories(&child));
