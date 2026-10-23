@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/il_steers.schema.json",
+  "title": "steer request on an Intent Ledger task (Steer button in the Architect IL pane); the Architect sets status relayed once it has told the PM",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["status", "at", "session", "task", "text", "by"],
+  "additionalProperties": false,
+  "properties": {
+    "status": {"enum": ["new", "relayed"]},
+    "at": {"$ref": "#/$defs/iso"},
+    "session": {"type": "string", "minLength": 1},
+    "task": {"type": "string", "minLength": 1},
+    "text": {"type": "string", "minLength": 1},
+    "by": {"type": "string"},
+    "relayed_at": {"$ref": "#/$defs/iso"}
+  }
+}

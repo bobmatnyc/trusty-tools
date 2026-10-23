@@ -76,3 +76,28 @@ templates/user.md	templates/local/user.md
 templates/mandates/**	templates/local/mandates
 templates/owner/**	templates/local/owner
 templates/projects/**	templates/local/projects
+
+# Dashboard store set (P4a-1). The serve family (dashboard_il, _media, _viz,
+# dashboard-serve.py), the page and the tests that need them land in P4a-2.
+scripts/dashboard_store.py
+scripts/dashboard_jsonl.py
+scripts/dashboard_schema.py
+scripts/dashboard_derive.py
+scripts/dashboard_ids.py
+scripts/dashboard_qual.py
+scripts/owner_answers.py
+scripts/dashboard-db.py
+scripts/il-archive.py
+scripts/stale-tasks.py
+schemas/dashboard/**	schemas/dashboard
+scripts/test_dashboard_derive.py	tests/test_dashboard_derive.py
+scripts/test_dashboard_footer.py	tests/test_dashboard_footer.py
+scripts/test_dashboard_ids.py	tests/test_dashboard_ids.py
+scripts/test_dashboard_run.py	tests/test_dashboard_run.py
+scripts/test_dashboard_schema.py	tests/test_dashboard_schema.py
+scripts/test_dashboard_specs_links.py	tests/test_dashboard_specs_links.py
+scripts/test_dashboard_summary.py	tests/test_dashboard_summary.py
+scripts/test_dashboard_tally.py	tests/test_dashboard_tally.py
+scripts/test_il_archive.py	tests/test_il_archive.py
+scripts/test_stale_tasks.py	tests/test_stale_tasks.py
+scripts/fixtures/dashboard/golden/**	tests/fixtures/dashboard/golden

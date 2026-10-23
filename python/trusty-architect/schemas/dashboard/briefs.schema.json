@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/briefs.schema.json",
+  "title": "brief (a one-paragraph answer to an owner question, optionally pointing at a Markdown document)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["question", "answer", "project", "status", "created", "updated"],
+  "additionalProperties": false,
+  "properties": {
+    "question": {"type": "string", "minLength": 1},
+    "answer": {"type": "string"},
+    "project": {"type": "string", "minLength": 1},
+    "session": {"type": "string"},
+    "goal": {"type": "string", "pattern": "^G[0-9a-f]{2}$"},
+    "doc": {"type": "string", "pattern": "^docs/briefs/[^/].*[.]md$"},
+    "status": {"enum": ["open", "done"]},
+    "created": {"$ref": "#/$defs/iso"},
+    "updated": {"$ref": "#/$defs/iso"}
+  }
+}

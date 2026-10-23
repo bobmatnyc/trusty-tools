@@ -1,0 +1,82 @@
+{
+ "goal_sessions": [
+  {
+   "G01": [
+    "tm-a"
+   ],
+   "G04": [
+    "tm-a"
+   ]
+  },
+  {
+   "tm-a": [
+    "G01",
+    "G04"
+   ]
+  }
+ ],
+ "next": {
+  "A": "A03",
+  "D": "D06",
+  "G": "G05",
+  "S": "S03",
+  "T": "T03"
+ },
+ "pending": [
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "id": "A02",
+   "kind": "resume_request",
+   "text": "Do it"
+  },
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "id": "A02",
+   "kind": "steer",
+   "text": "go"
+  },
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "id": "D03",
+   "kind": "clarify_request",
+   "text": "general"
+  },
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "id": "D04",
+   "kind": "answered",
+   "text": "Hold"
+  },
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "goal": "",
+   "id": "S01",
+   "kind": "owner_command",
+   "session": "tm-a",
+   "text": "later",
+   "type": "park"
+  },
+  {
+   "at": "2026-10-11T04:00:00Z",
+   "id": "G02",
+   "kind": "goal_park",
+   "text": "until unparked: Efficiency"
+  }
+ ],
+ "stale": [
+  [
+   "2026-10-02T00:00:00+00:00",
+   "T01",
+   "tm-a",
+   "Old task"
+  ]
+ ],
+ "tally": {
+  "actions": 1,
+  "answered_unrelayed": 1,
+  "open": 4,
+  "parked": 2,
+  "questions": 1,
+  "tasks": 2
+ }
+}
