@@ -79,7 +79,7 @@
 //!    every future caller for the rest of the process's lifetime (the exact
 //!    #3659/#3666 round-2 "opposite-polarity" bug recurring in a new guard).
 //!    [`spawn_detached_rehydrate`] now constructs a real RAII guard
-//!    ([`RehydrateGateClearOnDrop`]) BEFORE the blocking scan even starts, so
+//!    (`rehydrate_task::RehydrateGateClearOnDrop`) BEFORE the blocking scan even starts, so
 //!    the clear fires on every exit path — success, a handled error, OR an
 //!    unwinding panic — exactly mirroring `open_guard::WedgeClearOnDrop`.
 //! 2. **Evict-vs-rehydrate commit race.** A rehydrate's final step —
@@ -179,154 +179,28 @@
 //! `service::server::idle_eviction_tests`.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
 use tokio::sync::Notify;
 
 use crate::core::bm25::CodeBm25Index;
-use crate::core::chunker::RawChunk;
-use crate::core::corpus::CorpusStore;
-use crate::core::entity::RawEntity;
 
 use super::CodeIndexer;
 
-/// RAII guard clearing the per-index rehydrate gate + waking every waiter
-/// when dropped — unconditionally, on ANY exit path of the detached
-/// rehydrate task (issue #3683 code-critic review finding 1).
-///
-/// Why: mirrors `core::corpus::open_guard::WedgeClearOnDrop` for the
-/// identical hazard class (issue #3659 round 3) — constructing the guard
-/// right after installing the gate, BEFORE any fallible work runs, makes the
-/// clear a structural guarantee (fires on early return, a future error path,
-/// OR a panic unwinding through the commit phases) instead of resting on
-/// "the code after the guard never panics", which was exactly the bug this
-/// replaces: an earlier version cleared the gate via an ordinary trailing
-/// statement, so a panic in the BM25/map commit phases left
-/// `rehydrate_inflight` wedged at `Some(dead_notify)` forever.
-/// What: holds the `Arc`s needed to clear the gate and notify; `Drop::drop`
-/// is synchronous (this is why `rehydrate_inflight` is a `std::sync::Mutex`,
-/// not a `tokio::sync::Mutex` — `Drop` cannot `.await`), so it can run
-/// during a panicking unwind, where async code cannot.
-/// Test: `rehydrate_gate_clears_after_a_panic_in_the_commit_phase` in
-/// `indexer::rehydrate_tests`.
-struct RehydrateGateClearOnDrop {
-    gate: Arc<StdMutex<Option<Arc<Notify>>>>,
-    notify: Arc<Notify>,
-}
-
-impl Drop for RehydrateGateClearOnDrop {
-    fn drop(&mut self) {
-        *self.gate.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.notify.notify_waiters();
-    }
-}
-
-/// Test-only hook: inject a panic into the detached rehydrate task's commit
-/// phase (issue #3683 code-critic review finding 1).
-///
-/// Why: proving the gate-clear survives a panic requires actually panicking
-/// partway through Phase 1-3 — there is no production code path that does
-/// this intentionally, so a dedicated test hook is the only way to exercise
-/// the unwind deterministically.
-/// What: holds the keys of the indexers armed via [`CommitPhasePanicArmed`];
-/// an armed indexer's `spawn_detached_rehydrate` panics immediately after the
-/// redb scan completes (inside the commit phase, after the
-/// `RehydrateGateClearOnDrop` guard is already live) instead of running
-/// Phase 1-3. A key is the address of the indexer's `rehydrate_inflight` gate.
-// #9513: keyed per indexer, not a process-global bool — a global flag panicked
-// every concurrent test's rehydrate (e.g. `warm_corpus_rehydrates_an_evicted_index`).
-#[cfg(test)]
-static TEST_PANIC_IN_COMMIT_PHASE: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
-
-/// Test-only: arms the commit-phase panic for ONE indexer until dropped.
-/// Test: `commit_phase_panic_injection_reaches_only_the_armed_indexer`,
-/// `rehydrate_gate_clears_after_a_panic_in_the_commit_phase`.
-#[cfg(test)]
-pub(crate) struct CommitPhasePanicArmed(usize);
+// #10193: the detached rehydrate task and the query-path wait live in
+// submodules so this file stays under the 500-SLOC cap.
+mod query_wait;
+mod rehydrate_task;
 
 #[cfg(test)]
-impl CommitPhasePanicArmed {
-    /// Arm the injected commit-phase panic for `indexer` only.
-    pub(crate) fn arm(indexer: &CodeIndexer) -> Self {
-        let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
-        armed_commit_panics().push(key);
-        Self(key)
-    }
-}
+mod bm25_off_lock_tests;
 
 #[cfg(test)]
-impl Drop for CommitPhasePanicArmed {
-    fn drop(&mut self) {
-        let mut armed = armed_commit_panics();
-        if let Some(pos) = armed.iter().position(|k| *k == self.0) {
-            armed.swap_remove(pos);
-        }
-    }
-}
-
-#[cfg(test)]
-fn armed_commit_panics() -> std::sync::MutexGuard<'static, Vec<usize>> {
-    TEST_PANIC_IN_COMMIT_PHASE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
-/// Test-only hook: pause AFTER Phase 1-3 have published fresh data but
-/// BEFORE the generation-CAS commit check (issue #3683 code-critic review
-/// finding 2).
-///
-/// Why: deterministically reproducing the evict-vs-rehydrate race requires
-/// a reliable window in which a test can run a concurrent
-/// `evict_bm25_entities_if_idle` / `evict_chunks_if_idle` call against
-/// freshly-repopulated (therefore non-empty, therefore actually evictable)
-/// structures, strictly between this task's own writes and its commit
-/// check — a window normally microseconds wide.
-/// What: an async `tokio::time::sleep` (not `std::thread::sleep` —
-/// `spawn_detached_rehydrate`'s async block, not its `spawn_blocking`
-/// closure) for this many milliseconds, gated to zero (a no-op) outside
-/// tests.
-#[cfg(test)]
-pub(crate) static TEST_DELAY_BEFORE_COMMIT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Test-only hook: hold `rehydrate_generation`'s mutex across a SYNCHRONOUS
-/// sleep, injected strictly BETWEEN the commit's generation load and its
-/// conditional flag-stores (code-critic review round 3 — the remaining
-/// HIGH after finding 2's fix).
-///
-/// Why: [`TEST_DELAY_BEFORE_COMMIT_MS`] above only covers a race landing
-/// BEFORE the generation read (the commit hasn't taken the lock yet). The
-/// round-3 finding is narrower and landed INSIDE the old
-/// read-then-store gap that used to exist between the generation load and
-/// the flag stores — proving THAT window is closed requires a test that
-/// holds the lock across it and shows a concurrently-spawned evict call
-/// genuinely blocks on the same mutex (not merely "happens to run later")
-/// until the critical section finishes, so the evict's own bump-and-set can
-/// never land in between.
-/// What: `std::thread::sleep` (deliberately NOT `.await` — never block on
-/// I/O/await while holding a `std::sync::Mutex` guard; this parks the
-/// current OS worker thread for the duration, which is fine for a
-/// `#[cfg(test)]`-only hook exercised under a multi-thread tokio runtime,
-/// where a second worker thread keeps the racing evict task running) for
-/// this many milliseconds while the commit branch's `generation_guard` is
-/// held. Zero (the default) is a no-op. Requires the test's runtime to have
-/// at least 2 worker threads (`#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`)
-/// so the concurrently-spawned evict call can actually attempt the lock
-/// (and block on it) on a different OS thread while this one sleeps —
-/// otherwise a single-threaded runtime would just serialize the two tasks
-/// without ever exercising real contention.
-/// Test: `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
-/// in `indexer::rehydrate_tests`.
-#[cfg(test)]
-pub(crate) static TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Restored (chunks, per-file entities) pair read from the durable corpus.
-/// Named for readability at the `spawn_blocking` closure boundary, mirroring
-/// `persist::RestoredCorpus`.
-type RestoredCorpus = (Vec<RawChunk>, Vec<(String, Vec<RawEntity>)>);
+pub(crate) use rehydrate_task::{
+    Bm25BuildDelayArmed, CommitPhasePanicArmed, RehydrateScanCounter, TEST_DELAY_BEFORE_COMMIT_MS,
+    TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS, TEST_REHYDRATE_DELAY_MS,
+};
 
 /// Default bound on how long a SINGLE `ensure_corpus_rehydrated` call waits
 /// for an in-flight (or newly-triggered) rehydrate before returning to let
@@ -354,81 +228,6 @@ type RestoredCorpus = (Vec<RawChunk>, Vec<(String, Vec<RawEntity>)>);
 /// way the degrade is no longer silent — see [`CodeIndexer::lane_degraded`]
 /// and the `trusty_bm25_lane_degraded` gauge.
 const DEFAULT_REHYDRATE_WAIT_MS: u64 = 9_000;
-
-/// Test-only artificial delay injected into the detached rehydrate task's
-/// blocking scan (issue #3683 slice 1).
-///
-/// Why: proving the detached task survives a CALLER's cancellation requires a
-/// scan slow enough to still be running when the caller's own (much shorter)
-/// timeout fires — a real redb scan is far too fast in a unit-test corpus of
-/// a handful of chunks. This lets tests simulate the production 27-40s NFS
-/// scan deterministically without a slow fixture.
-/// What: milliseconds to `std::thread::sleep` on the blocking-pool thread
-/// before running the real scan. Zero (the default) is a no-op.
-#[cfg(test)]
-pub(crate) static TEST_REHYDRATE_DELAY_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Test-only per-indexer count of started rehydrate scans.
-///
-/// Why: `rehydrate_dedupes_concurrent_callers_onto_one_scan` must observe how
-/// many scans ran, not how long they took. Keyed by the indexer's
-/// `rehydrate_inflight` address (as the #9513 panic hook is) so a concurrent
-/// test's scan never reaches another test's count.
-/// What: `(gate address, scans started)` pairs. A key exists only while a
-/// [`RehydrateScanCounter`] guard for it is alive; the blocking scan bumps an
-/// armed key and ignores any other. Compiled out of non-test builds.
-/// Test: `rehydrate_dedupes_concurrent_callers_onto_one_scan`.
-// #10015: scan counter replaces the wall-clock dedupe assertion. Arm/Drop (not a
-// never-cleared map) so a later indexer reusing a freed address sees no stale count.
-#[cfg(test)]
-static TEST_REHYDRATE_SCAN_COUNTS: StdMutex<Vec<(usize, u64)>> = StdMutex::new(Vec::new());
-
-#[cfg(test)]
-fn rehydrate_scan_counts() -> std::sync::MutexGuard<'static, Vec<(usize, u64)>> {
-    TEST_REHYDRATE_SCAN_COUNTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
-#[cfg(test)]
-fn record_rehydrate_scan(key: usize) {
-    if let Some((_, n)) = rehydrate_scan_counts().iter_mut().find(|(k, _)| *k == key) {
-        *n += 1;
-    }
-}
-
-/// Test-only: counts rehydrate scans of ONE indexer from `arm` until dropped.
-/// Test: `rehydrate_dedupes_concurrent_callers_onto_one_scan`.
-#[cfg(test)]
-pub(crate) struct RehydrateScanCounter(usize);
-
-#[cfg(test)]
-impl RehydrateScanCounter {
-    /// Start counting scans of `indexer` from zero.
-    pub(crate) fn arm(indexer: &CodeIndexer) -> Self {
-        let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
-        let mut counts = rehydrate_scan_counts();
-        counts.retain(|(k, _)| *k != key);
-        counts.push((key, 0));
-        Self(key)
-    }
-
-    /// Scans of the armed indexer started since `arm`.
-    pub(crate) fn count(&self) -> u64 {
-        rehydrate_scan_counts()
-            .iter()
-            .find(|(k, _)| *k == self.0)
-            .map_or(0, |(_, n)| *n)
-    }
-}
-
-#[cfg(test)]
-impl Drop for RehydrateScanCounter {
-    fn drop(&mut self) {
-        rehydrate_scan_counts().retain(|(k, _)| *k != self.0);
-    }
-}
 
 /// Read `TRUSTY_REHYDRATE_WAIT_MS`, falling back to
 /// [`DEFAULT_REHYDRATE_WAIT_MS`] when unset, zero, or unparsable.
@@ -675,6 +474,10 @@ impl CodeIndexer {
     /// caller's own subsequent flag/emptiness check proceeds with fresh data
     /// exactly as if it had woken instantly — the only cost is one caller
     /// occasionally waiting the full budget instead of returning early.
+    ///
+    /// #10193: the query lanes no longer call this; they wait the short
+    /// shared budget of `query_wait::await_corpus_for_query`. This full wait
+    /// serves writers and other non-query readers.
     /// Test: `detached_rehydrate_survives_caller_cancellation`,
     /// `rehydrate_dedupes_concurrent_callers_onto_one_scan` in
     /// `indexer::rehydrate_tests`.
@@ -754,275 +557,6 @@ impl CodeIndexer {
             }
         };
         Some(notify)
-    }
-
-    /// Spawn the detached rehydrate task itself (issue #3683 slice 1; panic
-    /// safety + evict-race hardening from code-critic review round 2).
-    ///
-    /// Why: split out of `ensure_corpus_rehydrated` so the leader branch
-    /// stays readable; also the natural place to hang the full "why detached"
-    /// rationale referenced by the module docs.
-    /// What: `tokio::spawn`s a task — NOT awaited by the caller, so it is
-    /// never cancelled by a caller's own timeout. A [`RehydrateGateClearOnDrop`]
-    /// guard is constructed FIRST, before any fallible work, so the gate
-    /// clears on every exit path including a panic (finding 1). The task then
-    /// runs `CorpusStore::load_all_chunks` + `load_all_entities` on
-    /// `spawn_blocking`, sorts the chunks by their stable `id` (issue #3684 —
-    /// makes which subset survives the BM25 cap deterministic across
-    /// rehydrate cycles), then commits BM25 (via
-    /// `CodeBm25Index::upsert_document_reporting`, logging a per-rebuild
-    /// dropped-count instead of `upsert_document`'s process-wide log-once
-    /// latch), the chunk map, and the entity map — in that order, mirroring
-    /// `persist::load_chunks_from_redb`'s phase ordering (BM25 published
-    /// before chunks, so a concurrent reader never observes chunks without a
-    /// matching lexical lane). The final flag-clear only commits if
-    /// `rehydrate_generation` is unchanged from `generation_at_start` —
-    /// otherwise a concurrent evict/reclaim raced this rehydrate and the
-    /// commit is skipped (finding 2), leaving `*_evicted` exactly as that
-    /// newer clear left it.
-    /// Test: `detached_rehydrate_survives_caller_cancellation`,
-    /// `rehydrate_is_deterministic_across_repeated_cycles_over_cap`,
-    /// `rehydrate_gate_clears_after_a_panic_in_the_commit_phase`,
-    /// `rehydrate_commit_skips_flag_clear_when_evict_races_it`.
-    fn spawn_detached_rehydrate(
-        &self,
-        corpus: Arc<CorpusStore>,
-        notify: Arc<Notify>,
-        generation_at_start: u64,
-    ) {
-        let index_id = self.index_id.clone();
-        let chunks_map = Arc::clone(&self.chunks);
-        let bm25 = Arc::clone(&self.bm25);
-        let entities_map = Arc::clone(&self.entities);
-        let chunks_evicted = Arc::clone(&self.chunks_evicted);
-        let bm25_entities_evicted = Arc::clone(&self.bm25_entities_evicted);
-        let inflight_gate = Arc::clone(&self.rehydrate_inflight);
-        #[cfg(test)]
-        let commit_panic_key = Arc::as_ptr(&inflight_gate) as usize;
-        let rehydrate_generation = Arc::clone(&self.rehydrate_generation);
-        let lane_degraded = Arc::clone(&self.lane_degraded);
-        // #5917: the two failure arms below used to report an unreadable corpus
-        // to the log only, leaving every lane to answer from empty maps.
-        let corpus_read_fault = Arc::clone(&self.corpus_read_fault);
-        let last_rehydrate_cost_ms = Arc::clone(&self.last_rehydrate_cost_ms);
-        let scan_gate = Arc::clone(&self.corpus_scan_gate);
-
-        tokio::spawn(async move {
-            // Finding 1: constructed BEFORE any fallible work. Its `Drop`
-            // clears `inflight_gate` + notifies waiters unconditionally, on
-            // ANY exit from this async block — normal return, an early
-            // `return`-equivalent, or a panic unwinding through everything
-            // below. Do not remove/reorder this — see the struct's doc
-            // comment and the module docs' "hazards" section.
-            let _clear_guard = RehydrateGateClearOnDrop {
-                gate: inflight_gate,
-                notify,
-            };
-            // #10110: scan and publish under the read side, so a batch removal
-            // (write side) never deletes rows this scan already read.
-            let _scan_gate = scan_gate.read().await;
-
-            // #10192: time the whole rehydrate (scan, sort, BM25, maps,
-            // commit) for `cost_scaled_idle_threshold`; the scan alone was
-            // a fraction of it. Starts after the scan-gate wait, which is
-            // contention, not cost.
-            let rehydrate_started = Instant::now();
-            let loaded = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
-                #[cfg(test)]
-                {
-                    record_rehydrate_scan(commit_panic_key);
-                    let delay_ms = TEST_REHYDRATE_DELAY_MS.load(Ordering::Relaxed);
-                    if delay_ms > 0 {
-                        std::thread::sleep(Duration::from_millis(delay_ms));
-                    }
-                }
-                let mut chunks = corpus.load_all_chunks()?;
-                // Issue #3684: sort by the stable chunk id BEFORE the
-                // cap-truncated BM25 upsert loop below, so the surviving
-                // subset of an over-cap corpus is the same every rehydrate —
-                // independent of redb's B-tree iteration order, which shifts
-                // as keys are added/removed between cycles.
-                chunks.sort_by(|a, b| a.id.cmp(&b.id));
-                let entities = corpus.load_all_entities()?;
-                Ok((chunks, entities))
-            })
-            .await;
-
-            #[cfg(test)]
-            if armed_commit_panics().contains(&commit_panic_key) {
-                panic!("test-injected panic in rehydrate commit phase (issue #3683 finding 1)");
-            }
-
-            match loaded {
-                Ok(Ok((chunks, entities))) => {
-                    let n_chunks = chunks.len();
-                    let n_files = entities.len();
-
-                    // Phase 1: BM25, in the deterministic id-sorted order,
-                    // reporting (not silently swallowing) cap drops.
-                    let mut dropped = 0usize;
-                    {
-                        let mut bm25_guard = bm25.write().await;
-                        for chunk in &chunks {
-                            let text = CodeIndexer::bm25_doc_text(chunk);
-                            if !bm25_guard.upsert_document_reporting(&chunk.id, &text) {
-                                dropped += 1;
-                            }
-                        }
-                    }
-                    // Finding 5: always report the current dropped count —
-                    // including zero — so the gauge doesn't hold a stale
-                    // nonzero value from a PRIOR rehydrate after a later one
-                    // drops nothing (e.g. the corpus shrank under the cap).
-                    metrics::gauge!("trusty_bm25_docs_dropped", "index" => index_id.clone())
-                        .set(dropped as f64);
-                    if dropped > 0 {
-                        tracing::warn!(
-                            corpus_size = n_chunks,
-                            dropped,
-                            "index '{index_id}': BM25 corpus cap reached during rehydrate — \
-                             {dropped} of {n_chunks} chunks are not lexically searchable \
-                             (issue #3684; override with TRUSTY_BM25_CORPUS_CAP)"
-                        );
-                    }
-
-                    // Phase 2: chunk map.
-                    {
-                        let mut map = chunks_map.write().await;
-                        for chunk in chunks {
-                            map.insert(chunk.id.clone(), chunk);
-                        }
-                    }
-
-                    // Phase 3: per-file entities.
-                    {
-                        let mut emap = entities_map.write().await;
-                        for (file, ents) in entities {
-                            emap.insert(file, ents);
-                        }
-                    }
-
-                    #[cfg(test)]
-                    {
-                        let delay_ms = TEST_DELAY_BEFORE_COMMIT_MS.load(Ordering::Relaxed);
-                        if delay_ms > 0 {
-                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        }
-                    }
-
-                    // Commit (finding 2; hardened round-3 — remaining HIGH):
-                    // only clear the flags if no concurrent evict/reclaim
-                    // landed since this attempt started. The generation
-                    // compare and the flag-clear now happen under ONE lock
-                    // acquisition on `rehydrate_generation` (see that field's
-                    // doc comment) — the earlier version read the counter via
-                    // a bare atomic load, then stored the flags as separate
-                    // operations, leaving a window in which a concurrent
-                    // evict's own bump-and-set could land strictly between
-                    // the read and the stores and get silently clobbered.
-                    // Holding the lock across BOTH the compare and (when it
-                    // matches) the flag-clears makes that interleaving
-                    // impossible: either the evict's critical section runs
-                    // entirely before this one (generation_now mismatches,
-                    // we skip) or entirely after (our clears already
-                    // committed and released the lock before the evict's
-                    // `true` can land, so its `true` is the state that
-                    // survives — never torn). A generation mismatch means a
-                    // NEWER clear already ran (and re-set `*_evicted = true`,
-                    // possibly over data this task just wrote) — skip the
-                    // flag-clear so the next access re-triggers a fresh
-                    // rehydrate instead of us silently overwriting that newer
-                    // state.
-                    let generation_guard = rehydrate_generation
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let generation_now = *generation_guard;
-                    // Round-3 test hook: see this static's doc comment — lets
-                    // a test hold this exact lock across an injected delay
-                    // placed STRICTLY BETWEEN the generation load above and
-                    // the conditional flag-stores below, to prove a
-                    // concurrent evict attempting the same critical section
-                    // blocks (rather than racing in) until this one
-                    // completes and releases the lock.
-                    #[cfg(test)]
-                    {
-                        let delay_ms =
-                            TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS.load(Ordering::Relaxed);
-                        if delay_ms > 0 {
-                            std::thread::sleep(Duration::from_millis(delay_ms));
-                        }
-                    }
-                    if generation_now == generation_at_start {
-                        chunks_evicted.store(false, Ordering::Relaxed);
-                        bm25_entities_evicted.store(false, Ordering::Relaxed);
-                        // #5917: this scan read the whole corpus, so any fault
-                        // recorded by an earlier failed read is over.
-                        corpus_read_fault.clear();
-                        // Finding 5: this commit is the "recovery" instant —
-                        // the corpus is genuinely warm again, so clear the
-                        // degraded signal here rather than waiting for some
-                        // future query to notice, which would report a stale
-                        // "degraded" reading for however long until the next
-                        // query happens to land.
-                        lane_degraded.store(false, Ordering::Relaxed);
-                        metrics::gauge!("trusty_bm25_lane_degraded", "index" => index_id.clone())
-                            .set(0.0);
-                        tracing::info!(
-                            "index '{index_id}': rehydrated {n_chunks} chunks + BM25 + \
-                             {n_files} file entity lists from redb after idle eviction \
-                             (detached task; survives caller cancellation, issue #3683)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            generation_at_start,
-                            generation_now,
-                            "index '{index_id}': rehydrate commit SKIPPED — a concurrent \
-                             evict/reclaim landed mid-rehydrate; leaving *_evicted set so the \
-                             next access retriggers a fresh rehydrate (issue #3683 finding 2)"
-                        );
-                    }
-                    drop(generation_guard);
-
-                    // #10192: store the whole-rehydrate wall time once, at the
-                    // end of the success arm. A skipped commit still did the
-                    // full work, so its cost counts; the failure arms store
-                    // nothing, so a failed read cannot lower the window.
-                    let rehydrate_ms = rehydrate_started
-                        .elapsed()
-                        .as_millis()
-                        .min(u128::from(u64::MAX)) as u64;
-                    last_rehydrate_cost_ms.store(rehydrate_ms, Ordering::Relaxed);
-                    tracing::info!(
-                        rehydrate_ms,
-                        "index '{index_id}': rehydrate cost {rehydrate_ms} ms recorded \
-                         for idle-evict scaling"
-                    );
-                }
-                // #5917: record the fault, not just a log line. Both arms leave
-                // `*_evicted` set, so every lane below answers from an empty
-                // map — and an empty lexical lane is indistinguishable from a
-                // genuinely empty index unless the read failure travels with
-                // it. `search_with_drops` refuses on this record; a later
-                // successful rehydrate clears it above.
-                Ok(Err(e)) => {
-                    corpus_read_fault.record(format!("{e:#}"));
-                    tracing::warn!(
-                        "index '{index_id}': failed to rehydrate corpus from redb ({e:#}); \
-                         will retry on next access"
-                    );
-                }
-                Err(e) => {
-                    corpus_read_fault.record(format!("rehydrate task panicked: {e}"));
-                    tracing::warn!(
-                        "index '{index_id}': corpus rehydration task panicked ({e}); \
-                         will retry on next access"
-                    );
-                }
-            }
-
-            // `_clear_guard` drops here (or during an unwind above),
-            // unconditionally clearing the gate and waking every waiter.
-        });
     }
 
     /// Demote this index's HNSW vector store back to mmap-view mode when it
