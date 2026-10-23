@@ -1677,7 +1677,7 @@ pub(crate) enum Command {
 /// `--include-frozen` can require either one without duplicating the check.
 /// The `writes` group holds the flags whose destructive half DEFAULTS TO A
 /// PREVIEW (`--fix`, `--fix-skills`, `--fix-agents`, `--fix-launchd-secrets`,
-/// `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
+/// `--rotate-deps`, `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1691,7 +1691,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "rotate_deps", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1800,6 +1800,19 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_launchd_secrets: bool,
 
+    /// Rotate every oversized cargo `debug/` aside. DRY RUN unless `--yes`.
+    ///
+    /// Why (#10212): builds outside `tm build-lease` grow the shared target's
+    /// `debug/deps` with nothing to bound it, and an 844,490-entry one stalled
+    /// syspolicyd on every exec. Only an explicit operator act rotates the
+    /// shared dir (Architect ruling Q3a).
+    /// What: for each shared target and builder slot the `deps_budget` row
+    /// warns on, renames `debug/` aside while no build holds a cargo lock in
+    /// that target, and deletes the old tree; a held lock is refused and named.
+    /// Cargo rebuilds the profile cold. No other repair runs.
+    #[arg(long)]
+    pub rotate_deps: bool,
+
     /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
     ///
     /// Why (#4948): doctor checks were pull-only, so findings persisted
@@ -1836,8 +1849,8 @@ pub struct DoctorFlags {
     /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
     /// itself while writing the other half made the printed "dry run" untrue.
     /// What: promotes `--fix`, BOTH `--fix-skills` halves, `--fix-agents`
-    /// (#6649), `--fix-launchd-secrets` (#8236) and `--quarantine-mcp` from a
-    /// dry run to an applied run.
+    /// (#6649), `--fix-launchd-secrets` (#8236), `--rotate-deps` (#10212) and
+    /// `--quarantine-mcp` from a dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 

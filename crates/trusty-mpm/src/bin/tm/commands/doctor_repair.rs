@@ -55,6 +55,10 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
             PostReportAction::FixLaunchdSecrets => {
                 super::doctor_fix_launchd_secrets::fix_launchd_secrets_locally(flags.yes);
             }
+            // #10212: the oversized-deps rotation alone; `--fix` never runs it.
+            PostReportAction::RotateDeps => {
+                super::doctor_rotate_deps::rotate_deps_locally(flags.yes);
+            }
             PostReportAction::Fix => run_repairs(flags.yes, flags.include_frozen),
             PostReportAction::QuarantineMcp => {
                 if let Some(target) = &flags.quarantine_mcp {
@@ -76,6 +80,8 @@ enum PostReportAction {
     FixAgents,
     /// `--fix-launchd-secrets` (#8236).
     FixLaunchdSecrets,
+    /// `--rotate-deps` (#10212).
+    RotateDeps,
     /// `--fix` — every repair class.
     Fix,
     /// `--quarantine-mcp <PATH>`.
@@ -97,6 +103,7 @@ fn post_report_actions(flags: &DoctorFlags) -> Vec<PostReportAction> {
             flags.fix_launchd_secrets,
             PostReportAction::FixLaunchdSecrets,
         ),
+        (flags.rotate_deps, PostReportAction::RotateDeps),
         (flags.fix, PostReportAction::Fix),
         (
             flags.quarantine_mcp.is_some(),
@@ -728,6 +735,24 @@ mod tests {
         assert_eq!(
             post_report_actions(&doctor_flags(&["--fix", "--yes"])),
             vec![PostReportAction::Fix]
+        );
+    }
+
+    /// #10212: `--rotate-deps` selects the rotation alone, and `--fix` never
+    /// gains it.
+    #[test]
+    fn the_rotate_deps_flag_selects_exactly_one_repair() {
+        for args in [&["--rotate-deps"][..], &["--rotate-deps", "--yes"][..]] {
+            let flags = doctor_flags(args);
+            assert_eq!(
+                post_report_actions(&flags),
+                vec![PostReportAction::RotateDeps],
+                "{args:?}"
+            );
+            assert_eq!(flags.yes, args.contains(&"--yes"));
+        }
+        assert!(
+            !post_report_actions(&doctor_flags(&["--fix"])).contains(&PostReportAction::RotateDeps)
         );
     }
 

@@ -9,13 +9,14 @@
 //! are `<pool>/<owner>/<repo>/slot-<n>`. Both walks are strict: a level that
 //! cannot be listed makes the row Unknown (#10213 review). Each `debug/deps`
 //! gets one bounded count (`deps_budget::count_deps`, never a full readdir). Warn when any count
-//! reaches the line; Unknown when a dir or a root cannot be listed; else Ok. A
+//! reaches the line, or a rotated-aside tree's deleter died (#10212); Unknown when a dir or a root cannot be listed; else Ok. A
 //! missing `debug/deps` is listed as missing, never as 0 entries.
 //! Test: the `#[cfg(test)]` suite below.
 
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::build_lease::deps_budget::{DEPS_WARN_ENTRIES, DepsCount, count_deps};
+use trusty_mpm::core::build_lease::deps_rotate::stale_aside;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -109,7 +110,8 @@ fn thousands(n: usize) -> String {
 /// Test: `deps_budget_warns_over_the_line`, `deps_budget_is_ok_under_the_line`,
 /// `a_missing_deps_dir_is_reported_missing_not_zero`,
 /// `an_unreadable_deps_dir_is_unknown`, `an_unlistable_root_is_unknown`,
-/// `an_unlistable_pool_owner_is_unknown`.
+/// `an_unlistable_pool_owner_is_unknown`,
+/// `a_leftover_aside_tree_warns_and_names_the_rotation`.
 pub(crate) fn deps_budget_check(shared_root: &Path, pool_root: &Path, line: usize) -> DoctorCheck {
     let mut parts = Vec::new();
     let mut status = CheckStatus::Ok;
@@ -131,6 +133,14 @@ pub(crate) fn deps_budget_check(shared_root: &Path, pool_root: &Path, line: usiz
             _ => status = CheckStatus::Unknown,
         }
         parts.push(format!("{}: {}", deps.display(), verdict(&count)));
+        // #10212: an aside tree whose deleter died is a delete that failed.
+        for tree in stale_aside(target) {
+            over = true;
+            parts.push(format!(
+                "{}: a rotated-aside profile not yet deleted",
+                tree.display()
+            ));
+        }
     }
     if targets.is_empty() && status == CheckStatus::Ok {
         return DoctorCheck::new(
@@ -153,9 +163,10 @@ pub(crate) fn deps_budget_check(shared_root: &Path, pool_root: &Path, line: usiz
             CHECK,
             CheckStatus::Warn,
             format!(
-                "{body} A deps dir this large stalls syspolicyd on every exec. With no build \
-                 running in it, rename that target's `debug/` aside (cargo rebuilds it cold) \
-                 and delete the old tree in the background (#10212)."
+                "{body} A deps dir this large stalls syspolicyd on every exec. \
+                 `tm doctor --rotate-deps --yes` renames each such `debug/` aside while no \
+                 build holds it (cargo rebuilds it cold) and deletes the old tree, \
+                 including any rotated-aside tree left over (#10212)."
             ),
         )
     } else {
@@ -321,6 +332,23 @@ mod tests {
         for part in [
             "locked cannot be listed",
             "o/r/debug/deps: WARN, >= 5 entries",
+        ] {
+            assert!(check.message.contains(part), "{part}: {}", check.message);
+        }
+    }
+
+    /// #10212 Fail-Open Check: an aside tree whose deleter died is a failed
+    /// delete, so the row warns and names it rather than reading Ok.
+    #[test]
+    fn a_leftover_aside_tree_warns_and_names_the_rotation() {
+        let (_tmp, shared, pool) = roots(1, 1);
+        let left = pool.join("o/r/slot-0/.slot-x.evicting.4294967294.1");
+        std::fs::create_dir_all(left.join("deps")).expect("an aside tree");
+        let check = deps_budget_check(&shared, &pool, 5);
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        for part in [
+            ".slot-x.evicting.4294967294.1",
+            "tm doctor --rotate-deps --yes",
         ] {
             assert!(check.message.contains(part), "{part}: {}", check.message);
         }

@@ -247,3 +247,34 @@ fn pool_status_lists_a_seed_in_progress_and_slot_states() {
     assert_eq!(repos[0].staging[0].path, live);
     assert!(live.exists(), "status deletes nothing");
 }
+
+/// #10212: an oversized shared `debug/deps` was cloned into every new slot. A
+/// source at or over the line seeds the slot cold instead, on every platform.
+#[test]
+fn seeding_does_not_clone_an_oversized_shared_deps() {
+    let tmp = tempfile::tempdir().expect("temp root");
+    let shared = tmp.path().join("shared");
+    let deps = shared.join("debug/deps");
+    std::fs::create_dir_all(&deps).expect("a shared deps dir");
+    for i in 0..6 {
+        std::fs::write(deps.join(format!("f{i}")), b"").expect("an artifact");
+    }
+    let pool = pool(&tmp.path().join("pool")).with_deps_line(5);
+
+    let (path, seed) = pool.seed(0, Some(&shared)).expect("a cold seed commits");
+
+    assert!(
+        matches!(&seed, SeedKind::ColdDirectory(d) if d.contains("#10212")),
+        "{seed:?}"
+    );
+    assert_eq!(pool.committed(0), Some(path.clone()), "the slot committed");
+    assert!(
+        !path.join("debug/deps").exists(),
+        "no oversized deps in the slot"
+    );
+    assert_eq!(
+        std::fs::read_dir(&deps).map(Iterator::count).ok(),
+        Some(6),
+        "the source is untouched"
+    );
+}
