@@ -19,13 +19,14 @@ use trusty_mpm::core::build_lease::deps_rotate::Rotation;
 use trusty_mpm::core::build_lease::slots::SlotDir;
 use trusty_mpm::core::config::MpmConfig;
 
-/// `--rotate-deps` action — preview, or apply, the rotation.
+/// `--rotate-deps` action — preview, or apply, the rotation; `Err` on any FAIL row.
 ///
-/// Test: `a_dry_run_moves_nothing_and_names_the_apply_command`.
-pub(crate) fn rotate_deps_locally(yes: bool) {
+/// Test: `a_dry_run_moves_nothing_and_names_the_apply_command`,
+/// `tm_doctor_rotate_deps_fail_row_exits_non_zero`.
+pub(crate) fn rotate_deps_locally(yes: bool) -> anyhow::Result<()> {
     let Some(home) = dirs::home_dir() else {
         eprintln!("  could not resolve the home directory — nothing was checked");
-        return;
+        return Ok(());
     };
     let shared_root = home
         .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
@@ -39,20 +40,23 @@ pub(crate) fn rotate_deps_locally(yes: bool) {
     if yes {
         println!("\nrotate-deps: waiting for each rotated tree to be deleted (#10212)");
     }
-    print!(
-        "{}",
-        report(&shared_root, &pool_root, store, DEPS_WARN_ENTRIES, yes)
-    );
+    let (text, failures) = report(&shared_root, &pool_root, store, DEPS_WARN_ENTRIES, yes);
+    print!("{text}");
+    // #10212: a FAIL row must reach the exit code, or a script misses it.
+    if failures > 0 {
+        anyhow::bail!("rotate-deps: {failures} FAIL row(s) above");
+    }
+    Ok(())
 }
 
-/// The text one pass prints.
+/// The text one pass prints, and how many of its rows are failures.
 fn report(
     shared_root: &Path,
     pool_root: &Path,
     store: Result<&SlotDir, &str>,
     line: usize,
     yes: bool,
-) -> String {
+) -> (String, usize) {
     let mode = if yes {
         "applying"
     } else {
@@ -68,7 +72,7 @@ fn report(
     if !yes && rows.iter().any(|(_, r)| *r == Rotation::WouldRotate) {
         out.push_str("  apply with: tm doctor --rotate-deps --yes\n");
     }
-    out
+    (out, rows.iter().filter(|(_, r)| r.is_failure()).count())
 }
 
 #[cfg(test)]
@@ -84,9 +88,10 @@ mod tests {
         for i in 0..3 {
             std::fs::write(deps.join(format!("f{i}")), b"").expect("file");
         }
-        let text = report(&shared, &tmp.path().join("pool"), Err("no store"), 2, false);
+        let (text, failures) = report(&shared, &tmp.path().join("pool"), Err("no store"), 2, false);
         assert!(text.contains("would rename it aside"), "{text}");
         assert!(text.contains("tm doctor --rotate-deps --yes"), "{text}");
         assert!(deps.join("f0").exists(), "a dry run moves nothing");
+        assert_eq!(failures, 0, "{text}");
     }
 }

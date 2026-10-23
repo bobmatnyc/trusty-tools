@@ -41,7 +41,9 @@ use crate::cli::DoctorFlags;
 /// Test: `cli_parses_doctor_fix`, `cli_parses_doctor_fix_skills` pin the flags;
 /// `the_scoped_launchd_flag_selects_exactly_one_repair` pins the dispatch; the
 /// actions' own modules carry the behaviour tests.
-pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
+/// `Err` (after every action has run) when `--rotate-deps` printed a FAIL row.
+pub(crate) fn run_post_report_actions(flags: &DoctorFlags) -> anyhow::Result<()> {
+    let mut failed = Ok(());
     for action in post_report_actions(flags) {
         match action {
             PostReportAction::PruneStaleSkills => prune_stale_skills_locally(),
@@ -57,7 +59,7 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
             }
             // #10212: the oversized-deps rotation alone; `--fix` never runs it.
             PostReportAction::RotateDeps => {
-                super::doctor_rotate_deps::rotate_deps_locally(flags.yes);
+                failed = super::doctor_rotate_deps::rotate_deps_locally(flags.yes);
             }
             PostReportAction::Fix => run_repairs(flags.yes, flags.include_frozen),
             PostReportAction::QuarantineMcp => {
@@ -67,6 +69,7 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
             }
         }
     }
+    failed
 }
 
 /// One post-report action `tm doctor` can run.
