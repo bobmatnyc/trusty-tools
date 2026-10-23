@@ -37,6 +37,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "support/self_copy.rs"]
+mod self_copy;
+use self_copy::self_copy;
+
 const TEST: &str = "live_bridge_is_judged_by_the_real_server";
 const ROLE: &str = "TC_LIVE_ROLE";
 const SOCKET: &str = "TC_LIVE_SOCKET";
@@ -65,7 +69,8 @@ fn server_binary() -> PathBuf {
     )
 }
 
-/// One temp root: the project checkout, the server and the copies.
+/// One temp root: the project checkout and the server. The named copies are
+/// per process, from [`self_copy`] (#10212).
 struct Live {
     root: TempDir,
     children: Vec<Child>,
@@ -104,10 +109,6 @@ impl Live {
         // #9067: the console dials only for a project the tm registry lists.
         let rows = json!([{ "alias": "web", "path": repo }]);
         std::fs::write(live.path("registry.json"), rows.to_string()).expect("registry");
-        let exe = std::env::current_exe().expect("exe");
-        for name in ["trusty-console", "claude", "notclaude"] {
-            std::fs::copy(&exe, live.path(name)).expect("copy test binary");
-        }
         live
     }
 
@@ -151,7 +152,7 @@ impl Live {
     /// Start the `trusty-console` copy on `socket`; its bound address.
     fn console(&mut self, tag: &str, socket: &Path) -> SocketAddr {
         let out = self.path(tag).join("addr");
-        let console = role(&self.path("trusty-console"), "console")
+        let console = role(&self_copy("trusty-console"), "console")
             .env(SOCKET, socket)
             .env(REGISTRY, self.path("registry.json"))
             .env(OUT, &out)
@@ -166,7 +167,7 @@ impl Live {
     /// Run the client under a parent copy named `parent`; its report.
     fn client(&self, parent: &str, addr: SocketAddr) -> Value {
         let out = self.path(&format!("{parent}-{}.json", addr.port()));
-        let status = role(&self.path(parent), "parent")
+        let status = role(&self_copy(parent), "parent")
             .env(CLIENT, std::env::current_exe().expect("exe"))
             .env(ADDR, addr.to_string())
             .env(PROJECT, self.path("repo"))
