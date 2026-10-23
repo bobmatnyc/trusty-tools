@@ -201,7 +201,7 @@ fn write_stub(staging: &Path, body: &str) {
         .arg("-c")
         .arg(r#"printf '%s\n' "$2" > "$1" && chmod 755 "$1""#)
         .arg("sh")
-        .arg(&staging)
+        .arg(staging)
         .arg(format!("#!/bin/sh\n{body}"))
         .stdin(std::process::Stdio::null())
         .status()
