@@ -65,3 +65,62 @@ def test_footer_unreadable_store_fails_without_count(tmp_path, capsys):
     (tmp_path / "items" / "D01.json").write_text("{not json")
     rc, out, err = run(tmp_path, capsys, "footer")
     assert rc != 0 and out == "" and err
+
+
+LOCAL = "http://127.0.0.1:7890/"   # the footer's localhost link
+
+
+def fresh_db(tmp_path, monkeypatch, config, env_url=None):
+    """A newly loaded dashboard-db whose config is `config` (dict) and whose DASHBOARD_TAILNET_URL is `env_url`."""
+    cfg = tmp_path / "architect.json"
+    cfg.write_text(json.dumps(config))
+    monkeypatch.setenv("ARCHITECT_CONFIG", str(cfg))
+    if env_url is None:
+        monkeypatch.delenv("DASHBOARD_TAILNET_URL", raising=False)
+    else:
+        monkeypatch.setenv("DASHBOARD_TAILNET_URL", env_url)
+    s = importlib.util.spec_from_file_location("dashboard_db_fresh", os.path.join(SCRIPTS, "dashboard-db.py"))
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+def footer_out(m, root, capsys):
+    root.mkdir()
+    mixed(root)
+    rc = m.main(["--root", str(root), "footer"])
+    cap = capsys.readouterr()
+    assert rc == 0, cap.err
+    return cap.out
+
+
+def test_footer_takes_tailnet_from_architect_json(tmp_path, capsys, monkeypatch):
+    """#10161: only local/architect.json carries the tailnet origin; the footer prints both links."""
+    m = fresh_db(tmp_path, monkeypatch, {"tailnet_url": "https://tailnet.example:7890/"})
+    out = footer_out(m, tmp_path / "store", capsys)
+    assert out.startswith(f"Dashboard: [localhost]({LOCAL}) · [tailnet](https://tailnet.example:7890/) — ")
+
+
+def test_footer_env_tailnet_overrides_architect_json(tmp_path, capsys, monkeypatch):
+    m = fresh_db(tmp_path, monkeypatch, {"tailnet_url": "https://tailnet.example:7890/"},
+                 env_url="https://override.tailnet.example:7890/")
+    out = footer_out(m, tmp_path / "store", capsys)
+    assert "[tailnet](https://override.tailnet.example:7890/) — " in out
+    assert "https://tailnet.example:" not in out
+
+
+def test_footer_without_any_tailnet_origin_prints_localhost_only(tmp_path, capsys, monkeypatch):
+    m = fresh_db(tmp_path, monkeypatch, {})
+    out = footer_out(m, tmp_path / "store", capsys)
+    assert out.startswith(f"Dashboard: [localhost]({LOCAL}) — ") and "tailnet" not in out
+
+
+def test_footer_survives_unusable_architect_json(tmp_path, capsys, monkeypatch):
+    """A config that fails to load costs the tailnet link (named on stderr), never the footer; env still wins."""
+    m = fresh_db(tmp_path, monkeypatch, {"tailnet_url": 7890})
+    assert "tailnet_url" in capsys.readouterr().err
+    out = footer_out(m, tmp_path / "store", capsys)
+    assert out.startswith(f"Dashboard: [localhost]({LOCAL}) — ")
+    m = fresh_db(tmp_path, monkeypatch, {"tailnet_url": 7890}, env_url="https://override.tailnet.example:7890/")
+    capsys.readouterr()
+    assert "[tailnet](https://override.tailnet.example:7890/)" in footer_out(m, tmp_path / "store2", capsys)

@@ -17,7 +17,8 @@ Writes to collection "questions" (set, update on the merged doc, batch) validate
 tally [--json] counts open items by kind from the store (plus ", N answers waiting" for open `questions` docs, only when N > 0): the only source for dashboard counts quoted
 in replies (parked items are counted apart). Prints "<N> open dashboard items: <q> questions, <a> actions, <t> tasks".
 footer [--json] prints the one-line reply footer: "Dashboard: [localhost](...) · [tailnet](...) — <tally line>"; the tailnet part and the
-tailnet half of `specs` normalisation need DASHBOARD_TAILNET_URL (e.g. https://<name>:7890/; unset = localhost only, #10161). Same tally() path; exit 2 with a stderr message when the store cannot be read (no guessed count). Replies quote it verbatim.
+tailnet half of `specs` normalisation need a tailnet origin: DASHBOARD_TAILNET_URL, else key tailnet_url of local/architect.json
+(architect_config; e.g. https://<name>:7890/; neither = localhost only; an unusable config is named on stderr, #10161). Same tally() path; exit 2 with a stderr message when the store cannot be read (no guessed count). Replies quote it verbatim.
 summary prints at most ~25 read-only lines for a resume: user_state (+ since), open D/A/T counts, the answers still to relay
 (owner_answers.pending: id, kind, session, time, text cut to 60 chars) and the open `questions` count. Replaces `list items` in the resume prompt.
 Qualified ids (ar-T44): get/update/delete accept "<S id>:<local id>" (e.g. S0c:D01) as well as the bare id; the S id must be the store's own session (Architect store = S14, a session store = its meta/state.session_id), else exit 1 with a hint naming it.
@@ -41,6 +42,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
+import architect_config  # noqa: E402
 import dashboard_derive as derive  # noqa: E402
 import dashboard_jsonl as dj  # noqa: E402
 import dashboard_schema as dsch  # noqa: E402
@@ -66,7 +68,22 @@ def load_json(arg):
 
 
 LOCAL_HOST = "http://127.0.0.1:7890/"
-TAIL_HOST = os.environ.get("DASHBOARD_TAILNET_URL", "")   # empty: no tailnet link
+
+
+def tailnet_host():
+    """The tailnet origin: DASHBOARD_TAILNET_URL, else architect.json `tailnet_url`, else "" (no tailnet link).
+
+    An unusable config costs the tailnet link, never the command: the error (path and key, no value) goes to stderr
+    and the environment variable alone decides (#10161).
+    """
+    try:
+        return architect_config.load().tailnet_url
+    except architect_config.ConfigError as e:
+        sys.stderr.write(f"dashboard-db: tailnet link from DASHBOARD_TAILNET_URL only: {e}\n")
+        return os.environ.get("DASHBOARD_TAILNET_URL", "")
+
+
+TAIL_HOST = tailnet_host()
 _LOCAL_URL = re.compile(r"http://127\.0\.0\.1:7890/[^\s)<>\"']+")
 _SUFFIX = re.compile(r"\s*\((?:localhost|tailnet)\)\s*$")
 
