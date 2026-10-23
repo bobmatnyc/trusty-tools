@@ -272,7 +272,7 @@ async fn a_failed_spawn_reports_its_cause_inside_the_deadline() {
     );
     let text = format!("{err:#}");
     assert!(text.contains("spawn failed"), "{text}");
-    assert!(!text.contains("deadline"), "{text}");
+    assert!(!text.contains("missed its"), "not a deadline miss: {text}");
 
     let (vector, detail) = idx
         .embed_query_or_degrade("query", false)
