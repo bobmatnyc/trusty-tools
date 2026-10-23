@@ -189,6 +189,14 @@ fn binding_json(root: Option<&Path>) -> serde_json::Value {
 /// `the_spawned_daemon_leads_its_own_session`.
 fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
     let staging = dir.join(format!(".{name}.tmp"));
+    write_stub(&staging, body);
+    let script = dir.join(name);
+    std::fs::rename(&staging, &script).expect("move the stub into place");
+    script
+}
+
+/// Write `#!/bin/sh\n<body>` to `staging` from a reaped `sh` child (#6231).
+fn write_stub(staging: &Path, body: &str) {
     let status = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(r#"printf '%s\n' "$2" > "$1" && chmod 755 "$1""#)
@@ -202,8 +210,60 @@ fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
         status.success(),
         "stub writer failed for {staging:?}: {status}"
     );
+}
+
+/// The per-user root that [`stable_stub`] keys its stubs under.
+fn stable_stub_root() -> PathBuf {
+    // SAFETY: `getuid` takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir().join(format!("trusty-test-stubs-{uid}"))
+}
+
+/// Return an executable `sh` stub for a FIXED `body`, written once per machine.
+///
+/// Why (#10212): macOS syspolicyd scans every new executable file on its
+/// first launch, and a fresh stub per test is one more scan per test. A body
+/// that names no per-test path is the same file for every test and every run.
+/// What: the path is `<temp>/trusty-test-stubs-<uid>/<sha256(name, body)>/<name>`.
+/// An existing file there is returned untouched. Otherwise [`write_stub`] fills
+/// a staging name unique to this process and call, and a `rename` publishes it.
+/// Two racing writers each rename a complete file of the same content, so the
+/// path only ever names a closed executable (#6231). The root is created 0700
+/// and must belong to this user. A body with a per-test path must use
+/// [`stub_binary`] instead, or this root grows by one file per test.
+/// Test: `a_stable_stub_is_written_once_and_reused`,
+/// `racing_stable_stub_writers_both_get_an_executable`.
+fn stable_stub(name: &str, body: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let digest = Sha256::new()
+        .chain_update(name)
+        .chain_update([0u8])
+        .chain_update(body)
+        .finalize();
+    let key: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
+    let root = stable_stub_root();
+    let dir = root.join(key);
     let script = dir.join(name);
-    std::fs::rename(&staging, &script).expect("move the stub into place");
+    if script.is_file() {
+        return script;
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("create the stable stub dir");
+    // SAFETY: `getuid` takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let owner = std::fs::metadata(&root).expect("stat the stub root").uid();
+    assert_eq!(owner, uid, "{root:?} belongs to another user");
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+    write_stub(&staging, body);
+    std::fs::rename(&staging, &script).expect("publish the stable stub");
     script
 }
 
@@ -1301,8 +1361,7 @@ async fn reports_a_daemon_that_dies_on_startup() {
     let _lock = ENV_LOCK.lock().await;
     let _env = EnvGuard::isolated();
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stub = stub_binary(dir.path(), "tcode-dies", "exit 3");
+    let stub = stable_stub("tcode-dies", "exit 3");
     let sock_dir = tempfile::tempdir().expect("socket dir");
     // Nothing is bound here, so readiness can only ever come from the child
     // — which exits at once.
@@ -1330,8 +1389,7 @@ async fn reports_a_daemon_that_dies_on_startup() {
 /// Test: this test.
 #[tokio::test]
 async fn the_spawned_daemon_leads_its_own_session() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stub = stub_binary(dir.path(), "tcode-session", "exec sleep 300");
+    let stub = stable_stub("tcode-session", "exec sleep 300");
     let mut child = spawn_daemon(&stub, None, false, None).expect("spawn the stub daemon");
     let pid = child.id().expect("a live child has a pid") as libc::pid_t;
     // SAFETY: `getsid` only reads the session of our own unreaped child.
@@ -1342,4 +1400,92 @@ async fn the_spawned_daemon_leads_its_own_session() {
         sid, pid,
         "the daemon `tcode tui` starts must lead its own session (#8783)"
     );
+}
+
+/// A body no earlier run wrote, so the first [`stable_stub`] call must create
+/// it; the caller removes its directory afterwards.
+fn fresh_body(tag: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_nanos();
+    format!("# {tag} {} {nanos}\nexit 0", std::process::id())
+}
+
+/// Why (#10212): a stable stub is only a saving if a second call reuses the
+/// first call's file instead of writing a new one.
+/// What: two calls with one body return one path, and the inode and mtime the
+/// first call published are unchanged after the second. A helper that wrote a
+/// fresh file per call would publish a new inode by `rename`.
+/// Test: this test.
+#[test]
+fn a_stable_stub_is_written_once_and_reused() {
+    use std::os::unix::fs::MetadataExt;
+    let body = fresh_body("reuse");
+    let first = stable_stub("tcode-stable", &body);
+    let before = std::fs::metadata(&first).expect("stat the first stub");
+    let second = stable_stub("tcode-stable", &body);
+    let after = std::fs::metadata(&second).expect("stat the second stub");
+    let dir = first.parent().expect("stub dir").to_path_buf();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(first, second, "one body must map to one path");
+    assert!(first.starts_with(stable_stub_root()), "{first:?}");
+    assert_eq!(
+        before.ino(),
+        after.ino(),
+        "the second call rewrote the stub"
+    );
+    assert_eq!(
+        before.modified().expect("mtime"),
+        after.modified().expect("mtime"),
+        "the second call touched the stub"
+    );
+}
+
+/// Why (#10212): parallel tests share one stable stub, so two first callers
+/// can write the same body at once.
+/// What: per round, two threads released by a barrier call [`stable_stub`]
+/// with a body no run has written; both must get the same path, and that path
+/// must run to exit 0. Eight rounds, so the race is entered more than once.
+/// Test: this test.
+#[test]
+fn racing_stable_stub_writers_both_get_an_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    for round in 0..8 {
+        let body = fresh_body(&format!("race-{round}"));
+        let barrier = std::sync::Barrier::new(2);
+        let paths: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        stable_stub("tcode-race", &body)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("writer thread"))
+                .collect()
+        });
+        let dir = paths[0].parent().expect("stub dir").to_path_buf();
+        let runs: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let mode = std::fs::metadata(path).expect("stat").permissions().mode();
+                let status = std::process::Command::new(path)
+                    .status()
+                    .expect("run the stub");
+                (mode, status)
+            })
+            .collect();
+        let leftovers = std::fs::read_dir(&dir).expect("list stub dir").count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(paths[0], paths[1], "round {round}: one body, one path");
+        for (mode, status) in runs {
+            assert_eq!(mode & 0o111, 0o111, "round {round}: not executable");
+            assert!(status.success(), "round {round}: stub failed: {status}");
+        }
+        assert_eq!(leftovers, 1, "round {round}: a staging file was left");
+    }
 }
