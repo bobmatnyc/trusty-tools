@@ -33,7 +33,7 @@
    "max": null,
    "value": 27,
    "threshold": "<27/32 fails the gate",
-   "notes": "Mechanisms on. ranks (0-based) q01=0 q02=2 q03=0 q04=0 q05=0 q06=0 q07=0 q08=1 q09=0 q10=5 q11=0 q12=0 q13=0 q14=0 q15=0 q16=0 q17=0 q18=0 q19=0 q20=0 q21=0 q22=0 q23=0 q24=0 q25=0 q26=0 q27=0 q28=0 q29=0 q30=0 q31=1 q32=1 debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Mechanisms on. ranks (0-based) q01=0 q02=2 q03=0 q04=0 q05=0 q06=0 q07=0 q08=1 q09=0 q10=5 q11=0 q12=0 q13=0 q14=0 q15=0 q16=0 q17=0 q18=0 q19=0 q20=0 q21=0 q22=0 q23=0 q24=0 q25=0 q26=0 q27=0 q28=0 q29=0 q30=0 q31=1 q32=1 debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "effectiveness",
@@ -46,7 +46,7 @@
    "max": null,
    "value": 0,
    "threshold": "any >0 fails the gate",
-   "notes": "Mechanisms on; red-arm test passed (goes red as designed). debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Mechanisms on; red-arm test passed (goes red as designed). debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "effectiveness",
@@ -59,7 +59,7 @@
    "max": null,
    "value": 0.9062,
    "threshold": "none set; baseline",
-   "notes": "From recall-eval-summary. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "From recall-eval-summary. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "effectiveness",
@@ -72,7 +72,7 @@
    "max": null,
    "value": 31,
    "threshold": "none set; baseline",
-   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "effectiveness",
@@ -85,7 +85,7 @@
    "max": null,
    "value": 31,
    "threshold": "none set; baseline",
-   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "effectiveness",
@@ -98,7 +98,7 @@
    "max": null,
    "value": 0.9688,
    "threshold": "none set; baseline",
-   "notes": "One expected drawer per query. k=5. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "One expected drawer per query. k=5. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --test recall_eval -- --include-ignored --nocapture"
   },
   {
    "dimension": "speed",
@@ -111,7 +111,7 @@
    "max": 16998,
    "value": 15568,
    "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows",
-   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [16998, 16299, 15443, 15568, 15261]; p50 per run: [15621, 14302, 13858, 13903, 13644]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [16998, 16299, 15443, 15568, 15261]; p50 per run: [15621, 14302, 13858, 13903, 13644]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --config env.TRUSTY_RECALL_SUPERSESSION_PROFILE=1 --test recall_supersession recall_supersession_latency_profile -- --nocapture"
   },
   {
    "dimension": "speed",
@@ -124,7 +124,7 @@
    "max": 18911,
    "value": 16016,
    "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows",
-   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [18911, 16484, 15329, 16016, 15514]; p50 per run: [16108, 14115, 13803, 14128, 13809]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [18911, 16484, 15329, 16016, 15514]; p50 per run: [16108, 14115, 13803, 14128, 13809]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --config env.TRUSTY_RECALL_SUPERSESSION_PROFILE=1 --test recall_supersession recall_supersession_latency_profile -- --nocapture"
   },
   {
    "dimension": "indexing",
@@ -137,7 +137,7 @@
    "max": 781.499045747,
    "value": 672.4,
    "threshold": "alert if up >25% over pinned baseline",
-   "notes": "release. Seed time for 20000 drawers, median of 5; per run: [708.7, 781.5, 654.2, 672.4, 657.5]. Runs overlapped other fleet jobs on EVO. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "release. Seed time for 20000 drawers, median of 5; per run: [708.7, 781.5, 654.2, 672.4, 657.5]. Runs overlapped other fleet jobs on EVO. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --config env.TRUSTY_RECALL_SUPERSESSION_PROFILE=1 --test recall_supersession recall_supersession_latency_profile -- --nocapture"
   },
   {
    "dimension": "speed",
@@ -150,7 +150,7 @@
    "max": 202.098,
    "value": 516.1,
    "threshold": "HIGH if error count >0; alert p95 up >10%",
-   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.495, 0.952, 3.563]. p95 per run (ms): [168.28, 195.911, 200.049]. max per run (ms): [201.789, 202.098, 242.492]. p99 per run (ms): [178.804, 199.838, 214.542]. ops/s per run: [594.2, 516.1, 496.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.495, 0.952, 3.563]. p95 per run (ms): [168.28, 195.911, 200.049]. max per run (ms): [201.789, 202.098, 242.492]. p99 per run (ms): [178.804, 199.838, 214.542]. ops/s per run: [594.2, 516.1, 496.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --test concurrent_perf -- --include-ignored --nocapture"
   },
   {
    "dimension": "speed",
@@ -163,7 +163,7 @@
    "max": null,
    "value": 29.4,
    "threshold": "HIGH if error count >0; alert p95 up >10%",
-   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [29.5, 29.4, 29.3]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [29.5, 29.4, 29.3]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --test concurrent_perf -- --include-ignored --nocapture"
   },
   {
    "dimension": "speed",
@@ -176,7 +176,7 @@
    "max": 31.687,
    "value": null,
    "threshold": "HIGH if error count >0; alert p95 up >10%",
-   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.263, 4.112, 2.513]. p95 per run (ms): [24.775, 27.889, 6.927]. max per run (ms): [26.417, 31.687, 36.797]. p99 per run (ms): [25.913, 31.126, 7.382]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. (ops/s of the whole test is on the (total) row)"
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.263, 4.112, 2.513]. p95 per run (ms): [24.775, 27.889, 6.927]. max per run (ms): [26.417, 31.687, 36.797]. p99 per run (ms): [25.913, 31.126, 7.382]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. (ops/s of the whole test is on the (total) row) Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --test concurrent_perf -- --include-ignored --nocapture"
   },
   {
    "dimension": "speed",
@@ -189,7 +189,7 @@
    "max": null,
    "value": 30.0,
    "threshold": "HIGH if error count >0; alert p95 up >10%",
-   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [30.0, 29.9, 30.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [30.0, 29.9, 30.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --test concurrent_perf -- --include-ignored --nocapture"
   },
   {
    "dimension": "speed",
@@ -202,7 +202,7 @@
    "max": 16992.1,
    "value": 29.4,
    "threshold": "HIGH if error count >0; alert p95 up >10%",
-   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [71.329, 86.73, 89.169]. p95 per run (ms): [15086.605, 15183.285, 15113.572]. max per run (ms): [16886.294, 17038.073, 16992.1]. p99 per run (ms): [16527.303, 16681.017, 16572.093]. ops/s per run: [29.5, 29.3, 29.4]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [71.329, 86.73, 89.169]. p95 per run (ms): [15086.605, 15183.285, 15113.572]. max per run (ms): [16886.294, 17038.073, 16992.1]. p99 per run (ms): [16527.303, 16681.017, 16572.093]. ops/s per run: [29.5, 29.3, 29.4]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --test concurrent_perf -- --include-ignored --nocapture"
   },
   {
    "dimension": "indexing",
@@ -215,7 +215,7 @@
    "max": null,
    "value": 18.099,
    "threshold": "alert if up >25% over pinned baseline",
-   "notes": "Per run: [18.099143, 19.148373, 17.94882]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Per run: [18.099143, 19.148373, 17.94882]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --lib -- --ignored --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured --nocapture"
   },
   {
    "dimension": "indexing",
@@ -228,7 +228,7 @@
    "max": null,
    "value": 1211.206,
    "threshold": "alert if up >25% over pinned baseline",
-   "notes": "Median of each run's 3 batches; per run median: [1179.477, 1261.478, 1211.206]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "Median of each run's 3 batches; per run median: [1179.477, 1261.478, 1211.206]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --lib -- --ignored --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured --nocapture"
   },
   {
    "dimension": "speed",
@@ -241,7 +241,7 @@
    "max": 20.333,
    "value": null,
    "threshold": "alert if p95 up >25% over pinned baseline",
-   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [20.333, 20.22, 24.575] (max field is the median of these); p95 per run (ms): [19.696, 19.49, 23.13]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [20.333, 20.22, 24.575] (max field is the median of these); p95 per run (ms): [19.696, 19.49, 23.13]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --lib -- --ignored --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured --nocapture"
   },
   {
    "dimension": "speed",
@@ -254,11 +254,23 @@
    "max": 1156.13,
    "value": null,
    "threshold": "alert if p95 up >25% over pinned baseline",
-   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [1134.664, 1254.781, 1156.13] (max field is the median of these); p95 per run (ms): [1124.326, 1227.376, 1105.265]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [1134.664, 1254.781, 1156.13] (max field is the median of these); p95 per run (ms): [1124.326, 1227.376, 1105.265]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. Toolchain: +1.99.0, rustc 1.99.0 (b940084d7 2026-09-28). Command: cargo +1.99.0 test -p trusty-memory --release --lib -- --ignored --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured --nocapture"
   }
  ],
  "comparison": {
-  "seeded_in_rerun": null,
+  "seeded_in_rerun": {
+   "seeded_in_s": 768.874,
+   "delta_pct_vs_baseline": 78.9,
+   "baseline_seeded_in_s": 429.7,
+   "commit": "a77de395033e31879fc15bc83150b115c27a97a1",
+   "load_1m_during_seeding": {
+    "min": 0.89,
+    "max": 1.13
+   },
+   "overlapping_jobs": "none",
+   "verdict": "regression",
+   "issue": null
+  },
   "baseline": "2026-10-17-0.36.0-evo.json (commit 68ab813f07b6c3ca8bafddabbf995d0bd3e62869)",
   "deltas": [
    {
@@ -598,7 +610,7 @@
   "not_comparable": [
    "The 10-17 notes also carry superseded debug-profile figures for concurrent_perf, the embed measure and query-embed; the debug legs were not re-run today (the brief names release for these), so those are not compared.",
    "seeded_in, concurrent_reads p50 and the query_embed_idle figures are comparable by method but load-confounded: other fleet cargo jobs ran on the shared host in both runs, and 10-17 per-run spread on concurrent_reads p50 was 0.918-2.026 ms.",
-   "Toolchain: 10-17 JSON does not record it; the README names +1.99.0, used today (rustc recorded in the report, not the envelope)."
+   "Toolchain: the 10-17 JSON does not record it; the README names +1.99.0, used today (rustc 1.99.0 (b940084d7 2026-09-28)), now recorded with each suite's command line in every result's notes."
   ]
  }
 }
