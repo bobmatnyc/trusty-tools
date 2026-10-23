@@ -1,0 +1,604 @@
+{
+ "schema": 1,
+ "tool": "trusty-memory",
+ "version": "0.36.0",
+ "commit": "a77de395033e31879fc15bc83150b115c27a97a1",
+ "label": "evo",
+ "host": {
+  "id": "EVO-X3",
+  "os": "Ubuntu 26.04 (WSL2)",
+  "cpu": "AMD Ryzen AI Max+ 395 (28 vCPU in WSL)",
+  "ram_gb": 47
+ },
+ "date": "2026-10-23",
+ "corpus": "recall_eval 32 queries/12 groups; supersession profile 20000 drawers/40 rulings/300 queries; slice measure 16 legacy drawers; concurrent_perf temp daemons",
+ "load": {
+  "before": "uptime 1-min load at block start: eval1=5.44; eval2=3.69; prof1=2.58; prof2=2.96; prof3=0.87; prof4=0.83; prof5=1.00; conc1=0.83; conc2=3.47; conc3=2.29; slice1=1.59; slice2=7.45; slice3=5.57",
+  "after": "1-min load at block end: eval1=3.69; eval2=2.58; prof1=2.96; prof2=0.87; prof3=0.83; prof4=1.00; prof5=0.83; conc1=3.47; conc2=2.29; conc3=1.59; slice1=7.45; slice2=5.57; slice3=10.43. Other fleet cargo jobs overlapped on EVO during the suite; several blocks started or ended at load >=2 (idle gate not met, same as the 10-17 run); the 20k profile blocks 2-5 sat at 0.8-1.0."
+ },
+ "residency": {
+  "cached": null,
+  "total": null,
+  "notes": "n/a: in-process benches, no live daemon touched"
+ },
+ "results": [
+  {
+   "dimension": "effectiveness",
+   "metric": "hit@1",
+   "unit": "queries/32",
+   "n": 32,
+   "k": 1,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 27,
+   "threshold": "<27/32 fails the gate",
+   "notes": "Mechanisms on. ranks (0-based) q01=0 q02=2 q03=0 q04=0 q05=0 q06=0 q07=0 q08=1 q09=0 q10=5 q11=0 q12=0 q13=0 q14=0 q15=0 q16=0 q17=0 q18=0 q19=0 q20=0 q21=0 q22=0 q23=0 q24=0 q25=0 q26=0 q27=0 q28=0 q29=0 q30=0 q31=1 q32=1 debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "effectiveness",
+   "metric": "superseded_above_current",
+   "unit": "groups/12",
+   "n": 12,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 0,
+   "threshold": "any >0 fails the gate",
+   "notes": "Mechanisms on; red-arm test passed (goes red as designed). debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "effectiveness",
+   "metric": "MRR",
+   "unit": "ratio",
+   "n": 32,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 0.9062,
+   "threshold": "none set; baseline",
+   "notes": "From recall-eval-summary. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "effectiveness",
+   "metric": "hit@3",
+   "unit": "queries/32",
+   "n": 32,
+   "k": 3,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 31,
+   "threshold": "none set; baseline",
+   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "effectiveness",
+   "metric": "hit@5",
+   "unit": "queries/32",
+   "n": 32,
+   "k": 5,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 31,
+   "threshold": "none set; baseline",
+   "notes": "debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "effectiveness",
+   "metric": "recall@k",
+   "unit": "ratio",
+   "n": 32,
+   "k": 5,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 0.9688,
+   "threshold": "none set; baseline",
+   "notes": "One expected drawer per query. k=5. debug profile; ranks are deterministic and profile-independent; identical ranks across 2 runs. Test run with --include-ignored (both tests are #[ignore] in this tree). Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "memory_recall_latency_rulings-off",
+   "unit": "us",
+   "n": 300,
+   "k": null,
+   "p50": 13903,
+   "p95": 15568,
+   "max": 16998,
+   "value": 15568,
+   "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows",
+   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [16998, 16299, 15443, 15568, 15261]; p50 per run: [15621, 14302, 13858, 13903, 13644]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "memory_recall_latency_rulings-on",
+   "unit": "us",
+   "n": 300,
+   "k": null,
+   "p50": 14115,
+   "p95": 16016,
+   "max": 18911,
+   "value": 16016,
+   "threshold": "alert if median-of-5 p95 up >10% over pinned baseline; HIGH at >2x or E12 +5ms at 20k rows",
+   "notes": "Release profile, 20000 drawers, 300 queries, 5 runs. p95 (us) per run in order: [18911, 16484, 15329, 16016, 15514]; p50 per run: [16108, 14115, 13803, 14128, 13809]. p50 and p95 fields are medians over runs; max is the max of the 5 p95 values. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "indexing",
+   "metric": "seeded_in",
+   "unit": "s",
+   "n": 5,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": 781.499045747,
+   "value": 672.4,
+   "threshold": "alert if up >25% over pinned baseline",
+   "notes": "release. Seed time for 20000 drawers, median of 5; per run: [708.7, 781.5, 654.2, 672.4, 657.5]. Runs overlapped other fleet jobs on EVO. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "concurrent_perf test_concurrent_reads",
+   "unit": "ms (latency); ops/s (value)",
+   "n": 3,
+   "k": null,
+   "p50": 3.495,
+   "p95": 195.911,
+   "max": 202.098,
+   "value": 516.1,
+   "threshold": "HIGH if error count >0; alert p95 up >10%",
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.495, 0.952, 3.563]. p95 per run (ms): [168.28, 195.911, 200.049]. max per run (ms): [201.789, 202.098, 242.492]. p99 per run (ms): [178.804, 199.838, 214.542]. ops/s per run: [594.2, 516.1, 496.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "concurrent_perf test_sustained_load",
+   "unit": "ms (latency); ops/s (value)",
+   "n": 3,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 29.4,
+   "threshold": "HIGH if error count >0; alert p95 up >10%",
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [29.5, 29.4, 29.3]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "concurrent_perf test_concurrent_rw READ",
+   "unit": "ms (latency); ops/s (value)",
+   "n": 3,
+   "k": null,
+   "p50": 3.263,
+   "p95": 24.775,
+   "max": 31.687,
+   "value": null,
+   "threshold": "HIGH if error count >0; alert p95 up >10%",
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [3.263, 4.112, 2.513]. p95 per run (ms): [24.775, 27.889, 6.927]. max per run (ms): [26.417, 31.687, 36.797]. p99 per run (ms): [25.913, 31.126, 7.382]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only. (ops/s of the whole test is on the (total) row)"
+  },
+  {
+   "dimension": "speed",
+   "metric": "concurrent_perf test_concurrent_rw (total)",
+   "unit": "ms (latency); ops/s (value)",
+   "n": 3,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 30.0,
+   "threshold": "HIGH if error count >0; alert p95 up >10%",
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. ops/s per run: [30.0, 29.9, 30.1]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "concurrent_perf test_burst",
+   "unit": "ms (latency); ops/s (value)",
+   "n": 3,
+   "k": null,
+   "p50": 86.73,
+   "p95": 15113.572,
+   "max": 16992.1,
+   "value": 29.4,
+   "threshold": "HIGH if error count >0; alert p95 up >10%",
+   "notes": "Median of 3 runs. Release profile (cargo test --release, --include-ignored --nocapture); 5 tests ran in parallel in one process, each with its own daemon; 3 runs, rc 0 each, 0 errors. p50 per run (ms): [71.329, 86.73, 89.169]. p95 per run (ms): [15086.605, 15183.285, 15113.572]. max per run (ms): [16886.294, 17038.073, 16992.1]. p99 per run (ms): [16527.303, 16681.017, 16572.093]. ops/s per run: [29.5, 29.3, 29.4]. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "indexing",
+   "metric": "embed_per_chunk",
+   "unit": "ms",
+   "n": 3,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 18.099,
+   "threshold": "alert if up >25% over pinned baseline",
+   "notes": "Per run: [18.099143, 19.148373, 17.94882]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "indexing",
+   "metric": "embed_64_chunk_batch",
+   "unit": "ms",
+   "n": 3,
+   "k": null,
+   "p50": null,
+   "p95": null,
+   "max": null,
+   "value": 1211.206,
+   "threshold": "alert if up >25% over pinned baseline",
+   "notes": "Median of each run's 3 batches; per run median: [1179.477, 1261.478, 1211.206]. Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "query_embed_idle",
+   "unit": "ms",
+   "n": 600,
+   "k": null,
+   "p50": 18.675,
+   "p95": 19.696,
+   "max": 20.333,
+   "value": null,
+   "threshold": "alert if p95 up >25% over pinned baseline",
+   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [20.333, 20.22, 24.575] (max field is the median of these); p95 per run (ms): [19.696, 19.49, 23.13]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  },
+  {
+   "dimension": "speed",
+   "metric": "query_embed_under_slice",
+   "unit": "ms",
+   "n": 600,
+   "k": null,
+   "p50": 17.37,
+   "p95": 1124.326,
+   "max": 1156.13,
+   "value": null,
+   "threshold": "alert if p95 up >25% over pinned baseline",
+   "notes": "200 samples per run, 3 runs; p50 and p95 are medians over runs; max per run (ms): [1134.664, 1254.781, 1156.13] (max field is the median of these); p95 per run (ms): [1124.326, 1227.376, 1105.265]. contention_p95/idle_p95 per run: [57.08, 62.97, 47.78] (verdict FLAG each run; test still passes, rc 0). Release profile (cargo test --release --lib -- --ignored --exact ... --nocapture), 3 runs, rc 0 each. Fresh temp dirs, access counts started at zero, EVO CPU embedder, compare EVO-to-EVO only."
+  }
+ ],
+ "comparison": {
+  "seeded_in_rerun": null,
+  "baseline": "2026-10-17-0.36.0-evo.json (commit 68ab813f07b6c3ca8bafddabbf995d0bd3e62869)",
+  "deltas": [
+   {
+    "metric": "hit@1",
+    "field": "value",
+    "unit": "queries/32",
+    "old": 27,
+    "new": 27,
+    "abs": 0,
+    "pct": 0.0
+   },
+   {
+    "metric": "superseded_above_current",
+    "field": "value",
+    "unit": "groups/12",
+    "old": 0,
+    "new": 0,
+    "abs": 0,
+    "pct": null
+   },
+   {
+    "metric": "MRR",
+    "field": "value",
+    "unit": "ratio",
+    "old": 0.9062,
+    "new": 0.9062,
+    "abs": 0.0,
+    "pct": 0.0
+   },
+   {
+    "metric": "hit@3",
+    "field": "value",
+    "unit": "queries/32",
+    "old": 31,
+    "new": 31,
+    "abs": 0,
+    "pct": 0.0
+   },
+   {
+    "metric": "hit@5",
+    "field": "value",
+    "unit": "queries/32",
+    "old": 31,
+    "new": 31,
+    "abs": 0,
+    "pct": 0.0
+   },
+   {
+    "metric": "recall@k",
+    "field": "value",
+    "unit": "ratio",
+    "old": 0.9688,
+    "new": 0.9688,
+    "abs": 0.0,
+    "pct": 0.0
+   },
+   {
+    "metric": "memory_recall_latency_rulings-off",
+    "field": "value",
+    "unit": "us",
+    "old": 16383.0,
+    "new": 15568,
+    "abs": -815.0,
+    "pct": -5.0
+   },
+   {
+    "metric": "memory_recall_latency_rulings-off",
+    "field": "p50",
+    "unit": "us",
+    "old": 14639.0,
+    "new": 13903,
+    "abs": -736.0,
+    "pct": -5.0
+   },
+   {
+    "metric": "memory_recall_latency_rulings-off",
+    "field": "p95",
+    "unit": "us",
+    "old": 16383.0,
+    "new": 15568,
+    "abs": -815.0,
+    "pct": -5.0
+   },
+   {
+    "metric": "memory_recall_latency_rulings-off",
+    "field": "max",
+    "unit": "us",
+    "old": 20986.0,
+    "new": 16998,
+    "abs": -3988.0,
+    "pct": -19.0
+   },
+   {
+    "metric": "memory_recall_latency_rulings-on",
+    "field": "value",
+    "unit": "us",
+    "old": 16437.0,
+    "new": 16016,
+    "abs": -421.0,
+    "pct": -2.6
+   },
+   {
+    "metric": "memory_recall_latency_rulings-on",
+    "field": "p50",
+    "unit": "us",
+    "old": 14736.0,
+    "new": 14115,
+    "abs": -621.0,
+    "pct": -4.2
+   },
+   {
+    "metric": "memory_recall_latency_rulings-on",
+    "field": "p95",
+    "unit": "us",
+    "old": 16437.0,
+    "new": 16016,
+    "abs": -421.0,
+    "pct": -2.6
+   },
+   {
+    "metric": "memory_recall_latency_rulings-on",
+    "field": "max",
+    "unit": "us",
+    "old": 28120.0,
+    "new": 18911,
+    "abs": -9209.0,
+    "pct": -32.7
+   },
+   {
+    "metric": "seeded_in",
+    "field": "value",
+    "unit": "s",
+    "old": 429.7,
+    "new": 672.4,
+    "abs": 242.7,
+    "pct": 56.5
+   },
+   {
+    "metric": "seeded_in",
+    "field": "max",
+    "unit": "s",
+    "old": 463.438072176,
+    "new": 781.499045747,
+    "abs": 318.061,
+    "pct": 68.6
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_reads",
+    "field": "value",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 603.9,
+    "new": 516.1,
+    "abs": -87.8,
+    "pct": -14.5
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_reads",
+    "field": "p50",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 1.982,
+    "new": 3.495,
+    "abs": 1.513,
+    "pct": 76.3
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_reads",
+    "field": "p95",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 168.449,
+    "new": 195.911,
+    "abs": 27.462,
+    "pct": 16.3
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_reads",
+    "field": "max",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 182.514,
+    "new": 202.098,
+    "abs": 19.584,
+    "pct": 10.7
+   },
+   {
+    "metric": "concurrent_perf test_sustained_load",
+    "field": "value",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 29.3,
+    "new": 29.4,
+    "abs": 0.1,
+    "pct": 0.3
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_rw READ",
+    "field": "p50",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 3.725,
+    "new": 3.263,
+    "abs": -0.462,
+    "pct": -12.4
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_rw READ",
+    "field": "p95",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 29.808,
+    "new": 24.775,
+    "abs": -5.033,
+    "pct": -16.9
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_rw READ",
+    "field": "max",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 32.447,
+    "new": 31.687,
+    "abs": -0.76,
+    "pct": -2.3
+   },
+   {
+    "metric": "concurrent_perf test_concurrent_rw (total)",
+    "field": "value",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 30.1,
+    "new": 30.0,
+    "abs": -0.1,
+    "pct": -0.3
+   },
+   {
+    "metric": "concurrent_perf test_burst",
+    "field": "value",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 29.6,
+    "new": 29.4,
+    "abs": -0.2,
+    "pct": -0.7
+   },
+   {
+    "metric": "concurrent_perf test_burst",
+    "field": "p50",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 81.932,
+    "new": 86.73,
+    "abs": 4.798,
+    "pct": 5.9
+   },
+   {
+    "metric": "concurrent_perf test_burst",
+    "field": "p95",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 15098.172,
+    "new": 15113.572,
+    "abs": 15.4,
+    "pct": 0.1
+   },
+   {
+    "metric": "concurrent_perf test_burst",
+    "field": "max",
+    "unit": "ms (latency); ops/s (value)",
+    "old": 16821.829,
+    "new": 16992.1,
+    "abs": 170.271,
+    "pct": 1.0
+   },
+   {
+    "metric": "embed_per_chunk",
+    "field": "value",
+    "unit": "ms",
+    "old": 19.474,
+    "new": 18.099,
+    "abs": -1.375,
+    "pct": -7.1
+   },
+   {
+    "metric": "embed_64_chunk_batch",
+    "field": "value",
+    "unit": "ms",
+    "old": 1251.297,
+    "new": 1211.206,
+    "abs": -40.091,
+    "pct": -3.2
+   },
+   {
+    "metric": "query_embed_idle",
+    "field": "p50",
+    "unit": "ms",
+    "old": 16.592,
+    "new": 18.675,
+    "abs": 2.083,
+    "pct": 12.6
+   },
+   {
+    "metric": "query_embed_idle",
+    "field": "p95",
+    "unit": "ms",
+    "old": 17.605,
+    "new": 19.696,
+    "abs": 2.091,
+    "pct": 11.9
+   },
+   {
+    "metric": "query_embed_idle",
+    "field": "max",
+    "unit": "ms",
+    "old": 18.964,
+    "new": 20.333,
+    "abs": 1.369,
+    "pct": 7.2
+   },
+   {
+    "metric": "query_embed_under_slice",
+    "field": "p50",
+    "unit": "ms",
+    "old": 17.671,
+    "new": 17.37,
+    "abs": -0.301,
+    "pct": -1.7
+   },
+   {
+    "metric": "query_embed_under_slice",
+    "field": "p95",
+    "unit": "ms",
+    "old": 1236.305,
+    "new": 1124.326,
+    "abs": -111.979,
+    "pct": -9.1
+   },
+   {
+    "metric": "query_embed_under_slice",
+    "field": "max",
+    "unit": "ms",
+    "old": 1266.598,
+    "new": 1156.13,
+    "abs": -110.468,
+    "pct": -8.7
+   }
+  ],
+  "not_comparable": [
+   "The 10-17 notes also carry superseded debug-profile figures for concurrent_perf, the embed measure and query-embed; the debug legs were not re-run today (the brief names release for these), so those are not compared.",
+   "seeded_in, concurrent_reads p50 and the query_embed_idle figures are comparable by method but load-confounded: other fleet cargo jobs ran on the shared host in both runs, and 10-17 per-run spread on concurrent_reads p50 was 0.918-2.026 ms.",
+   "Toolchain: 10-17 JSON does not record it; the README names +1.99.0, used today (rustc recorded in the report, not the envelope)."
+  ]
+ }
+}
