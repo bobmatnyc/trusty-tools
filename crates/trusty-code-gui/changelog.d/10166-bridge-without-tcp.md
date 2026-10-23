@@ -11,3 +11,5 @@ Changed
 - The credential-attaching `fetch` compares protocol and host, because a
   custom scheme's URL origin is the opaque `"null"` and would otherwise match
   any other custom-scheme URL.
+- A page reload closes every open event stream, so the old page's daemon
+  connections no longer outlive it.

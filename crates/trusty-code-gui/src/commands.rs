@@ -62,8 +62,9 @@ fn bridge_token_from(state: &GuiState) -> String {
 /// Why (#10166): a custom-scheme response cannot stream, so the two event
 /// routes reach the webview through a Tauri `Channel` instead.
 /// What: `GET {path}?ticket={ticket}` through the bridge router, then each SSE
-/// event as a [`StreamEvent`]. A failed send — the webview went away — stops
-/// the pump.
+/// event as a [`StreamEvent`]. A failed send — the webview was destroyed — stops
+/// the pump; a page reload closes every stream through `StreamRegistry::close_all`
+/// (#10166).
 ///
 /// # Errors
 ///

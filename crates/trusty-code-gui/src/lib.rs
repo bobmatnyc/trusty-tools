@@ -22,6 +22,7 @@ mod commands;
 mod state;
 
 use state::GuiState;
+use tauri::Manager as _;
 
 /// Build and run the Tauri application.
 ///
@@ -59,6 +60,14 @@ pub fn run() {
             },
         )
         .manage(GuiState::new(bridge.url, bridge.token, bridge.router))
+        // #10166: a reload leaves the old page's streams with no owner and no
+        // failing send (heartbeats emit nothing), so release them all when the
+        // new page starts loading, before its scripts open their own.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                webview.state::<GuiState>().streams.close_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_daemon_url,
             commands::get_daemon_token,
