@@ -60,7 +60,7 @@ assesses significant user or operator impact. Owner ruling, 2026-09-30
 label, never a milestone.
 
 **Other labels in use**, applied when they describe the issue: `blocked`,
-`breaking-change`, `closed:sweep`, `do-not-merge`, `duplicate`, `regression`,
+`breaking-change`, `closed:sweep`, `do-not-merge`, `duplicate`, `bug:regression`,
 `release`, `release-cleanup`, `security`, `self-improvement`, `tech-debt`,
 `wont-do`.
 
