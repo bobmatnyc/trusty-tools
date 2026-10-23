@@ -10,11 +10,12 @@
 //! macOS `proc_pidpath` reports one path for two links of one inode, and the
 //! server judges a peer by that path. An `atexit` hook removes the directory
 //! when the process exits; a run killed before `exit` leaves its directory,
-//! and the next process's first call removes every sibling directory whose
-//! pid is dead.
+//! and the next process's first call removes every sibling directory (a real
+//! directory this euid owns, not a symlink) named for a dead canonical pid.
 //! Test: `one_name_is_one_copy_per_process`, `two_names_are_two_inodes`,
 //! `racing_first_calls_make_one_complete_copy`,
-//! `copies_are_removed_at_process_exit`, `a_dead_runs_copies_are_swept`.
+//! `copies_are_removed_at_process_exit`, `a_dead_runs_copies_are_swept`,
+//! `live_signed_padded_and_symlinked_entries_survive_the_sweep`.
 
 use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt as _;
@@ -52,21 +53,41 @@ fn alive(pid: libc::pid_t) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Remove the copy directories of dead runs of this package.
+/// A pid written the way [`copy_dir`] writes one: positive decimal digits,
+/// no sign, no leading zero. `kill` reads 0 and negatives as process groups.
+fn canonical_pid(text: &str) -> Option<libc::pid_t> {
+    let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if !digits || text.starts_with('0') {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Remove the copy directories of dead runs of this package: real
+/// directories this euid owns, named for a canonical pid that is not alive.
 fn sweep_dead_runs() {
+    use std::os::unix::fs::MetadataExt as _;
     let Ok(entries) = std::fs::read_dir(base()) else {
         return;
     };
     let prefix = prefix();
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
+    let euid = unsafe { libc::geteuid() };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid) = name
             .to_str()
             .and_then(|n| n.strip_prefix(&prefix))
-            .and_then(|p| p.parse::<libc::pid_t>().ok())
+            .and_then(canonical_pid)
         else {
             continue;
         };
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() || meta.uid() != euid {
+            continue;
+        }
         if pid != std::process::id() as libc::pid_t && !alive(pid) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
@@ -203,5 +224,39 @@ mod tests {
         std::fs::write(stale.join("claude"), b"leftover").unwrap();
         super::sweep_dead_runs();
         assert!(!stale.exists(), "{stale:?} survived the sweep");
+    }
+
+    #[test]
+    fn live_signed_padded_and_symlinked_entries_survive_the_sweep() {
+        let mut live = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let (base, prefix) = (super::base(), super::prefix());
+        let dirs = [
+            base.join(format!("{prefix}{}", live.id())),
+            base.join(format!("{prefix}+{dead}")),
+            base.join(format!("{prefix}0{dead}")),
+        ];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let target = tempfile::tempdir().unwrap();
+        let link = base.join(format!("{prefix}{dead}"));
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        super::sweep_dead_runs();
+        let mut survived: Vec<_> = dirs.iter().map(|d| (d.clone(), d.exists())).collect();
+        survived.push((link.clone(), link.symlink_metadata().is_ok()));
+        for dir in &dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let _ = std::fs::remove_file(&link);
+        let _ = live.kill();
+        let _ = live.wait();
+        let removed: Vec<_> = survived.iter().filter(|(_, kept)| !kept).collect();
+        assert!(removed.is_empty(), "swept: {removed:?}");
     }
 }
