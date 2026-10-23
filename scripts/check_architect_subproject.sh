@@ -83,7 +83,7 @@ TAB="$(printf '\t')"
 # poller's alert triage and Architect watchdog (P1b-0), then PM intake, its
 # digest and the Notification hook pair (P2), then the Intent Ledger set (P3),
 # then the six D2 skills (review, drift, provisioning, macOS, improvements,
-# host administration).
+# host administration), then the dashboard store set and its schemas (P4a-1).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -124,6 +124,32 @@ scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
 scripts/self-clear.sh|crates/trusty-mpm/src/assets/architect/scripts/self-clear.sh
 scripts/state-archive.py|crates/trusty-mpm/src/assets/architect/scripts/state-archive.py
 scripts/architect-idle.py|crates/trusty-mpm/src/assets/architect/scripts/architect-idle.py
+scripts/dashboard_store.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_store.py
+scripts/dashboard_jsonl.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_jsonl.py
+scripts/dashboard_schema.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_schema.py
+scripts/dashboard_derive.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_derive.py
+scripts/dashboard_ids.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_ids.py
+scripts/dashboard_qual.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_qual.py
+scripts/owner_answers.py|crates/trusty-mpm/src/assets/architect/scripts/owner_answers.py
+scripts/dashboard-db.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-db.py
+scripts/il-archive.py|crates/trusty-mpm/src/assets/architect/scripts/il-archive.py
+scripts/stale-tasks.py|crates/trusty-mpm/src/assets/architect/scripts/stale-tasks.py
+schemas/dashboard/accounts.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/accounts.schema.json
+schemas/dashboard/briefs.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/briefs.schema.json
+schemas/dashboard/effort_tunes.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/effort_tunes.schema.json
+schemas/dashboard/goal_removals.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goal_removals.schema.json
+schemas/dashboard/goal_reorders.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goal_reorders.schema.json
+schemas/dashboard/goals.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/goals.schema.json
+schemas/dashboard/il_steers.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/il_steers.schema.json
+schemas/dashboard/items.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/items.schema.json
+schemas/dashboard/media.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/media.schema.json
+schemas/dashboard/meta-gh_track.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-gh_track.schema.json
+schemas/dashboard/meta-seen.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-seen.schema.json
+schemas/dashboard/meta-settings.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-settings.schema.json
+schemas/dashboard/meta-state.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/meta-state.schema.json
+schemas/dashboard/questions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/questions.schema.json
+schemas/dashboard/sessions.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/sessions.schema.json
+schemas/dashboard/step_progress.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/step_progress.schema.json
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh

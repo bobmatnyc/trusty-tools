@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/media.schema.json",
+  "title": "media (the stable B id of one diagram or image file, keyed by project and path)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["project", "path", "status", "created", "updated"],
+  "additionalProperties": false,
+  "properties": {
+    "project": {"type": "string", "minLength": 1},
+    "path": {"type": "string", "minLength": 1},
+    "status": {"enum": ["open", "done"]},
+    "created": {"$ref": "#/$defs/iso"},
+    "done_at": {"$ref": "#/$defs/iso"},
+    "accessed": {"$ref": "#/$defs/iso"},
+    "updated": {"$ref": "#/$defs/iso"}
+  }
+}

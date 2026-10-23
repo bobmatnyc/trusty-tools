@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/meta-gh_track.schema.json",
+  "title": "meta/gh_track (repo totals written by scripts/gh-session-track.py)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"},
+    "count": {"type": "integer", "minimum": 0}
+  },
+  "required": ["repo", "at", "prs_open", "issues_open"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {"type": "string"}, "at": {"$ref": "#/$defs/iso"},
+    "prs_open": {"$ref": "#/$defs/count"}, "prs_cap": {"$ref": "#/$defs/count"},
+    "prs_by_state": {"type": "object", "additionalProperties": {"$ref": "#/$defs/count"}},
+    "issues_open": {"$ref": "#/$defs/count"}, "bugs": {"$ref": "#/$defs/count"}, "bugs_p1": {"$ref": "#/$defs/count"},
+    "p1": {"$ref": "#/$defs/count"}, "p2": {"$ref": "#/$defs/count"}, "security": {"$ref": "#/$defs/count"},
+    "merged_open": {"$ref": "#/$defs/count"}
+  }
+}

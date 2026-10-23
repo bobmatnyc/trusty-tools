@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/meta-settings.schema.json",
+  "title": "meta/settings (owner presence and sleep window)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "additionalProperties": false,
+  "properties": {
+    "sleep_start": {"type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$"},
+    "sleep_end": {"type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$"},
+    "tz": {"type": "string", "minLength": 1},
+    "user_state": {"enum": ["active", "remote", "away", "sleeping"]},
+    "user_state_at": {"$ref": "#/$defs/iso"},
+    "user_state_by": {"type": "string"},
+    "sleep_auto_on": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "updated": {"$ref": "#/$defs/iso"}
+  }
+}

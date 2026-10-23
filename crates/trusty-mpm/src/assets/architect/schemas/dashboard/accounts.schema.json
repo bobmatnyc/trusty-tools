@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/accounts.schema.json",
+  "title": "account usage meter",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["account", "pct5h", "pctwk", "ts", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "account": {"type": "string", "minLength": 1},
+    "pct5h": {"type": "integer", "minimum": 0, "maximum": 100},
+    "pctwk": {"type": "integer", "minimum": 0, "maximum": 100},
+    "reset5h": {"type": ["string", "null"]},
+    "resetwk": {"type": ["string", "null"]},
+    "ts": {"$ref": "#/$defs/iso"},
+    "source": {"enum": ["statusline-cache", "manual"]}
+  }
+}
