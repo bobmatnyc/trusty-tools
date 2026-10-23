@@ -188,15 +188,7 @@ impl CodeIndexer {
         embedder: &Arc<dyn Embedder>,
         text: &str,
     ) -> Result<Vec<f32>> {
-        if let Some(pool) = self.resolve_embed_pool().await {
-            let mut out = pool
-                .embed(vec![text.to_string()], RequestPriority::Interactive)
-                .await?;
-            return out
-                .pop()
-                .context("embed pool returned no vector for interactive request");
-        }
-        embedder.embed(text).await
+        embed_one(self.resolve_embed_pool().await, embedder, text).await
     }
 
     /// Embed an arbitrary text using the wired embedder, bypassing the
@@ -567,4 +559,25 @@ impl CodeIndexer {
             }
         }
     }
+}
+
+/// Embed one text on `pool`'s Interactive lane, else directly on `embedder`.
+///
+/// Why: the routing of [`CodeIndexer::embed_interactive`], with no `&self`,
+/// so the #10194 detached query embed can run it on a `'static` task.
+/// Test: `embed_pool_routing::query_embeds_route_through_interactive_lane_when_pool_installed`.
+pub(super) async fn embed_one(
+    pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+    embedder: &Arc<dyn Embedder>,
+    text: &str,
+) -> Result<Vec<f32>> {
+    if let Some(pool) = pool {
+        let mut out = pool
+            .embed(vec![text.to_string()], RequestPriority::Interactive)
+            .await?;
+        return out
+            .pop()
+            .context("embed pool returned no vector for interactive request");
+    }
+    embedder.embed(text).await
 }
