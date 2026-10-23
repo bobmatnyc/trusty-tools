@@ -428,12 +428,22 @@ fn mute_daemon_at(socket: &Path) {
 }
 
 /// A stub that touches `marker` — used to PROVE a branch never spawned it.
+///
+/// Why (#10212): a body naming the per-test marker made a new executable file
+/// per test. What: one [`stable_stub`] that touches `spawned` beside the path
+/// it was run as (`${0%/*}`), reached through a per-test symlink in `dir`, so
+/// `marker` must be `dir/spawned`.
+/// Test: `a_linked_marker_stub_marks_its_own_dir`.
 fn marker_stub(dir: &Path, marker: &Path) -> PathBuf {
-    stub_binary(
-        dir,
-        "tcode-marker",
-        &format!("touch {}\nsleep 300", marker.display()),
-    )
+    assert_eq!(
+        marker,
+        dir.join("spawned"),
+        "the marker sits beside the link"
+    );
+    let script = stable_stub("tcode-marker", "touch \"${0%/*}/spawned\"\nsleep 300");
+    let link = dir.join("tcode-marker");
+    std::os::unix::fs::symlink(&script, &link).expect("link the marker stub");
+    link
 }
 
 fn is_alive(pid: u32) -> bool {
@@ -1488,4 +1498,28 @@ fn racing_stable_stub_writers_both_get_an_executable() {
         }
         assert_eq!(leftovers, 1, "round {round}: a staging file was left");
     }
+}
+
+/// Why (#10212): every "never spawned" case asserts `!marker.exists()`, which
+/// passes vacuously if a run stub would mark some other directory.
+/// What: spawns the linked [`marker_stub`] through [`spawn_daemon`], the
+/// production spawn, and requires `dir/spawned` to appear.
+/// Test: this test.
+#[tokio::test]
+async fn a_linked_marker_stub_marks_its_own_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("spawned");
+    let stub = marker_stub(dir.path(), &marker);
+    let mut child = spawn_daemon(&stub, None, false, None).expect("spawn the marker stub");
+    let mut seen = false;
+    for _ in 0..200 {
+        if marker.exists() {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    child.start_kill().expect("signal the marker stub");
+    child.wait().await.expect("reap the marker stub");
+    assert!(seen, "a run marker stub must touch {marker:?}");
 }
