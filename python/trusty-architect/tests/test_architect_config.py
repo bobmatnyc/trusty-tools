@@ -182,6 +182,33 @@ def test_a_bad_variable_fails_and_names_it(tmp_path, env, name):
     assert env[name] not in str(info.value)
 
 
+def test_tailnet_url_is_read_from_the_file_and_defaults_to_empty(tmp_path):
+    # Ported from the prototype's dashboard footer tests: the footer's second link.
+    assert ac.load(root=str(tmp_path / "none"), environ={}).tailnet_url == ""
+    _write(tmp_path, json.dumps({"tailnet_url": "https://tailnet.example:7890/"}))
+    assert ac.load(root=str(tmp_path), environ={}).tailnet_url == "https://tailnet.example:7890/"
+
+
+def test_dashboard_tailnet_url_beats_the_file(tmp_path):
+    _write(tmp_path, json.dumps({"tailnet_url": "https://tailnet.example:7890/"}))
+    env = {"DASHBOARD_TAILNET_URL": "https://override.tailnet.example:7890/"}
+    assert ac.load(root=str(tmp_path), environ=env).tailnet_url == env["DASHBOARD_TAILNET_URL"]
+    blank = ac.load(root=str(tmp_path), environ={"DASHBOARD_TAILNET_URL": ""})
+    assert blank.tailnet_url == "https://tailnet.example:7890/", "an empty variable counts as unset"
+
+
+@pytest.mark.parametrize("value", [7890, "host.example:7890", "ftp://host.example/"])
+def test_a_bad_tailnet_url_in_the_file_fails_and_names_the_key(tmp_path, value):
+    text = _error(tmp_path, json.dumps({"tailnet_url": value}))
+    assert "tailnet_url" in text and "host.example" not in text
+
+
+def test_a_bad_dashboard_tailnet_url_fails_and_names_the_variable(tmp_path):
+    with pytest.raises(ac.ConfigError) as info:
+        ac.load(root=str(tmp_path), environ={"DASHBOARD_TAILNET_URL": "host.example:7890"})
+    assert "DASHBOARD_TAILNET_URL" in str(info.value) and "host.example" not in str(info.value)
+
+
 def test_an_unreadable_path_fails(tmp_path):
     (tmp_path / "local" / "architect.json").mkdir(parents=True)
     with pytest.raises(ac.ConfigError):

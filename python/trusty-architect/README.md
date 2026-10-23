@@ -76,6 +76,7 @@ an empty variable counts as unset.
 | `owner_name` | string | `""`: say "the owner" | `ARCHITECT_OWNER_NAME` |
 | `memory_palace` | string | `""`: derive it from the session or project | `ARCHITECT_MEMORY_PALACE` |
 | `dashboard_port` | integer, 1 to 65535 | `7890` | `DASHBOARD_PORT` |
+| `tailnet_url` | `""` or an `http://` / `https://` origin | `""`: the dashboard footer links localhost only | `DASHBOARD_TAILNET_URL` |
 | `repos` | `{name: {slug, gh_config_dir, checkout}}`, `slug` required | `{}` | none |
 | `caps` | `{name: number}`; `builder_slots` an integer of 1 or more, `load_factor` above 0 | `{}`: each script's own constant | `LOAD_FACTOR` sets `caps.load_factor` |
 

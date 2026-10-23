@@ -3,6 +3,8 @@
 Why: owner name, repo table, dashboard port, memory palace and caps differ per
 installation. They must live in the instance's own file, never in a shipped
 script, so the shipped scripts carry no operator value (#9171, D77).
+`tailnet_url` is the dashboard's tailnet origin (e.g. https://<name>:7890/), the
+second link of the reply footer; "" means localhost only.
 What: `load()` reads `<root>/local/architect.json`, where `root` is the parent
 of this `scripts/` directory, and returns a frozen `Config`. `ARCHITECT_CONFIG`
 names another file, which must exist. Precedence is environment, then file,
@@ -26,7 +28,7 @@ from typing import Any, Mapping, Optional, Tuple
 
 DEFAULT_PORT = 7890
 _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
-_KNOWN = ("owner_name", "memory_palace", "dashboard_port", "repos", "caps")
+_KNOWN = ("owner_name", "memory_palace", "dashboard_port", "tailnet_url", "repos", "caps")
 _REPO_FIELDS = ("slug", "gh_config_dir", "checkout")
 _EMPTY: Mapping[str, Any] = types.MappingProxyType({})
 
@@ -50,6 +52,7 @@ class Config:
 
     `owner_name` "" means no owner is configured; callers say "the owner".
     `memory_palace` "" means the caller derives it from its session or project.
+    `tailnet_url` "" means no tailnet origin: the footer shows localhost only.
     A cap absent from `caps` means the calling script's own constant applies.
     """
 
@@ -57,6 +60,7 @@ class Config:
     owner_name: str = ""
     memory_palace: str = ""
     dashboard_port: int = DEFAULT_PORT
+    tailnet_url: str = ""
     repos: Mapping[str, Repo] = field(default_factory=lambda: _EMPTY)
     caps: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)
     unknown: Tuple[str, ...] = ()
@@ -81,18 +85,21 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
     owner = _string(path, data, "owner_name")
     palace = _string(path, data, "memory_palace")
     port = _port(path, "dashboard_port", data.get("dashboard_port", DEFAULT_PORT))
+    tailnet = _url(path, "tailnet_url", _string(path, data, "tailnet_url"))
     repos = _repos(path, data.get("repos", {}), unknown)
     caps = _caps(path, data.get("caps", {}))
     # See #10161: the environment wins over the file, one variable per key.
     owner = env.get("ARCHITECT_OWNER_NAME") or owner
     palace = env.get("ARCHITECT_MEMORY_PALACE") or palace
+    if env.get("DASHBOARD_TAILNET_URL"):
+        tailnet = _url("environment", "DASHBOARD_TAILNET_URL", env["DASHBOARD_TAILNET_URL"])
     if env.get("DASHBOARD_PORT"):
         port = _port("environment", "DASHBOARD_PORT", _env_number(env, "DASHBOARD_PORT", int))
     if env.get("LOAD_FACTOR"):
         caps["load_factor"] = _positive(
             "environment", "LOAD_FACTOR", _env_number(env, "LOAD_FACTOR", float))
     return Config(path=path, owner_name=owner, memory_palace=palace, dashboard_port=port,
-                  repos=types.MappingProxyType(repos), caps=types.MappingProxyType(caps),
+                  tailnet_url=tailnet, repos=types.MappingProxyType(repos), caps=types.MappingProxyType(caps),
                   unknown=tuple(sorted(unknown)))
 
 
@@ -131,6 +138,13 @@ def _string(path: str, data: Mapping[str, Any], key: str) -> str:
     value = data.get(key, "")
     if not isinstance(value, str):
         raise _fail(path, key, "a string")
+    return value
+
+
+def _url(path: str, key: str, value: str) -> str:
+    """"" or an http(s) origin; the error names the key, never the value."""
+    if value and not value.startswith(("https://", "http://")):
+        raise _fail(path, key, "an http:// or https:// URL")
     return value
 
 
