@@ -80,7 +80,9 @@ impl CodeIndexer {
     ///
     /// Why: see the module doc.
     /// What: `Ok((vector, None))` on success (`vector` is `None` when no
-    /// embedder is wired). On failure with `pinned_semantic == false` returns
+    /// embedder is wired). The embed waits at most
+    /// `TRUSTY_QUERY_EMBED_DEADLINE_MS` (#10194); a miss is a failure here.
+    /// On failure with `pinned_semantic == false` returns
     /// `Ok((None, Some(reason)))` and logs a warning; with `pinned_semantic ==
     /// true` returns `Err(EmbedderUnavailable)`.
     /// Test: `a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailable`.
@@ -89,7 +91,9 @@ impl CodeIndexer {
         text: &str,
         pinned_semantic: bool,
     ) -> anyhow::Result<(Option<Vec<f32>>, Option<String>)> {
-        match self.embed_query(text).await {
+        // #10194: bounded by the query-embed deadline; a miss degrades below.
+        let deadline = super::embed_deadline::resolve_query_embed_deadline();
+        match self.embed_query_within(text, deadline).await {
             Ok(vector) => Ok((vector, None)),
             Err(e) => {
                 let detail = format!("{e:#}");

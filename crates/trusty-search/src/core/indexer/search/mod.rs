@@ -12,6 +12,7 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod drops;
+pub(crate) mod embed_deadline;
 pub(crate) mod embed_degrade;
 pub(crate) mod exact;
 pub(crate) mod kg;
