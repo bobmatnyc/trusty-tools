@@ -50,8 +50,9 @@ docs/specs/SPEC-IL-01.md
 .claude/skills/architect-strategy/SKILL.md	skills/architect-strategy.md
 .claude/skills/architect-tmux-ops/SKILL.md	skills/architect-tmux-ops.md
 .claude/skills/architect-workflow/SKILL.md	skills/architect-workflow.md
-.claude/skills/tm-context-refresh/SKILL.md	skills/tm-context-refresh.md
-.claude/skills/tm-fleet-check/SKILL.md	skills/tm-fleet-check.md
+# Live sources are the trusty-* dirs; the Architect's tm-* dirs are stale copies (#10161).
+.claude/skills/trusty-context-refresh/SKILL.md	skills/tm-context-refresh.md
+.claude/skills/trusty-fleet-check/SKILL.md	skills/tm-fleet-check.md
 
 # Voice guide.
 docs/architect/voice.md	docs/voice.md
