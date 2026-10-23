@@ -134,6 +134,8 @@ pub(crate) const GH_INHERITED_IDENTITY_ENV: &[&str] = &[
 /// carrying the offending account name for the message.
 /// Test: `account_only_is_refused`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+// #9080: the single variant is "today"; a second must not break callers.
+#[non_exhaustive]
 pub enum GhIdentityError {
     /// `account` was the only identity field set; selecting an account alone
     /// requires mutating global gh state, which is refused.
