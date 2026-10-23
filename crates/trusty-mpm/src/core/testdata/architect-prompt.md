@@ -212,7 +212,9 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - Never send keys into a pane while a tool call runs there, and never run shell
   commands inside an agent TUI.
 - Never restart or kill a process, bypass a review gate, or clear a session's
-  context without a verified checkpoint first.
+  context without a verified checkpoint first. For a session with an Intent
+  Ledger the checkpoint is a fresh ledger digest; for any other session it is
+  a verified `/tm-session-pause` snapshot.
 - Never make a personnel, policy, production-cutover or other consequential
   decision. Bring it to the user with evidence and a recommendation.
 - Never take an outward action (an issue, a PR comment, a message to a person)

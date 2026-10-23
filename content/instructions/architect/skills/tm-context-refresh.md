@@ -91,11 +91,24 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
 - Your own pane shows no `ctx` field. The poller measures your context in
   tokens from this project's newest interactive transcript with
   `scripts/self-ctx.py` and raises a `self_ctx` alert at the same bar.
-- Refresh yourself with the same steps at the next safe boundary: no dialog
-  open for the user and no relay half sent. Verify the snapshot first.
-- Before the pause, record your crons and Monitors with their ids in
-  `local/state.md`, so the resumed session can tell them apart from new ones.
+- Refresh yourself at the next safe boundary: no dialog open for the user
+  and no relay half sent. Your Intent Ledger is the handoff, not a
+  pause snapshot: update it (tasks, the session's next, waiting_on and owed,
+  agents, crons and Monitors with their ids) so its digest (the `digest`
+  verb of `scripts/datg.py`) summarises all current activity, then run
+  `scripts/self-clear.sh --live`. Without `--live` it is a
+  dry run. It refuses unless the ledger is fresh and its SESSION block is
+  recorded, then sends `/clear` and a resume prompt that reads the digest.
+  Write no handoff block in `local/state.md`.
 - Never let your session reach automatic compaction.
+
+## Intent Ledger sessions
+
+For a session the Intent Ledger schedule lists, the checkpoint is a fresh,
+verified ledger digest, written and checked before `/clear`; steps 2, 3 and
+5 above (pause, snapshot check, resume command) do not apply. Every other
+session keeps the pause, clear and resume steps. Spec: SPEC-IL-01,
+sections 8 and 11.3.
 
 ## Hard rules
 

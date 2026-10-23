@@ -93,6 +93,13 @@ changes go to an engineer or the owning PM. Record what you find in
   works it without asking. Any uncertainty: the session raises it to you, and
   you answer at high confidence or bring it to the owner as a decision.
   Issues the session filed itself skip the review.
+- **Issue tracking is a core factory principle.** Every issue a factory
+  session files or works carries a milestone, its relationships (parent and
+  sub-issue, blocked-by, linked PR) and its current state (the project Status
+  or a status label), updated at every transition. Backfill existing open
+  issues at a steady pace; where a repository has no usable milestone set,
+  the session proposes one to you before any bulk write. Board sweeps check
+  it.
 
 ## Board sweeps
 
