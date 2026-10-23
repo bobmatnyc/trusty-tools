@@ -72,9 +72,8 @@ with `git log --format=%B <range>`. Allow a line only when ALL of these hold:
 - it matches the whole line `^Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]+$`;
 - it is the only line in that message containing `claude.ai/code/session_`.
 
-The check is `is_attribution_trailer` in
-`crates/trusty-mpm/src/core/commit_trailers.rs`; its fixture tests are the
-evidence. Report each allowed trailer as INFO with a count, never silently.
+The check is the trusty-mpm function `is_attribution_trailer`; its fixture
+tests are the evidence. Report each allowed trailer as INFO with a count, never silently.
 Anything else stays a finding: the same URL in a `git diff` hunk, a fixture, a
 commit body or a non-last-paragraph line; a second session line; trailing text,
 a path or a `?query` (`?from=cli` included); or a credential-shaped value in
