@@ -9,7 +9,7 @@ nothing is ever written (files are opened for reading only). Served by dashboard
 mode only). Output: {generated_at, totals, sessions: [{session, code, architect, project, state_path, error, v,
 written_at, written_epoch, age_s, stale, task, next, goals, items, tasks, counts}]}. Every item and task carries
 `session`. Only open/answered items and open/running tasks are listed; done work lives in the ledger archive.
-Test: scripts/test_dashboard_il.py
+Test: tests/test_dashboard_il.py
 """
 import json
 import os

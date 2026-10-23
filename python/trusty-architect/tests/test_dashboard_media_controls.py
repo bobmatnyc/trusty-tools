@@ -57,7 +57,9 @@ class TestMediaControls(unittest.TestCase):
         self.assertIn('.rd-pop[hidden] { display: none; }', SRC)   # normal pane keeps the button
 
     def test_no_new_server_endpoint(self):
-        serve = open(os.path.join(ROOT, "scripts/dashboard-serve.py"), encoding="utf-8").read()
+        # #10161: the server is split into four modules; read them all
+        serve = "".join(open(os.path.join(ROOT, "scripts", n), encoding="utf-8").read()
+                        for n in ("dashboard-serve.py", "dashboard_http.py", "dashboard_page.py", "dashboard_docs.py"))
         self.assertNotIn("media-download", serve)
         self.assertNotIn("media-copy", serve)
 

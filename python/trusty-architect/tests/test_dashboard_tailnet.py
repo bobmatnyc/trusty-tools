@@ -85,14 +85,67 @@ class Guard(unittest.TestCase):
             st = self.req("POST", "/api/items", {"Host": NAME, "Origin": o}, {"data": {"title": "t"}})
             self.assertEqual(st, 403, o)
 
-    def test_config_names_the_tailnet_origin_for_the_page(self):
-        # #10161: the page's tailnet link comes from /config.json, never from a host name in the page
-        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        c.request("GET", "/config.json", headers={"Host": f"127.0.0.1:{self.port}"})
+    def config(self, port):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", "/config.json", headers={"Host": f"127.0.0.1:{port}"})
         cfg = json.loads(c.getresponse().read())
         c.close()
-        self.assertEqual(cfg["tailnet"], f"https://{NAME}:7890/")
-        self.assertEqual(self.mod.tailnet_origin(frozenset()), "")
+        return cfg
+
+    def test_config_tailnet_is_empty_without_tailnet_url(self):
+        # #10161: a guard name admits requests; it never becomes the page's tailnet link
+        self.assertEqual(self.config(self.port)["tailnet"], "")
+
+    def test_config_names_the_configured_tailnet_url_for_the_page(self):
+        # #10161: the page's tailnet link is local/architect.json tailnet_url, served by /config.json
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        page = os.path.join(tmp.name, "index.html")
+        with open(page, "w") as f:
+            f.write("<html><head></head><body>x</body></html>")
+        srv = self.mod.DashboardServer(0, self.mod.ds.Store(os.path.join(tmp.name, "store")), page,
+                                       tailnet_url="https://tailnet.example:7890/")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.assertEqual(self.config(srv.server_address[1])["tailnet"], "https://tailnet.example:7890/")
+
+    def test_instance_settings_read_local_architect_json(self):
+        # #10161: tailnet_url and owner_name come from architect_config; a bad file costs both, named on stderr
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        good = os.path.join(tmp.name, "good.json")
+        with open(good, "w") as f:
+            json.dump({"tailnet_url": "https://tailnet.example:7890/", "owner_name": "Pat"}, f)
+        env = {"ARCHITECT_CONFIG": good, "DASHBOARD_TAILNET_URL": "", "ARCHITECT_OWNER_NAME": ""}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(self.mod.instance_settings(), ("https://tailnet.example:7890/", "Pat"))
+        bad = os.path.join(tmp.name, "bad.json")
+        with open(bad, "w") as f:
+            json.dump({"tailnet_url": 7890}, f)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, dict(env, ARCHITECT_CONFIG=bad)), redirect_stderr(err):
+            self.assertEqual(self.mod.instance_settings(), ("", ""))
+        self.assertIn("tailnet_url", err.getvalue())
+
+    def test_user_name_falls_back_to_the_configured_owner_then_neutral(self):
+        # #10161: no owner name is built in; meta/state wins, then owner_name, then "the owner"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        page = os.path.join(tmp.name, "index.html")
+        with open(page, "w") as f:
+            f.write("<html><head></head><body>x</body></html>")
+        names = []
+        for owner in ("Pat", ""):
+            srv = self.mod.DashboardServer(0, self.mod.ds.Store(os.path.join(tmp.name, f"store{owner}")), page, owner_name=owner)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+            c.request("GET", "/api/user", headers={"Host": f"127.0.0.1:{srv.server_address[1]}"})
+            names.append(json.loads(c.getresponse().read())["name"])
+            c.close()
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(names, ["Pat", "the owner"])
 
 
 class PageTailnet(unittest.TestCase):

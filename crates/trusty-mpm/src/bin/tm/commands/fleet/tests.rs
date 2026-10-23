@@ -1480,6 +1480,50 @@ fn every_schema_asset_is_seeded() {
     assert_eq!(checked, rows, "schema assets {checked}, seeded rows {rows}");
 }
 
+/// #10161: every dashboard page asset (the page, the Live view and the reader
+/// libraries) is seeded byte-equal at `templates/dashboard/<rel>`, where
+/// `dashboard-serve.py` reads it, and every seeded page row has an asset.
+#[test]
+fn every_dashboard_asset_is_seeded() {
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates/trusty-mpm/src/assets/architect/dashboard");
+    let files = seeded_files();
+    let mut stack = vec![root.clone()];
+    let mut checked = 0;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().is_some_and(|n| n == ".DS_Store") {
+                continue;
+            }
+            let rel = path.strip_prefix(&root).unwrap().to_string_lossy();
+            let dest = format!("templates/dashboard/{rel}");
+            let seeded = files
+                .iter()
+                .find(|f| f.dest == dest)
+                .unwrap_or_else(|| panic!("{dest}: a dashboard asset tm fleet init does not seed"));
+            assert!(!seeded.executable, "{dest}: a page file is not executable");
+            assert_eq!(
+                seeded.contents,
+                std::fs::read_to_string(&path).unwrap(),
+                "{dest}"
+            );
+            checked += 1;
+        }
+    }
+    let rows = files
+        .iter()
+        .filter(|f| f.dest.starts_with("templates/dashboard/"))
+        .count();
+    assert!(checked > 0, "no dashboard assets under {}", root.display());
+    assert_eq!(checked, rows, "dashboard assets {checked}, seeded rows {rows}");
+}
+
 /// #9997 AC5: a seed carrying one more skill writes it with no change to
 /// `seed.rs`; the table is built from the seed's skills.
 #[test]

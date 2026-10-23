@@ -83,7 +83,8 @@ TAB="$(printf '\t')"
 # poller's alert triage and Architect watchdog (P1b-0), then PM intake, its
 # digest and the Notification hook pair (P2), then the Intent Ledger set (P3),
 # then the six D2 skills (review, drift, provisioning, macOS, improvements,
-# host administration), then the dashboard store set and its schemas (P4a-1).
+# host administration), then the dashboard store set and its schemas (P4a-1),
+# then the serve set, the read-only views, the page, Live and vendor (D3b).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -134,6 +135,19 @@ scripts/owner_answers.py|crates/trusty-mpm/src/assets/architect/scripts/owner_an
 scripts/dashboard-db.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-db.py
 scripts/il-archive.py|crates/trusty-mpm/src/assets/architect/scripts/il-archive.py
 scripts/stale-tasks.py|crates/trusty-mpm/src/assets/architect/scripts/stale-tasks.py
+scripts/dashboard-serve.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard-serve.py
+scripts/dashboard_http.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_http.py
+scripts/dashboard_page.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_page.py
+scripts/dashboard_docs.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_docs.py
+scripts/dashboard_il.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_il.py
+scripts/dashboard_media.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_media.py
+scripts/dashboard_viz.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_viz.py
+scripts/dashboard_harness.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness.py
+templates/dashboard/index.html|crates/trusty-mpm/src/assets/architect/dashboard/index.html
+templates/dashboard/live.html|crates/trusty-mpm/src/assets/architect/dashboard/live.html
+templates/dashboard/vendor/marked.umd.js|crates/trusty-mpm/src/assets/architect/dashboard/vendor/marked.umd.js
+templates/dashboard/vendor/purify.min.js|crates/trusty-mpm/src/assets/architect/dashboard/vendor/purify.min.js
+templates/dashboard/vendor/VERSIONS.md|crates/trusty-mpm/src/assets/architect/dashboard/vendor/VERSIONS.md
 schemas/dashboard/accounts.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/accounts.schema.json
 schemas/dashboard/briefs.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/briefs.schema.json
 schemas/dashboard/effort_tunes.schema.json|crates/trusty-mpm/src/assets/architect/schemas/dashboard/effort_tunes.schema.json

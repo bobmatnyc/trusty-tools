@@ -8,7 +8,7 @@
 <script>(function(){try{var t=localStorage.getItem("architect-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <style>
 /* Layout: one narrow column; a header line, then four accordion sections (Decisions, Actions, Goals, Sessions), each a flat list of one-line rows that expand in place */
-/* Theme: Trusty Foundry v2 "rust-on-paper" (light) and "night shift" (dark), after trusty-tools crates/trusty-console/ui/src/theme.css and docs/design/UI/design-system/tokens.css. Console token -> local name: content-bg=bg, card-bg=surface, text-primary=fg, text-secondary=muted, border=line, accent=accent, text-inverse=accent-ink, accent-soft=rec-bg, warning=warn, danger=bad, surface-raised=done-bg. Light --warn is darkened from the console's #b07d10 (3.2:1 on paper) to 4.9:1 for text; light --rec-bg and --bad-bg are lighter than the console's soft tints so accent and danger text on them reach 4.5:1. */
+/* Theme: Trusty Foundry v2 "rust-on-paper" (light) and "night shift" (dark), after the trusty-console UI theme (theme.css) and the trusty-tools design-system tokens (tokens.css). Console token -> local name: content-bg=bg, card-bg=surface, text-primary=fg, text-secondary=muted, border=line, accent=accent, text-inverse=accent-ink, accent-soft=rec-bg, warning=warn, danger=bad, surface-raised=done-bg. Light --warn is darkened from the console's #b07d10 (3.2:1 on paper) to 4.9:1 for text; light --rec-bg and --bad-bg are lighter than the console's soft tints so accent and danger text on them reach 4.5:1. */
 :root {
   --bg: #f5efe7;
   --surface: #fffdf9;

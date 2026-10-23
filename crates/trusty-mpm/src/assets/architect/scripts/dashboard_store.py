@@ -16,7 +16,7 @@ changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collecti
 document against schemas/dashboard/ (DASHBOARD_SCHEMA=off|warn|enforce; default warn for jsonl, off for dir).
 A store of the other format is refused loudly, never read as empty.
 No network, no secrets.
-Test: scripts/test_dashboard_store.py, scripts/test_dashboard_jsonl.py
+Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py
 """
 import copy
 import fcntl
@@ -107,7 +107,7 @@ def normalize_timestamps(value, key=None):
     """Return value with every minute-precision timestamp (2026-10-12T03:46Z) in a timestamp field given seconds.
     Why: the schemas want HH:MM:SS; the Architect's hand-typed CLI writes used HH:MMZ and made validate fail (2026-10-12).
     What: recurse dicts and lists; rewrite a string only under created/updated/due/at/until/eta* or a key ending _at,
-    never free text (title, detail, answer). Test: scripts/test_dashboard_migrate_validate.py"""
+    never free text (title, detail, answer). Test: tests/test_dashboard_store_guards.py"""
     if isinstance(value, dict):
         return {k: normalize_timestamps(v, k) for k, v in value.items()}
     if isinstance(value, list):
@@ -151,7 +151,7 @@ def _refuse_live_write_under_test(root):
     """A test run must never write the live store, whatever conftest did or did not set.
     Why: tests that ran without scripts/conftest.py wrote "exited" over every session doc (2026-10-09).
     What: raise when pytest is loaded and root is the real local/owner-queue.
-    Test: scripts/test_store_live_guard.py"""
+    Test: tests/test_dashboard_store_guards.py"""
     if "pytest" in sys.modules and os.path.realpath(root) == os.path.realpath(DEFAULT_ROOT):
         raise StoreError(f"refusing to write the live store {root} under pytest")
 

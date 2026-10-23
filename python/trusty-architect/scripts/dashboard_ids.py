@@ -8,7 +8,7 @@ when full); free_count(prefix) is 256 minus the used ids; retire_candidates(pref
 oldest status "done" items (by done_at) to retire so at least keep_free ids stay free. Used ids come from the
 items, goals, priorities, sessions, questions and media (prefix B, dashboard_media.sync_ids) collections. The rules are in dashboard_derive; this module is the root-based wrapper. This module never deletes: retirement (archive to memory,
 then delete) stays with the Architect.
-Test: scripts/test_dashboard_ids.py
+Test: tests/test_dashboard_ids.py
 """
 import os
 import sys

@@ -16,7 +16,7 @@ What: build() returns {generated_at, since, tokens, projects, ctx_hours, il_clos
              `session` are recorded; `goal` is inferred from the ledger's session.
 Goal key: a goal id ("G01") when the session's goal field starts with one, else that field's text when it has no id, else
 the goals collection's `sessions` list names the session, else "" (unattributed). Nothing is written; every file is opened read-only.
-Test: scripts/test_dashboard_viz.py
+Test: tests/test_dashboard_viz.py
 """
 import json
 import os

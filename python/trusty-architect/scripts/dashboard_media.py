@@ -13,7 +13,7 @@ Conflict and the pass re-reads), marks a vanished file done (it keeps its id; re
 if it returns (`accessed`, the ISO time the viewer last opened the file, is written by the page with PATCH /api/media/<id>
 and kept by every rewrite here); when all 256 ids are used the oldest done media id is deleted and reused. media_rows() is the /media payload
 with an `id` and, once the file was opened in the viewer, an `accessed` time on each row. SVG files listed under both types share one id. PRs, issues and briefs get no ids.
-Test: scripts/test_dashboard_media.py, scripts/test_dashboard_media_ids.py
+Test: tests/test_dashboard_media.py, tests/test_dashboard_media_ids.py
 """
 import os
 import re

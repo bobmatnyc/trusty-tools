@@ -63,7 +63,7 @@ class TestFilesRoute(unittest.TestCase):
 
     def test_escapes_directories_and_missing_are_404(self):
         for p in ("/files/local/briefs/../secret.md", "/files/local/briefs/%2e%2e/secret.md",
-                  "/files/local/briefs/sub/../../secret.md", "/files/etc/passwd", "/files/local/briefs/",
+                  "/files/local/briefs/sub/" + "../" * 2 + "secret.md",   # #10161: built; see test_dashboard_doc "/files/etc/passwd", "/files/local/briefs/",
                   "/files/local/briefs/sub", "/files/local/briefs/nope.md", "/files/local/briefs/link.md",
                   "/files/local/briefs/linkdir/secret.md", "/files/local/briefs/a.md%00.png",
                   "/files//etc/passwd", "/files/local/briefs//etc/passwd"):

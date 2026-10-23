@@ -100,4 +100,6 @@ def test_pruned_verb_without_log_is_empty(env):
 
 
 def test_server_does_not_read_archive_path():
-    assert "owner-queue-archive" not in open(os.path.join(SCRIPTS, "dashboard-serve.py")).read()
+    # #10161: the server is split into four modules; none of them reads the archive path
+    for name in ("dashboard-serve.py", "dashboard_http.py", "dashboard_page.py", "dashboard_docs.py"):
+        assert "owner-queue-archive" not in open(os.path.join(SCRIPTS, name)).read(), name

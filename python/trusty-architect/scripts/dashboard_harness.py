@@ -26,7 +26,7 @@ file {id, path, project, rel, view, session, tool, ts, epoch, n}. `view` is {pro
 diff of the latest change comes from GET /api/harness/diff?id= (doc_diff): difflib over the Edit old/new strings, or the whole file as additions
 for a Write. Secret-named files are never listed; secret-looking values in a diff are redacted. SendMessage sends found in the Architect's own
 transcripts are added to `messages` (dir "out", kind "sendmessage"). Read-only; bounded by READ_CAP per file and DOC_FILES files per dir.
-Test: scripts/test_dashboard_harness.py
+Test: tests/test_dashboard_harness.py
 """
 import difflib
 import fnmatch
