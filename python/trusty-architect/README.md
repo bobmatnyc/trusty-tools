@@ -42,12 +42,14 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/dashboard_store.py`, `scripts/dashboard_jsonl.py`, `scripts/dashboard_schema.py` | The dashboard's file-backed document store: one JSON file per document (or one canonical `.jsonl` per collection), versioned writes under one lock, all-or-nothing batches. `dashboard_schema.py` validates documents against `schemas/dashboard/` with a small stdlib validator. Default root `local/owner-queue`; `DASHBOARD_ROOT` overrides it. |
 | `scripts/dashboard_derive.py`, `scripts/dashboard_ids.py`, `scripts/dashboard_qual.py`, `scripts/owner_answers.py` | Pure functions over a store snapshot: open counts, parked items, next id (256 ids per prefix, recycled), stale tasks, session-qualified ids, and the owner answers still waiting for a relay. |
-| `scripts/dashboard-db.py` | The Architect's command line over the store: `get`, `list`, `set`, `update`, `delete`, `batch`, `next`, `create`, `tally` and the reply `footer`. The footer's tailnet link needs `DASHBOARD_TAILNET_URL`. |
+| `scripts/dashboard-db.py` | The Architect's command line over the store: `get`, `list`, `set`, `update`, `delete`, `batch`, `next`, `create`, `tally` and the reply `footer`. The footer's tailnet link needs `tailnet_url` (see Configuration). |
 | `scripts/il-archive.py` | Archives done dashboard items and closed PM-ledger lines to trusty-memory, then removes them. Live by default; `--dry-run` writes nothing. |
 | `scripts/stale-tasks.py` | Lists open, unparked dashboard tasks with no activity for `--hours` (default 24). Read only. |
 | `schemas/dashboard/` | The draft 2020-12 JSON Schemas for each dashboard collection. Seeded beside `scripts/`, where `dashboard_schema.py` reads them. |
 | `docs/specs/SPEC-IL-01.md` | The Intent Ledger spec the scripts above cite. A design record: trusty-mpm does not ship it. |
 | `tests/` | pytest suite for the scripts above; `tests/fixtures/dashboard/golden/` holds the store fixtures the derive test reads. |
+
+The dashboard store scripts are the one allowed copy of the dashboard code (DOC-82 LDG-1.2 interim ruling): `tm fleet init` seeds them into the Architect project only, never a PM project. They stay the reference until the Rust port (#10063) is live-checked (LDG-1.5). While both exist, one process writes a store (LDG-3.8): do not point `tm architect dashboard` verbs at the Architect's `local/owner-queue`.
 
 ## Configuration
 
