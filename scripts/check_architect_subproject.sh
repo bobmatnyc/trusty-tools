@@ -81,7 +81,9 @@ TAB="$(printf '\t')"
 # then the architect-* skills, the relay scripts and the voice guide.
 # #10161: the config loader and its local/architect.json seed, then the
 # poller's alert triage and Architect watchdog (P1b-0), then PM intake, its
-# digest and the Notification hook pair (P2), then the Intent Ledger set (P3).
+# digest and the Notification hook pair (P2), then the Intent Ledger set (P3),
+# then the six D2 skills (review, drift, provisioning, macOS, improvements,
+# host administration).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -94,6 +96,12 @@ skills/architect-github.md|content/instructions/architect/skills/architect-githu
 skills/architect-strategy.md|content/instructions/architect/skills/architect-strategy.md
 skills/architect-completion-standard.md|content/instructions/architect/skills/architect-completion-standard.md
 skills/architect-owner-model.md|content/instructions/architect/skills/architect-owner-model.md
+skills/architect-drift-check.md|content/instructions/architect/skills/architect-drift-check.md
+skills/architect-review.md|content/instructions/architect/skills/architect-review.md
+skills/architect-project-provision.md|content/instructions/architect/skills/architect-project-provision.md
+skills/architect-macos.md|content/instructions/architect/skills/architect-macos.md
+skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
+skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py

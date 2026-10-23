@@ -126,6 +126,13 @@ const ARCHITECT_ONLY_SKILLS: &[&str] = &[
     "architect-strategy",
     "architect-tmux-ops",
     "architect-workflow",
+    // #10161 D2: the second set of seeded Architect skills.
+    "architect-drift-check",
+    "architect-host-admin",
+    "architect-improvements",
+    "architect-macos",
+    "architect-project-provision",
+    "architect-review",
     "tm-context-refresh",
     "tm-fleet-check",
 ];

@@ -195,7 +195,13 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 /// Directories `tm fleet init` guarantees, created when absent.
 // #9997: per-project records live in `local/projects/`; the skills write
 // other users' profiles to `local/users/` and briefs to `local/briefs/`.
-pub(crate) const DIRS: &[&str] = &["local/projects", "local/users", "local/briefs"];
+// #10161: `architect-improvements` keeps its ledger in `local/improvements/`.
+pub(crate) const DIRS: &[&str] = &[
+    "local/projects",
+    "local/users",
+    "local/briefs",
+    "local/improvements",
+];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`; one step each.
 ///

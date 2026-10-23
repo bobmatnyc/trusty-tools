@@ -819,7 +819,7 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert_eq!(meta.permissions().mode() & 0o111 != 0, executable, "{rel}");
     }
-    for rel in ["local/users", "local/briefs"] {
+    for rel in ["local/users", "local/briefs", "local/improvements"] {
         assert!(dir.join(rel).is_dir(), "{rel} is not created");
     }
 }

@@ -16,7 +16,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `skills/architect-*.md` | The eight skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model). Seeded the same way. |
+| `skills/architect-*.md` | The fourteen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check). Seeded the same way. |
 | `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`), and the `architect.json` config seed with no owner values. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
@@ -131,9 +131,8 @@ a start that fails fails the command.
 
 ## Not here yet
 
-The question collector, the host-admin, review, drift-check, improvements,
-provision and dashboard skills, and `fleet-restart` stay in the prototype for
-now (#8536).
+The question collector, the dashboard and token-optimizer skills, and
+`fleet-restart` stay in the prototype for now (#8536).
 
 ## Provision by hand
 
@@ -180,7 +179,7 @@ Copy each file only if the target is absent. Never overwrite an edited one.
 ```sh
 src=<src>
 mkdir -p "$dir/scripts" "$dir/local/projects" "$dir/local/users" "$dir/local/briefs" \
-  "$dir/docs/architect"
+  "$dir/local/improvements" "$dir/docs/architect"
 cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
 cp -Rn "$src/templates/local/."         "$dir/local/"

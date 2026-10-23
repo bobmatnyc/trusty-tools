@@ -271,7 +271,23 @@ path = "instructions/architect/skills/architect-completion-standard.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/architect/skills/architect-drift-check.md"
+version = "0.1.0"
+
+[[member]]
 path = "instructions/architect/skills/architect-github.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-host-admin.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-improvements.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-macos.md"
 version = "0.1.0"
 
 [[member]]
@@ -280,6 +296,14 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-owner-model.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-project-provision.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-review.md"
 version = "0.1.0"
 
 [[member]]

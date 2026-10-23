@@ -7,7 +7,11 @@
 # blank lines are skipped.
 #
 # Starter set: exactly what python/trusty-architect/ ships today. Each later
-# export PR adds the rows it ships, reviewed with its content. Instance paths
+# export PR adds the rows it ships, reviewed with its content. A skill shipped
+# in trusty-tools form (its frontmatter and wording rewritten by hand, #10161)
+# is never overwritten by a later export: re-export it to a scratch staging
+# directory, diff it against the shipped copy and run the leak pass, then
+# hand-merge the delta. Instance paths
 # (local/, owner/, records/, inbox/, docs/briefs/, .env*, .mcp.json, ...) are
 # refused by the tool even when listed here. Never add an instance-* skill or
 # any path that names an account, host or person.
@@ -44,9 +48,15 @@ docs/specs/SPEC-IL-01.md
 
 # Skills: .claude/skills/<name>/SKILL.md -> skills/<name>.md.
 .claude/skills/architect-completion-standard/SKILL.md	skills/architect-completion-standard.md
+.claude/skills/architect-drift-check/SKILL.md	skills/architect-drift-check.md
 .claude/skills/architect-github/SKILL.md	skills/architect-github.md
+.claude/skills/architect-host-admin/SKILL.md	skills/architect-host-admin.md
+.claude/skills/architect-improvements/SKILL.md	skills/architect-improvements.md
+.claude/skills/architect-macos/SKILL.md	skills/architect-macos.md
 .claude/skills/architect-operating-rules/SKILL.md	skills/architect-operating-rules.md
 .claude/skills/architect-owner-model/SKILL.md	skills/architect-owner-model.md
+.claude/skills/architect-project-provision/SKILL.md	skills/architect-project-provision.md
+.claude/skills/architect-review/SKILL.md	skills/architect-review.md
 .claude/skills/architect-search-memory/SKILL.md	skills/architect-search-memory.md
 .claude/skills/architect-strategy/SKILL.md	skills/architect-strategy.md
 .claude/skills/architect-tmux-ops/SKILL.md	skills/architect-tmux-ops.md
