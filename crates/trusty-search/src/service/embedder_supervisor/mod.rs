@@ -983,3 +983,6 @@ fn parse_env_u32(var: &str, default: u32) -> u32 {
 
 #[cfg(test)]
 mod tests;
+// #10194: the query-embed deadline against a real child process.
+#[cfg(all(test, unix))]
+mod deadline_tests;

@@ -259,6 +259,9 @@ mod tests_index_routing;
 // #8348: a failed query embed degrades to lexical instead of a 500.
 #[cfg(test)]
 mod tests_8348;
+// #10194: a cold embedder waits at most the query-embed deadline.
+#[cfg(test)]
+mod tests_10194;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;

@@ -273,6 +273,9 @@ pub struct CodeIndexer {
     /// LRU cache of query → embedding, keyed by `hash_query`.
     pub(super) query_cache: Arc<Mutex<LruCache<u64, Vec<f32>>>>,
 
+    /// #10194: query embeds that missed their deadline and still run.
+    pub(super) query_embed_gate: Arc<search::embed_deadline::QueryEmbedGate>,
+
     /// Call graph derived from the chunk corpus.
     pub(super) symbol_graph: Arc<RwLock<Arc<SymbolGraph>>>,
 
@@ -791,6 +794,7 @@ impl CodeIndexer {
             chunk_embeddings: Arc::new(RwLock::new(LruCache::new(emb_cap))),
             bm25: Arc::new(RwLock::new(CodeBm25Index::new())),
             query_cache: Arc::new(Mutex::new(LruCache::new(cap))),
+            query_embed_gate: Arc::default(),
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
             graph_refresh: graph_refresh::GraphRefresh::default(),
             path_write_locks: ingest::supersede::PathWriteLocks::default(),
