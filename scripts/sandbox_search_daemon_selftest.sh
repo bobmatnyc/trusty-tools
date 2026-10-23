@@ -48,6 +48,8 @@
 #     embedder-knobs the embedder names (#9828) reach the stub with the
 #                 caller's value; a credential-shaped name under their
 #                 prefixes, a near-miss prefix and an exported empty value do not
+#     perf-knobs  the idle-evict, rehydrate, query-timeout and sidecar
+#                 idle/startup knobs (#10192) reach the stub with the caller's value
 #
 # Usage: ./scripts/sandbox_search_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -558,6 +560,33 @@ elif grep -qE '^TRUSTY_(EMBEDDER|DEVICE|UV_BIN|EMBEDDERD_PY_BIN|EMBEDDERD_RECYCL
   fail embedder-knobs-empty "an exported empty value reached the daemon: $(grep '^TRUSTY_' "$DIR21/home/stub-env" | tr '\n' ' ')"
 else
   pass embedder-knobs-empty
+fi
+
+# 16. perf-knobs (#10192): the perf-probe knobs reach the daemon with the
+# caller's value, beside a fake secret that does not.
+PERF_SET="TRUSTY_CHUNKS_IDLE_EVICT_SECS=5 TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS=0
+TRUSTY_REHYDRATE_WAIT_MS=20000 TRUSTY_QUERY_TIMEOUT_SECS=60 TRUSTY_QUERY_EMBED_DEADLINE_MS=5000
+TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS=300 TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS=45"
+DIR22="$TMP_ROOT/case22"
+mkdir -p "$DIR22"
+set +e
+# shellcheck disable=SC2086  # PERF_SET is NAME=value words, split on purpose
+OUT22="$(env -i PATH="$PATH" GITHUB_TOKEN="$FAKE_TOKEN" $PERF_SET \
+  bash "$LAUNCHER" --bin "$STUBV" --dir "$DIR22" 2>&1)"
+S22=$?
+set -e
+MISSING22=""
+for word in $PERF_SET; do
+  grep -qxF -- "$word" "$DIR22/home/stub-env" 2>/dev/null || MISSING22="$MISSING22 $word"
+done
+if [ "$S22" -ne 0 ] || [ ! -f "$DIR22/home/stub-env" ]; then
+  fail perf-knobs "exit $S22 or the stub never ran: $OUT22"
+elif [ -n "$MISSING22" ]; then
+  fail perf-knobs "the daemon did not receive:$MISSING22"
+elif leaks "$OUT22" || leaks "$(cat "$DIR22/home/stub-env")"; then
+  fail perf-knobs "a fake secret value reached the daemon or the output"
+else
+  pass perf-knobs
 fi
 
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"
