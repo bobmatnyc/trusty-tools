@@ -112,7 +112,8 @@ pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with
 // #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.
 pub use bounded_store::{
     STORE_ERROR_CACHE_TTL, STORE_READ_TIMEOUT, SecretResolveError, StoreErrorKind, StoreFailure,
-    resolve_env_var_bounded, resolve_provider_bounded_with, store_get_bounded,
+    resolve_env_var_bounded, resolve_env_var_bounded_store_first,
+    resolve_provider_bounded_store_first_with, resolve_provider_bounded_with, store_get_bounded,
 };
 pub use dotenv::{
     SANDBOX_ENV_VAR, env_local_value, find_workspace_env_local, load_env_from_path,
