@@ -30,7 +30,7 @@ use trusty_common::control_bus::{
 
 use crate::core::hook::{HookEvent, HookEventRecord};
 use crate::core::session::SessionId;
-use crate::daemon::services::hook_service::is_coding_file;
+use crate::daemon::services::hook_service::keep_file_changed;
 
 /// Sessions tracked at once; the least recently touched is evicted.
 pub const MAX_SESSIONS: usize = 256;
@@ -165,7 +165,7 @@ impl Threader {
         // #6849: the watcher skips `hook_service`'s noise filter; build,
         // dependency and VCS writes would flood the bounded buffer.
         if record.event == HookEvent::FileChanged
-            && !is_coding_file(&str_field(&record.payload, "path").unwrap_or_default())
+            && !keep_file_changed(&str_field(&record.payload, "path").unwrap_or_default())
         {
             return Vec::new();
         }
