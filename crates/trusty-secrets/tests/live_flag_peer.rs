@@ -43,6 +43,10 @@ use trusty_common::uds::{send_framed_request, socket_is_serving};
 use trusty_secrets::store::{FileBackend, NamesIndex, SecretBackend, SecretStore, VALUES_SUBDIR};
 use trusty_secrets::{SecretKey, SecretValue, VaultName};
 
+#[path = "support/self_copy.rs"]
+mod self_copy;
+use self_copy::self_copy;
+
 const BIN: &str = env!("CARGO_BIN_EXE_trusty-secrets");
 /// The env var naming a re-run's role; unset in the orchestrator.
 const ROLE: &str = "TS_LIVE_ROLE";
@@ -348,13 +352,11 @@ fn live_claude_named_ancestor_is_refused_a_grant() {
     }
     let live = live();
     let exe = std::env::current_exe().unwrap();
-    let bin = live.path("bin");
-    std::fs::create_dir(&bin).unwrap();
     let out = live.path("out");
     std::fs::create_dir(&out).unwrap();
     for name in ["claude", "notclaude"] {
-        let copy = bin.join(name);
-        std::fs::copy(&exe, &copy).unwrap();
+        // #10212: one copy per name per process, not one per test.
+        let copy = self_copy(name);
         let mut launcher = role(&copy, GRANT_TEST, "launcher")
             .env(ORIGINAL, &exe)
             .env("TS_LIVE_LAUNCHER", name)
