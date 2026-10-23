@@ -23,7 +23,11 @@
 //! skills' nested `<stem>/references/<file>.md` artifacts, materialized under
 //! a matching nested directory (not flattened) and pruned recursively via
 //! [`prune_orphaned_skill_files`] — the pre-#2903 top-level-only sweep never
-//! descended into skill subdirectories. [`ensure_skill_source_fresh`] compares the
+//! descended into skill subdirectories. #10211: a skill's carried files are
+//! any extension (`references/*.yml`, `scripts/*.sh`); `scripts/*` is written
+//! `0o755`, and a `.materialized` ledger of what this module wrote is what lets
+//! the prune remove a stale non-`.md` file without touching a file it never
+//! wrote. [`ensure_skill_source_fresh`] compares the
 //! current stamp against a marker file written alongside the source
 //! directory and re-materializes it only when they differ (including "never
 //! materialized at all"), so callers can invoke it unconditionally and cheap
@@ -35,17 +39,22 @@
 //! `materialize_skill_artifacts_prunes_files_not_in_table`,
 //! `materialize_skill_artifacts_writes_nested_reference_files`,
 //! `materialize_skill_artifacts_prunes_stale_reference_files`,
+//! `materialize_writes_scripts_executable_and_non_md_references`,
+//! `materialize_prunes_an_orphaned_script_it_wrote`,
+//! `materialize_keeps_a_file_it_never_wrote`,
 //! `ensure_skill_source_fresh_materializes_when_missing`,
 //! `ensure_skill_source_fresh_is_noop_when_current`,
 //! `ensure_skill_source_fresh_prunes_renamed_files`,
 //! `ensure_skill_source_fresh_skips_submodule_source`.
 
 use std::collections::HashSet;
+use std::path::Path;
 
-use crate::core::agent_manifest::{atomic_write, checksum};
+use crate::core::agent_manifest::{atomic_write, atomic_write_executable, checksum};
 use crate::core::error::Result;
 use crate::core::framework_content::FrameworkContent;
 use crate::core::paths::FrameworkPaths;
+use crate::core::skill_deployer::is_executable_skill_file;
 
 /// Marker file recording the last-materialized bundle stamp, written
 /// directly under the skill source directory (`paths.skills/.bundle-stamp`).
@@ -54,6 +63,13 @@ use crate::core::paths::FrameworkPaths;
 /// already-current and stop [`ensure_skill_source_fresh`] materializing the
 /// content's skills over it.
 pub(crate) const STAMP_FILE_NAME: &str = ".bundle-stamp";
+
+/// Ledger of every file [`materialize_skill_artifacts`] last wrote, one
+/// root-relative path per line, under `paths.skills/.materialized` (#10211).
+///
+/// Why: the prune removes a non-`.md` file only when this ledger names it, so
+/// a renamed skill's `scripts/*.sh` goes while a file tm never wrote stays.
+pub(crate) const LEDGER_FILE_NAME: &str = ".materialized";
 
 /// Compute a stable sha256 fingerprint over every skill file of `content`.
 ///
@@ -86,9 +102,12 @@ pub fn skill_bundle_stamp(content: &FrameworkContent) -> String {
 /// What: creates `paths.skills` if absent, atomically (over)writes each
 /// `skills/*` artifact's contents to `<paths.skills>/<basename>` (always,
 /// regardless of prior content — this is the authoritative re-materialization
-/// path, not the user-facing incremental `tm install`), then removes any
-/// existing top-level `*.md` file whose name is not one of the artifacts just
-/// written. Hidden files (leading `.`, e.g. the stamp marker) are never
+/// path, not the user-facing incremental `tm install`), a `<stem>/scripts/*`
+/// artifact as `0o755` (#10211, [`is_executable_skill_file`]), then removes
+/// any existing `*.md` file, or any file the previous run's
+/// [`LEDGER_FILE_NAME`] ledger names, whose path is not one of the artifacts
+/// just written, and rewrites the ledger. Hidden files (leading `.`, e.g. the
+/// stamp marker) are never
 /// touched. An artifact whose OWN stem (the first path segment, `.md`-stripped
 /// — never a nested `references/*.md` sibling's filename) contains "mcp"
 /// (case-insensitive) is skipped entirely — never written, and any stale copy
@@ -105,7 +124,10 @@ pub fn skill_bundle_stamp(content: &FrameworkContent) -> String {
 /// materialize the file. Returns the basenames written.
 /// Test: `materialize_skill_artifacts_writes_all_skills`,
 /// `materialize_skill_artifacts_prunes_files_not_in_table`,
-/// `materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename`.
+/// `materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename`,
+/// `materialize_writes_scripts_executable_and_non_md_references`,
+/// `materialize_prunes_an_orphaned_script_it_wrote`,
+/// `materialize_keeps_a_file_it_never_wrote`.
 pub fn materialize_skill_artifacts(
     paths: &FrameworkPaths,
     content: &FrameworkContent,
@@ -154,36 +176,87 @@ pub fn materialize_skill_artifacts(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        atomic_write(&dest, contents)?;
+        // #10211: `<stem>/scripts/*` lands executable; the tarball's `0644`
+        // cannot carry the bit, so the path is the contract.
+        if is_executable_artifact(basename) {
+            atomic_write_executable(&dest, contents)?;
+        } else {
+            atomic_write(&dest, contents)?;
+        }
         keep.insert(basename.to_string());
         written.push(basename.to_string());
     }
 
-    prune_orphaned_skill_files(&paths.skills, &paths.skills, &keep)?;
+    // #10211: what the previous run wrote is what this run may prune beyond
+    // the legacy `.md` rule. An unreadable ledger is an error, never "nothing
+    // owned": the prune would then keep stale scripts while the stamp advanced.
+    let ledger_path = paths.skills.join(LEDGER_FILE_NAME);
+    let owned = read_ledger(&ledger_path)?;
+    prune_orphaned_skill_files(&paths.skills, &paths.skills, &keep, &owned)?;
+    let mut ledger: Vec<&str> = keep.iter().map(String::as_str).collect();
+    ledger.sort_unstable();
+    atomic_write(&ledger_path, &ledger.join("\n"))?;
 
     Ok(written)
 }
 
-/// Recursively remove any `.md` file under `dir` whose path (relative to
-/// `root`, `/`-separated) is not in `keep`, then remove any directory left
-/// empty by that pruning.
+/// Whether a `skills/`-relative artifact path names a file written `0o755`.
+///
+/// What: `<stem>/<rel>` with [`is_executable_skill_file`] true for `<rel>`.
+/// Test: `materialize_writes_scripts_executable_and_non_md_references`.
+fn is_executable_artifact(basename: &str) -> bool {
+    basename
+        .split_once('/')
+        .is_some_and(|(_, rel)| is_executable_skill_file(rel))
+}
+
+/// The root-relative paths the previous materialization wrote (#10211).
+///
+/// What: one path per non-empty line of `ledger_path`; an absent ledger is the
+/// empty set (a source dir no run of this version has written yet); any other
+/// read error propagates.
+/// Test: `materialize_prunes_an_orphaned_script_it_wrote`.
+fn read_ledger(ledger_path: &Path) -> Result<HashSet<String>> {
+    match std::fs::read_to_string(ledger_path) {
+        Ok(text) => Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Recursively remove any `.md` file, or any file in `owned`, under `dir`
+/// whose path (relative to `root`, `/`-separated) is not in `keep`, then
+/// remove any directory left empty by that pruning.
 ///
 /// Why: [`materialize_skill_artifacts`] must prune stale entries for renamed
 /// or removed skills (#1917) AND, since #2903 added nested
 /// `<stem>/references/<file>.md` artifacts, stale reference files and their
 /// now-empty `<stem>/references/` or `<stem>/` directories — a flat top-level
 /// `read_dir` sweep (the pre-#2903 implementation) only ever saw top-level
-/// `.md` files and never descended into skill subdirectories.
-/// What: hidden entries (leading `.`, e.g. the bundle-stamp marker) are never
-/// touched; every other file is removed unless its root-relative path is in
-/// `keep`; every directory is recursed into first, then removed if left with
-/// no entries.
+/// `.md` files and never descended into skill subdirectories. #10211: a
+/// skill's `scripts/*.sh` or `references/*.yml` is pruned too, but only when
+/// the previous run's ledger (`owned`) says this module wrote it — a file tm
+/// never wrote is never deleted.
+/// What: hidden entries (leading `.`, e.g. the bundle-stamp marker and the
+/// ledger) are never touched; a `.md` file, or a file named in `owned`, is
+/// removed unless its root-relative path is in `keep`; any other file stays;
+/// every directory is recursed into first, then removed if left with no
+/// entries. Any read or remove error propagates, so the caller never advances
+/// its stamp over a half-pruned tree.
 /// Test: `materialize_skill_artifacts_prunes_files_not_in_table`,
-/// `materialize_skill_artifacts_prunes_stale_reference_files`.
+/// `materialize_skill_artifacts_prunes_stale_reference_files`,
+/// `materialize_prunes_an_orphaned_script_it_wrote`,
+/// `materialize_keeps_a_file_it_never_wrote`.
 fn prune_orphaned_skill_files(
-    dir: &std::path::Path,
-    root: &std::path::Path,
+    dir: &Path,
+    root: &Path,
     keep: &HashSet<String>,
+    owned: &HashSet<String>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -195,19 +268,23 @@ fn prune_orphaned_skill_files(
             continue;
         }
         if entry.file_type()?.is_dir() {
-            prune_orphaned_skill_files(&path, root, keep)?;
+            prune_orphaned_skill_files(&path, root, keep, owned)?;
             if std::fs::read_dir(&path)?.next().is_none() {
                 std::fs::remove_dir(&path)?;
             }
-        } else if name.ends_with(".md") {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
-            if !keep.contains(rel.as_str()) {
-                std::fs::remove_file(&path)?;
-            }
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if keep.contains(rel.as_str()) {
+            continue;
+        }
+        // #10211: non-`.md` files are pruned by ledger, never by extension.
+        if name.ends_with(".md") || owned.contains(rel.as_str()) {
+            std::fs::remove_file(&path)?;
         }
     }
     Ok(())
@@ -388,6 +465,110 @@ mod tests {
             !paths.skills.join("removed-skill").exists(),
             "the entire orphaned skill directory must be pruned, including now-empty dirs"
         );
+    }
+
+    /// A fixture skill carrying a script and a non-`.md` reference (#10211).
+    const FIXTURE_SKILL: &[(&str, &str)] = &[
+        ("tm-fixture.md", "---\nname: tm-fixture\n---\nbody\n"),
+        ("tm-fixture/references/guide.md", "# Guide\n"),
+        ("tm-fixture/references/adr-check.yml", "rules: []\n"),
+        ("tm-fixture/scripts/check.sh", "#!/bin/sh\nexit 0\n"),
+    ];
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// #10211: every fixture file materializes byte-identical; `scripts/*` is
+    /// `0o755`, every reference is not executable. Fails on the pre-fix code,
+    /// which wrote the script `0644`.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_writes_scripts_executable_and_non_md_references() {
+        use crate::core::framework_content::tests::content_with_skill_files;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+
+        materialize_skill_artifacts(&paths, &content_with_skill_files(FIXTURE_SKILL)).unwrap();
+
+        for (rel, body) in FIXTURE_SKILL {
+            let path = paths.skills.join(rel);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), *body, "{rel}");
+            let executable = mode_of(&path) & 0o111 != 0;
+            assert_eq!(executable, rel.contains("/scripts/"), "{rel} mode");
+        }
+        assert_eq!(
+            mode_of(&paths.skills.join("tm-fixture/scripts/check.sh")),
+            0o755
+        );
+    }
+
+    /// #10211: a non-`.md` file a previous run wrote (named in the ledger) and
+    /// the current content no longer lists is pruned, directory included.
+    /// Fails on the pre-fix code, whose sweep removed `.md` files only.
+    #[test]
+    fn materialize_prunes_an_orphaned_script_it_wrote() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let stale = paths.skills.join("removed-skill").join("scripts");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("old.sh"), "stale\n").unwrap();
+        std::fs::write(
+            paths.skills.join(LEDGER_FILE_NAME),
+            "removed-skill/scripts/old.sh\n",
+        )
+        .unwrap();
+
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
+
+        assert!(
+            !paths.skills.join("removed-skill").exists(),
+            "an orphaned script this module wrote must be pruned with its directory"
+        );
+        let ledger = std::fs::read_to_string(paths.skills.join(LEDGER_FILE_NAME)).unwrap();
+        assert!(ledger.lines().any(|l| l == "tm-doctor.md"), "{ledger}");
+        assert!(!ledger.contains("removed-skill"), "{ledger}");
+    }
+
+    /// #10211: a non-`.md` file absent from the ledger was not written by this
+    /// module, so the prune leaves it — beside a managed skill or at the root.
+    #[test]
+    fn materialize_keeps_a_file_it_never_wrote() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let user_dir = paths.skills.join("tm-doctor").join("scripts");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let beside = user_dir.join("mine.sh");
+        let root_level = paths.skills.join("notes.txt");
+        std::fs::write(&beside, "user\n").unwrap();
+        std::fs::write(&root_level, "user\n").unwrap();
+
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
+
+        assert!(
+            beside.is_file(),
+            "a user script beside a managed skill stays"
+        );
+        assert!(root_level.is_file(), "a user file at the root stays");
+        assert!(paths.skills.join("tm-doctor.md").is_file());
+    }
+
+    /// #10211: an unreadable ledger stops the run before any prune, so the
+    /// caller never writes a stamp over a tree it could not reconcile.
+    #[cfg(unix)]
+    #[test]
+    fn materialize_fails_closed_on_an_unreadable_ledger() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        std::fs::create_dir_all(&paths.skills).unwrap();
+        // A directory where the ledger file belongs is unreadable as a file.
+        std::fs::create_dir_all(paths.skills.join(LEDGER_FILE_NAME)).unwrap();
+
+        let err = materialize_skill_artifacts(&paths, &repo_content());
+
+        assert!(err.is_err(), "an unreadable ledger must not read as empty");
     }
 
     #[test]
