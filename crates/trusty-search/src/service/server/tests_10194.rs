@@ -260,28 +260,38 @@ async fn concurrent_cold_queries_share_one_spawn_and_all_answer_in_time() {
     assert_eq!(cold.spawns.load(Ordering::SeqCst), 1, "one spawn only");
 }
 
-/// A query that pinned the semantic lane keeps the #8348 contract on expiry:
-/// `503 vector_unavailable`, retryable, inside the deadline.
+/// A query that pinned the semantic lane takes neither the deadline nor the
+/// gate: it waits for the detached embed within the query budget, so a cold
+/// spawn that finishes inside that budget answers 200 with vector results.
 ///
-/// Pre-fix it waited out [`COLD_START`] and answered 200.
+/// Pre-fix it answered `503 vector_unavailable` after the 300 ms deadline.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_pinned_semantic_query_on_a_cold_embedder_is_503_inside_the_deadline() {
+async fn a_pinned_semantic_query_waits_out_a_cold_spawn_instead_of_503() {
     let _env = EnvGuard::set("TRUSTY_QUERY_EMBED_DEADLINE_MS", DEADLINE_MS);
-    let id = "cold-embed-pinned-10194";
-    let (state, _cold, _tmp) = state_with_cold_embedder(id).await;
+    let id = "cold-embed-pinned-wait-10194";
+    let (state, cold, _tmp) = state_with_cold_embedder(id).await;
 
     let started = Instant::now();
-    let (status, body) = search(
+    let body = search(
         &state,
         id,
         serde_json::json!({ "text": "authenticate session token", "stage": "semantic" }),
     )
     .await
-    .expect_err("a pinned semantic query cannot be answered lexically");
-    assert!(started.elapsed() < Duration::from_millis(300) + SLACK);
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["error"], "vector_unavailable");
-    assert_eq!(body["retryable"], true);
+    .unwrap_or_else(|(s, b)| panic!("a pinned semantic query must wait, got {s}: {b}"));
+    assert!(
+        started.elapsed() >= COLD_START - Duration::from_millis(200),
+        "it waited for the spawn: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(body["meta"]["vector_unavailable"], false, "{body}");
+    assert!(
+        body["results"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|h| h["id"] == "auth.rs:1:3")),
+        "the vector lane answers: {body}"
+    );
+    assert_eq!(cold.spawns.load(Ordering::SeqCst), 1, "one spawn only");
 }

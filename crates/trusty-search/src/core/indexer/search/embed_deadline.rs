@@ -267,4 +267,58 @@ mod tests {
         gate.finish_abandoned();
         assert!(!gate.blocked(t0), "the gate clears when every embed ends");
     }
+
+    /// An embedder that outlasts the deadline, then panics.
+    struct PanickingEmbedder;
+
+    #[async_trait::async_trait]
+    impl crate::core::embed::Embedder for PanickingEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            panic!("embedder panicked (#10194 test)");
+        }
+        async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            unreachable!("only the single-text path is used")
+        }
+        fn dimension(&self) -> usize {
+            8
+        }
+    }
+
+    /// A detached embed that panics after its query was abandoned still clears
+    /// the gate, so the index is not held lexical until the 60 s expiry.
+    ///
+    /// Pre-fix the panic skipped `finish_abandoned`, leaving `outstanding` at 1.
+    /// Test: this test.
+    #[tokio::test]
+    async fn a_panicking_embed_clears_the_gate_when_its_task_ends() {
+        use crate::core::store::{UsearchStore, VectorStore};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(8).expect("usearch"));
+        let embedder: Arc<dyn crate::core::embed::Embedder> = Arc::new(PanickingEmbedder);
+        let indexer =
+            CodeIndexer::new("panic-embed-10194", tmp.path()).with_components(embedder, store);
+
+        let err = indexer
+            .embed_query_within("q", Some(Duration::from_millis(30)))
+            .await
+            .expect_err("the embed outlasts the deadline");
+        assert!(
+            err.downcast_ref::<QueryEmbedDeadline>().is_some(),
+            "{err:#}"
+        );
+        assert!(
+            indexer.query_embed_gate.blocked(Instant::now()),
+            "the abandoned embed holds the gate while it runs"
+        );
+
+        let until = Instant::now() + Duration::from_secs(5);
+        while indexer.query_embed_gate.blocked(Instant::now()) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            !indexer.query_embed_gate.blocked(Instant::now()),
+            "a task that ended by panic must release the gate"
+        );
+    }
 }
