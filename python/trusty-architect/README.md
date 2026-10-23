@@ -36,12 +36,18 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/architect_config.py` | Loads the instance settings in `local/architect.json` (see Configuration). Imported by sibling scripts; no command line. |
 | `scripts/datg.py`, `scripts/datg_store.py`, `scripts/datg_ops.py`, `scripts/datg_log.py`, `scripts/datg_read.py`, `scripts/datg-hook.sh` | The Intent Ledger store (`docs/specs/SPEC-IL-01.md`): a PM's goals, decisions, asks, tasks and session record in `<project>/.trusty-mpm/datg/`, with the resume digest, `fresh` and the Stop-hook `stamp`. `datg.py` is the CLI and imports the four `datg_*` modules from its own directory, so the five ship together. `datg-hook.sh` is the SessionStart, Stop and PreToolUse hook wrapper and always exits 0. The shipped poller does not load them yet (#10161, P1b). |
 | `scripts/ctx-watch.py` | Evaluates the clear signals S1 to S5 per session from `local/il-schedule.json`, the IL session record and the session transcript, and prints the clear candidates. Sends no keys. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
-| `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`, which lands in P4a; until then that job fails and alerts. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/self-clear.sh` | The Architect's gated self-refresh: refuses unless `datg.py fresh` passes and the IL session block is recorded, then, with `--live` only, waits for idle and sends `/clear` and a resume prompt. A dry run by default. Its idle test needs `turn-active.py` (P1b). The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/state-archive.py` | Moves old handoff sections out of `local/state.md` into `local/state-archive.md`, keeping the newest 3 and the `NEXT IDS` line. `--dry-run` writes nothing. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
+| `scripts/dashboard_store.py`, `scripts/dashboard_jsonl.py`, `scripts/dashboard_schema.py` | The dashboard's file-backed document store: one JSON file per document (or one canonical `.jsonl` per collection), versioned writes under one lock, all-or-nothing batches. `dashboard_schema.py` validates documents against `schemas/dashboard/` with a small stdlib validator. Default root `local/owner-queue`; `DASHBOARD_ROOT` overrides it. |
+| `scripts/dashboard_derive.py`, `scripts/dashboard_ids.py`, `scripts/dashboard_qual.py`, `scripts/owner_answers.py` | Pure functions over a store snapshot: open counts, parked items, next id (256 ids per prefix, recycled), stale tasks, session-qualified ids, and the owner answers still waiting for a relay. |
+| `scripts/dashboard-db.py` | The Architect's command line over the store: `get`, `list`, `set`, `update`, `delete`, `batch`, `next`, `create`, `tally` and the reply `footer`. The footer's tailnet link needs `DASHBOARD_TAILNET_URL`. |
+| `scripts/il-archive.py` | Archives done dashboard items and closed PM-ledger lines to trusty-memory, then removes them. Live by default; `--dry-run` writes nothing. |
+| `scripts/stale-tasks.py` | Lists open, unparked dashboard tasks with no activity for `--hours` (default 24). Read only. |
+| `schemas/dashboard/` | The draft 2020-12 JSON Schemas for each dashboard collection. Seeded beside `scripts/`, where `dashboard_schema.py` reads them. |
 | `docs/specs/SPEC-IL-01.md` | The Intent Ledger spec the scripts above cite. A design record: trusty-mpm does not ship it. |
-| `tests/` | pytest suite for the scripts above. |
+| `tests/` | pytest suite for the scripts above; `tests/fixtures/dashboard/golden/` holds the store fixtures the derive test reads. |
 
 ## Configuration
 
@@ -121,8 +127,8 @@ Checklist for a PR that brings exported files in:
 ## Deployment
 
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,
-`skills/`, `templates/` and `docs/` except `docs/specs/`, and the drift check
-fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`,
+`schemas/`, `skills/`, `templates/` and `docs/` except `docs/specs/`, and the drift check
+fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`, `schemas/dashboard/`,
 `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore`, `local/` and
 `docs/architect/voice.md`.
 It writes a file only when it is absent and reports an edited one as skipped.
@@ -184,6 +190,7 @@ cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
 cp -Rn "$src/templates/local/."         "$dir/local/"
 cp -n "$src"/scripts/*.py "$src"/scripts/*.sh "$dir/scripts/"
+cp -Rn "$src/schemas" "$dir/"
 cp -n "$src/docs/voice.md"             "$dir/docs/architect/voice.md"
 for f in "$src"/skills/tm-fleet-check.md "$src"/skills/tm-context-refresh.md "$src"/skills/architect-*.md; do
   stem="$(basename "$f" .md)"

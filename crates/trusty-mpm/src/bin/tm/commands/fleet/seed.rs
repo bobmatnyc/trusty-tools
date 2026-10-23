@@ -23,6 +23,7 @@
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
+//! `every_schema_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `the_relay_scripts_and_the_voice_guide_are_seeded`,
@@ -68,6 +69,21 @@ macro_rules! template {
         (
             $rel,
             include_str!(concat!("../../../../assets/architect/templates/", $rel)),
+            false,
+        )
+    };
+}
+
+/// Build one [`EMBEDDED`] row for a dashboard schema seeded at
+/// `schemas/dashboard/<name>`, its path under `src/assets/architect/` (#10161).
+macro_rules! schema {
+    ($name:literal) => {
+        (
+            concat!("schemas/dashboard/", $name),
+            include_str!(concat!(
+                "../../../../assets/architect/schemas/dashboard/",
+                $name
+            )),
             false,
         )
     };
@@ -142,6 +158,43 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/architect-idle.py",
         true
     ),
+    // See #10161: the dashboard store set (P4a-1). Each module imports its
+    // siblings from its own directory, and dashboard_schema.py reads
+    // `schemas/dashboard/` beside `scripts/`, so all of them ship together.
+    embedded!("scripts/dashboard_store.py", "scripts/dashboard_store.py", true),
+    embedded!("scripts/dashboard_jsonl.py", "scripts/dashboard_jsonl.py", false),
+    embedded!(
+        "scripts/dashboard_schema.py",
+        "scripts/dashboard_schema.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_derive.py",
+        "scripts/dashboard_derive.py",
+        false
+    ),
+    embedded!("scripts/dashboard_ids.py", "scripts/dashboard_ids.py", false),
+    embedded!("scripts/dashboard_qual.py", "scripts/dashboard_qual.py", false),
+    embedded!("scripts/owner_answers.py", "scripts/owner_answers.py", false),
+    embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
+    embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
+    embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
+    schema!("accounts.schema.json"),
+    schema!("briefs.schema.json"),
+    schema!("effort_tunes.schema.json"),
+    schema!("goal_removals.schema.json"),
+    schema!("goal_reorders.schema.json"),
+    schema!("goals.schema.json"),
+    schema!("il_steers.schema.json"),
+    schema!("items.schema.json"),
+    schema!("media.schema.json"),
+    schema!("meta-gh_track.schema.json"),
+    schema!("meta-seen.schema.json"),
+    schema!("meta-settings.schema.json"),
+    schema!("meta-state.schema.json"),
+    schema!("questions.schema.json"),
+    schema!("sessions.schema.json"),
+    schema!("step_progress.schema.json"),
     embedded!(
         "scripts/start-fleet-poll.sh",
         "scripts/start-fleet-poll.sh",

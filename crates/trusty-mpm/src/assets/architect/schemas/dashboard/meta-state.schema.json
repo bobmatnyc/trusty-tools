@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/meta-state.schema.json",
+  "title": "meta/state (owner name and fleet usage; next ids are derived, not stored)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"}
+  },
+  "required": ["owner_name", "updated"],
+  "additionalProperties": false,
+  "properties": {
+    "owner_name": {"type": "string", "minLength": 1},
+    "updated": {"$ref": "#/$defs/iso"},
+    "session_id": {"type": "string", "pattern": "^S[0-9a-f]{2}$", "description": "S id of the session that owns this store; qualifies ids as <S id>:<local id> (SPEC-IL-01 section 15)"},
+    "fleet_usage": {"type": "object", "additionalProperties": false,
+                    "properties": {"agents_active": {"type": "integer"}, "agents_parked": {"type": "integer"},
+                                   "measured_at": {"$ref": "#/$defs/iso"}, "out_tokens_1h": {"type": "integer"},
+                                   "out_tokens_24h": {"type": "integer"}, "units_24h": {"type": "number"}}}
+  }
+}
