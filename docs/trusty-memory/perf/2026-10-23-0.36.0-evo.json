@@ -269,7 +269,7 @@
    },
    "overlapping_jobs": "none",
    "verdict": "regression",
-   "issue": null
+   "issue": 10204
   },
   "baseline": "2026-10-17-0.36.0-evo.json (commit 68ab813f07b6c3ca8bafddabbf995d0bd3e62869)",
   "deltas": [
