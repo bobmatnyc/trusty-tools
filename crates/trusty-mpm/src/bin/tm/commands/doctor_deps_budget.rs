@@ -6,8 +6,9 @@
 //! operator rotates it before the host stalls.
 //! What: one local row, no daemon. The shared targets are the
 //! `<owner>/<repo>` directories under `~/.trusty-tools/cargo-target`; the slots
-//! come from `evict::list_pool_slots`. Each `debug/deps` gets one bounded count
-//! (`deps_budget::count_deps`, never a full readdir). Warn when any count
+//! are `<pool>/<owner>/<repo>/slot-<n>`. Both walks are strict: a level that
+//! cannot be listed makes the row Unknown (#10213 review). Each `debug/deps`
+//! gets one bounded count (`deps_budget::count_deps`, never a full readdir). Warn when any count
 //! reaches the line; Unknown when a dir or a root cannot be listed; else Ok. A
 //! missing `debug/deps` is listed as missing, never as 0 entries.
 //! Test: the `#[cfg(test)]` suite below.
@@ -15,39 +16,63 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::build_lease::deps_budget::{DEPS_WARN_ENTRIES, DepsCount, count_deps};
-use trusty_mpm::core::build_lease::evict::list_pool_slots;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
 /// This check's name.
 const CHECK: &str = "deps_budget";
 
-/// The `<owner>/<repo>` target directories under the shared root.
+/// The subdirectories of `dir`, recording every listing error.
 ///
-/// What: two directory levels, the layout `default_cargo_target_dir_at`
-/// writes. A missing root is no targets; an owner that cannot be listed is
-/// an error, so a hidden target is never reported as healthy.
-fn shared_targets(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let owners = match std::fs::read_dir(root) {
-        Ok(owners) => owners,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut targets = Vec::new();
-    for owner in owners {
-        let owner = owner?.path();
-        if !owner.is_dir() {
-            continue;
+/// Why: `evict::list_pool_slots` skips an owner or repo dir it cannot list, so
+/// the slots under it vanish and the row would read Ok (#10213 review). This
+/// walk is strict and leaves that function unchanged for its other callers.
+/// What: a missing `dir` has no subdirectories and hides nothing; a `dir` that
+/// cannot be opened, or an entry that cannot be read, is pushed to `errors`.
+fn subdirs(dir: &Path, errors: &mut Vec<String>) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            errors.push(format!("{} cannot be listed ({err})", dir.display()));
+            return Vec::new();
         }
-        for repo in std::fs::read_dir(&owner)? {
-            let repo = repo?.path();
-            if repo.is_dir() {
-                targets.push(repo);
-            }
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.path().is_dir() => dirs.push(entry.path()),
+            Ok(_) => {}
+            Err(err) => errors.push(format!("{} cannot be listed ({err})", dir.display())),
         }
     }
-    targets.sort();
-    Ok(targets)
+    dirs.sort();
+    dirs
+}
+
+/// Every `<root>/<owner>/<repo>` dir, and below it every `slot-<n>` dir when
+/// `slots` is set; an unlistable level is an error and the walk goes on.
+///
+/// Test: `an_unlistable_pool_owner_is_unknown`,
+/// `an_unlistable_shared_owner_keeps_the_other_targets`.
+fn targets_under(root: &Path, slots: bool, errors: &mut Vec<String>) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    for owner in subdirs(root, errors) {
+        for repo in subdirs(&owner, errors) {
+            if !slots {
+                targets.push(repo);
+                continue;
+            }
+            let is_slot = |p: &PathBuf| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_prefix("slot-"))
+                    .is_some_and(|i| i.parse::<u32>().is_ok())
+            };
+            targets.extend(subdirs(&repo, errors).into_iter().filter(is_slot));
+        }
+    }
+    targets
 }
 
 /// One count rendered for the row.
@@ -83,27 +108,17 @@ fn thousands(n: usize) -> String {
 /// never hidden behind an unreadable sibling.
 /// Test: `deps_budget_warns_over_the_line`, `deps_budget_is_ok_under_the_line`,
 /// `a_missing_deps_dir_is_reported_missing_not_zero`,
-/// `an_unreadable_deps_dir_is_unknown`, `an_unlistable_root_is_unknown`.
+/// `an_unreadable_deps_dir_is_unknown`, `an_unlistable_root_is_unknown`,
+/// `an_unlistable_pool_owner_is_unknown`.
 pub(crate) fn deps_budget_check(shared_root: &Path, pool_root: &Path, line: usize) -> DoctorCheck {
     let mut parts = Vec::new();
     let mut status = CheckStatus::Ok;
-    let mut targets = Vec::new();
-    match shared_targets(shared_root) {
-        Ok(found) => targets.extend(found),
-        Err(err) => {
-            status = CheckStatus::Unknown;
-            parts.push(format!(
-                "{} cannot be listed ({err})",
-                shared_root.display()
-            ));
-        }
-    }
-    match list_pool_slots(pool_root) {
-        Ok(slots) => targets.extend(slots.into_iter().map(|s| s.path)),
-        Err(err) => {
-            status = CheckStatus::Unknown;
-            parts.push(format!("{} cannot be listed ({err})", pool_root.display()));
-        }
+    let mut errors = Vec::new();
+    let mut targets = targets_under(shared_root, false, &mut errors);
+    targets.extend(targets_under(pool_root, true, &mut errors));
+    if !errors.is_empty() {
+        status = CheckStatus::Unknown;
+        parts.extend(errors);
     }
     let mut over = false;
     for target in &targets {
@@ -272,6 +287,42 @@ mod tests {
                 "{root}: {}",
                 check.message
             );
+        }
+    }
+
+    /// Fail-Open Check: an unlistable pool owner hides its slots, so the row
+    /// is Unknown, never Ok (#10213 review).
+    #[test]
+    fn an_unlistable_pool_owner_is_unknown() {
+        let (tmp, shared, pool) = roots(1, 1);
+        let owner = tmp.path().join("pool/o");
+        std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let check = deps_budget_check(&shared, &pool, 5);
+        std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(check.status, CheckStatus::Unknown, "{}", check.message);
+        assert!(
+            check.message.contains("pool/o cannot be listed"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// One unlistable shared owner does not hide another owner's oversized
+    /// target: Warn still wins over Unknown.
+    #[test]
+    fn an_unlistable_shared_owner_keeps_the_other_targets() {
+        let (tmp, shared, pool) = roots(6, 1);
+        let locked = tmp.path().join("cargo-target/locked");
+        std::fs::create_dir_all(locked.join("repo")).expect("owner");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let check = deps_budget_check(&shared, &pool, 5);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        for part in [
+            "locked cannot be listed",
+            "o/r/debug/deps: WARN, >= 5 entries",
+        ] {
+            assert!(check.message.contains(part), "{part}: {}", check.message);
         }
     }
 }
