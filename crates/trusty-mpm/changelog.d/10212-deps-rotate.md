@@ -1,0 +1,5 @@
+Fixed
+- `tm build-lease` renames a slot's `debug/` aside before the build when its `debug/deps` holds 300,000 entries or more (provisional), and deletes the old tree in the background. A slot whose cargo lock a build holds is never rotated, and a failed rename leaves the live directory in place and says so (#10212).
+- A new builder slot is no longer cloned from a shared target whose `debug/deps` is at or over that line, cannot be counted, or still holds a rotated-aside tree; it starts cold instead (#10212).
+- New `tm doctor --rotate-deps` (dry run unless `--yes`) rotates each shared target and slot the `deps_budget` row warns on and waits for the old tree's deletion. It refuses any target whose cargo lock is held, and any slot whose `tm build-lease` lease is held or whose lease state cannot be read. The daemon's slot-pool tick (which stops at shutdown) and the `deps_budget` row delete and report rotated-aside trees a dead process left behind (#10212).
+- `tm doctor --rotate-deps` exits non-zero when it prints a FAIL row, after every other requested action has run, so a script checking the exit code sees a failed rotation or deletion (#10212).

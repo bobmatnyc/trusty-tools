@@ -25,6 +25,7 @@ use tracing::{info, warn};
 use crate::core::build_lease::config::BuildLeaseConfig;
 use crate::core::build_lease::evict::{SweepOutcome, effective_evict_pct, sweep};
 use crate::core::build_lease::slots::SlotDir;
+use crate::core::build_lease::{deps_repair, deps_rotate};
 use crate::core::disk_usage_guard;
 use crate::daemon::state::DaemonState;
 
@@ -171,7 +172,8 @@ fn log_tick(line: &TickLog) {
 ///
 /// What: the binding only — the pool root from `builders.slot_pool_root`, the
 /// guard from `disk.max_usage_pct`, the threshold from
-/// `builders.slot_pool_evict_pct` — then [`evict_measured`].
+/// `builders.slot_pool_evict_pct` — then [`evict_measured`]. Before it, every
+/// slot's and shared target's dead-owner aside profile is deleted (#10212).
 /// Test: `evict_measured`'s tests; this reads the operator's config files.
 pub(crate) fn evict_in(home: &Path, cancelled: &dyn Fn() -> bool) -> TickLog {
     let builders = crate::core::config::MpmConfig::load_default().builders;
@@ -181,6 +183,14 @@ pub(crate) fn evict_in(home: &Path, cancelled: &dyn Fn() -> bool) -> TickLog {
     let threshold = effective_evict_pct(lease.slot_pool_evict_pct, guard);
     let store = SlotDir::resolve(Some(home));
     let mut measure = |p: &Path| disk_usage_guard::measure(p).map(|m| m.usage_pct);
+    // #10212: finish deleting rotated-aside profiles a dead `tm build-lease` left.
+    let shared = home
+        .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+        .join(crate::core::build_env::CARGO_TARGET_SUBDIR);
+    deps_rotate::log_reclaim(
+        &pool,
+        &deps_repair::reclaim_everywhere(&shared, &pool, cancelled),
+    );
     evict_measured(
         &pool,
         home,

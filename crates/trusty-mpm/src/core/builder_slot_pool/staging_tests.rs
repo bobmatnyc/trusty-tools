@@ -247,3 +247,76 @@ fn pool_status_lists_a_seed_in_progress_and_slot_states() {
     assert_eq!(repos[0].staging[0].path, live);
     assert!(live.exists(), "status deletes nothing");
 }
+
+/// #10212: an oversized shared `debug/deps` was cloned into every new slot. A
+/// source at or over the line seeds the slot cold instead, on every platform.
+#[test]
+fn seeding_does_not_clone_an_oversized_shared_deps() {
+    let tmp = tempfile::tempdir().expect("temp root");
+    let shared = tmp.path().join("shared");
+    let deps = shared.join("debug/deps");
+    std::fs::create_dir_all(&deps).expect("a shared deps dir");
+    for i in 0..6 {
+        std::fs::write(deps.join(format!("f{i}")), b"").expect("an artifact");
+    }
+    let pool = pool(&tmp.path().join("pool")).with_deps_line(5);
+
+    let (path, seed) = pool.seed(0, Some(&shared)).expect("a cold seed commits");
+
+    assert!(
+        matches!(&seed, SeedKind::ColdDirectory(d) if d.contains("#10212")),
+        "{seed:?}"
+    );
+    assert_eq!(pool.committed(0), Some(path.clone()), "the slot committed");
+    assert!(
+        !path.join("debug/deps").exists(),
+        "no oversized deps in the slot"
+    );
+    assert_eq!(
+        std::fs::read_dir(&deps).map(Iterator::count).ok(),
+        Some(6),
+        "the source is untouched"
+    );
+}
+
+/// #10212 round 1, Fail-Open Check: a source whose `debug/deps` cannot be
+/// counted may be over the line, so it is never cloned.
+#[test]
+fn an_uncountable_shared_deps_seeds_cold() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("temp root");
+    let shared = tmp.path().join("shared");
+    let deps = shared.join("debug/deps");
+    std::fs::create_dir_all(&deps).expect("a shared deps dir");
+    let pool = pool(&tmp.path().join("pool")).with_deps_line(5);
+    std::fs::set_permissions(&deps, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let seeded = pool.seed(0, Some(&shared));
+    std::fs::set_permissions(&deps, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let (path, seed) = seeded.expect("a cold seed commits");
+    assert!(
+        matches!(&seed, SeedKind::ColdDirectory(d) if d.contains("could not be counted")),
+        "{seed:?}"
+    );
+    assert!(!path.join("debug").exists(), "nothing was cloned");
+}
+
+/// #10212 round 1: a `tm doctor` killed mid-delete leaves its aside tree in the
+/// shared target, and `cp -c -R` would clone that tree whole into the slot.
+#[test]
+fn a_shared_target_holding_an_aside_tree_seeds_cold() {
+    let tmp = tempfile::tempdir().expect("temp root");
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir_all(shared.join("debug/deps")).expect("a shared deps dir");
+    let aside = shared.join(format!(".slot-x.evicting.{DEAD_PID}.1"));
+    std::fs::create_dir_all(aside.join("deps")).expect("an aside tree");
+    let pool = pool(&tmp.path().join("pool")).with_deps_line(5);
+    let (path, seed) = pool.seed(0, Some(&shared)).expect("a cold seed commits");
+    assert!(
+        matches!(&seed, SeedKind::ColdDirectory(d) if d.contains("rotated-aside")),
+        "{seed:?}"
+    );
+    assert!(
+        !path.join(".slot-x.evicting.4294967294.1").exists(),
+        "the aside tree is not cloned"
+    );
+}

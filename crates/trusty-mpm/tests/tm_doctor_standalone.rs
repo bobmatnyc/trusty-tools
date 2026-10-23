@@ -194,3 +194,31 @@ fn tm_doctor_dir_that_does_not_exist_fails_closed() {
         "a report was printed anyway.\nstdout:\n{stdout}"
     );
 }
+
+/// #10212: a `--rotate-deps` FAIL row exits non-zero, so a script sees it.
+///
+/// A regular file where the shared `cargo-target/` dir belongs cannot be
+/// listed, which the pass reports as one FAIL row, even in a dry run.
+#[test]
+fn tm_doctor_rotate_deps_fail_row_exits_non_zero() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let tools = home.path().join(".trusty-tools");
+    std::fs::create_dir_all(&tools).expect("tools dir");
+    std::fs::write(tools.join("cargo-target"), b"not a dir").expect("file");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--rotate-deps"])
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --rotate-deps`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("  FAIL "),
+        "no FAIL row.\nstdout:\n{stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "exited 0 despite a FAIL row.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

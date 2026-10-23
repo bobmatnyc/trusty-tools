@@ -41,6 +41,7 @@ use trusty_mpm::core::build_lease::acquire::{
 use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
+use trusty_mpm::core::build_lease::deps_rotate::{lease_notice, rotate_before_build};
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
@@ -286,6 +287,12 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 }
             };
             announce_slot(&target_plan, guard.slot(), target.as_deref());
+            // #10212: the slot's flock is held here, so no other lease builds in it.
+            if let Some(dir) = target.as_deref().map(Path::new)
+                && let Some(line) = lease_notice(dir, &rotate_before_build(dir))
+            {
+                eprintln!("tm build-lease: {line}");
+            }
             let mut record =
                 HolderRecord::new(guard.slot(), command_line.clone(), checkout.clone());
             record.target_dir.clone_from(&target);

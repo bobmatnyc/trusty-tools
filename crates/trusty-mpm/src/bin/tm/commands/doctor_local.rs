@@ -89,9 +89,8 @@ pub(crate) async fn doctor(
     // #4948: every opt-in local action the report can be followed by lives in
     // `doctor_repair`, so this file stays the report and the actions stay
     // together.
-    super::doctor_repair::run_post_report_actions(flags);
-
-    Ok(())
+    // #10212: a `--rotate-deps` FAIL row makes the command exit non-zero.
+    super::doctor_repair::run_post_report_actions(flags)
 }
 
 /// Run the daemon's own check battery in this process.
