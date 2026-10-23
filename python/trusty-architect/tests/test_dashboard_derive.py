@@ -1,6 +1,6 @@
 """dashboard_derive: pure derived values, golden output over the fixture store, and the no-direct-reads gate.
 
-Why: one rule per derived value (the owner 2026-10-11 04:12Z, deterministic data); callers must not read store files themselves.
+Why: one rule per derived value (owner 2026-10-11 04:12Z, deterministic data); callers must not read store files themselves.
 Test: scripts/test_dashboard_derive.py
 """
 import json

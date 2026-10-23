@@ -29,9 +29,6 @@ scripts/relay.sh
 scripts/self-ctx.py
 scripts/start-fleet-poll.sh
 
-# The local/architect.json loader (P1a); re-exported with tailnet_url (P4a-1).
-scripts/architect_config.py
-
 # PM intake, its digest and the Notification hook pair.
 scripts/notify-supervisor.sh
 scripts/pm-digest.py

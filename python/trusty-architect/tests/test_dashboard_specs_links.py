@@ -1,4 +1,4 @@
-"""dashboard-db.py normalizes item `specs` to one localhost reader-form entry per local doc (the owner 2026-10-21).
+"""dashboard-db.py normalizes item `specs` to one localhost reader-form entry per local doc (owner 2026-10-21).
 
 Covers: legacy doc/ and files/local/briefs/ forms, label suffix strip, localhost+tailnet pair collapse, spec equal to
 `brief` dropped, other urls untouched, detail URL moved to specs, update and batch paths. Test: scripts/test_dashboard_specs_links.py

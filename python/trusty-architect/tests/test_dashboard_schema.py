@@ -1,6 +1,6 @@
 """dashboard_schema: the schemas in schemas/dashboard/ accept the migrated fixture store and reject one bad value per enum.
 
-Why: the owner (2026-10-11 04:12Z) wants every dashboard structure described by a schema; the vendored validator must agree
+Why: owner (2026-10-11 04:12Z) wants every dashboard structure described by a schema; the vendored validator must agree
 with the real `jsonschema` library on every case here (compared when that library is installed).
 Test: scripts/test_dashboard_schema.py
 """
@@ -48,8 +48,8 @@ CASES = [  # (coll, id, doc, expected error count > 0?)
     ("items", "D01", {**ITEM, "due": ""}, True),
     ("items", "D01", {**ITEM, "due": "2026-10-15"}, False),
     ("items", "D01", {**ITEM, "id": "D01"}, True),
-    ("items", "D01", {**ITEM, "parked": {"choice": "later", "at": T, "by": "the owner"}}, True),
-    ("items", "D01", {**ITEM, "parked": {"choice": "stale", "until": None, "at": T, "by": "the owner"}}, False),
+    ("items", "D01", {**ITEM, "parked": {"choice": "later", "at": T, "by": "owner"}}, True),
+    ("items", "D01", {**ITEM, "parked": {"choice": "stale", "until": None, "at": T, "by": "owner"}}, False),
     ("items", "D01", {**ITEM, "options": [{"label": "a", "desc": "b", "markers": {"risk": 4}}]}, True),
     ("items", "D01", {**ITEM, "steer_requests": [{"text": "x", "at": T}]}, True),
     ("items", "D01", {**ITEM, "resume_request": None, "status_request": {"at": T}}, False),
@@ -69,7 +69,7 @@ CASES = [  # (coll, id, doc, expected error count > 0?)
     ("meta", "settings", {"user_state": "remote", "sleep_start": "20:00", "tz": "Europe/Rome"}, False),
     ("meta", "settings", {"user_state": "dozing"}, True),
     ("meta", "settings", {"sleep_start": "8pm"}, True),
-    ("meta", "state", {"owner_name": "the owner", "updated": T, "next_ids": {"A": "01"}}, True),
+    ("meta", "state", {"owner_name": "owner", "updated": T, "next_ids": {"A": "01"}}, True),
     ("meta", "seen", {"map": {"D01": "sig", "D02": ["a", "b"]}}, False),
     ("meta", "other", {}, True),
     ("briefs", "2026-10-11-x", {"question": "q", "answer": "a", "project": "architect", "status": "open", "created": T, "updated": T}, False),

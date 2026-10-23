@@ -1,6 +1,6 @@
 """il-archive.py: archive Intent Ledger items to memory, then delete (dashboard) or move (per-PM ledger).
 
-Why: the owner 2026-10-17 03:56Z: "Decision archiving (any IL archiving) should be scripted."
+Why: owner 2026-10-17 03:56Z: "Decision archiving (any IL archiving) should be scripted."
 Covers: retire and prune selection, memory-before-delete order, a failed memory write deletes nothing and
 exits non-zero, dry-run writes nothing, note batching, palace mapping (the Architect's palace from the config key
 memory_palace, its session from ARCHITECT_SESSION; an unusable config writes nothing), and pm-ledger archive.jsonl
@@ -258,7 +258,7 @@ def test_pm_ledger_prune_reads_archive_jsonl_and_removes_old_lines(env):
     assert calls and calls[0][calls[0].index("--palace") + 1] == "proj-palace"
     assert "th-D01" in calls[0][1] and "th-T01" in calls[0][1] and "th-D02" not in calls[0][1]
     kept = [f for f in os.listdir(datg.datg_dir(proj)) if f.startswith("archive-") and f.endswith(".jsonl")]
-    assert len(kept) == 1                              # removed lines are appended, not dropped (the owner D2b)
+    assert len(kept) == 1                              # removed lines are appended, not dropped (owner D2b)
     kept_ids = sorted(json.loads(x)["item"]["id"] for x in open(os.path.join(datg.datg_dir(proj), kept[0])))
     assert kept_ids == ["th-D01", "th-T01"]
 
