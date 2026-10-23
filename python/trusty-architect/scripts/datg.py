@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""datg.py: per-PM goals/decisions/asks/tasks store and hook logic (stdlib only).
+"""datg.py: per-PM goals/decisions/actions/tasks store and hook logic (stdlib only).
 
 Why: pilot of the PM D/A/T/G design (local/briefs/2026-10-09-pm-datg-prototype-design.md,
 the owner D93, 2026-10-09 13:28Z): keep a PM on ranked goals. Only the PM writes, one call per turn.
