@@ -124,6 +124,7 @@ markdown link, never a bare number, in every artifact you author.
 
 ## Every issue: milestone, relationships, state
 
+<!-- rule:tm-ticketing/every-issue-milestone-relationships-state -->
 🔴 **Every issue you file or touch carries three things: a milestone, its
 relationships, and its current state.** This section is the one statement of
 the rule (owner rule 2026-10-19, #10045). Other skills and agents point here
@@ -133,6 +134,7 @@ and never restate it.
 that has none. Pick it by the rule in "Choosing the Milestone and the Project
 (issues)".
 
+<!-- rule:tm-ticketing/propose-a-milestone-set -->
 **No usable milestone set.** When the repository has no open milestone that
 rule can pick, propose a set to the PM: each milestone's name and the scope it
 holds. Never leave the milestone unset without a proposal: file the issue, post
@@ -166,6 +168,7 @@ gh issue view N --json milestone,projectItems,labels   # read both back
 
 **Before you report, run this checklist on every issue you filed or touched:**
 
+<!-- rule:tm-ticketing/status-and-label-name-one-stage -->
 ```
 □ Milestone set — or `no-milestone:` posted and a proposal in the report
 □ Parent, sub-issues, blocked-by, blocking and linked PR recorded natively, where they exist
@@ -177,6 +180,7 @@ gh issue view N --json milestone,projectItems,labels   # read both back
 
 ## The Labels, Project, Milestone Standard
 
+<!-- rule:tm-ticketing/labels-project-milestone-standard -->
 🔴 **Every issue and every pull request carries the same four things: the
 `ws/<session>` label, its component label(s), its project, and its milestone.**
 One standard, two artifacts. This section is where it is stated; `ticketing.md`,

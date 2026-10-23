@@ -61,6 +61,7 @@ pub mod agent_schema;
 pub mod provenance;
 pub mod quarantine;
 pub mod quarantine_receipt;
+pub mod rule_marker;
 // #7727: the `{{TM_SKILLS}}` placeholder a deploy resolves to the install's
 // absolute skills directory, so a no-`Skill` agent can `Read` a skill file.
 pub mod skill_root;

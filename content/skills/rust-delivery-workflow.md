@@ -23,6 +23,7 @@ Three skills divide the Rust surface. Keep them apart.
 | `rust-build-performance` | Inner-loop speed: `cargo check` first, `--timings`, dependency and feature trimming, incremental cache, sccache mechanics |
 | `cargo-commands` (where a project ships one) | Command spelling: release builds, feature-gated runs, single tests by name |
 
+<!-- rule:rust-delivery-workflow/defers-to-sibling-skills -->
 This skill points at the other two rather than restating them. A project's own
 `CLAUDE.md` and `docs/` outrank all three, because only the project knows its
 crate list, its CI pin, and its test ladder. When this skill and the project
@@ -30,6 +31,7 @@ disagree, the project wins.
 
 ## 2. Commit Before the Gate Chain
 
+<!-- rule:rust-delivery-workflow/commit-before-gates -->
 Commit and push the branch as soon as the files exist, before starting a gate
 chain that runs for minutes. Then add follow-up commits instead of amending.
 
@@ -44,6 +46,7 @@ this one protects against the process dying.
 
 ## 3. CI-Equivalent Clippy
 
+<!-- rule:rust-delivery-workflow/ci-clippy-pin -->
 Verify that your local toolchain matches the project's CI pin before you
 trust a local clippy pass. The CI workflow file is the source of truth for
 that pin, not your memory and not the toolchain your shell happens to
@@ -53,6 +56,7 @@ Two failures this prevents:
 
 - **Toolchain drift.** Clippy adds lints between releases. A local run on an
   older toolchain reports zero warnings on code that CI's newer clippy denies.
+<!-- rule:rust-delivery-workflow/crate-scope-is-not-ci-evidence -->
 - **Scope drift.** CI lints the whole workspace with an explicit exclude list.
   A crate-scoped local `cargo clippy -p <crate>` exit 0 is not evidence that
   the CI job passes, because it never compiled the other crates.
@@ -67,6 +71,7 @@ Incident: PR #5488, where a local clippy pass preceded a red CI clippy job.
 
 ## 4. Build Concurrency
 
+<!-- rule:rust-delivery-workflow/builds-are-cpu-and-ram-bound -->
 A Rust build is CPU and RAM bound. Two concurrent `cargo build` or `cargo
 test` invocations on one host can thrash swap or get OOM-killed, and worktree
 isolation does not help. Isolation gives each agent its own `target/`
@@ -82,6 +87,7 @@ Two mechanisms enforce the cap, and neither is a number you should hardcode:
 - The doctor check reports the machine's own build environment and the job
   count it supports (#6868).
 
+<!-- rule:rust-delivery-workflow/job-cap-from-the-machine -->
 Take the number from the machine, not from this file. Then prefix it inline on
 every cargo invocation:
 
@@ -89,6 +95,7 @@ every cargo invocation:
 CARGO_BUILD_JOBS=<n> cargo test -p <crate> --no-fail-fast
 ```
 
+<!-- rule:rust-delivery-workflow/env-inline-per-command -->
 Inline on every command, because an agent's shell environment does not persist
 between tool calls. An `export` in one call is gone by the next, so a single
 `export CARGO_BUILD_JOBS=2` at the top of a task silently protects nothing.
@@ -104,6 +111,7 @@ the values above.
 
 ## 5. Gate-Output Economy
 
+<!-- rule:rust-delivery-workflow/gate-output-is-a-verdict -->
 A gate is a declarative process. It owes you a verdict, not a play-by-play.
 Redirect the chain into a scratch file, check `EXIT=$?`, and read the file
 only when the exit code is non-zero.
@@ -129,6 +137,7 @@ Reference: PR #4790, which landed the gate-economy prose.
 workspace path crate gets no cross-worktree hit under incremental
 compilation, and where the win actually comes from. Read it there.
 
+<!-- rule:rust-delivery-workflow/sccache-never-silent -->
 The process rule is the one this skill adds: recommend sccache to the
 operator, never silently enable it. Writing a `rustc-wrapper` into a shared
 config changes every build on the machine, including builds you did not run,
@@ -143,6 +152,7 @@ emits `RUSTC_WRAPPER=sccache` in the prefix line only when the operator's
 
 ## 7. Batch Merges, Then One Install and One Probe
 
+<!-- rule:rust-delivery-workflow/batch-installs -->
 For a change class whose close requires live proof on an installed binary,
 merge the batch first, then run one `cargo install` and one live-probe pass
 across all of it. Do not install and probe once per issue.
@@ -162,6 +172,7 @@ PRs, applied one stage later.
 
 ## 8. Test Scope by Stage
 
+<!-- rule:rust-delivery-workflow/test-scope-by-stage -->
 `tm-workflow`'s "Test Scope Widens by Stage" table already states the rule:
 develop against the changed code, gate a merge on the full changed test files,
 and reserve the full corpus for publish. It is generic and already codified.

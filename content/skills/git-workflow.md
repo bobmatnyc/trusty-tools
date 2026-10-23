@@ -133,6 +133,7 @@ git merge origin/main
 
 ### Pulling After a Merge — Check Untracked Collisions First
 
+<!-- rule:git-workflow/pre-pull-collision-check -->
 <!-- #7558: the post-merge pull aborted blind on an untracked research doc the
      incoming branch also committed, and the recovery was improvised by hand. -->
 
@@ -155,8 +156,10 @@ git show origin/<base>:<path> | diff - <path> # one per colliding path
 
 There are exactly two outcomes:
 
+<!-- rule:git-workflow/identical-content-resolves -->
 - **Identical content** — the untracked copy is byte-for-byte what the branch
   commits, so nothing is lost. Delete the untracked copy and pull.
+<!-- rule:git-workflow/differing-content-is-reported -->
 - **Differing content** — stop and report the diff. That copy holds work the
   branch does not have, and the pull is not the thing to force.
 
@@ -293,6 +296,7 @@ could merge (#8630).
 
 ### Four Checks Before a Workflow Edit or a PR on a Billed Repo
 
+<!-- rule:git-workflow/actions-spend-four-checks -->
 When you create or edit a file under `.github/workflows/`, or open a PR on a
 repo billed for private-repo minutes, check each item and report pass or fail
 per item. Fix a fail inside a workflow change you own; flag any other fail.
@@ -359,12 +363,14 @@ per item. Fix a fail inside a workflow change you own; flag any other fail.
 - No empty commit (`git commit --allow-empty`) or same-tree re-push to start
   CI. It buys a full run and no new information.
 - Batch fixup commits into one push. Every push is a full run.
+<!-- rule:git-workflow/never-rerun-a-green-run -->
 - Never re-run a green run.
 
 ### Billing Failure Is an Owner Blocker
 
 A job that fails with this text did not run:
 
+<!-- rule:git-workflow/billing-blocker -->
 > recent account payments have failed or your spending limit needs to be increased
 
 Report it to the PM as an owner blocker, naming the repo and the first failed

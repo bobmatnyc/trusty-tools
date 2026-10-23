@@ -10,6 +10,11 @@ use super::*;
 use crate::core::content_source::test_support::rc;
 use crate::core::framework_content::tests::skill_with_references;
 
+// #10058: pinned prose became rule-id markers; the registry and lookups.
+#[path = "bundle_rule_markers_tests.rs"]
+mod rule_markers;
+use rule_markers::{has_rule, plain, rule_section, rule_sentence};
+
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
 fn skill_text(path: &str) -> &'static str {
@@ -326,14 +331,8 @@ fn tm_capabilities_constants_are_non_empty() {
     );
 }
 
-/// The heading of the one section that states the labels/project/milestone
-/// standard (#7274).
-const STANDARD_HEADING: &str = "## The Labels, Project, Milestone Standard";
-
-/// The one sentence that states it. Asserting on the sentence, not the
-/// heading, is what makes "stated once" mechanical.
-const STANDARD_RULE: &str = "Every issue and every pull request carries the same four things: the\n\
-     `ws/<session>` label, its component label(s), its project, and its milestone.";
+/// The rule id of the labels/project/milestone standard (#7274, #10058).
+const STANDARD_RULE_ID: &str = "tm-ticketing/labels-project-milestone-standard";
 
 #[test]
 fn the_labels_project_milestone_standard_is_stated_once() {
@@ -344,10 +343,15 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     // step, which worked only for as long as someone remembered to.
     // #10055: the canonical section is resident in the tm-ticketing entry;
     // tm-workflow's pointer may sit in its references.
+    // #10058: the rule is its marker; "stated once" and the pointers read the
+    // sentence and section through it, so rewording the rule breaks nothing.
+    let canonical = skill_text("skills/tm-ticketing.md");
     assert!(
-        skill_text("skills/tm-ticketing.md").contains(STANDARD_HEADING),
-        "`tm-ticketing.md` must hold the section `{STANDARD_HEADING}`"
+        has_rule(canonical, STANDARD_RULE_ID),
+        "`tm-ticketing.md` must carry the marker `{STANDARD_RULE_ID}`"
     );
+    let rule = rule_sentence(canonical, STANDARD_RULE_ID).expect("the standard's sentence");
+    let name = rule_section(canonical, STANDARD_RULE_ID).expect("the standard's section");
     let stated: Vec<&str> = [
         ("tm-ticketing.md", skill_text("skills/tm-ticketing.md")),
         ("ticketing.md", agent("ticketing.md")),
@@ -358,7 +362,7 @@ fn the_labels_project_milestone_standard_is_stated_once() {
         ),
     ]
     .into_iter()
-    .filter(|(_, body)| body.contains(STANDARD_RULE))
+    .filter(|(_, body)| plain(body).contains(&rule))
     .map(|(name, _)| name)
     .collect();
     assert_eq!(
@@ -369,7 +373,6 @@ fn the_labels_project_milestone_standard_is_stated_once() {
 
     // The three mechanics files reach the rule by naming the section, so a
     // reader landing in any of them can find it without knowing it exists.
-    let name = STANDARD_HEADING.trim_start_matches('#').trim();
     for (file, body) in [
         ("ticketing.md", agent("ticketing.md")),
         ("version-control.md", agent("version-control.md")),
@@ -379,7 +382,7 @@ fn the_labels_project_milestone_standard_is_stated_once() {
         ),
     ] {
         assert!(
-            body.contains(name),
+            one_line(body).contains(name),
             "`{file}` must reference the shared section by name (`{name}`)"
         );
         assert!(
@@ -390,17 +393,16 @@ fn the_labels_project_milestone_standard_is_stated_once() {
 
     // `version-control.md` also has to say what applies its half.
     assert!(
-        agent("version-control.md").contains("`tm pr open` applies your half itself"),
+        has_rule(
+            agent("version-control.md"),
+            "version-control/tm-pr-open-applies-half"
+        ),
         "`version-control.md` must say `tm pr open` applies the PR side (#7274)"
     );
 }
 
-/// The section that states the milestone/relationships/state rule (#10045).
-const EVERY_ISSUE_SECTION: &str = "Every issue: milestone, relationships, state";
-
-/// The rule sentence, whitespace-collapsed so a rewrap does not hide a copy.
-const EVERY_ISSUE_RULE: &str = "Every issue you file or touch carries three things: a milestone, its \
-     relationships, and its current state.";
+/// The rule id of the milestone/relationships/state rule (#10045, #10058).
+const EVERY_ISSUE_RULE_ID: &str = "tm-ticketing/every-issue-milestone-relationships-state";
 
 /// `text` with every whitespace run collapsed to one space.
 fn one_line(text: &str) -> String {
@@ -411,27 +413,28 @@ fn one_line(text: &str) -> String {
 /// relationships and state, stated once in `tm-ticketing` and pointed at
 /// from the ticketing agents and every skill that files, moves or closes an
 /// issue.
-/// What: `tm-ticketing` holds the section, the rule sentence, the
-/// propose-a-milestone rule and the checklist; no other skill or agent holds
-/// the sentence; each pointer file names the section and `tm-ticketing`; the
-/// ticketing agent calls the three mandatory and reports them.
+/// What: `tm-ticketing` carries the rule, propose-a-milestone and checklist
+/// markers; no other skill or agent holds the rule's sentence; each pointer
+/// file names the rule's section and `tm-ticketing`; the ticketing agent
+/// carries its mandatory, propose and report markers (#10058).
 /// Test: this test.
 #[test]
 fn every_issue_milestone_relationships_state_is_stated_once_10045() {
     // #10055: entry files only — the rule and its pointers are resident text
     // that must load on invoke, never only from references/.
-    let canonical = one_line(skill_text("skills/tm-ticketing.md"));
-    for needle in [
-        format!("## {EVERY_ISSUE_SECTION}"),
-        EVERY_ISSUE_RULE.to_string(),
-        "propose a set to the PM".to_string(),
-        "Project Status and `status:*` label name the same stage".to_string(),
+    let canonical = skill_text("skills/tm-ticketing.md");
+    for id in [
+        EVERY_ISSUE_RULE_ID,
+        "tm-ticketing/propose-a-milestone-set",
+        "tm-ticketing/status-and-label-name-one-stage",
     ] {
         assert!(
-            canonical.contains(&needle),
-            "`tm-ticketing.md` must state `{needle}` (#10045)"
+            has_rule(canonical, id),
+            "`tm-ticketing.md` must carry `{id}` (#10045)"
         );
     }
+    let rule = rule_sentence(canonical, EVERY_ISSUE_RULE_ID).expect("the rule's sentence");
+    let section = rule_section(canonical, EVERY_ISSUE_RULE_ID).expect("the rule's section");
 
     let restated: Vec<&str> = rc()
         .skills()
@@ -439,9 +442,7 @@ fn every_issue_milestone_relationships_state_is_stated_once_10045() {
             ("agents/ticketing.md", agent("ticketing.md")),
             ("agents/version-control.md", agent("version-control.md")),
         ])
-        .filter(|(rel, body)| {
-            *rel != "skills/tm-ticketing.md" && one_line(body).contains(EVERY_ISSUE_RULE)
-        })
+        .filter(|(rel, body)| *rel != "skills/tm-ticketing.md" && plain(body).contains(&rule))
         .map(|(rel, _)| rel)
         .collect();
     assert!(
@@ -492,20 +493,19 @@ fn every_issue_milestone_relationships_state_is_stated_once_10045() {
     for (file, body) in &pointers {
         let body = one_line(body);
         assert!(
-            body.contains(EVERY_ISSUE_SECTION) && body.contains("tm-ticketing"),
-            "`{file}` must point at `tm-ticketing`, section `{EVERY_ISSUE_SECTION}`"
+            body.contains(section) && body.contains("tm-ticketing"),
+            "`{file}` must point at `tm-ticketing`, section `{section}`"
         );
     }
 
-    let ticketing = one_line(agent("ticketing.md"));
-    for needle in [
-        "Milestone, Relationships, State — Mandatory on Every Issue",
-        "propose one to the PM",
-        "state its milestone, its relationships and its state",
+    for id in [
+        "ticketing/milestone-relationships-state-mandatory",
+        "ticketing/propose-a-milestone",
+        "ticketing/report-milestone-relationships-state",
     ] {
         assert!(
-            ticketing.contains(needle),
-            "`ticketing.md` must carry `{needle}` (#10045)"
+            has_rule(agent("ticketing.md"), id),
+            "`ticketing.md` must carry `{id}` (#10045)"
         );
     }
 }
@@ -517,17 +517,22 @@ fn every_issue_milestone_relationships_state_is_stated_once_10045() {
 /// names the rejected field.
 #[test]
 fn auto_merge_read_uses_a_field_gh_accepts_9747() {
-    const READ: &str = "--jq .allow_auto_merge";
-    for (file, body) in [
-        ("version-control.md", agent("version-control.md")),
+    // #10058: the read is pinned by its marker in each file.
+    for (file, body, id) in [
+        (
+            "version-control.md",
+            agent("version-control.md"),
+            "version-control/auto-merge-read",
+        ),
         (
             "tm-workflow.md",
             skill_with_references("skills/tm-workflow.md"),
+            "tm-workflow/auto-merge-read",
         ),
     ] {
         assert!(
-            body.contains(READ),
-            "`{file}` must read auto-merge via `{READ}`"
+            has_rule(body, id),
+            "`{file}` must carry the auto-merge read `{id}`"
         );
     }
     let named: Vec<&str> = rc()
@@ -721,29 +726,27 @@ fn output_styles_carry_identity_protocol_and_load_marker() {
     // `<!-- trusty-mpm-instructions-loaded: v1 -->` must be the literal first
     // line of that section (so a stale/degraded style is greppably distinct
     // from one carrying the current floor).
+    // #10058: the load marker is the section's id, so the heading's wording is
+    // not pinned. The probe commands stay pinned until their #10061 eval lands:
+    // an output style carries no rule-id markers.
     const MARKER: &str = "<!-- trusty-mpm-instructions-loaded: v1 -->";
-    const HEADING: &str = "## Identity & Self-Awareness Protocol (Non-Overridable)";
     for style in OUTPUT_STYLES {
-        assert!(
-            style.content(rc()).contains(HEADING),
-            "{} is missing the Identity & Self-Awareness Protocol section",
-            style.id
-        );
-        let marker_pos = style
-            .content(rc())
+        let body = style.content(rc());
+        let marker_pos = body
             .find(MARKER)
             .unwrap_or_else(|| panic!("{} is missing the load marker", style.id));
-        let heading_pos = style.content(rc()).find(HEADING).expect("heading present");
-        let between = &style.content(rc())[marker_pos + MARKER.len()..heading_pos];
-        assert_eq!(
-            between.trim(),
-            "",
-            "{}: marker must be the first line immediately preceding the heading",
+        let next = body[marker_pos + MARKER.len()..]
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        assert!(
+            next.is_some_and(|line| line.starts_with("## ")),
+            "{}: the load marker must immediately precede its section heading",
             style.id
         );
         // Forbidden shell-probe list must be greppable for regressions.
-        assert!(style.content(rc()).contains("pip3 show"));
-        assert!(style.content(rc()).contains("which claude-mpm"));
+        assert!(body.contains("pip3 show"));
+        assert!(body.contains("which claude-mpm"));
     }
 }
 
@@ -1148,74 +1151,65 @@ fn base_agent_guidance_sections_survive_composition() {
     let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
 
+    // #10058: each rule is a marker in its source file, and the composed body
+    // carries each chain link's body verbatim, which also guards the order.
+    let base = agent("BASE-AGENT.md");
+    for (rule, issue) in [
+        ("base-agent/never-block-on-ci", "#4792"),
+        ("base-agent/report-dont-promise", "#2610"),
+        ("base-agent/pm-directives-scope", "#2502"),
+        ("base-agent/no-background-monitor", "#2610"),
+    ] {
+        assert!(
+            has_rule(base, rule),
+            "BASE-AGENT.md is missing `{rule}` ({issue})"
+        );
+    }
     assert!(
-        composed.contains("## Finishing Work — Push, Report, Stop"),
-        "composed version-control is missing the Finishing Work section (#4792)"
+        has_rule(agent("version-control.md"), "version-control/ci-waits"),
+        "version-control.md is missing its persona-level CI section (#4792)"
     );
     assert!(
-        composed.contains("Never block on CI"),
-        "composed version-control is missing the BASE-AGENT no-CI-block rule (#4792)"
-    );
-    assert!(
-        composed.contains("PROTOCOL VIOLATION"),
-        "composed version-control is missing the promise-instead-of-report rule (#2610)"
+        has_rule(agent("local-ops.md"), "local-ops/long-waits"),
+        "local-ops.md is missing its persona-level long-wait section (#2610)"
     );
     // #4792: the retired blocking wait must not come back through ANY layer.
     assert!(
         !composed.contains("--watch --fail-fast"),
         "composed version-control prescribes the retired blocking CI wait (#4792)"
     );
-    assert!(
-        composed.contains("## CI Waits — Push, Report, Stop; NEVER Block"),
-        "composed version-control is missing its persona-level CI section (#4792)"
-    );
-    assert!(
-        composed.contains("## PM Directives Do Not Bind You"),
-        "composed version-control is missing the PM Directives Do Not Bind You section"
-    );
-    assert!(
-        composed.contains("governs the orchestrating PM session"),
-        "composed version-control is missing the PM-directive-scope guidance"
-    );
+    for (stem, link) in [
+        ("version-control", "BASE-AGENT.md"),
+        ("version-control", "version-control.md"),
+        ("local-ops", "BASE-AGENT.md"),
+        ("local-ops", "local-ops.md"),
+    ] {
+        assert_composed_carries(stem, link);
+    }
+}
 
-    // Position assertions: guard the section ORDER, not just presence, so a
-    // future compose/extends refactor can't silently reorder BASE-AGENT.md
-    // content into an incoherent sequence.
-    let pm_directives_idx = composed
-        .find("## PM Directives Do Not Bind You")
-        .expect("PM Directives Do Not Bind You marker must be present");
-    let git_workflow_idx = composed
-        .find("## Git Workflow")
-        .expect("Git Workflow marker must be present");
-    assert!(
-        pm_directives_idx < git_workflow_idx,
-        "PM Directives Do Not Bind You ({pm_directives_idx}) must appear before \
-         Git Workflow ({git_workflow_idx})"
-    );
+/// Why: #10058 — the composer drops rule markers, so a rule's presence is
+/// checked in its source and its arrival in a composed agent structurally.
+/// What: `link`'s body, frontmatter removed and markers stripped, appears
+/// verbatim in `stem`'s composed body; that also pins the link's section order.
+/// Test: `base_agent_guidance_sections_survive_composition`,
+/// `pm_authority_doctrine_survives_composition`,
+/// `base_agent_prose_rules_survive_composition`.
+fn assert_composed_carries(stem: &str, link: &str) {
+    use trusty_agents_common::agents::rule_marker::strip_rule_markers;
 
-    let finishing_work_idx = composed
-        .find("## Finishing Work — Push, Report, Stop")
-        .expect("Finishing Work marker must be present");
-    let output_format_idx = composed
-        .find("## Output Format")
-        .expect("Output Format marker must be present");
+    let composed = crate::core::agent_builder::compose_agent(stem, agent_assets_dir())
+        .unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"));
+    let source = agent(link);
+    let body = source
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map_or(source, |(_, body)| body);
+    let body = strip_rule_markers(body);
+    let body = body.trim_matches('\n');
     assert!(
-        finishing_work_idx < output_format_idx,
-        "Finishing Work ({finishing_work_idx}) must appear before \
-         Output Format ({output_format_idx})"
-    );
-
-    // #2610: local-ops (the release-agent offender) must carry its own
-    // long-wait reinforcement on top of the inherited BASE-AGENT rule.
-    let local_ops =
-        compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
-    assert!(
-        local_ops.contains("## Long Waits — Block On Your Own Gates, Never On CI"),
-        "composed local-ops is missing its persona-level long-wait section (#2610)"
-    );
-    assert!(
-        local_ops.contains("Never spawn a background monitor"),
-        "composed local-ops is missing the inherited BASE-AGENT no-parking rule (#2610)"
+        !body.is_empty() && composed.contains(body),
+        "composed {stem} does not carry {link}'s body verbatim (#10058)"
     );
 }
 
@@ -1312,10 +1306,9 @@ fn code_review_standards_flags_github_token_protected_branch_pushes_8016() {
     // restriction or ruleset bypass actor, so the workflow is unworkable no
     // matter how green its first (nothing-to-publish) run looked.
     assert!(
-        contains_prose_anchor(
+        has_rule(
             skill_text("skills/code-review-standards.md"),
-            "GitHub never allows the Actions identity as a restriction or \
-             ruleset bypass actor"
+            "code-review-standards/github-token-protected-push"
         ),
         "code-review-standards must flag a GITHUB_TOKEN push to a protected \
          branch (#8016)"
@@ -1332,10 +1325,9 @@ fn code_review_standards_flags_format_interpolated_structured_payloads_7624() {
     // malformed the payload and the system under test answered it with a
     // permissive default indistinguishable from a real pass.
     assert!(
-        contains_prose_anchor(
+        has_rule(
             skill_text("skills/code-review-standards.md"),
-            "builds a JSON/YAML/TOML/SQL payload by `format!` interpolating \
-             a caller-supplied value into a string literal"
+            "code-review-standards/format-interpolated-payload"
         ),
         "code-review-standards must flag format!-interpolated structured \
          test payloads (#7624)"
@@ -1467,18 +1459,14 @@ fn what_is_trusty_mpm_is_in_bundle() {
 
 #[test]
 fn what_is_trusty_mpm_disambiguates_claude_mpm() {
-    // DOC-28 R1 acceptance: the doc must contain the literal substrings that
-    // prove it identifies the project (Rust, tm, tcode) and explicitly
-    // disambiguates it from the unrelated Python claude-mpm package.
-    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("Rust"));
-    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("tm"));
-    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("tcode"));
-    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("claude-mpm"));
-    // The claude-mpm substring must appear inside an explicit disambiguation
-    // sentence, not incidentally — assert it co-occurs with "NOT" nearby.
+    // DOC-28 R1 acceptance: the doc identifies the project (Rust, tm, tcode)
+    // and explicitly disambiguates it from the unrelated Python claude-mpm
+    // package. #10058: that statement is pinned by its marker.
     assert!(
-        instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("NOT")
-            && instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("claude-mpm"),
+        has_rule(
+            instruction_text("docs/WHAT-IS-TRUSTY-MPM.md"),
+            "what-is-trusty-mpm/not-claude-mpm"
+        ),
         "doc must explicitly disambiguate from claude-mpm, not mention it incidentally"
     );
 }
@@ -1496,48 +1484,44 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // `assemble_system_prompt` (the real PM_INSTRUCTIONS/WORKFLOW/
     // AGENT_DELEGATION/BASE_PM assembly used at session launch) for the
     // PM-tier assertion — not a hand-built fixture string.
-    use crate::core::agent_builder::compose_agent;
     use crate::core::instruction_pipeline::assemble_system_prompt;
 
-    let assets_dir = agent_assets_dir();
-
+    // #10058: each rule is a marker in its source; composition is covered by
+    // `base_agent_guidance_sections_survive_composition`.
     // (a) BASE-AGENT.md's report-don't-promise subsection (which replaced the
-    // retired chunked-repoll guidance in #4792) must reach a composed agent
-    // that inherits BASE-AGENT (version-control extends it).
-    let composed = compose_agent("version-control", assets_dir)
-        .expect("compose_agent(version-control) must succeed");
-    assert!(
-        composed.contains("### Report, don't promise"),
-        "composed version-control is missing the BASE-AGENT report-don't-promise subsection (#4792)"
-    );
-
-    // (c) version-control's own merge-decision bullets (distinct from the
-    // inherited BASE-AGENT section) must also survive composition.
-    assert!(
-        composed.contains("Repeated `gh pr update-branch` is a treadmill"),
-        "composed version-control is missing its persona-level update-branch bullet (#4792)"
-    );
+    // retired chunked-repoll guidance in #4792), and (c) the update-branch
+    // treadmill bullet.
+    for rule in [
+        "base-agent/report-dont-promise",
+        "base-agent/update-branch-treadmill",
+    ] {
+        assert!(
+            has_rule(agent("BASE-AGENT.md"), rule),
+            "BASE-AGENT.md is missing `{rule}` (#4792)"
+        );
+    }
 
     // (b) The Parked-Subagent Re-Engagement TRIGGER must survive the real PM
     // system-prompt assembly (not just exist in the source .md file). The
     // trigger is what cannot be deferred: an agent handing back with CI pending
     // is the moment the PM must act, and a PM that never learns to act does not
-    // know to load anything.
+    // know to load anything. #4969: the MECHANICS moved to
+    // `tm-delegation-patterns`, so the resident text names the Skill call; the
+    // section's marker pins that pointer.
+    let section = instruction_text("sections/subagent-re-engagement.md");
+    assert!(
+        has_rule(
+            section,
+            "subagent-re-engagement/resume-via-pm-re-engagement"
+        ),
+        "the resident re-engagement trigger must name the Skill call that \
+         carries the mechanics (#2833, #4792)"
+    );
+    let heading = section.lines().next().expect("the section's heading");
     let pm_prompt = assemble_system_prompt(rc());
     assert!(
-        pm_prompt.contains("## Parked-Subagent Re-Engagement (issues #2833, #4792)"),
-        "assembled PM system prompt is missing the Parked-Subagent \
-         Re-Engagement section (#2833, #4792)"
-    );
-    // #4969: the MECHANICS moved to `tm-delegation-patterns` (per-prompt rule: an
-    // instruction not needed on EVERY prompt lives in a skill). The resident
-    // text must therefore name the call explicitly — a bare `[SKILL: name]`
-    // mention is documentation style, not a tool invocation, and is exactly how
-    // the previous pointer decayed into decoration beside a re-inlined copy.
-    assert!(
-        pm_prompt.contains(r#"Skill(skill="tm-delegation-patterns")"#),
-        "the resident re-engagement trigger must name the Skill call that \
-         carries the mechanics, not merely mention the skill (#2833, #4792)"
+        pm_prompt.contains(heading),
+        "assembled PM system prompt is missing the section `{heading}` (#2833, #4792)"
     );
     assert!(
         !pm_prompt.contains("never a 30-second blind poll"),
@@ -1550,16 +1534,15 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // #10055: the mechanics may live in references/; the description below is
     // frontmatter, so it reads the entry file alone.
     let skill = skill_with_references("skills/tm-delegation-patterns.md");
-    assert!(
-        skill.contains("30-second blind poll") && skill.contains("counter-failure"),
-        "tm-delegation-patterns must carry the PM-side anti-spam-monitoring \
-         guidance the prompt now points at (#2833)"
-    );
-    assert!(
-        skill.contains("## PM Re-Engagement (issues #2833, #4792, #5843)"),
-        "tm-delegation-patterns must carry the PM Re-Engagement section the \
-         prompt names by title (#2833, #4792)"
-    );
+    for rule in [
+        "tm-delegation-patterns/no-blind-poll",
+        "tm-delegation-patterns/pm-re-engagement",
+    ] {
+        assert!(
+            has_rule(skill, rule),
+            "tm-delegation-patterns must carry `{rule}`, which the prompt points at (#2833)"
+        );
+    }
     // The skill has to be REACHABLE by relevance too: its description is what a
     // relevance match sees, and "delegation matrices" alone never fires at the
     // moment an agent hands back with pending CI.
@@ -1577,26 +1560,19 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
 /// ADR-0061/#5649 forbid it from committing.
 #[test]
 fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
-    for needle in [
-        "**Check the worktree still exists first (#8004).**",
-        "`git worktree list`",
-        "re-dispatch fresh with `isolation: \"worktree\"`",
-        "never `SendMessage` into the main checkout",
-        "ADR-0061, #5649",
-        // #8004 recurrence: Claude Code removes an unchanged tree on stop, so
-        // the check covers every resume, and the fresh brief names the base.
-        "applies to EVERY resume",
-        "Claude Code removes an unchanged worktree",
-        "restate the base commit and branch in the brief",
-        "A worktree agent's tree must still exist first",
+    // #10058: the check (`git worktree list`, re-dispatch with isolation, never
+    // into the main checkout, every resume) and the Retry Protocol's pointer to
+    // it are pinned by their markers.
+    for rule in [
+        "tm-delegation-patterns/worktree-check-first",
+        "tm-delegation-patterns/tree-must-exist-before-retry",
     ] {
         assert!(
-            contains_prose_anchor(
+            has_rule(
                 skill_with_references("skills/tm-delegation-patterns.md"),
-                needle
+                rule
             ),
-            "tm-delegation-patterns' PM Re-Engagement section is missing the \
-             #8004 worktree-survival check: {needle:?}"
+            "tm-delegation-patterns is missing the #8004 worktree-survival check `{rule}`"
         );
     }
 }
@@ -1606,18 +1582,14 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
 /// ruling or a released HOLD skipped the worktree-survival check.
 #[test]
 fn resident_re_engagement_routes_every_resume_to_the_worktree_check_8004() {
-    let section = instruction_text("sections/subagent-re-engagement.md");
-    for needle in [
-        "Before any `SendMessage` resume",
-        "\"PM Re-Engagement\"",
-        "#8004",
-    ] {
-        assert!(
-            contains_prose_anchor(section, needle),
-            "subagent-re-engagement.md must route every resume to the #8004 \
-             worktree check: {needle:?}"
-        );
-    }
+    // #10058: pinned by the section's marker, not its wording.
+    assert!(
+        has_rule(
+            instruction_text("sections/subagent-re-engagement.md"),
+            "subagent-re-engagement/resume-via-pm-re-engagement"
+        ),
+        "subagent-re-engagement.md must route every resume to the #8004 worktree check"
+    );
 }
 
 #[test]
@@ -1629,62 +1601,30 @@ fn pm_authority_doctrine_survives_composition() {
     // pending CI, fabricated evidence, worktree discipline) stay the agent's
     // own non-negotiables — must reach a composed agent through the REAL
     // bundled asset chain, not just live in the source .md.
-    use crate::core::agent_builder::compose_agent;
-
-    let assets_dir = agent_assets_dir();
-
-    let composed = compose_agent("version-control", assets_dir)
-        .expect("compose_agent(version-control) must succeed");
-
-    // (a) BASE-AGENT's PM Authority & Escalation section must be inherited by
-    // version-control (which extends base-ops → base-agent).
+    // #10058: each half is a marker in its source file — (a) BASE-AGENT's PM
+    // Authority & Escalation (the anti-distrust sentence, the injection-
+    // skepticism scope, the report-back path), (b) version-control's own
+    // relayed-merge authority with its `--admin` limit, (c) the objective-
+    // safety gate — and the composed body carries both sources verbatim.
+    for rule in [
+        "base-agent/pm-authority",
+        "base-agent/injection-skepticism-scope",
+        "base-agent/authority-and-objective-safety",
+    ] {
+        assert!(
+            has_rule(agent("BASE-AGENT.md"), rule),
+            "BASE-AGENT.md is missing `{rule}`"
+        );
+    }
     assert!(
-        composed.contains("## PM Authority & Escalation"),
-        "composed version-control is missing the inherited BASE-AGENT \
-         'PM Authority & Escalation' section"
+        has_rule(
+            agent("version-control.md"),
+            "version-control/pm-relayed-merge-authority"
+        ),
+        "version-control.md is missing its PR-workflow authority text"
     );
-    // The load-bearing anti-distrust sentence — the exact behavior that failed.
-    assert!(
-        composed.contains("do NOT treat the dispatching PM as an untrusted third party"),
-        "composed version-control is missing the anti-third-party-distrust rule"
-    );
-    // Injection-skepticism must be scoped to untrusted CONTENT, not the PM.
-    assert!(
-        composed.contains("Injection-skepticism is for UNTRUSTED CONTENT you read"),
-        "composed version-control is missing the injection-skepticism scoping"
-    );
-    // The escalation path: doubt → report back to the PM, never freeze.
-    assert!(
-        composed.contains("REPORT BACK TO THE PM"),
-        "composed version-control is missing the escalate-to-PM path"
-    );
-
-    // (b) version-control's own PR-workflow authority text (distinct from the
-    // inherited section) must also survive composition.
-    assert!(
-        composed.contains("When the PM relays operator authorization to merge directly"),
-        "composed version-control is missing its PR-workflow authority text"
-    );
-
-    // (c) The OBJECTIVE-safety-gate half of the doctrine must survive
-    // composition too — authority never buys a bypass of red/pending CI, from
-    // both the inherited BASE-AGENT rule and version-control's own rule.
-    assert!(
-        composed.contains("never merge red or pending CI (`--admin`"),
-        "composed version-control is missing the inherited BASE-AGENT \
-         objective-safety-gate (red/pending CI) text"
-    );
-    assert!(
-        composed.contains("never a failing check"),
-        "composed version-control is missing the 'never a failing check' \
-         qualifier on the CI safety gate"
-    );
-    let composed_normalized = composed.replace('\n', " ");
-    assert!(
-        composed_normalized.contains("never merge red or pending CI"),
-        "composed version-control is missing its own PR-workflow \
-         objective-safety-gate (red/pending CI) text"
-    );
+    assert_composed_carries("version-control", "BASE-AGENT.md");
+    assert_composed_carries("version-control", "version-control.md");
 }
 
 #[test]
@@ -1796,42 +1736,55 @@ fn rust_delivery_workflow_states_each_delivery_rule() {
     // in incident prose. A body that dropped one would still pass the
     // reachability test above, so pin the rule set itself — one needle per
     // section that a rewrite must not silently lose.
-    for (fact, needle) in [
+    // #10058: one marker per rule, so a rewrite may reword any of them.
+    for (fact, rule) in [
         (
             "it defers build speed to the sibling skill",
-            "rust-build-performance",
+            "rust-delivery-workflow/defers-to-sibling-skills",
         ),
         (
             "the gate chain is preceded by a commit",
-            "Commit and push the branch",
+            "rust-delivery-workflow/commit-before-gates",
         ),
         (
             "CI's workflow file is the clippy pin's source",
-            "CI workflow file is the source of truth",
+            "rust-delivery-workflow/ci-clippy-pin",
         ),
         (
             "a crate-scoped local pass is not CI evidence",
-            "is not evidence",
+            "rust-delivery-workflow/crate-scope-is-not-ci-evidence",
         ),
         (
             "concurrent builds contend for RAM, not just the build lock",
-            "CPU and RAM bound",
+            "rust-delivery-workflow/builds-are-cpu-and-ram-bound",
         ),
-        ("the job cap is read off the machine", "CARGO_BUILD_JOBS"),
+        (
+            "the job cap is read off the machine",
+            "rust-delivery-workflow/job-cap-from-the-machine",
+        ),
         (
             "env must be prefixed inline per command",
-            "does not persist",
+            "rust-delivery-workflow/env-inline-per-command",
         ),
-        ("gate output is a verdict", "EXIT=$?"),
+        (
+            "gate output is a verdict",
+            "rust-delivery-workflow/gate-output-is-a-verdict",
+        ),
         (
             "sccache is recommended, never silently enabled",
-            "never silently enable",
+            "rust-delivery-workflow/sccache-never-silent",
         ),
-        ("installs batch across a merge batch", "one `cargo install`"),
-        ("test scope widens by stage", "Test Scope Widens by Stage"),
+        (
+            "installs batch across a merge batch",
+            "rust-delivery-workflow/batch-installs",
+        ),
+        (
+            "test scope widens by stage",
+            "rust-delivery-workflow/test-scope-by-stage",
+        ),
     ] {
         assert!(
-            skill_text("skills/rust-delivery-workflow.md").contains(needle),
+            has_rule(skill_text("skills/rust-delivery-workflow.md"), rule),
             "`rust-delivery-workflow.md` must state that {fact} (#8192)"
         );
     }
@@ -1860,45 +1813,51 @@ fn self_improvement_loop_skill_carries_the_moved_anchors() {
     // trigger and the skill name in `BASE-AGENT.md`; this test asserts the
     // ten anchors that section used to carry directly, against the skill
     // they moved into.
-    let flat = skill_text("skills/self-improvement-loop.md").replace('\n', " ");
-    for (fact, needle) in [
+    // #10058: one marker per anchor, so a rewrite may reword any of them.
+    for (fact, rule) in [
         (
             "the section exists",
-            "## Self-Analysis and Improvement Reporting",
+            "self-improvement-loop/reporting-section",
         ),
         (
             "the fast-loop section exists",
-            "## Continuous Self-Improvement — the Fast Loop",
+            "self-improvement-loop/fast-loop-section",
         ),
         (
             "the detection heuristics are headed and findable",
-            "**Detection heuristics.**",
+            "self-improvement-loop/detection-heuristics",
         ),
         (
             "the one memory tag is named",
-            "The tag is `self-improvement-hypothesis`",
+            "self-improvement-loop/hypothesis-tag",
         ),
         (
             "the post-mortem's query is spelled out",
-            r#"memory_list(tag: "self-improvement-hypothesis")"#,
+            "self-improvement-loop/post-mortem-query",
         ),
         (
             "trusty-tools is the fixed destination",
-            "bobmatnyc/trusty-tools",
+            "self-improvement-loop/fixed-destination",
         ),
         (
             "a subagent returns a block instead of filing",
-            "Improvement recommendations",
+            "self-improvement-loop/return-a-block-not-a-filing",
         ),
         (
             "dedup runs against the label",
-            "`self-improvement` label first",
+            "self-improvement-loop/dedup-by-label",
         ),
-        ("a clean run files nothing", "A clean run reports nothing"),
-        ("the post-mortem tracker is named", "#6933"),
+        (
+            "a clean run files nothing",
+            "self-improvement-loop/clean-run-reports-nothing",
+        ),
+        (
+            "the post-mortem tracker is named",
+            "self-improvement-loop/post-mortem-tracker",
+        ),
     ] {
         assert!(
-            flat.contains(needle),
+            has_rule(skill_text("skills/self-improvement-loop.md"), rule),
             "`self-improvement-loop.md` must state that {fact} (#6935, #6937, #7723)"
         );
     }
@@ -1963,33 +1922,27 @@ fn tm_init_surfaces_build_performance_pointer_for_rust_projects() {
     // `CLAUDE.md` MUST get a durable Build Performance pointer, and that
     // pointer must not assert a benefit the in-flight sccache measurement
     // has not established.
-    assert!(
-        skill_text("skills/tm-init.md").contains("Cargo.toml"),
-        "tm-init must key the Build Performance pointer off the same \
-         Cargo.toml marker rust-engineer deploys on"
-    );
-    assert!(
-        skill_text("skills/tm-init.md").contains("Build Performance"),
-        "tm-init is missing the Build Performance section instruction for \
-         Rust projects"
-    );
-    assert!(
-        skill_text("skills/tm-init.md").contains("rust-build-performance"),
-        "tm-init's Build Performance pointer must reference the bundled \
-         rust-build-performance skill"
-    );
-    assert!(
-        skill_text("skills/tm-init.md").contains("cargo build --timings"),
-        "tm-init must direct a new Rust project toward measuring a baseline \
-         with --timings, not toward a compiler-flag or cache guess"
-    );
-    assert!(
-        skill_text("skills/tm-init.md").contains("Never assert that `sccache`"),
-        "tm-init must not let a scaffolded CLAUDE.md assert an unmeasured \
-         sccache speedup — the skill's own §6 caveats (no default hit on \
-         incremental path-crate builds) must be preserved, not silently \
-         dropped, by the pointer this test guards"
-    );
+    // #10058: the pointer (keyed off `Cargo.toml`, naming the skill), the
+    // `--timings` baseline and the sccache caveat are pinned by markers.
+    for (fact, rule) in [
+        (
+            "a Rust project's CLAUDE.md gets a Build Performance pointer",
+            "tm-init/build-performance-section",
+        ),
+        (
+            "a new Rust project measures a baseline with --timings first",
+            "tm-init/timings-baseline",
+        ),
+        (
+            "a scaffolded CLAUDE.md never asserts an unmeasured sccache speedup",
+            "tm-init/no-unmeasured-sccache-claim",
+        ),
+    ] {
+        assert!(
+            has_rule(skill_text("skills/tm-init.md"), rule),
+            "tm-init must state that {fact} (`{rule}`)"
+        );
+    }
 }
 
 #[test]
@@ -2024,67 +1977,30 @@ fn output_styles_keep_claude_code_coding_instructions() {
     assert!(frontmatter(architect).contains("keep-coding-instructions: false"));
 }
 
-/// Every prose RULE the output styles must state resident, as a short anchor.
-///
-/// Why: #7423 moved the worked example and the observed-instance inventories
-/// into `tm-prose-style` and left each rule as a one-line statement. Pinning the
-/// paragraph wording would re-forbid that trim on the next pass; pinning one
-/// anchor per rule still fails the moment a rule is dropped.
-/// What: one substring per surviving rule, plus the #2647 rationale and the
-/// `tm-prose-style` pointer that carries the evidence.
-/// Test: `bundle_tests::output_styles_state_every_pm_prose_rule`.
-/// Does `haystack` state `anchor`, ignoring where Markdown broke the lines?
-///
-/// Why: #7709 — the prose-anchor loops matched a multi-word anchor with a plain
-/// `contains`, so a rewrap that moved the anchor's last word onto the next line
-/// failed a pin whose prose had not changed at all (found in #7683 round 2).
-/// What: collapses every run of whitespace in both sides to a single space
-/// before the substring test, so a newline and its indentation read as the
-/// single space a reflow replaced.
-/// Test: `prose_rule_anchors_survive_a_markdown_rewrap_7709`.
-fn contains_prose_anchor(haystack: &str, anchor: &str) -> bool {
-    fn collapse(text: &str) -> String {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-    collapse(haystack).contains(&collapse(anchor))
-}
-
-const PROSE_RULE_ANCHORS: &[&str] = &[
-    "## Communication — Write Plainly",
-    "issue #2647",
-    "**Tone**",
-    "**No mocks**",
-    "**no placeholders**",
-    "concrete referent",
-    "closing aphorisms",
-    "**Do not embellish.**",
-    "**Don't justify the restraint**",
-    "trailing emphatic negation",
-    "**No praise for the user.**",
-    "**If you are saying it, its worth is implied.**",
-    "**Banned word — \"honest\"**",
-    "**No borrowed-metaphor jargon.**",
-    "ASD-STE-100",
-    "**Ticket and PR bodies**",
-    "never whether it is said",
-    "Skill(skill=\"tm-prose-style\")",
-];
-
 #[test]
 fn output_styles_state_every_pm_prose_rule() {
     // #2647: the output style is the only channel that survives a manual
     // `claude` launch with no tm-appended system prompt, so every PM prose rule
     // is stated RESIDENT here rather than referenced. #7423 kept the rules and
-    // moved their examples behind `Skill(skill="tm-prose-style")`, so the
-    // contract is "the rule is still stated, and its evidence is one hop away".
-    // #8453: the PM styles; the supervisor style's prose section is pinned
-    // verbatim by `the_architect_style_carries_write_plainly_verbatim`.
+    // moved their examples behind `Skill(skill="tm-prose-style")`.
+    // #10058: a style is delivered verbatim on every PM turn and the floor is
+    // cut from it, so it carries no rule-id markers. Each PM style must carry
+    // the floor sections the production cut names (`FLOOR_SECTIONS`); the
+    // rules inside are model behaviour, listed for the #10061 evals. The
+    // supervisor's section is pinned by
+    // `the_architect_style_carries_write_plainly_verbatim`.
+    use crate::core::output_style::FLOOR_SECTIONS;
+
     for style in pm_output_styles() {
-        for needle in PROSE_RULE_ANCHORS {
-            // #7709: whitespace-insensitive, so a rewrap is not a regression.
+        for heading in FLOOR_SECTIONS {
             assert!(
-                contains_prose_anchor(style.content(rc()), needle),
-                "{} is missing prose rule anchor {needle:?} (#2647, #7423)",
+                // The teacher and research styles qualify the directive's
+                // heading ("(still absolute)"), so a prefix match.
+                style
+                    .content(rc())
+                    .lines()
+                    .any(|line| line.starts_with(heading)),
+                "{} is missing the floor section `{heading}` (#2647, #8533)",
                 style.id
             );
         }
@@ -2101,56 +2017,6 @@ fn output_styles_state_every_pm_prose_rule() {
     }
 }
 
-/// 🔴 #7709 REGRESSION: the prose-anchor loops matched with a plain `contains`,
-/// so a Markdown rewrap that wrapped a multi-word anchor across two lines broke
-/// the pin even though the prose was unchanged (found in #7683 round 2).
-#[test]
-fn prose_rule_anchors_survive_a_markdown_rewrap_7709() {
-    /// Rewraps `text` at `words_per_line`, the way a reflow moves a phrase's
-    /// tail onto the next line — every multi-word anchor ends up split.
-    fn rewrap(text: &str, words_per_line: usize) -> String {
-        text.split_whitespace()
-            .collect::<Vec<_>>()
-            .chunks(words_per_line)
-            .map(|chunk| chunk.join(" "))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    for style in pm_output_styles() {
-        let rewrapped = rewrap(style.content(rc()), 3);
-        // A reflow-broken anchor must still match…
-        for needle in PROSE_RULE_ANCHORS {
-            assert!(
-                contains_prose_anchor(&rewrapped, needle),
-                "{}: anchor {needle:?} stopped matching after a Markdown rewrap \
-                 (#7709)",
-                style.id
-            );
-        }
-        // …and the pre-fix matcher is what fails on exactly that text, so the
-        // loop above is not passing for the trivial reason that nothing broke.
-        assert!(
-            PROSE_RULE_ANCHORS
-                .iter()
-                .any(|needle| !rewrapped.contains(needle)),
-            "{}: rewrap must actually split at least one anchor, or this test \
-             proves nothing (#7709)",
-            style.id
-        );
-    }
-
-    // Normalizing whitespace must not turn the match into a tautology: an
-    // anchor the text does not state still fails, wrapped or not.
-    assert!(
-        !contains_prose_anchor(
-            "a rule that is\n  stated here",
-            "a rule that is not stated here"
-        ),
-        "whitespace normalization must not make an absent anchor match (#7709)"
-    );
-}
-
 #[test]
 fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     // The owner banned "load-bearing" on 2026-08-10 as an instance of a
@@ -2158,42 +2024,17 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     // prose (BASE-AGENT.md composition) alike. #7423 split the two halves: the
     // RULE stays resident in both channels, and the category statement that
     // keeps it from degenerating into a phrase list moved to `tm-prose-style`.
-    // Both halves are asserted, in their new homes.
-    use crate::core::agent_builder::compose_agent;
-
-    const RESIDENT: &[&str] = &["**No borrowed-metaphor jargon.**", "load-bearing"];
-
-    for style in OUTPUT_STYLES {
-        for needle in RESIDENT {
-            assert!(
-                style.content(rc()).contains(needle),
-                "{} is missing the borrowed-metaphor ban {needle:?}",
-                style.id
-            );
-        }
-    }
-
-    let assets_dir = agent_assets_dir();
-    let composed =
-        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in RESIDENT {
-        assert!(
-            composed.contains(needle),
-            "composed agent is missing the borrowed-metaphor ban {needle:?}"
-        );
-    }
-
-    // The category statement and the scope note are what stop the ban becoming
-    // a word list; they now live one Skill call away, not in either channel.
-    for needle in [
-        "an engineering metaphor borrowed to signal precision",
-        "Scope: PM and agent prose.",
-    ] {
-        assert!(
-            skill_text("skills/tm-prose-style.md").contains(needle),
-            "tm-prose-style must carry the borrowed-metaphor category statement {needle:?}"
-        );
-    }
+    // #10058: both channels' sections are pinned by
+    // `output_styles_state_every_pm_prose_rule` and
+    // `base_agent_prose_rules_survive_composition`; the category statement
+    // by its marker here.
+    assert!(
+        has_rule(
+            skill_text("skills/tm-prose-style.md"),
+            "tm-prose-style/borrowed-metaphor-category"
+        ),
+        "tm-prose-style must carry the borrowed-metaphor category statement"
+    );
 }
 
 #[test]
@@ -2203,43 +2044,16 @@ fn the_honest_ban_reaches_both_prose_channels() {
     // styles pointed at a rule they did not state. It now states the rule, in
     // every position the word can take — the owner's flagged instance was the
     // heading modifier "Distribution, stated honestly", not a bare "honest".
-    use crate::core::agent_builder::compose_agent;
-
-    const RESIDENT: &[&str] = &["**Banned word — \"honest\"**", "label on your own register"];
-
-    for style in OUTPUT_STYLES {
-        for needle in RESIDENT {
-            assert!(
-                style.content(rc()).contains(needle),
-                "{} is missing the \"honest\" ban {needle:?}",
-                style.id
-            );
-        }
-    }
-
-    let assets_dir = agent_assets_dir();
-    let composed =
-        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in RESIDENT {
-        assert!(
-            composed.contains(needle),
-            "composed agent is missing the \"honest\" ban {needle:?}"
-        );
-    }
-
-    // Every position the word can take, and the owner's flagged instance, moved
-    // to `tm-prose-style` in #7423. The ban is useless without them, so they are
-    // asserted there rather than dropped.
-    for needle in [
-        "adjective, adverb, heading modifier, parenthetical",
-        "\"Distribution, stated honestly:\"",
-        "plainly, candidly, bluntly,",
-    ] {
-        assert!(
-            skill_text("skills/tm-prose-style.md").contains(needle),
-            "tm-prose-style must carry the \"honest\" ban's detail {needle:?}"
-        );
-    }
+    // #10058: both channels' sections are pinned elsewhere (see the borrowed-
+    // metaphor test); every position the word can take, moved to
+    // `tm-prose-style` in #7423, by its marker here.
+    assert!(
+        has_rule(
+            skill_text("skills/tm-prose-style.md"),
+            "tm-prose-style/honest-ban-positions"
+        ),
+        "tm-prose-style must carry the \"honest\" ban's positions"
+    );
 }
 
 #[test]
@@ -2249,27 +2063,20 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
     // vocabulary is deliberately NOT adopted, because it forbids common verbs
     // and would make trade-off discussion stilted. Both halves are asserted —
     // the layer's presence, and the refusal that keeps a future reader from
-    // "fixing" it into literal conformance. Reaches PM prose (output styles,
-    // #2647) and agent prose (BASE-AGENT.md composition) alike, per the
-    // keep-the-two-in-step rule the section states.
-    use crate::core::agent_builder::compose_agent;
-
-    const RESIDENT: &[&str] = &[
-        "ASD-STE-100, applied in spirit",
-        "one idea per",
-        "active voice",
-        // ADD, not replace: the stance rules the layer sits on top of.
-        "**No praise for the user.**",
-    ];
-
+    // "fixing" it into literal conformance.
+    // #10058: both channels' sections are pinned elsewhere (see the borrowed-
+    // metaphor test); the refusal and the construction rules, in
+    // `tm-prose-style` since #7423, by their markers here.
+    for rule in [
+        "tm-prose-style/asd-ste-100-spirit-only",
+        "tm-prose-style/asd-ste-100-rules",
+    ] {
+        assert!(
+            has_rule(skill_text("skills/tm-prose-style.md"), rule),
+            "tm-prose-style must carry the ASD-STE-100 detail `{rule}`"
+        );
+    }
     for style in OUTPUT_STYLES {
-        for needle in RESIDENT {
-            assert!(
-                style.content(rc()).contains(needle),
-                "{} is missing the ASD-STE-100 construction layer {needle:?}",
-                style.id
-            );
-        }
         // The superseded bullet was FOLDED IN, not left beside the layer as a
         // second statement of "one idea per sentence" in different words.
         assert!(
@@ -2279,31 +2086,6 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
             "{}: the old short-sentence bullet must be folded into the \
              ASD-STE-100 layer, not duplicated beside it",
             style.id
-        );
-    }
-
-    let assets_dir = agent_assets_dir();
-    let composed =
-        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in RESIDENT {
-        assert!(
-            composed.contains(needle),
-            "composed agent is missing the ASD-STE-100 construction layer {needle:?}"
-        );
-    }
-
-    // The seven construction rules in full, and the refusal that stops a future
-    // reader "fixing" the spirit adoption into literal conformance, moved to
-    // `tm-prose-style` in #7423.
-    for needle in [
-        "approved vocabulary does NOT",
-        "literal conformance with the word list",
-        "One idea per sentence; one instruction per sentence.",
-        "No noun cluster longer than three words.",
-    ] {
-        assert!(
-            skill_text("skills/tm-prose-style.md").contains(needle),
-            "tm-prose-style must carry the ASD-STE-100 detail {needle:?}"
         );
     }
 }
@@ -2331,6 +2113,9 @@ fn output_styles_name_the_todowrite_fallback() {
     // its own tracking. The section must state the CONDITION and the fallback;
     // pinning both halves keeps a future trim from dropping one of them.
     // #8453: a PM section; the supervisor style carries no TodoWrite mandate.
+    // #10058: an output style carries no rule-id markers (it is delivered
+    // verbatim every PM turn), so these two pins stay until the #10061 eval
+    // that replaces them lands.
     for style in pm_output_styles() {
         assert!(
             style.content(rc()).contains("where the harness exposes it"),
@@ -3210,49 +2995,63 @@ fn base_agent_prose_rules_survive_composition() {
     // prompt), so the prose rules have to reach agents through BASE-AGENT.md
     // composition instead. #7423 trimmed that section to one line per rule and
     // pointed it at the same skill the output style points at, so assert the
-    // heading, the pointer, and one anchor per rule — plus the sparse-on-success
-    // rule and the raw-output evidence floor it must not weaken.
-    use crate::core::agent_builder::compose_agent;
-
-    let assets_dir = agent_assets_dir();
-
-    let composed =
-        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-
-    // The agent-facing variant is kept in step with the output style, so it
-    // states the same rules under a heading naming the same standard.
+    // section, the sparse-on-success rule and the raw-output evidence floor it
+    // must not weaken.
     // #7683: the pointer is PROSE, not a modelled `Skill(...)` call — most
     // agents' `tools:` allowlist no longer carries `Skill`, so an instruction
     // to invoke it would name a tool the agent does not have. The PM's own
     // output style still models the call (it keeps the tool); that pin lives in
     // `claude_md_sections_tests.rs`.
-    for needle in [
-        "Write Plainly",
-        "`tm-prose-style` skill",
-        "concrete referent",
-        "closing aphorisms",
-        "**Do not embellish.**",
-        "**Don't justify the restraint**",
-        "trailing emphatic negation",
-        "**No praise for the user.**",
-        "**If you are saying it, its worth is implied.**",
-        "**Banned word — \"honest\"**",
-        "**No borrowed-metaphor jargon.**",
-        "ASD-STE-100",
-        "**Ticket and PR bodies you draft**",
-        "never whether it is said",
+    // #10058: each rule is a marker in BASE-AGENT.md, and the composed body
+    // carries BASE-AGENT's body verbatim; the rules' effect is a #10061 eval.
+    use crate::core::agent_builder::compose_agent;
+
+    for (fact, rule) in [
+        ("the Write Plainly section", "base-agent/write-plainly"),
+        ("a Write Plainly bullet", "base-agent/concrete-referent"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/cut-hedges-and-aphorisms",
+        ),
+        ("a Write Plainly bullet", "base-agent/do-not-embellish"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/dont-justify-restraint",
+        ),
+        ("a Write Plainly bullet", "base-agent/no-praise"),
+        ("a Write Plainly bullet", "base-agent/worth-is-implied"),
+        ("a Write Plainly bullet", "base-agent/honest-ban"),
+        ("a Write Plainly bullet", "base-agent/borrowed-metaphor-ban"),
+        ("a Write Plainly bullet", "base-agent/asd-ste-100-spirit"),
+        (
+            "a Write Plainly bullet",
+            "base-agent/ticket-pr-bodies-sparse",
+        ),
+        (
+            "the graduated-verbosity rule",
+            "base-agent/verbosity-scales",
+        ),
+        (
+            "the evidence-rule carve-out",
+            "base-agent/sparse-on-success-keeps-evidence",
+        ),
+        (
+            "the raw-output evidence floor",
+            "base-agent/raw-output-evidence",
+        ),
     ] {
-        // #7709: whitespace-insensitive, so a rewrap is not a regression.
         assert!(
-            contains_prose_anchor(&composed, needle),
-            "composed agent is missing prose rule anchor {needle:?} (#7423)"
+            has_rule(agent("BASE-AGENT.md"), rule),
+            "BASE-AGENT.md is missing {fact} `{rule}` (#7423)"
         );
     }
+    assert_composed_carries("version-control", "BASE-AGENT.md");
 
     // #7683: BASE-AGENT is the `extends` root of every roster agent, and most
     // of their `tools:` allowlists omit `Skill`. Compose one of those and
     // assert the base template models no `Skill(...)` call at all — an agent
     // must never be told to invoke a tool it does not carry.
+    let assets_dir = agent_assets_dir();
     let no_skill_tool =
         compose_agent("code-critic", assets_dir).expect("compose_agent must succeed");
     assert!(
@@ -3260,25 +3059,10 @@ fn base_agent_prose_rules_survive_composition() {
         "an agent whose tools: omits Skill must inherit no modelled Skill(...) call (#7683)"
     );
 
-    assert!(
-        composed.contains("Verbosity scales with what went wrong"),
-        "composed agent is missing the graduated-verbosity rule"
-    );
-    assert!(
-        composed.contains("A long report about a clean run"),
-        "composed agent is missing the sparse-on-success rule"
-    );
-    // The evidence floor must survive verbatim next to it.
-    assert!(
-        composed.contains("Show raw output. Never summarise test results in your own words."),
-        "graduated verbosity must not weaken the raw-output rule"
-    );
-    assert!(
-        composed.contains("Sparse-on-success governs the"),
-        "composed agent is missing the evidence-rule carve-out"
-    );
     // "Caveman" is taken: hooks/optimizer.toml uses it for an unrelated
     // tool-output compression level. The prose rule must not collide with it.
+    let composed =
+        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     assert!(
         !composed.contains("Caveman"),
         "graduated-verbosity rule must not reuse the optimizer's `Caveman` term"
@@ -3293,23 +3077,12 @@ fn base_agent_prose_rules_survive_composition() {
 /// shapes and the margin a bounded loop owes.
 #[test]
 fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
-    use crate::core::agent_builder::compose_agent;
-
-    let assets_dir = agent_assets_dir();
-    let local_ops =
-        compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
-
-    for needle in [
-        "A deploy script and a reachability poll are your commands too",
-        "`tm wait --for run`",
-        "tm wait --for run --pid <pid> --timeout 480",
-        "tm wait --for file --path <sentinel>",
-        "10-15% under the harness's foreground ceiling",
-        "600000ms",
-    ] {
+    // #10058: pinned by marker in the source; composition is covered by
+    // `base_agent_guidance_sections_survive_composition`.
+    for rule in ["local-ops/deploy-and-poll-block", "local-ops/loop-margin"] {
         assert!(
-            local_ops.contains(needle),
-            "composed local-ops is missing the #7612 blocking-wait guidance: {needle:?}"
+            has_rule(agent("local-ops.md"), rule),
+            "local-ops.md is missing the #7612 blocking-wait guidance `{rule}`"
         );
     }
 }
@@ -3322,27 +3095,24 @@ fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
 /// deleted.
 #[test]
 fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
-    for needle in [
-        "Pulling After a Merge — Check Untracked Collisions First",
-        "git status --porcelain",
-        "git show origin/<base>:<path>",
-        "**Identical content**",
-        "**Differing content**",
-        "Never delete an untracked path to clear the abort without diffing it",
+    for rule in [
+        "git-workflow/pre-pull-collision-check",
+        "git-workflow/identical-content-resolves",
+        "git-workflow/differing-content-is-reported",
     ] {
         assert!(
             // #10055: entry plus references, so a split may move the section.
-            skill_with_references("skills/git-workflow.md").contains(needle),
+            has_rule(skill_with_references("skills/git-workflow.md"), rule),
             "git-workflow skill is missing the #7558 pre-pull untracked-collision \
-             guidance: {needle:?}"
+             guidance `{rule}`"
         );
     }
 }
 
 /// #8630: adaptive-crm spent its org's Actions cap and every job failed after.
-/// The deployed `git-workflow` entry must carry the four-check heading, each
-/// check, the run-spend rule and the billing-blocker phrase, and the composed
-/// `version-control` body must point at that section.
+/// The deployed `git-workflow` entry must carry the four checks, the run-spend
+/// rule and the billing-blocker phrase, and `version-control` must point at
+/// that section.
 #[test]
 fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
     // #10055: entry file only, on purpose — the spend checks are resident
@@ -3352,26 +3122,24 @@ fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
         .find(|a| a.rel_path == "skills/git-workflow.md")
         .expect("git-workflow must be in the ALL bundle table")
         .contents;
-    for needle in [
-        "### Four Checks Before a Workflow Edit or a PR on a Billed Repo",
-        "branches: [main]",
-        "cancel-in-progress: ${{ github.ref != format(",
-        "timeout-minutes: 20",
-        "if: needs.changes.outputs.db == 'true'",
-        "Never re-run a green run.",
-        "recent account payments have failed or your spending limit",
-        "19,667 Linux minutes",
+    for rule in [
+        "git-workflow/actions-spend-four-checks",
+        "git-workflow/never-rerun-a-green-run",
+        "git-workflow/billing-blocker",
     ] {
         assert!(
-            deployed.contains(needle),
-            "deployed git-workflow skill is missing the #8630 Actions-spend text: {needle:?}"
+            has_rule(deployed, rule),
+            "deployed git-workflow skill is missing the #8630 Actions-spend rule `{rule}`"
         );
     }
-    let composed = crate::core::agent_builder::compose_agent("version-control", agent_assets_dir())
-        .expect("compose_agent(version-control) must succeed");
+    // #10058: the pointer is a marker in the source; composition is covered by
+    // `base_agent_guidance_sections_survive_composition`.
     assert!(
-        composed.contains("git-workflow/SKILL.md`, \"GitHub Actions Spend\""),
-        "composed version-control must point at the #8630 section"
+        has_rule(
+            agent("version-control.md"),
+            "version-control/actions-spend-pointer"
+        ),
+        "version-control must point at the #8630 section"
     );
 }
 
@@ -3385,17 +3153,11 @@ fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
 #[test]
 fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
     let workflow = skill_with_references("skills/tm-workflow.md");
-    for needle in [
-        "untracked path the incoming commits also add",
-        "Pulling After a Merge — Check Untracked Collisions First",
-        "#7558",
-    ] {
-        assert!(
-            workflow.contains(needle),
-            "tm-workflow is missing the #7558 cross-reference to the pre-pull \
-             untracked-collision check: {needle:?}"
-        );
-    }
+    assert!(
+        has_rule(workflow, "tm-workflow/pre-pull-collision-pointer"),
+        "tm-workflow is missing the #7558 cross-reference to the pre-pull \
+         untracked-collision check"
+    );
     // A pointer, not a duplicate: the procedure itself stays in one place.
     assert!(
         !workflow.contains("git show origin/<base>:<path> | diff - <path>"),
@@ -3410,19 +3172,17 @@ fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
 /// including the one `128 + N` value that IS a failure (137 nobody killed).
 #[test]
 fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
-    for needle in [
-        "## Reading an Exit Code",
-        "`128 + N`",
-        "`143` (128+15)",
-        "`SIGTERM` — the ordinary `kill <pid>`",
-        "**terminated by signal N**",
-        "never as \"failed with exit code 143\"",
-        "The one exception is `137`",
+    for rule in [
+        "verification-before-completion/exit-code-signal-reading",
+        "verification-before-completion/exit-137-exception",
     ] {
         assert!(
-            skill_with_references("skills/verification-before-completion.md").contains(needle),
+            has_rule(
+                skill_with_references("skills/verification-before-completion.md"),
+                rule
+            ),
             "verification-before-completion skill is missing the #7561 \
-             signal-exit reading: {needle:?}"
+             signal-exit reading `{rule}`"
         );
     }
 }
@@ -3435,13 +3195,17 @@ fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
 #[test]
 fn version_control_gate_requires_a_clean_tree_before_push_7739() {
     assert!(
-        agent("version-control.md").contains("git status --porcelain")
-            && agent("version-control.md").contains("#7739"),
+        has_rule(
+            agent("version-control.md"),
+            "version-control/clean-tree-before-gate"
+        ),
         "version-control.md is missing the #7739 clean-tree-before-gate rule"
     );
-    let workflow = skill_with_references("skills/tm-workflow.md");
     assert!(
-        workflow.contains("git status --porcelain") && workflow.contains("#7739"),
+        has_rule(
+            skill_with_references("skills/tm-workflow.md"),
+            "tm-workflow/clean-tree-before-gate"
+        ),
         "tm-workflow.md is missing the #7739 clean-tree-before-gate rule"
     );
 }
@@ -3453,18 +3217,13 @@ fn version_control_gate_requires_a_clean_tree_before_push_7739() {
 /// each answer the list can give.
 #[test]
 fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() {
-    for needle in [
-        "#7871",
-        "never call a label absent without `gh label list` in front of you",
-        "gh label list -R <owner>/<repo> --limit 200",
-        "`gh label create <name>` and report what you created",
-    ] {
-        assert!(
-            agent("ticketing.md").contains(needle),
-            "ticketing.md is missing the #7871 list-before-asserting-absence \
-             rule: {needle:?}"
-        );
-    }
+    assert!(
+        has_rule(
+            agent("ticketing.md"),
+            "ticketing/live-label-list-before-absence"
+        ),
+        "ticketing.md is missing the #7871 list-before-asserting-absence rule"
+    );
 }
 
 /// #8013: a 5xx or timeout from a mutating `gh` call is not proof the call
@@ -3474,13 +3233,11 @@ fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() 
 #[test]
 fn version_control_verifies_before_retrying_a_5xx_8013() {
     assert!(
-        agent("version-control.md").contains("5xx")
-            && agent("version-control.md").contains("#8013"),
+        has_rule(
+            agent("version-control.md"),
+            "version-control/verify-before-retry-5xx"
+        ),
         "version-control.md is missing the #8013 verify-before-retry rule"
-    );
-    assert!(
-        agent("version-control.md").contains("gh pr view --json state,mergeCommit"),
-        "version-control.md must name the state-read command that gates a retry (#8013)"
     );
 }
 
@@ -3490,8 +3247,10 @@ fn version_control_verifies_before_retrying_a_5xx_8013() {
 #[test]
 fn version_control_treats_brief_examples_as_shapes_8014() {
     assert!(
-        agent("version-control.md").contains("is a shape, not a literal")
-            && agent("version-control.md").contains("#8014"),
+        has_rule(
+            agent("version-control.md"),
+            "version-control/brief-example-is-a-shape"
+        ),
         "version-control.md is missing the #8014 brief-example-is-a-shape rule"
     );
 }
@@ -3502,8 +3261,7 @@ fn version_control_treats_brief_examples_as_shapes_8014() {
 #[test]
 fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
     assert!(
-        agent("research.md").contains("never replaces the report")
-            && agent("research.md").contains("#8015"),
+        has_rule(agent("research.md"), "research/report-carries-findings"),
         "research.md is missing the #8015 report-carries-findings rule"
     );
 }
@@ -3514,13 +3272,8 @@ fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
 #[test]
 fn web_qa_recovers_a_dropped_tab_group_8022() {
     assert!(
-        agent("web-qa.md").contains("Never close the last other tab")
-            && agent("web-qa.md").contains("#8022"),
+        has_rule(agent("web-qa.md"), "web-qa/tab-group-recovery"),
         "web-qa.md is missing the #8022 tab-group-recovery rule"
-    );
-    assert!(
-        agent("web-qa.md").contains("tabs_context_mcp"),
-        "web-qa.md must name `tabs_context_mcp` as the recovery check (#8022)"
     );
 }
 
@@ -3530,13 +3283,12 @@ fn web_qa_recovers_a_dropped_tab_group_8022() {
 #[test]
 fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
     assert!(
-        agent("vercel-ops.md").contains("meta.githubCommitSha")
-            && agent("vercel-ops.md").contains("#8023"),
-        "vercel-ops.md is missing the #8023 commit-verification source"
-    );
-    assert!(
-        agent("vercel-ops.md").contains("POST /v13/deployments"),
-        "vercel-ops.md must name the git-sourced redeploy path for a dropped webhook (#8023)"
+        has_rule(
+            agent("vercel-ops.md"),
+            "vercel-ops/deployment-commit-source"
+        ),
+        "vercel-ops.md is missing the #8023 commit-verification source and \
+         dropped-webhook redeploy path"
     );
 }
 
@@ -3544,15 +3296,15 @@ fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
 /// stale log (last written before the incident window) as root cause.
 #[test]
 fn local_ops_honours_diagnose_only_briefs_8027() {
-    assert!(
-        agent("local-ops.md").contains("A diagnose-only brief overrides this playbook")
-            && agent("local-ops.md").contains("#8027"),
-        "local-ops.md is missing the #8027 diagnose-only-overrides-playbook rule"
-    );
-    assert!(
-        agent("local-ops.md").contains("check its mtime against"),
-        "local-ops.md must state the log-mtime check before citing root cause (#8027)"
-    );
+    for rule in [
+        "local-ops/diagnose-only-overrides",
+        "local-ops/log-mtime-check",
+    ] {
+        assert!(
+            has_rule(agent("local-ops.md"), rule),
+            "local-ops.md is missing the #8027 rule `{rule}`"
+        );
+    }
 }
 
 /// #8017: the resume skill's CLI fallback named `tm session catchup`, a verb
@@ -3564,9 +3316,8 @@ fn local_ops_honours_diagnose_only_briefs_8027() {
 /// Why: the skill is the only thing the PM reads before shelling out; a
 /// deprecated verb there is a warning on every fallback, and an unnamed paging
 /// knob is a paging knob nobody uses.
-/// What: asserts the singular verb is gone from the skill and that the paged
-/// and JSON forms are named — the MCP tool's and, since #8017's CLI half, the
-/// CLI's `--json --sessions-offset`.
+/// What: asserts the singular verb is gone from the skill and that the CLI
+/// fallback and its paged full-digest form carry their markers (#10058).
 /// Test: this test.
 #[test]
 fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
@@ -3575,18 +3326,13 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
         "tm-session-resume.md still cites the deprecated singular `tm session catchup`; \
          the live verb is `tm sessions catchup` (#2116)"
     );
-    for needle in [
-        "tm sessions catchup",
-        "--all-projects",
-        "--full",
-        "sessions_offset",
-        "sessions_next_offset",
-        "--json --sessions-offset",
-        "#8017",
+    for rule in [
+        "tm-session-resume/cli-fallback",
+        "tm-session-resume/paged-full-digest",
     ] {
         assert!(
-            skill_text("skills/tm-session-resume.md").contains(needle),
-            "tm-session-resume.md is missing the #8017 CLI-fallback correction: {needle:?}"
+            has_rule(skill_text("skills/tm-session-resume.md"), rule),
+            "tm-session-resume.md is missing the #8017 CLI-fallback correction `{rule}`"
         );
     }
 }
@@ -3595,20 +3341,16 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
 /// resolved snapshot plus live `git status` — with the digest behind
 /// `full: true`. A skill still teaching the watermarked digest as the default
 /// would send the PM looking for a `sessions` array that is no longer there.
-/// What: the skill names the lean fields and `full: true` / `--full` as the
-/// digest switch, and no longer calls the default a watermarked digest or
-/// `full` a watermark switch.
+/// What: the skill carries the lean-default marker (#10058), and no longer
+/// calls the default a watermarked digest or `full` a watermark switch.
 /// Test: this test.
 #[test]
 fn session_resume_skill_matches_the_lean_default_9883() {
     let text = skill_text("skills/tm-session-resume.md");
-    for needle in [
-        "\"git_status\"",
-        "\"resolved_session\"",
-        "\"digest\": \"lean\"",
-    ] {
-        assert!(text.contains(needle), "missing {needle:?}");
-    }
+    assert!(
+        has_rule(text, "tm-session-resume/lean-default"),
+        "missing the lean default"
+    );
     for stale in [
         "watermarked markdown digest",
         "true ignores the watermark",
@@ -3665,8 +3407,8 @@ fn shipped_content_never_teaches_all_projects_without_full_9883() {
 /// Why (#8408): every relaunch recreates the tmux window, so the skill's old
 /// "select the recorded `@id`" step pointed a resumed PM at a window that no
 /// longer existed.
-/// What: the skill gives no `tmux select-window` step and names the
-/// `tmux_session` resolution route.
+/// What: the skill gives no `tmux select-window` step and carries the
+/// tmux-session route's marker (#10058).
 /// Test: this test.
 #[test]
 fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
@@ -3675,7 +3417,10 @@ fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
         "tm-session-resume.md must not tell a resumed PM to select the recorded window"
     );
     assert!(
-        skill_text("skills/tm-session-resume.md").contains("\"tmux_session\""),
-        "tm-session-resume.md must list the `tmux_session` resolved_via value"
+        has_rule(
+            skill_text("skills/tm-session-resume.md"),
+            "tm-session-resume/tmux-session-route"
+        ),
+        "tm-session-resume.md must name the tmux-session resolution route"
     );
 }
