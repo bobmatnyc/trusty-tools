@@ -115,8 +115,11 @@ pub async fn open(router: axum::Router, path: &str, ticket: &str) -> Result<Body
 /// Forward every event in `body` to `emit` until the body ends or `emit` says
 /// the receiver is gone.
 ///
-/// Why `emit` returns `bool`: a `Channel` whose webview reloaded fails to send,
+/// Why `emit` returns `bool`: a destroyed webview makes `Channel::send` fail,
 /// and a pump that kept reading would hold the daemon socket open for nothing.
+/// A reload does NOT fail the send (`Channel::send` is `webview.eval`, Ok while
+/// the webview object exists), and a quiet stream never calls `emit`, so a
+/// reload is released by [`StreamRegistry::close_all`], not by this return.
 /// What: decodes SSE blocks, emits one [`StreamEvent::Message`] per `data:`
 /// payload (comments such as `: heartbeat` are dropped), and finishes with one
 /// [`StreamEvent::End`] — `error: None` when the body closed, `Some` when it
@@ -267,9 +270,26 @@ impl StreamRegistry {
 
     /// Stop every stream; return how many were live.
     ///
-    /// Test: `close_all_aborts_a_quiet_heartbeat_only_pump`.
+    /// Why: a page reload leaves the old page's streams with nobody to close
+    /// them. Aborting each pump task drops its body, which drops the daemon
+    /// connection.
+    ///
+    /// Test: `close_all_aborts_a_quiet_heartbeat_only_pump` and
+    /// `close_all_drops_the_daemon_connection_of_a_quiet_stream`
+    /// (`tests/bridge_uds.rs`).
     pub fn close_all(&self) -> usize {
-        0
+        // #10166: drain under the lock, abort after it is released.
+        let handles: Vec<AbortHandle> = self
+            .live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in &handles {
+            handle.abort();
+        }
+        handles.len()
     }
 
     /// How many streams are pumping.
