@@ -709,3 +709,60 @@ async fn minting_a_ticket_requires_the_token() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ─── page reload ─────────────────────────────────────────────────────────────
+
+/// Why (#10166): a reloaded page never closes its streams. `close_all` must
+/// drop the daemon connection itself; the stub sees it as a failed write. (The
+/// quiet, heartbeat-only case is the unit test in `bridge::channel`.)
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_all_drops_the_daemon_connection_of_a_quiet_stream() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("tcode.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let (hung_up, mut hung_up_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.expect("accept");
+        let (rx, mut tx) = conn.split();
+        let mut reader = tokio::io::BufReader::new(rx);
+        let mut request = Vec::new();
+        reader
+            .read_until(b'\n', &mut request)
+            .await
+            .expect("request");
+        // The client half-closes after its request, so EOF proves nothing;
+        // keep writing until the write fails, which only a dropped read side
+        // does.
+        loop {
+            let frame = format!("{}\n", item_frame(json!({"seq": 1})));
+            if tx.write_all(frame.as_bytes()).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = hung_up.send(());
+    });
+
+    let (router, _) = router_for(socket);
+    let ticket = mint(&router, "/workstreams/w-1/events").await;
+    let registry = channel::StreamRegistry::default();
+    registry
+        .open(router, "/workstreams/w-1/events", &ticket, |_| true)
+        .await
+        .expect("the stream opens");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut hung_up_rx)
+            .await
+            .is_err(),
+        "the daemon connection must stay up while the stream is open"
+    );
+
+    assert_eq!(registry.close_all(), 1);
+    tokio::time::timeout(Duration::from_secs(5), hung_up_rx)
+        .await
+        .expect("the daemon must see the connection close")
+        .expect("stub alive");
+    assert_eq!(registry.live(), 0);
+}

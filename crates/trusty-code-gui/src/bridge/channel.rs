@@ -265,6 +265,13 @@ impl StreamRegistry {
         handle.map(|h| h.abort()).is_some()
     }
 
+    /// Stop every stream; return how many were live.
+    ///
+    /// Test: `close_all_aborts_a_quiet_heartbeat_only_pump`.
+    pub fn close_all(&self) -> usize {
+        0
+    }
+
     /// How many streams are pumping.
     #[must_use]
     pub fn live(&self) -> usize {
@@ -461,5 +468,79 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the finished stream is still registered");
+    }
+
+    /// Why (#10166): a reloaded page cannot close the streams it opened, and a
+    /// `: heartbeat`-only stream emits nothing, so no failed send ever stops
+    /// its pump. `close_all` must drop each body (the daemon connection) itself.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn close_all_aborts_a_quiet_heartbeat_only_pump() {
+        /// Counts the response bodies alive: +1 when built, -1 when dropped.
+        struct Live(Arc<AtomicU64>);
+        impl Live {
+            fn new(n: &Arc<AtomicU64>) -> Self {
+                n.fetch_add(1, Ordering::SeqCst);
+                Self(Arc::clone(n))
+            }
+        }
+        impl Drop for Live {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let bodies = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&bodies);
+        let router = axum::Router::new().route(
+            "/sessions/{id}/events",
+            get(move || {
+                let live = Live::new(&counted);
+                async move {
+                    let beats = futures_util::stream::unfold(live, |live| async move {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let beat = axum::body::Bytes::from(": heartbeat\n\n");
+                        Some((Ok::<_, std::io::Error>(beat), live))
+                    });
+                    axum::response::Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(beats))
+                        .expect("response")
+                }
+            }),
+        );
+        let registry = StreamRegistry::default();
+        let sent = Arc::new(AtomicU64::new(0));
+        for _ in 0..2 {
+            let sent = Arc::clone(&sent);
+            registry
+                .open(router.clone(), "/sessions/s-1/events", "t1", move |_| {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                    true
+                })
+                .await
+                .expect("open");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(registry.live(), 2);
+        assert_eq!(bodies.load(Ordering::SeqCst), 2);
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "heartbeats emit nothing");
+
+        assert_eq!(registry.close_all(), 2);
+        assert_eq!(registry.live(), 0);
+        for _ in 0..100 {
+            if bodies.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(bodies.load(Ordering::SeqCst), 0, "every body was dropped");
+
+        // A stream opened after the drain still works.
+        let id = registry
+            .open(quiet_sse_router(), "/sessions/s-1/events", "t2", |_| true)
+            .await
+            .expect("open after close_all");
+        assert_eq!(registry.live(), 1);
+        assert!(registry.close(id));
     }
 }
