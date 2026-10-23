@@ -1521,7 +1521,10 @@ fn every_dashboard_asset_is_seeded() {
         .filter(|f| f.dest.starts_with("templates/dashboard/"))
         .count();
     assert!(checked > 0, "no dashboard assets under {}", root.display());
-    assert_eq!(checked, rows, "dashboard assets {checked}, seeded rows {rows}");
+    assert_eq!(
+        checked, rows,
+        "dashboard assets {checked}, seeded rows {rows}"
+    );
 }
 
 /// #9997 AC5: a seed carrying one more skill writes it with no change to
