@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.2.2"
+version = "2.3.0"
 schema_major = 1
 
 [[member]]
@@ -556,7 +556,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-adr.md"
-version = "2.0.0"
+version = "2.1.0"
 
 [[member]]
 path = "skills/tm-agent-architecture.md"

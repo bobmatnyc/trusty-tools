@@ -1,0 +1,5 @@
+Added
+- `tm-adr` skill (2.1.0): generic create/supersede/amend steps on `docs/adr/`, an `init` procedure that bootstraps a project's ADR setup as one staged pull request, and a `status` procedure that reports each managed copy against the deployed skill with five outcomes (`up to date`, `update available`, `locally edited`, `unmanaged`, `tm behind`) ([#10080](https://github.com/bobmatnyc/trusty-tools/issues/10080)).
+  - `references/adr-standard.md` is the one source for when to write an ADR, metadata, lifecycle, numbering, vetting and governance; `references/README.md`, `template.md`, `INDEX.md`, `0001-record-architecture-decisions.md` and `adr-check.yml` are the files `init` seeds.
+  - `scripts/check_adr.sh` (structural ADR gate, `--self-test`, `--verify-self` over a `body-sha256` header), `scripts/adr_init.sh` and `scripts/adr_status.sh`; each needs bash 4+ and carries its own self-test.
+  - The skill no longer references repository-specific documents or an ADR-standard spec outside the skill; the layout-ADR paragraph is removed.
