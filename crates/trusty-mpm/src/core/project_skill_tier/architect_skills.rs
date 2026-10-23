@@ -95,7 +95,30 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "e71d8d57bdafae52f954fce12a3edc0e9367cd05fad9c2978b627f32a6808240",
         // #9997 U1b: the 50% text, before the 250k-token bar.
         "de6c0d83f2432fd4016c59ec3522e5b03a145db5474a58e4b8ed2bb98c78471d",
+        // #10161: the U1b text, before the Intent Ledger handoff.
+        "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
     ],
+};
+
+/// `architect-operating-rules`, edited since its first release.
+const OPERATING_RULES: ShippedSkill = ShippedSkill {
+    stem: "architect-operating-rules",
+    // #10161: the U1b text, before the Asks-to-Actions rename.
+    previous: &["fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3"],
+};
+
+/// `architect-workflow`, edited since its first release.
+const WORKFLOW: ShippedSkill = ShippedSkill {
+    stem: "architect-workflow",
+    // #10161: the U1b text, before the Intent Ledger handoff.
+    previous: &["bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755"],
+};
+
+/// `architect-strategy`, edited since its first release.
+const STRATEGY: ShippedSkill = ShippedSkill {
+    stem: "architect-strategy",
+    // #10161: the U1b text, before the factory issue-tracking rule.
+    previous: &["2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77"],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
@@ -113,11 +136,11 @@ pub const SHIPPED: &[ShippedSkill] = &[
     CONTEXT_REFRESH,
     // #9997 U1b: the skills the operating manual indexes, first shipped here.
     first_release("architect-tmux-ops"),
-    first_release("architect-operating-rules"),
-    first_release("architect-workflow"),
+    OPERATING_RULES,
+    WORKFLOW,
     first_release("architect-search-memory"),
     first_release("architect-github"),
-    first_release("architect-strategy"),
+    STRATEGY,
     first_release("architect-completion-standard"),
     first_release("architect-owner-model"),
 ];
