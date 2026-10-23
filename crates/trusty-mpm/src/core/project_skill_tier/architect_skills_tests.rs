@@ -257,7 +257,7 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 10] = [
+    const PINNED: [(&str, &str); 16] = [
         (
             "tm-fleet-check",
             "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
@@ -298,15 +298,45 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "architect-owner-model",
             "f9d9b4afd2f28fd93d45947bc0b13376a7d99f44befd73e08132136fb70f4bf1",
         ),
+        (
+            "architect-drift-check",
+            "26a86b0a4ac74bdc255e7dd5c42e5a818b0cb776ccd3f513193f30ec5a400401",
+        ),
+        (
+            "architect-review",
+            "ce86d88ac5823fb981cb71df0e503c21377030b89911de991f84673c89fba117",
+        ),
+        (
+            "architect-project-provision",
+            "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
+        ),
+        (
+            "architect-macos",
+            "442541a32d8c81f2cdcc4d9e74f0fc3e993ae535f5d94ca9f3223af48487077b",
+        ),
+        (
+            "architect-improvements",
+            "bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0",
+        ),
+        (
+            "architect-host-admin",
+            "8aff58414cd2ddca8c830dcebdabc49b319de8399c6e6227a707daae92034085",
+        ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 5] = [
+    const FIRST_RELEASE: [&str; 11] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
         "architect-completion-standard",
         "architect-owner-model",
+        "architect-drift-check",
+        "architect-review",
+        "architect-project-provision",
+        "architect-macos",
+        "architect-improvements",
+        "architect-host-admin",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

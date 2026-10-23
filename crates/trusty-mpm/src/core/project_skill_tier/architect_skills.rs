@@ -143,6 +143,14 @@ pub const SHIPPED: &[ShippedSkill] = &[
     STRATEGY,
     first_release("architect-completion-standard"),
     first_release("architect-owner-model"),
+    // #10161 D2: the review, drift, provisioning, macOS, improvement and
+    // host-administration skills, rewritten into trusty-tools form.
+    first_release("architect-drift-check"),
+    first_release("architect-review"),
+    first_release("architect-project-provision"),
+    first_release("architect-macos"),
+    first_release("architect-improvements"),
+    first_release("architect-host-admin"),
 ];
 
 /// The deploy record, beside the skills in the project tier.
