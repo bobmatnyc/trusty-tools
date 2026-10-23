@@ -91,9 +91,16 @@ impl CodeIndexer {
         text: &str,
         pinned_semantic: bool,
     ) -> anyhow::Result<(Option<Vec<f32>>, Option<String>)> {
-        // #10194: bounded by the query-embed deadline; a miss degrades below.
-        let deadline = super::embed_deadline::resolve_query_embed_deadline();
-        match self.embed_query_within(text, deadline).await {
+        // #10194: an unpinned query is bounded by the query-embed deadline and a
+        // miss degrades below; a pinned semantic query waits on the detached
+        // embed up to the caller's query budget instead.
+        let embedded = if pinned_semantic {
+            self.embed_query_detached(text).await
+        } else {
+            let deadline = super::embed_deadline::resolve_query_embed_deadline();
+            self.embed_query_within(text, deadline).await
+        };
+        match embedded {
             Ok(vector) => Ok((vector, None)),
             Err(e) => {
                 let detail = format!("{e:#}");

@@ -14,6 +14,9 @@
 //! degrade at once instead of queueing one more task behind the spawn
 //! ([`QueryEmbedGate`]); the gate lapses after [`GATE_STALE_AFTER`] so a hung
 //! embed cannot hold an index lexical forever.
+//! A query pinned to `stage: semantic` skips both the deadline and the gate
+//! ([`CodeIndexer::embed_query_detached`]): it waits on the same kind of
+//! detached embed for as long as its own query budget allows.
 //! Test: `service::server::tests_10194`, `embedder_supervisor::deadline_tests`,
 //! and the unit tests below.
 
@@ -133,7 +136,91 @@ const WAITING: u8 = 0;
 const ABANDONED: u8 = 1;
 const DONE: u8 = 2;
 
+/// Settles an abandoned embed's gate bookkeeping when its task ends, however
+/// it ends (#10194).
+///
+/// Why: a panic in the embed, or in the cache lock, unwinds the detached task
+/// past the explicit `finish_abandoned` call; `outstanding` would then stay
+/// above zero and hold the index lexical until the 60 s expiry.
+/// What: dropped by the task on return, panic or cancellation; if the waiter
+/// had already abandoned the embed it decrements the gate. `swap` makes it
+/// idempotent with the task's own settlement.
+/// Test: `a_panicking_embed_clears_the_gate_when_its_task_ends`.
+struct TaskEnd {
+    owner: Arc<AtomicU8>,
+    gate: Arc<QueryEmbedGate>,
+}
+
+impl TaskEnd {
+    /// Claim the outcome; true when the waiter had abandoned this embed.
+    fn settle(&self) -> bool {
+        if self.owner.swap(DONE, Ordering::AcqRel) == ABANDONED {
+            self.gate.finish_abandoned();
+            return true;
+        }
+        false
+    }
+}
+
+impl Drop for TaskEnd {
+    fn drop(&mut self) {
+        self.settle();
+    }
+}
+
+/// Embed `text` and fill the query-embed cache with the vector.
+async fn embed_and_cache(
+    pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+    embedder: &Arc<dyn crate::core::embed::Embedder>,
+    text: &str,
+    key: u64,
+    cache: &Mutex<lru::LruCache<u64, Vec<f32>>>,
+) -> Result<Vec<f32>> {
+    let result = super::lanes::embed_one(pool, embedder, text).await;
+    if let Ok(v) = &result {
+        cache
+            .lock()
+            .expect("query_cache mutex poisoned")
+            .put(key, v.clone());
+    }
+    result
+}
+
 impl CodeIndexer {
+    /// Embed a query for a caller pinned to the semantic lane (#10194).
+    ///
+    /// Why: a pinned `stage: semantic` query cannot be answered lexically, so
+    /// it takes neither the deadline nor the gate; it waits for the embed up to
+    /// the caller's own query budget. Awaiting the embed inline would let that
+    /// budget's expiry drop the sidecar spawn (`kill_on_drop`).
+    /// What: cache hit → the vector; else the embed runs on a detached task
+    /// that fills the cache, and this awaits it with no timeout of its own.
+    /// Dropping this future (the query budget expired) leaves the task running.
+    /// Test: `a_pinned_semantic_query_waits_out_a_cold_spawn_instead_of_503`.
+    pub(crate) async fn embed_query_detached(&self, query: &str) -> Result<Option<Vec<f32>>> {
+        let Some(embedder) = self.embedder.clone() else {
+            return Ok(None);
+        };
+        let key = hash_query(query);
+        if let Some(v) = self
+            .query_cache
+            .lock()
+            .expect("query_cache mutex poisoned")
+            .get(&key)
+        {
+            return Ok(Some(v.clone()));
+        }
+        let pool = self.resolve_embed_pool().await;
+        let cache = Arc::clone(&self.query_cache);
+        let text = query.to_string();
+        let vector =
+            tokio::spawn(async move { embed_and_cache(pool, &embedder, &text, key, &cache).await })
+                .await
+                .context("query embed task failed")?
+                .context("embed query")?;
+        Ok(Some(vector))
+    }
+
     /// Embed a query, waiting at most `deadline` on a cache miss (#10194).
     ///
     /// Why: see the module doc.
@@ -176,21 +263,17 @@ impl CodeIndexer {
 
         let pool = self.resolve_embed_pool().await;
         let cache = Arc::clone(&self.query_cache);
-        let gate = Arc::clone(&self.query_embed_gate);
         let owner = Arc::new(AtomicU8::new(WAITING));
-        let task_owner = Arc::clone(&owner);
-        let (index_id, text) = (self.index_id.clone(), query.to_string());
+        let end = TaskEnd {
+            owner: Arc::clone(&owner),
+            gate: Arc::clone(&self.query_embed_gate),
+        };
+        let index_id = self.index_id.clone();
+        let text = query.to_string();
         let started = Instant::now();
         let mut task = tokio::spawn(async move {
-            let result = super::lanes::embed_one(pool, &embedder, &text).await;
-            if let Ok(v) = &result {
-                cache
-                    .lock()
-                    .expect("query_cache mutex poisoned")
-                    .put(key, v.clone());
-            }
-            if task_owner.swap(DONE, Ordering::AcqRel) == ABANDONED {
-                gate.finish_abandoned();
+            let result = embed_and_cache(pool, &embedder, &text, key, &cache).await;
+            if end.settle() {
                 let ms = started.elapsed().as_millis();
                 match &result {
                     Ok(_) => tracing::info!(
