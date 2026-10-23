@@ -55,6 +55,7 @@ const NOISE_COMPONENTS: &[&str] = &[
     "local storage",
     "localstorage",
     "sessionstorage",
+    "__pycache__",
 ];
 
 /// Path-component prefixes that mark OS / browser temp directories.
@@ -79,13 +80,14 @@ const NOISE_FILE_SUFFIXES: &[&str] = &[".log", ".tmp", ".lock"];
 const STATE_ROOT_DIRS: &[(&str, &str)] = &[("library", "caches"), ("library", "preferences")];
 
 /// Return `true` when a directory component is a dot-tool cache: a dot-named
-/// directory containing `cache` (`.mypy_cache`, `.parcel-cache`), or `cache`
-/// directly under a dot-named directory (`.next/cache`).
+/// directory containing `cache` (`.mypy_cache`, `.parcel-cache`), or `cache` /
+/// `caches` directly under a dot-named directory (`.next/cache`,
+/// `.gradle/caches`).
 /// Test: `is_coding_file_rejects_tool_cache_dirs_10097`.
 // #10097: the old `cache` substring rejected these; component matching must too.
 fn is_tool_cache_dir(parent: Option<&str>, dir: &str) -> bool {
     (dir.starts_with('.') && dir.contains("cache"))
-        || (dir == "cache" && parent.is_some_and(|p| p.starts_with('.')))
+        || (matches!(dir, "cache" | "caches") && parent.is_some_and(|p| p.starts_with('.')))
 }
 
 /// Process-wide count of `FileChanged` events dropped by the noise filter.
@@ -667,6 +669,10 @@ mod tests {
             "/w/app/.next/cache/a.json",
             "/w/app/.parcel-cache/x.json",
             "C:\\w\\app\\.mypy_cache\\x.json",
+            "/w/app/src/pkg/__pycache__/x.pyc",
+            "src/pkg/__pycache__/x.pyc",
+            "src/pkg/__pycache__/x.json",
+            "/w/app/.gradle/caches/8.5/x.json",
         ] {
             assert!(!is_coding_file(p), "{p} must stay rejected");
         }
