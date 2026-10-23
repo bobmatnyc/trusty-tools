@@ -164,7 +164,8 @@
 //! OWN idle-eviction window, scaled by how expensive that specific index is
 //! to rehydrate — see `helpers::scaled_idle_evict_threshold` for the formula.
 //! [`spawn_detached_rehydrate`] now also records the wall-clock duration of
-//! its own redb scan into [`super::CodeIndexer::last_rehydrate_cost_ms`], so
+//! the whole rehydrate (#10192: scan through commit, not the scan alone) into
+//! [`super::CodeIndexer::last_rehydrate_cost_ms`], so
 //! the scaling input becomes a real MEASUREMENT (not just a chunk-count
 //! estimate) after an index's first rehydrate in a process's lifetime. The
 //! sweep itself (`spawn_idle_chunk_eviction_ticker` /
@@ -821,12 +822,11 @@ impl CodeIndexer {
             // (write side) never deletes rows this scan already read.
             let _scan_gate = scan_gate.read().await;
 
-            // Issue #3683 slice 2: wall-clock the scan itself (not the whole
-            // detached task, which also includes lock acquisition + map
-            // publish below) so `last_rehydrate_cost_ms` reflects the actual
-            // O(corpus) cost that drives `cost_scaled_idle_threshold`, not
-            // incidental commit-phase overhead.
-            let scan_started = Instant::now();
+            // #10192: time the whole rehydrate (scan, sort, BM25, maps,
+            // commit) for `cost_scaled_idle_threshold`; the scan alone was
+            // a fraction of it. Starts after the scan-gate wait, which is
+            // contention, not cost.
+            let rehydrate_started = Instant::now();
             let loaded = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
                 #[cfg(test)]
                 {
@@ -847,8 +847,6 @@ impl CodeIndexer {
                 Ok((chunks, entities))
             })
             .await;
-            let scan_elapsed_ms =
-                scan_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
             #[cfg(test)]
             if armed_commit_panics().contains(&commit_panic_key) {
@@ -859,12 +857,6 @@ impl CodeIndexer {
                 Ok(Ok((chunks, entities))) => {
                     let n_chunks = chunks.len();
                     let n_files = entities.len();
-
-                    // Issue #3683 slice 2: record the MEASURED scan cost so
-                    // the next idle-eviction tick's `cost_scaled_idle_threshold`
-                    // uses a real measurement instead of the chunk-count
-                    // estimate — see `CodeIndexer::rehydrate_cost_estimate_ms`.
-                    last_rehydrate_cost_ms.store(scan_elapsed_ms, Ordering::Relaxed);
 
                     // Phase 1: BM25, in the deterministic id-sorted order,
                     // reporting (not silently swallowing) cap drops.
@@ -990,6 +982,21 @@ impl CodeIndexer {
                         );
                     }
                     drop(generation_guard);
+
+                    // #10192: store the whole-rehydrate wall time once, at the
+                    // end of the success arm. A skipped commit still did the
+                    // full work, so its cost counts; the failure arms store
+                    // nothing, so a failed read cannot lower the window.
+                    let rehydrate_ms = rehydrate_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64;
+                    last_rehydrate_cost_ms.store(rehydrate_ms, Ordering::Relaxed);
+                    tracing::info!(
+                        rehydrate_ms,
+                        "index '{index_id}': rehydrate cost {rehydrate_ms} ms recorded \
+                         for idle-evict scaling"
+                    );
                 }
                 // #5917: record the fault, not just a log line. Both arms leave
                 // `*_evicted` set, so every lane below answers from an empty
@@ -1154,7 +1161,8 @@ impl CodeIndexer {
     /// re-warm.
     /// What: returns the most recently MEASURED rehydrate duration
     /// ([`super::CodeIndexer::last_rehydrate_cost_ms`], set by
-    /// [`spawn_detached_rehydrate`] after a real redb scan) when nonzero.
+    /// [`spawn_detached_rehydrate`] from the whole rehydrate's wall time,
+    /// #10192) when nonzero.
     /// Otherwise ESTIMATES from the durable corpus's on-disk chunk count — a
     /// cheap O(1) redb metadata read (`CorpusStore::chunk_count`, not a
     /// scan — the same call `files::enumerate_chunks_after` already makes
@@ -1163,7 +1171,10 @@ impl CodeIndexer {
     /// index with no durable corpus wired (nothing to rehydrate, nothing to
     /// cost).
     /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated`,
-    /// `rehydrate_cost_estimate_ms_falls_back_to_corpus_chunk_count_estimate`
+    /// `rehydrate_cost_estimate_ms_falls_back_to_corpus_chunk_count_estimate`,
+    /// `rehydrate_cost_covers_post_scan_phases_and_raises_threshold`,
+    /// `second_equal_cost_rehydrate_does_not_lower_threshold`,
+    /// `panicked_rehydrate_keeps_the_prior_cost`
     /// in `indexer::cost_scaled_threshold_tests`.
     pub(crate) fn rehydrate_cost_estimate_ms(&self) -> u64 {
         let measured = self.last_rehydrate_cost_ms.load(Ordering::Relaxed);

@@ -1,0 +1,2 @@
+Fixed
+- The idle-evict window now scales with the time of the whole corpus rehydrate (scan, sort, BM25 build, chunk and entity maps, commit), not the redb scan alone. The scan was 1-2 s of a 7 s rehydrate on a 123k-chunk index, so the window fell back to the base and the index was evicted again within minutes. A failed or panicked rehydrate stores no cost. The daemon logs the stored value as `rehydrate cost <N> ms recorded for idle-evict scaling` (#10192).
