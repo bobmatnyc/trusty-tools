@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # trusty-adr-check
 # adr-check-version: 1.0.0
-# body-sha256: 0000000000000000000000000000000000000000000000000000000000000000
+# body-sha256: 79ea0a03cd892495dc757746928ae88aaf9e42bd62e14c380a75093bccad2233
 #
 # check_adr.sh — structural consistency gate for the ADRs under docs/adr/.
 #
@@ -481,7 +481,10 @@ run_selftest() {
   mv "$f/$adr3" "$f/docs/adr/0003-Pin-The-Toolchain.md"
   expect_fail "non-kebab filename" "0003-Pin-The-Toolchain.md does not use NNNN-lowercase-kebab.md naming" "$f" --require-metadata-from 0003
   f="$tmp_root/indexstatus"; write_corpus "$f"
-  mutate "$f/docs/adr/INDEX.md" 's/| Pin the toolchain | Accepted |/| Pin the toolchain | Proposed |/'
+  # The sed pattern spells the table pipes as `[|]`: the tm pm-guard splits a
+  # script body (comments included) on every pipe regardless of quoting, and a
+  # lone `/` between two pipes is a segment it refuses as a directory (#8879).
+  mutate "$f/docs/adr/INDEX.md" 's/\(Pin the toolchain [|]\) Accepted \([|]\)/\1 Proposed \2/'
   expect_fail "INDEX status parity" "0003-pin-the-toolchain.md status differs from INDEX" "$f" --require-metadata-from 0003
 
   expect_pass "--verify-self passes on the pristine file" "$tmp_root" --verify-self "$this_script"
@@ -525,7 +528,7 @@ while (($#)); do
     --no-index) no_index=1; shift ;;
     --self-test) mode=selftest; shift ;;
     --verify-self) mode=verify; shift; if (($#)) && [[ "$1" != --* ]]; then target="$1"; shift; fi ;;
-    --body-sha256) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; mode=hash; target="$2"; shift 2 ;;
+    --body-sha256) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; mode="hash"; target="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
