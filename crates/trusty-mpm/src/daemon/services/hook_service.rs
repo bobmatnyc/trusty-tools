@@ -16,6 +16,7 @@
 //! disabled-overseer fast path, the decision conversion, and the file filter.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::hook::{HookEvent, HookEventRecord};
 use crate::core::overseer::{OverseerContext, OverseerDecision};
@@ -27,44 +28,58 @@ use crate::daemon::state::DaemonState;
 
 // ---- FileChanged noise filter -------------------------------------------
 
-/// Path substrings that indicate OS / browser noise rather than source files.
+/// Path components whose exact (case-insensitive) name marks OS / browser /
+/// build state.
 ///
 /// Why: Claude Code's `FileChanged` hook fires for every `inotify`/FSEvents
 /// notification on the system, including Chrome temp files, macOS preferences,
 /// and browser caches. Storing those in the ring buffer fills the TUI "Recent
 /// Events" panel with irrelevant noise.
-/// What: a substring deny-list checked case-insensitively against the full
-/// path.  Any match causes the event to be silently dropped before ring-buffer
-/// insertion.
-/// Test: `is_coding_file_rejects_noise`, `is_coding_file_accepts_source`.
-const NOISE_PATTERNS: &[&str] = &[
-    // Browser temp/state files
+/// What: matched against whole path components, never substrings, so a source
+/// file in `src/cache/` or named `history.rs` is kept (#10097). `cache` and
+/// `history` are not here; they are denied only under a state root
+/// ([`STATE_ROOT_DIRS`], [`under_application_support`]).
+/// Test: `is_coding_file_rejects_noise`,
+/// `is_coding_file_still_rejects_real_state_files_10097`.
+const NOISE_COMPONENTS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    ".ds_store",
+    ".trashes",
+    ".fseventsd",
+    ".temporaryitems",
+    ".cache",
+    "gpucache",
+    "indexeddb",
+    "local storage",
+    "localstorage",
+    "sessionstorage",
+];
+
+/// Path-component prefixes that mark OS / browser temp directories.
+/// Test: `is_coding_file_rejects_noise`.
+const NOISE_COMPONENT_PREFIXES: &[&str] = &[
     ".com.google.chrome",
     ".com.apple.",
     "com.apple.",
-    "preferences",
-    "cookies",
-    "history",
-    "cache",
-    "gpucache",
-    "indexeddb",
-    "localstorage",
-    "sessionstorage",
-    // OS noise
-    ".ds_store",
     ".spotlight-",
-    ".temporaryitems",
-    ".trashes",
-    ".fseventsd",
-    // Log / tmp / lock
-    ".log",
-    ".tmp",
-    ".lock",
-    // Build / dependency artifacts
-    "node_modules/",
-    "/target/",
-    "/.git/",
 ];
+
+/// File names that are browser / OS state, matched on the last component only.
+/// Test: `is_coding_file_still_rejects_real_state_files_10097`.
+const NOISE_FILE_NAMES: &[&str] = &["preferences", "cookies", "cookies-journal", "history"];
+
+/// File-name suffixes for log / tmp / lock files.
+/// Test: `is_coding_file_rejects_noise`.
+const NOISE_FILE_SUFFIXES: &[&str] = &[".log", ".tmp", ".lock"];
+
+/// Adjacent component pairs that root OS state (`Library/Caches`).
+/// Test: `is_coding_file_still_rejects_real_state_files_10097`.
+const STATE_ROOT_DIRS: &[(&str, &str)] = &[("library", "caches"), ("library", "preferences")];
+
+/// Process-wide count of `FileChanged` events dropped by the noise filter.
+static DROPPED_FILE_CHANGES: AtomicU64 = AtomicU64::new(0);
 
 /// File extensions that identify coding-relevant files.
 ///
@@ -89,20 +104,38 @@ const SOURCE_DIRS: &[&str] = &["/src/", "/lib/", "/crates/", "/packages/"];
 ///
 /// Why: OS file watchers emit events for every byte written anywhere on the
 /// system; the ring buffer must only retain events that a developer would
-/// recognise as meaningful (source, config, docs). Centralising the logic here
-/// makes it easy to extend without touching the event dispatch loop.
-/// What: rejects any path whose lowercased form contains a [`NOISE_PATTERNS`]
-/// substring; keeps any path with a [`CODE_EXTENSIONS`] suffix or a
-/// [`SOURCE_DIRS`] component; silently drops everything else.
+/// recognise as meaningful (source, config, docs). Substring matching dropped
+/// real source such as `compress/history.rs` (#10097).
+/// What: splits the path on `/` and `\` once and rejects it when a component
+/// equals a [`NOISE_COMPONENTS`] name, starts with a
+/// [`NOISE_COMPONENT_PREFIXES`] entry, follows a [`STATE_ROOT_DIRS`] pair or
+/// `Application Support` with a `cache`/`history` directory, or when the file
+/// name is a [`NOISE_FILE_NAMES`] entry or ends in a [`NOISE_FILE_SUFFIXES`]
+/// entry. Otherwise keeps a [`CODE_EXTENSIONS`] suffix or a [`SOURCE_DIRS`]
+/// component and drops everything else.
 /// Test: `is_coding_file_rejects_noise`, `is_coding_file_accepts_source`,
-/// `is_coding_file_accepts_source_dir`.
+/// `is_coding_file_accepts_source_dir`,
+/// `is_coding_file_accepts_paths_with_noise_words_in_names_10097`.
 // #6849: pub(crate) so the bus projection drops the same noise.
+// #10097: component and file-name matching replaces the whole-path substring scan.
 pub(crate) fn is_coding_file(path: &str) -> bool {
     let lower = path.to_lowercase();
+    let parts: Vec<&str> = lower.split(['/', '\\']).filter(|c| !c.is_empty()).collect();
 
-    // Deny: matches any noise pattern.
-    if NOISE_PATTERNS.iter().any(|p| lower.contains(p)) {
-        return false;
+    // Deny: a component, file name or state root marks OS / browser / build noise.
+    let mut in_app_support = false;
+    for (i, c) in parts.iter().enumerate() {
+        let is_last = i + 1 == parts.len();
+        if NOISE_COMPONENTS.contains(c)
+            || NOISE_COMPONENT_PREFIXES.iter().any(|p| c.starts_with(p))
+            || (in_app_support && (*c == "cache" || *c == "history"))
+            || (i > 0 && STATE_ROOT_DIRS.contains(&(parts[i - 1], c)))
+            || (is_last && NOISE_FILE_NAMES.contains(c))
+            || (is_last && NOISE_FILE_SUFFIXES.iter().any(|s| c.ends_with(s)))
+        {
+            return false;
+        }
+        in_app_support |= *c == "application support";
     }
 
     // Allow: has a recognised code extension.
@@ -112,6 +145,29 @@ pub(crate) fn is_coding_file(path: &str) -> bool {
 
     // Allow: lives inside a source directory tree.
     SOURCE_DIRS.iter().any(|dir| path.contains(dir))
+}
+
+/// Filter a `FileChanged` path, counting every drop.
+///
+/// Why: the hook ring buffer and the trusty-events projection both filter
+/// `FileChanged`; one helper keeps them in agreement and makes the number of
+/// dropped events observable (#10097).
+/// What: returns [`is_coding_file`]; on `false` bumps the process-wide counter
+/// and logs the running total at debug level.
+/// Test: `keep_file_changed_counts_only_drops_10097`.
+pub(crate) fn keep_file_changed(path: &str) -> bool {
+    keep_counting(&DROPPED_FILE_CHANGES, path)
+}
+
+/// [`keep_file_changed`] against an explicit counter, so a test can assert an
+/// exact delta without racing the shared static.
+fn keep_counting(counter: &AtomicU64, path: &str) -> bool {
+    let keep = is_coding_file(path);
+    if !keep {
+        let total = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::debug!(total, "dropped FileChanged noise: {path}");
+    }
+    keep
 }
 
 /// The daemon-facing result of processing one hook event.
@@ -317,8 +373,7 @@ impl HookService {
         //     are kept. Non-FileChanged events are unaffected.
         if event == HookEvent::FileChanged {
             let path = payload.get("path").and_then(Value::as_str).unwrap_or("");
-            if !is_coding_file(path) {
-                tracing::trace!("dropped FileChanged noise: {path}");
+            if !keep_file_changed(path) {
                 return HookDecision::Allow;
             }
         }
@@ -544,6 +599,58 @@ mod tests {
         assert!(!is_coding_file(
             "/Users/masa/Projects/app/.git/objects/pack/pack-abc.idx"
         ));
+    }
+
+    #[test]
+    fn is_coding_file_accepts_paths_with_noise_words_in_names_10097() {
+        for p in [
+            "crates/trusty-agents/src/compress/history.rs",
+            "crates/trusty-agents/src/skills/global_cache/mod.rs",
+            "/Users/x/my-cache-repo/src/lib.rs",
+            "/w/preferences-ui/src/a.rs",
+            "/w/app/src/cache/lru.rs",
+            "/w/app/src/cookies_jar.rs",
+            "/w/app/src/history/mod.rs",
+            "C:\\w\\app\\src\\history.rs",
+        ] {
+            assert!(is_coding_file(p), "{p} must be a coding file");
+        }
+    }
+
+    #[test]
+    fn is_coding_file_still_rejects_real_state_files_10097() {
+        for p in [
+            "/Users/x/Library/Application Support/Google/Chrome/Default/Cookies",
+            "/Users/x/Library/Application Support/Google/Chrome/Default/History",
+            "/Users/x/Library/Application Support/Google/Chrome/Default/Cache/data_0",
+            "/Users/x/Library/Application Support/Google/Chrome/Default/GPUCache/index",
+            "/Users/x/Library/Preferences/x.plist",
+            "/Users/x/Library/Caches/foo/a.json",
+            "/Users/x/.cache/foo/a.json",
+            "/Users/x/.mozilla/firefox/p/cookies.sqlite-journal.log",
+            "/tmp/a.log",
+            "/w/x.lock",
+            // Inside a source dir the extension/source-dir allow does not
+            // save them; only the file-name and suffix rules reject these.
+            "/w/app/src/run.log",
+            "/w/app/src/x.lock",
+            "/w/app/src/Cookies",
+            "target/debug/foo.o",
+            "node_modules/x/index.js",
+            ".git/index",
+            "C:\\w\\app\\target\\debug\\a.rs",
+        ] {
+            assert!(!is_coding_file(p), "{p} must stay rejected");
+        }
+    }
+
+    #[test]
+    fn keep_file_changed_counts_only_drops_10097() {
+        let counter = AtomicU64::new(0);
+        assert!(keep_counting(&counter, "/w/app/src/lib.rs"));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert!(!keep_counting(&counter, "/tmp/a.log"));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[test]
