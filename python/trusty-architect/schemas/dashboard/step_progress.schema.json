@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dashboard/step_progress.schema.json",
+  "title": "step progress (owner ticks on an item's steps)",
+  "type": "object",
+  "$defs": {
+    "iso": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"},
+    "isoOrEmpty": {"type": "string", "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"}
+  },
+  "required": ["item", "updated", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "item": {"type": "string", "minLength": 1},
+    "updated": {"$ref": "#/$defs/iso"},
+    "steps": {"type": "object",
+              "additionalProperties": {"type": "object", "required": ["done"], "additionalProperties": false,
+                                       "properties": {"done": {"type": "boolean"}, "done_at": {"$ref": "#/$defs/isoOrEmpty"},
+                                                      "note": {"type": "string"}, "note_at": {"$ref": "#/$defs/iso"}}}}
+  }
+}
