@@ -38,7 +38,7 @@ use crate::daemon::state::DaemonState;
 /// What: matched against whole path components, never substrings, so a source
 /// file in `src/cache/` or named `history.rs` is kept (#10097). `cache` and
 /// `history` are not here; they are denied only under a state root
-/// ([`STATE_ROOT_DIRS`], [`under_application_support`]).
+/// ([`STATE_ROOT_DIRS`], `Application Support`).
 /// Test: `is_coding_file_rejects_noise`,
 /// `is_coding_file_still_rejects_real_state_files_10097`.
 const NOISE_COMPONENTS: &[&str] = &[
@@ -78,6 +78,16 @@ const NOISE_FILE_SUFFIXES: &[&str] = &[".log", ".tmp", ".lock"];
 /// Test: `is_coding_file_still_rejects_real_state_files_10097`.
 const STATE_ROOT_DIRS: &[(&str, &str)] = &[("library", "caches"), ("library", "preferences")];
 
+/// Return `true` when a directory component is a dot-tool cache: a dot-named
+/// directory containing `cache` (`.mypy_cache`, `.parcel-cache`), or `cache`
+/// directly under a dot-named directory (`.next/cache`).
+/// Test: `is_coding_file_rejects_tool_cache_dirs_10097`.
+// #10097: the old `cache` substring rejected these; component matching must too.
+fn is_tool_cache_dir(parent: Option<&str>, dir: &str) -> bool {
+    (dir.starts_with('.') && dir.contains("cache"))
+        || (dir == "cache" && parent.is_some_and(|p| p.starts_with('.')))
+}
+
 /// Process-wide count of `FileChanged` events dropped by the noise filter.
 static DROPPED_FILE_CHANGES: AtomicU64 = AtomicU64::new(0);
 
@@ -109,7 +119,8 @@ const SOURCE_DIRS: &[&str] = &["/src/", "/lib/", "/crates/", "/packages/"];
 /// What: splits the path on `/` and `\` once and rejects it when a component
 /// equals a [`NOISE_COMPONENTS`] name, starts with a
 /// [`NOISE_COMPONENT_PREFIXES`] entry, follows a [`STATE_ROOT_DIRS`] pair or
-/// `Application Support` with a `cache`/`history` directory, or when the file
+/// `Application Support` with a `cache`/`history` directory, is a dot-tool
+/// cache directory ([`is_tool_cache_dir`]), or when the file
 /// name is a [`NOISE_FILE_NAMES`] entry or ends in a [`NOISE_FILE_SUFFIXES`]
 /// entry. Otherwise keeps a [`CODE_EXTENSIONS`] suffix or a [`SOURCE_DIRS`]
 /// component and drops everything else.
@@ -130,6 +141,7 @@ pub(crate) fn is_coding_file(path: &str) -> bool {
             || NOISE_COMPONENT_PREFIXES.iter().any(|p| c.starts_with(p))
             || (in_app_support && (*c == "cache" || *c == "history"))
             || (i > 0 && STATE_ROOT_DIRS.contains(&(parts[i - 1], c)))
+            || (!is_last && is_tool_cache_dir(i.checked_sub(1).map(|j| parts[j]), c))
             || (is_last && NOISE_FILE_NAMES.contains(c))
             || (is_last && NOISE_FILE_SUFFIXES.iter().any(|s| c.ends_with(s)))
         {
@@ -642,6 +654,26 @@ mod tests {
         ] {
             assert!(!is_coding_file(p), "{p} must stay rejected");
         }
+    }
+
+    #[test]
+    fn is_coding_file_rejects_tool_cache_dirs_10097() {
+        // The old `cache` substring rejected these; `.json`/`.md` would
+        // otherwise be kept by the extension allow-list.
+        for p in [
+            "/w/app/.mypy_cache/3.12/x.meta.json",
+            "/w/app/.pytest_cache/README.md",
+            "/w/app/.ruff_cache/0.1/x.json",
+            "/w/app/.next/cache/a.json",
+            "/w/app/.parcel-cache/x.json",
+            "C:\\w\\app\\.mypy_cache\\x.json",
+        ] {
+            assert!(!is_coding_file(p), "{p} must stay rejected");
+        }
+        // A plain `cache` directory or a dot-file name stays a coding file.
+        assert!(is_coding_file("/w/app/src/cache/lru.rs"));
+        assert!(is_coding_file("/w/app/cache/x.json"));
+        assert!(is_coding_file("/w/app/.cache_config.json"));
     }
 
     #[test]
