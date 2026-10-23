@@ -27,7 +27,7 @@
 # Exit: 0 installed and staged; 1 an existing ADR setup was found (nothing
 #   written) or the installed check fails; 2 usage, bash < 4, not inside a git
 #   worktree, the file listing failed, or the deployed skill is incomplete.
-#   An NNNN-*.md the scan cannot read counts as a marker (exit 1).
+#   An NNNN-*.md or a CLAUDE.md the scan cannot read counts as a marker (exit 1).
 
 set -euo pipefail
 if ((BASH_VERSINFO[0] < 4)); then
@@ -84,7 +84,7 @@ project_root() {
 # Lists every existing-setup marker, one per line. Runs from the project root
 # over the tracked and the untracked-not-ignored files. Fails closed (#10080):
 # a listing that cannot be produced is exit 2, never "no markers", and an
-# NNNN-*.md that cannot be read is a marker, never an absence.
+# NNNN-*.md or CLAUDE.md that cannot be read is a marker, never an absence.
 list_markers() {
   local path dir base part prefix claude line marker listing ls_status grep_status
   local -A seen_dir=()
@@ -129,10 +129,16 @@ list_markers() {
       fi
     fi
   done <<<"$listing"
+  # #10080: -L keeps a dangling symlink in the scan; -m 1 replaces `| head`,
+  # whose SIGPIPE would reach the status under pipefail.
   for claude in CLAUDE.md .claude/CLAUDE.md; do
-    [[ -f "$claude" ]] || continue
-    line="$(grep -niwE 'adrs?|architecture[- ]decisions?' -- "$claude" | head -n 1)" || true
-    [[ -z "$line" ]] || printf '%s line %s (an ADR mention in CLAUDE.md)\n' "$claude" "${line%%:*}"
+    [[ -f "$claude" || -L "$claude" ]] || continue
+    line="$(grep -m 1 -niwE 'adrs?|architecture[- ]decisions?' -- "$claude" 2>/dev/null)" && grep_status=0 || grep_status=$?
+    case "$grep_status" in
+      0) printf '%s line %s (an ADR mention in CLAUDE.md)\n' "$claude" "${line%%:*}" ;;
+      1) ;;
+      *) printf '%s (a CLAUDE.md that could not be read, grep exit %s; treated as a marker)\n' "$claude" "$grep_status" ;;
+    esac
   done
 }
 
@@ -294,8 +300,11 @@ run_init() {
 
 passes=0
 failures=0
+skips=0
 ok() { printf '  ok   %s\n' "$1"; passes=$((passes + 1)); }
 bad() { printf 'FAIL: %s\n%s\n' "$1" "${2:-}" >&2; failures=$((failures + 1)); }
+# A case the environment cannot exercise; counted apart from the passes.
+skip() { printf '  skip %s\n' "$1"; skips=$((skips + 1)); }
 
 # new_repo <dir> [default-branch]: an empty git repository.
 new_repo() {
@@ -464,12 +473,22 @@ check_fail_closed() {
   printf '# 0007. Pick a db\n\nNothing decided yet.\n' >"$adr"
   chmod 000 "$adr"
   if [[ -r "$adr" ]]; then
-    ok "an unreadable NNNN-*.md: skipped, the file stays readable to this user"
+    skip "an unreadable NNNN-*.md: a mode-000 file stays readable to this user"
   else
     expect_marker "an unreadable NNNN-*.md is a marker, not an absence" \
       'notes/0007-pick-a-db.md (an NNNN-*.md that could not be read, grep exit 2; treated as a marker)' "$f"
   fi
   chmod 644 "$adr"
+  # The CLAUDE.md has no ADR mention: unreadable alone must stop init.
+  f="$1/claude000"; new_repo "$f"; printf '# Project\n\nUse the address book ladder.\n' >"$f/CLAUDE.md"
+  chmod 000 "$f/CLAUDE.md"
+  if [[ -r "$f/CLAUDE.md" ]]; then
+    skip "an unreadable CLAUDE.md: a mode-000 file stays readable to this user"
+  else
+    expect_marker "an unreadable CLAUDE.md is a marker, not an absence" \
+      'CLAUDE.md (a CLAUDE.md that could not be read, grep exit 2; treated as a marker)' "$f"
+  fi
+  chmod 644 "$f/CLAUDE.md"
 }
 
 run_selftest() {
@@ -483,10 +502,10 @@ run_selftest() {
   check_refusals "$tmp_root"
   check_fail_closed "$tmp_root"
   if ((failures > 0)); then
-    printf 'adr_init self-test: %d/%d case(s) failed\n' "$failures" "$((passes + failures))" >&2
+    printf 'adr_init self-test: %d/%d case(s) failed, %d skipped\n' "$failures" "$((passes + failures))" "$skips" >&2
     return 1
   fi
-  printf 'adr_init self-test: all %d cases passed\n' "$passes"
+  printf 'adr_init self-test: all %d cases passed, %d skipped\n' "$passes" "$skips"
 }
 
 # ---- entry ------------------------------------------------------------------
