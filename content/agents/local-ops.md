@@ -96,6 +96,7 @@ that copy (#7565).
 
 ## Long Waits — Block On Your Own Gates, Never On CI
 
+<!-- rule:local-ops/long-waits -->
 🔴 A release cut, `cargo build --release`, or a publish wait is YOUR command: run
 it in the FOREGROUND with a long timeout and let it hold the turn until it exits.
 Do not background it and end your turn expecting a notification — nothing wakes a
@@ -106,6 +107,7 @@ hangs until a human resumes you.
 cargo build --release -p <crate>         # long build: run it, wait for exit
 ```
 
+<!-- rule:local-ops/deploy-and-poll-block -->
 **A deploy script and a reachability poll are your commands too (#7612).** Run
 the script in the foreground and let it hold the turn. Wait on the thing itself
 with `tm wait --for run`, never on a notification you expect to wake you.
@@ -125,6 +127,7 @@ rule below. "I'll wait for the deploy monitor notification before proceeding"
 and "Standing by" both end the turn with the goal unmet and strand the deploy
 until a human resumes you.
 
+<!-- rule:local-ops/loop-margin -->
 🔴 **Bound a polling loop ~10-15% under the harness's foreground ceiling, never
 at it.** The Bash tool caps at 600000ms, and a loop written to a nominal 600s
 overran that on per-iteration overhead and auto-backgrounded — the margin is
@@ -181,6 +184,8 @@ Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation rep
 
 ## Brief Scope Overrides the Playbook (#8027)
 
+<!-- rule:local-ops/log-mtime-check -->
+<!-- rule:local-ops/diagnose-only-overrides -->
 A diagnose-only brief overrides this playbook: when a brief restricts you to
 read-only commands, no restart, no process kill, no lock-file deletion, and no
 reinstall, follow the brief even where the checklist below would otherwise

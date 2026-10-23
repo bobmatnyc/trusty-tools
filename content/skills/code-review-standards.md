@@ -130,6 +130,7 @@ CRITICAL or HIGH: silent data loss, or a broken contract.
 
 ## CI Push-Permission Check
 
+<!-- rule:code-review-standards/github-token-protected-push -->
 A workflow granted `contents: write` that pushes to a branch protected by a
 push restriction or ruleset cannot use `GITHUB_TOKEN` for that push — GitHub
 never allows the Actions identity as a restriction or ruleset bypass actor.
@@ -138,6 +139,7 @@ with nothing to publish never exercises the push (#8016).
 
 ## Structured Test Payload Check
 
+<!-- rule:code-review-standards/format-interpolated-payload -->
 Flag a test helper that builds a JSON/YAML/TOML/SQL payload by `format!`
 interpolating a caller-supplied value into a string literal, instead of the
 format's own builder or serializer (e.g. `serde_json::json!`). A value

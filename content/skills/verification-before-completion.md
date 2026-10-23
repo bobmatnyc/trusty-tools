@@ -66,6 +66,7 @@ Skip any step = lying, not verifying.
 
 ## Reading an Exit Code
 
+<!-- rule:verification-before-completion/exit-code-signal-reading -->
 <!-- #7561: a `kill <pid>` stop of a dev server was reported four times as
      "failed with exit code 143". -->
 
@@ -87,6 +88,7 @@ is **terminated by signal N**, which is the outcome you asked for. Report it
 that way and never as "failed with exit code 143". Do not file a bug or start
 debugging a failure that did not happen.
 
+<!-- rule:verification-before-completion/exit-137-exception -->
 The one exception is `137` on a build or test run nobody killed: that is the
 OOM killer, a real failure, and it is diagnosed rather than read as a clean
 stop.

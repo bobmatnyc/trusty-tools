@@ -936,15 +936,22 @@ pub(crate) fn resolve<S: SourceLookup>(
 /// Extracting this shared tail keeps the two entry points byte-identical for
 /// identical input instead of risking silent drift between two copies.
 /// What: delegates frontmatter merging to [`merge_frontmatter`], then joins
-/// non-empty, newline-trimmed bodies with a blank line between each.
+/// non-empty, newline-trimmed bodies with a blank line between each, after
+/// dropping each body's rule-id markers (#10058).
 /// Test: `compose_engineer_chain`, `compose_base_only` (fs);
-/// `fs_and_in_memory_compose_are_byte_equivalent` (builder_in_memory.rs).
+/// `fs_and_in_memory_compose_are_byte_equivalent` (builder_in_memory.rs),
+/// `compose_agent_drops_rule_markers_from_every_chain_link`.
 pub(crate) fn render_composed(frontmatters: &[Frontmatter], bodies: &[String]) -> String {
     let mut out = merge_frontmatter(frontmatters);
     out.push('\n');
     let joined: Vec<String> = bodies
         .iter()
-        .map(|b| b.trim_matches('\n').to_string())
+        // #10058: rule-id markers are test metadata, never dispatch text.
+        .map(|b| {
+            super::rule_marker::strip_rule_markers(b)
+                .trim_matches('\n')
+                .to_string()
+        })
         .filter(|b| !b.is_empty())
         .collect();
     out.push_str(&joined.join("\n\n"));

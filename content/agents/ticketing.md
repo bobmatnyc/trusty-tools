@@ -37,6 +37,8 @@ file changes, follow-ups, staleness, and the skeleton.
 
 ## Milestone, Relationships, State — Mandatory on Every Issue
 
+<!-- rule:ticketing/milestone-relationships-state-mandatory -->
+<!-- rule:ticketing/propose-a-milestone -->
 🔴 **Every issue you file or touch carries all three: a milestone, its
 relationships, and its state** (project `Status` plus the `status:*` label,
 moved in step). With no usable milestone set, propose one to the PM; never
@@ -199,6 +201,7 @@ once.** Both commands fail outright on a label the repo has never seen, and the
 seed is what makes the retry succeed. If the retry still fails, the label is not
 one the harness owns.
 
+<!-- rule:ticketing/live-label-list-before-absence -->
 🔴 **#7871: never call a label absent without `gh label list` in front of you.**
 Run `gh label list -R <owner>/<repo> --limit 200` before any such claim, then act
 on that output: the label is there, so use it, not a variant you invent; it is
@@ -477,6 +480,7 @@ When PM delegates a TODO list for conversion:
 
 ## Reporting Format
 
+<!-- rule:ticketing/report-milestone-relationships-state -->
 Report scope classification, and for anything that could have become a ticket,
 which of the four dispositions you took and what you searched. 🔴 **For every
 issue filed or touched, state its milestone, its relationships and its state**,

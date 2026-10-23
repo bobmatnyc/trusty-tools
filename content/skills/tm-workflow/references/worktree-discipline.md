@@ -79,6 +79,7 @@ pause PR lands, the same as after any other merge, and the snapshot is visible
 locally again. Where a project gitignores that store instead, a pause opens no
 PR and owes no refresh — the snapshot is machine-local and stays on disk.
 
+<!-- rule:tm-workflow/pre-pull-collision-pointer -->
 🟡 **One cause is an untracked path the incoming commits also add.** `--ff-only`
 then aborts with "The following untracked working tree files would be
 overwritten by merge", naming the path and nothing else. Diff that untracked

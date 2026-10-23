@@ -130,6 +130,7 @@ resolves here: find the section name in the middle column.
 
 Before any `git push`, delegate a credential scan to the `security` agent.
 
+<!-- rule:tm-workflow/clean-tree-before-gate -->
 🔴 **`git status --porcelain` must read empty before you run any gate below
 (#7739).** A gate run against a dirty tree proves the working copy, not the
 ref a push actually ships; commit every post-rebase edit first, so the ref
@@ -278,6 +279,7 @@ raw-`gh` fallback, one `statusCheckRollup` read must list at least one check
 (or the brief says the repo has no CI) and show no failed or running check
 outside the brief's waivers.
 
+<!-- rule:tm-workflow/auto-merge-read -->
 🔴 **Never assume auto-merge is available (#8640).** `version-control` reads
 `gh api repos/<owner>/<repo> --jq .allow_auto_merge` before planning a merge
 and reports it up front (#9747). An empty answer means the token cannot read

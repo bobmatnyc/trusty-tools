@@ -144,6 +144,7 @@ vercel rollback
 
 ### Confirming Which Commit a Deployment Serves (#8023)
 
+<!-- rule:vercel-ops/deployment-commit-source -->
 `vercel inspect DEPLOYMENT_URL --json` covers state, alias, and timestamps
 only — its response carries no `meta` object, so `githubCommitSha` is never
 in it. Use `vercel ls --prod --json` (the deployment-list form) or the API's

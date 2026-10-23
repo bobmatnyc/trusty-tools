@@ -102,6 +102,7 @@ Every trusty-mpm tmux session is named `tm-<folder>`, so a later session
 reuses the name. Without `tmux_session_created` the session-name route
 resolves nothing (#8408).
 
+<!-- rule:tm-session-resume/lean-default -->
 By default (`full` omitted or `false`) the tool returns the lean answer:
 
 ```json
@@ -180,6 +181,7 @@ anyway sets that in the `AUTONOMOUS-EXECUTION` marker section of its root
 `CLAUDE.md`. Read `commits_since_snapshot` before re-planning anything the
 snapshot lists as next.
 
+<!-- rule:tm-session-resume/tmux-session-route -->
 > **Omit `session_id`; the tool resolves your own pause automatically** — it
 > derives the id your pause was filed under, tries that first, then
 > `tmux_window` only when it owns nothing (no "latest overall" fallback,
@@ -222,6 +224,7 @@ snapshot lists as next.
 
 ## CLI Fallback: `tm sessions catchup`
 
+<!-- rule:tm-session-resume/cli-fallback -->
 For scripted / non-MCP callers the CLI still works, and the MCP tool is
 additive rather than a replacement:
 
@@ -234,6 +237,7 @@ tm sessions catchup --json --full    # the full digest's JSON, first page
 tm sessions catchup --full --json --sessions-offset <n>   # the next page
 ```
 
+<!-- rule:tm-session-resume/paged-full-digest -->
 `--all-projects` and `--sessions-offset` select from the full digest, so they
 need `--full`. **Prefer the MCP tool whenever it is reachable.** The
 `--full` markdown has no paging, so a project with many paused sessions emits

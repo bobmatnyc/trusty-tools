@@ -88,6 +88,7 @@ unknown, Research is mandatory (never default to a guess).
 
 ## Retry Protocol (delegated work came back failing)
 
+<!-- rule:tm-delegation-patterns/tree-must-exist-before-retry -->
 1. **`SendMessage` the SAME agent** — never open a new delegation to fix a
    previous one. The agent fixes and re-verifies inside its own context, at zero
    context-reload cost. A worktree agent's tree must still exist first — see
@@ -210,6 +211,7 @@ brings a stopped agent back except the PM's `SendMessage`.
 
 ## PM Re-Engagement (issues #2833, #4792, #5843)
 
+<!-- rule:tm-delegation-patterns/pm-re-engagement -->
 An agent that pushes, takes a one-shot status read, reports, and stops has done
 the right thing. Nothing wakes it again, so the work is abandoned unless the PM
 re-engages. That is the whole mechanism at this layer.
@@ -227,6 +229,7 @@ fresh delegation for work an existing agent already owns: the fresh one reloads
 ~95K tokens of context and knows none of the history. Never nudge an agent back
 into a blocking wait.
 
+<!-- rule:tm-delegation-patterns/worktree-check-first -->
 **Check the worktree still exists first (#8004).** This applies to EVERY
 resume of an agent that held an isolated worktree — CI outcome, retry, a
 released HOLD, an owner ruling. Claude Code removes an unchanged worktree the
@@ -249,6 +252,7 @@ drift, so `cargo fmt --check` is red before re-engagement even starts
 full gate first, since the branch may not be green as handed over. Do not
 assume the hand-over inherited a clean baseline.
 
+<!-- rule:tm-delegation-patterns/no-blind-poll -->
 **Sizing a `Monitor`, if you use one.** Size the interval to the known CI
 wall-clock — 5 minutes or more for a ~15-minute run. Message only on state
 change. If it overruns, run a one-shot `gh run view <run-id>` rather than
