@@ -152,7 +152,7 @@ version = "0.2.0"
 
 [[member]]
 path = "agents/security.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "agents/svelte-engineer.md"
