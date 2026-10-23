@@ -161,8 +161,16 @@ const EMBEDDED: &[Embedded] = &[
     // See #10161: the dashboard store set (P4a-1). Each module imports its
     // siblings from its own directory, and dashboard_schema.py reads
     // `schemas/dashboard/` beside `scripts/`, so all of them ship together.
-    embedded!("scripts/dashboard_store.py", "scripts/dashboard_store.py", true),
-    embedded!("scripts/dashboard_jsonl.py", "scripts/dashboard_jsonl.py", false),
+    embedded!(
+        "scripts/dashboard_store.py",
+        "scripts/dashboard_store.py",
+        true
+    ),
+    embedded!(
+        "scripts/dashboard_jsonl.py",
+        "scripts/dashboard_jsonl.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_schema.py",
         "scripts/dashboard_schema.py",
@@ -173,9 +181,21 @@ const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_derive.py",
         false
     ),
-    embedded!("scripts/dashboard_ids.py", "scripts/dashboard_ids.py", false),
-    embedded!("scripts/dashboard_qual.py", "scripts/dashboard_qual.py", false),
-    embedded!("scripts/owner_answers.py", "scripts/owner_answers.py", false),
+    embedded!(
+        "scripts/dashboard_ids.py",
+        "scripts/dashboard_ids.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_qual.py",
+        "scripts/dashboard_qual.py",
+        false
+    ),
+    embedded!(
+        "scripts/owner_answers.py",
+        "scripts/owner_answers.py",
+        false
+    ),
     embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
     embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
     embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
