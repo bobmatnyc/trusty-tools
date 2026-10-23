@@ -264,7 +264,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "tm-context-refresh",
-            "eebce72992c84b3e7cc25356cf9b94bc0001b1e67947a668cd94e14fddd04c12",
+            "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
         ),
         (
             "architect-tmux-ops",
@@ -272,11 +272,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-operating-rules",
-            "fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3",
+            "821edcc7c292dc6263ddaa2538bee3e235155679d5f3282c9823b9de1ceb0109",
         ),
         (
             "architect-workflow",
-            "bcc47e5103279f23c1af085d2d36e90fbf90d06fc1ec1f9e7d6fb65bb7c0f755",
+            "15e6c3d5bff69fccb7066adbe228ea7376f435ea91a6fe826dad3a24f5e2c2e4",
         ),
         (
             "architect-search-memory",
@@ -288,7 +288,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
+            "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
         ),
         (
             "architect-completion-standard",
@@ -301,13 +301,10 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 8] = [
+    const FIRST_RELEASE: [&str; 5] = [
         "architect-tmux-ops",
-        "architect-operating-rules",
-        "architect-workflow",
         "architect-search-memory",
         "architect-github",
-        "architect-strategy",
         "architect-completion-standard",
         "architect-owner-model",
     ];

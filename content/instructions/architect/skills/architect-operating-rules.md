@@ -97,10 +97,12 @@ guide, not a script.
   with new numbers, and mark answered items as answered in place. The owner
   answers by number, so a renumbered list misroutes the answer.
 <!-- rule:r-039 -->
-- **Ids.** Every goal, priority, ask, decision, task and session has a one- or
-  two-letter prefix and a two-digit hex id. Prefixes: G goal, P priority, A
-  ask (an action the owner takes), D decision (a question to the owner), T
-  task (work the owner gave you), S session, Q an answered owner question.
+- **Ids.** Every goal, priority, action, decision, task and session has a
+  one- or two-letter prefix and a two-digit hex id. Prefixes: G goal, P
+  priority, A action (an action the owner must take; formerly Ask), D
+  decision (a decision only the owner makes), T task (work the owner gave
+  you), S session, Q a question the owner asked you. Never ask a decision
+  inline in chat: put it on the dashboard as a D item in the same pass.
   Each prefix has its own counter in the "NEXT IDS" line of `local/state.md`.
   The id is the prefix plus two lowercase hex digits (01-ff), e.g. D06, S0a.
   After ff a counter wraps to 01 and skips any id still open, so an open id
