@@ -149,13 +149,16 @@ marker below ends the run; the output names the marker it found.
 filled in: files already present are kept byte-identical and named in the output,
 missing files are written. Adopting a project that already has ADRs is out of scope.
 
-**What init writes.** `docs/adr/README.md`, `template.md`, `INDEX.md` (one row),
-`0001-record-architecture-decisions.md` (Accepted, dated the day of the run), and
-`check_adr.sh` copied with `cp` and proven with `cmp`, mode 100755. A `.gitattributes`
+**What init writes.** `docs/adr/README.md`, `template.md`, `INDEX.md` (one row, from
+[references/INDEX.md](references/INDEX.md)), `0001-record-architecture-decisions.md`
+(Accepted, dated the day of the run, from
+[references/0001-record-architecture-decisions.md](references/0001-record-architecture-decisions.md)),
+and `check_adr.sh` copied with `cp` and proven with `cmp`, mode 100755. A `.gitattributes`
 `eol=lf` line for the script. When `.github/workflows/` exists,
-`.github/workflows/adr-check.yml` rendered to the project's default branch; otherwise a
-run-it note in the README and in the PR body. Init stages what it writes and does not
-commit.
+`.github/workflows/adr-check.yml` rendered from
+[references/adr-check.yml](references/adr-check.yml) to the project's default branch;
+otherwise a run-it note in the README and in the PR body. Init stages what it writes and
+does not commit.
 
 **Delivery — one PR.** The dispatched agent runs one command in a worktree:
 

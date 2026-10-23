@@ -26,7 +26,8 @@
 #
 # Exit: 0 installed and staged; 1 an existing ADR setup was found (nothing
 #   written) or the installed check fails; 2 usage, bash < 4, not inside a git
-#   worktree, or the deployed skill is incomplete.
+#   worktree, the file listing failed, or the deployed skill is incomplete.
+#   An NNNN-*.md the scan cannot read counts as a marker (exit 1).
 
 set -euo pipefail
 if ((BASH_VERSINFO[0] < 4)); then
@@ -81,10 +82,17 @@ project_root() {
 # ---- detection --------------------------------------------------------------
 
 # Lists every existing-setup marker, one per line. Runs from the project root
-# over the tracked and the untracked-not-ignored files.
+# over the tracked and the untracked-not-ignored files. Fails closed (#10080):
+# a listing that cannot be produced is exit 2, never "no markers", and an
+# NNNN-*.md that cannot be read is a marker, never an absence.
 list_markers() {
-  local path dir base part prefix claude line marker
+  local path dir base part prefix claude line marker listing ls_status grep_status
   local -A seen_dir=()
+  listing="$(git ls-files --cached --others --exclude-standard)" && ls_status=0 || ls_status=$?
+  if ((ls_status != 0)); then
+    complain "git ls-files exited $ls_status; cannot tell whether an ADR setup exists; nothing written"
+    return 2
+  fi
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     base="${path##*/}"
@@ -111,11 +119,16 @@ list_markers() {
     if [[ "$base" =~ ^[0-9]{4}-.*[.]md$ ]]; then
       if [[ "$dir" == docs/adr ]]; then
         printf '%s (an ADR already under docs/adr/)\n' "$path"
-      elif grep -qF '## Decision' -- "$path" 2>/dev/null; then
-        printf '%s (an NNNN-*.md containing "## Decision")\n' "$path"
+      else
+        grep -qF '## Decision' -- "$path" 2>/dev/null && grep_status=0 || grep_status=$?
+        case "$grep_status" in
+          0) printf '%s (an NNNN-*.md containing "## Decision")\n' "$path" ;;
+          1) ;;
+          *) printf '%s (an NNNN-*.md that could not be read, grep exit %s; treated as a marker)\n' "$path" "$grep_status" ;;
+        esac
       fi
     fi
-  done < <(git ls-files --cached --others --exclude-standard)
+  done <<<"$listing"
   for claude in CLAUDE.md .claude/CLAUDE.md; do
     [[ -f "$claude" ]] || continue
     line="$(grep -niwE 'adrs?|architecture[- ]decisions?' -- "$claude" | head -n 1)" || true
@@ -260,12 +273,15 @@ install_seed() {
 }
 
 run_init() {
-  local root
+  local root found
   local -a markers
   require_source || return $?
   root="$(project_root)" || return $?
   cd "$root"
-  mapfile -t markers < <(list_markers)
+  # #10080: capture the status too; `mapfile < <(...)` discards it.
+  found="$(list_markers)" || return $?
+  markers=()
+  [[ -z "$found" ]] || mapfile -t markers <<<"$found"
   if ((${#markers[@]})); then
     complain "existing ADR setup found; nothing written:"
     printf '  marker: %s\n' "${markers[@]}" >&2
@@ -433,6 +449,29 @@ check_refusals() {
   if ((status == 2)); then ok "an unknown flag exits 2"; else bad "unknown flag: exit $status" "$output"; fi
 }
 
+# #10080: the marker scan fails closed — a listing that fails is exit 2 with
+# nothing written; an NNNN-*.md that cannot be read is a marker.
+check_fail_closed() {
+  local f adr
+  f="$1/corrupt"; new_repo "$f"; printf 'x\n' >"$f/notes.md"
+  printf 'garbage\n' >"$f/.git/index"
+  in_repo "$f" "$BASH" "$this_init"
+  if ((status == 2)) && grep -qF 'git ls-files exited' <<<"$output" && [[ ! -e "$f/docs" && ! -e "$f/.gitattributes" ]]; then
+    ok "a corrupt git index: exit 2 names git ls-files, nothing written"
+  else bad "a corrupt git index (exit $status)" "$output"; fi
+  f="$1/unreadable"; new_repo "$f"; mkdir -p "$f/notes"
+  adr="$f/notes/0007-pick-a-db.md"
+  printf '# 0007. Pick a db\n\nNothing decided yet.\n' >"$adr"
+  chmod 000 "$adr"
+  if [[ -r "$adr" ]]; then
+    ok "an unreadable NNNN-*.md: skipped, the file stays readable to this user"
+  else
+    expect_marker "an unreadable NNNN-*.md is a marker, not an absence" \
+      'notes/0007-pick-a-db.md (an NNNN-*.md that could not be read, grep exit 2; treated as a marker)' "$f"
+  fi
+  chmod 644 "$adr"
+}
+
 run_selftest() {
   local tmp_root output status
   tmp_root="$(mktemp -d)"
@@ -442,6 +481,7 @@ run_selftest() {
   check_existing_docs_adr "$tmp_root/existing"
   check_markers "$tmp_root"
   check_refusals "$tmp_root"
+  check_fail_closed "$tmp_root"
   if ((failures > 0)); then
     printf 'adr_init self-test: %d/%d case(s) failed\n' "$failures" "$((passes + failures))" >&2
     return 1
