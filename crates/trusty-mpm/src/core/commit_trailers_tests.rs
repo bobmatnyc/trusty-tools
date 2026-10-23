@@ -313,3 +313,73 @@ fn strip_leaves_a_paragraph_that_is_not_only_trailers() {
     let message = "feat: x\n\nModel: the T-800 is not a trailer.\nIt sits in prose.\n";
     assert_eq!(strip_trailers(message), message);
 }
+
+const SESSION_TRAILER: &str = "Claude-Session: https://claude.ai/code/session_01AbC";
+
+/// Why (#10056): the footer's own shape (`Generated with` line, then the
+/// trailer, in the last paragraph) must pass the credential scan.
+/// Test: itself.
+#[test]
+fn session_trailer_accepts_the_footer_trailer() {
+    assert!(is_attribution_trailer(&message_with_footer()));
+    assert!(is_attribution_trailer(&format!(
+        "fix: x\n\nbody\n\n{SESSION_TRAILER}"
+    )));
+}
+
+/// Why (#10056): the same line in a body paragraph is a leak, not attribution.
+/// Test: itself.
+#[test]
+fn session_trailer_rejects_a_body_line() {
+    let in_body = format!("fix: x\n\n{SESSION_TRAILER}\n\nmore body after it\n");
+    assert!(!is_attribution_trailer(&in_body));
+    let in_first_paragraph = format!("fix: x\n{SESSION_TRAILER}\n\nbody\n");
+    assert!(!is_attribution_trailer(&in_first_paragraph));
+    assert!(!is_attribution_trailer("fix: x\n\nno session id at all\n"));
+}
+
+/// Why (#10056): the allowance is once per message; a second line fails both.
+/// Test: itself.
+#[test]
+fn session_trailer_rejects_two_trailers() {
+    let two = format!("fix: x\n\n{SESSION_TRAILER}\n{SESSION_TRAILER}2\n");
+    assert!(!is_attribution_trailer(&two));
+    let body_and_footer = format!("fix: {SESSION_TRAILER}\n\nbody\n\n{SESSION_TRAILER}\n");
+    assert!(!is_attribution_trailer(&body_and_footer));
+}
+
+/// Why (#10056): only the exact `^...session_[A-Za-z0-9]+$` line passes, so a
+/// query (`?from=cli` is out of scope), a path, trailing text or an empty id
+/// fails.
+/// Test: itself.
+#[test]
+fn session_trailer_rejects_malformed_or_extended_urls() {
+    for last in [
+        format!("{SESSION_TRAILER}?from=cli"),
+        format!("{SESSION_TRAILER}/"),
+        format!("{SESSION_TRAILER} extra"),
+        "Claude-Session: https://claude.ai/code/session_".to_string(),
+        "Claude-Session: http://claude.ai/code/session_01AbC".to_string(),
+        "Claude-Session: https://claude.ai/code/session_01-AbC".to_string(),
+        " Claude-Session: https://claude.ai/code/session_01AbC".to_string(),
+        "Co-Authored-By: https://claude.ai/code/session_01AbC".to_string(),
+    ] {
+        let message = format!("fix: x\n\n{last}\n");
+        assert!(!is_attribution_trailer(&message), "{last:?}");
+    }
+}
+
+/// Why (#10056): a credential-shaped value in the trailer slot must still be
+/// flagged, whether it replaces the id or the whole line.
+/// Test: itself.
+#[test]
+fn session_trailer_rejects_token_shaped_values() {
+    for last in [
+        "Claude-Session: https://claude.ai/code/session_ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+        "Claude-Session: https://claude.ai/code/session_sk-ant-api03-0123456789abcdef",
+        "Claude-Session: ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+    ] {
+        let message = format!("fix: x\n\n{last}\n");
+        assert!(!is_attribution_trailer(&message), "{last:?}");
+    }
+}

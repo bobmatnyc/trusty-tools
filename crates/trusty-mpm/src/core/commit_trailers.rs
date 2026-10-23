@@ -378,6 +378,61 @@ fn already_stamped(message: &str) -> bool {
     })
 }
 
+/// The text every session URL carries; a line holding it is a credential-scan
+/// candidate, whatever else is on the line.
+const SESSION_URL_MARK: &str = "claude.ai/code/session_";
+
+/// The whole-line prefix of the allowed attribution trailer.
+const SESSION_TRAILER_PREFIX: &str = "Claude-Session: https://claude.ai/code/session_";
+
+/// Is `message`'s Claude-Session line the one allowed attribution trailer?
+///
+/// Why: every commit ends with `Claude-Session: https://claude.ai/code/session_<id>`
+/// under the required attribution footer, and the `security` agent's credential
+/// scan flagged it as a leaked session id (#10056, from the 2026-10-17 11:31Z
+/// #9078 L2 scan FAIL). The allowance has to be this one line shape and nothing
+/// wider, or a session URL in a body line, or a token-shaped value dressed as a
+/// trailer, would pass too.
+/// What: `true` only when the message holds exactly ONE line containing
+/// `claude.ai/code/session_`, that line sits in the message's last paragraph,
+/// and the whole line matches `^Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]+$`.
+/// A body line, a second session line, trailing text, a path, a `?query`, or an
+/// id with a character outside `[A-Za-z0-9]` all return `false`. `security.md`
+/// quotes this pattern and rule (`security/claude-session-trailer`).
+/// Test: `session_trailer_accepts_the_footer_trailer`,
+/// `session_trailer_rejects_a_body_line`, `session_trailer_rejects_two_trailers`,
+/// `session_trailer_rejects_malformed_or_extended_urls`,
+/// `session_trailer_rejects_token_shaped_values`.
+pub fn is_attribution_trailer(message: &str) -> bool {
+    let lines: Vec<&str> = message.lines().collect();
+    let mut hits = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(SESSION_URL_MARK))
+        .map(|(at, _)| at);
+    // #10056: once only. A second session line is never an attribution trailer.
+    let (Some(at), None) = (hits.next(), hits.next()) else {
+        return false;
+    };
+    let Some(end) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let start = lines[..=end]
+        .iter()
+        .rposition(|line| line.trim().is_empty())
+        .map_or(0, |blank| blank + 1);
+    // #10056: last paragraph only. A body line never earns the allowance.
+    (start..=end).contains(&at) && is_session_trailer_line(lines[at])
+}
+
+/// Whole-line match of `^Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]+$`.
+///
+/// Test: `session_trailer_rejects_malformed_or_extended_urls`.
+fn is_session_trailer_line(line: &str) -> bool {
+    line.strip_prefix(SESSION_TRAILER_PREFIX)
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 /// Is `line` real message content, rather than a git comment or blank?
 ///
 /// Test: `append_goes_above_a_trailing_comment_block`.
