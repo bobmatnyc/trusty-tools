@@ -73,7 +73,8 @@ jobs:
     name: Architect sub-project (pytest + independence/drift check)
     if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # #10161 D3b: the dashboard tests (page tests under node) need more than 5 minutes.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 

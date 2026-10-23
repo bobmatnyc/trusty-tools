@@ -151,6 +151,8 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-macos"),
     first_release("architect-improvements"),
     first_release("architect-host-admin"),
+    // #10161 D3b: the dashboard skill, with the served page it describes.
+    first_release("architect-dashboard"),
 ];
 
 /// The deploy record, beside the skills in the project tier.

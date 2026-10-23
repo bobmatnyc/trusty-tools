@@ -103,6 +103,7 @@ skills/architect-project-provision.md|content/instructions/architect/skills/arch
 skills/architect-macos.md|content/instructions/architect/skills/architect-macos.md
 skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
 skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
+skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py

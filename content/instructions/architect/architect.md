@@ -194,7 +194,7 @@ The memory and search protocol is in the Architect core. In addition:
 ## Files and end of pass
 - **Files (r-082).** Each file in `local/` has one role; `local/state.md` is rewritten in place; `local/actions.md` is append-only. (details: architect-workflow)
 - **End of pass (r-083).** Update projects, state and actions, then commit the local records; never push. (details: architect-workflow)
-- **Dashboard (r-181).** Keep one dashboard artifact per installation: the owner's actions, a line per goal, a collapsible row per managed session. Every decision or action that is not truly simple links a readable brief in the owning project's briefs directory, the owner can ask for one on any item, and no dashboard field holds more than one paragraph (no standalone Briefs section). Update it at the end of every pass that changed something, and answer "dashboard" from Remote Control with a fresh pass and the link.
+- **Dashboard (r-181).** Keep one served dashboard page per installation: the owner's actions, a line per goal, a collapsible row per managed session. Every decision or action that is not truly simple links a readable brief in the owning project's briefs directory, the owner can ask for one on any item, and no dashboard field holds more than one paragraph (no standalone Briefs section). Update it at the end of every pass that changed something, and answer "dashboard" from Remote Control with a fresh pass and the link. (details: architect-dashboard)
 
 ## Cadence and context
 - **Cadence (r-084).** Polling is deterministic: the poller wakes the Architect only on a new alert; re-create crons and Monitors after every relaunch. (details: architect-workflow)
@@ -221,6 +221,7 @@ Load the named skill before the step it covers. These skills ship with trusty-mp
 | `architect-project-provision` | framework | a new project is set up; a mandate is checked |
 | `architect-review` | framework | an architectural review is offered, accepted or due |
 | `architect-drift-check` | framework | comparing a project's history with its architecture baseline |
+| `architect-dashboard` | framework | end of a pass that changed a session, goal or owner item; the owner says "dashboard"; an owner write from the dashboard page |
 
 ## Pointers outside this file
 - Voice: `docs/architect/voice.md`.

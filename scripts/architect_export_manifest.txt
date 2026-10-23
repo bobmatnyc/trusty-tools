@@ -77,8 +77,7 @@ templates/mandates/**	templates/local/mandates
 templates/owner/**	templates/local/owner
 templates/projects/**	templates/local/projects
 
-# Dashboard store set (P4a-1). The serve family (dashboard_il, _media, _viz,
-# dashboard-serve.py), the page and the tests that need them land in P4a-2.
+# Dashboard store set (P4a-1).
 scripts/dashboard_store.py
 scripts/dashboard_jsonl.py
 scripts/dashboard_schema.py
@@ -101,3 +100,71 @@ scripts/test_dashboard_tally.py	tests/test_dashboard_tally.py
 scripts/test_il_archive.py	tests/test_il_archive.py
 scripts/test_stale_tasks.py	tests/test_stale_tasks.py
 scripts/fixtures/dashboard/golden/**	tests/fixtures/dashboard/golden
+
+# Dashboard serve set, read-only views, page, Live and vendor (D3b). dashboard-serve.py
+# stages whole; the subproject splits it into dashboard-serve.py (facade) and
+# dashboard_http/page/docs.py (500-SLOC cap), so re-export to scratch and hand-merge.
+# mermaid.min.js and templates/dashboard/preview-live.html are not shipped.
+scripts/dashboard-serve.py
+scripts/dashboard_il.py
+scripts/dashboard_media.py
+scripts/dashboard_viz.py
+scripts/dashboard_harness.py
+templates/dashboard/index.html
+templates/dashboard/live.html
+templates/dashboard/vendor/marked.umd.js
+templates/dashboard/vendor/purify.min.js
+templates/dashboard/vendor/VERSIONS.md
+scripts/conftest.py	tests/conftest.py
+scripts/shim_harness.js	tests/shim_harness.js
+scripts/test_dashboard_3pane.py	tests/test_dashboard_3pane.py
+scripts/test_dashboard_action_layout.py	tests/test_dashboard_action_layout.py
+scripts/test_dashboard_autocollapse.py	tests/test_dashboard_autocollapse.py
+scripts/test_dashboard_beep.py	tests/test_dashboard_beep.py
+scripts/test_dashboard_busy.py	tests/test_dashboard_busy.py
+scripts/test_dashboard_clarify.py	tests/test_dashboard_clarify.py
+scripts/test_dashboard_crosslink.py	tests/test_dashboard_crosslink.py
+scripts/test_dashboard_decision_order.py	tests/test_dashboard_decision_order.py
+scripts/test_dashboard_discovery.py	tests/test_dashboard_discovery.py
+scripts/test_dashboard_doc.py	tests/test_dashboard_doc.py
+scripts/test_dashboard_doc_links.py	tests/test_dashboard_doc_links.py
+scripts/test_dashboard_factory_goal.py	tests/test_dashboard_factory_goal.py
+scripts/test_dashboard_feedback.py	tests/test_dashboard_feedback.py
+scripts/test_dashboard_files.py	tests/test_dashboard_files.py
+scripts/test_dashboard_goal_done.py	tests/test_dashboard_goal_done.py
+scripts/test_dashboard_goal_park.py	tests/test_dashboard_goal_park.py
+scripts/test_dashboard_goalprogress.py	tests/test_dashboard_goalprogress.py
+scripts/test_dashboard_harness.py	tests/test_dashboard_harness.py
+scripts/test_dashboard_header_cache.py	tests/test_dashboard_header_cache.py
+scripts/test_dashboard_il.py	tests/test_dashboard_il.py
+scripts/test_dashboard_input_hold.py	tests/test_dashboard_input_hold.py
+scripts/test_dashboard_item_brief.py	tests/test_dashboard_item_brief.py
+scripts/test_dashboard_jsonl.py	tests/test_dashboard_jsonl.py
+scripts/test_dashboard_localtime.py	tests/test_dashboard_localtime.py
+scripts/test_dashboard_media.py	tests/test_dashboard_media.py
+scripts/test_dashboard_media_controls.py	tests/test_dashboard_media_controls.py
+scripts/test_dashboard_media_ids.py	tests/test_dashboard_media_ids.py
+scripts/test_dashboard_meters.py	tests/test_dashboard_meters.py
+scripts/test_dashboard_mobile.py	tests/test_dashboard_mobile.py
+scripts/test_dashboard_mode.py	tests/test_dashboard_mode.py
+scripts/test_dashboard_progress.py	tests/test_dashboard_progress.py
+scripts/test_dashboard_pruned.py	tests/test_dashboard_pruned.py
+scripts/test_dashboard_qualified.py	tests/test_dashboard_qualified.py
+scripts/test_dashboard_questions.py	tests/test_dashboard_questions.py
+scripts/test_dashboard_reload.py	tests/test_dashboard_reload.py
+scripts/test_dashboard_reminder.py	tests/test_dashboard_reminder.py
+scripts/test_dashboard_reset_clock.py	tests/test_dashboard_reset_clock.py
+scripts/test_dashboard_resume_steer.py	tests/test_dashboard_resume_steer.py
+scripts/test_dashboard_seen.py	tests/test_dashboard_seen.py
+scripts/test_dashboard_session_cmd.py	tests/test_dashboard_session_cmd.py
+scripts/test_dashboard_sessionbars.py	tests/test_dashboard_sessionbars.py
+scripts/test_dashboard_settings.py	tests/test_dashboard_settings.py
+scripts/test_dashboard_store.py	tests/test_dashboard_store.py
+scripts/test_dashboard_summary_wrap.py	tests/test_dashboard_summary_wrap.py
+scripts/test_dashboard_tailnet.py	tests/test_dashboard_tailnet.py
+scripts/test_dashboard_task_notes.py	tests/test_dashboard_task_notes.py
+scripts/test_dashboard_task_tabs.py	tests/test_dashboard_task_tabs.py
+scripts/test_dashboard_viz.py	tests/test_dashboard_viz.py
+scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
+# skills/architect-dashboard.md is hand-merged and not listed: its source still
+# names an instance host, so a listed row fails the gate. Re-export it to scratch.
