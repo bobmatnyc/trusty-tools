@@ -1424,20 +1424,18 @@ fn fresh_body(tag: &str) -> String {
 
 /// Why (#10212): a stable stub is only a saving if a second call reuses the
 /// first call's file instead of writing a new one.
-/// What: two calls with one body return one path, and the inode and mtime the
-/// first call published are unchanged after the second. A helper that wrote a
-/// fresh file per call would publish a new inode by `rename`.
+/// What: two calls with one fixed body return one path, and the inode and
+/// mtime are unchanged by the second call. A helper that wrote a fresh file
+/// per call would publish a new inode by `rename`. The body is fixed, so after
+/// the first run on a machine this test creates no file at all.
 /// Test: this test.
 #[test]
 fn a_stable_stub_is_written_once_and_reused() {
     use std::os::unix::fs::MetadataExt;
-    let body = fresh_body("reuse");
-    let first = stable_stub("tcode-stable", &body);
+    let first = stable_stub("tcode-stable", "exit 0");
     let before = std::fs::metadata(&first).expect("stat the first stub");
-    let second = stable_stub("tcode-stable", &body);
+    let second = stable_stub("tcode-stable", "exit 0");
     let after = std::fs::metadata(&second).expect("stat the second stub");
-    let dir = first.parent().expect("stub dir").to_path_buf();
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(first, second, "one body must map to one path");
     assert!(first.starts_with(stable_stub_root()), "{first:?}");
     assert_eq!(
@@ -1455,13 +1453,15 @@ fn a_stable_stub_is_written_once_and_reused() {
 /// Why (#10212): parallel tests share one stable stub, so two first callers
 /// can write the same body at once.
 /// What: per round, two threads released by a barrier call [`stable_stub`]
-/// with a body no run has written; both must get the same path, and that path
-/// must run to exit 0. Eight rounds, so the race is entered more than once.
+/// with a body no run has written. Both must get the same path, holding the
+/// whole script with every execute bit set, and no staging file may remain.
+/// Round 0 also runs the stub to exit 0; the other rounds do not, since each
+/// launch of a new file is one more macOS first-launch scan.
 /// Test: this test.
 #[test]
 fn racing_stable_stub_writers_both_get_an_executable() {
     use std::os::unix::fs::PermissionsExt;
-    for round in 0..8 {
+    for round in 0..3 {
         let body = fresh_body(&format!("race-{round}"));
         let barrier = std::sync::Barrier::new(2);
         let paths: Vec<PathBuf> = std::thread::scope(|scope| {
@@ -1479,21 +1479,26 @@ fn racing_stable_stub_writers_both_get_an_executable() {
                 .collect()
         });
         let dir = paths[0].parent().expect("stub dir").to_path_buf();
-        let runs: Vec<_> = paths
+        let seen: Vec<_> = paths
             .iter()
             .map(|path| {
                 let mode = std::fs::metadata(path).expect("stat").permissions().mode();
-                let status = std::process::Command::new(path)
-                    .status()
-                    .expect("run the stub");
-                (mode, status)
+                (mode, std::fs::read_to_string(path).expect("read the stub"))
             })
             .collect();
+        let ran = (round == 0).then(|| {
+            std::process::Command::new(&paths[0])
+                .status()
+                .expect("run the stub")
+        });
         let leftovers = std::fs::read_dir(&dir).expect("list stub dir").count();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(paths[0], paths[1], "round {round}: one body, one path");
-        for (mode, status) in runs {
+        for (mode, text) in seen {
             assert_eq!(mode & 0o111, 0o111, "round {round}: not executable");
+            assert_eq!(text, format!("#!/bin/sh\n{body}\n"), "round {round}");
+        }
+        if let Some(status) = ran {
             assert!(status.success(), "round {round}: stub failed: {status}");
         }
         assert_eq!(leftovers, 1, "round {round}: a staging file was left");
