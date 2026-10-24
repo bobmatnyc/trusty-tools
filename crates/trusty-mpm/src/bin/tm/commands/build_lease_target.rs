@@ -72,11 +72,13 @@ pub(super) fn target_dir(
         TargetPlan::Keep(dir) => return Ok(Some(dir.clone())),
         TargetPlan::Slot { pool, clone_from } => (pool, clone_from),
         TargetPlan::UnsetSlot { pool, clone_from } => {
-            return Ok(slot_dir(pool, clone_from, slot, cwd, seed_wait)
+            // #10215: nothing was inherited, so no shared-directory clause.
+            return Ok(slot_dir(pool, clone_from, slot, cwd, seed_wait, "")
                 .inspect_err(|why| {
                     eprintln!(
-                        "tm build-lease: WARNING building in cargo's own target directory, \
-                         not slot {slot} (#10215) — {why}"
+                        "tm build-lease: WARNING no CARGO_TARGET_DIR was set and slot {slot} is \
+                         unusable, so this build runs in cargo's own target directory (#10215) \
+                         — {why}"
                     );
                 })
                 .ok());
@@ -84,19 +86,27 @@ pub(super) fn target_dir(
         TargetPlan::Refuse(why) => return Err(why.clone()),
         _ => return Ok(None),
     };
-    slot_dir(pool, clone_from, slot, cwd, seed_wait).map(Some)
+    slot_dir(pool, clone_from, slot, cwd, seed_wait, SHARED_CLAUSE).map(Some)
 }
+
+/// Appended to a seed failure when the build inherited a SHARED directory.
+const SHARED_CLAUSE: &str = ", and the inherited CARGO_TARGET_DIR is a shared target directory, \
+                             which concurrent worktrees overwrite. Repair the slot pool root \
+                             (`builders.slot_pool_root`, see `tm doctor`) or set a private \
+                             CARGO_TARGET_DIR for this build";
 
 /// Seed slot `slot` of `pool` and return its directory.
 ///
 /// What: the seed and stale-fingerprint steps of [`target_dir`]; `Err` names
-/// why the slot directory cannot be used.
+/// why the slot directory cannot be used, a seed failure followed by
+/// `seed_clause`.
 fn slot_dir(
     pool: &SlotPool,
     clone_from: &Option<PathBuf>,
     slot: u32,
     cwd: &Path,
     seed_wait: Duration,
+    seed_clause: &str,
 ) -> Result<String, String> {
     let path = pool.slot_path(slot);
     if pool.committed(slot).is_none() {
@@ -110,10 +120,7 @@ fn slot_dir(
         tokio::task::block_in_place(|| pool.seed_within(slot, clone_from.as_deref(), seed_wait));
     let dir = seeded.map(|(dir, _)| dir).map_err(|err| {
         format!(
-            "slot directory {} is unusable ({err}), and the inherited CARGO_TARGET_DIR is a \
-             shared target directory, which concurrent worktrees overwrite. Repair the slot \
-             pool root (`builders.slot_pool_root`, see `tm doctor`) or set a private \
-             CARGO_TARGET_DIR for this build",
+            "slot directory {} is unusable ({err}){seed_clause}",
             path.display()
         )
     })?;

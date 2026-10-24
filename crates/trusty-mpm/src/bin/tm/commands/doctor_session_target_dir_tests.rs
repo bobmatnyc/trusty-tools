@@ -193,3 +193,36 @@ fn gather_is_undetermined_outside_a_git_repository() {
         "{facts:?}"
     );
 }
+
+/// #10215 (critic MEDIUM): a target dir reached through a symlink or `..`
+/// still lies inside the checkout, so the row must WARN, not read Private.
+#[test]
+fn gather_sees_a_symlinked_or_dotdot_target_dir_inside_a_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().canonicalize().expect("canonical");
+    let (_, wt) = rust_repo_with_worktree(&root);
+    let link = root.join("link-to-wt");
+    std::os::unix::fs::symlink(&wt, &link).expect("symlink");
+    std::fs::create_dir_all(root.join("sibling")).expect("sibling");
+    let through_link = link.join("target").display().to_string();
+    let through_dotdot = root.join("sibling/../wt/target").display().to_string();
+    for dir in [through_link, through_dotdot] {
+        let facts = gather(
+            Some(&wt),
+            Ok(Some(dir.clone())),
+            &BuildersConfig::default(),
+            &root,
+        );
+        assert!(
+            matches!(
+                &facts,
+                Facts::Probed {
+                    session: SessionTarget::CheckoutLocal(_),
+                    ..
+                }
+            ),
+            "{dir}: {facts:?}"
+        );
+        assert_eq!(build_check(&facts).status, CheckStatus::Warn, "{dir}");
+    }
+}

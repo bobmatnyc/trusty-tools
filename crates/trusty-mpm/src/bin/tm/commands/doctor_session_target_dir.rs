@@ -205,8 +205,9 @@ pub(crate) fn gather(
     );
     let session = match plan {
         TargetPlan::Keep(dir) => {
-            let abs = project_dir.join(&dir);
-            if checkouts.iter().any(|c| abs.starts_with(c)) {
+            // #10215: compare resolved paths, so a symlink or `..` cannot hide a checkout.
+            let abs = resolved(&project_dir.join(&dir));
+            if checkouts.iter().any(|c| abs.starts_with(resolved(c))) {
                 SessionTarget::CheckoutLocal(dir)
             } else {
                 SessionTarget::Private(dir)
@@ -234,6 +235,31 @@ pub(crate) fn gather(
     Facts::Probed {
         session,
         local_targets,
+    }
+}
+
+/// `path` with symlinks and `..` resolved as far as it exists (#10215).
+///
+/// Why: a lexical `starts_with` reads a symlinked or `..` target directory
+/// inside a checkout as private — a false OK on the condition this row exists
+/// for.
+/// What: canonicalizes the deepest existing ancestor and appends the rest;
+/// `path` unchanged when no ancestor canonicalizes.
+/// Test: `gather_sees_a_symlinked_or_dotdot_target_dir_inside_a_checkout`.
+fn resolved(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut cur = path;
+    loop {
+        if let Ok(canon) = cur.canonicalize() {
+            return tail.iter().rev().fold(canon, |acc, c| acc.join(c));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
