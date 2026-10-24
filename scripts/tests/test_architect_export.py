@@ -102,6 +102,22 @@ def test_forbidden_manifest_path_refused(world, rel):
     assert not world.staging.exists()
 
 
+@pytest.mark.parametrize("rel", ["scripts/init.sh", "scripts/doctor.sh", "scripts/test_init.py", "Scripts/Init.sh"])
+def test_instance_setup_script_refused(world, rel):
+    """#10161 D3c (plan s.6): init.sh, doctor.sh and test_init.py are instance-only."""
+    world.write(rel, "#!/bin/sh\n")
+    world.manifest.write_text(MANIFEST + rel + "\n")
+    proc = world.run()
+    assert proc.returncode == 2, proc.output
+    assert "forbidden path" in proc.stderr
+    assert not world.staging.exists()
+    world.write("scripts/init.sh", "#!/bin/sh\n")  # a glob reaches it too
+    world.manifest.write_text(MANIFEST + "scripts/**\tlib\n")
+    proc = world.run()
+    assert proc.returncode == 2, proc.output
+    assert "forbidden path" in proc.stderr
+
+
 def test_forbidden_dest_path_refused(world):
     world.manifest.write_text(MANIFEST + "docs/guide.md\tlocal/guide.md\n")
     proc = world.run()

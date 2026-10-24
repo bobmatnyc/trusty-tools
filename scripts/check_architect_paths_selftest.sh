@@ -29,7 +29,8 @@ clean="$WORK/clean"
 manual="$clean/root/content/instructions/architect/architect.md"
 mkdir -p "$(dirname "$manual")" \
   "$clean/init/scripts" "$clean/init/local/projects" "$clean/init/docs/architect" \
-  "$clean/init/.claude/skills/architect-tmux-ops" "$clean/init/.claude/skills/tm-fleet-check"
+  "$clean/init/.claude/skills/architect-tmux-ops" "$clean/init/.claude/skills/tm-fleet-check" \
+  "$clean/init/.claude/agents"
 for f in scripts/relay.sh scripts/posted.sh scripts/input-state.py local/state.md \
          docs/architect/voice.md CLAUDE.md; do
   printf 'seeded\n' >"$clean/init/$f"
@@ -55,7 +56,13 @@ printf '%s\n' '---' 'name: architect-tmux-ops' '---' \
 printf '%s\n' '---' 'name: tm-fleet-check' '---' 'See `scripts/relay.sh` and `CLAUDE.md`.' \
   >"$clean/init/.claude/skills/tm-fleet-check/SKILL.md"
 
+# #10161 D3c: one seeded agent; agents name paths and skills like the skills do.
+printf '%s\n' '---' 'name: runner' '---' \
+  'Run `scripts/relay.sh` read-only; see `architect-tmux-ops` and `local/projects/*.md`.' \
+  >"$clean/init/.claude/agents/runner.md"
+
 SKILL_FILE=".claude/skills/architect-tmux-ops/SKILL.md"
+AGENT_FILE=".claude/agents/runner.md"
 plant() { # $1 = case name, $2 = case dir (a copy of the clean pair)
   local d="$2" m="$2/root/content/instructions/architect/architect.md"
   case "$1" in
@@ -74,6 +81,12 @@ plant() { # $1 = case name, $2 = case dir (a copy of the clean pair)
     undecodable-skill) printf '\377\376 planted-bytes\n' >"$d/init/$SKILL_FILE" ;;
     missing-manual) rm "$m" ;;
     no-skills) rm -rf "$d/init/.claude/skills" && mkdir -p "$d/init/.claude/skills" ;;
+    agent-backtick) printf 'Write `local/planted-agent/run.md`.\n' >>"$d/init/$AGENT_FILE" ;;
+    agent-command) printf 'Run python3 scripts/planted-agent.py -.\n' >>"$d/init/$AGENT_FILE" ;;
+    agent-skill) printf 'Load `architect-planted-agent-skill` first.\n' >>"$d/init/$AGENT_FILE" ;;
+    undecodable-agent) printf '\377\376 planted-bytes\n' >"$d/init/$AGENT_FILE" ;;
+    no-agents) rm -rf "$d/init/.claude/agents" && mkdir -p "$d/init/.claude/agents" ;;
+    missing-agents) rm -rf "$d/init/.claude/agents" ;;
   esac
 }
 
@@ -92,7 +105,13 @@ deleted-script${TAB}PATH${TAB}scripts/relay.sh
 unreadable-skill${TAB}READ${TAB}architect-tmux-ops
 undecodable-skill${TAB}READ${TAB}architect-tmux-ops
 missing-manual${TAB}READ${TAB}architect.md
-no-skills${TAB}EMPTY${TAB}.claude/skills"
+no-skills${TAB}EMPTY${TAB}.claude/skills
+agent-backtick${TAB}PATH${TAB}local/planted-agent/run.md
+agent-command${TAB}PATH${TAB}scripts/planted-agent.py
+agent-skill${TAB}SKILL${TAB}architect-planted-agent-skill
+undecodable-agent${TAB}READ${TAB}runner.md
+no-agents${TAB}EMPTY${TAB}.claude/agents
+missing-agents${TAB}READ${TAB}.claude/agents"
 
 fail=0
 pass=0

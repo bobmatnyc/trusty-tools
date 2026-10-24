@@ -31,6 +31,8 @@ mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
 mod relaunch;
 mod seed;
+// #10161 D3c: the Architect agents, under the skills' deploy rule.
+mod seed_agents;
 mod session_name;
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
 pub(crate) mod status;
@@ -393,6 +395,7 @@ pub(crate) fn init_with_seed(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir, &seed)?);
+    report.steps.extend(seed_agents::steps(dir, home, &seed));
     // #8942 ruling 2: before the launch writes this run's sidecar.
     report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;

@@ -135,6 +135,9 @@ const ARCHITECT_ONLY_SKILLS: &[&str] = &[
     "architect-review",
     // #10161 D3b: the dashboard skill.
     "architect-dashboard",
+    // #10161 D3c: the skills that run the drift-guard and improver agents.
+    "architect-drift-guard",
+    "architect-improver",
     "tm-context-refresh",
     "tm-fleet-check",
 ];

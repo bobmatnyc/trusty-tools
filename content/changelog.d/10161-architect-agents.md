@@ -1,0 +1,2 @@
+Added
+- Architect agents: five agents ship under `instructions/architect/agents/` in trusty-tools form (`runner`, `event-extractor`, `improver`, `improvement-curator`, `drift-guard`), with the `architect-drift-guard` and `architect-improver` skills that run two of them. The operating manual indexes the skills and lists the agents, and `architect-improvements` now dispatches the `improvement-curator` agent for its daily consolidation (#10161).

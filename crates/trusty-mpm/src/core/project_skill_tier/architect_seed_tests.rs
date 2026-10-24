@@ -11,6 +11,7 @@ use trusty_agents_common::agent_content::checkout_content;
 use super::*;
 use crate::core::content_source::test_support::{rc, repo_content};
 use crate::core::framework_content::tests::{fake_checkout_with_package, legacy_content};
+use crate::core::project_skill_tier::architect_agents::SHIPPED_AGENTS;
 use crate::core::project_skill_tier::architect_skills::{
     self, CONTEXT_REFRESH, FLEET_CHECK, SHIPPED, ShippedSkill, deploy_resolved, deploy_skills_into,
 };
@@ -176,6 +177,8 @@ fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
         .map(|s| (s.source(), shipped(&s.source())))
         .collect();
     files.push((CLAUDE_MD_TEMPLATE.to_owned(), shipped(CLAUDE_MD_TEMPLATE)));
+    // #10161 D3c: the seed carries the agents too.
+    files.extend(SHIPPED_AGENTS.iter().map(|a| (a.source(), shipped(&a.source()))));
     files.push((EXTRA.source(), body.to_owned()));
     let extra: Vec<(&str, &str)> = files
         .iter()
@@ -197,6 +200,46 @@ fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
         std::fs::read_to_string(architect_skills::skill_path(tier.path(), EXTRA.stem))
             .expect("the extra skill was written"),
         body
+    );
+}
+
+/// #10161 D3c: every agent the seed needs is required. An absent agent and a
+/// blank one each fail the whole load by name, so `tm fleet init` writes
+/// nothing; the checkout's content seeds all five.
+#[test]
+fn a_missing_or_blank_agent_source_loads_nothing() {
+    let seed = ArchitectSeed::load(rc()).expect("the checkout carries the seed");
+    let names: Vec<&str> = seed.agents.iter().map(|a| a.stem).collect();
+    let want: Vec<&str> = SHIPPED_AGENTS.iter().map(|a| a.name).collect();
+    assert_eq!(names, want);
+
+    let mut files: Vec<(String, String)> = SHIPPED
+        .iter()
+        .map(|s| (s.source(), shipped(&s.source())))
+        .collect();
+    files.push((CLAUDE_MD_TEMPLATE.to_owned(), shipped(CLAUDE_MD_TEMPLATE)));
+    let last = SHIPPED_AGENTS.last().expect("an agent ships").source();
+    for agent in SHIPPED_AGENTS {
+        if agent.source() != last {
+            files.push((agent.source(), shipped(&agent.source())));
+        }
+    }
+    let view = |files: &[(String, String)]| -> FrameworkContent {
+        let refs: Vec<(&str, &str)> = files.iter().map(|(r, b)| (r.as_str(), b.as_str())).collect();
+        content_with(&refs)
+    };
+    let err = ArchitectSeed::load(&view(&files)).expect_err("an agent is missing");
+    assert!(
+        matches!(&err, ArchitectSeedError::Missing { path, .. }
+            if *path == format!("instructions/{last}")),
+        "{err:?}"
+    );
+    files.push((last.clone(), " \n\n".to_owned()));
+    let err = ArchitectSeed::load(&view(&files)).expect_err("an agent is blank");
+    assert!(
+        matches!(&err, ArchitectSeedError::Empty { path, .. }
+            if *path == format!("instructions/{last}")),
+        "{err:?}"
     );
 }
 

@@ -7,7 +7,8 @@ acts on a file or a procedure that is not there. A check that reads only
 backticked words misses a path inside a fenced block and a script named in a
 command (`python3 scripts/x.py`), so all three forms are parsed.
 What: reads the manual (`<root>/content/instructions/architect/architect.md`),
-the seeded `CLAUDE.md` and every `<init-dir>/.claude/skills/*/SKILL.md`.
+the seeded `CLAUDE.md`, every `<init-dir>/.claude/skills/*/SKILL.md` and, since
+#10161 D3c, every `<init-dir>/.claude/agents/*.md`.
 From each it takes path tokens from inline code spans (`backtick`), fenced
 code blocks (`fence`) and `python3|python|bash|sh <path>` commands anywhere
 (`command`). A token counts when it starts with one of PREFIXES or is
@@ -15,7 +16,7 @@ code blocks (`fence`) and `python3|python|bash|sh <path>` commands anywhere
 exist under the init dir (FAIL PATH). Every skill named in a
 `(details: ...)` pointer, a skill-index row or a backticked `architect-*`
 word must have a `SKILL.md` (FAIL SKILL). A text that cannot be read or
-decoded is FAIL READ; no skills at all is FAIL EMPTY. It never skips.
+decoded is FAIL READ; no skills, or no agents, is FAIL EMPTY. It never skips.
 Test: scripts/check_architect_paths_selftest.sh plants one fault per form.
 Usage: architect_paths.py --root <repo> --init-dir <dir>
   Exit 0: every reference resolves. Exit 1: a FAIL line per finding.
@@ -116,10 +117,21 @@ def check(root, init_dir):
         stems = []
     if not stems and not fails:
         fails.append(f"FAIL EMPTY: .claude/skills holds no skill under {init_dir}")
+    # #10161 D3c: the Architect agents name scripts, records and skills too.
+    agents_dir = os.path.join(init_dir, ".claude", "agents")
+    try:
+        agents = sorted(e for e in os.listdir(agents_dir) if e.endswith(".md"))
+    except OSError as e:
+        fails.append(f"FAIL READ: .claude/agents: {type(e).__name__}: {e}")
+        agents = None
+    if agents == []:
+        fails.append(f"FAIL EMPTY: .claude/agents holds no agent under {init_dir}")
     for label, path in ([("architect.md", os.path.join(root, MANUAL)),
                          ("CLAUDE.md", os.path.join(init_dir, "CLAUDE.md"))]
                         + [(f".claude/skills/{s}/SKILL.md",
-                            os.path.join(skills_dir, s, "SKILL.md")) for s in stems]):
+                            os.path.join(skills_dir, s, "SKILL.md")) for s in stems]
+                        + [(f".claude/agents/{a}", os.path.join(agents_dir, a))
+                           for a in agents or []]):
         text = read(path, fails, label)
         if text is not None:
             texts.append((label, text))

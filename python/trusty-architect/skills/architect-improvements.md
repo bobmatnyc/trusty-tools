@@ -78,8 +78,8 @@ issues only when the Architect asks it to.
 
 ## 3. Consolidation (daily, and when 10+ reports are open)
 
-Dispatch one read-only `research` agent in the background over the open
-ledger reports. Its brief asks it to cluster the reports by cause, check each
+Dispatch the read-only `improvement-curator` agent in the background over
+the open ledger reports. Its brief asks it to cluster the reports by cause, check each
 cluster's evidence, search the target tracker for an existing issue, and
 write one recommendation per cluster (symptom, cause, change, evidence,
 signal, existing issue if any) to a run file in `runs/`. Read its run file.

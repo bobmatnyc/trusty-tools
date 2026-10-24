@@ -222,6 +222,19 @@ Load the named skill before the step it covers. These skills ship with trusty-mp
 | `architect-review` | framework | an architectural review is offered, accepted or due |
 | `architect-drift-check` | framework | comparing a project's history with its architecture baseline |
 | `architect-dashboard` | framework | end of a pass that changed a session, goal or owner item; the owner says "dashboard"; an owner write from the dashboard page |
+| `architect-drift-guard` | framework | a scheduled drift-guard day; the owner asks for a drift review of the instructions; reporting on drift-guard runs |
+| `architect-improver` | framework | a scheduled improver day; reporting on improver runs |
+
+## Agents
+`tm fleet init` writes these agents to `.claude/agents/`. Dispatch each by name; each writes only what its own file names.
+
+| Agent | Use it for |
+| --- | --- |
+| `runner` | one read-only shell check (gh, CI status, tmux capture), at most 20 lines back |
+| `event-extractor` | one PM message as an event line, checked by `scripts/verify-claim.py` |
+| `improvement-curator` | the daily improvement consolidation (details: architect-improvements) |
+| `improver` | a scheduled improver run (details: architect-improver) |
+| `drift-guard` | a scheduled instruction-drift run (details: architect-drift-guard) |
 
 ## Pointers outside this file
 - Voice: `docs/architect/voice.md`.
