@@ -166,5 +166,6 @@ scripts/test_dashboard_task_notes.py	tests/test_dashboard_task_notes.py
 scripts/test_dashboard_task_tabs.py	tests/test_dashboard_task_tabs.py
 scripts/test_dashboard_viz.py	tests/test_dashboard_viz.py
 scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
-# skills/architect-dashboard.md is hand-merged and not listed: its source still
-# names an instance host, so a listed row fails the gate. Re-export it to scratch.
+# Hand-merged into trusty-tools form (see the note at the top): re-export to
+# scratch, diff against the shipped copy, hand-merge the delta.
+.claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md
