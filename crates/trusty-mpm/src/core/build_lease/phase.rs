@@ -15,15 +15,20 @@
 //! a failed record write keeps the phase at [`Phase::Compile`] and is retried
 //! on the next poll, so every failure keeps the slot counted. A lock never seen
 //! held never flips: the build keeps its capacity until it exits, as before.
+//! Only a lease whose target plan is the slot-owned `Slot` plan flips
+//! ([`flip_lock_dir`]); a `Keep` or `Unset` lease stays compiling until it
+//! exits, as before, until PR B (#9223) locks shared directories.
 //! A run-phase holder keeps its flock and its target directory until it exits;
 //! only the capacity count changes. Its later compilers (a `cargo watch`
 //! rebuild) are left to the census, which counts them as foreign.
 //! Test: `phase_tests.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use super::target_dir::TargetPlan;
 
 /// How often the holder reads cargo's build lock.
 pub const PHASE_POLL: Duration = Duration::from_millis(250);
@@ -126,29 +131,23 @@ impl PhaseTracker {
     }
 }
 
-/// The target directories whose build lock a leased command's cargo takes.
+/// The directory whose build lock ends the compile phase, or `None` when
+/// this lease must stay [`Phase::Compile`] until it exits.
 ///
-/// What: `target` (the `CARGO_TARGET_DIR` the lease gave, or kept), resolved
-/// against `cwd` when relative. With none, cargo's default `<workspace>/target`
-/// is not known here, so every `<dir>/target` from `cwd` up to `checkout` is
-/// returned; their locks are read together. A directory cargo does not
-/// actually use never reads held, so a wrong guess never flips the build: it
-/// keeps its capacity until exit, as before #8692.
-/// Test: `the_lock_dirs_are_the_target_or_each_default_target`.
+/// What: `Some(target)` only for a [`TargetPlan::Slot`] lease — the slot's
+/// own directory, which no other lease builds in while the flock is held.
+/// A `Keep` or `Unset` plan builds in a directory another build can share,
+/// so a foreign `.cargo-lock` there could flip this lease while it still
+/// compiles, and a second lease could rebuild binaries its tests use (#9223).
+/// Test: `only_a_slot_plan_has_a_flip_lock_dir`,
+/// `a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692`.
 #[must_use]
-pub fn lock_dirs(target: Option<&str>, cwd: &Path, checkout: &Path) -> Vec<PathBuf> {
-    if let Some(dir) = target {
-        return vec![cwd.join(dir)];
+pub fn flip_lock_dir(plan: &TargetPlan, target: Option<&str>) -> Option<PathBuf> {
+    // #8692: slot-owned dirs only; PR B (#9223) adds a dir lock and lifts this.
+    match plan {
+        TargetPlan::Slot { .. } => target.map(PathBuf::from),
+        _ => None,
     }
-    let mut dirs: Vec<PathBuf> = cwd
-        .ancestors()
-        .take_while(|dir| dir.starts_with(checkout))
-        .map(|dir| dir.join("target"))
-        .collect();
-    if dirs.is_empty() {
-        dirs.push(cwd.join("target"));
-    }
-    dirs
 }
 
 #[cfg(test)]

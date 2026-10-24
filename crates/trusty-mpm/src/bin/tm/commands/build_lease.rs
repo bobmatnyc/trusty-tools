@@ -43,7 +43,7 @@ use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::deps_rotate::{lease_notice, rotate_before_build};
-use trusty_mpm::core::build_lease::phase::lock_dirs;
+use trusty_mpm::core::build_lease::phase::flip_lock_dir;
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
@@ -301,8 +301,8 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             record.target_dir.clone_from(&target);
             let _ = write_record(&mut guard, &record);
             post_decision(daemon.as_ref(), "admitted", &command_line, &decision, &[]).await;
-            // #8692: the compile phase ends when cargo drops its build lock here.
-            let lock_dirs = lock_dirs(target.as_deref(), &cwd, &checkout_root(&cwd));
+            // #8692: only a slot-owned dir flips to run; PR B (#9223) lifts this.
+            let lock_dir = flip_lock_dir(&target_plan, target.as_deref());
             // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
             // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
             let run_argv = match (&explicit_target_dir, &target) {
@@ -316,7 +316,7 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 Some(Lease {
                     guard: &mut guard,
                     record: &mut record,
-                    lock_dirs,
+                    lock_dir,
                 }),
             )
             .await;

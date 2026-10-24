@@ -194,28 +194,15 @@ fn run_phase_holders_free_capacity_but_keep_their_slots() {
     );
 }
 
-/// The lock is read in the lease's target dir, or each default `target`.
+/// #8692: only the slot-owned `Slot` plan flips; a kept, unset or refused
+/// plan builds where another build can, so it never reads a lock dir.
 #[test]
-fn the_lock_dirs_are_the_target_or_each_default_target() {
-    let repo = Path::new("/repo");
+fn only_a_slot_plan_has_a_flip_lock_dir() {
+    use crate::core::build_lease::target_dir::TargetPlan;
     assert_eq!(
-        lock_dirs(Some("/slots/slot-2"), &repo.join("crates/a"), repo),
-        vec![PathBuf::from("/slots/slot-2")]
+        flip_lock_dir(&TargetPlan::Keep("/private/t".into()), Some("/private/t")),
+        None
     );
-    assert_eq!(
-        lock_dirs(Some("rel"), &repo.join("crates/a"), repo),
-        vec![PathBuf::from("/repo/crates/a/rel")]
-    );
-    assert_eq!(
-        lock_dirs(None, &repo.join("crates/a"), repo),
-        vec![
-            PathBuf::from("/repo/crates/a/target"),
-            PathBuf::from("/repo/crates/target"),
-            PathBuf::from("/repo/target"),
-        ]
-    );
-    assert_eq!(
-        lock_dirs(None, Path::new("/elsewhere"), repo),
-        vec![PathBuf::from("/elsewhere/target")]
-    );
+    assert_eq!(flip_lock_dir(&TargetPlan::Unset, None), None);
+    assert_eq!(flip_lock_dir(&TargetPlan::Refuse("x".into()), None), None);
 }
