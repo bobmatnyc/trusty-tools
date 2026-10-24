@@ -1021,7 +1021,7 @@ async fn bridge_backends_match_doctor_and_are_audited_once() {
         .expect("doctor rows")
         .iter()
         // #9069: D15 — doctor lists sync targets; the copy dialog does not.
-        .filter(|row| row["id"] != "github-actions")
+        .filter(|row| row["id"] != "github-actions" && row["id"] != "vercel")
         .map(|row| json!({"id": row["id"], "available": row["available"]}))
         .collect();
     assert_eq!(
