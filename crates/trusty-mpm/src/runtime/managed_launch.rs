@@ -382,7 +382,8 @@ fn abort_notice(session_id: &str) -> String {
 /// What: resolves the tm binary ([`crate::core::spawn_disclaim::launch_wrapper_bin`]);
 /// CONFIRMS the pane's shell is executing what it is typed
 /// ([`super::pane_handshake::confirm_prompt`]) before anything else happens;
-/// writes the spec to its mode-0600 file; reads it back ([`LaunchSpec::verify`]);
+/// names the spec after `tmux_name` ([`super::remote_name::named_after_session`],
+/// #9025); writes the spec to its mode-0600 file; reads it back ([`LaunchSpec::verify`]);
 /// publishes this launch's id ([`LaunchSpec::write_launch_pointer_in`]); types
 /// [`pane_line`] through
 /// [`crate::session_manager::ManagedTmuxDriver::send_command_line`], which
@@ -460,6 +461,8 @@ fn deliver_inner(
             "refusing to launch into pane '{tmux_name}': {reason}"
         )));
     }
+    // #9025: the remote name is the tmux session name, on spawn and resume.
+    let spec = &super::remote_name::named_after_session(spec, tmux_name);
     let path = spec
         .write_in(spec_dir)
         .map_err(|e| super::RuntimeError::Spawn(e.to_string()))?;

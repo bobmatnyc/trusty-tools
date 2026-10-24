@@ -34,6 +34,8 @@ mod managed_launch;
 mod pane_handshake;
 // #7568: the PM system-prompt file and its named-root compiled-prompt refresh.
 mod prompt_file;
+// #9025: a managed session's remote name is its tmux session name.
+pub mod remote_name;
 mod tcode;
 
 #[cfg(test)]

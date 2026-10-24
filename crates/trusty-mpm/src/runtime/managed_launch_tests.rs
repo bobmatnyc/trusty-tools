@@ -815,7 +815,9 @@ fn deliver_types_a_short_line_and_leaves_a_readable_spec() {
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     assert_eq!(written.len(), 1, "one spec per launch: {written:?}");
-    assert_eq!(LaunchSpec::verify(&written[0]).expect("verify"), spec);
+    // #9025: the spec written is the one named after the tmux session.
+    let named = crate::runtime::remote_name::named_after_session(&spec, "tm-sess");
+    assert_eq!(LaunchSpec::verify(&written[0]).expect("verify"), named);
 }
 
 /// #8233 review (defence in depth, independent of line length): the length

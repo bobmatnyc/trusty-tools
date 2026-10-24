@@ -503,9 +503,10 @@ fn fleet_init_resumes_the_prior_conversation_after_the_record_is_gone() {
         text(&out)
     );
     for argv in [&first, &second] {
+        // #9025: the Remote Control session is named after the tmux session.
         assert_eq!(
-            argv.last().map(String::as_str),
-            Some("--remote-control"),
+            argv.get(argv.len().saturating_sub(2)..),
+            Some(&["--remote-control".to_owned(), "tm-architect".to_owned()][..]),
             "{argv:?}"
         );
     }
@@ -1107,6 +1108,57 @@ fn fleet_relaunch_restarts_the_architect_and_rebinds_it() {
     assert!(!trusty_mpm::core::process::process_name_is_claude(old));
     assert_eq!(env.status_json()["binding"]["ok"], true);
     assert_eq!(daemon.requests().len(), 2, "init and relaunch register");
+}
+
+/// #9025: `tm fleet init` names the session, and its Remote Control
+/// session, after the tmux session it starts — an overridden name included.
+#[test]
+fn fleet_init_names_the_remote_session_after_its_tmux_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let init = [
+        "fleet",
+        "init",
+        "--session",
+        "tm-sup-r",
+        "--dir",
+        dir_arg(&dir),
+    ];
+    let out = env.tm(&init);
+    assert!(out.status.success(), "{}", text(&out));
+    let argv = env.launches(1).first().cloned().unwrap_or_default();
+    assert_eq!(flag_value(&argv, "--name"), Some("tm-sup-r"), "{argv:?}");
+    assert_eq!(
+        flag_value(&argv, "--remote-control"),
+        Some("tm-sup-r"),
+        "{argv:?}"
+    );
+}
+
+/// #9025: `tm fleet relaunch` starts the new `claude` under the tmux
+/// session's name too.
+#[test]
+fn fleet_relaunch_names_the_remote_session_after_its_tmux_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&relaunch, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let second = env.launches(2).get(1).cloned().unwrap_or_default();
+    assert_eq!(
+        flag_value(&second, "--name"),
+        Some("tm-architect"),
+        "{second:?}"
+    );
+    assert_eq!(
+        flag_value(&second, "--remote-control"),
+        Some("tm-architect"),
+        "{second:?}"
+    );
 }
 
 /// #10033 owner ruling D8a: inside a Claude Code session `relaunch` refuses

@@ -353,11 +353,37 @@ fn send_spec_launch_types_a_short_line_naming_a_readable_spec() {
 
     let written = entries(&spec_dir);
     assert_eq!(written.len(), 1, "one spec: {written:?}");
-    assert_eq!(LaunchSpec::verify(&written[0]).expect("readable"), spec);
+    // #9025: what is written is the spec named after its session.
+    let named = crate::runtime::remote_name::named_after_session(&spec, "tm-sess");
+    assert_eq!(LaunchSpec::verify(&written[0]).expect("readable"), named);
     let argv = std::fs::read_to_string(&log).expect("tmux ran");
     let want = super::pane_line("/w/tm", &written[0]);
     assert!(argv.contains(&want), "want {want:?} in: {argv}");
     assert!(argv.contains("Enter"), "{argv}");
+}
+
+/// #9025: `tm launch`, `tm connect` and `tm session start` all deliver through
+/// `send_spec_launch`; the spec it writes names the session after its tmux
+/// session, ahead of every other flag.
+#[serial_test::serial]
+#[test]
+fn a_cli_launch_is_named_after_its_tmux_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (bin, _) = fake_tmux(tmp.path(), 0);
+    let spec_dir = tmp.path().join("specs");
+    let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
+
+    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-dogfood", &spec, &spec_dir)
+        .expect("a short line is typed");
+
+    let written = LaunchSpec::verify(&entries(&spec_dir)[0]).expect("readable");
+    assert_eq!(
+        written.args[..2],
+        ["--name", "tm-dogfood"],
+        "{:?}",
+        written.args
+    );
+    assert_eq!(written.args[2..], spec.args[..], "{:?}", written.args);
 }
 
 /// #8308: when tmux cannot type the line, nothing will consume the spec, so

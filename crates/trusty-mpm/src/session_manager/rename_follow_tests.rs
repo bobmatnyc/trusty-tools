@@ -31,6 +31,9 @@ struct PaneTmux {
     /// `%N` → (server, session holding it).
     panes: HashMap<String, (String, String)>,
     list_fails: bool,
+    /// #9025: `pane_claude` answers `Unknown` (else `Absent`: no `claude`, so
+    /// the doctor row never reads the real registry).
+    claude_unreadable: bool,
     /// Every kill or rename asked for. The fix must never ask.
     mutations: Mutex<Vec<String>>,
 }
@@ -78,6 +81,13 @@ impl ManagedTmuxDriver for PaneTmux {
             return Err(ManagedError::TmuxUnavailable("fake: no server".into()));
         }
         Ok(self.sessions.clone())
+    }
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        if self.claude_unreadable {
+            crate::core::process::PaneClaude::Unknown
+        } else {
+            crate::core::process::PaneClaude::Absent
+        }
     }
     fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
         Some(self.panes.get(pane_id).is_some_and(|(_, s)| s == name))
@@ -441,4 +451,69 @@ async fn the_doctor_row_flags_a_live_pane_under_another_name() {
         check_session_names(&blind_mgr).await.status,
         CheckStatus::Unknown
     );
+}
+
+/// #9025 rename case: a tmux session renamed after launch leaves its `claude`
+/// under the old remote name, and the doctor row warns with the `/rename`
+/// that fixes it. A registry that could not be read is said, not hidden.
+#[test]
+fn the_doctor_row_flags_a_remote_name_that_left_its_tmux_session() {
+    use crate::daemon::doctor::doctor_session_names::session_names_row;
+    use crate::runtime::remote_name::RemoteNameDrift;
+    let drift = RemoteNameDrift {
+        session: "tm-dogfood".to_owned(),
+        pid: 4242,
+        remote: "trusty-tools-a7".to_owned(),
+    };
+    let row = session_names_row(Ok(Vec::new()), Ok(vec![drift]), &[]);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(row.message.starts_with("1 session(s)"), "{}", row.message);
+    assert!(
+        row.message.contains(
+            "tmux session 'tm-dogfood' runs claude pid 4242 under the remote name \
+             'trusty-tools-a7'; type `/rename tm-dogfood` in that session"
+        ),
+        "{}",
+        row.message
+    );
+
+    // #9025 round 1: a check that did not run is `Unknown`, never `Ok`.
+    let row = session_names_row(Ok(Vec::new()), Err("timed out".to_owned()), &[]);
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(
+        row.message
+            .ends_with("; remote names were not checked (timed out)"),
+        "{}",
+        row.message
+    );
+}
+
+/// #9025 round 1: a pane the `claude` probe could not read is named in the row
+/// as unchecked (`Unknown`), not skipped into an `Ok`; a drift elsewhere stays
+/// a `Warn` that still carries the note. Through the real `check_session_names`
+/// too, so the probe's collection is covered, not only the row text.
+#[tokio::test]
+async fn a_pane_the_probe_could_not_read_is_reported_unchecked() {
+    use crate::daemon::doctor::doctor_session_names::session_names_row;
+    let unchecked = ["tm-blind".to_owned()];
+    let row = session_names_row(Ok(Vec::new()), Ok(Vec::new()), &unchecked);
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(
+        row.message
+            .contains("1 session(s) could not be probed for a claude")
+            && row.message.contains("tm-blind"),
+        "{}",
+        row.message
+    );
+
+    let tmux = Arc::new(PaneTmux {
+        sessions: vec!["tm-blind".to_owned()],
+        claude_unreadable: true,
+        ..PaneTmux::default()
+    });
+    let (_d, mgr) = manager(tmux).await;
+    seed(&mgr, "tm-blind", ManagedSessionState::Active, "%9", None).await;
+    let row = check_session_names(&mgr).await;
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(row.message.contains("tm-blind"), "{}", row.message);
 }

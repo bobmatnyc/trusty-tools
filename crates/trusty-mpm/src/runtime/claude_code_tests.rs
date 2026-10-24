@@ -1460,6 +1460,61 @@ fn spawn_errors_when_the_line_is_refused() {
     );
 }
 
+/// #9025: the daemon's launch names the session after its tmux session.
+#[test]
+#[serial_test::serial]
+fn spawn_names_the_remote_session_after_its_tmux_session() {
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    adapter
+        .spawn("tm-dogfood", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect("spawn must succeed with claude on PATH");
+    let spec = sent_spec(&only_line(&fake));
+    assert!(
+        has_flag_pair(&spec, "--name", "tm-dogfood"),
+        "{:?}",
+        spec.args
+    );
+}
+
+/// #9025: a resume names the session after the tmux session it runs in.
+#[test]
+#[serial_test::serial]
+fn spawn_resume_names_the_remote_session_after_its_tmux_session() {
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let cwd = home.home().join("ws");
+    std::fs::create_dir_all(&cwd).expect("mkdir ws");
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    adapter
+        .spawn_resume(
+            "tm-dogfood",
+            Some("%3"),
+            &cwd,
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume must succeed");
+    let pane_sends = fake.pane_sends.lock().expect("pane send log").clone();
+    let spec = sent_spec(&pane_sends[0].2);
+    assert!(
+        has_flag_pair(&spec, "--name", "tm-dogfood"),
+        "{:?}",
+        spec.args
+    );
+}
+
 /// #1744/#2013: a stored id that still resolves on disk resumes by id.
 #[test]
 #[serial_test::serial]
