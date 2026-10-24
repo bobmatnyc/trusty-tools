@@ -29,7 +29,7 @@ Every delete (single or in a batch) first appends the full pre-delete document t
 <root>/../owner-queue-archive/pruned.jsonl (pruned_at, actor, collection, id, version, data; flush + fsync);
 if that append fails the delete is refused (exit 2). `pruned [--id ID] [--collection C]` prints matching lines, newest last.
 --actor names the change-log actor (default architect). Format: DASHBOARD_FORMAT=dir|jsonl.
-Test: scripts/test_dashboard_store.py, scripts/test_dashboard_tally.py, scripts/test_dashboard_footer.py, scripts/test_dashboard_jsonl.py, scripts/test_dashboard_pruned.py, scripts/test_dashboard_summary.py, scripts/test_dashboard_qualified.py, scripts/test_dashboard_specs_links.py
+Test: tests/test_dashboard_store.py, tests/test_dashboard_tally.py, tests/test_dashboard_footer.py, tests/test_dashboard_jsonl.py, tests/test_dashboard_pruned.py, tests/test_dashboard_summary.py, tests/test_dashboard_qualified.py, tests/test_dashboard_specs_links.py
 Specs: writes to `items` (set, update, create, batch) normalize `specs`: one entry per local doc, localhost `#doc/` reader form (the page shows the tailnet twin); a localhost URL in `detail` becomes "see doc links" plus one spec.
 """
 import argparse

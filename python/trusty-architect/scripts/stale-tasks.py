@@ -6,7 +6,7 @@ What: read-only. A task is stale when status is "open", parked is empty, and the
 `updates[].at`, `progress.estimated_at` and `updated` (created if none) is older than --hours (default 24).
 Prints one tab-separated line per task, oldest first: id, session, last activity (ISO), title.
 Exit 0 always on a readable store, 2 on a store error. Root: --root or DASHBOARD_ROOT, default local/owner-queue.
-Test: scripts/test_stale_tasks.py
+Test: tests/test_stale_tasks.py
 """
 import argparse
 import os

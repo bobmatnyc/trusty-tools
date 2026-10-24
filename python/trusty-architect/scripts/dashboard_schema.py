@@ -12,7 +12,7 @@ properties, additionalProperties (bool or schema), items, pattern, minimum, maxi
 into the file's own $defs. bool is never an integer or number. An unknown keyword raises SchemaError at load,
 so a schema edit cannot silently weaken a check. The code invariants "goal lifecycle parked <=> parked is an
 object" and "factory goal has a board" are checked here, not in JSON Schema. Mode helpers: mode() reads DASHBOARD_SCHEMA (off|warn|enforce).
-Test: scripts/test_dashboard_schema.py
+Test: tests/test_dashboard_schema.py
 """
 import json
 import os

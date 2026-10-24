@@ -48,7 +48,7 @@ text: "<title>" or "<title> — <done_note>"}; the Architect sets done_ack to an
 Reads only through dashboard_store (either format); the rules live in dashboard_derive. Raises StoreError on an unreadable collection.
 Qualified ids (ar-T44): resolve_id(root, ref) maps "S0c:D01" or a bare id to the local id (NotFound when the S id is not this store's own session); qualified(root, entries) adds a derived `qid` ("<S id>:<id>", bare when unknown) to pending entries, so a relay or log line can name the
 entry fleet-wide. Stored ids stay bare.
-Test: scripts/test_fleet_poll_owner_answer.py, scripts/test_dashboard_derive.py, scripts/test_dashboard_qualified.py
+Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py
 """
 import os
 import sys

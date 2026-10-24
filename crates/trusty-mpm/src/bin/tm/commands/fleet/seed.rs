@@ -23,7 +23,7 @@
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
-//! `every_schema_asset_is_seeded`,
+//! `every_schema_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
 //! `the_relay_scripts_and_the_voice_guide_are_seeded`,
@@ -84,6 +84,19 @@ macro_rules! schema {
                 "../../../../assets/architect/schemas/dashboard/",
                 $name
             )),
+            false,
+        )
+    };
+}
+
+/// Build one [`EMBEDDED`] row for a dashboard page file seeded at
+/// `templates/dashboard/<rel>`, its path under `src/assets/architect/dashboard/`
+/// (#10161).
+macro_rules! page {
+    ($rel:literal) => {
+        (
+            concat!("templates/dashboard/", $rel),
+            include_str!(concat!("../../../../assets/architect/dashboard/", $rel)),
             false,
         )
     };
@@ -199,6 +212,50 @@ const EMBEDDED: &[Embedded] = &[
     embedded!("scripts/dashboard-db.py", "scripts/dashboard-db.py", true),
     embedded!("scripts/il-archive.py", "scripts/il-archive.py", false),
     embedded!("scripts/stale-tasks.py", "scripts/stale-tasks.py", true),
+    // See #10161: the dashboard server (D3b), split into a facade and three
+    // modules it imports by name, and the read-only views it serves. The page,
+    // the Live view and the reader libraries sit where the server reads them.
+    embedded!(
+        "scripts/dashboard-serve.py",
+        "scripts/dashboard-serve.py",
+        true
+    ),
+    embedded!(
+        "scripts/dashboard_http.py",
+        "scripts/dashboard_http.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_page.py",
+        "scripts/dashboard_page.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_docs.py",
+        "scripts/dashboard_docs.py",
+        false
+    ),
+    embedded!("scripts/dashboard_il.py", "scripts/dashboard_il.py", false),
+    embedded!(
+        "scripts/dashboard_media.py",
+        "scripts/dashboard_media.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_viz.py",
+        "scripts/dashboard_viz.py",
+        false
+    ),
+    embedded!(
+        "scripts/dashboard_harness.py",
+        "scripts/dashboard_harness.py",
+        false
+    ),
+    page!("index.html"),
+    page!("live.html"),
+    page!("vendor/marked.umd.js"),
+    page!("vendor/purify.min.js"),
+    page!("vendor/VERSIONS.md"),
     schema!("accounts.schema.json"),
     schema!("briefs.schema.json"),
     schema!("effort_tunes.schema.json"),

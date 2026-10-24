@@ -15,7 +15,7 @@ an unreadable path raises `ConfigError`, which names the path and the key and
 never the value. Unknown keys are kept out of the config and listed in
 `Config.unknown`. Session names stay env-only (#8436). Standard library only,
 Python 3.9+; import it as `architect_config` from a sibling script.
-Test: tests/test_architect_config.py; tailnet_url in scripts/test_dashboard_footer.py.
+Test: tests/test_architect_config.py; tailnet_url in tests/test_dashboard_footer.py.
 """
 # No `from __future__ import annotations`: a dataclass with string annotations
 # fails when a sibling loads this file by path without registering it.
