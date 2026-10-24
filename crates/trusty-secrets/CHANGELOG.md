@@ -8,6 +8,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.1.6] — 2026-10-11
 
+### Breaking
+
+- trusty-secrets 0.1.6 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-secrets-0.1.6.txt` (Refs #8699).
+
 ### Added
 
 - The `trusty-secrets` server keeps the values `secrets.resolve` reads from 1Password or Keeper for up to the cache max age (600 s by default, counted in both wall time and awake time), so a second resolve of the same key does not run `op` or `keeper` again or ask for another unlock. Keychain and file values are never cached, and neither is a failed read. The grant, ancestry, agents-flag and audit checks still run on every call; a cache hit skips only the backend read, and a one-shot grant is spent by a hit as by a read. Entries are keyed by backend, vault and key, and `secrets.set`, `secrets.delete` and `secrets.copy` evict the key they write (#7520).
