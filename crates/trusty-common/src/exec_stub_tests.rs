@@ -60,7 +60,13 @@ fn stubs_exec_while_siblings_spawn_without_etxtbsy() {
         let module = module.split_once("::").map_or(module, |(_, rest)| rest);
         let name = format!("{module}::stubs_exec_while_siblings_spawn_without_etxtbsy");
         let out = Command::new(std::env::current_exe().expect("test binary"))
-            .args([name.as_str(), "--exact", "--nocapture", "--test-threads", "1"])
+            .args([
+                name.as_str(),
+                "--exact",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
             .env(CHILD_RUN, "1")
             .output()
             .expect("re-run this test as a child process");

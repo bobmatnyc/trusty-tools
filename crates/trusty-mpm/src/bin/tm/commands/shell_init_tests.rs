@@ -18,7 +18,6 @@
 //! Test: this file.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -234,8 +233,8 @@ struct Harness {
 }
 
 fn write_exec(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, body).unwrap();
 }
 
 /// Build a temp dir holding the stub `tm`, a start dir, two target dirs, and a

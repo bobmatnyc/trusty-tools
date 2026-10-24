@@ -240,13 +240,12 @@ async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
     // the pane process `sleep`.
     #[cfg(not(target_os = "macos"))]
     {
-        std::fs::write(&fake_claude, "#!/bin/sh\n/bin/sleep \"$1\"\nexit $?\n")
-            .expect("fake claude");
-        std::fs::set_permissions(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &fake_claude,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            "#!/bin/sh\n/bin/sleep \"$1\"\nexit $?\n",
         )
-        .expect("chmod fake claude");
+        .expect("fake claude");
     }
     let pane = helper_pane(
         &server,
@@ -291,12 +290,9 @@ async fn a_helper_whose_pane_pid_cannot_be_read_is_not_registered() {
     let reg = tmux_registration(&root);
     let _pane = helper_pane(&server, &reg, "exec /bin/sleep 60");
     let failing = root.path().join("tmux-fails");
-    std::fs::write(&failing, "#!/bin/sh\nexit 1\n").expect("failing tmux");
-    std::fs::set_permissions(
-        &failing,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .expect("chmod failing tmux");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&failing, "#!/bin/sh\nexit 1\n")
+        .expect("failing tmux");
 
     let report = crate::core::tmux::with_tmux_binary(
         failing,

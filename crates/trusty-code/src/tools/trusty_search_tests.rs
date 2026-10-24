@@ -408,8 +408,6 @@ async fn fail_open_paths_report_no_telemetry() {
 /// Test: `execute_attaches_telemetry_when_lane_reply_has_no_text`.
 #[cfg(unix)]
 fn write_fake_mcp_server(responses: &[Value; 3]) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let script = format!(
         "#!/bin/sh\ni=0\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":'*)\n      i=$((i + 1))\n      case \"$i\" in\n        1) printf '%s\\n' '{}' ;;\n        2) printf '%s\\n' '{}' ;;\n        3) printf '%s\\n' '{}' ;;\n      esac\n      ;;\n  esac\ndone\n",
         responses[0], responses[1], responses[2],
@@ -423,12 +421,8 @@ fn write_fake_mcp_server(responses: &[Value; 3]) -> std::path::PathBuf {
             .expect("clock")
             .as_nanos()
     ));
-    std::fs::write(&path, script).expect("write fake mcp script");
-    let mut perms = std::fs::metadata(&path)
-        .expect("stat fake mcp script")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod fake mcp script");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, script).expect("write fake mcp script");
     path
 }
 

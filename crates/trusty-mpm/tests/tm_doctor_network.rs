@@ -20,7 +20,6 @@ const SHIM_TOKEN: &str = "ya29.SHIM-SECRET-TOKEN-0123456789abcdef";
 
 /// Write an executable `gcloud` shim into `dir` that logs to `marker`.
 fn write_shim(dir: &Path, marker: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let script = format!(
         "#!/bin/sh\n\
          echo \"$@\" >> '{marker}'\n\
@@ -32,8 +31,8 @@ fn write_shim(dir: &Path, marker: &Path) {
         marker = marker.display()
     );
     let path = dir.join("gcloud");
-    std::fs::write(&path, script).expect("write gcloud shim");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod shim");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, script).expect("write gcloud shim");
 }
 
 /// Run `tm doctor <extra>` with the shim first on `PATH`; return stdout,

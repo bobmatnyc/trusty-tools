@@ -354,11 +354,7 @@ pub fn head_sha(root_path: &Path) -> Option<String> {
         return None;
     }
     let sha = std::str::from_utf8(&out.stdout).ok()?.trim().to_owned();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 /// The prefix of the only git stderr CONSISTENT with "there is genuinely no
@@ -623,13 +619,12 @@ mod tests {
     /// the first two calls and fails the third reaches the arm.
     fn git_shim_failing_untracked(dir: &Path) -> String {
         let shim = dir.join("git-shim.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = \"--others\" ] && exit 1\ndone\nexec git \"$@\"\n",
         )
         .expect("write shim");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         shim.to_string_lossy().into_owned()
     }
 

@@ -1,15 +1,14 @@
 //! The default-branch gate (#8454 Bob Db1, Architect G2/G3): each refusal
 //! is named, and the accepted shapes load.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Output};
 use std::time::Duration;
 
-use super::repo::{mkfifo, release_fifo, slack_routes, tempdir, within, Repo};
+use super::repo::{Repo, mkfifo, release_fifo, slack_routes, tempdir, within};
 use crate::policy::gate::{object_id, run, with_git_timeout};
-use crate::policy::{check_default_branch, GateError};
+use crate::policy::{GateError, check_default_branch};
 
 fn gate(repo: &Repo) -> Result<crate::policy::BranchState, GateError> {
     let bytes = std::fs::read(repo.routes_file()).expect("read routes");
@@ -288,8 +287,8 @@ fn grandchild_git(dir: &Path, pid_file: &Path, parent_waits: bool) {
         pid_file.display()
     );
     let path = dir.join("git");
-    std::fs::write(&path, script).expect("write git wrapper");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, script).expect("write git wrapper");
 }
 
 /// True while a process with `pid` exists.
@@ -307,21 +306,14 @@ fn git_timeout_kills_the_whole_process_group() {
         let (_tmp, root) = tempdir();
         let pid_file = root.join("grandchild.pid");
         grandchild_git(&root, &pid_file, parent_waits);
-        let mut got = None;
-        // A sibling test's fork can briefly hold the new script's write fd
-        // (ETXTBSY at spawn), so an unavailable git is retried.
-        for _ in 0..5 {
-            let path = root.clone();
-            let result = within(Duration::from_secs(30), move || {
-                with_git_timeout(Duration::from_secs(1), || {
-                    run(Command::new("git").env("PATH", &path), "wrapper").map(|_| ())
-                })
-            });
-            if !matches!(result, Some(Err(GateError::GitUnavailable { .. }))) {
-                got = result;
-                break;
-            }
-        }
+        // See #10248: `grandchild_git` leaves no write fd to fork, so the
+        // wrapper runs on the first attempt.
+        let path = root.clone();
+        let got = within(Duration::from_secs(30), move || {
+            with_git_timeout(Duration::from_secs(1), || {
+                run(Command::new("git").env("PATH", &path), "wrapper").map(|_| ())
+            })
+        });
         let text = std::fs::read_to_string(&pid_file).expect("grandchild pid");
         let pid: libc::pid_t = text.trim().parse().expect("pid");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

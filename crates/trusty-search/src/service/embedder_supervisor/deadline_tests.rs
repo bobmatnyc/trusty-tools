@@ -11,10 +11,9 @@
 //! `LazySlotEmbedderAdapter`.
 //! Test: this file.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::{LazyEmbedderHandle, SupervisorConfig};
@@ -57,7 +56,8 @@ impl Embedder for LazyAdapter {
 fn write_mock(dir: &Path, prelude: &str) -> PathBuf {
     let path = dir.join("mock-embedderd.sh");
     let pids = dir.join("pids");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &path,
         format!(
             r#"#!/bin/sh
@@ -73,9 +73,6 @@ done
         ),
     )
     .expect("write mock");
-    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
     path
 }
 

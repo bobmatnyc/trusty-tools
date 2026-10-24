@@ -103,14 +103,15 @@ fn allow_uv() {
 /// Real venv interpreters are always executable; a plain `fs::write` is not
 /// (mode 0o644), so tests that spawn the fake stub must set the exec bit
 /// explicitly or every spawn attempt fails with "permission denied".
+/// On unix the shared writer keeps every write fd out of this process, so a
+/// sibling test's fork cannot fail the later exec with ETXTBSY (#10248).
 fn write_fake_venv_python(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, body).unwrap();
+    // See #10248
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    trusty_common::exec_stub::write_executable(path, body).unwrap();
+    #[cfg(not(unix))]
+    fs::write(path, body).unwrap();
 }
 
 /// Create the site-packages marker directory `verify_venv_alive` checks for
@@ -405,9 +406,10 @@ fn locate_uv_rejects_bad_explicit_override() {
     deny_uv();
     let err = locate_uv().unwrap_err();
     allow_uv();
-    assert!(err
-        .to_string()
-        .contains("does not point to an existing file"));
+    assert!(
+        err.to_string()
+            .contains("does not point to an existing file")
+    );
 }
 
 #[test]
@@ -417,10 +419,11 @@ fn materialize_project_writes_package_and_lock_skips_tests() {
     super::materialize_project(&dest).unwrap();
     assert!(dest.join("pyproject.toml").is_file());
     assert!(dest.join("uv.lock").is_file());
-    assert!(dest
-        .join("trusty_embed_sidecar")
-        .join("__main__.py")
-        .is_file());
+    assert!(
+        dest.join("trusty_embed_sidecar")
+            .join("__main__.py")
+            .is_file()
+    );
     assert!(dest.join("trusty_embed_sidecar").join("model.py").is_file());
     // tests/ dir is intentionally skipped at runtime materialization.
     assert!(
@@ -838,7 +841,7 @@ fn locate_uv_with_no_uv_and_the_fetch_on_never_fetches() {
 #[cfg(unix)]
 #[test]
 fn uv_step_failures_are_typed_for_the_retry_decision() {
-    use crate::venv_error::{failure_kind, FailureKind};
+    use crate::venv_error::{FailureKind, failure_kind};
     let tmp = tempfile::tempdir().unwrap();
     let sh = Path::new("/bin/sh");
     let run = |args: &[&str], timeout| {
@@ -877,24 +880,6 @@ fn uv_step_failures_are_typed_for_the_retry_decision() {
     assert_eq!(failure_kind(&download), want, "{download:#}");
 }
 
-/// Write `script` at `path` and mark it executable from a `/bin/sh` child, so
-/// this process never holds a write fd on a file a later spawn execs (a
-/// concurrent fork would inherit it and the exec would fail with ETXTBSY).
-#[cfg(unix)]
-fn write_exec_script_via_child(path: &Path, script: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let status = std::process::Command::new("/bin/sh")
-        .args([
-            "-c",
-            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
-            "sh",
-        ])
-        .args([script, path.to_str().unwrap()])
-        .status()
-        .unwrap();
-    assert!(status.success(), "write {}", path.display());
-}
-
 /// #9971 regression: a build that follows a failed, not-ready build runs over
 /// the venv dir that attempt left. `/bin/sh` stands in for uv and runs the
 /// fake step scripts in the project dir. The fake `uv venv` exits 2 when the
@@ -905,7 +890,7 @@ fn write_exec_script_via_child(path: &Path, script: &str) {
 #[cfg(unix)]
 #[test]
 fn a_build_after_a_failed_sync_starts_over_the_partial_venv() {
-    use crate::venv_error::{failure_kind, FailureKind};
+    use crate::venv_error::{FailureKind, failure_kind};
     let tmp = tempfile::tempdir().unwrap();
     let layout = resolve_layout_in(tmp.path());
     let net_down = tmp.path().join("net-down");
@@ -982,12 +967,12 @@ fn clear_unready_venv_spares_a_ready_venv_and_its_siblings() {
 #[cfg(unix)]
 #[test]
 fn a_smoke_test_network_exit_is_transient_and_other_exits_permanent() {
-    use crate::venv_error::{failure_kind, FailureKind};
+    use crate::venv_error::{FailureKind, failure_kind};
     let tmp = tempfile::tempdir().unwrap();
     let layout = resolve_layout_in(tmp.path());
     fs::create_dir_all(&layout.project_dir).unwrap();
 
-    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit \"$3\"\n");
+    write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit \"$3\"\n");
     let net = super::smoke_test(&layout).expect_err("network exit");
     let free = fs4::available_space(&layout.project_dir).unwrap();
     let want = if free < REQUIRED_FREE_BYTES {
@@ -999,7 +984,7 @@ fn a_smoke_test_network_exit_is_transient_and_other_exits_permanent() {
     assert!(net.downcast_ref::<VenvBuildError>().is_some(), "{net:#}");
 
     fs::remove_file(&layout.venv_python).unwrap();
-    write_exec_script_via_child(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+    write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
     let other = super::smoke_test(&layout).expect_err("import error");
     assert_eq!(failure_kind(&other), FailureKind::Permanent, "{other:#}");
     assert!(

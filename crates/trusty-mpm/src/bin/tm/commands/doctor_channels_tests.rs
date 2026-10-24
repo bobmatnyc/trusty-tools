@@ -529,7 +529,6 @@ fn real_git() -> PathBuf {
 /// a grandchild sleep, records both pids in `pids`, then sleeps; elsewhere it
 /// runs the real git.
 fn blocking_git(bin: &Path, pids: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
     let script = format!(
         "#!/bin/sh\nif [ -e .block-git ]; then\n  /bin/sleep 300 &\n  \
          echo \"$$ $!\" >> '{}'\n  exec /bin/sleep 300\nfi\nexec '{}' \"$@\"\n",
@@ -537,20 +536,13 @@ fn blocking_git(bin: &Path, pids: &Path) {
         real_git().display()
     );
     let wrapper = bin.join("git");
-    std::fs::write(&wrapper, script).expect("write git wrapper");
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    // A sibling test's fork can briefly hold the script's write fd (ETXTBSY).
-    let runs = (0..50).any(|_| {
-        let ok = Command::new(&wrapper)
-            .arg("--version")
-            .current_dir(bin)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if !ok {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        ok
-    });
+    // See #10248: written by a child, so no fork can make it busy.
+    trusty_common::exec_stub::write_executable(&wrapper, script).expect("write git wrapper");
+    let runs = Command::new(&wrapper)
+        .arg("--version")
+        .current_dir(bin)
+        .output()
+        .is_ok_and(|o| o.status.success());
     assert!(runs, "the git wrapper never ran");
 }
 

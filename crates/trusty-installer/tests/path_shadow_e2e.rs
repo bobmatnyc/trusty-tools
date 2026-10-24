@@ -58,29 +58,17 @@ use std::ffi::OsStr;
 
 /// Write a mode-0755 `#!/bin/sh` fake binary that prints `version_line`.
 ///
-/// #3782: a `/bin/sh` child writes the bytes and exits before this returns, so
-/// no writable fd to `path` ever exists in this process for a sibling test's
-/// fork to inherit — the inherited fd is what made the later exec fail with
-/// ETXTBSY. Same helper as the lib's `test_support::write_exec_script`, which
-/// an integration target cannot reach.
+/// #3782, #10248: the shared writer keeps every write fd to `path` out of this
+/// process, so a sibling test's fork cannot make the later exec fail with
+/// ETXTBSY.
 #[cfg(unix)]
 fn write_versioned_binary(path: &std::path::Path, version_line: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let status = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"printf '%s' "$1" > "$2""#)
-        .arg("sh")
-        .arg(format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
-        .arg(path)
-        .status()
-        .expect("spawn /bin/sh to write the fake binary");
-    assert!(
-        status.success(),
-        "writing {} failed: {status}",
-        path.display()
-    );
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake binary");
+    // See #10248
+    trusty_common::exec_stub::write_executable(
+        path,
+        format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"),
+    )
+    .expect("write the fake binary");
 }
 
 /// THE #3554 regression shape, end to end: an isolated home directory that
@@ -240,7 +228,7 @@ async fn no_shadow_warning_when_path_resolves_to_the_installed_binary() {
 #[tokio::test]
 async fn supervisor_bootstrap_runs_fully_isolated_alongside_the_path_shadow_precondition() {
     use trusty_installer::commands::plist_bootstrap::{
-        install_mpm_supervisor_for, resolve_uid, StubLaunchctl, SupervisorTarget, PLIST_LABEL,
+        PLIST_LABEL, StubLaunchctl, SupervisorTarget, install_mpm_supervisor_for, resolve_uid,
     };
 
     let tmp = tempfile::tempdir().expect("tempdir");

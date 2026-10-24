@@ -11,7 +11,7 @@
 //! carry no `$TMUX` and no `-L`/`-S`, so none can reach the default socket.
 //! Test: this file IS the test module.
 
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -23,19 +23,14 @@ const BOUND: Duration = Duration::from_secs(60);
 
 /// Write the logging fake `tmux` into `bin_dir`.
 fn write_fake_tmux(bin_dir: &Path, log: &Path) {
-    use std::io::Write as _;
     let script = format!(
         "#!/bin/sh\necho \"TMUX_TMPDIR=${{TMUX_TMPDIR-unset}} TMUX=${{TMUX-unset}} ARGS=$*\" >> '{}'\n\
          case \"$1\" in\n  show-options) case \"$4\" in history-limit) echo 10000 ;; *) echo off ;; esac ;;\nesac\nexit 0\n",
         log.display()
     );
-    let mut f = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o755)
-        .open(bin_dir.join("tmux"))
-        .expect("create fake tmux");
-    f.write_all(script.as_bytes()).expect("write fake tmux");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin_dir.join("tmux"), script)
+        .expect("write fake tmux");
 }
 
 /// Why (#9557): the acceptance — with `TRUSTY_SANDBOX=1` every tmux call
