@@ -1,0 +1,2 @@
+Breaking
+- Daemon-URL discovery through the console gateway is removed (#6288). Removed: `core::discovery::{resolve_daemon_url_via_gateway, resolve_daemon_url_for_cli, resolve_daemon_url_probing}` (also re-exported as `core::resolve_daemon_url_*`), the `GATEWAY_PATH` and `GATEWAY_PROBE_TIMEOUT` constants, and the `DaemonUrlError::Unreachable` variant. Clients reach the daemon over its unix socket only, so callers drop these calls and match on the remaining `DaemonUrlError` variants.

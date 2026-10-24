@@ -1,6 +1,6 @@
 crate   trusty-mpm
 version 1.9.0
-reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2), and the #9755 D07 rename moves the fleet role's public Rust names from supervisor to Architect with no re-export shims (Architect answer Q5); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version. Refs #9390, #9755.
+reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2), and the #9755 D07 rename moves the fleet role's public Rust names from supervisor to Architect with no re-export shims (Architect answer Q5); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version, and the breaks listed below. Refs #9390, #9755.
 accept  constructible_struct_adds_field  FactSlot.verify
 # #9755 D07: the fleet role's Rust names, supervisor -> Architect. Serialized values keep their legacy spelling.
 accept  module_missing                   mod trusty_mpm::session_manager::supervisor
@@ -46,3 +46,75 @@ accept  pub_module_level_const_missing   SUPERVISOR_MODEL
 accept  pub_module_level_const_missing   SUPERVISOR_SECTIONS
 accept  pub_module_level_const_missing   SUPERVISOR_ROLE
 accept  pub_module_level_const_missing   COLLECTOR_ROLE
+# Remaining 1.9.0 breaks the release gate computes against 1.8.2 (Refs #9653). Each is named by a Breaking changelog fragment, except the #6288 stage-3 lock and TCP-bind rows, which sit in a Changed or Removed fragment (6288-s3-lock-addr, 6288-s3-retire-tcp-bind).
+accept  constructible_struct_adds_field          ActivityResponse.pending_decision_id
+accept  constructible_struct_adds_field          AnswerParams.answered_by
+accept  constructible_struct_adds_field          AnswerParams.decision_id
+accept  constructible_struct_adds_field          AnswerRequest.answered_by
+accept  constructible_struct_adds_field          AnswerRequest.decision_id
+accept  constructible_struct_adds_field          AnswerResponse.decision_id
+accept  constructible_struct_adds_field          CliLaunch.settings
+accept  constructible_struct_adds_field          ControlPlaneConfig.hook_exe
+accept  constructible_struct_adds_field          FleetMetrics.context_usage
+accept  constructible_struct_adds_field          FleetMetrics.plan_usage
+accept  constructible_struct_adds_field          HealthResponse.unbound_delegations
+accept  constructible_struct_adds_field          HealthResponse.unbound_delegations_error
+accept  constructible_struct_adds_field          HealthSnapshot.unbound_delegations
+accept  constructible_struct_adds_field          HealthSnapshot.unbound_delegations_error
+accept  constructible_struct_adds_field          LiveWorktree.pr
+accept  constructible_struct_adds_field          MpmConfig.legacy_supervisor
+accept  constructible_struct_adds_field          OrphanSweepOutcome.cancelled_unstarted
+accept  constructible_struct_adds_field          SessionRecord.blocked_prompt
+accept  constructible_struct_adds_field          SessionRecord.context_usage
+accept  constructible_struct_adds_field          SessionRecord.last_answer
+accept  constructible_struct_adds_field          SessionRecord.pending_decision_id
+accept  constructible_struct_adds_field          SessionRefRequest.git_env
+accept  constructible_struct_adds_field          SessionSummary.pending_decision_id
+accept  derive_trait_impl_removed                FleetMetrics Eq
+accept  derive_trait_impl_removed                PublishedMetrics Eq
+accept  derive_trait_impl_removed                SupervisorMetricsStatus Eq
+accept  enum_no_repr_variant_discriminant_changed EventKind::Removed
+accept  enum_struct_variant_field_added          EventKind::Observed session
+accept  enum_variant_added                       EventKind PrLinked
+accept  enum_variant_added                       Origin GitCommand
+accept  enum_variant_missing                     DaemonUrlError Unreachable
+accept  function_missing                         trusty_mpm::core::default_daemon_addr
+accept  function_missing                         trusty_mpm::core::deploy_validate::validate_and_repair_reusing_memory
+accept  function_missing                         trusty_mpm::core::discovery::default_daemon_addr
+accept  function_missing                         trusty_mpm::core::discovery::resolve_daemon_url_for_cli
+accept  function_missing                         trusty_mpm::core::discovery::resolve_daemon_url_probing
+accept  function_missing                         trusty_mpm::core::discovery::resolve_daemon_url_via_gateway
+accept  function_missing                         trusty_mpm::core::memory_reachable::probe_memory_reachable_blocking
+accept  function_missing                         trusty_mpm::core::memory_reachable::resolve_memory_reachable
+accept  function_missing                         trusty_mpm::core::memory_reachable::resolve_spawn_memory_reachable
+accept  function_missing                         trusty_mpm::core::resolve_daemon_url_for_cli
+accept  function_missing                         trusty_mpm::core::resolve_daemon_url_probing
+accept  function_missing                         trusty_mpm::core::resolve_daemon_url_via_gateway
+accept  function_missing                         trusty_mpm::core::session_launch::prepare_session_for_repair
+accept  function_missing                         trusty_mpm::core::session_launch::prepare_session_with_memory_reachable
+accept  function_missing                         trusty_mpm::daemon::run_http
+accept  function_missing                         trusty_mpm::daemon::serve_http
+accept  function_parameter_count_changed         trusty_mpm::core::daemon_identity::write_lock
+accept  function_parameter_count_changed         trusty_mpm::core::daemon_identity::write_lock_at
+accept  function_parameter_count_changed         trusty_mpm::core::memory_import::refresh::verify_findable
+accept  function_parameter_count_changed         trusty_mpm::core::session_launch::prepare_session_for_repair_under
+accept  function_parameter_count_changed         trusty_mpm::core::session_ref_publish::push_session_ref
+accept  function_parameter_count_changed         trusty_mpm::core::session_ref_publish::remote_tip
+accept  function_parameter_count_changed         trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory
+accept  function_parameter_count_changed         trusty_mpm::daemon::lock::write_lock
+accept  function_parameter_count_changed         trusty_mpm::daemon::serve_with_shutdown
+accept  function_parameter_count_changed         trusty_mpm::runtime::build_adapter
+accept  inherent_method_missing                  SessionManager clear_pending_decision
+accept  method_parameter_count_changed           trusty_mpm::daemon::manager::ManagerState::provision
+accept  method_parameter_count_changed           trusty_mpm::daemon::manager::PortfolioPalace::provision
+accept  method_parameter_count_changed           trusty_mpm::daemon::manager::memory::PortfolioPalace::provision
+accept  method_parameter_count_changed           trusty_mpm::daemon::manager::state::ManagerState::provision
+accept  method_parameter_count_changed           trusty_mpm::runtime::ClaudeCodeAdapter::new
+accept  method_parameter_count_changed           trusty_mpm::session_manager::SessionManager::answer_decision
+accept  method_parameter_count_changed           trusty_mpm::session_manager::manager::SessionManager::answer_decision
+accept  pub_module_level_const_missing           DEFAULT_DAEMON_ADDR
+accept  pub_module_level_const_missing           GATEWAY_PATH
+accept  pub_module_level_const_missing           GATEWAY_PROBE_TIMEOUT
+accept  struct_pub_field_missing                 PrepReport memory_reachable
+accept  trait_method_added                       trusty_mpm::mcp::OrchestratorBackend::ask_owner
+accept  trait_method_added                       trusty_mpm::mcp::OrchestratorBackend::sessions_chat
