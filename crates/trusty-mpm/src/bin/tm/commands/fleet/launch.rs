@@ -289,7 +289,9 @@ impl Prepared {
         let root = home.join(".trusty-mpm");
         let conversation =
             architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
-        claude_spec.args.extend(architect_args(&conversation));
+        claude_spec
+            .args
+            .extend(architect_args(&conversation, session));
         let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
         let workdir = dir
             .to_str()
@@ -499,13 +501,15 @@ fn kill_session(session: &str) -> Result<(), String> {
 ///
 /// Why: the owner (2026-10-01): "We should not require a remote session" —
 /// no `tmux attach` and `/remote-control` after a relaunch.
-/// What: the conversation's `--resume <id>` or `--session-id <id>`, then a
-/// bare `--remote-control` last, so its optional name never takes a
-/// following argument.
-/// Test: `the_architect_line_resumes_and_enables_remote_control`.
-pub(crate) fn architect_args(conversation: &ConversationStart) -> Vec<String> {
+/// What: the conversation's `--resume <id>` or `--session-id <id>`, then
+/// `--remote-control <session>` last. #9025: the Remote Control name is the
+/// tmux session name; `send_spec_launch` adds the matching `--name`.
+/// Test: `the_architect_line_resumes_and_enables_remote_control`,
+/// `fleet_init_names_the_remote_session_after_its_tmux_session`.
+pub(crate) fn architect_args(conversation: &ConversationStart, session: &str) -> Vec<String> {
     let mut args = conversation.claude_args().to_vec();
-    args.push("--remote-control".to_owned());
+    // #9025: name the Remote Control session after the tmux session.
+    args.extend(["--remote-control".to_owned(), session.to_owned()]);
     args
 }
 

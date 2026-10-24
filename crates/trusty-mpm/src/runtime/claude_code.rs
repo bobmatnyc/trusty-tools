@@ -37,6 +37,19 @@ use super::managed_launch::{self, ManagedLaunch};
 #[path = "claude_code_agents.rs"]
 mod claude_code_agents;
 
+/// Claude Code's live-session registry, for the remote-name check (#9025).
+///
+/// What: `claude agents --json` through the resolved binary under the
+/// managed config dir, by the bounded [`claude_code_agents::query_registry`].
+/// `Err` when no `claude` resolves or the read fails.
+/// Test: the parse is pinned by `a_renamed_tmux_session_is_a_remote_name_drift`.
+pub(crate) fn read_agent_registry() -> Result<String, String> {
+    let bin = ClaudeCodeAdapter::resolve_claude()
+        .ok_or_else(|| "no `claude` binary resolves".to_owned())?;
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
+    claude_code_agents::query_registry(&bin, config_dir.as_deref())
+}
+
 // #7568: the prompt-file writer and its named-root seam live in
 // `super::prompt_file`; `claude_code.rs` was at the 500-SLOC production cap.
 // #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
@@ -427,6 +440,21 @@ pub struct InPlaceResumeCommand {
     /// #8453: the profile the relaunched prompt was composed for; the exec
     /// stamps it as `TRUSTY_MPM_SESSION_PROFILE`.
     pub profile: crate::core::session_profile::SessionProfile,
+}
+
+impl InPlaceResumeCommand {
+    /// This command with `--name <session>` leading its argv (#9025).
+    ///
+    /// Why: the bare-`tm` relaunch execs `claude` directly, past both delivery
+    /// choke points that name a launch, so it must apply the rule itself.
+    /// What: [`super::remote_name::ensure_name_arg`] over `args`, the one rule
+    /// [`super::remote_name::named_after_session`] also uses.
+    /// Test: `an_inplace_relaunch_is_named_after_its_session` in the `tm` binary.
+    #[must_use]
+    pub fn named_after_session(mut self, session: &str) -> Self {
+        super::remote_name::ensure_name_arg(&mut self.args, session);
+        self
+    }
 }
 
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
