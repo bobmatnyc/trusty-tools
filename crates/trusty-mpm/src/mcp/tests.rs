@@ -455,7 +455,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     // two PM pause/resume context tools `session_context_catchup` /
     // `session_context_pause` + the #6927 Disk survey `disk_survey` + the
     // #7522 `secrets_get_ref` + the #9856 `ask_owner` + the #9979 `sessions_chat`
-    // + the #9758 `dbatg`).
+    // + the #9758 `dbatg` + the #10063 `architect_dashboard`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -464,7 +464,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 39);
+    assert_eq!(tools.as_array().unwrap().len(), 40);
     assert!(
         tools
             .as_array()
@@ -667,6 +667,47 @@ async fn dispatch_missing_argument_is_tool_error() {
             .as_str()
             .unwrap()
             .contains("session_id")
+    );
+}
+
+/// #10063: the `architect_dashboard` tool writes and reads a store through
+/// the `mpm.architect.dashboard.*` bodies; a stale `if_version` ends with
+/// exit 1 (owner ruling D34).
+#[tokio::test]
+async fn dispatch_architect_dashboard_tool_writes_and_conflicts() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = json!({"root": tmp.path().join("store"), "format": "jsonl"});
+    let text = |resp: Response| {
+        let result = resp.result.expect("result");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        (result["isError"] == true, text)
+    };
+    let set = json!({"op": "set", "store": store, "collection": "items", "id": "D01",
+        "data": {"title": "t"}, "if_version": 0});
+    let (err, body) = text(dispatch(&MockBackend, call("architect_dashboard", set.clone())).await);
+    assert!(!err, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("json")["version"],
+        1
+    );
+    let (err, body) = text(dispatch(&MockBackend, call("architect_dashboard", set)).await);
+    assert!(err && body.ends_with("(exit 1)"), "{body}");
+    let get = json!({"op": "get", "store": store, "collection": "items", "id": "D01"});
+    let (err, body) = text(dispatch(&MockBackend, call("architect_dashboard", get)).await);
+    assert!(!err, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("json")["data"]["title"],
+        "t"
+    );
+    let fsck = json!({"op": "fsck", "store": store});
+    let (err, body) = text(dispatch(&MockBackend, call("architect_dashboard", fsck)).await);
+    assert!(!err, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("json")["problems"],
+        json!([])
     );
 }
 
