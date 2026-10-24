@@ -12,7 +12,8 @@
 #   HOME, a private tmux directory and an environment of PATH, HOME, LANG,
 #   TMUX_TMPDIR and TRUSTY_CONTENT_OFFLINE=1 only, from the repo root so the
 #   checkout's content is the one seeded. Then scripts/lib/architect_paths.py
-#   parses the manual, the seeded CLAUDE.md and every seeded SKILL.md
+#   parses the manual, the seeded CLAUDE.md, every seeded SKILL.md and every
+#   seeded agent (#10161 D3c)
 #   (backticks, fenced blocks and `python3|bash <path>` commands) and fails on
 #   each reference that does not resolve. A missing `tm`, a failed init or a
 #   read error fails the check (FAIL INIT, FAIL READ); nothing is skipped.
