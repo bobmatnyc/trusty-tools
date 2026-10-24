@@ -322,6 +322,9 @@ fn touching_build(ran: &Path) -> Vec<String> {
 /// and says so, naming the store, the error and the repair. Round 2's version
 /// of this test accepted either 4 or 75 and so could not fail.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn an_unusable_store_runs_unleased_up_to_the_cap() {
     let home = home_with_ceiling(64, "");
     std::fs::write(home.path().join(".trusty-mpm/build-slots"), "a file").expect("file");
@@ -341,6 +344,9 @@ fn an_unusable_store_runs_unleased_up_to_the_cap() {
 /// An `admission.lock` that is a directory: unleased within the cap (64), with
 /// the degraded status naming it.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn an_admission_lock_directory_runs_unleased_up_to_the_cap() {
     let home = home_with_ceiling(64, "");
     let store = home.path().join(".trusty-mpm/build-slots");
@@ -361,6 +367,9 @@ fn an_admission_lock_directory_runs_unleased_up_to_the_cap() {
 /// No slot file can be locked — slot-0 is a directory and the store is
 /// read-only: unleased within the cap (64), degraded status named.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn every_unlockable_slot_file_runs_unleased_up_to_the_cap() {
     use std::os::unix::fs::PermissionsExt;
     let home = home_with_ceiling(64, "");
@@ -382,6 +391,9 @@ fn every_unlockable_slot_file_runs_unleased_up_to_the_cap() {
 /// home whose cap is 64), and a second one under a cap of 1 is refused — the
 /// census counts the earlier unleased `tm build-lease` whatever else runs.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn unleased_is_refused_once_the_census_reaches_the_cap() {
     let roomy = home_with_ceiling(64, "");
     let tight = home_with_ceiling(1, "");
@@ -1216,24 +1228,76 @@ fn slot_checkout(home: &Path, slot: u32) -> Option<String> {
     std::fs::read_to_string(home.join(format!(".trusty-mpm/build-slots/slot-{slot}.last"))).ok()
 }
 
-/// Run a leased `cargo <verb>` over a waiting crate at ceiling 1 and, once
-/// its program runs, a second leased build; return the second's output, the
-/// first's exit status and whether the first reached the run phase.
-fn second_build_while_the_first_runs(
-    home: &Path,
-    krate: &Path,
-    verb: &str,
-) -> (Output, std::process::ExitStatus, bool, bool) {
-    let first = build_lease(home)
-        .current_dir(krate)
+/// [`waiting_test_crate`] with [`slow_compile`]'s build script.
+fn slow_test_crate(dir: &Path) {
+    waiting_test_crate(dir);
+    slow_compile(dir);
+}
+
+/// The target plan a test's first leased build runs under (#8692).
+#[derive(Debug, Clone, Copy)]
+enum Plan {
+    /// The shared dir is inherited and replaced by the lease's slot.
+    Slot,
+    /// A private `CARGO_TARGET_DIR` the lease keeps.
+    Keep,
+    /// No `CARGO_TARGET_DIR`: cargo's own `target/`.
+    Unset,
+}
+
+/// A crate made by `make` for `plan`, and the `CARGO_TARGET_DIR` to inherit.
+///
+/// What: `Slot` puts the crate at the root of the `acme/widget` repo with
+/// the shared directory inherited; `Keep` and `Unset` put it in `probe`, with
+/// a private directory or none.
+fn crate_for(home: &Path, plan: Plan, make: fn(&Path)) -> (PathBuf, Option<PathBuf>) {
+    match plan {
+        Plan::Slot => {
+            let (repo, _pool, shared) = widget_repo(home);
+            make(&repo);
+            (repo, Some(shared))
+        }
+        Plan::Keep => {
+            let krate = home.join("probe");
+            make(&krate);
+            (krate, Some(home.join("private-target")))
+        }
+        Plan::Unset => {
+            let krate = home.join("probe");
+            make(&krate);
+            (krate, None)
+        }
+    }
+}
+
+/// A leased `cargo <verb> --offline --quiet` in `krate`, inheriting `target`.
+fn leased_cargo(home: &Path, krate: &Path, target: Option<&Path>, verb: &str) -> Child {
+    let mut cmd = build_lease(home);
+    cmd.current_dir(krate)
         .env("PROBE_DIR", home)
         .args(["--", &real_cargo(), verb, "--offline", "--quiet"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the first leased build");
+        .stderr(Stdio::null());
+    if let Some(dir) = target {
+        cmd.env("CARGO_TARGET_DIR", dir);
+    }
+    cmd.spawn().expect("spawn the first leased build")
+}
+
+/// Run a leased `cargo <verb>` over a waiting crate at ceiling 1 and, once
+/// its program runs, a second leased build; return the second's output, the
+/// first's exit status, whether the program ran, and whether the first's
+/// record read phase run within `phase_secs`.
+fn second_build_while_the_first_runs(
+    home: &Path,
+    krate: &Path,
+    target: Option<&Path>,
+    verb: &str,
+    phase_secs: u64,
+) -> (Output, std::process::ExitStatus, bool, bool) {
+    let first = leased_cargo(home, krate, target, verb);
     let running = wait_for_file(&home.join("running"), 180);
-    let run_phase = wait_for_run_phase(home, 0, 15);
+    let run_phase = wait_for_run_phase(home, 0, phase_secs);
     let second = build_lease(home)
         .args(["--wait-secs", "5", "--", "true"])
         .output()
@@ -1243,18 +1307,26 @@ fn second_build_while_the_first_runs(
     (second, status, running, run_phase)
 }
 
-/// #8692 regression: at ceiling 1, a leased `cargo test` whose test binary is
-/// running (cargo has dropped `.cargo-lock`) no longer holds compile capacity,
-/// so a second leased build is admitted — in slot 1, never in the first's
-/// slot 0. Before the fix the second waited and exited 75.
+/// The canonical scratch home, as a lease records it for its checkout.
+fn canonical(home: &Path) -> Option<String> {
+    home.canonicalize()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+}
+
+/// #8692 regression: at ceiling 1, a slot-owned leased `cargo test` whose test
+/// binary is running (cargo has dropped `.cargo-lock`) no longer holds compile
+/// capacity, so a second leased build is admitted — in slot 1, never in the
+/// first's slot 0. Before the fix the second waited and exited 75.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn a_second_build_is_admitted_while_the_first_ones_test_binary_runs_8692() {
     let home = home_with_ceiling_and_cargo(1);
-    let krate = home.path().join("probe");
-    waiting_test_crate(&krate);
-    slow_compile(&krate);
+    let (krate, target) = crate_for(home.path(), Plan::Slot, slow_test_crate);
     let (second, first, running, run_phase) =
-        second_build_while_the_first_runs(home.path(), &krate, "test");
+        second_build_while_the_first_runs(home.path(), &krate, target.as_deref(), "test", 15);
     let err = stderr(&second);
     assert!(running, "the test binary never ran");
     assert_eq!(
@@ -1265,25 +1337,52 @@ fn a_second_build_is_admitted_while_the_first_ones_test_binary_runs_8692() {
     assert!(run_phase, "the first lease's record never read phase run");
     assert!(first.success(), "the first build exits cleanly: {first:?}");
     assert_eq!(
-        slot_checkout(home.path(), 1).as_deref(),
-        home.path()
-            .canonicalize()
-            .ok()
-            .as_deref()
-            .and_then(Path::to_str),
+        slot_checkout(home.path(), 1),
+        canonical(home.path()),
         "the second build ran in slot 1, not the run-phase slot 0"
     );
 }
 
-/// #8692: a leased `cargo run` whose program is running (a server) does not
-/// hold compile capacity; a second leased build is admitted beside it.
+/// #8692 (fix round, #9223): a `Keep` or `Unset` lease builds in a directory
+/// another build can share, so it stays `compile` through its test run: at
+/// ceiling 1 a second build waits and exits 75, as before #8692, and can never
+/// rebuild binaries those tests use. PR B (#9223) lifts this with a dir lock.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
+fn a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692() {
+    for plan in [Plan::Keep, Plan::Unset] {
+        let home = home_with_ceiling_and_cargo(1);
+        let (krate, target) = crate_for(home.path(), plan, slow_test_crate);
+        let (second, first, running, run_phase) =
+            second_build_while_the_first_runs(home.path(), &krate, target.as_deref(), "test", 3);
+        let err = stderr(&second);
+        assert!(running, "{plan:?}: the test binary never ran");
+        assert_eq!(
+            second.status.code(),
+            Some(75),
+            "{plan:?}: a lease outside a slot must keep its capacity: {err}"
+        );
+        assert!(!run_phase, "{plan:?}: the record must stay phase compile");
+        assert!(
+            first.success(),
+            "{plan:?}: the first build exits: {first:?}"
+        );
+    }
+}
+
+/// #8692: a slot-owned leased `cargo run` whose program is running (a server)
+/// does not hold compile capacity; a second leased build is admitted beside it.
+#[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn a_running_cargo_run_server_does_not_hold_capacity_8692() {
     let home = home_with_ceiling_and_cargo(1);
-    let krate = home.path().join("server");
-    waiting_bin_crate(&krate);
+    let (krate, target) = crate_for(home.path(), Plan::Slot, waiting_bin_crate);
     let (second, first, running, run_phase) =
-        second_build_while_the_first_runs(home.path(), &krate, "run");
+        second_build_while_the_first_runs(home.path(), &krate, target.as_deref(), "run", 15);
     let err = stderr(&second);
     assert!(running, "the server never ran");
     assert_eq!(
@@ -1295,32 +1394,27 @@ fn a_running_cargo_run_server_does_not_hold_capacity_8692() {
     assert!(first.success(), "the server exits cleanly: {first:?}");
 }
 
-/// #8261, #8692: a holder SIGKILLed while its `cargo test` runs the test
-/// binary leaves that run alive with no flock and no `.cargo-lock`. Its
+/// #8261, #8692: a holder SIGKILLed while its slot-owned `cargo test` runs the
+/// test binary leaves that run alive with no flock and no `.cargo-lock`. Its
 /// record says `run`, so the orphan keeps slot 0 — never reused — but holds
 /// no compile capacity: at ceiling 1 the next build is admitted into slot 1.
+/// Once the orphaned run exits, slot 0 frees and a later lease takes it.
 #[test]
+// #8692: the unleased census counts every live `tm build-lease` thread on
+// Linux, so these never overlap the long-lived 8692 leases.
+#[serial_test::serial(lease_processes)]
 fn a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692() {
     let home = home_with_ceiling_and_cargo(1);
-    let krate = home.path().join("probe");
-    waiting_test_crate(&krate);
-    slow_compile(&krate);
-    let mut holder = build_lease(home.path())
-        .current_dir(&krate)
-        .env("PROBE_DIR", home.path())
-        .args(["--", &real_cargo(), "test", "--offline", "--quiet"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn a leased cargo test");
+    let (krate, target) = crate_for(home.path(), Plan::Slot, slow_test_crate);
+    let mut holder = leased_cargo(home.path(), &krate, target.as_deref(), "test");
     let running = wait_for_file(&home.path().join("running"), 180);
     let records = wait_for_holders(home.path(), 1);
     let build = u32::try_from(records[0]["child_pid"].as_u64().expect("pid")).expect("pid");
+    let slot_dir = PathBuf::from(records[0]["target_dir"].as_str().expect("a slot dir"));
     let run_phase = wait_for_run_phase(home.path(), 0, 15);
     holder.kill().expect("SIGKILL the holder");
     let _ = holder.wait();
-    let lock_free =
-        !trusty_mpm::core::build_lease::stale_guard::cargo_lock_held(&krate.join("target"));
+    let lock_free = !trusty_mpm::core::build_lease::stale_guard::cargo_lock_held(&slot_dir);
     let admitted = build_lease(home.path())
         .args(["--wait-secs", "5", "--", "true"])
         .output()
@@ -1330,6 +1424,19 @@ fn a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692() {
             .unwrap_or_default();
     std::fs::write(home.path().join("release"), "").expect("release");
     wait_until_dead(build);
+    let got = home.path().join("next-target-dir");
+    let mut next_cmd = build_lease(home.path());
+    next_cmd
+        .current_dir(&krate)
+        .args(["--wait-secs", "5", "--"]);
+    if let Some(dir) = &target {
+        next_cmd.env("CARGO_TARGET_DIR", dir);
+    }
+    let next = next_cmd
+        .args(record_target_dir(&got))
+        .output()
+        .expect("a build after the run");
+    let next_target = std::fs::read_to_string(&got).unwrap_or_default();
     let err = stderr(&admitted);
     assert!(running, "the test binary never ran");
     assert!(run_phase, "the record never read phase run");
@@ -1343,17 +1450,25 @@ fn a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692() {
         "a run-phase orphan must not hold compile capacity: {err}"
     );
     assert_eq!(
-        slot_checkout(home.path(), 1).as_deref(),
-        home.path()
-            .canonicalize()
-            .ok()
-            .as_deref()
-            .and_then(Path::to_str),
+        slot_checkout(home.path(), 1),
+        canonical(home.path()),
         "the orphan's slot 0 is never reused: {err}"
     );
     assert!(
         orphan_record.contains("\"phase\":\"run\""),
         "the orphan's record stays in slot 0: {orphan_record}"
+    );
+    assert_eq!(
+        next.status.code(),
+        Some(0),
+        "the slot frees once the run exits: {}",
+        stderr(&next)
+    );
+    assert_eq!(
+        Path::new(&next_target),
+        slot_dir,
+        "the freed slot 0 is taken again: {}",
+        stderr(&next)
     );
 }
 
