@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-10-04 | **Format version:** 1.1
+**Last updated:** 2026-10-24 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -82,6 +82,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0069](0069-remote-memory-store-api-spec-location.md) | Remote memory-store API spec location | Proposed | The normative API text lives in `docs/specs/` and the wire types and machine-readable schema in a small dedicated crate; trusty-mpm (the owner's suggested home) consumes it rather than holding it. | Workspace |
 | [0070](0070-memory-store-reference-implementation-repository.md) | Reference memory-store implementation in a separate repository | Proposed | A deployable reference endpoint lives in a separate repository, created only on owner GO at DOC-80 Stage 4; trusty-tools keeps an in-process fake endpoint and the conformance suite. | Workspace |
 | [0071](0071-recall-all-searches-resident-palaces-by-default.md) | recall_all searches resident palaces by default | Accepted | `memory_recall_all` searches only palaces already resident and opens none; `scope: "all"` keeps the full streamed search; every response reports `coverage` and counts palaces searched, skipped and not searched. | `trusty-memory`, `trusty-common` |
+| [0072](0072-probes-run-inside-the-secrets-server-and-a-type-is-index-metadata.md) | Probes run inside the secrets server; a type is index metadata | Accepted | Read-only credential probes run as in-process Rust adapters inside the trusty-secrets server and return a verdict, never a value; a key's type is optional metadata on its names-only index row (format version 2), checked against the value's shape before any I/O. | `trusty-secrets`, `trusty-mpm` |
 
 ## Notes
 
