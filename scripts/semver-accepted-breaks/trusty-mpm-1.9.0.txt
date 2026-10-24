@@ -1,6 +1,6 @@
 crate   trusty-mpm
 version 1.9.0
-reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2), and the #9755 D07 rename moves the fleet role's public Rust names from supervisor to Architect with no re-export shims (Architect answer Q5); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version. Refs #9390, #9755.
+reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2), and the #9755 D07 rename moves the fleet role's public Rust names from supervisor to Architect with no re-export shims (Architect answer Q5); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version, and the breaks listed below. Refs #9390, #9755.
 accept  constructible_struct_adds_field  FactSlot.verify
 # #9755 D07: the fleet role's Rust names, supervisor -> Architect. Serialized values keep their legacy spelling.
 accept  module_missing                   mod trusty_mpm::session_manager::supervisor
@@ -46,7 +46,7 @@ accept  pub_module_level_const_missing   SUPERVISOR_MODEL
 accept  pub_module_level_const_missing   SUPERVISOR_SECTIONS
 accept  pub_module_level_const_missing   SUPERVISOR_ROLE
 accept  pub_module_level_const_missing   COLLECTOR_ROLE
-# Remaining 1.9.0 breaks the release gate computes against 1.8.2 (Refs #9653). Each is named by a Breaking changelog fragment.
+# Remaining 1.9.0 breaks the release gate computes against 1.8.2 (Refs #9653). Each is named by a Breaking changelog fragment, except the #6288 stage-3 lock and TCP-bind rows, which sit in a Changed or Removed fragment (6288-s3-lock-addr, 6288-s3-retire-tcp-bind).
 accept  constructible_struct_adds_field          ActivityResponse.pending_decision_id
 accept  constructible_struct_adds_field          AnswerParams.answered_by
 accept  constructible_struct_adds_field          AnswerParams.decision_id
