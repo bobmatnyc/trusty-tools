@@ -10,12 +10,15 @@ http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`ho
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
 owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
-{"share": false}. Standard library only. The Rust successor is the console route (See #10064).
+{"share": false}. A Content-Length that is not plain digits is a 400 before any body read, and each connection
+times out after REQUEST_TIMEOUT_S (#10161). Standard library only. The Rust successor is the console route (See #10064).
 Test: tests/test_dashboard_store.py, tests/test_dashboard_tailnet.py, tests/test_dashboard_mode.py, tests/test_dashboard_doc.py,
-tests/test_dashboard_media.py, tests/test_dashboard_harness.py, tests/test_dashboard_il.py, tests/test_dashboard_viz.py
+tests/test_dashboard_media.py, tests/test_dashboard_harness.py, tests/test_dashboard_il.py, tests/test_dashboard_viz.py,
+tests/test_dashboard_concurrency.py
 """
 import json
 import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler
@@ -35,11 +38,14 @@ except ImportError:
     notion_sync = None
 
 MAX_BODY = 1 << 20
+REQUEST_TIMEOUT_S = 30   # #10161: a stalled client releases its handler thread after this
+_DIGITS = re.compile(r"[0-9]+")
 LOCAL_NAMES = ("127.0.0.1", "localhost")
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "dashboard-serve"
+    timeout = REQUEST_TIMEOUT_S   # socket timeout per connection (StreamRequestHandler)
     # HTTP/1.0 default: one request per connection, so an unread body never poisons the next request.
 
     # ---- plumbing ----
@@ -84,10 +90,11 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _body(self):
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
+        raw = (self.headers.get("Content-Length") or "0").strip()
+        # #10161: only plain ASCII digits; a negative length would make rfile.read(-1) wait for EOF
+        if not _DIGITS.fullmatch(raw):
             raise ds.StoreError("bad Content-Length")
+        n = int(raw)
         if n > MAX_BODY:
             raise ds.StoreError("request body too large")
         try:

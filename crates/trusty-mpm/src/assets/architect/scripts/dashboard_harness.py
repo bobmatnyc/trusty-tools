@@ -26,7 +26,7 @@ file {id, path, project, rel, view, session, tool, ts, epoch, n}. `view` is {pro
 diff of the latest change comes from GET /api/harness/diff?id= (doc_diff): difflib over the Edit old/new strings, or the whole file as additions
 for a Write. Secret-named files are never listed; secret-looking values in a diff are redacted. SendMessage sends found in the Architect's own
 transcripts are added to `messages` (dir "out", kind "sendmessage"). Read-only; bounded by READ_CAP per file and DOC_FILES files per dir.
-Test: tests/test_dashboard_harness.py
+Test: tests/test_dashboard_harness.py, tests/test_dashboard_concurrency.py
 """
 import difflib
 import fnmatch
@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -55,6 +56,8 @@ DOC_TEXT_MAX = 20000              # per old/new string
 DOC_DENY = ("*secret*", "*credential*", "*.env*", "*.pem", "*.key", "*id_rsa*")
 _TOKENS = re.compile(r"(?i)\b(?:ghp_|gho_|github_pat_|sk-|xox[bp]-|AKIA)[A-Za-z0-9_\-]{12,}")
 _doc_state = {"off": {}, "changes": [], "sends": []}
+# #10161: ThreadingHTTPServer serves requests concurrently; every read or write of _doc_state holds this lock.
+_doc_lock = threading.Lock()
 _agent_cache = {}                 # path -> {off, req{requestId: out_tokens}, first, tool, file, end}
 
 
@@ -330,7 +333,13 @@ def doc_id(path, epoch):
 
 
 def collect_docs(projects_dir, dir_owner, roots, now, architect_dir=None):
-    """(docs rows, sends). dir_owner = {encoded dir: session name}; roots = {project: root path} (for view/project). Newest change per file wins."""
+    """(docs rows, sends). dir_owner = {encoded dir: session name}; roots = {project: root path} (for view/project). Newest change per file wins.
+    Holds _doc_lock: one scan of _doc_state at a time (#10161)."""
+    with _doc_lock:
+        return _collect_docs(projects_dir, dir_owner, roots, now, architect_dir)
+
+
+def _collect_docs(projects_dir, dir_owner, roots, now, architect_dir):
     for d, owner in dir_owner.items():
         base = os.path.join(projects_dir, d)
         try:
@@ -371,7 +380,9 @@ def collect_docs(projects_dir, dir_owner, roots, now, architect_dir=None):
 
 def doc_diff(doc_id_, now=None):
     """Unified diff text of the latest change behind a docs row id, or None for an unknown id."""
-    for c in reversed(_doc_state["changes"]):
+    with _doc_lock:   # #10161: never iterate _doc_state while a scan appends to it
+        changes = list(_doc_state["changes"])
+    for c in reversed(changes):
         if doc_id(c["path"], c["epoch"]) == doc_id_:
             out = []
             for a, b in c["hunks"]:
@@ -468,9 +479,11 @@ class HarnessCache:
 
     def __init__(self, ttl=CACHE_TTL_S, clock=time.time):
         self.ttl, self.clock, self._at, self._val = ttl, clock, 0.0, None
+        self._lock = threading.Lock()   # #10161: concurrent requests share one build() instead of racing two
 
     def get(self, fn):
-        t = self.clock()
-        if self._val is None or t - self._at >= self.ttl:
-            self._val, self._at = fn(), t
-        return self._val
+        with self._lock:
+            t = self.clock()
+            if self._val is None or t - self._at >= self.ttl:
+                self._val, self._at = fn(), t
+            return self._val
