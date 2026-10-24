@@ -52,8 +52,6 @@ impl Now {
 
 /// What the ops of a batch read besides the state.
 pub(crate) struct Context<'a> {
-    /// Ids in `archive.jsonl`, never reissued (LDG-2.2.3).
-    pub archived: &'a [LedgerId],
     /// Last `answered` time per id, from `log.jsonl`.
     pub answered: &'a BTreeMap<String, f64>,
     /// The commit's clock reading.
@@ -72,7 +70,7 @@ pub(crate) fn apply(
     cx: &Context<'_>,
 ) -> Result<(Vec<BatchEvent>, Vec<Archived>), LedgerError> {
     match op {
-        Op::Add(a) => Ok((vec![apply_add(st, a, cx.archived)?], Vec::new())),
+        Op::Add(a) => Ok((vec![apply_add(st, a)?], Vec::new())),
         Op::Update(u) => Ok((apply_update(st, u)?, Vec::new())),
         Op::Close(c) => {
             let u = UpdateOp {
@@ -134,15 +132,15 @@ pub(crate) fn add_fields(a: &AddOp) -> Result<(Opts, String), LedgerError> {
     Ok((Opts::List(list.collect()), finish))
 }
 
-fn apply_add(st: &mut State, a: &AddOp, archived: &[LedgerId]) -> Result<BatchEvent, LedgerError> {
+fn apply_add(st: &mut State, a: &AddOp) -> Result<BatchEvent, LedgerError> {
     if a.kind == Prefix::Brief {
         return Err(bad("kind must be G, D, A or T"));
     }
     let title = check_title(&a.title)?.to_owned();
     let (opts, finish) = add_fields(a)?;
     let id = match a.id.as_deref() {
-        Some(x) => explicit_id(st, a.kind, x, archived)?,
-        None => st.allocate(a.kind, archived)?.to_string(),
+        Some(x) => explicit_id(st, a.kind, x)?,
+        None => st.allocate(a.kind)?.to_string(),
     };
     let goal = a.goal.clone().unwrap_or_default();
     match a.kind {
@@ -210,12 +208,8 @@ fn apply_add(st: &mut State, a: &AddOp, archived: &[LedgerId]) -> Result<BatchEv
     Ok(event(&id, if drift { "drift" } else { "open" }, &title))
 }
 
-fn explicit_id(
-    st: &State,
-    kind: Prefix,
-    x: &str,
-    archived: &[LedgerId],
-) -> Result<String, LedgerError> {
+// #10235: only a live id collides; an archived id is free to reuse.
+fn explicit_id(st: &State, kind: Prefix, x: &str) -> Result<String, LedgerError> {
     let id = LedgerId::parse(x)
         .ok()
         .filter(|id| id.code() == &st.code && id.prefix() == kind)
@@ -227,9 +221,6 @@ fn explicit_id(
         .chain(st.items.iter().map(|i| &i.id));
     if live.chain(st.tasks.iter().map(|t| &t.id)).any(|l| l == x) {
         return Err(bad(format!("id collision: {x} exists")));
-    }
-    if archived.contains(&id) {
-        return Err(bad(format!("id collision: {x} is archived")));
     }
     Ok(x.to_owned())
 }

@@ -203,7 +203,7 @@ fn ledger_writer_refuses_a_malformed_store_and_leaves_it() -> R {
 }
 
 #[test]
-fn ledger_writer_refuses_id_collisions_live_and_archived() -> R {
+fn ledger_writer_refuses_a_live_id_and_reuses_an_archived_one() -> R {
     let s = Store::new()?;
     let err = s
         .run(json!([{"op": "add", "kind": "G", "title": "dup", "id": "th-G01"}]))
@@ -213,12 +213,9 @@ fn ledger_writer_refuses_id_collisions_live_and_archived() -> R {
     s.ok(json!([task("t2")]))?;
     assert_eq!(s.ids("tasks"), ["th-T01", "th-T02"]);
     s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
-    let err =
-        s.run(json!([{"op": "add", "kind": "T", "title": "t", "goal": "th-G01", "id": "th-T01"}]));
-    assert!(
-        err.is_err_and(|e| e.to_string().contains("archived")),
-        "an archived id was reissued"
-    );
+    // #10235: the archived id is free again, an explicit add may take it.
+    s.ok(json!([{"op": "add", "kind": "T", "title": "t", "goal": "th-G01", "id": "th-T01"}]))?;
+    assert_eq!(s.ids("tasks"), ["th-T01", "th-T02"]);
     Ok(())
 }
 
@@ -747,17 +744,17 @@ fn ledger_writer_replays_a_request_id_past_a_non_utf8_log_line() -> R {
     Ok(())
 }
 
+// #10235: an unreadable archive line no longer matters; ids are not read from it.
 #[test]
-fn ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line() -> R {
+fn ledger_writer_reuses_an_archived_id_past_a_non_utf8_archive_line() -> R {
     let s = Store::new()?;
     s.ok(json!([task("t")]))?;
     s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
     append(&s.paths.archive, &not_utf8())?;
     let mut reuse = task("u");
     reuse["id"] = json!("th-T01");
-    let err = s.run(json!([reuse])).err().ok_or("archived id reissued")?;
-    assert!(err.to_string().contains("is archived"), "{err}");
-    assert_eq!(s.ids("tasks"), Vec::<String>::new());
+    s.ok(json!([reuse]))?;
+    assert_eq!(s.ids("tasks"), ["th-T01"]);
     Ok(())
 }
 
