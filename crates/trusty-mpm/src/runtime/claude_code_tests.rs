@@ -1465,9 +1465,21 @@ fn spawn_errors_when_the_line_is_refused() {
 #[serial_test::serial]
 fn spawn_names_the_remote_session_after_its_tmux_session() {
     let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
     let fake = FakeTmux::new();
-    let spec = sent_spec(&drive_spawn(&fake, &home));
-    assert!(has_flag_pair(&spec, "--name", "tm-sess"), "{:?}", spec.args);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    adapter
+        .spawn("tm-dogfood", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect("spawn must succeed with claude on PATH");
+    let spec = sent_spec(&only_line(&fake));
+    assert!(
+        has_flag_pair(&spec, "--name", "tm-dogfood"),
+        "{:?}",
+        spec.args
+    );
 }
 
 /// #9025: a resume names the session after the tmux session it runs in.
