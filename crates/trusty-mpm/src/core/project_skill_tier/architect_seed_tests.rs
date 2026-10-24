@@ -178,7 +178,11 @@ fn one_more_shipped_entry_and_content_file_load_seed_and_deploy() {
         .collect();
     files.push((CLAUDE_MD_TEMPLATE.to_owned(), shipped(CLAUDE_MD_TEMPLATE)));
     // #10161 D3c: the seed carries the agents too.
-    files.extend(SHIPPED_AGENTS.iter().map(|a| (a.source(), shipped(&a.source()))));
+    files.extend(
+        SHIPPED_AGENTS
+            .iter()
+            .map(|a| (a.source(), shipped(&a.source()))),
+    );
     files.push((EXTRA.source(), body.to_owned()));
     let extra: Vec<(&str, &str)> = files
         .iter()
@@ -225,7 +229,10 @@ fn a_missing_or_blank_agent_source_loads_nothing() {
         }
     }
     let view = |files: &[(String, String)]| -> FrameworkContent {
-        let refs: Vec<(&str, &str)> = files.iter().map(|(r, b)| (r.as_str(), b.as_str())).collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_str()))
+            .collect();
         content_with(&refs)
     };
     let err = ArchitectSeed::load(&view(&files)).expect_err("an agent is missing");
