@@ -15,14 +15,14 @@ spec_refs:
 
 **Status:** Accepted
 **Cross-ref:** Implementation progress — S1 and S2 have shipped in `trusty-secrets`; S8 is in progress under [#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070) (its wire methods `secrets.grant`, `secrets.resolve` and `secrets.revoke` are slice 2); `tm secrets exec` tier 1 is [#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621) (§10.5). §15.9 lists every slice. Section IDs stay `~draft` until each section is frozen (DOC-38 §4.4).
-**Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
+**Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-15~draft` (DOC-74); `SPEC-SECRETS-15~draft` is §15.11, added 2026-10-24 (owner ruling D3b, [#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237))
 **Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
-**Last-updated:** 2026-10-10
+**Last-updated:** 2026-10-24
 **PRD:** [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) — the WHAT and WHY of the console secrets service. This document is the HOW.
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
-**Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation.
-**Related issues:** epic [#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517); tailnet gap [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035); children listed in §15.10.
+**Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation. [ADR-0072](../adr/0072-probes-run-inside-the-secrets-server-and-a-type-is-index-metadata.md) — probes run inside the secrets server; a type is index metadata (§15.11).
+**Related issues:** epic [#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517); tailnet gap [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035); children listed in §15.10; typed secrets epic [#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237) (§15.11).
 
 ---
 
@@ -105,6 +105,11 @@ the one hand-rolled case in `trusty-agents`' task runner.
    are scrubbed from **captured** output"): `tm secrets exec` scrubs the
    command's stdout and stderr only when its stdout is not a terminal, and
    passes terminal output through unchanged (§10.5).
+   Amended 2026-10-24 (owner ruling D3b,
+   [#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237)): a value
+   may also reach an in-process HTTP or postgres client inside the
+   trusty-secrets server that runs a read-only probe (§15.11). The probe
+   returns a verdict; the value stays in the server.
 7. **G-7** `tm secrets doctor` / first `configure` reports, without unlocking
    anything, which secret-management tools are actually present on the
    machine, so a user is offered real choices instead of guessing.
@@ -733,6 +738,32 @@ tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
 tm secrets exec --dotenv .env -- <command...>  # parses .env, resolves each secret:// value, injects only the resolved values (§15.8 tier 2)
 ```
 
+**Typed secrets (amended 2026-10-24, owner ruling D3b,
+[#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237); S15).** The
+type, its probes and their contract are §15.11. The grammar gains:
+
+```
+tm secrets set KEY [group] [--value -] [--type ID]
+                                               # ID is a v1 type id (§15.11.3); an unknown id is refused, nothing stored
+                                               # without --type: propose a type and confirm on a TTY, else leave the key untyped
+tm secrets import <path> [group] [--type ID]   # applies ID to every imported key; same inference rule without it
+tm secrets list [--type ID] [--untyped]        # adds a TYPE column: the type id, or `-` when untyped
+tm secrets set-type KEY TYPE [group]           # changes the type, never the value (secrets.set_type)
+tm secrets type --suggest                      # proposes types from key NAMES only, reads no value; applies each on confirmation
+tm secrets test KEY [group] [--probe NAME] [--json]
+                                               # runs the type's default probes (reach, auth, then whoami or server_info), or one
+                                               # NAME: reach | auth | whoami | whereis | server_info
+                                               # one line per probe: probe, status, elapsed, facts; never a value, and no --show
+                                               # exit 0 all ok, 1 a probe ran and failed, 2 usage error or refusal, 3 internal fault
+tm secrets query KEY [group] [--sql -|--sql "<text>"] [--limit N] [--json|--tsv]
+                                               # postgres_url keys only; one guarded read-only statement (§15.11.3)
+                                               # SQL from stdin by default (SQL is not secret); --limit at most 200; --tsv is the default
+                                               # same exit codes as `test`
+```
+
+`test`, `query` and `set-type` take `--project-path` and `--scope
+project|owner` like the other verbs. No `check` alias is added (Q7).
+
 **`add` → `set` (amended 2026-10-01, from the 2026-09-17 rulings).** The
 owner ruled "let's just use 'set', remove 'add'" and "make --paste the
 default, throw an error if there is no value in the clipboard". `set` is the
@@ -830,6 +861,24 @@ names-only index records no per-key backend. `imported_at` is the index
 row's `updated_at`. The tool drops the row's length and its "agents may
 use" flag. An unknown key is `present: false`, not an error. Nothing calls
 the socket at session start. `secrets_list` is not built yet.
+
+**`secrets_test` and `secrets_query` (amended 2026-10-24, owner ruling D3b,
+[#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237); S15).** Two
+tools join `secrets_get_ref`. Each returns a verdict, never a value, so the
+rule above holds: neither has a parameter or an output field that carries a
+value.
+
+- `secrets_test` `{project, key, probe?}` returns a `ProbeResult`
+  (§15.11.5). Closed schema.
+- `secrets_query` `{project, key, sql, limit?}` returns a `ProbeResult` with
+  `rows`. Closed schema. A key whose type is not `postgres_url` is
+  `type_mismatch`.
+- `secrets_get_ref` adds `type` to its answer (`RefAnswer`,
+  `crates/trusty-mpm/src/secrets_client/get_ref.rs:66`).
+
+Both tools call `secrets.test` with `agent_caller: true`, so the
+"agents may use" gate applies on the stdio and the loopback `POST /rpc` paths
+alike (§15.11.5, "Agent gate").
 
 ### 10.3 Where session state lives
 
@@ -1577,6 +1626,13 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
 | S10 PR 1 | Token hand-down as a read-only fd on an unlinked file, read with `pread` (§10.5); the Rust client drops its pipe read and `GrantedError::Rearm`; `tm secrets exec` sweeps stale `tm-grant-*` directories (#9071, #9072) | 5 | S9 |
 | S10 | `tm secrets resolve <key>` command; no published Python or npm package (owner ruling 2026-10-21, #9072) | 6 | S10 PR 1 |
+| S11 | Typed secrets spec (§15.11) and ADR-0072 ([#10238](https://github.com/bobmatnyc/trusty-tools/issues/10238)); added 2026-10-24, owner ruling D3b ([#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237)) | 1 | — |
+| S12 | Type in the index and wire, `INDEX_VERSION` 2, `secrets.set_type` ([#10239](https://github.com/bobmatnyc/trusty-tools/issues/10239)); trusty-secrets 0.2.2 | 5 | S11 |
+| S13 | `adapters` feature, adapter core, scrubber, `secrets.test`, agent gate; `github_token` and `openai_api_key` ([#10240](https://github.com/bobmatnyc/trusty-tools/issues/10240)); trusty-secrets 0.2.2 | 5 | S12; security review gate before S14 and S15 merge |
+| S14 | `postgres_url` adapter and the five-layer write refusal ([#10241](https://github.com/bobmatnyc/trusty-tools/issues/10241)); trusty-secrets 0.2.2 | 5, plus `code-critic` and security review | S13 |
+| S15 | `tm secrets test`/`query`/`set-type`/`type`, `--type`, MCP `secrets_test`/`secrets_query`, skill and agent text ([#10242](https://github.com/bobmatnyc/trusty-tools/issues/10242)); trusty-mpm 2.0.0 | 6 | S13; S14 for `query` |
+
+Acceptance criteria for S11–S15 are in §15.11.7.
 
 ### 15.10 Child re-scope
 
@@ -1588,6 +1644,330 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | [#7522](https://github.com/bobmatnyc/trusty-tools/issues/7522) | Drops the session-start preload |
 | [#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524) | Security review covers the console path and the tailnet gate |
 | [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525) | Scope resolution for `exec` and `secret://`; includes S7 |
+
+### 15.11 Typed secrets and test adapters {#SPEC-SECRETS-15~draft}
+
+Added 2026-10-24 under owner ruling D3b (Bob, 2026-10-24 10:40Z, epic
+[#10237](https://github.com/bobmatnyc/trusty-tools/issues/10237); this text is
+S11, [#10238](https://github.com/bobmatnyc/trusty-tools/issues/10238)). The
+decision record is
+[ADR-0072](../adr/0072-probes-run-inside-the-secrets-server-and-a-type-is-index-metadata.md).
+
+A key carries a **type**. The trusty-secrets server runs read-only **probes**
+against the stored value — reach, auth, whoami, and for postgres `whereis`,
+`server_info` and a guarded `query` — and returns a verdict. The value never
+leaves the server's memory. No verb, method or tool in this section returns a
+value.
+
+Release placement: nothing ships in trusty-mpm 1.9.0. S12–S14 ship in
+trusty-secrets 0.2.2; S15 ships in trusty-mpm 2.0.0. The server and the client
+change one wire contract, so they ship as one release train (§15.11.4).
+
+#### 15.11.1 Owner decisions (D3b)
+
+Bob accepted all nine recommendations on 2026-10-24. They are settled; this
+section does not reopen them.
+
+| # | Question | Decision |
+|---|---|---|
+| Q1 | Adapter model | In-process Rust adapters inside the trusty-secrets server, behind an `adapters` cargo feature. No out-of-process adapter executables, no Python. |
+| Q2 | Postgres client | `tokio-postgres` with a rustls connector. No `psql` child, no `PG*` environment. |
+| Q3 | Who may probe | An agent caller only when the key's "agents may use" flag is on (§15.8). A human caller always. |
+| Q4 | `query` rows | Capped rows (200 rows and a byte cap) go to agents in v1. A per-key `query` flag follows only if the security review asks for it. |
+| Q5 | Type inference | Propose a type and confirm on a TTY; without a TTY the key stays untyped. Never auto-assign. |
+| Q6 | v1 types | `postgres_url`, `github_token`, `openai_api_key`. |
+| Q7 | Verb name | `tm secrets test`. No `check` alias. |
+| Q8 | Milestones | trusty-secrets 0.2.2 (S12–S14) and trusty-mpm 2.0.0 (S15). Not 1.9.0. |
+| Q9 | Prototypes | The Architect's Python prototypes (a read-only postgres runner and a key-label rule set) stay in use until S14 and S15 ship. Their test inputs are ported as the Rust statement-guard test corpus in S14. |
+
+#### 15.11.2 What exists today
+
+Verified at `origin/main` `5facb0b2c8`:
+
+| Fact | Where |
+|---|---|
+| The names-only index row holds `length` and `updated_at` only, `deny_unknown_fields` | `crates/trusty-secrets/src/store/index.rs:46-55` |
+| The index format version is 1, and a reader accepts only an equal version | `index.rs:31`, `index.rs:370` |
+| `KeyMeta`, the `secrets.list` row, carries name, length, `updated_at` and the agents flag; it is not `deny_unknown_fields` | `crates/trusty-secrets/src/api/methods.rs:92-105` |
+| `SetRequest` is closed (`deny_unknown_fields`) and carries vault, key and value | `methods.rs:134-144` |
+| The server's method table | `crates/trusty-secrets/src/server/router.rs:414` |
+| `secrets.resolve` is the only value-returning method; it needs an exec grant | `crates/trusty-secrets/src/server/exec.rs:190`, `methods.rs:50` |
+| The agent-ancestry gate on `secrets.grant` | `exec.rs:75-92`, `crates/trusty-secrets/src/ancestry.rs:129` |
+| Wire error kinds, with pinned discriminants | `crates/trusty-secrets/src/server/errors.rs:38` (`AgentUseRefused = 16`, `Internal = 29`) |
+| Per-method deadlines: 120 s for backend-reading methods, 15 s for the rest | `crates/trusty-secrets/src/server/deadline.rs:26-29`, `:49-60` |
+| `SecretValue` redacts `Debug` and has one read path, `expose`; it does **not** zeroize on drop | `crates/trusty-secrets/src/api/value.rs:24`, `:33`, `:48` |
+| The CLI-backend cache holds values as `Zeroizing<String>` | `crates/trusty-secrets/src/store/cache.rs:154` |
+| The `server` feature is a default feature and already pulls `trusty-common` with `credentials` | `crates/trusty-secrets/Cargo.toml:28`, `:35`, `:53` |
+| `scrub_secrets` removes known values of 8 characters or more | `crates/trusty-common/src/credentials/redact.rs:50`, `:155` |
+| `tm secrets exec`'s byte scrubber is private to the `tm` binary | `crates/trusty-mpm/src/bin/tm/commands/secrets/exec_scrub.rs:22-28` |
+| `tm secrets` verb dispatch | `crates/trusty-mpm/src/bin/tm/commands/secrets/mod.rs:132` |
+| `secrets_get_ref` is the only secrets MCP tool; its answer type | `crates/trusty-mpm/src/mcp/tools/mod.rs:102`, `:133`; `crates/trusty-mpm/src/secrets_client/get_ref.rs:66` |
+| The MCP catalog is served over stdio and over the daemon's loopback `POST /rpc` | `crates/trusty-mpm/src/mcp/mod.rs:22-24` |
+| The sentinel test shape new tests copy | `resolve_sentinel_never_reaches_the_audit_file_or_logs`, `crates/trusty-secrets/src/server/wire_tests.rs:403` |
+
+No type, kind or adapter concept exists in `crates/trusty-secrets/src`.
+
+#### 15.11.3 Types and probe sets
+
+A type is a closed enum, `SecretType`, serialized as its snake-case id. An id
+the build does not know is refused with `invalid_params`.
+
+| Type id | Shape check (before any I/O) | `reach` | `auth` | Read-only probes |
+|---|---|---|---|---|
+| `postgres_url` | parses as a `postgres://` or `postgresql://` URL with a host | TCP connect, then TLS when the URL asks for it | connect and run `select 1` | `whereis` (endpoint, database, role, `pooled`; opens no connection); `server_info` (`show server_version`, `current_user`, `current_database()`); `query` (one guarded read-only statement) |
+| `github_token` | a GitHub token prefix (`ghp_`, `github_pat_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | HTTPS to `api.github.com` | `GET /user`; `GET /rate_limit` for a token without user scope | `whoami`: login, token kind (classic, fine-grained, app), scopes from the `x-oauth-scopes` header |
+| `openai_api_key` | an `sk-` prefix | HTTPS to `api.openai.com` | `GET /v1/models` | `whoami`: the model count only, never model names |
+
+**The shape check runs first.** A value that fails it is `bad_value`, and the
+adapter opens no connection. This bounds a retyped key: a postgres URL retyped
+as `github_token` is never sent to GitHub as a bearer token. The index is
+same-uid editable (§15.8), so the type is not trusted beyond this check.
+
+**Hosts are fixed in v1.** `github_token` and `openai_api_key` reach only the
+hosts in the table. No request argument, index field or tracked config names a
+base URL, because a caller-chosen host would carry the key to that host. Other
+OpenAI-compatible endpoints are deferred types.
+
+**Deferred types** (one adapter and one table row each): `neon_api_key`,
+`vercel_token`, `anthropic_api_key`, `openrouter_api_key`, and
+`google_oauth_client`. The last needs a client id and a secret, two values, so
+it changes the one-key-one-value model and waits for its own decision.
+
+**Postgres refuses writes in five layers.** Any one layer refuses; a test
+proves each layer on its own (S14).
+
+1. **Statement guard, before any connection.** The SQL parses (`sqlparser`,
+   PostgreSQL dialect) to exactly one query statement whose first keyword is
+   `select`, `show`, `explain` or `with`. Refused: a `;`, a comment, a
+   backslash, `EXPLAIN ANALYZE`, `FOR UPDATE` or `FOR SHARE`, `SELECT INTO`,
+   a data-modifying CTE, and any write, DDL or session keyword. A keyword
+   deny list runs as a second check after the parse. A refusal is `refused`
+   with zero connections opened.
+2. **Session option** `default_transaction_read_only=on` at connect.
+3. **`BEGIN READ ONLY` … `ROLLBACK`** around the statement.
+4. **Timeouts:** `statement_timeout` 15 s and
+   `idle_in_transaction_session_timeout`.
+5. **Caps:** 200 rows and the result byte cap (§15.11.5). The adapter stops
+   reading at the cap and sets `truncated`.
+
+A pooled host (Neon's `-pooler` endpoint) rejects startup options. The
+adapter connects to the direct endpoint instead and reports `pooled: true`
+in `whereis`.
+
+#### 15.11.4 Recording and showing the type
+
+**Storage.** The type is not secret, so it lives in the names-only index, never
+in the backend item; 1Password and Keeper items are unchanged.
+
+- `IndexRow` gains `secret_type: Option<SecretType>`, with
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+- `INDEX_VERSION` becomes 2. A 0.2.2 build reads version 1 and version 2 and
+  writes version 2; a version-1 row loads as untyped. Today's reader accepts
+  only an equal version (`index.rs:370`), so S12 widens that check.
+- `KeyMeta` and `SetRequest` gain the same optional field.
+- `secrets.copy` carries the type through the destination's index row.
+
+**Wire compatibility.** `KeyMeta` is not `deny_unknown_fields`, so an older
+client reads a newer `secrets.list` and ignores the type. `SetRequest` is
+closed, so an older server refuses a newer client's typed `set` with
+`invalid_params`. An untyped `set` omits the field and still works against an
+older server. An older server refuses a version-2 index file as
+`index_corrupt` and never resets it; the remedy is to reinstall 0.2.2. This is
+why server and client ship as one train.
+
+**Inference (Q5).** Without `--type`, a candidate is proposed and confirmed on
+a TTY. Without a TTY the key stays untyped. Name rules run in the CLI and read
+no value (key-label rules ported from the prototype). Shape rules
+(`postgres://`, a GitHub token prefix, `sk-`) run inside the server, which
+returns `proposed_type` with the set outcome; the CLI never reads the value to
+infer. Shape alone never assigns a type: `sk-` is shared by several providers.
+
+**Retype.** A new method, `secrets.set_type`, changes a key's type without
+touching the value. It writes one audit record.
+
+**Migration.** Nothing is destructive. Every existing key loads as untyped.
+`tm secrets list --untyped` lists them. `tm secrets type --suggest` proposes
+types from key names only, reads no value, and applies a type on
+confirmation. A probe on an untyped key is `type_mismatch` with the hint "set
+a type". `tm secrets doctor` prints the untyped count once.
+
+#### 15.11.5 Adapter contract
+
+**Placement (Q1).** Adapters are Rust code inside the trusty-secrets server,
+behind a new `adapters` cargo feature that implies `server`. `adapters` joins
+the `default` set, so `cargo install trusty-secrets` builds a binary that can
+probe. No other feature implies it, so an `api`, `store`, `ancestry` or
+`cli-backends` consumer with `default-features = false` links no HTTP or
+postgres client; `tests/cli_backends_feature_closure.rs` pins this. New
+dependencies sit in `adapters` only: an HTTP client (the workspace `reqwest`,
+rustls), `tokio-postgres` with a rustls connector, and `sqlparser`.
+
+**Input.** `secrets.test` takes `{project, vault?, key, probe?, args?}`.
+
+- `probe` is a closed enum: `reach`, `auth`, `whoami`, `whereis`, `query`,
+  `server_info`. Omitted, the type's default set runs: `reach`, `auth`, then
+  `whoami` or `server_info`.
+- `args` is a closed struct per probe. Only `query` takes args: `sql` and
+  `limit` (at most 200).
+- The caller names a key, never a value. Scope resolution is the existing
+  project-then-owner order (§15.3).
+
+**Value path.** The handler reads the value from the backend, passes a
+reference to the adapter, and drops it when the probe ends. The value is held
+in a zeroize-on-drop container for the whole probe. `SecretValue` does not
+zeroize today (`value.rs:24`), so S13 wraps the read in `Zeroizing<String>`, as
+the cache already does (`cache.rs:154`). The adapter builds its connection
+config or `Authorization` header in memory. It never writes the value to a
+file, argv, environment variable or log, and it spawns no child process.
+
+**Output.** A closed `ProbeResult`:
+`{type, probe, ok, status, elapsed_ms, facts, rows?, truncated?}`.
+
+- `status` is a closed enum: `ok`, `unreachable`, `auth_failed`, `refused`
+  (statement guard), `timeout`, `bad_value` (the value fails the shape check),
+  `type_mismatch` (untyped key, or a probe the type lacks), `unsupported_probe`,
+  `internal`.
+- `facts` is a map of non-secret strings. Each probe has an allow-list of fact
+  keys (endpoint id, database, role, login, token kind, scopes, server
+  version, model count, `pooled`). The serializer drops a key not on the
+  list, so an adapter cannot leak by adding a field.
+- `rows` appears for `query` only.
+
+**Scrubbing, three layers.**
+
+1. Output is built from allow-listed fields only.
+2. Every string that leaves an adapter — facts, row cells, error text — passes
+   through one scrubber. Its needles are the value and every form derived from
+   it: the URL, the credential segment, the password raw and percent-decoded,
+   the `Authorization` header value, and the base64 of the value. It uses
+   `trusty_common::credentials::scrub_secrets` (`redact.rs:155`), already a
+   `server` dependency. Rows are built in memory under the caps, not streamed,
+   so `exec_scrub.rs`'s byte scrubber is not needed and is not moved.
+3. An upstream error maps to a `status` and a fixed message. Raw driver or HTTP
+   error text is never forwarded.
+
+Row cells are scrubbed because a hostile or odd table can echo the password.
+
+**Known limit.** `scrub_secrets` skips a needle under 8 characters
+(`redact.rs:50`). A postgres password under 8 characters is therefore not
+scrubbed from row cells. Layers 1 and 3 still hold for facts and errors. The
+S13 security review rules on this limit.
+
+**Timeouts and limits.** Connect 10 s, whole probe 20 s, HTTP response body
+64 KiB, rows 200, result 256 KiB. Probes run on a bounded pool of 4, so a hung
+host cannot stall `secrets.list`. Defaults sit in
+`crates/trusty-secrets/src/server/settings.rs`; hard ceilings sit in code and
+a setting cannot exceed them. The probe clock starts after the backend read.
+That read can wait on an unlock prompt, so `secrets.test` joins the 120 s
+deadline group in `deadline.rs`, not the 15 s default.
+
+**Agent gate (Q3).** When the caller has an agent ancestor, the key must carry
+the "agents may use" flag. Otherwise the reply is `agent_use_refused`, and the
+backend is not read. A human caller is not gated. The server judges the socket
+peer's ancestry as `secrets.grant` does (`exec.rs:75-92`). Every call from an
+MCP tool (§10.2) also carries `agent_caller: true`, because the daemon's
+loopback `POST /rpc` path makes the long-running daemon the socket peer, and
+the daemon has no agent ancestor. The claim can only tighten the gate: the
+server applies the flag rule when either its own ancestry check or the claim
+says agent. On that path the gate rests on tm's own code, as the console path
+rests on the bridge verdict (§15.6).
+
+**Result and exit contract.** A failed credential is a normal reply with
+`ok: false` and a status, never a transport error. Transport errors use the
+existing kinds: `invalid_params`, `vault_out_of_scope`, `not_found`,
+`agent_use_refused`, `deadline_exceeded`, `audit_unavailable`, `internal`,
+and the existing backend kinds for the value read (`backend_locked`,
+`backend_timeout`, `backend_failed`).
+This design adds no `ErrorKind`. `tm secrets test` and `query` exit `0` when
+every probe is `ok`, `1` when a probe ran and failed, `2` on a usage error or a
+refusal, and `3` on an internal fault.
+
+**Audit.** One record per probe: key, type, probe, status. A `query` record
+carries the SQL's SHA-256 and length, never its text. The record follows the
+existing fail-closed rule: no audit, no backend read.
+
+**Surface.** `secrets.test` and `secrets.set_type` join the method table. This
+design adds no console route.
+
+#### 15.11.6 Security properties
+
+Each property is a test in the slice that ships it.
+
+| # | Property |
+|---|---|
+| P1 | No probe output carries the value or a derived form of 8 characters or more: not stdout, stderr, the MCP result, error text, a log line at `trace`, the audit file, or a raw socket frame. |
+| P2 | No value enters argv or an environment variable, the CLI's or a child's. The adapter spawns no child. |
+| P3 | An echoing upstream — an HTTP stub that reflects the `Authorization` header, a postgres whose error text, `current_user` or row cell holds the password — yields `[REDACTED]` or a dropped field on every channel. |
+| P4 | Postgres refuses writes at each of the five layers on its own (§15.11.3); a guard refusal opens zero connections. |
+| P5 | An agent caller on an unflagged key gets `agent_use_refused` and zero backend reads. |
+| P6 | A value that fails its type's shape check opens no connection. |
+| P7 | Removing the output scrubber turns the echo tests red (mutation check, run once and recorded in the S13 PR). |
+
+#### 15.11.7 Slices and acceptance criteria
+
+Rungs follow the [Rust Test Ladder](../../CLAUDE.md#rust-test-ladder). The
+security review ([#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)
+scope or a new child) clears S13 before S14 and S15 merge. Rung 4–6 slices
+close at On Prod.
+
+**S11 — spec and ADR ([#10238](https://github.com/bobmatnyc/trusty-tools/issues/10238)), docs, rung 1.**
+This section, the §3 G-6, §9, §10.2 and §15.9 amendments, and ADR-0072.
+§3.1 needs no change: it bars a surface that shows a value, not the use of a
+value inside the server. Accepted when the doc gates pass and the nine D3b decisions read as decided.
+
+**S12 — type in the index and wire ([#10239](https://github.com/bobmatnyc/trusty-tools/issues/10239)), trusty-secrets 0.2.2, rung 5.**
+`SecretType`, `IndexRow`/`KeyMeta`/`SetRequest.secret_type`, `INDEX_VERSION`
+2, `secrets.set_type`, the server-side shape proposal (`proposed_type`).
+
+- A version-1 index file loads with every key untyped; a version-2 file round
+  trips.
+- An older client reads a newer `secrets.list`; an untyped `set` from a newer
+  client works against an older server; a typed one is refused as
+  `invalid_params`.
+- An unknown type id is refused. `secrets.copy` keeps the type.
+- `proposed_type` never assigns a type by itself.
+
+**S13 — adapter core and `secrets.test` ([#10240](https://github.com/bobmatnyc/trusty-tools/issues/10240)), trusty-secrets 0.2.2, rung 5, security review gate.**
+The `adapters` feature, the adapter trait, `ProbeResult`, the scrubber, the
+audit record, the agent gate, the pool and limits; `reach`, `auth` and
+`whoami` for `github_token` and `openai_api_key`.
+
+- P1, P2, P3 (HTTP), P5, P6 and P7 hold, each with a sentinel test copying
+  `resolve_sentinel_never_reaches_the_audit_file_or_logs`.
+- Fault tests: timeout, unreachable host, wrong credential, malformed value,
+  oversized body (cap), non-UTF-8 body, slow-drip server.
+- `secrets.test` sits in the 120 s deadline group; the feature-closure test
+  proves `api`/`store` consumers link no adapter dependency.
+
+**S14 — `postgres_url` adapter ([#10241](https://github.com/bobmatnyc/trusty-tools/issues/10241)), trusty-secrets 0.2.2, rung 5 plus `code-critic` and security review.**
+`whereis`, `server_info`, `query`, the five-layer write refusal, the pooled
+endpoint rule.
+
+- P4: one test per layer. The guard refuses `insert`, `update`, `delete`,
+  `drop`, `create`, `copy`, `;` stacking, `/* */`, `--`, `select … for
+  update`, `select into`, `explain analyze`, and
+  `with x as (delete … returning *) select`, each as `refused` with zero
+  connects counted by a stub. A test-only hook bypasses the guard and proves
+  the server refuses a write: a real local postgres under `#[ignore]`, where
+  `CREATE TABLE` fails in a read-only transaction.
+- P3 for postgres: the password in error text, `current_user` and a row cell.
+- The prototype's guard test inputs pass as the Rust corpus (Q9).
+
+**S15 — CLI and MCP surface ([#10242](https://github.com/bobmatnyc/trusty-tools/issues/10242)), trusty-mpm 2.0.0, rung 6.**
+The §9 verbs, the §10.2 tools, the `tm-secrets` skill and `secrets-manager`
+agent text. The agent file's "No agent-callable client" line
+(`content/agents/secrets-manager.md:47`) changes; both files are asserted on by
+`crates/trusty-mpm/src/core/bundle_tests.rs`.
+
+- P1 and P2 on the real binary: spawn `tm secrets test` and `query`, capture
+  stdout and stderr, scan argv during a slow probe against a stub.
+- MCP schemas are closed and carry no value field; descriptor tests copy
+  `secrets_get_ref_schema_is_closed_and_documents_no_value`
+  (`crates/trusty-mpm/src/mcp/tools/mod.rs:341`).
+- Every MCP call sends `agent_caller: true`.
+- Live: one smoke run of each verb under `scripts/sandbox_secrets_console.sh`
+  against a local postgres and a stub HTTP server, showing a verdict and no
+  value on any channel (the epic's closure condition).
 
 ---
 
