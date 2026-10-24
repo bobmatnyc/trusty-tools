@@ -5,7 +5,8 @@
 //! per-thread override live in `crate::runtime_content::test_support`, which
 //! every content reader shares; this module keeps the prompt-shaped helpers.
 //! What: [`prompts`] reads both prompts from the staged content;
-//! [`repo_prompt_files`] lists the checkout's two prompt files.
+//! [`repo_prompt_files`] lists the checkout's prompt files, the principles
+//! addendum included (#9991).
 //! Test: `the_repository_prompts_load_byte_identical`, and the pipeline arm
 //! `run_review_without_prompts_fails_closed_before_any_fetch_or_model_call`.
 
@@ -14,13 +15,15 @@ use std::sync::OnceLock;
 pub(crate) use crate::runtime_content::test_support::{OverrideGuard, fake_checkout};
 
 use super::{COVERAGE_GATING_FILE, PROMPTS_DIR, ReviewerPrompts, STOCK_FILE};
+use crate::voice::principles::PRINCIPLES_FILE;
 
-/// The checkout's two prompt files as `(repo-relative path, bytes)`, read from
-/// the runtime checkout (#9298), never the compile-time build path.
+/// The checkout's two prompt files and the principles addendum (#9991) as
+/// `(repo-relative path, bytes)`, read from the runtime checkout (#9298), never
+/// the compile-time build path.
 pub(crate) fn repo_prompt_files() -> Vec<(String, Vec<u8>)> {
     let root = trusty_common::test_harness::test_repo_root()
         .expect("resolve the trusty-tools checkout (set TRUSTY_TEST_REPO_ROOT)");
-    [STOCK_FILE, COVERAGE_GATING_FILE]
+    [STOCK_FILE, COVERAGE_GATING_FILE, PRINCIPLES_FILE]
         .iter()
         .map(|file| {
             let rel = format!("content/{PROMPTS_DIR}/{file}");
