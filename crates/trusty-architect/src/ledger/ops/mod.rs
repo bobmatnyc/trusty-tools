@@ -210,7 +210,7 @@ fn apply_add(st: &mut State, a: &AddOp) -> Result<BatchEvent, LedgerError> {
 
 // #10235: only a live id collides; an archived id is free to reuse.
 fn explicit_id(st: &State, kind: Prefix, x: &str) -> Result<String, LedgerError> {
-    let id = LedgerId::parse(x)
+    LedgerId::parse(x)
         .ok()
         .filter(|id| id.code() == &st.code && id.prefix() == kind)
         .ok_or_else(|| bad(format!("bad id {x:?} for {}", kind.letter())))?;

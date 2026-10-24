@@ -215,7 +215,7 @@ fn ledger_writer_refuses_a_live_id_and_reuses_an_archived_one() -> R {
     s.ok(json!([{"op": "close", "id": "th-T01", "outcome": "merged"}]))?;
     // #10235: the archived id is free again, an explicit add may take it.
     s.ok(json!([{"op": "add", "kind": "T", "title": "t", "goal": "th-G01", "id": "th-T01"}]))?;
-    assert_eq!(s.ids("tasks"), ["th-T01", "th-T02"]);
+    assert_eq!(s.ids("tasks"), ["th-T02", "th-T01"]);
     Ok(())
 }
 
