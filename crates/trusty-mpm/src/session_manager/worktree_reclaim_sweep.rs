@@ -22,7 +22,7 @@
 //! locked worktree regardless, so this re-check was the ONLY thing honouring
 //! the lock; it now refuses too, and this pass is the outer of two defences.
 //!
-//! So: [`reclaim_scoped`] re-reads the live session set, git's own
+//! So: [`reclaim_scoped_with_cancel`] re-reads the live session set, git's own
 //! worktree registry, the ownership marker, the pull-request state, and the
 //! working tree PER CANDIDATE, immediately before that candidate's deletion —
 //! mirroring `prune_orphaned_worktrees`' Phase 2, whose comment warns against
@@ -700,6 +700,9 @@ fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
 /// Test: `a_project_scope_admits_only_that_projects_worktrees`,
 /// `the_preview_lists_exactly_what_force_removes`,
 /// `a_force_run_removes_nothing_its_preview_did_not_list`.
+// #7619: production reaches the engine through `reclaim_scoped_with_cancel`;
+// this no-cancel shape is what the pre-#7619 tests drive.
+#[cfg(test)]
 pub(crate) fn reclaim_scoped(
     repos_root: &Path,
     probes: &FreshProbes<'_>,
@@ -711,7 +714,7 @@ pub(crate) fn reclaim_scoped(
     reclaim_scoped_with_cancel(repos_root, probes, mode, adopted, scope, &never)
 }
 
-/// [`reclaim_scoped`], stopped by `cancel` (#7619).
+/// `reclaim_scoped`, stopped by `cancel` (#7619).
 ///
 /// Why: a killed client left this pass deleting to the end of its list.
 /// What: `cancel` is read before each candidate's classification and byte

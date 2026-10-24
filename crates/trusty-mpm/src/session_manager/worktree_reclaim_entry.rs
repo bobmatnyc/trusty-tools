@@ -18,7 +18,7 @@ use super::super::worktree_reclaim_landed::reclaim_landed_proof;
 use super::super::worktree_scope::WorktreeScope;
 use super::{FreshProbes, reclaim_scoped_with_cancel};
 
-/// [`super::reclaim_scoped`] against the real `gh`-backed index and a live
+/// [`super::reclaim_scoped_with_cancel`] against the real `gh`-backed index and a live
 /// re-read of the session store (#2919).
 ///
 /// Why: the production entry point for the merged-PR reclaim — reached from the

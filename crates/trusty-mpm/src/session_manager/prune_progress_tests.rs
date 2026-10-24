@@ -243,7 +243,7 @@ fn worktree_7619_a_cancelled_reclaim_stops_after_the_first_removal() {
 #[test]
 fn worktree_7619_cancel_during_a_removal_lets_that_removal_finish() {
     let fx = GitWorktreeFixture::new();
-    let trees = merged_trees(&fx, "inflight-7619", 3);
+    merged_trees(&fx, "inflight-7619", 3);
     let (flag, cancel) = flag_cancel();
     let fire = |_: &Path| {
         flag.store(true, Ordering::SeqCst);
