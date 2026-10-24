@@ -1,2 +1,0 @@
-Added
-- `agents/trusty-agents/agents/` (the bundled `tagent` roster: flat agents and directory packages) and `agents/trusty-agents/workflows/` (the workflow definitions): trusty-agents' own content, moved out of the `tagent` binary. Each `.md` declares `metadata: {version: "0.1.0"}`; the only other edit is a comment in `writing-assistant/agent.toml` that named the retired embed. They sit beneath `agents/`, so the shared roster does not list them (#9014).
