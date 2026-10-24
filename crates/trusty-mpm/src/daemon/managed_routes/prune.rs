@@ -931,8 +931,8 @@ mod tests {
     /// it held is released.
     ///
     /// The pass is parked on the store's write lock, as in the test above,
-    /// and the route future is dropped there. Fails on `570ab64dbf`: the
-    /// detached pass removes all three orphans after the drop.
+    /// and the route future is dropped there. Fails with the drop guard
+    /// removed (the pre-#7619 shape): the detached pass removes the orphans.
     #[allow(clippy::await_holding_lock)]
     #[serial_test::serial]
     #[tokio::test]
