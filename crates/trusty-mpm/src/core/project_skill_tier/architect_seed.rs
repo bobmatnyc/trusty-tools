@@ -5,19 +5,22 @@
 //! `include_str!` into `content/instructions/architect/`. They sit under
 //! `instructions/`, not `skills/`: every `skills/` file deploys to every PM's
 //! tier, and these must reach the Architect only (df-D21, df-D22).
-//! What: [`ArchitectSeed::load`] reads all three from one loaded
-//! [`FrameworkContent`] and fails closed. An absent file is
+//! #10161 D3c adds the Architect agents (`architect/agents/<name>.md`).
+//! What: [`ArchitectSeed::load`] reads the template, the skills and the agents
+//! from one loaded [`FrameworkContent`] and fails closed. An absent file is
 //! [`ArchitectSeedError::Missing`], a blank one [`ArchitectSeedError::Empty`],
 //! and a source that cannot be resolved or loaded is
-//! [`ArchitectSeedError::Content`]. It returns all three or an error, so a
+//! [`ArchitectSeedError::Content`]. It returns every file or an error, so a
 //! caller that loads before it writes never writes a partial seed.
 //! Test: `the_repository_content_seeds_the_architect`,
 //! `a_source_without_the_seed_files_names_the_first_missing_one`,
 //! `a_source_missing_one_skill_loads_nothing`, `a_blank_seed_file_is_refused`,
-//! `an_unresolvable_source_is_a_content_error`.
+//! `an_unresolvable_source_is_a_content_error`,
+//! `a_missing_or_blank_agent_source_loads_nothing`.
 
 use std::path::Path;
 
+use super::architect_agents::{SHIPPED_AGENTS, ShippedAgent};
 use super::architect_skills::{ArchitectSkill, SHIPPED, ShippedSkill};
 use crate::core::content_source::{self, AgentContentError, Fetch, FrameworkContent};
 use crate::core::framework_content::INSTRUCTIONS_CLASS;
@@ -52,13 +55,17 @@ pub enum ArchitectSeedError {
     Content(#[from] AgentContentError),
 }
 
-/// The Architect seed: the `CLAUDE.md` template and the shipped skills.
+/// The Architect seed: the `CLAUDE.md` template, the shipped skills and the
+/// shipped agents.
 #[derive(Debug, Clone)]
 pub struct ArchitectSeed {
     /// The `CLAUDE.md` template text.
     pub claude_md: String,
     /// One entry per [`SHIPPED`] skill, in that order.
     pub skills: Vec<ArchitectSkill>,
+    /// One entry per [`SHIPPED_AGENTS`] agent, in that order; `stem` is the
+    /// agent's name (#10161 D3c).
+    pub agents: Vec<ArchitectSkill>,
 }
 
 impl ArchitectSeed {
@@ -66,7 +73,7 @@ impl ArchitectSeed {
     ///
     /// # Errors
     /// [`ArchitectSeedError::Missing`] or [`ArchitectSeedError::Empty`] naming
-    /// the first file that fails, `CLAUDE.md` first.
+    /// the first file that fails: `CLAUDE.md`, then the skills, then the agents.
     pub fn load(content: &FrameworkContent) -> Result<Self, ArchitectSeedError> {
         Self::load_from(content, SHIPPED)
     }
@@ -83,6 +90,7 @@ impl ArchitectSeed {
         Ok(Self {
             claude_md: seed_file(content, CLAUDE_MD_TEMPLATE)?.to_owned(),
             skills: load_skills_from(content, shipped)?,
+            agents: load_agents_from(content, SHIPPED_AGENTS)?,
         })
     }
 
@@ -143,6 +151,27 @@ pub fn load_skills_from(
                 stem: shipped.stem,
                 contents: seed_file(content, &shipped.source())?.to_owned(),
                 previous: shipped.previous,
+            })
+        })
+        .collect()
+}
+
+/// `shipped`'s agents with their text from `content`, in table order, or the
+/// first error; a missing or blank agent source fails like a skill's (#10161 D3c).
+///
+/// # Errors
+/// As [`ArchitectSeed::load`].
+pub fn load_agents_from(
+    content: &FrameworkContent,
+    shipped: &[ShippedAgent],
+) -> Result<Vec<ArchitectSkill>, ArchitectSeedError> {
+    shipped
+        .iter()
+        .map(|agent| {
+            Ok(ArchitectSkill {
+                stem: agent.name,
+                contents: seed_file(content, &agent.source())?.to_owned(),
+                previous: agent.previous,
             })
         })
         .collect()
