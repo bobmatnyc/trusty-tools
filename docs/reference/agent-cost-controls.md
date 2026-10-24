@@ -97,6 +97,19 @@ cold rather than holding the build
 `tm build-lease status` lists the lease holders, each slot's seed state, and
 every seed in progress with its slot, owner pid and age.
 
+Compile capacity is released at the end of compilation; the slot directory
+stays owned until the command exits
+([#8692](https://github.com/bobmatnyc/trusty-tools/issues/8692)). Once cargo
+drops its build lock — before `cargo test` runs test binaries, or when
+`cargo run` starts the program — the holder record reads `run`, and that
+holder no longer counts against `builders.max_concurrent`. It keeps its flock,
+so no other lease builds in its directory while its tests or server run. The
+flip is one-way: a later rebuild inside the same command (`cargo watch`) is
+counted by the census as a foreign build. `builders.max_run_slots` (default:
+the ceiling) caps the run-phase slots, since each keeps a full target
+directory. `cargo watch -s ./script` runs the script's own builds without a
+lease.
+
 `.envrc` is the operator's local mechanism. The declarative one that tm itself
 ships is the `build:` section of `~/.trusty-tools/trusty-mpm/config.yaml`,
 reported by the `rust_build_env` `tm doctor` row

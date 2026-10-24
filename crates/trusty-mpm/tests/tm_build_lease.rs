@@ -824,7 +824,8 @@ fn home_with_ceiling_and_cargo(ceiling: u32) -> tempfile::TempDir {
         format!(
             "[builders]\nmax_concurrent = {ceiling}\ncount_foreign_builds = false\n\
              memory_pressure_max = \"critical\"\nmin_available_pct = 0\nload_factor = 64\n\
-             heavy_build_commands = [\"sleep\", \"true\", \"sh\", \"touch\", \"cargo test\"]\n"
+             heavy_build_commands = [\"sleep\", \"true\", \"sh\", \"touch\", \"cargo test\", \
+             \"cargo run\"]\n"
         ),
     )
     .expect("config");
@@ -1160,15 +1161,150 @@ fn a_live_cargo_compile_reads_held_beside_a_large_deps_dir() {
     );
 }
 
-/// #8261: a holder SIGKILLed while its `cargo test`
-/// runs the test binary leaves that run alive with no flock and no
-/// `.cargo-lock`. Its slot must stay taken until the run exits — before the
-/// fix a second build took it at once.
+/// Give the crate at `dir` a build script that sleeps 1.5 s (#8692).
+///
+/// Why: the phase flip needs to see cargo's build lock held once. A one-file
+/// crate compiled through a warm `sccache` can hold it for less than one
+/// 250 ms poll, and a build never seen compiling keeps its capacity by design.
+fn slow_compile(dir: &Path) {
+    std::fs::write(
+        dir.join("build.rs"),
+        "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(1500));\n}\n",
+    )
+    .expect("build script");
+}
+
+/// A one-binary crate at `dir` whose `main` writes `$PROBE_DIR/running` and
+/// then waits (at most 60 s) for `$PROBE_DIR/release`: a stand-in server.
+fn waiting_bin_crate(dir: &Path) {
+    std::fs::create_dir_all(dir.join("src")).expect("crate dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"leaseserver\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "fn main() {\n    let dir = std::path::PathBuf::from(std::env::var(\"PROBE_DIR\").unwrap());\n    \
+         std::fs::write(dir.join(\"running\"), \"\").unwrap();\n    for _ in 0..600 {\n        \
+         if dir.join(\"release\").exists() {\n            return;\n        }\n        \
+         std::thread::sleep(std::time::Duration::from_millis(100));\n    }\n}\n",
+    )
+    .expect("main");
+    slow_compile(dir);
+}
+
+/// Whether slot `slot`'s record reads `"phase": "run"` within `secs` (#8692).
+fn wait_for_run_phase(home: &Path, slot: u32, secs: u64) -> bool {
+    let lock = home.join(format!(".trusty-mpm/build-slots/slot-{slot}.lock"));
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        let phase = std::fs::read_to_string(&lock)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|record| record["phase"].as_str().map(str::to_string));
+        if phase.as_deref() == Some("run") {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// The checkout a lease last recorded for slot `slot`, if any.
+fn slot_checkout(home: &Path, slot: u32) -> Option<String> {
+    std::fs::read_to_string(home.join(format!(".trusty-mpm/build-slots/slot-{slot}.last"))).ok()
+}
+
+/// Run a leased `cargo <verb>` over a waiting crate at ceiling 1 and, once
+/// its program runs, a second leased build; return the second's output, the
+/// first's exit status and whether the first reached the run phase.
+fn second_build_while_the_first_runs(
+    home: &Path,
+    krate: &Path,
+    verb: &str,
+) -> (Output, std::process::ExitStatus, bool, bool) {
+    let first = build_lease(home)
+        .current_dir(krate)
+        .env("PROBE_DIR", home)
+        .args(["--", &real_cargo(), verb, "--offline", "--quiet"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the first leased build");
+    let running = wait_for_file(&home.join("running"), 180);
+    let run_phase = wait_for_run_phase(home, 0, 15);
+    let second = build_lease(home)
+        .args(["--wait-secs", "5", "--", "true"])
+        .output()
+        .expect("a second build");
+    std::fs::write(home.join("release"), "").expect("release");
+    let status = first.wait_with_output().expect("the first exits").status;
+    (second, status, running, run_phase)
+}
+
+/// #8692 regression: at ceiling 1, a leased `cargo test` whose test binary is
+/// running (cargo has dropped `.cargo-lock`) no longer holds compile capacity,
+/// so a second leased build is admitted — in slot 1, never in the first's
+/// slot 0. Before the fix the second waited and exited 75.
 #[test]
-fn a_sigkilled_holders_live_test_run_keeps_its_slot() {
+fn a_second_build_is_admitted_while_the_first_ones_test_binary_runs_8692() {
     let home = home_with_ceiling_and_cargo(1);
     let krate = home.path().join("probe");
     waiting_test_crate(&krate);
+    slow_compile(&krate);
+    let (second, first, running, run_phase) =
+        second_build_while_the_first_runs(home.path(), &krate, "test");
+    let err = stderr(&second);
+    assert!(running, "the test binary never ran");
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "a run-phase holder must not hold compile capacity: {err}"
+    );
+    assert!(run_phase, "the first lease's record never read phase run");
+    assert!(first.success(), "the first build exits cleanly: {first:?}");
+    assert_eq!(
+        slot_checkout(home.path(), 1).as_deref(),
+        home.path()
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .and_then(Path::to_str),
+        "the second build ran in slot 1, not the run-phase slot 0"
+    );
+}
+
+/// #8692: a leased `cargo run` whose program is running (a server) does not
+/// hold compile capacity; a second leased build is admitted beside it.
+#[test]
+fn a_running_cargo_run_server_does_not_hold_capacity_8692() {
+    let home = home_with_ceiling_and_cargo(1);
+    let krate = home.path().join("server");
+    waiting_bin_crate(&krate);
+    let (second, first, running, run_phase) =
+        second_build_while_the_first_runs(home.path(), &krate, "run");
+    let err = stderr(&second);
+    assert!(running, "the server never ran");
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "a running server must not hold compile capacity: {err}"
+    );
+    assert!(run_phase, "the server's lease never read phase run");
+    assert!(first.success(), "the server exits cleanly: {first:?}");
+}
+
+/// #8261, #8692: a holder SIGKILLed while its `cargo test` runs the test
+/// binary leaves that run alive with no flock and no `.cargo-lock`. Its
+/// record says `run`, so the orphan keeps slot 0 — never reused — but holds
+/// no compile capacity: at ceiling 1 the next build is admitted into slot 1.
+#[test]
+fn a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692() {
+    let home = home_with_ceiling_and_cargo(1);
+    let krate = home.path().join("probe");
+    waiting_test_crate(&krate);
+    slow_compile(&krate);
     let mut holder = build_lease(home.path())
         .current_dir(&krate)
         .env("PROBE_DIR", home.path())
@@ -1180,37 +1316,44 @@ fn a_sigkilled_holders_live_test_run_keeps_its_slot() {
     let running = wait_for_file(&home.path().join("running"), 180);
     let records = wait_for_holders(home.path(), 1);
     let build = u32::try_from(records[0]["child_pid"].as_u64().expect("pid")).expect("pid");
+    let run_phase = wait_for_run_phase(home.path(), 0, 15);
     holder.kill().expect("SIGKILL the holder");
     let _ = holder.wait();
     let lock_free =
         !trusty_mpm::core::build_lease::stale_guard::cargo_lock_held(&krate.join("target"));
-    let refused = build_lease(home.path())
-        .args(["--wait-secs", "3", "--", "true"])
-        .output()
-        .expect("a second build");
-    std::fs::write(home.path().join("release"), "").expect("release");
-    wait_until_dead(build);
-    let next = build_lease(home.path())
+    let admitted = build_lease(home.path())
         .args(["--wait-secs", "5", "--", "true"])
         .output()
-        .expect("a build after the run");
-    let err = stderr(&refused);
+        .expect("a second build");
+    let orphan_record =
+        std::fs::read_to_string(home.path().join(".trusty-mpm/build-slots/slot-0.lock"))
+            .unwrap_or_default();
+    std::fs::write(home.path().join("release"), "").expect("release");
+    wait_until_dead(build);
+    let err = stderr(&admitted);
     assert!(running, "the test binary never ran");
+    assert!(run_phase, "the record never read phase run");
     assert!(
         lock_free,
         "the run holds no .cargo-lock while its test runs"
     );
     assert_eq!(
-        refused.status.code(),
-        Some(75),
-        "two builders in one slot: {err}"
-    );
-    assert!(err.contains("slot 0: cargo test"), "{err}");
-    assert_eq!(
-        next.status.code(),
+        admitted.status.code(),
         Some(0),
-        "the slot frees once the run exits: {}",
-        stderr(&next)
+        "a run-phase orphan must not hold compile capacity: {err}"
+    );
+    assert_eq!(
+        slot_checkout(home.path(), 1).as_deref(),
+        home.path()
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .and_then(Path::to_str),
+        "the orphan's slot 0 is never reused: {err}"
+    );
+    assert!(
+        orphan_record.contains("\"phase\":\"run\""),
+        "the orphan's record stays in slot 0: {orphan_record}"
     );
 }
 
