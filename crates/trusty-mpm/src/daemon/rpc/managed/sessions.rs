@@ -288,6 +288,12 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
                 }
             },
         )
+        // #7619: RUNS TO COMPLETION after its client is gone. Unary dispatch
+        // (`trusty_common::uds::server::handle_connection`) awaits the handler
+        // without watching the peer, so the drop guard in
+        // `prune_worktrees_core_in` never fires for a killed `tm session
+        // prune-worktrees`. Only a dropped HTTP request cancels in PR 1; the
+        // streaming method of #7619 PR 2 adds the socket-side cancel.
         .typed(
             "mpm.managed.prune_worktrees",
             move |req: PruneWorktreesRequest| {

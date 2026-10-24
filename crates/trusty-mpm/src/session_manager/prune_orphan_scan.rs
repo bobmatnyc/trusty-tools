@@ -151,6 +151,9 @@ pub struct OrphanSweepOutcome {
     /// Candidates git failed on after deleting some or all of their content,
     /// each as `"<path>: <report>"` (#8782). Neither removed nor kept.
     pub partially_removed: Vec<String>,
+    /// Candidates a cancelled pass never started (#7619): tree and registry row
+    /// untouched. Disjoint from `removed` and `partially_removed`.
+    pub cancelled_unstarted: Vec<std::path::PathBuf>,
 }
 
 /// Per-sweep classification counts for the orphan sweep's one log line (#4323).
