@@ -1,0 +1,40 @@
+# trusty-adr-check
+# adr-check-version: 1.0.0
+# body-sha256: 86d1a1af780f613381be6a8b58927cee2bd21d0e04b6b9384b554b1a258ae207
+#
+# adr-check.yml — runs docs/adr/check_adr.sh on every pull request and on
+# every push to the default branch.
+#
+# Installed by the tm-adr skill (`/tm-adr init`), which renders the default
+# branch below and restamps the body hash. The three header lines above mark
+# this file as a managed copy: do not edit the body; a newer version arrives
+# as a pull request (`/tm-adr status`). No file filter on the triggers: a
+# filtered required check never reports on an unrelated pull request.
+name: ADR check
+
+on:
+  pull_request:
+  push:
+    branches: ["{{DEFAULT_BRANCH}}"]
+
+# Per-commit group on push so a merge never cancels the previous merge's run;
+# per-ref group on pull_request so a new push supersedes the stale run.
+concurrency:
+  group: adr-check-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  adr-check:
+    name: ADR consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # The script is a managed copy; a body edited without a restamp fails
+      # here before the corpus check runs.
+      - name: Verify the check script is pristine
+        run: bash docs/adr/check_adr.sh --verify-self
+
+      - name: Check ADR corpus consistency
+        run: bash docs/adr/check_adr.sh

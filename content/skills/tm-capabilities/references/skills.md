@@ -34,7 +34,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `test-quality-inspector` | agent-reference | no | Test quality inspection framework for reviewing test coverage, identifying gaps, and ensuring comprehensive validation |
 | `testing-anti-patterns` | agent-reference | no | Never test mock behavior. Never add test-only methods to production classes. Understand dependencies before mocking. Language-agnostic principles with TypeScript/Jest and Python/pytest examples. |
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
-| `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
+| `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — create, supersede and amend decision records under docs/adr/ with consistency vetting; bootstrap a project's ADR setup (init) and report whether its check-script copy matches the deployed skill (status) |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
 | `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
