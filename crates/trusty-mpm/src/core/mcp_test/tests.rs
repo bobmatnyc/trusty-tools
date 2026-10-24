@@ -442,18 +442,56 @@ fn any_failed_flags_a_single_failure() {
 /// Why: the message layer above is fixture-tested; this proves the framing and
 /// child lifecycle interoperate with an actual trusty server. Ignored by
 /// default (like the ONNX embedder tests) because it needs `trusty-memory` on
-/// PATH and its daemon reachable.
+/// PATH and its daemon reachable. A host with no `trusty-memory` on PATH skips
+/// (#10230); with the binary present, any probe failure still fails the test.
 /// Run: `cargo test -p trusty-mpm probe_stdio_against_trusty_memory -- --ignored`.
 #[tokio::test]
 #[ignore = "requires trusty-memory on PATH + reachable daemon"]
 async fn probe_stdio_against_trusty_memory() {
     let entry = crate::core::mcp_config::builtin_server_entry("trusty-memory").unwrap();
+    // #10230: an absent binary is a skip, not a failure; nothing else is.
+    let command = entry["command"]
+        .as_str()
+        .expect("builtin entry has a command");
+    if let Some(reason) = missing_binary_skip_reason(command) {
+        eprintln!("{reason}");
+        return;
+    }
     let target = make_target("trusty-memory".to_string(), entry);
     let outcome = probe_target(&target, DEFAULT_PROBE_TIMEOUT).await;
     match outcome {
         McpTestOutcome::Ok { tools: Some(n) } => assert!(n > 0, "expected a non-empty tool list"),
         other => panic!("expected Ok with tools, got {other:?}"),
     }
+}
+
+/// The skip line for a live-server test whose binary is not on PATH.
+///
+/// Why (#10230): a host with no trusty-* binaries installed (EVO, by design)
+/// failed the live probe with `Spawn("…: No such file or directory")` instead
+/// of skipping it.
+/// What: `Some("SKIP: <command> not on PATH")` when [`which::which`] — the same
+/// PATH lookup `tokio::process::Command` spawns through — finds no `command`;
+/// `None` when it is present, so every later probe error still fails.
+/// Test: `missing_binary_skip_reason_skips_only_an_absent_binary`.
+fn missing_binary_skip_reason(command: &str) -> Option<String> {
+    which::which(command)
+        .is_err()
+        .then(|| format!("SKIP: {command} not on PATH"))
+}
+
+/// The skip predicate fires only for an absent binary (#10230).
+#[test]
+fn missing_binary_skip_reason_skips_only_an_absent_binary() {
+    assert_eq!(
+        missing_binary_skip_reason("definitely-not-a-real-binary-xyz-123").as_deref(),
+        Some("SKIP: definitely-not-a-real-binary-xyz-123 not on PATH")
+    );
+    assert_eq!(
+        missing_binary_skip_reason("sh"),
+        None,
+        "a present binary must not skip"
+    );
 }
 
 /// A spawn failure (nonexistent binary) is reported, not panicked.
