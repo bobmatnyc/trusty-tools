@@ -121,6 +121,13 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     previous: &["2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77"],
 };
 
+/// `architect-improvements`, edited since its first release.
+const IMPROVEMENTS: ShippedSkill = ShippedSkill {
+    stem: "architect-improvements",
+    // #10161 D3c: the D2 text, before consolidation named `improvement-curator`.
+    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+};
+
 /// A skill on its first release: no earlier shipped text to recognise.
 const fn first_release(stem: &'static str) -> ShippedSkill {
     ShippedSkill {
@@ -149,10 +156,13 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-review"),
     first_release("architect-project-provision"),
     first_release("architect-macos"),
-    first_release("architect-improvements"),
+    IMPROVEMENTS,
     first_release("architect-host-admin"),
     // #10161 D3b: the dashboard skill, with the served page it describes.
     first_release("architect-dashboard"),
+    // #10161 D3c: the skills that dispatch the drift-guard and improver agents.
+    first_release("architect-drift-guard"),
+    first_release("architect-improver"),
 ];
 
 /// The deploy record, beside the skills in the project tier.
@@ -170,6 +180,30 @@ pub fn project_tier(project_dir: &Path) -> PathBuf {
 pub fn skill_path(skills_dir: &Path, stem: &str) -> PathBuf {
     skills_dir.join(stem).join("SKILL.md")
 }
+
+/// How one kind of Architect file sits in its project tier.
+///
+/// Why: #10161 D3c — the Architect agents follow the skills' shipped-history
+/// and owner-edit rule, so both kinds share one deploy loop.
+/// What: the per-name file path, the deploy record's file name and the noun
+/// the log and error lines use.
+/// Test: `architect_agents_tests.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct Layout {
+    /// Where `name`'s file lives under the tier directory.
+    pub path: fn(&Path, &str) -> PathBuf,
+    /// The deploy record, beside the files in the tier.
+    pub record: &'static str,
+    /// `skill` or `agent`.
+    pub kind: &'static str,
+}
+
+/// The skills' layout: `<tier>/<stem>/SKILL.md`, recorded in [`RECORD_FILE`].
+pub const SKILL_LAYOUT: Layout = Layout {
+    path: skill_path,
+    record: RECORD_FILE,
+    kind: "skill",
+};
 
 /// One skill's state in the project tier, against the shipped bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,8 +248,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// An unreadable or malformed record is also empty, plus the error line it
 /// returns: with no record a differing copy counts as project-custom, so
 /// nothing is lost, and the caller must not trust the shipped history either.
-fn load_record(skills_dir: &Path) -> (Record, Option<String>) {
-    let path = skills_dir.join(RECORD_FILE);
+fn load_record(dir: &Path, record_file: &str) -> (Record, Option<String>) {
+    let path = dir.join(record_file);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -293,13 +327,14 @@ fn resolve_lenient(path: &Path) -> PathBuf {
 /// would send the write there.
 /// What: compares real paths, so a symlink anywhere in `tier` is followed.
 /// Test: `a_tier_resolving_onto_a_reserved_dir_is_refused`.
-fn reserved_conflict(tier: &Path, reserved: &[PathBuf]) -> Option<String> {
+pub(crate) fn reserved_conflict(tier: &Path, reserved: &[PathBuf], kind: &str) -> Option<String> {
     let real = resolve_lenient(tier);
     reserved.iter().find_map(|dir| {
         let real_reserved = resolve_lenient(dir);
         real.starts_with(&real_reserved).then(|| {
             format!(
-                "{} resolves onto {}, a tier shared skills deploy to; the Architect's                  skills are never written there",
+                "{} resolves onto {}, a tier shared {kind}s deploy to; the Architect's \
+                 {kind}s are never written there",
                 tier.display(),
                 real_reserved.display()
             )
@@ -325,7 +360,7 @@ pub fn deploy_architect_skills(
     skills: &[ArchitectSkill],
 ) -> DeployReport {
     let tier = project_tier(project_dir);
-    if let Some(why) = reserved_conflict(&tier, reserved) {
+    if let Some(why) = reserved_conflict(&tier, reserved, SKILL_LAYOUT.kind) {
         return DeployReport {
             errors: vec![why],
             ..DeployReport::default()
@@ -376,13 +411,21 @@ pub fn deploy_resolved(
 /// `a_byte_equal_seed_is_adopted_then_refreshed`,
 /// `a_second_run_writes_nothing`, `a_blocked_skill_dir_is_an_error_line`.
 pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> DeployReport {
+    deploy_into(skills_dir, skills, &SKILL_LAYOUT)
+}
+
+/// [`deploy_skills_into`] for any [`Layout`]: the one deploy loop the skills
+/// and, since #10161 D3c, the Architect agents share.
+///
+/// Test: `a_second_init_follows_the_shipped_history_and_keeps_an_edit`.
+pub fn deploy_into(dir: &Path, skills: &[ArchitectSkill], layout: &Layout) -> DeployReport {
     let mut report = DeployReport::default();
-    let (mut record, record_error) = load_record(skills_dir);
+    let (mut record, record_error) = load_record(dir, layout.record);
     let trust_history = record_error.is_none();
     report.errors.extend(record_error);
     let mut record_changed = false;
     for skill in skills {
-        let path = skill_path(skills_dir, skill.stem);
+        let path = (layout.path)(dir, skill.stem);
         let shipped = skill.contents.as_bytes();
         let shipped_hash = sha256_hex(shipped);
         match classify(&path, skill, record.deployed.get(skill.stem), trust_history) {
@@ -408,8 +451,9 @@ pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> Deplo
                 // #9540: df-D22 — the project's edit wins; never back up and replace.
                 tracing::warn!(
                     path = %path.display(),
-                    "architect skill {} differs from the last deployed copy: kept as \
+                    "architect {} {} differs from the last deployed copy: kept as \
                      project-custom, not refreshed",
+                    layout.kind,
                     skill.stem
                 );
                 report.kept_custom.push(skill.stem.to_owned());
@@ -418,7 +462,7 @@ pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> Deplo
         }
     }
     if record_changed {
-        let path = skills_dir.join(RECORD_FILE);
+        let path = dir.join(layout.record);
         let body = serde_json::to_vec_pretty(&record).unwrap_or_default();
         if let Err(err) = trusty_common::atomic_file::write_atomic(&path, &body) {
             report
@@ -438,7 +482,7 @@ pub fn inspect(
     skills_dir: &Path,
     skills: &[ArchitectSkill],
 ) -> (Vec<(&'static str, SkillState)>, Option<String>) {
-    let (record, record_error) = load_record(skills_dir);
+    let (record, record_error) = load_record(skills_dir, RECORD_FILE);
     let states = skills
         .iter()
         .map(|skill| {
@@ -481,7 +525,7 @@ pub fn health_with(
     skills: &[ArchitectSkill],
 ) -> (bool, String) {
     let tier = project_tier(project_dir);
-    if let Some(why) = reserved_conflict(&tier, reserved) {
+    if let Some(why) = reserved_conflict(&tier, reserved, SKILL_LAYOUT.kind) {
         return (false, format!("deploy refused: {why}"));
     }
     let (states, record_error) = inspect(&tier, skills);

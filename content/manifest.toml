@@ -267,6 +267,26 @@ path = "agents/web-ui-engineer.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/architect/agents/drift-guard.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/agents/event-extractor.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/agents/improvement-curator.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/agents/improver.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/agents/runner.md"
+version = "0.1.0"
+
+[[member]]
 path = "instructions/architect/skills/architect-completion-standard.md"
 version = "0.1.0"
 
@@ -279,6 +299,10 @@ path = "instructions/architect/skills/architect-drift-check.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/architect/skills/architect-drift-guard.md"
+version = "0.1.0"
+
+[[member]]
 path = "instructions/architect/skills/architect-github.md"
 version = "0.1.0"
 
@@ -288,6 +312,10 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-improvements.md"
+version = "0.1.0"
+
+[[member]]
+path = "instructions/architect/skills/architect-improver.md"
 version = "0.1.0"
 
 [[member]]

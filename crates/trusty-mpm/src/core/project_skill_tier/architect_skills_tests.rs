@@ -257,7 +257,7 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 17] = [
+    const PINNED: [(&str, &str); 19] = [
         (
             "tm-fleet-check",
             "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
@@ -316,7 +316,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-improvements",
-            "bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0",
+            "8842ef9456b59bcd78aaf24ff74a0c9c8b7cf80b55db06e209386fdf5182a012",
         ),
         (
             "architect-host-admin",
@@ -326,10 +326,18 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "architect-dashboard",
             "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
         ),
+        (
+            "architect-drift-guard",
+            "228a8d37f9b0a73de888918c4e2fb5bf9b4b3f055f69d5861d1d9b5713c42deb",
+        ),
+        (
+            "architect-improver",
+            "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
+        ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 12] = [
+    const FIRST_RELEASE: [&str; 13] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
@@ -339,9 +347,10 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         "architect-review",
         "architect-project-provision",
         "architect-macos",
-        "architect-improvements",
         "architect-host-admin",
         "architect-dashboard",
+        "architect-drift-guard",
+        "architect-improver",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

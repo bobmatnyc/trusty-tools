@@ -311,6 +311,8 @@ pub fn ensure_project_skill_tier_for_version(
 pub mod architect_skills;
 // #9132: the Architect seed files, read from content instead of compiled in.
 pub mod architect_seed;
+// #10161 D3c: the Architect-only agents, seeded beside the skills.
+pub mod architect_agents;
 
 #[cfg(test)]
 #[path = "project_skill_tier_tests.rs"]

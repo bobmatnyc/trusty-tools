@@ -16,7 +16,9 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `skills/architect-*.md` | The fifteen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check, dashboard). Seeded the same way. |
+| `skills/architect-*.md` | The seventeen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check, dashboard, drift guard, improver). Seeded the same way. |
+| `agents/*.md` | The Architect's five agents: `runner` (one read-only shell check), `event-extractor` (one PM message as an event line, checked by `scripts/verify-claim.py`), `improvement-curator`, `improver` and `drift-guard`. Architect only: `tm fleet init` writes them into the Architect project's `.claude/agents/`, never a PM agent tier. A re-run refreshes an agent nobody edited and keeps an edited one, as for the skills. |
+| `scripts/verify-claim.py`, `scripts/verify_claim_input.py` | Checks the claims in one PM-message event (PR head, base, merge commit, state, checks, issues, crates.io version, CI run) with read-only gh, git and crates.io calls; prints `MATCH`, `MISMATCH` or `UNCHECKED` per claim. The repo map and the gh config dir per GitHub owner come from `repos` in `local/architect.json`. Run by the `event-extractor` agent by path; nothing runs it by default. |
 | `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`), and the `architect.json` config seed with no owner values. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
@@ -142,7 +144,7 @@ a start that fails fails the command.
 
 ## Not here yet
 
-The question collector, the token-optimizer skill, the usage feed (the
+The question collector, the token-optimizer skill and agent, the usage feed (the
 dashboard's Accounts rows and the Live view's feed file) and `fleet-restart`
 stay in the prototype for now (#8536).
 
@@ -191,7 +193,8 @@ Copy each file only if the target is absent. Never overwrite an edited one.
 ```sh
 src=<src>
 mkdir -p "$dir/scripts" "$dir/local/projects" "$dir/local/users" "$dir/local/briefs" \
-  "$dir/local/improvements" "$dir/docs/architect"
+  "$dir/local/improvements/runs" "$dir/local/improver/runs" "$dir/local/drift-guard/runs" \
+  "$dir/.claude/agents" "$dir/docs/architect"
 cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
 cp -Rn "$src/templates/local/."         "$dir/local/"
@@ -203,8 +206,10 @@ for f in "$src"/skills/tm-fleet-check.md "$src"/skills/tm-context-refresh.md "$s
   mkdir -p "$dir/.claude/skills/$stem"
   cp -n "$f" "$dir/.claude/skills/$stem/SKILL.md"
 done
+cp -n "$src"/agents/*.md "$dir/.claude/agents/"
 chmod 755 "$dir/scripts/fleet-poll.py" "$dir/scripts/input-state.py" \
-  "$dir/scripts/start-fleet-poll.sh" "$dir/scripts/relay.sh" "$dir/scripts/posted.sh"
+  "$dir/scripts/start-fleet-poll.sh" "$dir/scripts/relay.sh" "$dir/scripts/posted.sh" \
+  "$dir/scripts/verify-claim.py"
 ```
 
 This is the same set `tm fleet init` writes. The setup skill
