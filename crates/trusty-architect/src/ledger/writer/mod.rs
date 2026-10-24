@@ -41,7 +41,6 @@ use self::journal::{
 };
 use crate::clock::Clock;
 use crate::error::LedgerError;
-use crate::ledger::ids::LedgerId;
 use crate::ledger::limits::{SIZE_REFUSE, SIZE_WARN, SizeVerdict, check_writable, size_verdict};
 use crate::ledger::model::{ArchiveLine, Archived, Extra, LogLine, State};
 use crate::ledger::ops::{self, Context, Now};
@@ -191,10 +190,8 @@ impl<'a> Writer<'a> {
                 st.v
             )));
         }
-        let archived = archived_ids(&paths)?;
         let answered = answered_times(&paths)?;
         let cx = Context {
-            archived: &archived,
             answered: &answered,
             now: &now,
         };
@@ -391,18 +388,6 @@ impl Commit<'_> {
         complete(self.paths, &journal, faults)?;
         Ok(result)
     }
-}
-
-/// Ids in `archive.jsonl` (LDG-2.2.3: an archived id is never reissued).
-/// #9758: a read error refuses the batch; only a missing file is empty.
-/// Test: `ledger_writer_never_reissues_an_archived_id_past_a_non_utf8_archive_line`.
-fn archived_ids(paths: &StorePaths) -> Result<Vec<LedgerId>, LedgerError> {
-    let text = read_lossy(&paths.archive)?.unwrap_or_default();
-    let id = |l: &str| {
-        let v: Value = serde_json::from_str(l).ok()?;
-        LedgerId::parse(v["item"]["id"].as_str()?).ok()
-    };
-    Ok(text.lines().filter_map(id).collect())
 }
 
 /// The last `answered` time per id in `log.jsonl`, either log shape.

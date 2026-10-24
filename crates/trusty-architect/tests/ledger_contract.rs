@@ -262,9 +262,9 @@ fn ledger_two_sessions_in_one_checkout_get_two_stores() -> R {
     assert_ne!(a.dir, b.dir);
     let mut sa = ledger::load_for_write(&a)?;
     let mut sb = ledger::load_for_write(&b)?;
-    assert_eq!(sa.allocate(Prefix::Task, &[])?.to_string(), "xa-T01");
-    assert_eq!(sa.allocate(Prefix::Task, &[])?.to_string(), "xa-T02");
-    assert_eq!(sb.allocate(Prefix::Task, &[])?.to_string(), "xb-T01");
+    assert_eq!(sa.allocate(Prefix::Task)?.to_string(), "xa-T01");
+    assert_eq!(sa.allocate(Prefix::Task)?.to_string(), "xa-T02");
+    assert_eq!(sb.allocate(Prefix::Task)?.to_string(), "xb-T01");
     // Same code and session again is a no-op that keeps the store.
     let before = fs::read(&a.state)?;
     ledger::init_store(
