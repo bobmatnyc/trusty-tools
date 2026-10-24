@@ -135,39 +135,88 @@ def fsync_dir(path):
 
 
 # ---- change log --------------------------------------------------------------
-def _read_tail_line(path):
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - 8192))
-            lines = [ln for ln in f.read().split(b"\n") if ln]
-    except FileNotFoundError:
-        return None
-    return json.loads(lines[-1]) if lines else None
+_TAIL_CHUNK = 8192
 
 
-def _read_first_line(path):
+def _change_entry(raw):
+    """One change-log line -> its entry dict, or None when it is not a JSON object with an integer seq."""
+    try:
+        entry = json.loads(raw)
+    except ValueError:      # also UnicodeDecodeError
+        return None
+    seq = entry.get("seq") if isinstance(entry, dict) else None
+    return entry if isinstance(seq, int) and not isinstance(seq, bool) else None
+
+
+def _read_tail(path):
+    """Why: #10225 — a fixed 8 KiB window and a strict parse of the last line let one torn or oversized line make
+    every later append fail, so every later write skipped the audit log.
+    What: scans path backwards in chunks to the newest line that is a valid entry, however long. Returns
+    (entry or None, torn, skipped): torn is True when the file does not end in LF, skipped counts the lines after
+    that entry that are not valid entries. (None, False, 0) for an absent or empty file.
+    Test: `test_corrupt_change_log_tail_does_not_block_later_appends`
+    """
+    try:
+        f = open(path, "rb")
+    except FileNotFoundError:
+        return None, False, 0
+    with f:
+        pos = f.seek(0, os.SEEK_END)
+        if pos == 0:
+            return None, False, 0
+        f.seek(pos - 1)
+        torn = f.read(1) != b"\n"
+        carry, skipped = b"", 0
+        while pos > 0:
+            step = min(_TAIL_CHUNK, pos)
+            pos -= step
+            f.seek(pos)
+            parts = (f.read(step) + carry).split(b"\n")
+            carry = parts[0]                # may continue in the previous chunk
+            for raw in reversed(parts[1:] if pos else parts):
+                if not raw.strip():
+                    continue
+                entry = _change_entry(raw)
+                if entry is not None:
+                    return entry, torn, skipped
+                skipped += 1
+    return None, torn, skipped
+
+
+def _read_first_entry(path):
+    """The first valid entry of path (None when it has none); a corrupt line cannot date the file for rotation."""
     try:
         with open(path, "rb") as f:
-            first = f.readline()
+            for raw in f:
+                entry = _change_entry(raw) if raw.strip() else None
+                if entry is not None:
+                    return entry
     except FileNotFoundError:
-        return None
-    return json.loads(first) if first.strip() else None
+        pass
+    return None
 
 
 def append_changes(root, entries, ts):
     """Append entries (dicts without seq/ts) to changes.jsonl; rotate first when the file is from an earlier month.
-    ts is an ISO UTC string. Returns the number written."""
+    ts is an ISO UTC string. Returns the number written.
+    A torn or corrupt tail is not fatal and not trusted (#10225): seq continues from the newest valid entry, a torn
+    line is terminated so the new entries start on their own line, the corruption is reported on stderr, and fsck
+    keeps reporting the bad line."""
     if not entries:
         return 0
     path = os.path.join(root, CHANGES)
-    last = _read_tail_line(path)
+    # #10225: read past a torn/oversized/invalid tail instead of raising on it, which blocked every later append.
+    last, torn, skipped = _read_tail(path)
+    if torn or skipped:
+        sys.stderr.write(f"dashboard-jsonl: {path}: corrupt line(s) at the end of the change log "
+                         f"({skipped} invalid, torn={torn}); appending after them, seq continues from "
+                         f"{(last or {}).get('seq', 0)}; run fsck\n")
     seq = (last or {}).get("seq", 0)
-    first = _read_first_line(path)
-    if first and str(first.get("ts", ""))[:7] not in ("", ts[:7]):
+    first = _read_first_entry(path)
+    rotated = bool(first) and str(first.get("ts", ""))[:7] not in ("", ts[:7])
+    if rotated:
         os.replace(path, os.path.join(root, f"changes-{str(first['ts'])[:7]}.jsonl"))
-    lines = []
+    lines = ["\n"] if torn and not rotated else []
     for e in entries:
         seq += 1
         lines.append(canonical(dict(e, seq=seq, ts=ts)) + "\n")
@@ -184,16 +233,31 @@ def changed_keys(old, new):
     return sorted(k for k in set(old) | set(new) if k not in old or k not in new or canonical(old[k]) != canonical(new[k]))
 
 
-def read_changes(root):
-    """All entries of changes.jsonl in order (rotated months are not read)."""
-    out = []
+def _scan_changes(root):
+    """(entries, problems) of changes.jsonl: the valid entries in order, and one problem per line that is not one.
+    #10225: shared by read_changes (refuses any problem) and fsck (reports each one and checks the rest)."""
+    path = os.path.join(root, CHANGES)
+    out, problems = [], []
     try:
-        with open(os.path.join(root, CHANGES), "rb") as f:
-            for raw in f:
-                if raw.strip():
-                    out.append(json.loads(raw))
+        with open(path, "rb") as f:
+            for n, raw in enumerate(f, 1):
+                if not raw.strip():
+                    continue
+                entry = _change_entry(raw)
+                if entry is None:
+                    problems.append(f"{path}:{n}: invalid change line (torn, not JSON, or no integer seq)")
+                else:
+                    out.append(entry)
     except FileNotFoundError:
         pass
+    return out, problems
+
+
+def read_changes(root):
+    """All entries of changes.jsonl in order (rotated months are not read); JsonlError on a corrupt line."""
+    out, problems = _scan_changes(root)
+    if problems:
+        raise JsonlError(problems[0])
     return out
 
 
@@ -216,7 +280,9 @@ def fsck(root):
         for doc_id, (version, data) in docs.items():
             lines[(coll, doc_id)] = sha256(render_line(doc_id, version, data))
     last = {}
-    for e in read_changes(root):
+    changes, bad = _scan_changes(root)
+    problems.extend(bad)
+    for e in changes:
         last[(e.get("coll"), e.get("id"))] = e
     for key, e in sorted(last.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
         want = e.get("sha256")

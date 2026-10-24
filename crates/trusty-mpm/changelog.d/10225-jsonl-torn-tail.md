@@ -1,0 +1,2 @@
+Fixed
+- The Architect dashboard store's change log no longer stops recording after one bad line. A torn, invalid, or oversized last line in `changes.jsonl` used to make every later write skip the audit log. Appends now continue after the newest valid entry and warn on stderr. A torn line gets a terminating newline first. `fsck` reports each bad line, and `read_changes` refuses the file instead of crashing (#10225).
