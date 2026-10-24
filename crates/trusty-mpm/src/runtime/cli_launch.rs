@@ -276,14 +276,16 @@ pub fn send_spec_launch(
 
 /// [`send_spec_launch`] with the tmux binary and the wrapper named (test seam).
 ///
-/// What: writes the spec (mode 0600), reads it back ([`LaunchSpec::verify`]),
+/// What: names the spec after `session`
+/// ([`super::remote_name::named_after_session`], #9025), writes it (mode 0600), reads it back ([`LaunchSpec::verify`]),
 /// then types the line via [`crate::core::tmux::send_launch_line`], which
 /// refuses a line over `MAX_PANE_COMMAND_BYTES` before tmux runs (#8308). On
 /// any failure after the write it removes the spec, since it carries
 /// credentials and no shim will consume it.
 /// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
 /// `send_spec_launch_removes_the_spec_when_tmux_fails`,
-/// `cli_launch_paths_type_through_the_guard`.
+/// `cli_launch_paths_type_through_the_guard`,
+/// `a_cli_launch_is_named_after_its_tmux_session`.
 pub(crate) fn send_spec_launch_with(
     tmux_bin: Option<&str>,
     wrapper: &str,
@@ -291,6 +293,8 @@ pub(crate) fn send_spec_launch_with(
     spec: &LaunchSpec,
     spec_dir: &Path,
 ) -> Result<(), CliLaunchError> {
+    // #9025: every CLI and fleet launch names itself after its tmux session.
+    let spec = &super::remote_name::named_after_session(spec, session);
     let path = spec.write_in(spec_dir)?;
     let result = LaunchSpec::verify(&path)
         .map_err(CliLaunchError::from)
