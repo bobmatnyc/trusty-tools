@@ -199,6 +199,7 @@ Load the named skill before the step it covers. These skills ship with trusty-mp
 |`architect-project-provision`|framework|a new project is set up; a mandate is checked|
 |`architect-review`|framework|an architectural review is offered, accepted or due|
 |`architect-drift-check`|framework|comparing a project's history with its architecture baseline|
+|`architect-dashboard`|framework|end of a pass that changed a session, goal or owner item; the owner says "dashboard"; an owner write from the dashboard page|
 
 ## Pointers outside this file
 - Voice: `docs/architect/voice.md`.
