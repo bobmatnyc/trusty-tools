@@ -1352,6 +1352,32 @@ fn inplace_exec_command_for_follows_the_configured_renderer() {
     }
 }
 
+/// #9025: the bare-`tm` relaunch execs `claude` past both spec delivery
+/// points, so the argv that reaches `exec` leads with `--name <tmux session>`,
+/// and an argv that already names itself is kept.
+/// Test: this test.
+#[test]
+fn an_inplace_relaunch_is_named_after_its_session() {
+    let exec_args = |resume: &trusty_mpm::runtime::InPlaceResumeCommand| -> Vec<String> {
+        build_inplace_exec_command(resume, std::path::Path::new("/fake/cwd"), &no_gh(), false)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    let unnamed = synthetic_resume(&["--append-system-prompt-file", "/p"]);
+    let args = exec_args(&unnamed.named_after_session("tm-dogfood"));
+    assert_eq!(
+        args,
+        ["--name", "tm-dogfood", "--append-system-prompt-file", "/p"]
+    );
+
+    let named = synthetic_resume(&["--name", "mine", "--resume", "abc"]);
+    assert_eq!(
+        exec_args(&named.named_after_session("tm-dogfood")),
+        ["--name", "mine", "--resume", "abc"]
+    );
+}
+
 /// #8992: the bare-`tm` in-place relaunch is a PM resume, so it carries
 /// `CLAUDE_CODE_DISABLE_ARTIFACT=1` and the `--disallowedTools` value; a
 /// supervisor relaunch keeps every tool. Before the fix the exec seam set no

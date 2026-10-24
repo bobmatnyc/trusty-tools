@@ -13,7 +13,8 @@
 //! [`crate::runtime::remote_name::remote_name_drifts`]. It never writes the
 //! store, touches a tmux session, or renames a `claude`.
 //! Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
-//! `the_doctor_row_flags_a_remote_name_that_left_its_tmux_session`.
+//! `the_doctor_row_flags_a_remote_name_that_left_its_tmux_session`,
+//! `a_pane_the_probe_could_not_read_is_reported_unchecked`.
 
 use std::collections::BTreeSet;
 
@@ -35,32 +36,49 @@ pub(crate) const NAME: &str = "session_names";
 /// probed for a `claude` pid only when the tmux driver reports one present,
 /// so a driver that cannot inspect panes runs no process probe. The probe
 /// and the bounded registry read run off the async executor.
-/// Test: `the_doctor_row_flags_a_live_pane_under_another_name`.
+/// Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
+/// `a_pane_the_probe_could_not_read_is_reported_unchecked`.
 pub(crate) async fn check_session_names(mgr: &SessionManager) -> DoctorCheck {
     let drifts = mgr.name_drifts().await;
     let sessions = managed_sessions(mgr, drifts.as_deref().unwrap_or_default()).await;
     let tmux = mgr.tmux.clone();
-    // #9025: the name each managed `claude` shows peers.
-    let remote = tokio::task::spawn_blocking(move || {
-        remote_name::remote_name_drifts(
+    // #9025: the name each managed `claude` shows peers. A pane whose
+    // `pane_claude` answer is neither Present nor Absent is collected, not
+    // skipped, so the row can say it was not checked.
+    let (remote, unchecked) = tokio::task::spawn_blocking(move || {
+        let unchecked = std::cell::RefCell::new(Vec::new());
+        let remote = remote_name::remote_name_drifts(
             &sessions,
-            |s| {
-                (tmux.pane_claude(s) == PaneClaude::Present)
-                    .then(|| {
-                        crate::core::process::find_claude_pid_in_tmux(
-                            s,
-                            1,
-                            std::time::Duration::ZERO,
-                        )
-                    })
-                    .flatten()
+            |s| match tmux.pane_claude(s) {
+                PaneClaude::Absent => None,
+                PaneClaude::Present => {
+                    let pid = crate::core::process::find_claude_pid_in_tmux(
+                        s,
+                        1,
+                        std::time::Duration::ZERO,
+                    );
+                    if pid.is_none() {
+                        unchecked.borrow_mut().push(s.to_owned());
+                    }
+                    pid
+                }
+                PaneClaude::Unknown => {
+                    unchecked.borrow_mut().push(s.to_owned());
+                    None
+                }
             },
             remote_name::read_registry,
-        )
+        );
+        (remote, unchecked.into_inner())
     })
     .await
-    .unwrap_or_else(|e| Err(format!("the remote-name probe did not finish: {e}")));
-    session_names_row(drifts, remote)
+    .unwrap_or_else(|e| {
+        (
+            Err(format!("the remote-name probe did not finish: {e}")),
+            Vec::new(),
+        )
+    });
+    session_names_row(drifts, remote, &unchecked)
 }
 
 /// The live tmux name of every non-terminal record: the drifted name when
@@ -81,19 +99,22 @@ async fn managed_sessions(mgr: &SessionManager, drifts: &[NameDrift]) -> Vec<Str
 
 /// The row for a [`SessionManager::name_drifts`] and a remote-name answer.
 ///
-/// What: `Unknown` when tmux could not be listed. `Ok` when no record's pane
-/// is live under another name and no managed `claude` shows another remote
-/// name; a registry that could not be read says so in the `Ok` message.
-/// Otherwise `Warn`: one line per record naming its id, recorded name, pane
-/// and current name — a terminal record's line names the reactivate route,
-/// since it is hidden from `tm ls`, and a live record's line says the next
-/// `tm ls` follows the rename unless another record holds the name — then
-/// one line per #9025 remote-name drift naming the `/rename` that fixes it.
+/// What: `Unknown` when tmux could not be listed. Otherwise `Warn`: one line
+/// per record naming its id, recorded name, pane and current name — a
+/// terminal record's line names the reactivate route, since it is hidden from
+/// `tm ls`, and a live record's line says the next `tm ls` follows the rename
+/// unless another record holds the name — then one line per #9025 remote-name
+/// drift naming the `/rename` that fixes it. With neither, `Ok` when every
+/// check ran; `Unknown` when the remote-name check did not run (`remote` is
+/// `Err`) or `unchecked` names panes it could not probe, with the reason in
+/// the message. A `Warn` also carries those notes.
 /// Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
-/// `the_doctor_row_flags_a_remote_name_that_left_its_tmux_session`.
+/// `the_doctor_row_flags_a_remote_name_that_left_its_tmux_session`,
+/// `a_pane_the_probe_could_not_read_is_reported_unchecked`.
 pub(crate) fn session_names_row(
     drifts: Result<Vec<NameDrift>, ManagedError>,
     remote: Result<Vec<RemoteNameDrift>, String>,
+    unchecked: &[String],
 ) -> DoctorCheck {
     let drifts = match drifts {
         Ok(d) => d,
@@ -109,23 +130,37 @@ pub(crate) fn session_names_row(
     if !drifts.is_empty() {
         parts.push(record_part(&drifts));
     }
-    // #9025: a remote name that left its tmux session.
-    let unchecked = match remote {
-        Ok(remote) if !remote.is_empty() => {
-            parts.push(remote_part(&remote));
-            None
-        }
-        Ok(_) => None,
-        Err(why) => Some(why),
-    };
+    // #9025: a remote name that left its tmux session; a check that did not
+    // run is `Unknown`, never `Ok`.
+    let mut notes = Vec::new();
+    match remote {
+        Ok(remote) if !remote.is_empty() => parts.push(remote_part(&remote)),
+        Ok(_) => {}
+        Err(why) => notes.push(format!("remote names were not checked ({why})")),
+    }
+    if !unchecked.is_empty() {
+        notes.push(format!(
+            "{} session(s) could not be probed for a claude, so their remote names were not \
+             checked: {}",
+            unchecked.len(),
+            unchecked.join(", ")
+        ));
+    }
     if parts.is_empty() {
         let mut message =
             "every managed record whose pane is live carries its tmux session's name".to_owned();
-        if let Some(why) = unchecked {
-            message.push_str(&format!("; remote names were not checked ({why})"));
+        for note in &notes {
+            message.push_str("; ");
+            message.push_str(note);
         }
-        return DoctorCheck::new(NAME, CheckStatus::Ok, message);
+        let status = if notes.is_empty() {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Unknown
+        };
+        return DoctorCheck::new(NAME, status, message);
     }
+    parts.extend(notes);
     DoctorCheck::new(NAME, CheckStatus::Warn, parts.join("; "))
 }
 

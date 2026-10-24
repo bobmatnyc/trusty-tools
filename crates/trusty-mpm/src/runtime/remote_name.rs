@@ -5,10 +5,13 @@
 //! must equal its tmux session name, with no manual `/rename`. Without a name
 //! Claude Code generates one (`trusty-tools-a7`), so the operator could not
 //! tell which tmux session a remote entry belonged to.
-//! What: [`named_after_session`] adds `--name <tmux session>` to a launch spec;
-//! the two delivery choke points — `managed_launch::deliver_in` for the
-//! daemon's spawn and resume, `cli_launch::send_spec_launch_with` for every
-//! CLI and fleet launch — call it, so no launch path can skip it. A later
+//! What: [`ensure_name_arg`] is the one argv rule. [`named_after_session`]
+//! applies it to a launch spec at the two spec delivery points,
+//! `managed_launch::deliver_in` (the daemon's spawn and resume) and
+//! `cli_launch::send_spec_launch_with` (the CLI and fleet launches); the
+//! bare-`tm` in-place relaunch, which execs `claude` without a spec, applies
+//! it through `InPlaceResumeCommand::named_after_session`. A launch path that
+//! builds its own argv outside those three must call the rule itself. A later
 //! `tmux rename-session` is not followed live; [`remote_name_drifts`] finds
 //! the mismatch from Claude Code's own registry, and the `session_names`
 //! doctor row reports it.
@@ -36,15 +39,25 @@ pub const NAME_FLAG: &str = "--name";
 /// `an_attach_or_an_already_named_spec_is_left_alone`.
 pub fn named_after_session(spec: &LaunchSpec, session: &str) -> LaunchSpec {
     let mut named = spec.clone();
-    let attach = named.args.first().is_some_and(|a| a == "attach");
-    let has_name = named.args.iter().any(|a| a == NAME_FLAG || a == "-n");
+    ensure_name_arg(&mut named.args, session);
+    named
+}
+
+/// Put `--name <session>` at the front of `args` unless they already name it.
+///
+/// Why: the one argv rule, shared by [`named_after_session`] and the bare-`tm`
+/// in-place relaunch, which builds a bare argv rather than a [`LaunchSpec`].
+/// What: leaves `args` unchanged when they are `attach <id>` or already carry
+/// `--name`/`-n`; otherwise inserts the pair at index 0.
+/// Test: `a_spec_is_named_after_its_session`,
+/// `an_attach_or_an_already_named_spec_is_left_alone`.
+pub fn ensure_name_arg(args: &mut Vec<String>, session: &str) {
+    let attach = args.first().is_some_and(|a| a == "attach");
+    let has_name = args.iter().any(|a| a == NAME_FLAG || a == "-n");
     if !attach && !has_name {
         // #9025: the remote name equals the tmux session name.
-        named
-            .args
-            .splice(0..0, [NAME_FLAG.to_owned(), session.to_owned()]);
+        args.splice(0..0, [NAME_FLAG.to_owned(), session.to_owned()]);
     }
-    named
 }
 
 /// One managed session whose remote name is not its tmux session name.

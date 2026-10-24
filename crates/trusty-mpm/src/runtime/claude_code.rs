@@ -442,6 +442,21 @@ pub struct InPlaceResumeCommand {
     pub profile: crate::core::session_profile::SessionProfile,
 }
 
+impl InPlaceResumeCommand {
+    /// This command with `--name <session>` leading its argv (#9025).
+    ///
+    /// Why: the bare-`tm` relaunch execs `claude` directly, past both delivery
+    /// choke points that name a launch, so it must apply the rule itself.
+    /// What: [`super::remote_name::ensure_name_arg`] over `args`, the one rule
+    /// [`super::remote_name::named_after_session`] also uses.
+    /// Test: `an_inplace_relaunch_is_named_after_its_session` in the `tm` binary.
+    #[must_use]
+    pub fn named_after_session(mut self, session: &str) -> Self {
+        super::remote_name::ensure_name_arg(&mut self.args, session);
+        self
+    }
+}
+
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
 ///
 /// Why: separating the resume/fresh SELECTION from claude-binary

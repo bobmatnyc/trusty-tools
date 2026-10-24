@@ -716,7 +716,9 @@ pub(crate) async fn run_inplace_relaunch(
         &cwd,
         record.claude_session_id.as_deref(),
     ) {
-        Ok(resume) => resume,
+        // #9025: this exec bypasses both spec delivery points, so name the
+        // session here; the record's name is the tmux session's.
+        Ok(resume) => resume.named_after_session(&record.name),
         Err(e) => {
             return InPlaceOutcome::Result(Err(anyhow::anyhow!(
                 "cannot build in-place relaunch command: {e}"
