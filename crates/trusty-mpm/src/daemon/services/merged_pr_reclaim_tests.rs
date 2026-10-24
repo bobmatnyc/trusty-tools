@@ -83,6 +83,7 @@ fn outcome_with(removal_failed: Vec<String>, removed: Vec<PathBuf>) -> ReclaimOu
         refused_at_recheck: Vec::new(),
         removal_failed,
         partially_removed: Vec::new(),
+        cancelled_unstarted: Vec::new(),
     }
 }
 
@@ -192,6 +193,7 @@ async fn reclaim_on_an_empty_root_reclaims_nothing() {
         ReclaimMode::Remove,
         None,
         crate::session_manager::worktree_scope::WorktreeScope::all(),
+        crate::session_manager::prune_progress::PruneCancel::never(),
     )
     .await
     .expect("the probe assembly must not panic");

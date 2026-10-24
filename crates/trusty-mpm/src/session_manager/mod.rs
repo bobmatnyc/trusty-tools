@@ -46,6 +46,8 @@ pub mod pane_identity;
 // #9313: re-bind a record to its live pane after a tmux server replacement.
 pub mod pane_rebind;
 pub mod prune;
+// #7619: the stop signal both destructive prune loops read between candidates.
+pub mod prune_progress;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
