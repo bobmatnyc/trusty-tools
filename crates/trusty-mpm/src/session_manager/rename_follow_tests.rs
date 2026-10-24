@@ -442,3 +442,37 @@ async fn the_doctor_row_flags_a_live_pane_under_another_name() {
         CheckStatus::Unknown
     );
 }
+
+/// #9025 rename case: a tmux session renamed after launch leaves its `claude`
+/// under the old remote name, and the doctor row warns with the `/rename`
+/// that fixes it. A registry that could not be read is said, not hidden.
+#[test]
+fn the_doctor_row_flags_a_remote_name_that_left_its_tmux_session() {
+    use crate::daemon::doctor::doctor_session_names::session_names_row;
+    use crate::runtime::remote_name::RemoteNameDrift;
+    let drift = RemoteNameDrift {
+        session: "tm-dogfood".to_owned(),
+        pid: 4242,
+        remote: "trusty-tools-a7".to_owned(),
+    };
+    let row = session_names_row(Ok(Vec::new()), Ok(vec![drift]));
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(row.message.starts_with("1 session(s)"), "{}", row.message);
+    assert!(
+        row.message.contains(
+            "tmux session 'tm-dogfood' runs claude pid 4242 under the remote name \
+             'trusty-tools-a7'; type `/rename tm-dogfood` in that session"
+        ),
+        "{}",
+        row.message
+    );
+
+    let row = session_names_row(Ok(Vec::new()), Err("timed out".to_owned()));
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(
+        row.message
+            .ends_with("; remote names were not checked (timed out)"),
+        "{}",
+        row.message
+    );
+}
