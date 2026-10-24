@@ -354,7 +354,11 @@ pub fn head_sha(root_path: &Path) -> Option<String> {
         return None;
     }
     let sha = std::str::from_utf8(&out.stdout).ok()?.trim().to_owned();
-    if sha.is_empty() { None } else { Some(sha) }
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
 }
 
 /// The prefix of the only git stderr CONSISTENT with "there is genuinely no

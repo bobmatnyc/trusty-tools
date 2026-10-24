@@ -491,7 +491,7 @@ async fn stub_socket_named<F>(file_name: &str, handler: F) -> StubDaemon
 where
     F: Fn(&str, serde_json::Value) -> StubFuture + Send + Sync + 'static,
 {
-    use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
+    use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
     let dir = tempfile::TempDir::new().expect("tempdir for the stub socket");
     let socket = dir.path().join(file_name);

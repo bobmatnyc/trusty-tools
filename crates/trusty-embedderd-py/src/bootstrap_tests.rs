@@ -406,10 +406,9 @@ fn locate_uv_rejects_bad_explicit_override() {
     deny_uv();
     let err = locate_uv().unwrap_err();
     allow_uv();
-    assert!(
-        err.to_string()
-            .contains("does not point to an existing file")
-    );
+    assert!(err
+        .to_string()
+        .contains("does not point to an existing file"));
 }
 
 #[test]
@@ -419,11 +418,10 @@ fn materialize_project_writes_package_and_lock_skips_tests() {
     super::materialize_project(&dest).unwrap();
     assert!(dest.join("pyproject.toml").is_file());
     assert!(dest.join("uv.lock").is_file());
-    assert!(
-        dest.join("trusty_embed_sidecar")
-            .join("__main__.py")
-            .is_file()
-    );
+    assert!(dest
+        .join("trusty_embed_sidecar")
+        .join("__main__.py")
+        .is_file());
     assert!(dest.join("trusty_embed_sidecar").join("model.py").is_file());
     // tests/ dir is intentionally skipped at runtime materialization.
     assert!(
@@ -841,7 +839,7 @@ fn locate_uv_with_no_uv_and_the_fetch_on_never_fetches() {
 #[cfg(unix)]
 #[test]
 fn uv_step_failures_are_typed_for_the_retry_decision() {
-    use crate::venv_error::{FailureKind, failure_kind};
+    use crate::venv_error::{failure_kind, FailureKind};
     let tmp = tempfile::tempdir().unwrap();
     let sh = Path::new("/bin/sh");
     let run = |args: &[&str], timeout| {
@@ -890,7 +888,7 @@ fn uv_step_failures_are_typed_for_the_retry_decision() {
 #[cfg(unix)]
 #[test]
 fn a_build_after_a_failed_sync_starts_over_the_partial_venv() {
-    use crate::venv_error::{FailureKind, failure_kind};
+    use crate::venv_error::{failure_kind, FailureKind};
     let tmp = tempfile::tempdir().unwrap();
     let layout = resolve_layout_in(tmp.path());
     let net_down = tmp.path().join("net-down");
@@ -967,7 +965,7 @@ fn clear_unready_venv_spares_a_ready_venv_and_its_siblings() {
 #[cfg(unix)]
 #[test]
 fn a_smoke_test_network_exit_is_transient_and_other_exits_permanent() {
-    use crate::venv_error::{FailureKind, failure_kind};
+    use crate::venv_error::{failure_kind, FailureKind};
     let tmp = tempfile::tempdir().unwrap();
     let layout = resolve_layout_in(tmp.path());
     fs::create_dir_all(&layout.project_dir).unwrap();

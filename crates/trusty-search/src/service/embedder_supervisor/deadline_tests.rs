@@ -12,8 +12,8 @@
 //! Test: this file.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{LazyEmbedderHandle, SupervisorConfig};

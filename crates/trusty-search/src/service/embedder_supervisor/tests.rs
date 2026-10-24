@@ -1128,7 +1128,7 @@ exit 1
     #[tokio::test]
     #[serial_test::parallel]
     async fn search_health_reports_embedderd_rss_for_a_lazy_spawn_and_its_respawn() {
-        use crate::service::server::{SearchAppState, health_report};
+        use crate::service::server::{health_report, SearchAppState};
         let (_dir, binary) = write_mock_embedderd();
         wait_until_mock_answers(&binary).await;
         let handle = LazyEmbedderHandle::new(

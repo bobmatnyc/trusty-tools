@@ -6,9 +6,9 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Output};
 use std::time::Duration;
 
-use super::repo::{Repo, mkfifo, release_fifo, slack_routes, tempdir, within};
+use super::repo::{mkfifo, release_fifo, slack_routes, tempdir, within, Repo};
 use crate::policy::gate::{object_id, run, with_git_timeout};
-use crate::policy::{GateError, check_default_branch};
+use crate::policy::{check_default_branch, GateError};
 
 fn gate(repo: &Repo) -> Result<crate::policy::BranchState, GateError> {
     let bytes = std::fs::read(repo.routes_file()).expect("read routes");

@@ -157,7 +157,7 @@ fn a_missing_file_and_an_outside_file_answer_one_body() {
 /// neither serves content nor reveals existence.
 #[test]
 fn a_held_index_answers_one_refusal_for_every_path() {
-    use crate::service::rpc::error::{CODE_UNAVAILABLE_PERMANENT, code_for, refusal_is_permanent};
+    use crate::service::rpc::error::{code_for, refusal_is_permanent, CODE_UNAVAILABLE_PERMANENT};
 
     let mut fx = fixture();
     // Deliberately unparsable (an unclosed `[` class): an exclude glob that

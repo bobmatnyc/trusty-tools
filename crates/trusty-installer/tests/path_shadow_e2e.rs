@@ -228,7 +228,7 @@ async fn no_shadow_warning_when_path_resolves_to_the_installed_binary() {
 #[tokio::test]
 async fn supervisor_bootstrap_runs_fully_isolated_alongside_the_path_shadow_precondition() {
     use trusty_installer::commands::plist_bootstrap::{
-        PLIST_LABEL, StubLaunchctl, SupervisorTarget, install_mpm_supervisor_for, resolve_uid,
+        install_mpm_supervisor_for, resolve_uid, StubLaunchctl, SupervisorTarget, PLIST_LABEL,
     };
 
     let tmp = tempfile::tempdir().expect("tempdir");

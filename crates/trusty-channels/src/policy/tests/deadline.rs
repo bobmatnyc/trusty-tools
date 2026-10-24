@@ -15,9 +15,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::load::{file_error, file_state};
-use super::repo::{Home, Repo, slack_routes, tempdir, within};
-use crate::policy::gate::{GIT_TIMEOUT, with_git_path};
-use crate::policy::{FileState, GateError, LoadReport, ProjectFileError, load_effective_until};
+use super::repo::{slack_routes, tempdir, within, Home, Repo};
+use crate::policy::gate::{with_git_path, GIT_TIMEOUT};
+use crate::policy::{load_effective_until, FileState, GateError, LoadReport, ProjectFileError};
 
 /// The caller's budget for one load.
 const DEADLINE: Duration = Duration::from_secs(1);
