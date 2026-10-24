@@ -1,7 +1,8 @@
 //! Write an executable that this process will exec, with no `ETXTBSY` window.
 //!
 //! See #10248. Every test in the workspace that writes a stub script or copies
-//! a binary and then execs it goes through [`write_executable`].
+//! a binary and then execs it goes through
+//! [`write_executable`](crate::exec_stub::write_executable).
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
