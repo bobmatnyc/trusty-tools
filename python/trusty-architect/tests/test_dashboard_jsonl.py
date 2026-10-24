@@ -131,6 +131,38 @@ def test_change_log_rotates_monthly(tmp_path):
     assert [c["seq"] for c in dj.read_changes(root)] == [2]
 
 
+# #10225: a torn or oversized tail line once made every later write skip the audit log.
+OVERSIZED = (dj.canonical({"actor": "x", "coll": "c", "id": "big", "keys": ["k" * 20000], "seq": 7, "ts": T}) + "\n").encode()
+
+
+@pytest.mark.parametrize("tail,seq,bad", [
+    (b'{"seq":9,"ts":"2026-10-1', 2, True),        # torn: no LF, invalid JSON
+    (b"garbage\n", 2, True),                        # terminated, invalid JSON
+    (OVERSIZED, 8, False),                          # valid, longer than any fixed tail window
+], ids=["torn", "garbage", "oversized"])
+def test_corrupt_change_log_tail_does_not_block_later_appends(tmp_path, capsys, tail, seq, bad):
+    s = store(tmp_path)
+    s.set("items", "D01", ITEM)
+    root = str(tmp_path / "oq")
+    with open(os.path.join(root, dj.CHANGES), "ab") as f:
+        f.write(tail)
+    s.update("items", "D01", {"title": "after"})
+    err = capsys.readouterr().err
+    assert "change log not written" not in err
+    raw = open(os.path.join(root, dj.CHANGES), "rb").read().split(b"\n")
+    entry = json.loads(raw[-2])
+    assert raw[-1] == b"" and (entry["op"], entry["id"], entry["seq"]) == ("update", "D01", seq)
+    # Explicit, never silent: the corrupt line is warned about, refused by read_changes, and reported by fsck.
+    assert ("corrupt line" in err) == bad
+    probs = dj.fsck(root)
+    assert any("changes.jsonl" in p and "invalid" in p for p in probs) == bad
+    if bad:
+        with pytest.raises(dj.JsonlError):
+            dj.read_changes(root)
+    else:
+        assert probs == [] and [c["seq"] for c in dj.read_changes(root)] == [1, 7, 8]
+
+
 def test_schema_warn_accepts_and_logs_enforce_refuses(tmp_path, capsys):
     s = store(tmp_path, schema_mode="warn")
     s.set("items", "D01", {**ITEM, "goal": "Goal 3 · Acme"})
