@@ -1,0 +1,2 @@
+Breaking
+- The worktree ledger enums gain variants and a field (#8994). `core::worktree_ledger::Origin` gains `GitCommand`, `EventKind` gains `PrLinked`, and `EventKind::Observed` gains a `session` field, so an exhaustive `match` or a struct-pattern without `..` on them no longer compiles; inserting `PrLinked` also moves the discriminant of `EventKind::Removed` from 3 to 4. Add the new arms and `..` to patterns; the JSONL ledger format is unchanged.
