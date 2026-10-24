@@ -148,7 +148,10 @@ fn an_agent_tier_resolving_onto_a_pm_tier_is_refused() {
     let report = deploy_architect_agents(&project, &[pm.join("agents")], &shipped());
     assert!(report.written.is_empty(), "{report:?}");
     assert_eq!(report.errors.len(), 1, "{report:?}");
-    assert!(report.errors[0].contains("agents are never written there"), "{report:?}");
+    assert!(
+        report.errors[0].contains("agents are never written there"),
+        "{report:?}"
+    );
     assert_eq!(std::fs::read_dir(pm.join("agents")).unwrap().count(), 0);
 }
 

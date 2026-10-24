@@ -1583,7 +1583,9 @@ fn the_architect_agents_reach_only_the_architect_project() {
             "{rel}"
         );
         assert!(
-            report.steps.contains(&Step::Changed(format!("wrote {rel}"))),
+            report
+                .steps
+                .contains(&Step::Changed(format!("wrote {rel}"))),
             "{rel} not reported:\n{}",
             report.render()
         );
@@ -1703,7 +1705,10 @@ fn every_path_an_architect_agent_names_exists_after_init() {
             let skill = word.trim_end_matches(['.', ':', ';', '-']);
             if skill.starts_with("architect-") && skill.len() > "architect-".len() {
                 assert!(
-                    dir.join(".claude/skills").join(skill).join("SKILL.md").is_file(),
+                    dir.join(".claude/skills")
+                        .join(skill)
+                        .join("SKILL.md")
+                        .is_file(),
                     "{name}: skill `{skill}` is missing after init"
                 );
             }
