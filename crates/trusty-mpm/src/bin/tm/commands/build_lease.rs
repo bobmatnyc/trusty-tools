@@ -14,7 +14,8 @@
 //! command with inherited stdio, forward SIGINT/SIGTERM/SIGHUP to it, and exit
 //! with its status. The slot's
 //! `flock` is held by this process until the command exits; if this process
-//! dies the kernel releases it. When no lease can be taken, the build runs
+//! dies the kernel releases it. #8692: once cargo releases its build lock the
+//! record reads `run`, which frees compile capacity but not the slot. When no lease can be taken, the build runs
 //! UNLEASED only while the census counts fewer than the ceiling (owner ruling
 //! "allow up to the cap", #8261 round 3), with a degraded warning naming the
 //! store, the OS error and the repair; an unreadable census refuses. On
@@ -42,7 +43,8 @@ use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::deps_rotate::{lease_notice, rotate_before_build};
-use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
+use trusty_mpm::core::build_lease::phase::lock_dirs;
+use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, cargo_lock_held, checkout_root, invalidate_if_checkout_changed,
     workspace_packages,
@@ -52,6 +54,7 @@ use trusty_mpm::core::build_lease::target_dir::{
 };
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 
+use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
@@ -296,9 +299,10 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             let mut record =
                 HolderRecord::new(guard.slot(), command_line.clone(), checkout.clone());
             record.target_dir.clone_from(&target);
-            write_record(&mut guard, &record);
+            let _ = write_record(&mut guard, &record);
             post_decision(daemon.as_ref(), "admitted", &command_line, &decision, &[]).await;
-            // #8736: cargo run/watch slot handling is tracked in #8692
+            // #8692: the compile phase ends when cargo drops its build lock here.
+            let lock_dirs = lock_dirs(target.as_deref(), &cwd, &checkout_root(&cwd));
             // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
             // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
             let run_argv = match (&explicit_target_dir, &target) {
@@ -309,7 +313,11 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 &run_argv,
                 target.as_deref(),
                 pinned.as_deref(),
-                Some((&mut guard, &mut record)),
+                Some(Lease {
+                    guard: &mut guard,
+                    record: &mut record,
+                    lock_dirs,
+                }),
             )
             .await;
             drop(guard);
@@ -520,80 +528,6 @@ fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) -> Result<(), String>
         Err(err) => return Err(err),
     }
     Ok(())
-}
-
-fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {
-    if let Err(err) = guard.write_record(record) {
-        eprintln!(
-            "tm build-lease: could not write the holder record to {}: {err}",
-            guard.path().display()
-        );
-    }
-}
-
-/// Spawn the build, record its pid, forward termination signals, and wait.
-///
-/// What: the signal handlers are installed BEFORE the spawn (#8261 round 3),
-/// so a SIGTERM that lands between the spawn and the handler cannot kill this
-/// holder with the default action and orphan the build.
-/// `dir` is the `--chdir` directory the build runs in (#8969).
-async fn spawn_and_wait(
-    command: &[String],
-    target_dir: Option<&str>,
-    dir: Option<&Path>,
-    lease: Option<(&mut SlotGuard, &mut HolderRecord)>,
-) -> std::io::Result<std::process::ExitStatus> {
-    let Some((program, rest)) = command.split_first() else {
-        return Err(std::io::Error::other("no command given after `--`"));
-    };
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    let mut hup = signal(SignalKind::hangup())?;
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(rest);
-    if let Some(dir) = dir {
-        cmd.current_dir(dir).env("PWD", dir);
-    }
-    if let Some(dir) = target_dir {
-        cmd.env("CARGO_TARGET_DIR", dir);
-    }
-    // #8736: a SIGKILL between spawn and the child_pid write leaves the slot Free; waived as unreachable, tracked in #8692
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-    if let (Some((guard, record)), Some(pid)) = (lease, pid) {
-        record.child_pid = Some(pid);
-        write_record(guard, record);
-    }
-    loop {
-        let sig = tokio::select! {
-            status = child.wait() => return status,
-            _ = term.recv() => libc::SIGTERM,
-            _ = int.recv() => libc::SIGINT,
-            _ = hup.recv() => libc::SIGHUP,
-        };
-        if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-            // SAFETY: kill(2) on the child's pid with a valid signal number.
-            unsafe { libc::kill(pid, sig) };
-        }
-    }
-}
-
-/// Exit with the build's status: its code, or 128 + the signal that ended it.
-fn exit_with(status: std::io::Result<std::process::ExitStatus>) -> ! {
-    use std::os::unix::process::ExitStatusExt;
-    match status {
-        Ok(status) => std::process::exit(
-            status
-                .code()
-                .or_else(|| status.signal().map(|s| 128 + s))
-                .unwrap_or(1),
-        ),
-        Err(err) => {
-            eprintln!("tm build-lease: could not run the command: {err}");
-            std::process::exit(127)
-        }
-    }
 }
 
 /// Log one admission decision in the daemon, best effort.

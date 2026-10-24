@@ -9,7 +9,7 @@
 //!
 //! What: [`BuildLeaseConfig`] holds `memory_pressure_max`, `min_available_pct`,
 //! `lease_wait_secs`, `heavy_build_commands`, `count_foreign_builds` and
-//! `slot_pool_evict_pct` (#8451), each
+//! `slot_pool_evict_pct` (#8451) and `max_run_slots` (#8692), each
 //! optional with a documented default. [`BuildLeaseConfig::from_toml`] reads
 //! them out of a whole config file; [`LEASE_KEYS`] names them for the
 //! unknown-key report in `core::config_keys`.
@@ -75,6 +75,8 @@ pub const LEASE_KEYS: &[&str] = &[
     "builders.count_foreign_builds",
     // #8451: the slot-pool eviction threshold, read by `evict`.
     "builders.slot_pool_evict_pct",
+    // #8692: the run-phase slot cap, read by `acquire`.
+    "builders.max_run_slots",
 ];
 
 /// The lease keys of `[builders]`.
@@ -97,6 +99,9 @@ pub struct BuildLeaseConfig {
     /// #8451: percent of the pool's volume at which the daemon evicts
     /// `slot-N` directories; 85, held below `disk.max_usage_pct`.
     pub slot_pool_evict_pct: Option<u8>,
+    /// #8692: run-phase holders (cargo done, test or server running) admitted
+    /// beyond the ceiling, each keeping its slot directory; the ceiling.
+    pub max_run_slots: Option<u32>,
 }
 
 /// The file shape [`BuildLeaseConfig::from_toml`] reads: only `[builders]`.
@@ -203,6 +208,17 @@ impl BuildLeaseConfig {
         std::time::Duration::from_secs(clamp_wait(
             self.lease_wait_secs.unwrap_or(DEFAULT_LEASE_WAIT_SECS),
         ))
+    }
+
+    /// How many run-phase slots may hold target directories beyond `ceiling`.
+    ///
+    /// Why: a run-phase holder keeps a multi-GB slot directory; this bounds
+    /// the slot directories in use at `ceiling + max_run_slots` (#8692, Q3:
+    /// defaults to the ceiling).
+    /// Test: `max_run_slots_defaults_to_the_ceiling`.
+    #[must_use]
+    pub fn effective_max_run_slots(&self, ceiling: u32) -> u32 {
+        self.max_run_slots.unwrap_or(ceiling)
     }
 
     /// Whether foreign compiler groups reduce the slots.
@@ -360,6 +376,15 @@ mod tests {
             assert!(err.to_string().contains(key), "{err}");
         }
         assert!(BuildLeaseConfig::default().validate().is_ok());
+    }
+
+    /// #8692 (Architect Q3): unset is the ceiling; a set value is read as is.
+    #[test]
+    fn max_run_slots_defaults_to_the_ceiling() {
+        assert_eq!(BuildLeaseConfig::default().effective_max_run_slots(3), 3);
+        let cfg = BuildLeaseConfig::from_toml("[builders]\nmax_run_slots = 0\n");
+        assert_eq!(cfg.max_run_slots, Some(0));
+        assert_eq!(cfg.effective_max_run_slots(3), 0);
     }
 
     #[test]

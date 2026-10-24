@@ -176,6 +176,28 @@ pub fn decide(
     }
 }
 
+/// Withhold `decision` when run-phase slots fill the slot-directory cap.
+///
+/// Why: #8692 — a run-phase holder frees compile capacity but keeps its slot
+/// directory, so without a bound a stream of test runs would hold an
+/// unbounded number of multi-GB directories.
+/// What: `owners` is every slot owner, compiling or running; the running
+/// ones are `owners - decision.held`. With at least one running and
+/// `owners >= ceiling + max_run_slots`, the decision withholds with a line
+/// naming the run-phase slots and the cap. Otherwise `decision` is unchanged.
+/// Test: `a_run_slot_cap_withholds_with_a_named_reason_8692`.
+pub fn run_slot_gate(decision: &mut Decision, owners: u32, max_run_slots: u32) {
+    let running = owners.saturating_sub(decision.held);
+    if running > 0 && owners >= decision.ceiling.saturating_add(max_run_slots) {
+        decision.withheld.push(format!(
+            "{running} run-phase slot(s) hold target dirs (cap {max_run_slots}, \
+             builders.max_run_slots) and {owners} slot(s) are owned in all; a slot frees when \
+             its test run or program exits"
+        ));
+        decision.admit = false;
+    }
+}
+
 /// Decide whether a build that could take NO lease may run anyway.
 ///
 /// Why: the fail-open arms (no slot directory, no admission lock, every slot

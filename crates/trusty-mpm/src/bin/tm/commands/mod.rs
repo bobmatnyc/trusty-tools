@@ -61,6 +61,8 @@ pub(crate) mod egress_verdict_client;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #8692: the leased command's spawn, wait and compile-to-run flip.
+pub(crate) mod build_lease_spawn;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod doctor_builder_cap;
