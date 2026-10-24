@@ -24,7 +24,9 @@ OPERATOR_PATH	-	/Users/|/home/|-Users-
 OPERATOR_PATH	-	trusty-mpm-projects/[^/ ]+/supervisor
 SECRET	-	ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}
 OWNER_NAME	i	(github\.com[/:]|--repo[ =]+|^|[^A-Za-z0-9_])(bobmatnyc|masa|bob)([^A-Za-z0-9_]|$)	(github\.com[/:]|--repo[ =]+)bobmatnyc.*
-ORG	i	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:][A-Za-z0-9_.-]+	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:](example|acme|bobmatnyc)
+# #10161: markedjs, cure53 and babel are the upstream orgs in the vendored reader
+# libraries' license headers (templates/dashboard/vendor/).
+ORG	i	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:][A-Za-z0-9_.-]+	(github\.com|githubusercontent\.com|ghcr\.io|gitlab\.com)[/:](example|acme|bobmatnyc|markedjs|cure53|babel)
 ORG	i	--repo[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	--repo[ =]+(example|acme|bobmatnyc)/
 ORG	-	(^|[^A-Za-z0-9_-])gh [^|;&]*-R[ =]+[A-Za-z0-9][A-Za-z0-9_.-]*/	.*-R[ =]+(example|acme|bobmatnyc)/
 ORG	i	[A-Za-z0-9][A-Za-z0-9-]*\.github\.io	(example|acme|bobmatnyc)\.github\.io

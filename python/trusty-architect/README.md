@@ -16,7 +16,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `skills/architect-*.md` | The fourteen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check). Seeded the same way. |
+| `skills/architect-*.md` | The fifteen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check, dashboard). Seeded the same way. |
 | `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`), and the `architect.json` config seed with no owner values. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
@@ -46,10 +46,13 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/il-archive.py` | Archives done dashboard items and closed PM-ledger lines to trusty-memory, then removes them. Live by default; `--dry-run` writes nothing. |
 | `scripts/stale-tasks.py` | Lists open, unparked dashboard tasks with no activity for `--hours` (default 24). Read only. |
 | `schemas/dashboard/` | The draft 2020-12 JSON Schemas for each dashboard collection. Seeded beside `scripts/`, where `dashboard_schema.py` reads them. |
+| `scripts/dashboard-serve.py`, `scripts/dashboard_http.py`, `scripts/dashboard_page.py`, `scripts/dashboard_docs.py` | The dashboard server on `127.0.0.1:7890`, loopback only, behind a Host/Origin guard. `dashboard-serve.py` is the command and the server; `dashboard_http.py` the request handler and guard; `dashboard_page.py` the shim injected into the page, the page revision and the reader-library lookup; `dashboard_docs.py` the reader's path rules. `/config.json` serves `tailnet_url` and `/api/user` falls back to `owner_name` from `local/architect.json`. `--mode session --root DIR` serves one PM session's Intent Ledger instead. |
+| `scripts/dashboard_il.py`, `scripts/dashboard_media.py`, `scripts/dashboard_viz.py`, `scripts/dashboard_harness.py` | The server's read-only views: every Intent Ledger (`/api/il`), the media library (`/media`), the Visualize data (`/api/viz`) and the Live snapshot (`/api/harness`). A missing input reads as a listed missing source, never an error. |
+| `templates/dashboard/` | The page (`index.html`), the Live view (`live.html`) and the pinned reader libraries in `vendor/` (marked, DOMPurify; `VERSIONS.md` records them). `mermaid.min.js` is not shipped: the server serves it from the instance tree when an installation adds it. |
 | `docs/specs/SPEC-IL-01.md` | The Intent Ledger spec the scripts above cite. A design record: trusty-mpm does not ship it. |
-| `tests/` | pytest suite for the scripts above; `tests/fixtures/dashboard/golden/` holds the store fixtures the derive test reads. |
+| `tests/` | pytest suite for the scripts above; `tests/fixtures/dashboard/golden/` holds the store fixtures the derive test reads. The page tests run the page's JavaScript under `node` and skip without it. |
 
-The dashboard store scripts are the one allowed copy of the dashboard code (DOC-82 LDG-1.2 interim ruling): `tm fleet init` seeds them into the Architect project only, never a PM project. They stay the reference until the Rust port (#10063) is live-checked (LDG-1.5). While both exist, one process writes a store (LDG-3.8): do not point `tm architect dashboard` verbs at the Architect's `local/owner-queue`.
+The dashboard store and server scripts are the one allowed copy of the dashboard code (DOC-82 LDG-1.2 interim ruling): `tm fleet init` seeds them into the Architect project only, never a PM project. They stay the reference until the Rust port (#10063) is live-checked (LDG-1.5). While both exist, one process writes a store (LDG-3.8): do not point `tm architect dashboard` verbs at the Architect's `local/owner-queue`.
 
 ## Configuration
 
@@ -130,7 +133,7 @@ Checklist for a PR that brings exported files in:
 
 trusty-mpm ships a byte-identical copy of every file under `scripts/`,
 `schemas/`, `skills/`, `templates/` and `docs/` except `docs/specs/`, and the drift check
-fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`, `schemas/dashboard/`,
+fails when one differs. `tm fleet init` writes them into the Architect project: `scripts/`, `schemas/dashboard/`, `templates/dashboard/`,
 `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore`, `local/` and
 `docs/architect/voice.md`.
 It writes a file only when it is absent and reports an edited one as skipped.
@@ -139,8 +142,9 @@ a start that fails fails the command.
 
 ## Not here yet
 
-The question collector, the dashboard and token-optimizer skills, and
-`fleet-restart` stay in the prototype for now (#8536).
+The question collector, the token-optimizer skill, the usage feed (the
+dashboard's Accounts rows and the Live view's feed file) and `fleet-restart`
+stay in the prototype for now (#8536).
 
 ## Provision by hand
 

@@ -22,7 +22,7 @@ an unusable config exits 2 before any write). A project session maps through a l
 -> the Architect's palace (printed). pm-ledger uses the same line for basename(DIR); none -> nothing is removed (printed),
 because archive.jsonl is the only copy. Tags: archive, <dashboard|pm-ledger>, <retired-ids|pruned>, YYYY-MM-DD.
 Root: --root or DASHBOARD_ROOT (default local/owner-queue). No secrets are read or printed.
-Test: scripts/test_il_archive.py
+Test: tests/test_il_archive.py
 """
 import argparse
 import json

@@ -133,6 +133,8 @@ const ARCHITECT_ONLY_SKILLS: &[&str] = &[
     "architect-macos",
     "architect-project-provision",
     "architect-review",
+    // #10161 D3b: the dashboard skill.
+    "architect-dashboard",
     "tm-context-refresh",
     "tm-fleet-check",
 ];

@@ -257,7 +257,7 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 16] = [
+    const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
             "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
@@ -322,10 +322,14 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "architect-host-admin",
             "e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e",
         ),
+        (
+            "architect-dashboard",
+            "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
+        ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 11] = [
+    const FIRST_RELEASE: [&str; 12] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
@@ -337,6 +341,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         "architect-macos",
         "architect-improvements",
         "architect-host-admin",
+        "architect-dashboard",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

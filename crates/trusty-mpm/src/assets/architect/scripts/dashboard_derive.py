@@ -7,7 +7,7 @@ What: snapshot(store, colls) -> {coll: [{id, version, data}]}; is_parked(item) (
 tally(items); used_ids / next_id / free_count / retire_candidates (ids recycle, 256 per prefix); stale_tasks(items,
 now, hours) (kind == "task"); pending(snap, now) (owner events for the Architect); goal_sessions(goals, sessions);
 ordered(docs) (rank, then id). No function reads the clock or the filesystem.
-Test: scripts/test_dashboard_derive.py
+Test: tests/test_dashboard_derive.py
 """
 import re
 from datetime import datetime, timedelta, timezone

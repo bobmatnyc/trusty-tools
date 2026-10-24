@@ -11,7 +11,7 @@ normalised. `sv` is the schema version of that line; MIGRATIONS maps N -> a func
 <root>/changes.jsonl is an append-only audit log (seq, ts, actor, op, coll, id, version, sha256 of the line, keys),
 rotated monthly to changes-YYYY-MM.jsonl; it is not the source of truth. fsck() checks canonical bytes, order, sv, and
 the last logged hash of every document against the file.
-Test: scripts/test_dashboard_jsonl.py
+Test: tests/test_dashboard_jsonl.py
 """
 import hashlib
 import json
