@@ -67,6 +67,11 @@ pub(crate) async fn doctor(
         overall = overall.worst(check.status);
         print_check(&check);
     }
+    // #10215: where this session's builds land, read from its own environment.
+    let session_target =
+        super::doctor_session_target_dir::session_target_dir_row(project_dir.as_deref());
+    overall = overall.worst(session_target.status);
+    print_check(&session_target);
     // #8371: opt-in; without `--network` this spawns nothing.
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);

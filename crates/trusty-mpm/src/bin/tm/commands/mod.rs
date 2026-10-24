@@ -63,6 +63,7 @@ pub(crate) mod egress_verdict_client;
 pub(crate) mod build_lease;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
+pub(crate) mod build_lease_target;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
@@ -72,6 +73,7 @@ pub(crate) mod doctor_channels_egress;
 pub(crate) mod doctor_slot_pool;
 // #10212: a bounded entry count of each shared target's and slot's debug/deps.
 pub(crate) mod doctor_deps_budget;
+pub(crate) mod doctor_session_target_dir;
 // #10212: `tm doctor --rotate-deps`, the operator rotation of an oversized `debug/`.
 pub(crate) mod doctor_rotate_deps;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
