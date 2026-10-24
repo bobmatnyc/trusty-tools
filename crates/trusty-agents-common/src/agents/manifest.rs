@@ -123,8 +123,28 @@ pub fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
 /// Test: `atomic_write_leaves_old_intact_on_interrupted_write`,
 /// `atomic_write_temp_names_are_unique_per_attempt`.
 pub fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
+    write_then_rename(path, content, None)
+}
+
+/// [`atomic_write`], with the written file set to mode `0o755`.
+///
+/// Why: #10211 — a skill's `scripts/*` must land executable, and the content
+/// tarball pins every entry to `0644`, so the bit is applied at write time.
+/// What: identical swap to [`atomic_write`]; the mode is set on the scratch
+/// file BEFORE the rename, so the published path never holds a non-executable
+/// copy of a script.
+/// Test: `atomic_write_executable_sets_the_exec_bit_before_publishing`.
+pub fn atomic_write_executable(path: &std::path::Path, content: &str) -> Result<()> {
+    write_then_rename(path, content, Some(EXECUTABLE_MODE))
+}
+
+/// The mode a deployed script carries (`rwxr-xr-x`).
+pub const EXECUTABLE_MODE: u32 = 0o755;
+
+/// Shared body of [`atomic_write`] and [`atomic_write_executable`].
+fn write_then_rename(path: &std::path::Path, content: &str, mode: Option<u32>) -> Result<()> {
     let tmp = temp_path(path);
-    if let Err(e) = std::fs::write(&tmp, content) {
+    if let Err(e) = std::fs::write(&tmp, content).and_then(|()| apply_mode(&tmp, mode)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(ManifestError::Io(e));
     }
@@ -132,6 +152,21 @@ pub fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(ManifestError::Io(e));
     }
+    Ok(())
+}
+
+/// Set `mode` on `path` when given; a no-op for `None` and off Unix.
+#[cfg(unix)]
+fn apply_mode(path: &std::path::Path, mode: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match mode {
+        Some(mode) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_mode(_path: &std::path::Path, _mode: Option<u32>) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -672,6 +707,23 @@ mod tests {
             target.parent(),
             "publish must stay a same-fs rename"
         );
+    }
+
+    /// #10211: a script written through the executable variant is `0o755` at
+    /// its published path, and the plain variant never grants the bit.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_executable_sets_the_exec_bit_before_publishing() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let script = tmp.path().join("run.sh");
+        let doc = tmp.path().join("guide.md");
+        atomic_write_executable(&script, "#!/bin/sh\n").unwrap();
+        atomic_write(&doc, "text\n").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&script), EXECUTABLE_MODE, "script mode");
+        assert_eq!(mode(&doc) & 0o111, 0, "a document must not be executable");
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "#!/bin/sh\n");
     }
 
     #[test]

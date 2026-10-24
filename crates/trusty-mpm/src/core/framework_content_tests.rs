@@ -306,6 +306,29 @@ pub(crate) fn fake_checkout_with_package(root: &Path, package: &str) {
     fake_checkout(root, &refs);
 }
 
+/// The repository's required instructions plus the given skill files
+/// (`(path below content/skills/, body)`), loaded as content (#10211).
+///
+/// Why: Phase 1 of #10079 is not on `main`, so a test of the non-`.md` skill
+/// sibling path (`references/*.yml`, `scripts/*.sh`) needs its own fixture
+/// skill rather than `tm-adr`. The checkout is read into memory on load, so
+/// the returned value outlives its temporary directory.
+/// Test: `materialize_writes_scripts_executable_and_non_md_references`.
+pub(crate) fn content_with_skill_files(files: &[(&str, &str)]) -> FrameworkContent {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = repo_content()
+        .required("pm-instruction-package.json")
+        .to_string();
+    fake_checkout_with_package(dir.path(), &package);
+    for (rel, body) in files {
+        let path = dir.path().join("content/skills").join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, body).expect("skill file");
+    }
+    FrameworkContent::load(&checkout_content(dir.path()).expect("checkout"))
+        .expect("a fixture source loads")
+}
+
 /// #8436: a content source carrying only the legacy supervisor sections —
 /// every required instruction from the repository and no
 /// `architect/architect.md` — as a release older than PR B ships it.

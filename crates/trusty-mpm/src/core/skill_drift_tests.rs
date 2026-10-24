@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::core::content_source::test_support::repo_content;
+use crate::core::framework_content::tests::content_with_skill_files;
 use crate::core::skill_deployer::deploy_skills;
 use std::fs;
 use tempfile::TempDir;
@@ -169,31 +170,143 @@ fn reference_without_content_names_tm_content_update() {
 }
 
 /// #4622 review HIGH-1: the reference must be keyed by MANIFEST KEY, which for a
-/// multi-file skill's reference sibling is `<stem>/references/<file>.md`.
+/// multi-file skill's carried file is `<stem>/<rel>` — `references/<file>` or
+/// `scripts/<file>`, any extension (#10211).
 ///
 /// Why: `deploy_skills` records those nested keys, and `audit_deployed_skills`
 /// iterates every manifest key. A reference map that only holds bare stems makes
 /// every nested key unverifiable, which pins `skill_staleness` to Unknown on any
-/// real install. On this machine that is 80 of 132 keys.
+/// real install. On this machine that is 80 of 132 keys. #10211: the Phase 1
+/// `tm-adr` skill ships `references/adr-check.yml` and `scripts/*.sh`; the
+/// repository content on `main` has no such file yet, so the fixture content
+/// pins the non-`.md` half of the contract.
 /// Test: this test.
 #[test]
 fn reference_includes_nested_reference_keys() {
-    let reference = skill_reference(None, Some(&repo_content()));
-    let nested: Vec<&String> = reference
-        .assets
-        .keys()
-        .filter(|k| k.contains('/'))
-        .collect();
-    assert!(
-        !nested.is_empty(),
-        "the embedded reference must carry `<stem>/references/<file>.md` keys; got only bare stems"
-    );
-    assert!(
+    let nested_keys_match_the_deployer = |reference: &SkillReference| -> Vec<String> {
+        let nested: Vec<String> = reference
+            .assets
+            .keys()
+            .filter(|k| k.contains('/'))
+            .cloned()
+            .collect();
+        assert!(
+            !nested.is_empty(),
+            "the reference must carry `<stem>/<rel>` keys; got only bare stems"
+        );
+        assert!(
+            nested.iter().all(|k| {
+                let mut segments = k.split('/');
+                let stem = segments.next().unwrap_or_default();
+                let dir = segments.next().unwrap_or_default();
+                let file = segments.next_back().unwrap_or_default();
+                !stem.is_empty()
+                    && !stem.ends_with(".md")
+                    && matches!(dir, "references" | "scripts")
+                    && !file.is_empty()
+            }),
+            "nested keys must match the deployer's key format, got: {nested:?}"
+        );
         nested
-            .iter()
-            .all(|k| k.contains("/references/") && k.ends_with(".md")),
-        "nested keys must match the deployer's key format, got: {nested:?}"
+    };
+
+    nested_keys_match_the_deployer(&skill_reference(None, Some(&repo_content())));
+
+    let fixture = content_with_skill_files(&[
+        ("tm-fixture.md", "body"),
+        ("tm-fixture/references/guide.md", "guide"),
+        ("tm-fixture/references/adr-check.yml", "rules: []"),
+        ("tm-fixture/scripts/check.sh", "#!/bin/sh"),
+    ]);
+    let nested = nested_keys_match_the_deployer(&skill_reference(None, Some(&fixture)));
+    for key in [
+        "tm-fixture/references/guide.md",
+        "tm-fixture/references/adr-check.yml",
+        "tm-fixture/scripts/check.sh",
+    ] {
+        assert!(nested.iter().any(|k| k == key), "{key} missing: {nested:?}");
+    }
+}
+
+/// #10211 END-TO-END: a fixture skill with a script and a non-`.md` reference
+/// materializes, deploys byte-identical with `scripts/*` at `0o755`, and audits
+/// entirely Fresh — the hermetic form of the issue's `cmp` + `stat` check.
+#[cfg(unix)]
+#[test]
+fn a_skill_with_scripts_deploys_byte_identical_executable_and_fresh() {
+    use std::os::unix::fs::PermissionsExt;
+    let files = [
+        ("tm-fixture.md", "---\nname: tm-fixture\n---\nbody\n"),
+        ("tm-fixture/references/guide.md", "# Guide\n"),
+        ("tm-fixture/references/adr-check.yml", "rules: []\n"),
+        ("tm-fixture/scripts/check.sh", "#!/bin/sh\nexit 0\n"),
+    ];
+    let content = content_with_skill_files(&files);
+    let home = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(home.path());
+    crate::core::skill_source::materialize_skill_artifacts(&paths, &content).unwrap();
+
+    let dest = TempDir::new().unwrap();
+    deploy_skills(&paths.skills, dest.path()).unwrap();
+
+    for (rel, body) in files {
+        let key = if rel.contains('/') {
+            rel.to_string()
+        } else {
+            rel.trim_end_matches(".md").to_string()
+        };
+        let deployed = deployed_path(dest.path(), &key);
+        assert_eq!(fs::read_to_string(&deployed).unwrap(), body, "{rel} bytes");
+        let mode = fs::metadata(&deployed).unwrap().permissions().mode() & 0o777;
+        if rel.contains("/scripts/") {
+            assert_eq!(mode, 0o755, "{rel} mode");
+        } else {
+            assert_eq!(mode & 0o111, 0, "{rel} must not be executable");
+        }
+    }
+
+    let audit = audit_deployed_skills_with_roster(
+        &skill_reference(None, Some(&content)),
+        dest.path(),
+        true,
     );
+    let fixture: Vec<&SkillDriftFinding> = audit
+        .findings
+        .iter()
+        .filter(|f| key_stem(&f.stem) == "tm-fixture")
+        .collect();
+    assert_eq!(fixture.len(), 4, "{:?}", audit.findings);
+    assert!(
+        fixture.iter().all(|f| f.state == SkillDrift::Fresh),
+        "{fixture:?}"
+    );
+}
+
+/// #10211: drift in a carried SCRIPT is a finding keyed `<stem>/scripts/<file>`.
+#[test]
+fn drift_in_a_script_is_caught() {
+    let dest = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-adr.md"), "entry v1").unwrap();
+    let scripts = src.path().join("tm-adr").join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("check_adr.sh"), "script v1").unwrap();
+    deploy_skills(src.path(), dest.path()).unwrap();
+
+    // Only the script moved on in the content.
+    let reference = reference_of(&[
+        ("tm-adr", "entry v1"),
+        ("tm-adr/scripts/check_adr.sh", "script v2"),
+    ]);
+    let audit = audit_deployed_skills(&reference, dest.path());
+
+    let drifted: Vec<&SkillDriftFinding> = audit
+        .findings
+        .iter()
+        .filter(|f| f.state == SkillDrift::Drifted)
+        .collect();
+    assert_eq!(drifted.len(), 1, "findings: {:?}", audit.findings);
+    assert_eq!(drifted[0].stem, "tm-adr/scripts/check_adr.sh");
 }
 
 /// END-TO-END #4622 HIGH-1 PROOF: a REAL bundled deploy, audited against the
@@ -257,6 +370,13 @@ fn reference_prefers_the_submodule() {
     let refs = tmp.path().join("tm-workflow").join("references");
     fs::create_dir_all(&refs).unwrap();
     fs::write(refs.join("extra.md"), "submodule reference").unwrap();
+    // #10211: a non-`.md` reference and a script are carried files too.
+    fs::write(refs.join("check.yml"), "rules: []").unwrap();
+    let scripts = tmp.path().join("tm-workflow").join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("run.sh"), "#!/bin/sh").unwrap();
+    // A top-level non-`.md` file is not an entry point and stays out.
+    fs::write(tmp.path().join("README.txt"), "not a skill").unwrap();
 
     let reference = skill_reference(Some(tmp.path()), Some(&repo_content()));
     assert_eq!(
@@ -270,6 +390,27 @@ fn reference_prefers_the_submodule() {
             .unwrap(),
         "submodule reference",
         "the submodule reference must also carry nested keys"
+    );
+    assert_eq!(
+        reference
+            .assets
+            .get("tm-workflow/references/check.yml")
+            .map(String::as_str),
+        Some("rules: []"),
+        "a non-.md reference must be keyed: {:?}",
+        reference.assets.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        reference
+            .assets
+            .get("tm-workflow/scripts/run.sh")
+            .map(String::as_str),
+        Some("#!/bin/sh"),
+        "a script must be keyed"
+    );
+    assert!(
+        !reference.assets.keys().any(|k| k.contains("README")),
+        "a top-level non-.md file is not an entry point"
     );
     assert!(
         reference.origin.contains("submodule"),
