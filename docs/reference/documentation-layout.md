@@ -50,8 +50,10 @@ unmapped code units and spec sections but is not itself a completeness gate.
 ### Architecture decisions
 
 Workspace ADRs live under [`docs/adr/`](../adr/README.md). They record why a
-hard-to-reverse choice was made. [DOC-46](../specs/DOC-46-adr-standard.md)
-defines the format and `scripts/check_adr.sh` enforces corpus consistency.
+hard-to-reverse choice was made. The `tm-adr` skill's
+[`adr-standard.md`](../../content/skills/tm-adr/references/adr-standard.md)
+defines the format, [DOC-46](../specs/DOC-46-adr-standard.md) holds the
+trusty-tools-only rules, and `scripts/check_adr.sh` enforces corpus consistency.
 Package-local decision records may live under `docs/<product>/decisions/`.
 
 ## Historical evidence

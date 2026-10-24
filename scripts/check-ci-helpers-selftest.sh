@@ -646,8 +646,12 @@ assert_eq "capabilities-drift.yml has no duplicate classifier" "0" \
 
 # ADR consistency is a pure-shell document gate. Keep it beside document
 # allocation rather than installing Rust in the SLD workflow for ADR-only PRs.
+# #10081: the gate line is matched by its first flag, because the --self-test
+# and --verify-self steps share the `run: bash scripts/check_adr.sh` prefix.
 assert_eq "doc-numbers owns the ADR consistency step" "1" \
-  "$(grep -c 'run: bash scripts/check_adr.sh' .github/workflows/doc-numbers.yml || true)"
+  "$(grep -c 'run: bash scripts/check_adr.sh --require-metadata-from' .github/workflows/doc-numbers.yml || true)"
+assert_eq "doc-numbers proves the repo check_adr.sh is the content copy" "1" \
+  "$(grep -c 'run: cmp scripts/check_adr.sh content/skills/tm-adr/scripts/check_adr.sh' .github/workflows/doc-numbers.yml || true)"
 assert_eq "SLD no longer runs the ADR consistency step" "0" \
   "$(grep -c 'run: bash scripts/check_adr.sh' .github/workflows/sld-lint.yml || true)"
 
