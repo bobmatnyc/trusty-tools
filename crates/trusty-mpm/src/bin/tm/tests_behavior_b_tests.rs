@@ -1294,6 +1294,16 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
             || err_msg.contains("live git checkout"),
         "#1724: error message must explain the protection; got: {err_msg}"
     );
+    // #10255: the error names the manual route for THIS repo root.
+    let root_name = project.file_name().unwrap().to_string_lossy();
+    assert!(
+        err_msg.contains("`tm connect ") && err_msg.contains(root_name.as_ref()),
+        "#10255: error must name `tm connect <git_root>`; got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("not in an isolated managed clone"),
+        "#10255: error must say `tm connect` runs in the live checkout; got: {err_msg}"
+    );
 }
 
 /// Why (#2534): bare `tm` run from a directory that physically sits inside a

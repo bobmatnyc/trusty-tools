@@ -9,7 +9,7 @@
 //! Test: `cargo test -p trusty-mpm -- tests_behavior_c` runs this suite;
 //! no network or tmux required.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::commands::first_run::needs_first_run_clone;
@@ -2318,7 +2318,7 @@ fn guided_non_github_refusal_message_does_not_mention_daemon_or_start() {
     // What: call the helper with a GitLab remote and assert forbidden phrases
     // are absent.
     // Test: this is the test.
-    let msg = non_github_refusal_message("git@gitlab.com:org/repo.git");
+    let msg = non_github_refusal_message("git@gitlab.com:org/repo.git", Path::new("/srv/repo"));
     assert!(
         !msg.contains("daemon unreachable"),
         "refusal message must NOT blame the daemon: {msg}"
@@ -2339,7 +2339,10 @@ fn guided_non_github_refusal_message_explains_github_only_policy() {
     // GitHub repositories only, not Gitea/GitLab/bare-SSH remotes.
     // What: asserts the message names "GitHub" as the requirement.
     // Test: this is the test.
-    let msg = non_github_refusal_message("https://gitea.example.com/org/repo.git");
+    let msg = non_github_refusal_message(
+        "https://gitea.example.com/org/repo.git",
+        Path::new("/srv/repo"),
+    );
     assert!(
         msg.contains("GitHub"),
         "refusal must name GitHub as the auto-management requirement: {msg}"
@@ -2358,7 +2361,7 @@ fn guided_non_github_refusal_message_includes_detected_remote() {
     // What: asserts the passed-in remote string appears verbatim in the output.
     // Test: this is the test.
     let remote = "git@gitlab.com:myorg/myrepo.git";
-    let msg = non_github_refusal_message(remote);
+    let msg = non_github_refusal_message(remote, Path::new("/srv/repo"));
     assert!(
         msg.contains(remote),
         "refusal must echo the detected remote ({remote}): {msg}"
@@ -2371,7 +2374,8 @@ fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
     // The message must clearly state the live checkout was not touched.
     // What: asserts the reassurance phrase appears in the output.
     // Test: this is the test.
-    let msg = non_github_refusal_message("https://bitbucket.org/org/repo.git");
+    let msg =
+        non_github_refusal_message("https://bitbucket.org/org/repo.git", Path::new("/srv/repo"));
     assert!(
         msg.contains("live checkout"),
         "refusal must reassure that the live checkout was not touched: {msg}"
@@ -2379,6 +2383,36 @@ fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
     assert!(
         msg.contains("not touched"),
         "refusal must use the phrase 'not touched': {msg}"
+    );
+}
+
+#[test]
+fn guided_non_github_refusal_message_names_tm_connect_for_the_repo_root() {
+    // Why (#10255): "use an explicit `tm` subcommand" left the operator unable
+    // to tell what to run. The notice must name the copy-pasteable manual route
+    // and say it works in the live checkout, not an isolated clone.
+    // What: asserts `tm connect <git_root>` and the live-checkout caveat appear;
+    // a root with a space is shell-quoted so the command pastes as one argument.
+    // Test: this is the test.
+    let msg = non_github_refusal_message("git@gitlab.example:org/repo.git", Path::new("/srv/repo"));
+    assert!(
+        msg.contains("`tm connect /srv/repo`"),
+        "refusal must name `tm connect <git_root>`: {msg}"
+    );
+    assert!(
+        msg.contains("directly in this live checkout")
+            && msg.contains("not in an isolated managed clone"),
+        "refusal must say `tm connect` runs in the live checkout: {msg}"
+    );
+    assert!(
+        !msg.contains("explicit `tm` subcommand"),
+        "refusal must not fall back to the unnamed-subcommand hint: {msg}"
+    );
+    let spaced =
+        non_github_refusal_message("git@gitlab.example:o/r.git", Path::new("/srv/my repo"));
+    assert!(
+        spaced.contains("`tm connect '/srv/my repo'`"),
+        "a root with a space must be shell-quoted: {spaced}"
     );
 }
 

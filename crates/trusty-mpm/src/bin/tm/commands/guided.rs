@@ -817,16 +817,30 @@ pub(crate) fn print_non_tty_hint(
 /// running — the refusal is purely because `tm` only auto-manages GitHub
 /// repositories. Extracting the message into a pure helper makes it
 /// unit-testable without capturing stderr.
-/// What: returns a three-line notice that names the non-GitHub remote as the
-/// reason for refusal and reassures the operator that the live checkout was
-/// not modified. The caller prints via `eprintln!` and then bails.
+/// What: returns a four-line notice that names the non-GitHub remote as the
+/// reason for refusal, reassures the operator that the live checkout was not
+/// modified, and names `tm connect <git_root>` as the manual route. The caller
+/// prints via `eprintln!` and then bails.
 /// Test: `guided_non_github_refusal_message_*` in `tests_behavior_c_tests.rs`.
-pub(crate) fn non_github_refusal_message(remote_desc: &str) -> String {
+pub(crate) fn non_github_refusal_message(remote_desc: &str, git_root: &std::path::Path) -> String {
     format!(
         "tm: not auto-managing this project — `tm` auto-manages GitHub repositories only.\n\
          tm: detected non-GitHub remote: {remote_desc}.\n\
-         tm: your live checkout was not touched. \
-         (Use an explicit `tm` subcommand to work here manually.)"
+         tm: your live checkout was not touched.\n\
+         tm: to work here manually, {}.",
+        tm_connect_route(git_root)
+    )
+}
+
+/// The manual route for a refused non-GitHub checkout, shared by the notice and
+/// the bail error.
+// #10255: name the subcommand to run, not just "an explicit `tm` subcommand".
+fn tm_connect_route(git_root: &std::path::Path) -> String {
+    let dir = git_root.to_string_lossy();
+    let dir = shlex::try_quote(&dir).map_or_else(|_| dir.to_string(), |q| q.into_owned());
+    format!(
+        "run `tm connect {dir}` — it runs the session directly in this live \
+         checkout, not in an isolated managed clone"
     )
 }
 
@@ -1318,12 +1332,13 @@ pub(crate) async fn fallback_protected_gated(
         // reached even when the daemon is UP. The real reason for refusal is
         // that `tm` only auto-manages GitHub repositories (#1777).
         super::origin_plan::OriginPlan::RefuseNonGitHub(remote_desc) => {
-            eprintln!("{}", non_github_refusal_message(remote_desc));
+            eprintln!("{}", non_github_refusal_message(remote_desc, &git_root));
+            // #10255: the error names the same `tm connect` route as the notice.
             anyhow::bail!(
                 "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
-                 auto-managed clones require a GitHub remote; \
-                 use an explicit `tm` subcommand to work here manually",
-                git_root.display()
+                 auto-managed clones require a GitHub remote; to work here manually, {}",
+                git_root.display(),
+                tm_connect_route(&git_root)
             );
         }
     }
