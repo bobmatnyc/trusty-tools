@@ -37,6 +37,8 @@
 //! - [`evict`] — disk-budget eviction of the slot pool's `slot-N`
 //!   directories, skipping every slot in use (#8451).
 //! - [`orphan`] — a build still running after its holder was SIGKILLed.
+//! - [`phase`] — #8692: a lease's compile phase ends when cargo drops its
+//!   build lock; a run-phase holder keeps its slot but not compile capacity.
 //! - [`target_dir`] — the slot's private `CARGO_TARGET_DIR`.
 //! - [`stale_guard`] — clears a slot's workspace fingerprints when its next
 //!   holder builds a different worktree, and detects a slot directory an
@@ -58,7 +60,12 @@
 //! | lease impossible AND census unreadable | FAILS CLOSED: nothing bounds the build, so it waits and exits 75 naming both faults | `no_lease_and_no_census_admits_nothing` |
 //! | an unleased run whose inherited `CARGO_TARGET_DIR` is shared | REFUSED, exit 75: only a leased slot can replace the shared directory | `a_shared_dir_without_a_pool_is_refused` |
 //! | a free slot whose directory an orphaned build still uses (`.cargo-lock` held) | that slot is skipped; its fingerprints are untouched | `a_busy_orphan_slot_is_not_reused` |
-//! | a free slot whose dead holder's build still runs (a `cargo test` run holds no `.cargo-lock`) | counted as held, never taken, until that build exits — by pid and start window only, so an exec-replaced build (`cargo nextest` runs as `cargo-nextest`) stays held | `a_sigkilled_holders_live_test_run_keeps_its_slot`, `an_orphaned_build_keeps_its_slot`, `an_exec_replaced_cargo_subcommand_keeps_its_slot` |
+//! | a free slot whose dead holder's build still runs (a `cargo test` run holds no `.cargo-lock`) | counted as held, never taken, until that build exits — by pid and start window only, so an exec-replaced build (`cargo nextest` runs as `cargo-nextest`) stays held | `a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692`, `an_orphaned_build_keeps_its_slot`, `an_exec_replaced_cargo_subcommand_keeps_its_slot` |
+//! | #8692: a run-phase orphan (its record says `run`) | owns its slot, never taken, but counts no compile capacity; its compilers are foreign to the census | `a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692` |
+//! | #8692: cargo's build lock unreadable while a lease polls it | reads as held: the lease stays `compile` and keeps its capacity | `a_probe_error_reads_as_held` |
+//! | #8692: the `run` record write fails | the phase stays `compile` (counted) and the write is retried next poll | `a_failed_write_stays_compile_and_retries` |
+//! | #8692: a held slot's record with no `phase` (an older `tm`), or an unparseable one | counts as compiling | `a_record_without_a_phase_counts_for_capacity` |
+//! | #8692: run-phase owners reach `ceiling + builders.max_run_slots` | a new build waits, then exits 75, naming the cap | `a_run_slot_cap_withholds_with_a_named_reason_8692` |
 //! | a free slot whose leftover record is corrupt, or whose build's pid or start time cannot be read | BROKEN: skipped, never taken, record kept; `tm doctor` FAILS | `a_corrupt_record_in_a_free_slot_is_broken`, `a_corrupt_record_slot_is_skipped_not_taken`, `doctor_fails_on_a_corrupt_slot_record`, `an_unparseable_started_at_is_broken`, `an_uncheckable_pid_is_broken`, `a_failed_pid_check_is_unknown`, `an_unreadable_start_time_is_unknown` |
 //! | shared `CARGO_TARGET_DIR` and no slot directory (no pool, seed failed, fingerprints not clearable) | REFUSED, exit 75 | `an_unusable_slot_directory_refuses_instead_of_sharing`, `a_shared_target_without_a_repo_identity_refuses` |
 //! | pressure sysctl / PSI unreadable | pressure gate skipped; ceiling, leases and load still apply; warning | `unreadable_pressure_uses_the_ceiling_and_warns` |
@@ -101,6 +108,8 @@ pub mod deps_repair;
 // #8451: the daemon's percent-of-volume sweep over the slot pool.
 pub mod evict;
 pub mod orphan;
+// #8692: the compile-to-run flip that frees capacity once cargo drops its lock.
+pub mod phase;
 pub mod slots;
 pub mod stale_guard;
 pub mod store;
