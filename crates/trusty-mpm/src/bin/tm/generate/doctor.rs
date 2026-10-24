@@ -281,6 +281,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools (Slack, Gmail, Notion, Google Chat). Reads each project `.claude/settings*.json` the hygiene probe reaches and the managed `claude-config/settings*.json`. `Fail` when a provisioned file lacks the group, carries it with a timeout under 10 s or a narrowed matcher, or sets `disableAllHooks`; `Unknown` when a file cannot be read or parsed; `Ok` otherwise, including a foreign project with no tm hook. Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
     ),
     (
+        "tripwire_record",
+        "Whether the CTO tripwire in `tm hook --egress-guard` has tripped: reads `~/.trusty-tools/trusty-mpm/channels/tripwire/trips.jsonl`, the durable record of each channel-tainted session's tool call that reached a project the channel host config lists. `Ok` when the record is absent or empty; `Warn` naming the trip count and the newest timestamp when it holds trips, since until the go-live alert lands this row is the only trip signal; `Fail` on a line that does not parse or a record the hook cannot append to (an unwritable directory or `trips.jsonl`, or a missing directory under an unwritable ancestor); `Unknown` when the file or directory cannot be read. Read-only (issue #8454).",
+    ),
+    (
         "tcc_taint",
         "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
     ),

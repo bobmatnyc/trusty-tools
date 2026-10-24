@@ -16,7 +16,8 @@
 //! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
 //! trust-anchor floor ([`verdict`]), [`decide`]s, applies the channel-taint
 //! arm with its policy readiness gate ([`with_taint_async`], #8433, #9741;
-//! the daemon's verdict first, #8454 VC), and on
+//! the daemon's verdict first, #8454 VC) and, on a ready policy, the CTO
+//! tripwire ([`tripwire_verdict`], #8454 S6), and on
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
@@ -32,9 +33,8 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
-use crate::commands::egress_guard_taint::{
-    POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
-};
+use crate::commands::egress_guard_taint::{POLICY_CHECK, policy_not_ready_reason, taint_verdict};
+use crate::commands::egress_guard_tripwire::tripwire_verdict;
 use crate::commands::egress_verdict_client::cached_policy_ready;
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
@@ -264,10 +264,16 @@ fn taint_step<'a>(
 }
 
 /// The deny for a tainted gated call, given its policy readiness.
-fn taint_deny(payload: &serde_json::Value, taint: String, ready: Result<(), NotReady>) -> Verdict {
+fn taint_deny(
+    payload: &serde_json::Value,
+    home: Option<&std::path::Path>,
+    taint: String,
+    ready: Result<(), NotReady>,
+) -> Verdict {
     // #9741: readiness runs before the taint deny; both arms deny.
     match ready {
-        Ok(()) => deny(TAINT_CHECK, taint),
+        // #8454 S6: a ready policy hands the call to the CTO tripwire.
+        Ok(()) => tripwire_verdict(payload, home, taint),
         Err(not_ready) => deny(
             POLICY_CHECK,
             policy_not_ready_reason(payload, &not_ready, &taint),
@@ -282,7 +288,9 @@ fn taint_deny(payload: &serde_json::Value, taint: String, ready: Result<(), NotR
 /// either way; a policy that is not ready is reported as the cause first.
 /// What: a deny stands. An allow of a readable payload that [`taint_verdict`]
 /// refuses runs `ready`: not ready is a [`POLICY_CHECK`] deny naming the
-/// branch, ready is the [`TAINT_CHECK`] deny. `ready` runs for no other call.
+/// branch; ready goes to [`tripwire_verdict`] (#8454 S6), which denies a call
+/// in a listed project as `egress-channel-sensitive-path` and any other as
+/// `egress-channel-tainted`. `ready` runs for no other call.
 /// #8454 VC: the guard runs [`with_taint_async`]; this synchronous form,
 /// over the same steps, drives the S4 tests.
 /// Test: `with_taint_denies_an_allowed_gated_call_of_a_tainted_session`,
@@ -298,7 +306,7 @@ pub(crate) fn with_taint(
 ) -> Verdict {
     match taint_step(first, read, home, launch) {
         TaintStep::Done(verdict) => verdict,
-        TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready()),
+        TaintStep::Policy { payload, taint } => taint_deny(payload, home, taint, ready()),
     }
 }
 
@@ -322,7 +330,7 @@ where
 {
     match taint_step(first, read, home, launch) {
         TaintStep::Done(verdict) => verdict,
-        TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready().await),
+        TaintStep::Policy { payload, taint } => taint_deny(payload, home, taint, ready().await),
     }
 }
 

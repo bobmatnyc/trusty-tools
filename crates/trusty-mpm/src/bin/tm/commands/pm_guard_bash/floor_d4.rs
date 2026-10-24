@@ -253,7 +253,7 @@ const COMMAND_STARTERS: &[&str] = &[
 /// `time { tmux …; }`, `coproc tmux …` and `case x in (x) tmux …` hid the
 /// program word behind the grammar before it.
 /// Test: `a_program_after_shell_grammar_is_found`.
-fn grammar_prefix(argv: &[String]) -> usize {
+pub(crate) fn grammar_prefix(argv: &[String]) -> usize {
     let opens = |w: Option<&String>| w.is_some_and(|w| w == "{" || w.starts_with('('));
     let mut i = 0;
     while let Some(tok) = argv.get(i).map(String::as_str) {
