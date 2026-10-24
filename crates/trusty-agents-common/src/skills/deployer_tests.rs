@@ -752,3 +752,127 @@ fn deploy_directory_skill_preserves_a_user_edited_reference() {
         "{stats:?}"
     );
 }
+
+/// Mode bits of `path`, masked to the permission triplet.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A flat skill carrying one script and one non-`.md` reference, both `0644`
+/// at the source as the content tarball extracts them.
+#[cfg(unix)]
+fn write_skill_with_script(dir: &Path, stem: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    fs::write(dir.join(format!("{stem}.md")), "---\nname: x\n---\nbody\n").unwrap();
+    let scripts = dir.join(stem).join("scripts");
+    let refs = dir.join(stem).join("references");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&refs).unwrap();
+    let script = scripts.join("check.sh");
+    let reference = refs.join("check.yml");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&reference, "rules: []\n").unwrap();
+    chmod(&script, 0o644);
+    chmod(&reference, 0o644);
+    (script, reference)
+}
+
+/// #10211: the path rule alone decides the bit — `scripts/` only.
+#[test]
+fn scripts_are_executable_by_path() {
+    assert!(is_executable_skill_file("scripts/check.sh"));
+    assert!(is_executable_skill_file("scripts/nested/run"));
+    assert!(!is_executable_skill_file("references/check.yml"));
+    assert!(!is_executable_skill_file("scripts"));
+    assert!(!is_executable_skill_file("scripts/"));
+    assert!(!is_executable_skill_file("metadata.json"));
+}
+
+/// #10211: a `scripts/*` file deploys `0o755` byte-identical even when the
+/// source copy is `0644`; the non-`.md` reference deploys byte-identical and
+/// stays non-executable.
+#[cfg(unix)]
+#[test]
+fn deploy_scripts_carry_the_exec_bit() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    let (script, reference) = write_skill_with_script(src.path(), "tm-x");
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    let deployed_script = tgt.path().join("tm-x").join("scripts").join("check.sh");
+    let deployed_ref = tgt.path().join("tm-x").join("references").join("check.yml");
+    assert!(
+        stats
+            .deployed
+            .contains(&"tm-x/scripts/check.sh".to_string())
+    );
+    assert!(
+        stats
+            .deployed
+            .contains(&"tm-x/references/check.yml".to_string())
+    );
+    assert_eq!(
+        fs::read(&deployed_script).unwrap(),
+        fs::read(&script).unwrap()
+    );
+    assert_eq!(
+        fs::read(&deployed_ref).unwrap(),
+        fs::read(&reference).unwrap()
+    );
+    assert_eq!(mode_of(&deployed_script), 0o755, "script mode");
+    assert_eq!(
+        mode_of(&deployed_ref) & 0o111,
+        0,
+        "reference must not be executable"
+    );
+}
+
+/// #10211: a managed script an older deployer left `0644` gets the bit back on
+/// the next deploy even though its bytes are unchanged.
+#[cfg(unix)]
+#[test]
+fn redeploy_restores_a_lost_exec_bit_on_an_unchanged_script() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_skill_with_script(src.path(), "tm-x");
+    deploy_skills(src.path(), tgt.path()).unwrap();
+    let deployed_script = tgt.path().join("tm-x").join("scripts").join("check.sh");
+    chmod(&deployed_script, 0o644);
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    assert!(
+        stats
+            .unchanged
+            .contains(&"tm-x/scripts/check.sh".to_string()),
+        "{stats:?}"
+    );
+    assert_eq!(mode_of(&deployed_script), 0o755);
+}
+
+/// #10211: a source file executable outside `scripts/` keeps its bit.
+#[cfg(unix)]
+#[test]
+fn deploy_keeps_a_source_exec_bit_outside_scripts() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-x.md"), "body\n").unwrap();
+    let tools = src.path().join("tm-x").join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    let hook = tools.join("hook");
+    fs::write(&hook, "#!/bin/sh\n").unwrap();
+    chmod(&hook, 0o755);
+
+    deploy_skills(src.path(), tgt.path()).unwrap();
+
+    let deployed = tgt.path().join("tm-x").join("tools").join("hook");
+    assert_eq!(mode_of(&deployed), 0o755);
+}

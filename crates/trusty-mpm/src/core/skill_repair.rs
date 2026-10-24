@@ -41,10 +41,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_manifest::ManifestError;
-use crate::core::agent_manifest::{atomic_write, checksum};
+use crate::core::agent_manifest::{atomic_write, atomic_write_executable, checksum};
 use crate::core::doctor_repair::RepairMode;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::{SkillDeployTier, project_skill_tier, skill_deploy_tiers};
+use crate::core::skill_deployer::is_executable_skill_file;
 use crate::core::skill_drift::{
     ManifestState, SkillDrift, SkillReference, audit_deployed_skills_with_roster, deployed_path,
 };
@@ -483,8 +484,17 @@ fn rewrite_and_verify(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
-    atomic_write(&target, content)
-        .map_err(|e| format!("could not write {}: {e}", target.display()))?;
+    // #10211: a `<stem>/scripts/*` key is repaired `0o755`, as the deployer
+    // writes it; a repaired script that lost its exec bit is still broken.
+    let executable = stem
+        .split_once('/')
+        .is_some_and(|(_, rel)| is_executable_skill_file(rel));
+    let write = if executable {
+        atomic_write_executable(&target, content)
+    } else {
+        atomic_write(&target, content)
+    };
+    write.map_err(|e| format!("could not write {}: {e}", target.display()))?;
 
     // VERIFY FROM DISK. The write returning Ok is not evidence the file now
     // holds the intended bytes.
