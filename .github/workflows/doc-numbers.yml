@@ -93,11 +93,22 @@ jobs:
       - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
         run: bash scripts/check_doc_numbers.sh
 
+      # #10081: the repo gate runs the tm-adr skill's check_adr.sh byte for
+      # byte. Prove the copy matches the content source, prove the script's
+      # own fixtures and header hash, then run the gate. ADR-0001..0013
+      # predate the metadata block; --extra-dirs checks each per-crate
+      # decisions directory's README listing (docs/adr/README.md).
+      - name: Repo check_adr.sh is the tm-adr content copy
+        run: cmp scripts/check_adr.sh content/skills/tm-adr/scripts/check_adr.sh
+
       - name: Test ADR consistency checker
-        run: scripts/check_adr.sh --self-test
+        run: bash scripts/check_adr.sh --self-test
+
+      - name: Repo check_adr.sh header matches its body hash
+        run: bash scripts/check_adr.sh --verify-self
 
       - name: Check ADR corpus consistency
-        run: bash scripts/check_adr.sh
+        run: bash scripts/check_adr.sh --require-metadata-from 0014 --extra-dirs 'docs/*/decisions'
 
       - name: Check Trusty Code architecture reconciliation
         run: bash scripts/check_trusty_code_specs.sh

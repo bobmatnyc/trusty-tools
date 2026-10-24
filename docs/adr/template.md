@@ -30,7 +30,8 @@ about the cost and risks.
 ## Related Decisions
 
 **Vetting required before acceptance.** Sweep `docs/adr/INDEX.md` and prior decisions;
-record the outcome per the consistency-vetting protocol (see DOC-46 §3).
+record the outcome per the consistency-vetting protocol (see "Consistency Vetting" in
+`content/skills/tm-adr/references/adr-standard.md`).
 
 Vetted against prior ADRs on [DATE]:
 
