@@ -711,19 +711,16 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::Result(Err(anyhow::anyhow!("{msg}")));
     }
 
-    let resume = match trusty_mpm::runtime::build_inplace_resume_command_under(
-        fw,
-        &cwd,
-        record.claude_session_id.as_deref(),
+    let resume = match named_inplace_resume(
+        trusty_mpm::runtime::build_inplace_resume_command_under(
+            fw,
+            &cwd,
+            record.claude_session_id.as_deref(),
+        ),
+        &record.name,
     ) {
-        // #9025: this exec bypasses both spec delivery points, so name the
-        // session here; the record's name is the tmux session's.
-        Ok(resume) => resume.named_after_session(&record.name),
-        Err(e) => {
-            return InPlaceOutcome::Result(Err(anyhow::anyhow!(
-                "cannot build in-place relaunch command: {e}"
-            )));
-        }
+        Ok(resume) => resume,
+        Err(e) => return InPlaceOutcome::Result(Err(e)),
     };
 
     // #8233 review (HIGH): resolve the session workspace's pinned `gh` identity
@@ -753,6 +750,24 @@ pub(crate) async fn run_inplace_relaunch(
         &cwd,
         &gh_env,
     )))
+}
+
+/// The built in-place resume command, named after the session it relaunches.
+///
+/// Why (#9025): this exec bypasses both spec delivery points, so the name is
+/// applied here; the record's name is the tmux session's. A seam so a test
+/// drives the same step `run_inplace_relaunch` runs.
+/// What: maps a successful build through
+/// `InPlaceResumeCommand::named_after_session`; a failure becomes the
+/// "cannot build in-place relaunch command" error.
+/// Test: `an_inplace_relaunch_is_named_after_its_session`.
+pub(crate) fn named_inplace_resume(
+    built: Result<trusty_mpm::runtime::InPlaceResumeCommand, trusty_mpm::runtime::RuntimeError>,
+    session_name: &str,
+) -> anyhow::Result<trusty_mpm::runtime::InPlaceResumeCommand> {
+    built
+        .map(|resume| resume.named_after_session(session_name))
+        .map_err(|e| anyhow::anyhow!("cannot build in-place relaunch command: {e}"))
 }
 
 /// The in-place relaunch command with the renderer the config under
