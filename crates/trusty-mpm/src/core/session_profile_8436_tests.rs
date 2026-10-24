@@ -77,10 +77,12 @@ const HEX_ID_RULE: [&str; 2] = ["exactly two lowercase hex digits", "Never use `
 fn hex_id_rule_offsets(flat: &str) -> Option<Vec<usize>> {
     HEX_ID_RULE
         .iter()
-        .map(|rule| match flat.match_indices(rule).collect::<Vec<_>>()[..] {
-            [(at, _)] => Some(at),
-            _ => None,
-        })
+        .map(
+            |rule| match flat.match_indices(rule).collect::<Vec<_>>()[..] {
+                [(at, _)] => Some(at),
+                _ => None,
+            },
+        )
         .collect()
 }
 
