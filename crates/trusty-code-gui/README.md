@@ -17,18 +17,25 @@ REST gateway (#2983) lands.
 
 The `tcode serve` daemon owns all logic. It serves JSON-RPC on its Unix
 socket only and binds no TCP port (#6637). The GUI does no client-side
-computation and no Tauri-native filesystem/privileged access — web and Tauri
-builds must be behaviorally identical:
+computation and no Tauri-native filesystem/privileged access:
 
 - **Bridge**: a webview cannot dial a Unix socket, so this app's Rust side runs
-  an HTTP+SSE bridge (`src/bridge/`). It dials the daemon's socket and serves
-  the webview on an ephemeral loopback port, `127.0.0.1:0`, with a credential
-  minted per launch (`src/bridge/serve.rs`). #10166 tracks replacing this
-  remaining loopback listener with a non-TCP transport.
-- **Data fetching**: the Svelte frontend calls the bridge via `fetch()` and
-  `EventSource`, whether it runs inside Tauri's webview or a plain browser tab.
+  a bridge (`src/bridge/`) that dials the daemon's socket. The bridge opens no
+  port of its own (#10166): the webview reaches its router in-process, through
+  the `tcode-bridge://` custom URI scheme for REST calls
+  (`src/bridge/scheme.rs`) and a Tauri IPC `Channel` for the two event streams
+  (`src/bridge/channel.rs`). A credential minted per launch still guards every
+  route (`src/bridge/serve.rs`).
+- **Data fetching**: the Svelte frontend calls `fetch()` against
+  `tcode-bridge://localhost`, and opens event streams with the
+  `open_daemon_stream` command. It runs only inside Tauri's webview; there is no
+  plain-browser mode.
 - **Tauri IPC**: `get_daemon_url` and `get_daemon_token` hand the webview the
-  bridge's URL and credential. Only the native process knows them.
+  bridge's URL and credential; `open_daemon_stream` and `close_daemon_stream`
+  drive the event streams.
+- **Platform**: macOS only. WebKit on macOS addresses the scheme as
+  `tcode-bridge://localhost`; Windows and Android would use
+  `http://tcode-bridge.localhost`, which this app does not support.
 
 ### Tech Stack
 
@@ -39,10 +46,9 @@ builds must be behaviorally identical:
 
 The bridge dials the daemon's socket, `trusty-code.sock` in the daemon data
 directory (`trusty_common::daemon_addr::daemon_socket_path("trusty-code")`).
-`TRUSTY_DATA_DIR_OVERRIDE` moves that directory. There is no fixed port: the
-bridge picks a free loopback port at launch and logs it. In web mode, set the
-`trusty-code.daemonUrl` `localStorage` key to that bridge URL and
-`trusty-code.daemonToken` to the bridge credential.
+`TRUSTY_DATA_DIR_OVERRIDE` moves that directory. Nothing listens on a TCP port,
+so there is no URL to point a browser tab at; `pnpm dev` serves the UI for the
+Tauri dev window only.
 
 ## Building
 

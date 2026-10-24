@@ -6,30 +6,20 @@
 // that matters: a new call site is authenticated by default rather than by
 // remembering.
 //
-// The credential comes from the native shell (`get_daemon_token`). #6637 moved
-// where it originates without changing that: it used to be a 0600 file the
-// DAEMON wrote and the shell read, and it is now minted by the shell itself for
-// the bridge it binds — held in memory, never written down. A plain browser tab
-// has no such shell, so it falls back to a `localStorage` override, the same
-// shape as the base-URL override beside it, and the only way `pnpm dev` against
-// a running app stays workable. That override is a developer convenience, not a
-// security boundary: a page that can write this app's localStorage is already
-// running as this app.
+// The credential comes from the native shell (`get_daemon_token`), minted per
+// launch and held in memory. #10166 kept it (owner ruling Q3) when the bridge
+// stopped listening on a port: `fetch()` now reaches it over the
+// `tcode-bridge://` scheme, and the two event streams over an IPC `Channel`
+// (`open_daemon_stream`), each still presenting the credential or a ticket
+// minted with it. A plain browser tab has no shell and so no credential.
 //
 // What: `installDaemonAuth()` wraps `globalThis.fetch` so requests to the
-// bridge base URL carry the credential; `openDaemonEventStream()` is the SSE
-// counterpart, because `EventSource` cannot send a header at all and must
-// exchange the credential for a single-use ticket instead.
+// bridge base URL carry the credential; `openDaemonEventStream()` opens a
+// stream through the shell with a single-use ticket and keeps it open.
 //
 // Test: `daemon-auth.test.ts`.
 
 import { apiBase, isTauri } from './api-config';
-
-/** localStorage key holding a hand-pasted credential for plain-browser use. */
-export const TOKEN_STORAGE_KEY = 'trusty-code.daemonToken';
-
-/** Query parameter the bridge reads an SSE ticket from. */
-export const TICKET_QUERY_PARAM = 'ticket';
 
 /** Route that exchanges the credential for a single-use SSE ticket. */
 export const SSE_TICKET_PATH = '/auth/sse-ticket';
@@ -40,28 +30,18 @@ let cachedToken: string | null = null;
  * Resolve the bridge credential, or '' when there is none.
  *
  * Why: cached after the first resolution because every request would otherwise
- * cross the Tauri IPC boundary. The credential is fixed for a daemon's whole
- * life, so there is nothing to invalidate — a daemon restart that rotates it
- * also drops every connection this page holds.
+ * cross the Tauri IPC boundary. The credential is fixed for the app's whole
+ * life, so there is nothing to invalidate.
  */
 export async function daemonToken(): Promise<string> {
   if (cachedToken !== null) return cachedToken;
-  if (isTauri()) {
-    const { invoke } = await import('@tauri-apps/api/core');
-    cachedToken = await invoke<string>('get_daemon_token');
-    return cachedToken;
-  }
-  try {
-    cachedToken = localStorage.getItem(TOKEN_STORAGE_KEY) ?? '';
-  } catch {
-    // A browser with site data blocked throws on access; no credential is a
-    // valid state, so this is not an error path.
-    cachedToken = '';
-  }
+  if (!isTauri()) return '';
+  const { invoke } = await import('@tauri-apps/api/core');
+  cachedToken = await invoke<string>('get_daemon_token');
   return cachedToken;
 }
 
-/** Drop the cached credential — for tests, and for a re-read after a restart. */
+/** Drop the cached credential — for tests. */
 export function resetDaemonTokenCache(): void {
   cachedToken = null;
 }
@@ -70,17 +50,23 @@ export function resetDaemonTokenCache(): void {
  * Do `url` and `base` share an origin?
  *
  * Why: the first version compared with `url.startsWith(base)`, the prefix-match
- * class this repo already fixed once in #3280. `http://127.0.0.1:54321` is a
- * prefix of `http://127.0.0.1:54321.attacker.example`, so a request to the
- * attacker's host would have carried the credential. Comparing parsed origins
- * makes the host, port, and scheme all exact.
+ * class this repo already fixed once in #3280. A parsed comparison makes the
+ * host, port, and scheme all exact.
  *
- * What: `new URL(...).origin` on both sides. An unparseable URL is not
+ * #10166: the comparison is `protocol` + `host`, not `URL.origin`. For a
+ * non-special scheme such as `tcode-bridge:` the URL standard defines `origin`
+ * as the opaque `"null"`, so an `origin` comparison would call EVERY
+ * non-special URL — `evil-scheme://anywhere/` included — same-origin with the
+ * bridge, and attach the credential to it.
+ *
+ * What: an unparseable URL, or an empty host on either side, is not
  * same-origin — fail closed, send no credential.
  */
 export function sameOrigin(url: string, base: string): boolean {
   try {
-    return new URL(url).origin === new URL(base).origin;
+    const a = new URL(url);
+    const b = new URL(base);
+    return a.host !== '' && a.protocol === b.protocol && a.host === b.host;
   } catch {
     return false;
   }
@@ -119,10 +105,15 @@ export function installDaemonAuth(): void {
 /** Backoff between re-mint attempts after a stream drops, in milliseconds. */
 const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000];
 
-/** A live SSE subscription. `close()` stops it and cancels any pending retry. */
+/** A live stream subscription. `close()` stops it and cancels any pending retry. */
 export interface DaemonEventStream {
   close(): void;
 }
+
+/** What the Rust side's stream pump sends (`bridge::channel::StreamEvent`). */
+export type StreamEvent =
+  | { kind: 'message'; data: string }
+  | { kind: 'end'; error: string | null };
 
 /** Mint a ticket for `path`, or `null` when none can be obtained. */
 async function mintTicket(base: string, path: string): Promise<string | null> {
@@ -138,60 +129,83 @@ async function mintTicket(base: string, path: string): Promise<string | null> {
 }
 
 /**
- * Open an authenticated SSE subscription to a bridge stream, and keep it open.
+ * Open an authenticated subscription to a bridge stream, and keep it open.
  *
- * Why the ticket: `EventSource` has no header API, and putting the durable
- * token in the query string would write it into the access log and
- * every tracing span. The bridge mints a single-use ticket that expires in
- * seconds, so a ticket captured from a log is already spent.
+ * Why the ticket: it binds the stream to the path the token holder asked for
+ * and is spent on first use, so a ticket captured from a log is worthless.
  *
- * Why this is a subscription rather than a bare `EventSource`: single-use is
- * exactly what breaks `EventSource`'s own reconnect. On any drop the browser
- * retries the SAME URL, which carries the SAME spent ticket, so the bridge
- * answers `401` and the stream dies permanently — silently, with the component
- * still holding a handle it believes is live. Reconnecting has to mint a fresh
- * ticket, which only this layer can do.
+ * Why this is a subscription rather than one open: a stream ends whenever the
+ * daemon drops it, and every reopen needs a FRESH ticket, which only this
+ * layer can mint.
  *
- * What: mints, opens, and on `error` closes and re-mints on a bounded backoff
- * ([`RECONNECT_BACKOFF_MS`], then steady at its last value). `onMessage` is
- * rebound to each new `EventSource`, so a caller sees one continuous stream.
- * Returns `null` when the FIRST attempt cannot get a ticket — the caller then
- * falls back to polling, exactly as it already does when `EventSource` is
- * unavailable.
+ * What (#10166): mints, then invokes `open_daemon_stream` with an IPC
+ * `Channel`. Each `message` is handed to `onMessage` as a `MessageEvent` (the
+ * shape the old `EventSource` delivered, so callers did not change); an `end`
+ * — a clean close or a failure alike — is a drop, re-minted on a bounded
+ * backoff ([`RECONNECT_BACKOFF_MS`], then steady at its last value). Events
+ * from a superseded attempt are ignored. Returns `null` outside Tauri, or when
+ * the FIRST attempt cannot get a ticket or open the stream — the caller then
+ * falls back to polling.
  */
 export async function openDaemonEventStream(
   path: string,
   onMessage: (event: MessageEvent) => void,
 ): Promise<DaemonEventStream | null> {
-  if (typeof EventSource === 'undefined') return null;
+  if (!isTauri()) return null;
+  const { Channel, invoke } = await import('@tauri-apps/api/core');
   const base = await apiBase();
 
-  const first = await mintTicket(base, path);
-  if (!first) return null;
-
-  let source: EventSource | null = null;
+  let current: number | null = null;
+  let generation = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let attempt = 0;
   let closed = false;
 
-  const open = (ticket: string) => {
-    if (closed) return;
-    source = new EventSource(
-      `${base}${path}?${TICKET_QUERY_PARAM}=${encodeURIComponent(ticket)}`,
-    );
-    source.onmessage = (event) => {
-      // A message means the stream is healthy: reset the backoff so a later,
-      // unrelated drop retries promptly rather than at the previous ceiling.
-      attempt = 0;
-      onMessage(event);
-    };
-    source.onerror = () => {
-      // The browser would retry this URL itself, with the spent ticket. Close
-      // first so it cannot, then come back with a fresh one.
-      source?.close();
-      source = null;
+  const stop = (id: number) => {
+    void invoke('close_daemon_stream', { id }).catch(() => {
+      // The stream is gone either way; nothing is left to release.
+    });
+  };
+
+  /** One attempt: mint, open, and wire the channel. `false` when it failed. */
+  const open = async (): Promise<boolean> => {
+    let ticket: string | null;
+    try {
+      ticket = await mintTicket(base, path);
+    } catch {
+      // A rejected fetch is a failed attempt, never an exception that would
+      // stop the reconnect loop for good.
+      return false;
+    }
+    if (!ticket || closed) return false;
+    const mine = ++generation;
+    let ended = false;
+    const channel = new Channel<StreamEvent>();
+    channel.onmessage = (event) => {
+      if (closed || mine !== generation) return;
+      if (event.kind === 'message') {
+        // A message means the stream is healthy: reset the backoff so a later,
+        // unrelated drop retries promptly rather than at the previous ceiling.
+        attempt = 0;
+        onMessage(new MessageEvent('message', { data: event.data }));
+        return;
+      }
+      ended = true;
+      current = null;
       scheduleReconnect();
     };
+    let id: number;
+    try {
+      id = await invoke<number>('open_daemon_stream', { path, ticket, onEvent: channel });
+    } catch {
+      return false;
+    }
+    if (closed || mine !== generation) {
+      stop(id);
+    } else if (!ended) {
+      current = id;
+    }
+    return true;
   };
 
   const scheduleReconnect = () => {
@@ -202,16 +216,13 @@ export async function openDaemonEventStream(
     timer = setTimeout(() => {
       timer = null;
       if (closed) return;
-      void (async () => {
-        const ticket = await mintTicket(base, path);
-        if (closed) return;
-        if (ticket) open(ticket);
-        else scheduleReconnect();
-      })();
+      void open().then((ok) => {
+        if (!ok) scheduleReconnect();
+      });
     }, delay);
   };
 
-  open(first);
+  if (!(await open())) return null;
 
   return {
     close() {
@@ -220,8 +231,10 @@ export async function openDaemonEventStream(
         clearTimeout(timer);
         timer = null;
       }
-      source?.close();
-      source = null;
+      if (current !== null) {
+        stop(current);
+        current = null;
+      }
     },
   };
 }
