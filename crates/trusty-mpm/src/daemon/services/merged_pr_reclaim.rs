@@ -56,6 +56,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 use crate::daemon::state::DaemonState;
+use crate::session_manager::prune_progress::PruneCancel;
 use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode, ReclaimOutcome};
 use crate::session_manager::worktree_reclaim_launch::process_launch_dirs;
 use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
@@ -226,6 +227,8 @@ pub(crate) async fn reclaim(
     invoking_session: Option<String>,
     // #8782: the project/path bounds; `WorktreeScope::all()` for the sweep.
     scope: WorktreeScope,
+    // #7619: read between candidates; `PruneCancel::never()` for the sweep.
+    cancel: PruneCancel,
 ) -> Result<ReclaimOutcome, String> {
     let repos_root = repos_root.to_path_buf();
     // #7357: resolved here — on the entry point — never inside the engine, which
@@ -277,6 +280,7 @@ pub(crate) async fn reclaim(
             &adopted,
             &launched_from,
             &scope,
+            &cancel,
         );
         super::worktree_removal_ledger::record_reclaimed(&recorder, &outcome);
         outcome
@@ -387,6 +391,7 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         None,
         // The automatic sweep stays daemon-global: it has no caller project.
         WorktreeScope::all(),
+        PruneCancel::never(),
     )
     .await
     {

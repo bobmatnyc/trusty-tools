@@ -41,9 +41,7 @@ use std::time::{Duration, Instant};
 // current before anything is classified against them, and the landed-content
 // admission gate 5 asks when no pull request carries the branch's name.
 use super::worktree_landing_refresh::refresh_landing_refs;
-use super::worktree_reclaim_landed::{
-    ReclaimProof, landing_recheck, reclaim_landed_content, reclaim_landed_proof,
-};
+use super::worktree_reclaim_landed::{ReclaimProof, landing_recheck, reclaim_landed_content};
 
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims, NOT_INSPECTED_REASON,
@@ -54,11 +52,8 @@ use super::worktree_reclaim::{
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
 use super::worktree_reclaim_launch::launch_refusal;
-// #7540: the OS process-table cwd probe, so a process nothing registered
-// still spares the tree it stands in.
-use super::worktree_liveness::process_holding;
-// #8301: the preview's deadline and the batched pull-request listing.
-use super::worktree_reclaim_budget::{inspect_within, reclaim_index};
+// #8301: the preview's deadline.
+use super::worktree_reclaim_budget::inspect_within;
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
 use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
@@ -73,6 +68,8 @@ use super::worktree_registry::{
 use super::worktree_removal_integrity::identity_refusal;
 use super::worktree_safety::inspect_dirt;
 use super::worktree_scope::WorktreeScope;
+// #7619: the stop signal the survey and the delete loop read between candidates.
+use super::prune_progress::{CANCELLED_BEFORE_INSPECTION, PruneCancel, log_cancelled};
 
 /// How long a survey may spend measuring bytes, and classifying (#2919).
 ///
@@ -221,6 +218,7 @@ pub(crate) fn survey_with_landed_content(
         per_branch_fallback,
         keep_list,
         landed_content,
+        &PruneCancel::never(),
     )
 }
 
@@ -240,20 +238,28 @@ fn survey_scanned(
     per_branch_fallback: bool,
     keep_list: &KeepList,
     landed_content: LandedContentProbe<'_>,
+    // #7619: read between candidates; a cancelled pass inspects no further.
+    cancel: &PruneCancel,
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
     for scanned in scanned {
-        if budget.classify.is_some_and(|d| Instant::now() >= d) {
+        let past_deadline = budget.classify.is_some_and(|d| Instant::now() >= d);
+        if past_deadline || cancel.stop_requested() {
             // #2919: fail closed. A candidate we ran out of time to inspect is
             // reported as blocked, never omitted and never approved.
+            let reason = if past_deadline {
+                NOT_INSPECTED_REASON
+            } else {
+                CANCELLED_BEFORE_INSPECTION
+            };
             candidates.push(ReclaimCandidate {
                 path: scanned.path,
                 branch: scanned.branch,
                 registry_root: scanned.registry_root,
                 bytes: None,
                 pr: BranchPrState::Unknown,
-                verdict: ReclaimVerdict::blocked(ReclaimGate::Deadline, NOT_INSPECTED_REASON),
+                verdict: ReclaimVerdict::blocked(ReclaimGate::Deadline, reason),
             });
             continue;
         }
@@ -317,7 +323,7 @@ fn survey_scanned(
     // The measurement deadline starts HERE, when the phase does — not when the
     // survey did. See `SurveyBudget::measure`.
     let measure_deadline = budget.measure.map(|d| Instant::now() + d);
-    measure_reclaimable_first(&mut candidates, measure_deadline);
+    measure_reclaimable_first(&mut candidates, measure_deadline, cancel);
     ReclaimSurvey::from_candidates(candidates)
 }
 
@@ -349,12 +355,20 @@ fn survey_scanned(
 /// `reclaimable_bytes` must print that qualifier beside it.
 /// Test: `survey_measures_reclaimable_worktrees_before_blocked_ones`,
 /// `survey_discloses_a_partially_measured_reclaimable_set`.
-fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Option<Instant>) {
+fn measure_reclaimable_first(
+    candidates: &mut [ReclaimCandidate],
+    deadline: Option<Instant>,
+    cancel: &PruneCancel,
+) {
     for want_reclaimable in [true, false] {
         for c in candidates
             .iter_mut()
             .filter(|c| c.verdict.is_reclaimable() == want_reclaimable)
         {
+            // #7619: a cancelled pass leaves the rest unmeasured (`None`).
+            if cancel.stop_requested() {
+                return;
+            }
             c.bytes = measure_bytes_until(&c.path, deadline);
         }
     }
@@ -555,7 +569,8 @@ pub(crate) struct FreshProbes<'a> {
     /// What: asked in the last-moment guard, immediately before the removal,
     /// because other processes' cwds DO change during a sweep. `Some(reason)`
     /// refuses, covering both "a process stands in it" and "could not look"
-    /// (ADR-0045). Production passes [`process_holding`].
+    /// (ADR-0045). Production passes
+    /// [`process_holding`](super::worktree_liveness::process_holding).
     ///
     /// Known limit: without root, `lsof` omits other users' processes and
     /// still exits 0, so a process another user owns does not block.
@@ -563,9 +578,10 @@ pub(crate) struct FreshProbes<'a> {
     pub cwd_holder: &'a dyn Fn(&Path) -> Option<String>,
     /// Take a candidate's landed proof before its deletion (#8109).
     ///
-    /// Production passes [`reclaim_landed_proof`]. A probe so a test can change
-    /// the tree after the proof returns and show the branch deletion still
-    /// judges the SHA the proof judged.
+    /// Production passes
+    /// [`reclaim_landed_proof`](super::worktree_reclaim_landed::reclaim_landed_proof).
+    /// A probe so a test can change the tree after the proof returns and show
+    /// the branch deletion still judges the SHA the proof judged.
     pub prove: &'a dyn Fn(&Path) -> ReclaimProof,
 }
 
@@ -691,6 +707,30 @@ pub(crate) fn reclaim_scoped(
     adopted: &[PathBuf],
     scope: &WorktreeScope,
 ) -> ReclaimOutcome {
+    let never = PruneCancel::never();
+    reclaim_scoped_with_cancel(repos_root, probes, mode, adopted, scope, &never)
+}
+
+/// [`reclaim_scoped`], stopped by `cancel` (#7619).
+///
+/// Why: a killed client left this pass deleting to the end of its list.
+/// What: `cancel` is read before each candidate's classification and byte
+/// walk, before the landing-ref refresh, and before each approved candidate
+/// in the delete loop, never inside `remove_session_worktree_guarded`, so a
+/// removal in flight finishes. Unstarted candidates land in
+/// [`ReclaimOutcome::cancelled_unstarted`]; their trees, branches and registry
+/// rows are untouched.
+/// Test: `worktree_7619_a_cancelled_reclaim_stops_after_the_first_removal`,
+/// `worktree_7619_cancel_during_a_removal_lets_that_removal_finish`,
+/// `worktree_7619_a_partial_removal_is_never_also_cancelled_unstarted`.
+pub(crate) fn reclaim_scoped_with_cancel(
+    repos_root: &Path,
+    probes: &FreshProbes<'_>,
+    mode: ReclaimMode,
+    adopted: &[PathBuf],
+    scope: &WorktreeScope,
+    cancel: &PruneCancel,
+) -> ReclaimOutcome {
     // 🔴 #7965: `unwrap_or_default()` stood here, and an empty `LiveClaims` reads
     // as "nothing claims anything" — the exact downgrade the fail-closed contract
     // forbids, applied to EVERY candidate at once. A probe that could not answer
@@ -711,7 +751,8 @@ pub(crate) fn reclaim_scoped(
     // an unanswerable claim probe mutates no refs either.
     // #8782: one scoped scan feeds both the refresh and the survey.
     let scanned = scan_registered_worktrees_in(repos_root, adopted, scope);
-    if mode == ReclaimMode::Remove {
+    // #7619: a cancelled pass fetches nothing.
+    if mode == ReclaimMode::Remove && !cancel.stop_requested() {
         refresh_repositories(&scanned);
     }
     let survey = survey_scanned(
@@ -729,17 +770,14 @@ pub(crate) fn reclaim_scoped(
         // the only fetch a report performs, it is bounded, and it runs only for
         // a candidate that reached gate 5 with no pull request.
         Some(&reclaim_landed_content),
+        cancel,
     );
     // #8109: what this pass decided about EVERY worktree it looked at, before
     // it acts on any of them.
     log_decisions(&survey, mode);
     let mut out = ReclaimOutcome {
-        removed: Vec::new(),
-        removed_bytes: 0,
-        refused_at_recheck: Vec::new(),
-        removal_failed: Vec::new(),
-        partially_removed: Vec::new(),
         survey,
+        ..ReclaimOutcome::default()
     };
     if mode == ReclaimMode::Report {
         return out;
@@ -754,7 +792,13 @@ pub(crate) fn reclaim_scoped(
     // Rebuilt fresh for the delete phase — the survey's index is as old as the
     // survey, which is minutes.
     let mut fresh_indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
-    for candidate in approved {
+    let mut queue = approved.into_iter();
+    for candidate in queue.by_ref() {
+        // #7619: asked BEFORE each candidate, never inside the removal below.
+        if cancel.stop_requested() {
+            out.cancelled_unstarted.push(candidate.path);
+            break;
+        }
         let path = candidate.path;
         // #7504: ahead of the pull-request lookups, because it is the only gate
         // here that costs nothing — two in-process path compares — and a
@@ -930,59 +974,16 @@ pub(crate) fn reclaim_scoped(
                 .push(format!("{}: {reason}", path.display()));
         }
     }
+    out.cancelled_unstarted.extend(queue.map(|c| c.path));
+    log_cancelled("merged-PR reclaim", out.cancelled_unstarted.len());
     out
 }
 
-/// [`reclaim_scoped`] against the real `gh`-backed index and a live
-/// re-read of the session store (#2919).
-///
-/// Why: the production entry point for the merged-PR reclaim — reached from the
-/// `merged_prs` opt-in on `tm session prune-worktrees` AND, since #7504, from the
-/// daemon's automatic post-merge sweep. Both arrive through
-/// [`crate::daemon::services::merged_pr_reclaim::reclaim`], the one place the
-/// production probes are assembled, so an operator-typed reclaim and an automatic
-/// one cannot apply different gates.
-/// What: `in_use_paths` and `keep_list` are both re-invoked per candidate by
-/// the loop, so the caller must supply closures that genuinely RE-READ rather
-/// than ones closing over a captured snapshot. `in_use_paths` returns `None`
-/// when the set cannot be read, which refuses; `keep_list` returns
-/// `KeepList::unreadable` when the config cannot be parsed, which keeps
-/// everything (#6927).
-/// Test: exercised through `reclaim_scoped`' tests.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn reclaim_merged_pr_worktrees(
-    repos_root: &Path,
-    in_use_paths: &dyn Fn() -> Option<LiveClaims>,
-    agent_state: AgentStateProbe<'_>,
-    mode: ReclaimMode,
-    keep_list: &dyn Fn() -> KeepList,
-    // #7357: resolved by the route that invokes this, never here.
-    adopted: &[PathBuf],
-    // #7504: the caller's own launch directories, resolved by the entry point
-    // that assembles the probes — never here, so a test can hand in a scratch
-    // path without the real process's cwd leaking into the comparison.
-    launched_from: &[PathBuf],
-    // #8782: the project and path bounds the route resolved.
-    scope: &WorktreeScope,
-) -> ReclaimOutcome {
-    reclaim_scoped(
-        repos_root,
-        &FreshProbes {
-            in_use_now: in_use_paths,
-            // #8301: one full listing per repository, not one call per branch.
-            index_for: &reclaim_index,
-            agent_state,
-            keep_list,
-            launched_from,
-            // #7540: the real process table, read per candidate.
-            cwd_holder: &process_holding,
-            prove: &reclaim_landed_proof,
-        },
-        mode,
-        adopted,
-        scope,
-    )
-}
+// #7619: the production entry point, split out so this file stays under the
+// 500-SLOC cap when the cancel checks landed.
+#[path = "worktree_reclaim_entry.rs"]
+mod entry;
+pub(crate) use entry::reclaim_merged_pr_worktrees;
 
 #[cfg(test)]
 #[path = "worktree_reclaim_sweep_tests.rs"]
