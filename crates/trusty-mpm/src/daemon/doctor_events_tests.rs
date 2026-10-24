@@ -13,6 +13,28 @@ fn sock_in(dir: &tempfile::TempDir) -> std::path::PathBuf {
     dir.path().join("trusty-events.sock")
 }
 
+/// Wait until `path`'s listener is gone from the kernel, so a dead-socket test
+/// observes a socket that is actually dead.
+///
+/// Why (#7215): a child that a concurrent test forks between `bind` and `drop`
+/// inherits the listener fd and holds it until its `exec`, so the dropped
+/// socket briefly still accepts. Once a connect is refused, no fd keeps the
+/// listener alive and it cannot come back.
+/// What: probes every 20 ms for up to 5 s until the connect is refused.
+/// Test: `doctor_events_reports_a_dead_socket`.
+async fn await_listener_gone(path: &Path) {
+    for _ in 0..250 {
+        if probe_socket_verdict(path, CONNECT_TIMEOUT).await == SocketVerdict::NotServing {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "{} still accepts 5 s after its listener dropped",
+        path.display()
+    );
+}
+
 /// Why (fail-open check): a socket file left by a crashed daemon still exists;
 /// a row that only looked for the file would call a dead bus healthy.
 /// What: a socket whose listener is gone observes `Stale` and grades `Fail`,
@@ -21,9 +43,13 @@ fn sock_in(dir: &tempfile::TempDir) -> std::path::PathBuf {
 #[tokio::test]
 async fn doctor_events_reports_a_dead_socket() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = sock_in(&dir);
-    drop(std::os::unix::net::UnixListener::bind(&path).expect("bind"));
+    // See #7215: bind in a 0700 directory, as the bus does, so a late connect
+    // reaches the socket rather than the directory-mode refusal.
+    let path = hardened_sock_in(&dir);
+    drop(trusty_common::uds::bind_hardened(&path).expect("bind"));
     assert!(path.exists(), "the stale socket file must remain");
+    // See #7215: a forked child's inherited fd can keep the listener alive.
+    await_listener_gone(&path).await;
 
     let state = observe_socket(&path, CONNECT_TIMEOUT).await;
     assert_eq!(state, SocketState::Stale);
