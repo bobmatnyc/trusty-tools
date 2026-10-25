@@ -567,6 +567,20 @@ async fn wait_for_socket(path: &Path) -> bool {
     false
 }
 
+/// Wait up to 5 s for `path` to stop existing.
+///
+/// Why: `run_daemon` binds the socket before it withdraws the stale HTTP
+/// discovery files, so a serving socket does not yet mean they are gone.
+async fn wait_for_absence(path: &Path) -> bool {
+    for _ in 0..250 {
+        if !path.exists() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
 /// #9214: `run_daemon` is a real socket-only daemon.
 ///
 /// Why: ADR-0032 retires TCP :7878. A daemon that still published an HTTP
@@ -657,7 +671,7 @@ async fn run_daemon_serves_only_the_socket() {
 /// after an upgrade, either would send them to a port this daemon never
 /// holds — possibly one another process now owns.
 /// What: seeds both files with the old daemon's address, starts the daemon,
-/// and asserts both are gone once the socket serves.
+/// and asserts both are gone within 5 s of the socket serving.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
@@ -676,8 +690,8 @@ async fn run_daemon_removes_a_stale_http_addr() {
         let shutdown_tx = state.shutdown_tx.clone();
         let handle = tokio::spawn(run_daemon(state, None));
         let serving = wait_for_socket(&socket_path).await;
-        let addr_left = stale_addr.exists();
-        let port_left = stale_port.exists();
+        let addr_left = !wait_for_absence(&stale_addr).await;
+        let port_left = !wait_for_absence(&stale_port).await;
         let _ = shutdown_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
 

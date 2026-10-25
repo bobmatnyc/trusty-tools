@@ -36,9 +36,13 @@ async fn prefix_search_finds(
 
 /// A planted index over `<tmp>/root` with `src/` on disk, plus an alias
 /// symlink `<tmp>/alias -> <tmp>/root`.
+///
+/// The root is returned canonical, the form `create_index` registers.
 fn rooted(tmp: &Path) -> (PathBuf, PathBuf) {
-    let root = tmp.join("root");
-    std::fs::create_dir_all(root.join("src")).expect("root/src");
+    let raw = tmp.join("root");
+    std::fs::create_dir_all(raw.join("src")).expect("root/src");
+    // #10272: macOS `$TMPDIR` is `/var/…`, a symlink to `/private/var/…`.
+    let root = std::fs::canonicalize(&raw).expect("canonical root");
     let alias = tmp.join("alias");
     std::os::unix::fs::symlink(&root, &alias).expect("alias");
     (root, alias)
@@ -51,7 +55,7 @@ fn rooted(tmp: &Path) -> (PathBuf, PathBuf) {
 /// is then re-added under the raw, canonical and symlinked-root absolute
 /// forms, each with a new unique term. After each, the total is unchanged,
 /// no chunk sits under the absolute key, and a search scoped by the relative
-/// and the absolute prefix finds the new term. Fails before the fix: the
+/// and the canonical absolute prefix finds the new term. Fails before the fix: the
 /// total grows with each absolute re-add.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
@@ -66,8 +70,10 @@ async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
     let expected = total_chunks(&state, "ia").await;
     assert!(expected > 0, "the relative write must index something");
 
-    let canonical = std::fs::canonicalize(&root).expect("canonical root");
-    let forms = [root.join(FILE), canonical.join(FILE), alias.join(FILE)];
+    // #10272: `root` is canonical; the raw `$TMPDIR` spelling is a separate
+    // form, which differs from it on macOS and equals it on Linux.
+    let raw = tmp.path().join("root");
+    let forms = [raw.join(FILE), root.join(FILE), alias.join(FILE)];
     for (n, absolute) in forms.iter().enumerate() {
         let term = format!("rotate_secret_9510_{n}");
         let content = format!("fn {term}(token: &str) -> bool {{ verify(token) }}\n");
@@ -95,7 +101,7 @@ async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
             !chunks_for(&state, "ia", FILE).await.is_empty(),
             "{absolute}"
         );
-        let abs_prefix = canonical.join("src").display().to_string();
+        let abs_prefix = root.join("src").display().to_string();
         for prefix in ["src", abs_prefix.as_str()] {
             assert!(
                 prefix_search_finds(&state, "ia", &term, prefix).await,
