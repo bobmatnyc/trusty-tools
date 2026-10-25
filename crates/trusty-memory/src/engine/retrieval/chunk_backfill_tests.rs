@@ -1294,19 +1294,9 @@ async fn a_failed_later_repair_embed_call_commits_no_partial_group() {
     assert_repair_fails_closed(later_group(false)).await;
 }
 
-#[tokio::test]
+/// The paused clock jumps to the default bound once the second group wedges,
+/// so no env var shortens the bound for tests running beside this one.
+#[tokio::test(start_paused = true)]
 async fn a_repair_embed_timing_out_on_a_later_group_commits_no_partial_group() {
-    let _env = crate::env_test_lock::env_test_lock().lock().await;
-    // SAFETY: serialised by `env_test_lock`, held for the whole test.
-    // A 1 s bound over the whole paced embed: the first group finishes, the
-    // second wedges, and the timeout fires.
-    unsafe {
-        std::env::set_var("TRUSTY_EMBED_BATCH_TIMEOUT_SECS", "1");
-        std::env::set_var("TRUSTY_EMBED_CHUNKED_CAP_SECS", "1");
-    }
     assert_repair_fails_closed(later_group(true)).await;
-    unsafe {
-        std::env::remove_var("TRUSTY_EMBED_BATCH_TIMEOUT_SECS");
-        std::env::remove_var("TRUSTY_EMBED_CHUNKED_CAP_SECS");
-    }
 }
