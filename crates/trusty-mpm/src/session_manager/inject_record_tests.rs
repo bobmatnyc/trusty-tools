@@ -94,7 +94,7 @@ async fn an_inject_is_exactly_one_message_event_9167() {
         Some("claude-1".to_string()),
         "hello".to_string(),
     );
-    assert_eq!(recording.seen(), [one.clone()]);
+    assert_eq!(recording.seen(), std::slice::from_ref(&one));
 
     mgr.inject(&record.id, "draft", Submit::NoSubmit)
         .await
