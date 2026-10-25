@@ -1992,6 +1992,23 @@ fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
 /// Test: this test itself is the verification.
 #[test]
 fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
+    transitive_strand(false);
+}
+
+/// Why (#10204): a self-search with `ef` 64 can record a point the graph still
+/// reaches, and a record is never re-checked. A walk that stopped at a
+/// recorded point left the points behind it unscanned.
+/// What: [`transitive_strand`] with `first` recorded as stranded before the
+/// upserts that evict it, while the graph still reaches it and `behind`.
+/// Test: this test itself is the verification.
+#[test]
+fn a_drawer_behind_a_recorded_but_reachable_one_is_still_found() {
+    transitive_strand(true);
+}
+
+/// The #10186 scenario: 32 upserts evict `first`, the only path to `behind`.
+/// `pre_record` records `first` as stranded before those upserts.
+fn transitive_strand(pre_record: bool) {
     let dim = 20;
     let flat = |seed: u64| {
         let mut v = spread_vec(dim - 2, seed);
@@ -2027,6 +2044,9 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
         graph_reaches(&store, behind_id, &behind) && !is_stranded(&store, behind_id),
         "precondition: the graph reaches behind and the store did not record it"
     );
+    if pre_record {
+        stranded::add_stranded(&mut store.stranded.write(), &first, first_id);
+    }
     for (j, v) in around(&entry, &[&first, &behind], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
         .iter()
         .enumerate()
@@ -2057,11 +2077,12 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
 }
 
 /// Why (#10204): the #10186 walk re-searched every point it reached, including
-/// points already recorded as stranded and everything behind them, on every
-/// upsert that evicted one. Seeding 20k drawers went from 430 s to 769 s.
+/// points already recorded as stranded, on every upsert that evicted one.
+/// Seeding 20k drawers went from 430 s to 769 s.
 /// What: reports one drawer evicted from a list (its own, which never names
-/// it). Unrecorded, or recorded under another vector, the walk searches for it
-/// once. Recorded under its own vector, the walk runs no search at all.
+/// it). Unrecorded, the walk searches for it once. With every point recorded
+/// under its own vector, the walk runs no search. With the drawer recorded
+/// only under another vector (a re-upsert's stale copy), it is searched again.
 /// Test: this test itself is the verification.
 #[test]
 fn restrand_skips_a_point_already_recorded_as_stranded() {
@@ -2072,37 +2093,42 @@ fn restrand_skips_a_point_already_recorded_as_stranded() {
             .expect("upsert");
     }
     let index = store.index.read();
-    let point = index
-        .get_point_indexation()
-        .get_layer_iterator(0)
-        .next()
-        .expect("a point");
+    let points: Vec<_> = index.get_point_indexation().get_layer_iterator(0).collect();
+    let point = Arc::clone(&points[0]);
     let evicted = || {
         let gone =
             hnsw_rs::prelude::Neighbour::new(point.get_origin_id(), 0.0, point.get_point_id());
         vec![(Arc::clone(&point), vec![gone])]
     };
-    let id = point.get_origin_id() as u64;
-    assert!(!is_stranded(&store, id), "precondition: not yet recorded");
+    let record = |p: &hnsw_rs::prelude::Point<'static, f32>, v: &[f32]| {
+        stranded::add_stranded(&mut store.stranded.write(), v, p.get_origin_id() as u64);
+    };
+    assert!(
+        !is_stranded(&store, point.get_origin_id() as u64),
+        "precondition: not yet recorded"
+    );
     assert_eq!(
         stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
         1,
         "an unrecorded evicted point is searched for once"
     );
+    for p in &points[1..] {
+        record(p, p.get_v());
+    }
     let mut stale = point.get_v().to_vec();
     stale[0] += 1.0;
-    stranded::add_stranded(&mut store.stranded.write(), &stale, id);
+    record(&point, &stale);
     assert_eq!(
         stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
         1,
         "a record of the id under another vector (a re-upsert's stale copy) \
          does not stand for this point"
     );
-    stranded::add_stranded(&mut store.stranded.write(), point.get_v(), id);
+    record(&point, point.get_v());
     assert_eq!(
         stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
         0,
-        "a point already recorded as stranded must not be searched or walked again"
+        "a point already recorded as stranded must not be searched again"
     );
 }
 
