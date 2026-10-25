@@ -15,11 +15,14 @@
 //! `current`, `states`, `standard`, `seed-config`, `repair`, `audit`). Schema
 //! types live in `config.rs`, validation in `validate.rs`, the state machine in
 //! `state.rs`, the operations in `ops.rs`, the `standard` printer in
-//! `standard.rs`, the #7097 `audit` verb in `audit.rs`.
+//! `standard.rs`, the #7097 `audit` verb in `audit.rs`, the #10275 board spec
+//! and `project:` block in `board/`.
 //! Test: pure logic is unit-tested in the submodules (`config`/`validate`/
 //! `state`/`ops`); CLI parsing in `tests.rs`.
 
 pub(crate) mod audit;
+// #10275: the board-v1.yaml spec and the `project:` block schema.
+pub(crate) mod board;
 pub(crate) mod config;
 pub(crate) mod epic;
 pub(crate) mod ops;

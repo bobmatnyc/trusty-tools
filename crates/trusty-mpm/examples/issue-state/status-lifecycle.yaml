@@ -8,7 +8,8 @@
 # one of these, not a Unicorn Factory state. See
 # crates/trusty-mpm/src/bin/tm/commands/issue/config.rs. The model below must
 # stay identical to the repo-root file; `status_lifecycle_matches_the_repo_model_8609`
-# fails when they drift.
+# fails when they drift. The one exception is the repo-root `project:` block
+# (#10275): it names trusty-tools' own board, so it is never copied here.
 #
 # What it encodes: CLAUDE.md's "Issue lifecycle — open → in-progress → coded →
 # merged → tested → closed". The four `status:*` labels are MUTUALLY EXCLUSIVE:
