@@ -105,8 +105,9 @@ pub fn timeout_refusal() -> (StatusCode, serde_json::Value) {
 /// Why: a socket search against a stalled embedder would otherwise hang with
 /// nothing to cancel it. This is the deadline with no transport shape, so every
 /// query method applies the same one.
-/// What: `tokio::time::timeout` around `fut`; on expiry the future is dropped
-/// (cancelling it) and [`timeout_refusal`] is returned.
+/// What: `tokio::time::timeout` around `fut`, run inside a query scope
+/// (#10195); on expiry the future is dropped (cancelling it) and
+/// [`timeout_refusal`] is returned.
 /// Test: `query_timeout_returns_408_when_handler_stalls`,
 /// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
 pub async fn with_query_deadline<F>(
@@ -116,7 +117,11 @@ pub async fn with_query_deadline<F>(
 where
     F: std::future::Future,
 {
-    match tokio::time::timeout(cfg.timeout, fut).await {
+    // #10195: the query scope carries the deadline and the current stage, so a
+    // search dropped by the timeout below logs its index, query and stage.
+    let deadline_at = std::time::Instant::now() + cfg.timeout;
+    let scoped = crate::core::indexer::query_timings::scoped(deadline_at, fut);
+    match tokio::time::timeout(cfg.timeout, scoped).await {
         Ok(value) => Ok(value),
         Err(_elapsed) => {
             tracing::warn!(

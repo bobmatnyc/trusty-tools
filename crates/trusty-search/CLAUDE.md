@@ -801,6 +801,17 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     installs its embedder. The `search.query.all` fan-out carries the same
     object as a top-level `embedder`. Whether the index's own vectors are
     built is a separate signal: `vector_unavailable` and `search_capabilities`.
+  - `meta.timings` (#10195): milliseconds per stage — `resolve_ms` (index
+    lookup, including a cold lazy load), `lock_ms` (the index read lock),
+    `embed_ms`, `vector_ms`, `lexical_ms`, `ripgrep_ms`, `fusion_ms` (RRF, MMR,
+    KG, score adjustments, materialisation), `rehydrate_wait_ms` (inside the
+    lexical figures) and `total_ms`, equal to `latency_ms`, which now starts
+    before the index is resolved. `rehydrate_ran` / `hnsw_promoted` say
+    whether the query started a corpus rehydrate or ran while the vector index
+    promoted its mmap view. The `search` log line carries the same fields. A
+    search the query deadline cancels logs `query_timeout` at WARN with
+    `index_id`, `query`, `stage` and `elapsed_ms`; `search_all` logs one
+    `info` line naming its target indexes.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:

@@ -191,6 +191,7 @@ use super::CodeIndexer;
 // #10193: the detached rehydrate task and the query-path wait live in
 // submodules so this file stays under the 500-SLOC cap.
 mod query_wait;
+pub(crate) use query_wait::query_rehydrate_waited_ms;
 mod rehydrate_task;
 
 #[cfg(test)]

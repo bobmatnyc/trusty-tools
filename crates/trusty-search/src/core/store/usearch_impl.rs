@@ -24,6 +24,11 @@ use super::usearch_store::{
 
 #[async_trait]
 impl VectorStore for UsearchStore {
+    // #10195: the promote count the search timings compare.
+    fn promotions(&self) -> u64 {
+        self.promotions.load(Ordering::Relaxed)
+    }
+
     async fn upsert(&self, id: &str, embedding: Vec<f32>) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
         self.refuse_if_closed("upsert")?;

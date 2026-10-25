@@ -20,6 +20,10 @@ pub(crate) mod lanes;
 pub(crate) mod lexical_lane;
 pub(crate) mod materialize;
 pub(crate) mod path_filter;
+pub(crate) mod timings;
+
+// #10195: moved to `lanes` to keep this file under the 500-SLOC cap.
+pub(crate) use lanes::merge_grep_lane;
 
 #[cfg(test)]
 #[path = "lanes_tests.rs"]
@@ -39,6 +43,7 @@ use crate::core::search::rrf::{rrf_fuse, RRF_K};
 
 use super::archive::{self, MarkerCache};
 use super::docs_penalty;
+use super::idle_evict::query_rehydrate_waited_ms;
 use super::{
     definition_boost_query_tokens, file_type_score_multiplier, is_function_definition_chunk_type,
     is_struct_definition_chunk_type, CodeChunk, CodeIndexer, SearchQuery, HNSW_OVERSAMPLE,
@@ -48,6 +53,7 @@ use drops::SearchDrops;
 use embed_degrade::PrecomputedQueryVector;
 use exact::ExactMatchReport;
 use materialize::PageFilters;
+use timings::{QueryPhase, SearchTimings, StageClock};
 
 /// #2203: a balanced intent (`Unknown`; `Keyword` since #9027) in `Code` mode
 /// down-ranks non-code files instead of dropping them, so a short NL query can
@@ -93,6 +99,8 @@ pub struct SearchOutcome {
     /// #8348: the query embed failed and the vector lane was skipped; the
     /// embedder's error text. `None` when the lane ran or was never asked for.
     pub vector_lane_error: Option<String>,
+    /// #10195: milliseconds per stage, for the search log line and `meta`.
+    pub timings: SearchTimings,
 }
 
 /// Score assigned to grep-fallback hits (issue #75). Intentionally tiny so
@@ -112,38 +120,6 @@ pub(crate) const GREP_FALLBACK_SCORE: f32 = 0.001;
 /// What: applied as `>= KG_REFINE_THRESHOLD` so boundary values are kept.
 /// Test: `test_kg_refine_query_filters_irrelevant_neighbours`.
 pub(crate) const KG_REFINE_THRESHOLD: f32 = 0.4;
-
-/// Merge a grep lane into an already-RRF-fused list (issue #75).
-///
-/// Why: `rrf_fuse` is hard-coded to two lanes (HNSW + BM25). Rather than
-/// reshape its signature, we fold the grep lane in via the same reciprocal
-/// rank formula and re-truncate to `top_k`.
-/// What: walks `grep_lane` (ordered best-first), adds `weight * 1/(k+rank)`
-/// to each id's score, re-sorts by score desc with id as tie-break, truncates.
-/// Test: `test_merge_grep_lane_appends_new_ids` in `indexer::tests`.
-pub(crate) fn merge_grep_lane(
-    fused: Vec<(String, f32)>,
-    grep_lane: &[(String, f32)],
-    weight: f32,
-    top_k: usize,
-) -> Vec<(String, f32)> {
-    if grep_lane.is_empty() {
-        return fused;
-    }
-    let mut accum: HashMap<String, f32> = fused.into_iter().collect();
-    for (rank0, (id, _)) in grep_lane.iter().enumerate() {
-        let rank = (rank0 + 1) as f32;
-        *accum.entry(id.clone()).or_insert(0.0) += weight * (1.0 / (RRF_K + rank));
-    }
-    let mut out: Vec<(String, f32)> = accum.into_iter().collect();
-    out.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    out.truncate(top_k);
-    out
-}
 
 /// Lower bound for the branch-modified file score multiplier (issue #122).
 /// `1.0` disables boosting and is the floor.
@@ -292,7 +268,7 @@ impl CodeIndexer {
             ));
         }
         // #10193: start an evicted corpus's rehydrate now, so it overlaps the embed.
-        drop(self.begin_corpus_rehydrate());
+        let rehydrate_ran = self.begin_corpus_rehydrate().is_some();
         let intent = QueryClassifier::classify_with_domain(&query.text, &self.domain_terms);
         let (alpha, beta, use_kg_first) = intent.weights();
 
@@ -335,6 +311,8 @@ impl CodeIndexer {
         let force_kg = graph_lane;
         let skip_kg = lexical_only || semantic_lane;
 
+        // #10195: one clock read per stage change; `finish` totals them.
+        let mut clock = StageClock::start(QueryPhase::Embed, rehydrate_ran, self.hnsw_promotions());
         // 1) Embed (cache-first).
         // #8348: an embed failure degrades an unpinned query to lexical.
         let (embedding, mut vector_lane_error) = if lexical_only {
@@ -395,10 +373,12 @@ impl CodeIndexer {
         let exact_literal = exact::extract_exact_literal(&query.text);
         let exact_re = exact_literal.as_ref().and_then(exact::literal_regex);
         let bm25_fut = self.bm25_search(&query.text, lex_want, filter);
+        clock.enter(QueryPhase::Vector);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
             None => Vec::new(),
         };
+        clock.enter(QueryPhase::Lexical);
         let mut bm25_results = bm25_fut.await?;
         self.inject_entity_exact_match(&intent, &query.text, beta, &mut bm25_results)
             .await;
@@ -415,6 +395,7 @@ impl CodeIndexer {
         }
 
         // 2a) Issue #75: for Definition intent, run grep as a third RRF lane.
+        clock.enter(QueryPhase::Ripgrep);
         let grep_lane: Vec<(String, f32)> =
             if ripgrep_on && matches!(intent, QueryIntent::Definition) {
                 self.grep_fallback_search(&query.text, lex_want, filter)
@@ -424,14 +405,19 @@ impl CodeIndexer {
             };
 
         // 3) RRF fuse, then MMR diversity pass.
+        clock.enter(QueryPhase::Fusion);
         let fused_raw = rrf_fuse(&hnsw_results, &bm25_results, alpha, beta, RRF_K, want);
         let fused_raw = merge_grep_lane(fused_raw, &grep_lane, beta, want);
 
         // 3a) Issue #75: empty-result fallback — scan chunk corpus for literal
         // substring match.
         let fused_raw = if fused_raw.is_empty() && ripgrep_on {
-            self.grep_fallback_search(&query.text, lex_want, filter)
-                .await
+            clock.enter(QueryPhase::Ripgrep);
+            let hits = self
+                .grep_fallback_search(&query.text, lex_want, filter)
+                .await;
+            clock.enter(QueryPhase::Fusion);
+            hits
         } else {
             fused_raw
         };
@@ -570,6 +556,7 @@ impl CodeIndexer {
             dropped,
             exact_match,
             vector_lane_error,
+            timings: clock.finish(self.hnsw_promotions(), query_rehydrate_waited_ms()),
         })
     }
 

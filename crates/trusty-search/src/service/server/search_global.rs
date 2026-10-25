@@ -255,6 +255,9 @@ pub(crate) async fn global_search_report(
     }
 
     let started = std::time::Instant::now();
+    // #10195: a fan-out the deadline drops logs its query and stage.
+    let cancel_guard = super::search_log::CancelGuard::new("*", &req.query, started);
+    crate::core::indexer::query_timings::mark(crate::core::indexer::QueryPhase::Embed);
     let intent = QueryClassifier::classify(&req.query);
 
     // Issue #112: compute per-index context weights, then apply the routing
@@ -269,6 +272,7 @@ pub(crate) async fn global_search_report(
         super::fanout_deadline::resolve_embed_timeout(),
     )
     .await;
+    let embed_ms = super::search_log::ms_since(started);
     let query_vector = embed.vector;
     let routing_vector = query_vector
         .as_deref()
@@ -387,6 +391,9 @@ pub(crate) async fn global_search_report(
     // deadline. Taking it any earlier let a slow embed spend it before a single
     // index was searched.
     super::fanout_deadline::kick_evicted_rehydrates(&state.registry, &active_ids);
+    crate::core::indexer::query_timings::mark(crate::core::indexer::QueryPhase::Fanout);
+    // #10195: the targets, captured for the one `info` line below.
+    let targets = active_ids.clone();
     let deadline_at = tokio::time::Instant::now() + per_index_deadline;
     // #4087 / #5917 / #6581 / #9027: every way an index can contribute no lane
     // is classified by `search_one_index` and counted below, so a partial
@@ -491,6 +498,16 @@ pub(crate) async fn global_search_report(
         + deadline_skipped
         > 0
         || embed.status.degraded();
+    let n_searched = indexes_searched.len();
+    super::search_log::log_fanout(
+        &targets,
+        n_searched,
+        deadline_skipped,
+        embed_ms,
+        latency_ms,
+        &req.query,
+    );
+    cancel_guard.done();
     Ok(serde_json::json!({
         "results": results,
         "indexes_searched": indexes_searched,
