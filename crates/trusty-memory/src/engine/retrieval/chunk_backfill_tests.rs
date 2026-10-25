@@ -6,9 +6,11 @@
 //! mocks (window 12: ten words per chunk).
 //! Test: this file IS the tests.
 
-use super::chunk_backfill::{SliceBounds, SliceStop, write_ledger};
+use super::chunk_backfill::{Repair, SliceBounds, SliceStop, write_ledger};
 use super::chunk_health::{ChunkCheck, Sightings, first_sighting};
 use super::chunk_progress::{CHUNK_MARKER_FILE, ChunkMarker, ChunkState};
+use super::deferred_embed::RetryPolicy;
+use super::embed_store::BACKGROUND_EMBED_CALL_CAP;
 use super::embed_store_tests::{Counting, DIM, NoTokenizer, handle, shape, words};
 use super::handle::PalaceHandle;
 use crate::engine::embed::Embedder;
@@ -20,6 +22,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
@@ -62,11 +65,14 @@ fn full(h: &PalaceHandle, id: Uuid) -> bool {
     shape(h, id).is_some_and(|(rows, _)| rows > 1)
 }
 
-/// Blocks every multi-chunk `embed_batch` until `release` is notified.
+/// Blocks the first multi-chunk `embed_batch` until `release` is notified.
+///
+/// #10008: a paced embed makes several calls; only the first one waits.
 struct Gated {
     inner: MockEmbedder,
     entered: Arc<Notify>,
     release: Arc<Notify>,
+    armed: AtomicBool,
 }
 
 fn gated() -> (Emb, Arc<Notify>, Arc<Notify>) {
@@ -75,6 +81,7 @@ fn gated() -> (Emb, Arc<Notify>, Arc<Notify>) {
         inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
         entered: entered.clone(),
         release: release.clone(),
+        armed: AtomicBool::new(true),
     };
     (Arc::new(e), entered, release)
 }
@@ -109,7 +116,7 @@ macro_rules! delegate {
 #[async_trait]
 impl Embedder for Gated {
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.len() > 1 {
+        if texts.len() > 1 && self.armed.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
@@ -1109,4 +1116,101 @@ async fn a_redb_fault_in_the_upsert_loses_no_update_and_leaves_no_orphan_rows() 
         full(&h, faulted),
         "the store is writable after the rollback"
     );
+}
+
+// #10008: a background embed sends at most `BACKGROUND_EMBED_CALL_CAP`
+// chunks per `embed_batch` call, so the shared model lock is released between
+// calls and a recall query embed does not wait behind a whole drawer.
+
+/// Words in a drawer that splits into about 30 chunks at `WINDOW`.
+const PACED_WORDS: usize = 300;
+
+/// Every call carried at most the cap, and there was more than one.
+fn assert_paced(calls: &[usize], chunks: usize) {
+    assert!(chunks > 2 * BACKGROUND_EMBED_CALL_CAP, "{chunks} chunks");
+    assert!(
+        calls.iter().all(|&n| n <= BACKGROUND_EMBED_CALL_CAP),
+        "every background embed_batch call carries at most {BACKGROUND_EMBED_CALL_CAP} \
+         inputs: {calls:?}"
+    );
+    assert_eq!(calls.iter().sum::<usize>(), chunks, "{calls:?}");
+}
+
+#[tokio::test]
+async fn slice_embed_calls_carry_at_most_the_background_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(PACED_WORDS), 0.5).await;
+    let c = Arc::new(Counting::chunking(WINDOW));
+    let e: Emb = c.clone();
+    let report = h.reembed_slice(&e, &unexpiring()).await;
+    assert_eq!((report.repaired, report.failed), (1, 0), "{report:?}");
+    assert!(full(&h, id), "the drawer has its whole group");
+    assert_paced(&c.calls.lock(), report.chunks_embedded);
+}
+
+#[tokio::test]
+async fn repair_embed_calls_carry_at_most_the_background_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let text = words(PACED_WORDS);
+    let id = legacy(&h, &text, 0.5).await;
+    let c = Arc::new(Counting::chunking(WINDOW));
+    let e: Emb = c.clone();
+    let out = h
+        .repair_one(
+            &e,
+            id,
+            &text,
+            &RetryPolicy::instant(1),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(matches!(out, Repair::Repaired(1)), "{out:?}");
+    let rows = shape(&h, id).expect("group").0;
+    assert_paced(&c.calls.lock(), rows);
+}
+
+/// Fails the `fail_on`-th `embed_batch` call (1-based); counts every call.
+struct FailsCall {
+    inner: MockEmbedder,
+    fail_on: usize,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Embedder for FailsCall {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.fail_on {
+            anyhow::bail!("simulated failure on a later paced call");
+        }
+        self.inner.embed_batch(texts).await
+    }
+    delegate!();
+}
+
+#[tokio::test]
+async fn a_failed_later_embed_call_commits_no_partial_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(PACED_WORDS), 0.5).await;
+    let e = Arc::new(FailsCall {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        fail_on: 2,
+        calls: AtomicUsize::new(0),
+    });
+    let emb: Emb = e.clone();
+    let report = h.reembed_slice(&emb, &unexpiring()).await;
+    assert_eq!(
+        (report.repaired, report.failed, report.chunks_embedded),
+        (0, 1, 0),
+        "the drawer failed and no chunk counts as embedded: {report:?}"
+    );
+    assert_eq!(
+        e.calls.load(Ordering::SeqCst),
+        2,
+        "no call after the failure"
+    );
+    assert_eq!(shape(&h, id), Some((1, 0)), "the legacy row is untouched");
+    assert_eq!(ledger_ids(dir.path()), vec![id], "the drawer is ledgered");
 }
