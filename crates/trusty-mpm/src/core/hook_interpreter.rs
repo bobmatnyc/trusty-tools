@@ -74,15 +74,13 @@ pub fn classify_command(cmd: &str) -> Verdict {
     }
 }
 
-/// Whether any token of `cmd` has a basename in [`INTERPRETER_TABLE`].
+/// Whether `cmd` mentions any [`INTERPRETER_TABLE`] script name at all.
 ///
-/// Deliberately loose (any token, quotes and `$VAR/` prefixes ignored) so a
-/// table script in an odd shape still refuses rather than drops out of scope.
+/// Deliberately loose (a substring, not a parsed token) so a table script in
+/// a malformed shape — `"<abs>"x`, `$VAR/…` — still refuses rather than drops
+/// out of scope.
 fn names_table_script(cmd: &str) -> bool {
-    cmd.split_whitespace()
-        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
-        .map(|t| t.rsplit('/').next().unwrap_or(t))
-        .any(|base| interpreter_for(base).is_some())
+    INTERPRETER_TABLE.iter().any(|(name, _)| cmd.contains(name))
 }
 
 /// [`classify_command`] before the out-of-scope filter.
