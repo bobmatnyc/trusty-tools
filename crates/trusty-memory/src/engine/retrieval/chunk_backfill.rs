@@ -12,7 +12,7 @@
 use super::chunk_split::{SplitStep, is_split_part};
 use super::deferred_embed::{EmbedLoss, RetryPolicy, with_retry};
 use super::embed_repair::EmbedHealth;
-use super::embed_store::{chunked_embed_timeout, embed_planned, embed_planned_within, plan_chunks};
+use super::embed_store::{chunked_embed_timeout, embed_planned_paced, plan_chunks};
 use super::handle::PalaceHandle;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::Drawer;
@@ -550,9 +550,11 @@ enum EmbedFail {
 /// Why (#9735 gap 11): the scaled ceiling can be minutes; a slice must give
 /// up on one drawer sooner, and must tell a timeout from an error.
 /// What: one timeout at the lower of `slice_timeout` and the scaled bound,
-/// so either expiry is [`EmbedFail::TimedOut`].
+/// so either expiry is [`EmbedFail::TimedOut`], over an embed paced by
+/// [`embed_planned_paced`] (#10008).
 /// Test: `slice_embed_is_bounded_by_the_slice_timeout`,
-/// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`.
+/// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`,
+/// `slice_embed_calls_carry_at_most_the_background_cap`.
 async fn embed_bounded(
     embedder: &Arc<dyn Embedder + Send + Sync>,
     chunks: &[String],
@@ -560,7 +562,8 @@ async fn embed_bounded(
 ) -> Result<Vec<Vec<f32>>, EmbedFail> {
     let scaled = chunked_embed_timeout(timeouts::embed_batch_timeout(), chunks.len());
     let bound = slice_timeout.min(scaled);
-    match tokio::time::timeout(bound, embed_planned(embedder.as_ref(), chunks)).await {
+    // #10008: paced calls, so a recall query embed is not stuck behind the slice.
+    match tokio::time::timeout(bound, embed_planned_paced(embedder.as_ref(), chunks)).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(EmbedFail::Error(format!("{e:#}"))),
         Err(_) => Err(EmbedFail::TimedOut(format!(
@@ -637,8 +640,12 @@ impl PalaceHandle {
 /// Why (#9735 Q5): the embed and its retry sleeps must stay outside
 /// `write_mutex`.
 /// What: a split error is an `Embed` loss after one attempt (as in
-/// `embed_and_store`); each embed attempt runs under the scaled, clamped bound.
-/// Test: `backfill_embed_and_retry_sleeps_run_outside_write_mutex`.
+/// `embed_and_store`); each embed attempt runs under the scaled, clamped bound,
+/// paced by [`embed_planned_paced`] (#10008).
+/// Test: `backfill_embed_and_retry_sleeps_run_outside_write_mutex`,
+/// `repair_embed_calls_carry_at_most_the_background_cap`,
+/// `a_failed_later_repair_embed_call_commits_no_partial_group`,
+/// `a_repair_embed_timing_out_on_a_later_group_commits_no_partial_group`.
 pub(crate) async fn embed_outside(
     embedder: &Arc<dyn Embedder + Send + Sync>,
     text: &str,
@@ -653,9 +660,18 @@ pub(crate) async fn embed_outside(
     with_retry(policy, |_| {
         let chunks = &chunks;
         async move {
-            embed_planned_within(embedder.as_ref(), chunks, per_chunk)
-                .await
-                .map_err(|e| format!("{e:#}"))
+            // #9275: the ceiling scales with the chunk count; #10008: paced calls.
+            let bound = chunked_embed_timeout(per_chunk, chunks.len());
+            match tokio::time::timeout(bound, embed_planned_paced(embedder.as_ref(), chunks)).await
+            {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(_) => Err(format!(
+                    "embedding {} chunks timed out after {bound:?} ({per_chunk:?} per chunk); \
+                     increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately take \
+                     longer on this host",
+                    chunks.len()
+                )),
+            }
         }
     })
     .await
