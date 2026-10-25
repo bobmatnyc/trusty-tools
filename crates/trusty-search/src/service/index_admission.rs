@@ -536,6 +536,8 @@ mod tests {
             ".kube/config.yml",
             ".config/gh/hosts.yml",
             ".streamlit/secrets.toml",
+            ".streamlit/prod/secrets.toml",
+            ".x/a/b/credentials.yaml",
         ];
         for rel in creds.iter().chain([".github/workflows/ci.yml"].iter()) {
             let path = root.join(rel);

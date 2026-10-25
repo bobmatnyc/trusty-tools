@@ -156,8 +156,10 @@ pub const CREDENTIAL_DIRS: &[&str] = &[
 /// Why: tools keep secrets in a hidden project directory, e.g.
 /// `.streamlit/secrets.toml`, and no directory rule covers every such tool.
 /// What: a segment whose lowercased name, leading dots removed, starts with an
-/// entry is refused when the segment itself or its parent segment is hidden.
-/// `.github/workflows/ci.yml` and `src/credentials.rs` stay indexed.
+/// entry is refused when the segment itself or any ancestor segment of the
+/// root-relative path is hidden, e.g. `.streamlit/prod/secrets.toml`.
+/// `.github/workflows/ci.yml`, `src/credentials.rs` and `secrets/prod.yml`
+/// stay indexed.
 /// Test: `test_walker_never_yields_credential_paths`,
 /// `test_rel_path_credential_rule`.
 pub const SECRET_FILE_PREFIXES: &[&str] = &["secrets", "credentials"];
@@ -706,7 +708,7 @@ fn segments_in_skipped_dir(rel: &Path, extra_skip_dirs: &[String]) -> bool {
 ///
 /// What: `true` when a [`CREDENTIAL_DIRS`] entry occurs as consecutive
 /// segments of `rel`, or a segment matches [`SECRET_FILE_PREFIXES`] while it
-/// or its parent segment is hidden. `rel` must be root-relative: a hidden
+/// or any earlier segment is hidden. `rel` must be root-relative: a hidden
 /// segment of the root path itself would otherwise count.
 /// Test: `test_rel_path_credential_rule`.
 pub(crate) fn rel_path_is_credential(rel: &Path) -> bool {
@@ -718,12 +720,17 @@ pub(crate) fn rel_path_is_credential(rel: &Path) -> bool {
         let want: Vec<&str> = dir.split('/').collect();
         segs.windows(want.len()).any(|w| w == want.as_slice())
     });
-    in_credential_dir
-        || segs.iter().enumerate().any(|(i, seg)| {
-            let hidden = seg.starts_with('.') || (i > 0 && segs[i - 1].starts_with('.'));
-            let name = seg.trim_start_matches('.').to_ascii_lowercase();
-            hidden && SECRET_FILE_PREFIXES.iter().any(|p| name.starts_with(p))
-        })
+    if in_credential_dir {
+        return true;
+    }
+    // #10273: hiddenness is inherited from ANY ancestor segment, not only the
+    // immediate parent, so `.x/a/b/credentials.yaml` is refused.
+    let mut under_hidden = false;
+    segs.iter().any(|seg| {
+        under_hidden |= seg.starts_with('.');
+        let name = seg.trim_start_matches('.').to_ascii_lowercase();
+        under_hidden && SECRET_FILE_PREFIXES.iter().any(|p| name.starts_with(p))
+    })
 }
 
 /// Return `true` when the *contents* of a JS file look minified even though
@@ -1855,6 +1862,8 @@ mod tests {
         for rel in [
             "repo/.config/gh/hosts.yml",
             "a/.streamlit/secrets.toml",
+            ".streamlit/prod/secrets.toml",
+            ".x/a/b/credentials.yaml",
             ".credentials/x.json",
             ".secrets.yml",
             ".kube",
@@ -1865,6 +1874,7 @@ mod tests {
             ".config/nvim/init.json",
             "src/credentials.rs",
             "secrets/prod.yaml",
+            "secrets/prod.yml",
             ".github/workflows/ci.yml",
         ] {
             assert!(!rel_path_in_skipped_dir(Path::new(rel), &[]), "{rel}");
@@ -2237,6 +2247,8 @@ mod tests {
         ".kube/config.yml",
         ".config/gh/hosts.yml",
         ".streamlit/secrets.toml",
+        ".streamlit/prod/secrets.toml",
+        ".x/a/b/credentials.yaml",
     ];
 
     /// #10273: credential directories and hidden secrets files are never
@@ -2247,7 +2259,11 @@ mod tests {
     fn test_walker_never_yields_credential_paths() {
         for respect_gitignore in [true, false] {
             let tmp = tempfile::tempdir().expect("tempdir");
-            let kept = [".github/workflows/ci.yml", "src/credentials.rs"];
+            let kept = [
+                ".github/workflows/ci.yml",
+                "secrets/prod.yml",
+                "src/credentials.rs",
+            ];
             for rel in CREDENTIAL_FIXTURE.iter().chain(kept.iter()) {
                 let path = tmp.path().join(rel);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
