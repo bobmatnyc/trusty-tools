@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::graceful_bootstrap::{
-    adapter_supervisor_config, background_retry_delay, drive_bootstrap, PythonAdapterTeardown,
-    PythonBootstrap, VenvCheck,
+    adapter_supervisor_config, background_retry_delay, drive_bootstrap, outer_probe_timeout,
+    PythonAdapterTeardown, PythonBootstrap, VenvCheck,
 };
 use crate::core::Embedder;
 use crate::service::embedder_supervisor::bootstrap_control::PythonBootstrapHealth;
@@ -548,6 +548,44 @@ async fn retry_wait_after_a_failed_probe_reads_retrying_with_the_error() {
             .bootstrap_control()
             .shutdown(Duration::from_secs(5))
             .await
+    );
+}
+
+/// #10207: the outer readiness-probe timeout scales with host load exactly
+/// like the supervisor's first-spawn probe, plus a grace, so the supervisor's
+/// own probe decides a slow cold start.
+#[test]
+fn outer_probe_timeout_scales_with_host_load() {
+    let grace = Duration::from_secs(5);
+    let inner = |budget: Duration, load| {
+        let common = trusty_common::embedder_client::SupervisorConfig {
+            startup_timeout_secs: budget.as_secs(),
+            ..Default::default()
+        };
+        common.first_spawn_probe_timeout(load)
+    };
+    // Idle host: the budget plus the grace.
+    assert_eq!(
+        outer_probe_timeout(BASE_BUDGET, 4, None),
+        BASE_BUDGET + grace
+    );
+    // The failing host (load 8.8 on 16 CPUs): 1.55x, never below the inner probe.
+    let loaded = outer_probe_timeout(BASE_BUDGET, 4, Some(0.55));
+    assert_eq!(loaded, Duration::from_millis(46_500) + grace);
+    assert!(loaded > inner(BASE_BUDGET, Some(0.55)));
+    // Capped at `scale_max`; 1 turns the scaling off.
+    assert_eq!(
+        outer_probe_timeout(BASE_BUDGET, 4, Some(9.0)),
+        4 * BASE_BUDGET + grace
+    );
+    assert_eq!(
+        outer_probe_timeout(BASE_BUDGET, 1, Some(9.0)),
+        BASE_BUDGET + grace
+    );
+    // An extreme operator budget saturates instead of panicking.
+    assert_eq!(
+        outer_probe_timeout(Duration::MAX, 4, Some(3.0)),
+        Duration::MAX
     );
 }
 

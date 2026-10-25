@@ -95,6 +95,11 @@ use supervisor_recycle::{
     RecycleCtx, RecycleOutcome, RecycleWatch, TrackedClient, perform_recycle,
 };
 
+// #10207: the crash path's kill and the load-aware startup-probe timeout.
+#[path = "supervisor_hard_limit.rs"]
+mod supervisor_hard_limit;
+use supervisor_hard_limit::{SpawnKind, kill_sidecar, startup_probe_timeout};
+
 // ── Supervisor ───────────────────────────────────────────────────────────────
 
 /// Supervisor for the `trusty-embedderd` sidecar process.
@@ -170,7 +175,7 @@ impl EmbedderSupervisor {
         config: SupervisorConfig,
     ) -> Result<(Self, Arc<RwLock<Arc<dyn EmbedderClient>>>, Arc<AtomicU32>)> {
         let binary_path = binary_path.into();
-        let (child, client) = spawn_child(&binary_path, &config).await?;
+        let (child, client) = spawn_child(&binary_path, &config, SpawnKind::First).await?;
 
         // Capture the health signal (#1448/#1450) before erasing `client`
         // into the `Arc<dyn EmbedderClient>` trait object below — the trait
@@ -408,11 +413,13 @@ impl SupervisorHandle {
 /// Why: extracted so both the initial spawn and the respawn path call the same
 /// code.
 /// What: delegates command construction and the bounded ETXTBSY retry (#3570)
-/// to `spawn_retry::spawn_embedderd`, then runs the startup probe.
+/// to `spawn_retry::spawn_embedderd`, then runs the startup probe, bounded by
+/// `startup_probe_timeout` (#10207: load-scaled, respawns floored).
 /// Test: called by `spawn_stdio` and the supervision loop.
 pub(super) async fn spawn_child(
     binary_path: &Path,
     config: &SupervisorConfig,
+    kind: SpawnKind,
 ) -> Result<(Child, StdioEmbedderClient)> {
     // Forward resolved ONNX batch size (issue #747 Fix C).
     if let Some(bs) = config.sidecar_batch_size {
@@ -455,8 +462,9 @@ pub(super) async fn spawn_child(
     // model call: the daemon's `BatchQueue` will embed it once and discard the
     // result. The cost is ~1 ONNX call on startup, which is negligible
     // compared to model-load time.
+    let probe_timeout = startup_probe_timeout(config, kind);
     let probe_result = tokio::time::timeout(
-        Duration::from_secs(config.startup_timeout_secs),
+        probe_timeout,
         client.embed_batch(vec!["trusty-embedderd startup probe".to_string()]),
     )
     .await;
@@ -473,8 +481,9 @@ pub(super) async fn spawn_child(
         }
         Err(_elapsed) => {
             anyhow::bail!(
-                "sidecar did not respond within {}s (TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS={})",
-                config.startup_timeout_secs,
+                "sidecar did not respond within {:.0}s (TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS={}, \
+                 scaled for host load)",
+                probe_timeout.as_secs_f64(),
                 config.startup_timeout_secs
             );
         }
@@ -516,6 +525,9 @@ enum RestartTrigger {
     /// #9828: a recycle trigger crossed. Never a failure: handled before the
     /// crash counters and back-off are touched.
     Recycle(RecycleTrigger),
+    /// #10207: the footprint crossed the hard limit. A crash: counted toward
+    /// `max_restarts` (never as a wedge), respawned with no back-off delay.
+    HardFootprint,
 }
 
 // ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
@@ -622,8 +634,13 @@ fn should_give_up(
 /// crash counters: `perform_recycle` swaps in a fresh sidecar and the loop
 /// continues, so a recycle can never escalate toward `max_restarts`. A
 /// premature recycle or a failed replacement spawn backs off; an old sidecar
-/// that exits during the replacement spawn goes down the crash path.
+/// that exits during the replacement spawn goes down the crash path. A
+/// footprint over the hard limit (#10207), seen on a tick or during a
+/// replacement spawn, is a crash: killed, counted toward `max_restarts`, and
+/// respawned with no back-off delay.
 /// Test: `supervisor_restarts_on_crash`,
+/// `hard_limit_kills_a_sidecar_whose_replacement_cannot_start`,
+/// `repeated_hard_limit_breaches_give_up`,
 /// `supervisor_intentional_shutdown_does_not_respawn`,
 /// `recycle_on_footprint_ceiling_keeps_inflight_call_and_counts_no_failure`,
 /// `supervisor_closed_unhealthy_signal_does_not_busy_spin`,
@@ -793,6 +810,7 @@ async fn supervision_loop(
                         _ = recycle_tick.tick(), if recycle_on => {
                             let pid = child_pid_slot.load(AtomicOrdering::Acquire);
                             match watch.due(&config.recycle, &hooks, pid, &tracked) {
+                                Some(RecycleTrigger::HardFootprint) => RestartTrigger::HardFootprint,
                                 Some(reason) => RestartTrigger::Recycle(reason),
                                 None => continue,
                             }
@@ -817,7 +835,7 @@ async fn supervision_loop(
 
         // #9828: a recycle swaps in a fresh sidecar first, then drains and
         // stops the old one. It never touches the crash counters or back-off.
-        if let RestartTrigger::Recycle(reason) = trigger {
+        let trigger = if let RestartTrigger::Recycle(reason) = trigger {
             let ctx = RecycleCtx {
                 binary_path: &binary_path,
                 config: &config,
@@ -829,6 +847,7 @@ async fn supervision_loop(
             };
             // #9828: premature recycles and failed spawns back off; an old
             // sidecar that exited mid-spawn is left for the crash path.
+            let mut over_hard_limit = false;
             tracked = match perform_recycle(ctx, reason, tracked).await {
                 RecycleOutcome::Swapped(fresh) => {
                     unhealthy_signal = fresh.unhealthy_signal();
@@ -840,9 +859,19 @@ async fn supervision_loop(
                     kept
                 }
                 RecycleOutcome::OldExited(kept) => kept,
+                // #10207: the old sidecar crossed the hard limit mid-spawn.
+                RecycleOutcome::HardLimit(kept) => {
+                    over_hard_limit = true;
+                    kept
+                }
             };
-            continue;
-        }
+            if !over_hard_limit {
+                continue;
+            }
+            RestartTrigger::HardFootprint
+        } else {
+            trigger
+        };
 
         // Issue #3635: apply the SAME sustained-health gate to the
         // crash-storm counter that `wedge_counter_should_reset` already
@@ -887,6 +916,7 @@ async fn supervision_loop(
         }
 
         let is_wedge_restart = matches!(trigger, RestartTrigger::Unhealthy);
+        let is_hard_kill = matches!(trigger, RestartTrigger::HardFootprint);
 
         match trigger {
             RestartTrigger::ProcessExit(exit_status) => {
@@ -918,18 +948,18 @@ async fn supervision_loop(
                 );
                 // The process may still be running (that's the whole point of
                 // this signal) — force it down before respawning.
-                let mut guard = child_slot.lock().await;
-                if let Some(mut child) = guard.take() {
-                    if let Err(e) = child.start_kill() {
-                        tracing::warn!(
-                            "EmbedderSupervisor: start_kill on wedged sidecar failed \
-                             (may have already exited): {e}"
-                        );
-                    }
-                    let _ = child.wait().await;
-                }
-                drop(guard);
-                child_pid_slot.store(0, AtomicOrdering::Release);
+                kill_sidecar(&child_slot, &child_pid_slot, "wedged").await;
+            }
+            // #10207: a crash for `max_restarts`, never a wedge restart.
+            RestartTrigger::HardFootprint => {
+                hooks.stats.record_hard_kill();
+                tracing::warn!(
+                    "EmbedderSupervisor: killed the sidecar over its hard footprint limit \
+                     (failure #{}/{})",
+                    consecutive_failures + 1,
+                    config.max_restarts,
+                );
+                kill_sidecar(&child_slot, &child_pid_slot, "over-limit").await;
             }
             // Handled (and `continue`d) above.
             RestartTrigger::Recycle(_) => continue,
@@ -992,6 +1022,8 @@ async fn supervision_loop(
             consecutive_failures
         };
         let delay_secs = (1u64 << backoff_attempt.min(16)).min(config.backoff_max_secs);
+        // #10207: the respawn right after a hard kill is not delayed.
+        let delay_secs = if is_hard_kill { 0 } else { delay_secs };
         tracing::info!(
             "EmbedderSupervisor: restarting sidecar in {delay_secs}s (attempt \
              {consecutive_failures}{})",
@@ -1034,7 +1066,7 @@ async fn supervision_loop(
         }
 
         // Respawn.
-        match spawn_child(&binary_path, &config).await {
+        match spawn_child(&binary_path, &config, SpawnKind::Respawn).await {
             Ok((new_child, new_client)) => {
                 // Publish the new PID before swapping the client so any
                 // RSS sampler that wakes up after the swap sees a valid PID.

@@ -14,6 +14,8 @@
 //! retired, forwards new calls to its successor. The recycle back-off lives
 //! on [`RecycleWatch`]; `supervisor_recycle_swap.rs` holds `perform_recycle`,
 //! which spawns the replacement before it drains and stops the old child.
+//! #10207: the hard footprint limit above the soft ceiling is judged here
+//! too, but its breach is a crash-path kill, not a recycle.
 //! Test: `supervisor_recycle_tests.rs`.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -68,6 +70,19 @@ pub struct RecycleConfig {
     /// than the per-call timeout plus 5 s, so `0` means exactly that floor.
     /// Env: `TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS` (default 60).
     pub drain_secs: u64,
+    /// #10207: hard footprint limit (MB), meant to sit above the soft
+    /// ceiling. Over it, the sidecar is killed through the crash path, even
+    /// during a recycle back-off hold, and the kill counts toward
+    /// `max_restarts`. `None` = twice `footprint_ceiling_mb`; `Some(0)`
+    /// disables it; a value not above the soft ceiling is ignored (`None`
+    /// applies). See [`Self::effective_hard_footprint_mb`].
+    /// Env: `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` (default 2x the soft ceiling).
+    pub hard_footprint_mb: Option<u64>,
+    /// #10207: ceiling on the startup-probe load multiplier `1 + load1/ncpu`
+    /// applied to recycle replacements, crash respawns and the first spawn.
+    /// `0` or `1` turns load scaling off.
+    /// Env: `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` (default 4).
+    pub startup_load_scale_max: u32,
 }
 
 impl Default for RecycleConfig {
@@ -78,6 +93,8 @@ impl Default for RecycleConfig {
             max_calls: 100_000,
             check_interval: Duration::from_secs(30),
             drain_secs: 60,
+            hard_footprint_mb: None,
+            startup_load_scale_max: 4,
         }
     }
 }
@@ -91,22 +108,49 @@ impl RecycleConfig {
             "TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS",
             def.check_interval.as_secs(),
         );
+        let footprint_ceiling_mb = parse_env(
+            "TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB",
+            def.footprint_ceiling_mb,
+        );
         Self {
-            footprint_ceiling_mb: parse_env(
-                "TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB",
-                def.footprint_ceiling_mb,
-            ),
+            footprint_ceiling_mb,
             max_age_secs: parse_env("TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS", def.max_age_secs),
             max_calls: parse_env("TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS", def.max_calls),
             // A zero interval would turn the check into a busy loop.
             check_interval: Duration::from_secs(check_secs.max(1)),
             drain_secs: parse_env("TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS", def.drain_secs),
+            hard_footprint_mb: hard_footprint_from_env(footprint_ceiling_mb),
+            startup_load_scale_max: parse_env(
+                "TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX",
+                def.startup_load_scale_max,
+            ),
         }
     }
 
-    /// True when at least one trigger is on.
+    /// True when at least one trigger (or the hard limit) is on.
     pub fn enabled(&self) -> bool {
-        self.footprint_ceiling_mb > 0 || self.max_age_secs > 0 || self.max_calls > 0
+        self.footprint_ceiling_mb > 0
+            || self.max_age_secs > 0
+            || self.max_calls > 0
+            || self.effective_hard_footprint_mb().is_some()
+    }
+
+    /// The hard footprint limit in force, in MB; `None` = off.
+    ///
+    /// Why (#10207): a footprint recycle whose replacement cannot start kept
+    /// the old sidecar, and nothing bounded it after that; it reached 10 GB.
+    /// What: `Some(0)` is off; an explicit value is used when the soft
+    /// ceiling is off or the value is above it; otherwise (unset, or not
+    /// above the soft ceiling) twice the soft ceiling, or off when the soft
+    /// ceiling is off too.
+    /// Test: `hard_footprint_limit_resolution`.
+    pub fn effective_hard_footprint_mb(&self) -> Option<u64> {
+        let soft = self.footprint_ceiling_mb;
+        match self.hard_footprint_mb {
+            Some(0) => None,
+            Some(mb) if soft == 0 || mb > soft => Some(mb),
+            _ => (soft > 0).then(|| soft.saturating_mul(2)),
+        }
     }
 
     /// The check interval the supervisor runs, floored at 10 ms.
@@ -118,6 +162,24 @@ impl RecycleConfig {
     pub fn effective_check_interval(&self) -> Duration {
         self.check_interval.max(MIN_CHECK_INTERVAL)
     }
+}
+
+/// #10207: read `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB`; a value not
+/// above the soft ceiling is ignored with a WARN.
+/// Test: `recycle_config_from_env_defaults_and_overrides`.
+fn hard_footprint_from_env(soft: u64) -> Option<u64> {
+    const VAR: &str = "TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB";
+    let mb: u64 = std::env::var(VAR).ok()?.trim().parse().ok()?;
+    if mb != 0 && soft > 0 && mb <= soft {
+        tracing::warn!(
+            hard_mb = mb,
+            soft_mb = soft,
+            "EmbedderSupervisor: {VAR}={mb} is not above the recycle ceiling ({soft} MB) — \
+             ignored; the hard limit stays at twice the ceiling"
+        );
+        return None;
+    }
+    Some(mb)
 }
 
 /// Reads a process footprint in MB; `None` means the read failed.
@@ -170,6 +232,9 @@ pub enum RecycleTrigger {
     MaxCalls,
     /// The footprint could not be read for `FOOTPRINT_UNREADABLE_LIMIT` checks.
     FootprintUnreadable,
+    /// #10207: the footprint is over the hard limit. Not a recycle: the
+    /// supervisor kills the sidecar through its crash path.
+    HardFootprint,
 }
 
 impl RecycleTrigger {
@@ -180,6 +245,7 @@ impl RecycleTrigger {
             Self::MaxAge => "max_age",
             Self::MaxCalls => "max_calls",
             Self::FootprintUnreadable => "footprint_unreadable",
+            Self::HardFootprint => "hard_footprint",
         }
     }
 }
@@ -217,6 +283,7 @@ pub struct RecycleStats {
     footprint_unreadable: AtomicU64,
     spawn_failures: AtomicU64,
     footprint_read_errors: AtomicU64,
+    hard_footprint_kills: AtomicU64,
     last: Mutex<LastRecycle>,
     backoff: Mutex<BackoffView>,
 }
@@ -233,6 +300,9 @@ pub struct RecycleSnapshot {
     /// sidecar kept serving).
     pub spawn_failures: u64,
     pub footprint_read_errors: u64,
+    /// #10207: sidecars killed for crossing the hard footprint limit. Not
+    /// part of `recycles_total`; each kill counts toward `max_restarts`.
+    pub hard_footprint_kills: u64,
     pub last_trigger: Option<String>,
     pub last_old_pid: Option<u32>,
     pub last_new_pid: Option<u32>,
@@ -258,6 +328,7 @@ impl RecycleStats {
             RecycleTrigger::MaxAge => &self.max_age,
             RecycleTrigger::MaxCalls => &self.max_calls,
             RecycleTrigger::FootprintUnreadable => &self.footprint_unreadable,
+            RecycleTrigger::HardFootprint => &self.hard_footprint_kills,
         };
         counter.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut last) = self.last.lock() {
@@ -268,6 +339,11 @@ impl RecycleStats {
                 at_unix_secs: unix_now(),
             };
         }
+    }
+
+    /// #10207: count one hard-limit kill.
+    pub(crate) fn record_hard_kill(&self) {
+        self.hard_footprint_kills.fetch_add(1, Ordering::Relaxed);
     }
 
     fn set_backoff(&self, view: BackoffView) {
@@ -292,6 +368,7 @@ impl RecycleStats {
             footprint_unreadable: unreadable,
             spawn_failures: self.spawn_failures.load(Ordering::Relaxed),
             footprint_read_errors: self.footprint_read_errors.load(Ordering::Relaxed),
+            hard_footprint_kills: self.hard_footprint_kills.load(Ordering::Relaxed),
             last_trigger: last.trigger.map(str::to_string),
             last_old_pid: last.old_pid,
             last_new_pid: last.new_pid,
@@ -481,7 +558,15 @@ impl RecycleWatch {
     /// the latch is set, further failures (on any generation) recycle nothing
     /// — the sampler, not the sidecar, is then the likely fault, and the age
     /// and call bounds still apply. One successful read clears the latch.
-    /// Nothing is judged while a back-off hold runs.
+    /// Nothing is judged while a back-off hold runs, except the hard limit.
+    ///
+    /// #10207: the hard limit is checked first, on every tick of every
+    /// generation: during a back-off hold, after failed replacement spawns,
+    /// and on a generation's first tick. One footprint read serves both
+    /// limits, and every failed read counts in `footprint_read_errors`.
+    /// Test: `hard_limit_fires_during_a_backoff_hold`,
+    /// `failed_footprint_read_during_a_hold_is_counted`,
+    /// `hard_limit_kills_a_sidecar_whose_replacement_cannot_start`.
     pub(crate) fn due(
         &mut self,
         cfg: &RecycleConfig,
@@ -489,6 +574,28 @@ impl RecycleWatch {
         pid: u32,
         tracked: &TrackedClient,
     ) -> Option<RecycleTrigger> {
+        let hard = cfg.effective_hard_footprint_mb();
+        let read = (pid != 0 && (cfg.footprint_ceiling_mb > 0 || hard.is_some()))
+            .then(|| (hooks.sampler)(pid));
+        // #10207: counted here, before the hold and first-tick returns, so a
+        // hard limit that cannot read the sidecar is visible in `/health`.
+        if read == Some(None) {
+            hooks
+                .stats
+                .footprint_read_errors
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if let (Some(limit), Some(Some(mb))) = (hard, read)
+            && mb > limit
+        {
+            tracing::warn!(
+                pid,
+                footprint_mb = mb,
+                hard_limit_mb = limit,
+                "EmbedderSupervisor: sidecar footprint over the hard limit — killing it"
+            );
+            return Some(RecycleTrigger::HardFootprint);
+        }
         if self
             .hold_until
             .is_some_and(|t| tokio::time::Instant::now() < t)
@@ -500,22 +607,26 @@ impl RecycleWatch {
         if self.ticks < 2 {
             return None;
         }
-        let trigger = self.judge(cfg, hooks, pid, tracked);
+        let trigger = self.judge(cfg, hooks, pid, read, tracked);
         // #9828: due on the first judged check feeds the back-off.
         self.first_look = trigger.is_some() && self.ticks == 2;
         trigger
     }
 
+    /// `read` is the footprint read `due` took: `None` = not read.
     fn judge(
         &mut self,
         cfg: &RecycleConfig,
         hooks: &RecycleHooks,
         pid: u32,
+        read: Option<Option<u64>>,
         tracked: &TrackedClient,
     ) -> Option<RecycleTrigger> {
         let age = (hooks.clock)().saturating_sub(self.born);
-        if cfg.footprint_ceiling_mb > 0 && pid != 0 {
-            match (hooks.sampler)(pid) {
+        if cfg.footprint_ceiling_mb > 0
+            && let Some(read) = read
+        {
+            match read {
                 Some(mb) => {
                     self.read_failures = 0;
                     self.unreadable_latched = false;
@@ -531,10 +642,6 @@ impl RecycleWatch {
                     }
                 }
                 None => {
-                    hooks
-                        .stats
-                        .footprint_read_errors
-                        .fetch_add(1, Ordering::Relaxed);
                     self.read_failures += 1;
                     if !self.warned_read_failure {
                         self.warned_read_failure = true;
