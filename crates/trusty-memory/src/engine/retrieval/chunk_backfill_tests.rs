@@ -22,7 +22,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
@@ -65,14 +65,19 @@ fn full(h: &PalaceHandle, id: Uuid) -> bool {
     shape(h, id).is_some_and(|(rows, _)| rows > 1)
 }
 
-/// Blocks the first multi-chunk `embed_batch` until `release` is notified.
+/// Whether `texts` opens a multi-chunk drawer embed.
 ///
-/// #10008: a paced embed makes several calls; only the first one waits.
+/// #10008: a paced embed makes several `embed_batch` calls per drawer, so a
+/// gate counts drawers by their first chunk; every `words` drawer opens `w0 `.
+fn opens_a_drawer(texts: &[String]) -> bool {
+    texts.len() > 1 && texts[0].starts_with("w0 ")
+}
+
+/// Blocks every multi-chunk drawer embed until `release` is notified.
 struct Gated {
     inner: MockEmbedder,
     entered: Arc<Notify>,
     release: Arc<Notify>,
-    armed: AtomicBool,
 }
 
 fn gated() -> (Emb, Arc<Notify>, Arc<Notify>) {
@@ -81,7 +86,6 @@ fn gated() -> (Emb, Arc<Notify>, Arc<Notify>) {
         inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
         entered: entered.clone(),
         release: release.clone(),
-        armed: AtomicBool::new(true),
     };
     (Arc::new(e), entered, release)
 }
@@ -116,7 +120,7 @@ macro_rules! delegate {
 #[async_trait]
 impl Embedder for Gated {
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.len() > 1 && self.armed.swap(false, Ordering::SeqCst) {
+        if opens_a_drawer(texts) {
             self.entered.notify_one();
             self.release.notified().await;
         }
@@ -803,7 +807,7 @@ async fn backfill_stale_drawer_is_not_failing_and_writes_no_ledger_row() {
     assert!(ledger_ids(dir.path()).is_empty());
 }
 
-/// Fails the first multi-chunk batch, then blocks the next on `release`.
+/// Fails the first multi-chunk drawer embed, then blocks the next on `release`.
 struct FlakyGate {
     inner: MockEmbedder,
     calls: std::sync::atomic::AtomicU32,
@@ -814,7 +818,7 @@ struct FlakyGate {
 #[async_trait]
 impl Embedder for FlakyGate {
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.len() > 1 {
+        if opens_a_drawer(texts) {
             if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 anyhow::bail!("transient embed failure");
             }
@@ -1013,7 +1017,7 @@ async fn slice_on_a_read_only_handle_is_a_noop() {
     assert!(ledger_ids(dir.path()).is_empty());
 }
 
-/// Blocks the `nth` multi-chunk `embed_batch` (from 1) until `release`.
+/// Blocks the `nth` multi-chunk drawer embed (from 1) until `release`.
 struct NthGate {
     inner: MockEmbedder,
     nth: u32,
@@ -1026,7 +1030,7 @@ struct NthGate {
 impl Embedder for NthGate {
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let seq = std::sync::atomic::Ordering::SeqCst;
-        if texts.len() > 1 && self.calls.fetch_add(1, seq) + 1 == self.nth {
+        if opens_a_drawer(texts) && self.calls.fetch_add(1, seq) + 1 == self.nth {
             self.entered.notify_one();
             self.release.notified().await;
         }
