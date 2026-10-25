@@ -289,8 +289,12 @@ impl CodeIndexer {
     /// ranked outside the unscoped top `want` would already be gone by the
     /// time this function returns). Retries up to [`REHYDRATE_RACE_RETRIES`]
     /// times only when the race is detected; a genuinely empty BM25 index
-    /// returns `Ok(vec![])` on the first pass with no retry.
+    /// returns `Ok(vec![])` on the first pass with no retry. #10193: each wait
+    /// is the query's short shared budget (`await_corpus_for_query`); a
+    /// rehydrate still running past it degrades the lane at once.
     /// Test: BM25 results are covered by every search integration test;
+    /// `a_query_during_a_slow_bm25_build_answers_degraded_within_the_wait`
+    /// pins the #10193 bound;
     /// `bm25_search_survives_reclaim_race_between_ensure_and_read` in
     /// `indexer::tests_idle_evict` pins the race-detection retry itself;
     /// `test_path_prefix_filter_recovers_bm25_match_beyond_want` in
@@ -306,7 +310,11 @@ impl CodeIndexer {
         filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
     ) -> Result<Vec<(String, f32)>> {
         for _ in 0..REHYDRATE_RACE_RETRIES {
-            self.ensure_bm25_entities_loaded().await;
+            // #10193: wait only the query's short budget; a rehydrate still
+            // running past it degrades this lane now, not after 3 x 9 s.
+            if !self.await_corpus_for_query().await {
+                break;
+            }
             let bm25 = self.bm25.read().await;
             if !bm25.is_empty() {
                 return Ok(match filter {
@@ -351,9 +359,9 @@ impl CodeIndexer {
         metrics::counter!("trusty_bm25_lane_degraded_total", "index" => self.index_id.clone())
             .increment(1);
         tracing::warn!(
-            "index '{}': BM25 rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty lexical lane for this query (degraded, not a true empty \
-             result; issue #3683)",
+            "index '{}': BM25 rehydrate still not ready within the query's rehydrate wait — \
+             returning empty lexical lane for this query (degraded, not a true empty result; \
+             issues #3683, #10193)",
             self.index_id
         );
         Ok(Vec::new())
@@ -381,7 +389,8 @@ impl CodeIndexer {
     /// query / `want` / regex-build failure short-circuits to `Vec::new()`.
     /// Retries up to [`REHYDRATE_RACE_RETRIES`] times only when the race is
     /// detected (mirrors `bm25_search`'s flag-under-guard check); a
-    /// genuinely-empty map returns immediately.
+    /// genuinely-empty map returns immediately. #10193: waits only the
+    /// query's short shared budget, as `bm25_search` does.
     ///
     /// Issue #3401: when `filter` is set, a chunk must ALSO pass it to count
     /// toward the `out.len() >= want` early-exit. Counting an out-of-scope
@@ -406,7 +415,10 @@ impl CodeIndexer {
             return Vec::new();
         };
         for _ in 0..REHYDRATE_RACE_RETRIES {
-            self.ensure_chunks_loaded().await;
+            // #10193: same short query wait as `bm25_search`.
+            if !self.await_corpus_for_query().await {
+                break;
+            }
             let chunks = self.chunks.read().await;
             if chunks.is_empty() && self.chunks_evicted.load(Ordering::Relaxed) {
                 // A reclaim raced us since `ensure()` returned — drop the read
@@ -445,9 +457,9 @@ impl CodeIndexer {
         metrics::counter!("trusty_grep_fallback_lane_degraded_total", "index" => self.index_id.clone())
             .increment(1);
         tracing::warn!(
-            "index '{}': chunk rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty grep-fallback lane for this query (degraded, not a true \
-             empty result; issue #3683)",
+            "index '{}': chunk rehydrate still not ready within the query's rehydrate wait — \
+             returning empty grep-fallback lane for this query (degraded, not a true empty \
+             result; issues #3683, #10193)",
             self.index_id
         );
         Vec::new()

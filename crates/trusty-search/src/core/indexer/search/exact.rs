@@ -689,7 +689,10 @@ impl CodeIndexer {
         if terms.is_empty() {
             return None;
         }
-        self.ensure_bm25_entities_loaded().await;
+        // #10193: the query's short rehydrate wait; a cold index scans instead.
+        if !self.await_corpus_for_query().await {
+            return None;
+        }
         let bm25 = self.bm25.read().await;
         if bm25.is_empty() {
             return None;
@@ -753,7 +756,10 @@ impl CodeIndexer {
         let admitted = |raw: &RawChunk| filter.is_none_or(|f| f(&raw.id)) && mode_admits(raw);
         let postings = self.exact_postings_candidates(lit).await;
         for _ in 0..super::lanes::REHYDRATE_RACE_RETRIES {
-            self.ensure_chunks_loaded().await;
+            // #10193: the query's short rehydrate wait, shared with the other lanes.
+            if !self.await_corpus_for_query().await {
+                break;
+            }
             let chunks = self.chunks.read().await;
             if chunks.is_empty() && self.chunks_evicted.load(Ordering::Relaxed) {
                 continue;
@@ -812,11 +818,10 @@ impl CodeIndexer {
         metrics::counter!("trusty_exact_match_lane_degraded_total", "index" => self.index_id.clone())
             .increment(1);
         tracing::warn!(
-            "index '{}': chunk rehydrate still not ready after {} bounded waits — returning an \
-             empty exact-match lane for this query (degraded, not a literal that is absent; \
-             issue #7675)",
-            self.index_id,
-            super::lanes::REHYDRATE_RACE_RETRIES
+            "index '{}': chunk rehydrate still not ready within the query's rehydrate wait — \
+             returning an empty exact-match lane for this query (degraded, not a literal that \
+             is absent; issues #7675, #10193)",
+            self.index_id
         );
         ExactLaneOutcome {
             hits: Vec::new(),

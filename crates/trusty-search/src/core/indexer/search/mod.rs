@@ -266,6 +266,17 @@ impl CodeIndexer {
         query: &SearchQuery,
         query_vector: Option<PrecomputedQueryVector<'_>>,
     ) -> Result<SearchOutcome> {
+        // #10193: one short rehydrate wait per query, shared by every lane.
+        self.with_query_rehydrate_deadline(self.run_search(query, query_vector))
+            .await
+    }
+
+    /// The search pipeline behind [`Self::search_with_outcome_vec`].
+    async fn run_search(
+        &self,
+        query: &SearchQuery,
+        query_vector: Option<PrecomputedQueryVector<'_>>,
+    ) -> Result<SearchOutcome> {
         self.touch_activity();
         // #8232: a handle that outlived DELETE must not answer from closed files.
         self.refuse_if_deleted()?;
@@ -280,6 +291,8 @@ impl CodeIndexer {
                 },
             ));
         }
+        // #10193: start an evicted corpus's rehydrate now, so it overlaps the embed.
+        drop(self.begin_corpus_rehydrate());
         let intent = QueryClassifier::classify_with_domain(&query.text, &self.domain_terms);
         let (alpha, beta, use_kg_first) = intent.weights();
 
