@@ -181,10 +181,10 @@ pub(super) fn neighbourhoods_before_insert(
 /// the walk; a hit ends that branch, because a point the search found is
 /// reachable and so is everything it links to. A point stored under `new_id`
 /// — the new one, or a stale copy of it (#5171) — is not tested, and the walk
-/// goes on through it. A point `groups` already records is neither tested nor
-/// walked through (#10204): it lost its path before this insert, so no path
-/// this insert broke ran through it. Returns how many [`reachable`] searches
-/// the walk ran.
+/// goes on through it. A point `groups` already records, by id and vector, is
+/// neither tested nor walked through (#10204): it lost its path before this
+/// insert, so no path this insert broke ran through it. Returns how many
+/// [`reachable`] searches the walk ran.
 /// Test: `an_upsert_that_strands_an_existing_drawer_still_finds_it`,
 /// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
 /// `restrand_skips_a_point_already_recorded_as_stranded`.
@@ -218,12 +218,12 @@ pub(super) fn restrand_evicted(
             // #10204: re-walking recorded points re-searched whole stranded
             // clumps on every upsert that touched one; seeding 20k drawers
             // went from 430 s to 769 s.
-            if is_recorded(&groups.read(), id) {
-                continue;
-            }
             let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
                 continue;
             };
+            if is_recorded(&groups.read(), &vector, id) {
+                continue;
+            }
             searched += 1;
             if reachable(index, &vector, id) {
                 continue;
@@ -246,9 +246,16 @@ pub(super) fn restrand_evicted(
     searched
 }
 
-/// Whether `groups` records `id` for the exact scan (#10204).
-fn is_recorded(groups: &[StrandedGroup], id: u64) -> bool {
-    groups.iter().any(|(_, ids)| ids.contains(&id))
+/// Whether `groups` records `id` under `vector` for the exact scan (#10204).
+/// The vector must match too: a re-upsert (#5171) keeps the id, and the
+/// record of its stale copy says nothing about the new point.
+fn is_recorded(groups: &[StrandedGroup], vector: &[f32], id: u64) -> bool {
+    let same = |v: &[f32]| {
+        v.iter()
+            .map(|x| x.to_bits())
+            .eq(vector.iter().map(|x| x.to_bits()))
+    };
+    groups.iter().any(|(v, ids)| ids.contains(&id) && same(v))
 }
 
 /// Add every live stranded point to a graph arm's candidates, scored exactly.
