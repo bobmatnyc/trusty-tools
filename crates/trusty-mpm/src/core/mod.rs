@@ -208,6 +208,9 @@ pub mod home_trust_seed;
 // #8545: a test binary's fence around the operator's home config paths.
 pub mod home_write_fence;
 pub mod hook;
+// #10263: bare-script hook commands — detect, and add the interpreter.
+pub mod hook_interpreter;
+pub mod hook_interpreter_doctor;
 pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;

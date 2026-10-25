@@ -1,0 +1,4 @@
+Added
+- `tm doctor` reports a `hook-interpreter` row for hook and `statusLine` commands that are a bare `.sh` path, across the same machine-wide settings files `--fix` sweeps; a refused command or a settings file it cannot read or parse keeps the row non-OK.
+- `tm doctor --fix --yes` rewrites bare `notify-supervisor.sh` commands to `/bin/bash "<abs>"` and bare `datg-hook.sh` commands to `/bin/sh "<abs>"`, keeping trailing arguments, after a timestamped backup; any other script, a relative or `~` path, an env-var prefix, shell metacharacters or a missing script is reported and left alone, and a `datg-hook.sh` entry with no session argument gets its own warning.
+- `tm doctor` reports a `notify-supervisor-asset` row naming each seeded `notify-supervisor.sh` whose sha256 differs from the shipped asset; the copy is never overwritten.

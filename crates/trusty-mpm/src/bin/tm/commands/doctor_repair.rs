@@ -179,7 +179,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// What: runs, in order, the skill redeploy (`skill_staleness`), the
 /// machine-wide build-tree repoint (`hooks_build_tree_binary`, #7262 — first,
 /// so the strip below cannot delete a PM guard the repoint would have fixed),
-/// the project hook cleanup (`hooks_contamination`), the lifecycle-group
+/// the machine-wide interpreter prefix for bare seeded `.sh` hook commands
+/// (`hook-interpreter`, #10263), the project hook cleanup (`hooks_contamination`), the lifecycle-group
 /// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
 /// restores what a managed launch would write), the push-guard retrofit
 /// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
@@ -215,14 +216,18 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     let mut steps = skill_steps(include_frozen, mode);
 
     let project_dir = std::env::current_dir().ok();
+    // #9293: the home root is the caller's, so a test can supply a temp one.
+    let machine_files =
+        machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref());
     // #7262: the repoint runs BEFORE the contamination strip. A build-tree
     // command is tm-owned by `is_mpm_hook_command`, so a strip that ran first
     // would delete the PM guard this pass repairs in place.
-    steps.extend(repair_build_tree_binary(
-        // #9293: the home root is the caller's, so a test can supply a temp one.
-        &machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref()),
-        mode,
-    ));
+    steps.extend(repair_build_tree_binary(&machine_files, mode));
+    // #10263: add the interpreter to bare seeded `.sh` hook commands, over the
+    // same machine-wide list the `hook-interpreter` row reads.
+    steps.extend(
+        trusty_mpm::core::hook_interpreter_doctor::repair_hook_interpreter(&machine_files, mode),
+    );
     // #7617: AFTER the repoint, so a build-tree `statusLine` command is fixed by
     // the pass that owns that damage class and this one only seeds what is
     // missing. Scoped to the two tiers the `statusline` check reads — the cwd
@@ -433,7 +438,8 @@ fn rust_build_env_steps(
 /// the operator explicitly asked for pays the cost once.
 /// `home` is the walk root (`None` contributes nothing).
 /// Test: `machine_wide_settings_files_includes_the_cwd_project`.
-fn machine_wide_settings_files(
+// #10263: also the file list the `hook-interpreter` doctor row reads.
+pub(crate) fn machine_wide_settings_files(
     project_dir: Option<&std::path::Path>,
     home: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
