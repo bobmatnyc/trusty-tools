@@ -939,7 +939,7 @@ fn seeded_hook_commands_run_through_an_explicit_interpreter() {
             "notify-supervisor.sh lacks {needle}"
         );
     }
-    assert!(!notify.contains(r#"timeout 4 "$0""#), "{notify}");
+    assert!(!notify.contains(r#"timeout 4 "$0" "$@""#), "{notify}");
 }
 
 /// The fail-closed arm: a start script that fails is an error naming its
