@@ -4,8 +4,12 @@ This directory holds the **workspace-wide** Architecture Decision Records for
 trusty-tools — a **first-class documentation artifact, peer to Specs (DOC-38)
 and Requirements (DOC-43, future)**.
 
-See **[DOC-46](../specs/DOC-46-adr-standard.md)** for the formal ADR standard,
-including the consistency-vetting protocol and governance rules.
+The generic ADR standard — metadata, status lifecycle, numbering, the
+consistency-vetting protocol and governance — is the `tm-adr` skill's
+[`content/skills/tm-adr/references/adr-standard.md`](../../content/skills/tm-adr/references/adr-standard.md).
+**[DOC-46](../specs/DOC-46-adr-standard.md)** holds the trusty-tools-only
+rules: the CI gate, the per-crate decision directories, and the
+ADR-0001..0013 exemption.
 
 ## What is an ADR?
 
@@ -17,9 +21,10 @@ The old record's Status and backlink metadata are updated to point at the new
 ADR; its Context, Decision, and Consequences remain historical. We use the
 [Nygard format](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)
 (Title, Status, Context, Decision, Consequences) plus a **"Related Decisions"**
-section documenting consistency vetting (see DOC-46 §3).
+section documenting consistency vetting (see "Consistency Vetting" in
+[`content/skills/tm-adr/references/adr-standard.md`](../../content/skills/tm-adr/references/adr-standard.md)).
 
-ADR-0001..0013 predate DOC-46's modern metadata and Related Decisions
+ADR-0001..0013 predate the modern metadata and Related Decisions
 template. They are structurally grandfathered: their historical sections are
 not rewritten for template conformity, while their statuses, successor links,
 numbering, and index entries remain governed. ADR-0014 and later must satisfy
@@ -54,6 +59,14 @@ A crate-specific ADR may reference a workspace ADR, and vice versa.
 within the directory. Workspace ADRs and each crate's `decisions/` directory
 maintain **independent** numbering sequences. Never renumber an existing ADR.
 
+**Stage the stub to claim a number.** Pick the next number from `docs/adr/`
+on `origin/main`, and check open PRs and in-flight branches for a number
+already taken. Create the file with at least the title and `Status:` line and
+`git add` it before you write the body. An untracked stub claims nothing,
+because no peer can see it. On a collision, take the next free number; never
+renumber another author's ADR. `scripts/check_doc_numbers.sh` is the
+duplicate-number lint: CI refuses two files that claim the same ADR number.
+
 ## Status lifecycle
 
 ```
@@ -78,11 +91,23 @@ Proposed ──► Accepted ──► Superseded by linked NNNN
 
 1. Copy [`template.md`](./template.md) to the next free `NNNN-kebab-title.md`.
 2. Fill in Title, Status, Context, Decision, Consequences.
-3. **Critical: Add a "Related Decisions" section** (see DOC-46 §3) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
+3. **Critical: Add a "Related Decisions" section** (see "Related Decisions" in
+   [`adr-standard.md`](../../content/skills/tm-adr/references/adr-standard.md)) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
 4. Open it as **Proposed**; flip to **Accepted** when the decision is agreed and consistency vetting is complete.
-5. Run `bash scripts/check_adr.sh` before opening the PR. The check enforces
-   numbering, status grammar, index parity, successor links, and required
-   consistency-vetting sections.
+5. Run the gate before opening the PR, with the same flags CI uses:
+
+   ```bash
+   bash scripts/check_adr.sh --require-metadata-from 0014 --extra-dirs 'docs/*/decisions'
+   ```
+
+   The check enforces numbering, status grammar, index parity, successor
+   links, and required consistency-vetting sections. `--require-metadata-from
+   0014` exempts the grandfathered ADR-0001..0013 from the metadata and
+   vetting checks; `--extra-dirs` checks that each `docs/<crate>/decisions/`
+   README names every record in that directory. The script needs bash 4 or
+   later. `scripts/check_adr.sh` is a byte copy of
+   `content/skills/tm-adr/scripts/check_adr.sh`, and CI fails when they
+   differ: edit the content copy, then copy it over.
 
 See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick reference for vetting.
 

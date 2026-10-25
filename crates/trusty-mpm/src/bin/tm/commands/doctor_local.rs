@@ -38,7 +38,9 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// What: runs the check battery in-process via [`local_report`], prints one
 /// status-tagged line per check, appends the daemon rows from
 /// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
-/// only under `--network`), and folds every status into one overall verdict. When
+/// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
+/// rows over the machine-wide settings list (#10263), and folds every status
+/// into one overall verdict. When
 /// `prune_stale_skills` is set (hidden `--prune-stale-skills` flag), also runs
 /// `prune_stale_skills_locally` as a manual troubleshooting escape hatch —
 /// normal operation cleans up pre-rename `mpm-*` skill directories
@@ -71,6 +73,15 @@ pub(crate) async fn doctor(
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);
     print_check(&gcloud);
+    // #10263: bare-script hook commands, over the list `--fix` repairs.
+    let settings_files = super::doctor_repair::machine_wide_settings_files(
+        project_dir.as_deref(),
+        dirs::home_dir().as_deref(),
+    );
+    for check in trusty_mpm::core::hook_interpreter_doctor::hook_interpreter_rows(&settings_files) {
+        overall = overall.worst(check.status);
+        print_check(&check);
+    }
 
     println!(
         "\noverall: {} {}",
