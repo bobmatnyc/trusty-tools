@@ -26,9 +26,9 @@ use crate::core::idle_nudge::{IdleNudgeConfig, NudgeLedger};
 use crate::core::session::SessionId;
 use crate::core::sm::control::Submit;
 use crate::daemon::action_events::ActionPublisher;
+use crate::daemon::idle_nudge::{NudgeOutcome, run_nudge};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::inject_record::Delivery;
-use crate::daemon::idle_nudge::{NudgeOutcome, run_nudge};
 use crate::session_manager::{FakeNoopTmuxDriver, ManagedSessionId, SessionManager};
 
 fn sha(text: &str) -> String {
@@ -37,12 +37,22 @@ fn sha(text: &str) -> String {
 
 /// An Active session correlated to `claude_id`, as `idle_nudge`'s tests
 /// build one: create, stop, resume under the no-op driver.
-async fn active(dir: &tempfile::TempDir, claude_id: &str) -> (Arc<SessionManager>, ManagedSessionId) {
+async fn active(
+    dir: &tempfile::TempDir,
+    claude_id: &str,
+) -> (Arc<SessionManager>, ManagedSessionId) {
     let mgr = SessionManager::new(&dir.path().join("sm"), Arc::new(FakeNoopTmuxDriver))
         .await
         .expect("manager");
     let rec = mgr
-        .create("task".into(), Some(dir.path().to_path_buf()), None, None, None, None)
+        .create(
+            "task".into(),
+            Some(dir.path().to_path_buf()),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .expect("create");
     mgr.stop(&rec.id).await.expect("stop");
@@ -112,7 +122,10 @@ fn an_inject_is_one_tmux_message_event_with_its_digest_9167() {
     };
     assert_eq!(m.channel, MessageChannel::Tmux);
     assert_eq!(m.direction, MessageDirection::Sent);
-    assert_eq!((m.from.as_str(), m.to.as_str()), (INJECT_FROM, "tm-proj-01"));
+    assert_eq!(
+        (m.from.as_str(), m.to.as_str()),
+        (INJECT_FROM, "tm-proj-01")
+    );
     assert_eq!(m.bytes, delivery.text.len() as u64);
     assert_eq!(m.sha256, sha(delivery.text));
     assert_eq!(m.relay.as_deref(), Some("[Ops Architect 12:3xZ]"));
@@ -139,15 +152,22 @@ async fn an_inject_reaches_the_bus_under_its_session_root_9167() {
         json!({"cwd": "/w"}),
     ));
 
-    mgr.inject(&id, "hello", Submit::Enter).await.expect("inject");
-    mgr.inject(&id, "", Submit::Interrupt).await.expect("interrupt");
+    mgr.inject(&id, "hello", Submit::Enter)
+        .await
+        .expect("inject");
+    mgr.inject(&id, "", Submit::Interrupt)
+        .await
+        .expect("interrupt");
 
     let frames = flushed(&publisher, &sock).await;
     let found = messages(&frames);
     assert_eq!(found.len(), 1, "{frames:?}");
     let (event, m) = found[0];
     assert_eq!(event.parent_id, Some(frames[0].id), "a child of the root");
-    assert_eq!(event.session.as_deref(), Some(claude.0.to_string().as_str()));
+    assert_eq!(
+        event.session.as_deref(),
+        Some(claude.0.to_string().as_str())
+    );
     assert_eq!(m.sha256, sha("hello"));
 }
 
@@ -162,7 +182,9 @@ async fn an_unreachable_bus_keeps_the_inject_event_buffered_9167() {
     let (_state, publisher) = installed(&mgr, &sock).await;
     let before = mgr.get(&id).await.expect("record").last_activity_at;
 
-    mgr.inject(&id, "hello", Submit::Enter).await.expect("inject");
+    mgr.inject(&id, "hello", Submit::Enter)
+        .await
+        .expect("inject");
 
     let after = mgr.get(&id).await.expect("record").last_activity_at;
     assert!(after > before, "{before:?} -> {after:?}");

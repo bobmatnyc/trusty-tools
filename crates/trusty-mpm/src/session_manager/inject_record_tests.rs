@@ -99,7 +99,11 @@ async fn an_inject_is_exactly_one_message_event_9167() {
     mgr.inject(&record.id, "draft", Submit::NoSubmit)
         .await
         .expect("nosubmit");
-    let two = (record.tmux_name.clone(), Some("claude-1".into()), "draft".into());
+    let two = (
+        record.tmux_name.clone(),
+        Some("claude-1".into()),
+        "draft".into(),
+    );
     assert_eq!(recording.seen(), [one, two]);
 }
 
@@ -144,7 +148,11 @@ async fn a_refused_inject_records_no_message_9167() {
     mgr.stop(&record.id).await.expect("stop");
     let refused = mgr.inject(&record.id, "hello", Submit::Enter).await;
     assert!(refused.is_err(), "stopped: {refused:?}");
-    assert!(recording.seen().is_empty(), "stopped: {:?}", recording.seen());
+    assert!(
+        recording.seen().is_empty(),
+        "stopped: {:?}",
+        recording.seen()
+    );
 }
 
 /// The first recorder stays; a second install is refused.
