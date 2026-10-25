@@ -461,4 +461,17 @@ mod tests {
             "/elsewhere/stray.rs"
         );
     }
+
+    /// #10282: a missing root fails both the raw strip and `canonicalize`, so `strip_root` answers `None`.
+    #[test]
+    fn strip_root_returns_none_when_root_cannot_be_canonicalized_10282() {
+        let root = Path::new("/nonexistent-10282/root");
+        let path = Path::new("/nonexistent-10282/x");
+        assert!(
+            path.strip_prefix(root).is_err(),
+            "raw strip must fail first"
+        );
+        assert!(std::fs::canonicalize(root).is_err(), "root must not exist");
+        assert_eq!(strip_root(root, path), None);
+    }
 }
