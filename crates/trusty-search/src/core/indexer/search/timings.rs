@@ -14,6 +14,8 @@
 
 use std::cell::Cell;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -29,13 +31,14 @@ pub enum QueryPhase {
     Resolve,
     /// Waiting for the index's read lock.
     Lock,
-    /// Embedding the query text.
+    /// Embedding the query text and the `refine_query` text.
     Embed,
     /// The HNSW vector lane.
     Vector,
     /// The BM25 lane and the entity exact match, including a rehydrate wait.
     Lexical,
-    /// The ripgrep content-scan lane and the empty-result grep fallback.
+    /// The ripgrep content-scan lane, the empty-result grep fallback and the
+    /// exact-match lane, including a rehydrate wait.
     Ripgrep,
     /// RRF fusion, MMR, KG expansion, score adjustments and materialisation.
     Fusion,
@@ -67,6 +70,9 @@ impl QueryPhase {
 struct QueryScope {
     deadline_at: Instant,
     phase: Cell<QueryPhase>,
+    /// #10195: set once a guard logged this query's timeout, so the deadline
+    /// wrapper does not log it a second time.
+    logged: Arc<AtomicBool>,
 }
 
 tokio::task_local! {
@@ -78,13 +84,15 @@ tokio::task_local! {
 /// Why: a cancelled search must name the stage that ran out of time, and only
 /// the search itself knows its stage. tokio drops a scoped future inside its
 /// scope, so a guard dropped by the cancellation still reads [`scope_state`].
-/// What: a task-local holding `deadline_at` and the phase, stored inline in
-/// the returned future.
+/// What: a task-local holding `deadline_at`, the phase and `logged`, stored
+/// inline in the returned future. [`mark_timeout_logged`] sets `logged`; the
+/// caller keeps a clone to read it after the future is dropped.
 /// Test: `a_search_cancelled_at_the_deadline_logs_index_query_and_stage`.
-pub async fn scoped<F: Future>(deadline_at: Instant, fut: F) -> F::Output {
+pub async fn scoped<F: Future>(deadline_at: Instant, logged: Arc<AtomicBool>, fut: F) -> F::Output {
     let scope = QueryScope {
         deadline_at,
         phase: Cell::new(QueryPhase::Start),
+        logged,
     };
     QUERY_SCOPE.scope(scope, fut).await
 }
@@ -92,6 +100,12 @@ pub async fn scoped<F: Future>(deadline_at: Instant, fut: F) -> F::Output {
 /// Record that the enclosing query entered `phase`; a no-op outside [`scoped`].
 pub fn mark(phase: QueryPhase) {
     let _ = QUERY_SCOPE.try_with(|s| s.phase.set(phase));
+}
+
+/// Record that the enclosing query's timeout was logged; a no-op outside
+/// [`scoped`] (#10195).
+pub fn mark_timeout_logged() {
+    let _ = QUERY_SCOPE.try_with(|s| s.logged.store(true, Ordering::Relaxed));
 }
 
 /// The enclosing query's phase and whether its deadline has passed; `None`
@@ -107,8 +121,8 @@ pub fn scope_state() -> Option<(QueryPhase, bool)> {
 /// Why: published in the search log line and `meta.timings`, so a slow query
 /// says where its time went.
 /// What: wall time per [`QueryPhase`] the indexer drives. `rehydrate_wait_ms`
-/// is the time the lexical lanes waited for a corpus rehydrate, already
-/// counted inside `lexical_ms` and `ripgrep_ms`. `rehydrate_ran` is `true`
+/// is the time the lexical and exact-match lanes waited for a corpus
+/// rehydrate, already counted inside `lexical_ms` and `ripgrep_ms`. `rehydrate_ran` is `true`
 /// when the corpus was evicted and this query started or joined its
 /// rehydrate; `hnsw_promoted` when the vector store promoted its mmap view to
 /// a heap copy while the query ran.
@@ -263,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn scope_state_reports_the_marked_phase_and_deadline() {
         let past = Instant::now();
-        let state = scoped(past, async {
+        let state = scoped(past, Arc::default(), async {
             mark(QueryPhase::Lexical);
             scope_state()
         })

@@ -139,7 +139,7 @@ async fn search_reports_per_stage_timings_in_log_and_meta() {
 /// id, its query, the stage it was in and the elapsed time.
 ///
 /// Pre-fix the only line was `query_timeout ... timeout_secs=0`, with no index
-/// id, query or stage.
+/// id, query or stage; then both lines were written for one cancellation.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
@@ -174,6 +174,13 @@ async fn a_search_cancelled_at_the_deadline_logs_index_query_and_stage() {
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("no elapsed_ms in: {line}"));
     assert!(elapsed >= 50, "elapsed_ms is at least the deadline: {line}");
+    // #10195: the deadline wrapper adds no second `query_timeout` line.
+    let log = cap.text();
+    let timeouts = log.lines().filter(|l| l.contains("query_timeout")).count();
+    assert_eq!(
+        timeouts, 1,
+        "one query_timeout line per cancellation:\n{log}"
+    );
 }
 
 /// `search_all` writes one `info` line naming its target index ids.

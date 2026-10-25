@@ -156,6 +156,8 @@ impl Drop for CancelGuard<'_> {
                 elapsed_ms = ms_since(self.started),
                 "query_timeout: search cancelled at the deadline"
             );
+            // #10195: tell the deadline wrapper this cancellation is logged.
+            query_timings::mark_timeout_logged();
         }
     }
 }

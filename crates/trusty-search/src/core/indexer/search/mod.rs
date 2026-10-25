@@ -431,7 +431,10 @@ impl CodeIndexer {
             match &query.refine_query {
                 // #8348: a refine embed failure drops the rerank, not the query.
                 Some(rq) if !rq.is_empty() => {
+                    // #10195: the refine embed is embed time, not fusion time.
+                    clock.enter(QueryPhase::Embed);
                     let (v, err) = self.embed_query_or_degrade(rq, false).await?;
+                    clock.enter(QueryPhase::Fusion);
                     vector_lane_error = vector_lane_error.or(err);
                     v
                 }
@@ -480,15 +483,21 @@ impl CodeIndexer {
             let tie_scores = |id: &str| fused.get(id).copied().unwrap_or(0.0);
             let mut lane = match (&exact_literal, &exact_re) {
                 (Some(lit), Some(re)) => {
-                    self.exact_match_lane(
-                        lit,
-                        re,
-                        lex_want,
-                        effective_mode,
-                        filter,
-                        Some(&tie_scores),
-                    )
-                    .await
+                    // #10195: the exact-lane scan and its rehydrate wait are
+                    // content-scan time, not fusion time.
+                    clock.enter(QueryPhase::Ripgrep);
+                    let lane = self
+                        .exact_match_lane(
+                            lit,
+                            re,
+                            lex_want,
+                            effective_mode,
+                            filter,
+                            Some(&tie_scores),
+                        )
+                        .await;
+                    clock.enter(QueryPhase::Fusion);
+                    lane
                 }
                 _ => exact::ExactLaneOutcome::default(),
             };

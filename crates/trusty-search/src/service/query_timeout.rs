@@ -107,9 +107,11 @@ pub fn timeout_refusal() -> (StatusCode, serde_json::Value) {
 /// query method applies the same one.
 /// What: `tokio::time::timeout` around `fut`, run inside a query scope
 /// (#10195); on expiry the future is dropped (cancelling it) and
-/// [`timeout_refusal`] is returned.
+/// [`timeout_refusal`] is returned. It logs `query_timeout` only when no
+/// search guard inside the future already did.
 /// Test: `query_timeout_returns_408_when_handler_stalls`,
-/// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
+/// `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`,
+/// `a_deadline_with_no_guard_logs_one_query_timeout_line`.
 pub async fn with_query_deadline<F>(
     cfg: &QueryTimeoutConfig,
     fut: F,
@@ -120,14 +122,22 @@ where
     // #10195: the query scope carries the deadline and the current stage, so a
     // search dropped by the timeout below logs its index, query and stage.
     let deadline_at = std::time::Instant::now() + cfg.timeout;
-    let scoped = crate::core::indexer::query_timings::scoped(deadline_at, fut);
-    match tokio::time::timeout(cfg.timeout, scoped).await {
+    let logged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let scoped = crate::core::indexer::query_timings::scoped(deadline_at, Arc::clone(&logged), fut);
+    // The timed-out future is dropped when this await completes, so a search
+    // guard has logged (or not) by the time the arm below reads `logged`.
+    let outcome = tokio::time::timeout(cfg.timeout, scoped).await;
+    match outcome {
         Ok(value) => Ok(value),
         Err(_elapsed) => {
-            tracing::warn!(
-                timeout_secs = cfg.timeout.as_secs(),
-                "query_timeout: interactive query exceeded deadline (issue #907)"
-            );
+            // #10195: one `query_timeout` line per cancellation — the search
+            // guard's, with index and stage, or this one when no guard logged.
+            if !logged.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    timeout_secs = cfg.timeout.as_secs(),
+                    "query_timeout: interactive query exceeded deadline (issue #907)"
+                );
+            }
             metrics::counter!("trusty_query_timeouts_total").increment(1);
             Err(timeout_refusal())
         }
@@ -183,5 +193,39 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "408 must arrive before the 2 s wall-clock guard (elapsed: {elapsed:?})",
         );
+    }
+
+    /// A deadline that fires where no search guard logged still writes one
+    /// `query_timeout` line (#10195).
+    ///
+    /// Test: this test.
+    #[tokio::test]
+    async fn a_deadline_with_no_guard_logs_one_query_timeout_line() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let cap = Capture::default();
+        let writer = cap.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let cfg = QueryTimeoutConfig::from_duration(Duration::from_millis(20));
+        let refused = with_query_deadline(&cfg, std::future::pending::<()>()).await;
+        assert!(refused.is_err(), "a stalled query is refused");
+
+        let log = String::from_utf8_lossy(&cap.0.lock().expect("capture lock")).into_owned();
+        let timeouts = log.lines().filter(|l| l.contains("query_timeout")).count();
+        assert_eq!(timeouts, 1, "{log}");
     }
 }

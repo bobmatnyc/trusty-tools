@@ -82,3 +82,62 @@ async fn a_rehydrate_logs_its_stage_split() {
         assert!(line.contains(field), "missing `{field}` in: {line}");
     }
 }
+
+/// The refine query's text; only its embed is slow.
+const REFINE: &str = "refine this slowly";
+/// How long the refine embed takes.
+const REFINE_DELAY: Duration = Duration::from_millis(200);
+
+/// A mock embedder whose embed of [`REFINE`] takes [`REFINE_DELAY`].
+struct SlowRefineEmbedder(crate::core::embed::MockEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for SlowRefineEmbedder {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        if text == REFINE {
+            tokio::time::sleep(REFINE_DELAY).await;
+        }
+        self.0.embed(text).await
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if texts.contains(&REFINE) {
+            tokio::time::sleep(REFINE_DELAY).await;
+        }
+        self.0.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        self.0.dimension()
+    }
+}
+
+/// The `refine_query` embed is charged to `embed_ms`, not `fusion_ms`.
+///
+/// Pre-fix the refine embed ran while the clock was in the fusion stage, so
+/// its 200 ms landed in `fusion_ms`.
+/// Test: this test.
+#[tokio::test]
+async fn a_refine_query_embed_is_charged_to_embed_ms() {
+    let dim = 32;
+    let embedder: Arc<dyn Embedder> = Arc::new(SlowRefineEmbedder(
+        crate::core::embed::MockEmbedder::new(dim),
+    ));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let idx =
+        CodeIndexer::new("refine-10195", "/tmp/refine-10195").with_components(embedder, store);
+    idx.index_files_batch(&[("src/auth.rs".into(), "fn authenticate() {}".into())])
+        .await
+        .expect("index batch");
+    let q = SearchQuery {
+        text: "authenticate".to_string(),
+        top_k: 5,
+        refine_query: Some(REFINE.to_string()),
+        ..Default::default()
+    };
+    let t = idx.search_with_outcome(&q).await.expect("search").timings;
+    let delay_ms = REFINE_DELAY.as_millis() as u64;
+    assert!(t.embed_ms >= delay_ms, "refine embed in embed_ms: {t:?}");
+    assert!(
+        t.fusion_ms < delay_ms,
+        "refine embed not in fusion_ms: {t:?}"
+    );
+}
