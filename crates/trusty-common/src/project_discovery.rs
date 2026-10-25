@@ -11,11 +11,11 @@
 //! No global state.
 //!
 //! Test: `cargo test -p trusty-common --features unconditional-only` covers
-//! default-search-dir wiring; the filesystem-walking test is `#[ignore]`.
+//! default-search-dir wiring and the temp-directory walks.
 
 use std::path::{Path, PathBuf};
 
-use crate::claude_config::SCAN_SKIP_DIRS;
+use crate::claude_config::{SCAN_SKIP_DIRS, device_guard, device_of, home_walk_enters};
 
 /// Default depth [`discover_claude_projects`] recurses inside each search root.
 const DEFAULT_PROJECT_MAX_DEPTH: usize = 3;
@@ -66,23 +66,43 @@ pub const fn default_project_max_depth() -> usize {
 /// keeps the walk fast and the results relevant.
 /// What: for each entry of `search_dirs` (joined onto `home`), recursively walks
 /// up to `max_depth` directories deep, skipping any directory in
-/// [`SCAN_SKIP_DIRS`]. Every directory carrying a `.claude/` directory or a
+/// [`SCAN_SKIP_DIRS`], the synced top-level home folders in
+/// [`crate::claude_config::HOME_SKIP_DIRS`], and any directory on a device other
+/// than `home`'s (or whose device cannot be read). Every directory carrying a `.claude/` directory or a
 /// `CLAUDE.md` file is reported as a [`ClaudeProject`] with its marker flags
 /// populated. A directory matching is not recursed into (its subdirectories are
 /// considered part of the same project). Use [`DEFAULT_SEARCH_DIRS`] and
 /// [`default_project_max_depth`] for the standard configuration. Results are
 /// sorted by path and de-duplicated.
-/// Test: `discover_claude_projects_finds_marked_dirs` (`#[ignore]`, real fs).
+/// Test: `discover_claude_projects_finds_marked_dirs`,
+/// `discover_claude_projects_skips_synced_home_folders`.
 pub fn discover_claude_projects(
     home: &Path,
     search_dirs: &[&str],
     max_depth: usize,
 ) -> Vec<ClaudeProject> {
+    // #10267: same fail-closed device guard as the settings walk.
+    discover_projects_with(
+        home,
+        search_dirs,
+        max_depth,
+        &device_guard(home, &device_of),
+    )
+}
+
+/// [`discover_claude_projects`] with the device check injected (#10267).
+fn discover_projects_with(
+    home: &Path,
+    search_dirs: &[&str],
+    max_depth: usize,
+    on_home_device: &dyn Fn(&Path) -> bool,
+) -> Vec<ClaudeProject> {
     let mut found = Vec::new();
     for rel in search_dirs {
         let root = home.join(rel);
-        if root.is_dir() {
-            collect_projects(&root, max_depth, &mut found);
+        // #10267: a search root is held to the same rule as a walked directory.
+        if home_walk_enters(home, &root, on_home_device) && root.is_dir() {
+            collect_projects(home, &root, max_depth, on_home_device, &mut found);
         }
     }
     found.sort_by(|a, b| a.path.cmp(&b.path));
@@ -91,7 +111,13 @@ pub fn discover_claude_projects(
 }
 
 /// Recursive worker for [`discover_claude_projects`].
-fn collect_projects(dir: &Path, depth_remaining: usize, out: &mut Vec<ClaudeProject>) {
+fn collect_projects(
+    home: &Path,
+    dir: &Path,
+    depth_remaining: usize,
+    on_home_device: &dyn Fn(&Path) -> bool,
+    out: &mut Vec<ClaudeProject>,
+) {
     if let Some(project) = inspect_project_dir(dir) {
         // A matched directory IS the project — don't descend into it.
         out.push(project);
@@ -121,7 +147,17 @@ fn collect_projects(dir: &Path, depth_remaining: usize, out: &mut Vec<ClaudeProj
         if SCAN_SKIP_DIRS.contains(&name) {
             continue;
         }
-        collect_projects(&path, depth_remaining.saturating_sub(1), out);
+        // #10267: no synced top-level home folder, no other device.
+        if !home_walk_enters(home, &path, on_home_device) {
+            continue;
+        }
+        collect_projects(
+            home,
+            &path,
+            depth_remaining.saturating_sub(1),
+            on_home_device,
+            out,
+        );
     }
 }
 
@@ -220,5 +256,52 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    // #10267: a search root or a direct child of home in a synced folder was
+    // walked.
+    #[test]
+    fn discover_claude_projects_skips_synced_home_folders() {
+        let home = tempfile::tempdir().expect("temp home");
+        let h = home.path();
+        for rel in [
+            "Documents/proj",
+            "Desktop/code/proj",
+            "code/Documents/proj",
+            "code/proj",
+        ] {
+            std::fs::create_dir_all(h.join(rel).join(".claude")).expect("plant");
+        }
+
+        let found = discover_claude_projects(h, &[".", "Desktop/code", "code"], 3);
+        let paths: Vec<&Path> = found.iter().map(|p| p.path.as_path()).collect();
+
+        for skipped in ["Documents/proj", "Desktop/code/proj"] {
+            assert!(
+                !paths.contains(&h.join(skipped).as_path()),
+                "{skipped} returned: {paths:?}"
+            );
+        }
+        for kept in ["code/Documents/proj", "code/proj"] {
+            assert!(
+                paths.contains(&h.join(kept).as_path()),
+                "{kept} missing: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_claude_projects_skips_other_device() {
+        let home = tempfile::tempdir().expect("temp home");
+        let h = home.path();
+        for rel in ["code/mnt/proj", "code/proj"] {
+            std::fs::create_dir_all(h.join(rel).join(".claude")).expect("plant");
+        }
+        let mount_point = h.join("code").join("mnt");
+
+        let found = discover_projects_with(h, &["code"], 3, &|d: &Path| d != mount_point.as_path());
+        let paths: Vec<&Path> = found.iter().map(|p| p.path.as_path()).collect();
+
+        assert_eq!(paths, vec![h.join("code/proj").as_path()], "{paths:?}");
     }
 }
