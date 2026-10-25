@@ -1,0 +1,4 @@
+Fixed
+- `EmbedderSupervisor` bounds the sidecar footprint when a footprint recycle cannot start its replacement (#10207). A hard limit, `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` (default twice the recycle ceiling, `0` disables, a value not above the ceiling is ignored with a WARN), is checked on every recycle tick, during a recycle back-off hold, and while a replacement is starting. Over it, the sidecar is killed through the crash path and respawned with no back-off delay; the kill counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS` (not as a wedge restart), and `/health` `embedder_recycle.hard_footprint_kills` counts it.
+- The sidecar startup probe scales with host load: the timeout is multiplied by `1 + load1/ncpu`, capped by `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` (default 4), and a recycle replacement or crash respawn gets at least 120 s before scaling (#10207).
+- New `sys_metrics::load_per_cpu()` returns the one-minute load average per CPU.
