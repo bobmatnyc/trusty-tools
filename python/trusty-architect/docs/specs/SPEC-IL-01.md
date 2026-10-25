@@ -114,7 +114,7 @@ Any other cadence job (an extended-cycle rescore, a weekly review) is one entry 
 
 ## 5. Write points
 
-Hook set per PM (all through `scripts/datg-hook.sh <session>`):
+Hook set per PM (all through `/bin/sh "<root>/scripts/datg-hook.sh" <session>`):
 
 | Event | Action |
 | --- | --- |
@@ -224,7 +224,7 @@ The Architect's gates (section 8) are the existing `self-clear.sh` idle test plu
 Per PM (the Architect installs; a change to a project's CLAUDE.md goes to the owner first, r-067):
 
 1. `python3 scripts/datg.py --project <dir> init --code <code>` and seed goals; migrate an existing state.json with `datg.py prune` (section 3.4) before enabling the cycle.
-2. Merge the hooks block into `<dir>/.claude/settings.local.json` (SessionStart, Stop, PreToolUse Agent|Task), command `<root>/scripts/datg-hook.sh <session>`, timeout 5. A project dir shared by several PMs uses one hook entry per PM session (the script's session filter).
+2. Merge the hooks block into `<dir>/.claude/settings.local.json` (SessionStart, Stop, PreToolUse Agent|Task), command `/bin/sh "<root>/scripts/datg-hook.sh" <session>` (an explicit interpreter and the absolute `<root>` path, quoted; never the bare script path, D73), timeout 5. A project dir shared by several PMs uses one hook entry per PM session (the script's session filter).
 3. Add the PM instruction block (below) through the PM's own standing instructions, relayed once by the Architect.
 4. Add the session to `local/il-schedule.json` `sessions` (name, project dir, code, thresholds override, `enabled: false` until the pilot passes).
 

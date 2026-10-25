@@ -121,6 +121,13 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     previous: &["2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77"],
 };
 
+/// `architect-project-provision`, edited since its first release.
+const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
+    stem: "architect-project-provision",
+    // #10263: the D2 text, before hook commands named an interpreter (D73).
+    previous: &["102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8"],
+};
+
 /// A skill on its first release: no earlier shipped text to recognise.
 const fn first_release(stem: &'static str) -> ShippedSkill {
     ShippedSkill {
@@ -147,7 +154,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     // host-administration skills, rewritten into trusty-tools form.
     first_release("architect-drift-check"),
     first_release("architect-review"),
-    first_release("architect-project-provision"),
+    PROJECT_PROVISION,
     first_release("architect-macos"),
     first_release("architect-improvements"),
     first_release("architect-host-admin"),

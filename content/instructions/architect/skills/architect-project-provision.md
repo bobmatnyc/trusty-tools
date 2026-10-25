@@ -77,9 +77,15 @@ multiple-choice question per open decision, recommendation first:
 1. Register with tm: `tm project init --dir <dir>`. Confirm with
    `tm project list`.
 2. Push hook: the PM adds a `Notification` hook entry to
-   `<dir>/.claude/settings.json` whose command is the absolute path of this
-   directory's `scripts/notify-supervisor.sh`. Verify the entry in that file,
-   then watch `inbox/events.jsonl` for the project's first event.
+   `<dir>/.claude/settings.json` whose command runs this directory's script
+   through an explicit interpreter, with the absolute path quoted:
+   `/bin/bash "<abs>/scripts/notify-supervisor.sh"`. Never the bare script
+   path: a hook or statusLine command never execs a `#!` script (D73). The
+   Intent Ledger hook takes the same shape:
+   `/bin/sh "<abs>/scripts/datg-hook.sh" <session>`. `<abs>` is this
+   directory's absolute path; never `~` or `$CLAUDE_PROJECT_DIR`. Verify the
+   entry in that file, then watch `inbox/events.jsonl` for the project's
+   first event.
 3. Send the PM (or engineer agent) a short relay pointing to the brief for the
    in-repo items. The PM's own gates apply to that work.
 4. Verify each item before recording it as verified: use shell commands for
