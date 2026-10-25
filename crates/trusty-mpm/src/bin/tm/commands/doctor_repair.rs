@@ -425,7 +425,7 @@ fn rust_build_env_steps(
 /// outside the home directory.
 /// What: the deduplicated union of `<cwd>/.claude/{settings.json,
 /// settings.local.json}` and
-/// [`trusty_mpm::core::home_settings_walk::discover_home_settings`] under the
+/// [`trusty_common::claude_config::discover_claude_settings`] under the
 /// resolved home, which never enters a top-level synced folder or another
 /// device. Existence is not checked here — [`repair_build_tree_binary`] treats
 /// a missing file as nothing to do. An unresolvable home contributes nothing
@@ -450,15 +450,13 @@ pub(crate) fn machine_wide_settings_files(
     }
     // #9293: `home` is supplied, never resolved here, so the walk root is the
     // caller's; production passes `dirs::home_dir()`, a test passes a temp dir.
-    // #10263: tm's own walk, which never enters iCloud-synced home folders or
-    // another device — a read there froze a session.
+    // #10267: the shared trusty-common walk, which never enters iCloud-synced
+    // home folders or another device — a read there froze a session.
     if let Some(home) = home {
-        set.extend(
-            trusty_mpm::core::home_settings_walk::discover_home_settings(
-                home,
-                trusty_common::claude_config::default_settings_max_depth(),
-            ),
-        );
+        set.extend(trusty_common::claude_config::discover_claude_settings(
+            home,
+            trusty_common::claude_config::default_settings_max_depth(),
+        ));
     }
     set.into_iter().collect()
 }
