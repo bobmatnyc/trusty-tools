@@ -126,6 +126,44 @@ pub const SKIP_DIRS: &[&str] = &[
     "test_resources",
 ];
 
+/// Credential directories never walked or admitted, whatever the ignore files
+/// say and whatever `respect_gitignore` is.
+///
+/// Why: #10273 stopped pruning hidden paths, so an ungitignored `.aws/` or
+/// `.kube/` holding `.json` / `.yml` / `.toml` would be chunked and served by
+/// search. The allowlist's `SENSITIVE_COMPONENT_NAMES` is the index-ROOT gate
+/// and also names `.config`, `secrets` and `vault`, which are ordinary
+/// directories inside a repo, so it is not reused here.
+/// What: each entry is one or more `/`-separated directory names matched as
+/// consecutive path segments at any depth, so `.config/gh` prunes
+/// `a/.config/gh/hosts.yml` but not `.config/nvim/init.lua`.
+/// Test: `test_walker_never_yields_credential_paths`,
+/// `admission_refuses_credential_paths`, `test_rel_path_credential_rule`.
+pub const CREDENTIAL_DIRS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".docker",
+    ".kube",
+    ".password-store",
+    ".config/gh",
+    ".config/gcloud",
+];
+
+/// Name prefixes of secrets files under a hidden directory (#10273).
+///
+/// Why: tools keep secrets in a hidden project directory, e.g.
+/// `.streamlit/secrets.toml`, and no directory rule covers every such tool.
+/// What: a segment whose lowercased name, leading dots removed, starts with an
+/// entry is refused when the segment itself or any ancestor segment of the
+/// root-relative path is hidden, e.g. `.streamlit/prod/secrets.toml`.
+/// `.github/workflows/ci.yml`, `src/credentials.rs` and `secrets/prod.yml`
+/// stay indexed.
+/// Test: `test_walker_never_yields_credential_paths`,
+/// `test_rel_path_credential_rule`.
+pub const SECRET_FILE_PREFIXES: &[&str] = &["secrets", "credentials"];
+
 /// Names in [`SKIP_DIRS`] that mean build output in one ecosystem and a
 /// hand-written SOURCE directory in another.
 ///
@@ -610,10 +648,14 @@ pub(crate) fn len_exceeds_caps(path: &Path, len: u64, data_file_max_bytes: u64) 
 /// and never walks. Without this check a file modified inside `cdk.out/` (or
 /// any other build-artefact dir) would still be indexed incrementally,
 /// undoing the exclusion that the initial reindex honoured.
-/// What: delegates to [`rel_path_in_skipped_dir`] with no `extra_skip_dirs`.
+/// What: the [`rel_path_in_skipped_dir`] segment scan with no
+/// `extra_skip_dirs` and no credential rule: `path` may be absolute, and a
+/// hidden segment of the root itself (a macOS `.tmpXXXX` tempdir) must not
+/// make a `secrets/` directory under it a credential path (#10273). A caller
+/// holding the root checks [`rel_path_is_credential`] on the relative path.
 /// Test: see `test_path_in_skipped_dir` below.
 pub fn path_in_skipped_dir(path: &Path) -> bool {
-    rel_path_in_skipped_dir(path, &[])
+    segments_in_skipped_dir(path, &[])
 }
 
 /// Return `true` when `rel` lies inside a directory the indexer excludes.
@@ -629,10 +671,20 @@ pub fn path_in_skipped_dir(path: &Path) -> bool {
 /// [`SOURCE_ROOT_DIRS`] is a source directory and is kept. `rel` should be
 /// relative to the walk root (#1554): segments of the root path itself are
 /// otherwise tested, and a repo living under `/data/` prunes itself.
+/// A credential path ([`rel_path_is_credential`]) always prunes (#10273).
+/// Every rule is prefix-closed: a pruned directory prunes everything below
+/// it, so a directory-level prune agrees with the file test.
 /// Test: `src_bin_tree_is_walked`, `root_build_output_dirs_are_still_pruned`,
 /// `gitignored_dir_is_still_pruned` in `tests/src_bin_coverage_7694.rs`, plus
-/// `test_path_in_skipped_dir` below.
+/// `test_path_in_skipped_dir` and `test_rel_path_credential_rule` below.
 pub fn rel_path_in_skipped_dir(rel: &Path, extra_skip_dirs: &[String]) -> bool {
+    // #10273: credential paths are refused whatever the ignore files say.
+    rel_path_is_credential(rel) || segments_in_skipped_dir(rel, extra_skip_dirs)
+}
+
+/// The `extra_skip_dirs` / [`SKIP_DIRS`] segment scan of
+/// [`rel_path_in_skipped_dir`], without the credential rule.
+fn segments_in_skipped_dir(rel: &Path, extra_skip_dirs: &[String]) -> bool {
     let mut parent: Option<&str> = None;
     for seg in rel.components().filter_map(|c| c.as_os_str().to_str()) {
         if extra_skip_dirs.iter().any(|d| d == seg) {
@@ -650,6 +702,35 @@ pub fn rel_path_in_skipped_dir(rel: &Path, extra_skip_dirs: &[String]) -> bool {
         parent = Some(seg);
     }
     false
+}
+
+/// Whether `rel` is, or lies under, a credential path (#10273).
+///
+/// What: `true` when a [`CREDENTIAL_DIRS`] entry occurs as consecutive
+/// segments of `rel`, or a segment matches [`SECRET_FILE_PREFIXES`] while it
+/// or any earlier segment is hidden. `rel` must be root-relative: a hidden
+/// segment of the root path itself would otherwise count.
+/// Test: `test_rel_path_credential_rule`.
+pub(crate) fn rel_path_is_credential(rel: &Path) -> bool {
+    let segs: Vec<&str> = rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let in_credential_dir = CREDENTIAL_DIRS.iter().any(|dir| {
+        let want: Vec<&str> = dir.split('/').collect();
+        segs.windows(want.len()).any(|w| w == want.as_slice())
+    });
+    if in_credential_dir {
+        return true;
+    }
+    // #10273: hiddenness is inherited from ANY ancestor segment, not only the
+    // immediate parent, so `.x/a/b/credentials.yaml` is refused.
+    let mut under_hidden = false;
+    segs.iter().any(|seg| {
+        under_hidden |= seg.starts_with('.');
+        let name = seg.trim_start_matches('.').to_ascii_lowercase();
+        under_hidden && SECRET_FILE_PREFIXES.iter().any(|p| name.starts_with(p))
+    })
 }
 
 /// Return `true` when the *contents* of a JS file look minified even though
@@ -774,19 +855,18 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
     // belt-and-braces for callers that bypass the HTTP entry point.
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
-    // Configure the `ignore` crate. `standard_filters(true)` is a shorthand
-    // that flips on all the ripgrep-equivalent ignore sources at once
-    // (`.gitignore`, `.git/info/exclude`, global gitignore, `.ignore`, hidden
-    // files); we then explicitly re-enable each source we care about so a
-    // future `ignore` release that changes the standard-filter defaults
-    // doesn't silently flip behaviour.
-    //
-    // `hidden(false)` keeps dotfiles in the walk so e.g. `.github/workflows/*`
-    // remain indexable — the original `walkdir`-based walker did not skip
-    // hidden entries; the only hidden-directory exclusions came from
-    // SKIP_DIRS (`.git`, `.cargo`, ...). Honouring `.gitignore` is what
-    // prunes `.venv` / `.cache` / `.aws-sam` on projects that gitignore them.
-    let builder = configured_builder(&canonical_root, opts);
+    // Ignore sources and hidden-file handling: see `configured_builder`.
+    let mut builder = configured_builder(&canonical_root, opts);
+    // #10273: with hidden paths walked, stop descending into a pruned
+    // directory (`.git`, `.venv`, `.ssh`, ...) instead of listing its files
+    // and rejecting each one in `path_admitted`. Same predicate, so same set.
+    let (prune_root, extra) = (canonical_root.clone(), opts.extra_skip_dirs.clone());
+    builder.filter_entry(move |e| {
+        !(e.file_type().is_some_and(|t| t.is_dir())
+            && e.path()
+                .strip_prefix(&prune_root)
+                .is_ok_and(|rel| rel_path_in_skipped_dir(rel, &extra)))
+    });
 
     for entry in builder.build() {
         let entry = match entry {
@@ -877,12 +957,28 @@ pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> boo
 }
 
 /// Use the same ignore sources for walking and single-file admission.
+///
+/// Why: the walker and `index_admission::admits` must agree on every path,
+/// including hidden ones such as `.github/workflows/ci.yml`.
+/// What: honours `.gitignore`, `.git/info/exclude`, the global gitignore and
+/// `.ignore` when `respect_gitignore` is set, and never prunes a path for
+/// being hidden. Hidden noise (`.git`, `.venv`, `.cache`, ...) is pruned by
+/// [`SKIP_DIRS`] in [`path_admitted`], or by the project's ignore files.
+/// Credential paths ([`CREDENTIAL_DIRS`], [`SECRET_FILE_PREFIXES`]) are
+/// refused by [`path_admitted`] whatever the ignore files say.
+/// Test: `test_walker_yields_hidden_dir_files_under_default_options`,
+/// `test_walker_hidden_dirs_with_gitignore_disabled`,
+/// `test_walker_never_yields_credential_paths`,
+/// `admission_admits_a_hidden_dir_file_the_walker_yields`,
+/// `admission_refuses_credential_paths`.
 pub(crate) fn configured_builder(root: &Path, opts: &WalkOptions) -> ignore::WalkBuilder {
     let mut builder = ignore::WalkBuilder::new(root);
+    // #10273: `standard_filters(yes)` also calls `hidden(yes)`, so it must run
+    // before `hidden(false)`; the other way round, hidden paths were pruned.
     builder
         .follow_links(opts.follow_links)
-        .hidden(false)
         .standard_filters(opts.respect_gitignore)
+        .hidden(false)
         .git_ignore(opts.respect_gitignore)
         .git_exclude(opts.respect_gitignore)
         .git_global(opts.respect_gitignore)
@@ -1759,6 +1855,32 @@ mod tests {
         assert!(!path_in_skipped_dir(Path::new("project/src/main.rs")));
     }
 
+    /// #10273: the credential rule on root-relative paths, at any depth.
+    /// Fails against b8103ecdc2, which had no credential rule.
+    #[test]
+    fn test_rel_path_credential_rule() {
+        for rel in [
+            "repo/.config/gh/hosts.yml",
+            "a/.streamlit/secrets.toml",
+            ".streamlit/prod/secrets.toml",
+            ".x/a/b/credentials.yaml",
+            ".credentials/x.json",
+            ".secrets.yml",
+            ".kube",
+        ] {
+            assert!(rel_path_in_skipped_dir(Path::new(rel), &[]), "{rel}");
+        }
+        for rel in [
+            ".config/nvim/init.json",
+            "src/credentials.rs",
+            "secrets/prod.yaml",
+            "secrets/prod.yml",
+            ".github/workflows/ci.yml",
+        ] {
+            assert!(!rel_path_in_skipped_dir(Path::new(rel), &[]), "{rel}");
+        }
+    }
+
     #[test]
     fn test_skip_content_multiline_js_not_skipped() {
         // 5+ lines, even if one line is long.
@@ -2034,6 +2156,143 @@ mod tests {
             !names.iter().any(|n| n == "blob.rs"),
             ".git/ leaked into walk: {names:?}"
         );
+    }
+
+    /// Fixture for #10273: a hidden source dir, two hidden `SKIP_DIRS`, and a
+    /// gitignored hidden file. Returns the root-relative paths the walk yields.
+    fn walk_hidden_fixture(root: &Path, opts: &WalkOptions) -> Vec<String> {
+        for (rel, content) in [
+            (".github/workflows/ci.yml", "on: push\n"),
+            (".husky/pre-commit.sh", "echo hook\n"),
+            (".git/hooks/pre-push.sh", "echo git\n"),
+            (".venv/lib/x.py", "x = 1\n"),
+            (".private/notes.yml", "secret: 1\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        fs::write(root.join(".gitignore"), ".private/\n").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        walk_source_files_with_options(&root, opts)
+            .files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// #10273: under default options a hidden source dir is walked, while
+    /// `SKIP_DIRS` and `.gitignore` still prune hidden paths.
+    /// Fails against `standard_filters` called after `hidden(false)`.
+    #[test]
+    fn test_walker_yields_hidden_dir_files_under_default_options() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rels = walk_hidden_fixture(tmp.path(), &WalkOptions::default());
+        for kept in [
+            ".github/workflows/ci.yml",
+            ".husky/pre-commit.sh",
+            "src/main.rs",
+        ] {
+            assert!(
+                rels.iter().any(|r| r == kept),
+                "{kept} not walked: {rels:?}"
+            );
+        }
+        for pruned in [
+            ".git/hooks/pre-push.sh",
+            ".venv/lib/x.py",
+            ".private/notes.yml",
+        ] {
+            assert!(
+                !rels.iter().any(|r| r == pruned),
+                "{pruned} walked: {rels:?}"
+            );
+        }
+    }
+
+    /// #10273: `respect_gitignore: false` keeps walking hidden dirs and stops
+    /// honouring `.gitignore`, as before; `SKIP_DIRS` still prune.
+    #[test]
+    fn test_walker_hidden_dirs_with_gitignore_disabled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let opts = WalkOptions {
+            respect_gitignore: false,
+            ..WalkOptions::default()
+        };
+        let rels = walk_hidden_fixture(tmp.path(), &opts);
+        for kept in [".github/workflows/ci.yml", ".private/notes.yml"] {
+            assert!(
+                rels.iter().any(|r| r == kept),
+                "{kept} not walked: {rels:?}"
+            );
+        }
+        for pruned in [".git/hooks/pre-push.sh", ".venv/lib/x.py"] {
+            assert!(
+                !rels.iter().any(|r| r == pruned),
+                "{pruned} walked: {rels:?}"
+            );
+        }
+    }
+
+    /// Ungitignored credential files for #10273, as root-relative paths.
+    const CREDENTIAL_FIXTURE: &[&str] = &[
+        ".ssh/config.json",
+        ".aws/credentials.toml",
+        ".kube/config.yml",
+        ".config/gh/hosts.yml",
+        ".streamlit/secrets.toml",
+        ".streamlit/prod/secrets.toml",
+        ".x/a/b/credentials.yaml",
+    ];
+
+    /// #10273: credential directories and hidden secrets files are never
+    /// walked, with or without `respect_gitignore`, while hidden config such
+    /// as `.github/workflows/ci.yml` and `src/credentials.rs` still is.
+    /// Fails against b8103ecdc2, which walked every credential fixture.
+    #[test]
+    fn test_walker_never_yields_credential_paths() {
+        for respect_gitignore in [true, false] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let kept = [
+                ".github/workflows/ci.yml",
+                "secrets/prod.yml",
+                "src/credentials.rs",
+            ];
+            for rel in CREDENTIAL_FIXTURE.iter().chain(kept.iter()) {
+                let path = tmp.path().join(rel);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "k = 1\n").unwrap();
+            }
+            let root = fs::canonicalize(tmp.path()).unwrap();
+            let opts = WalkOptions {
+                respect_gitignore,
+                ..WalkOptions::default()
+            };
+            let mut rels: Vec<String> = walk_source_files_with_options(&root, &opts)
+                .files
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            rels.sort();
+            assert_eq!(rels, kept, "respect_gitignore={respect_gitignore}");
+            for rel in CREDENTIAL_FIXTURE {
+                assert!(
+                    !path_admitted(&root, &root.join(rel), &opts),
+                    "{rel} admitted, respect_gitignore={respect_gitignore}"
+                );
+            }
+        }
     }
 
     // --- Issue #2923: office document (pdf/docx/pptx/xlsx) walker wiring ---

@@ -63,7 +63,7 @@ use crate::core::registry::IndexHandle;
 use crate::service::index_admission::{admits, Admission};
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
 use crate::service::server::ReconcileSummary;
-use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::walker::{rel_path_in_skipped_dir, should_skip_path};
 use crate::service::warm_boot::index_is_stuck_unwalked;
 use crate::service::SearchAppState;
 
@@ -186,7 +186,7 @@ pub(crate) fn collect_stale_files_by_mtime(root_path: &Path, since_unix: u64) ->
                 let Ok(rel) = e.path().strip_prefix(root_path) else {
                     return false;
                 };
-                return !crate::service::walker::rel_path_in_skipped_dir(rel, &[]);
+                return !rel_path_in_skipped_dir(rel, &[]);
             }
             // For files: apply the same exclusion rules as the live watcher.
             // path_in_skipped_dir handles nested excluded dirs that share a name
@@ -235,12 +235,14 @@ pub(crate) fn collect_stale_files_by_mtime(root_path: &Path, since_unix: u64) ->
 ///
 /// Why: a file that appears in the git diff but lives inside an excluded subtree
 /// (e.g. `node_modules/`, `target/`, minified JS) must not enter the index.
-/// We share the walker's `should_skip_path` / `path_in_skipped_dir` predicates
-/// so the exclusion rules are applied consistently with the live watcher.
-/// What: delegates to the walker's two public skip predicates.
+/// We share the walker's `should_skip_path` / `rel_path_in_skipped_dir`
+/// predicates so the exclusion rules are applied consistently with the walk.
+/// What: delegates to those two predicates; `path` is root-relative, so the
+/// #10273 credential rule applies.
 /// Test: `reconcile_skip_excluded_path` in reconcile_tests.rs.
 pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
-    path_in_skipped_dir(path) || should_skip_path(path)
+    // #10273: `path` is root-relative, so the credential rule applies too.
+    rel_path_in_skipped_dir(path, &[]) || should_skip_path(path)
 }
 
 /// RAII guard that clears `ReconcileSummary::in_progress` on drop.
