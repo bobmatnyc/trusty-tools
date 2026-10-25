@@ -181,9 +181,13 @@ pub(super) fn neighbourhoods_before_insert(
 /// the walk; a hit ends that branch, because a point the search found is
 /// reachable and so is everything it links to. A point stored under `new_id`
 /// — the new one, or a stale copy of it (#5171) — is not tested, and the walk
-/// goes on through it. Returns how many points were evicted.
+/// goes on through it. A point `groups` already records is neither tested nor
+/// walked through (#10204): it lost its path before this insert, so no path
+/// this insert broke ran through it. Returns how many [`reachable`] searches
+/// the walk ran.
 /// Test: `an_upsert_that_strands_an_existing_drawer_still_finds_it`,
-/// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`.
+/// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
+/// `restrand_skips_a_point_already_recorded_as_stranded`.
 pub(super) fn restrand_evicted(
     index: &Hnsw<'static, f32, DistCosine>,
     before: Neighbourhoods,
@@ -205,15 +209,22 @@ pub(super) fn restrand_evicted(
             }
         }
     }
-    let evicted = walk.len();
+    let mut searched = 0;
     // #10186: layer 0 by `PointId` position, read only once a test misses.
     let mut layer: Option<Vec<Arc<Point<'static, f32>>>> = None;
     while let Some(n) = walk.pop_front() {
         let id = n.d_id as u64;
         if id != new_id {
+            // #10204: re-walking recorded points re-searched whole stranded
+            // clumps on every upsert that touched one; seeding 20k drawers
+            // went from 430 s to 769 s.
+            if is_recorded(&groups.read(), id) {
+                continue;
+            }
             let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
                 continue;
             };
+            searched += 1;
             if reachable(index, &vector, id) {
                 continue;
             }
@@ -232,7 +243,12 @@ pub(super) fn restrand_evicted(
             }
         }
     }
-    evicted
+    searched
+}
+
+/// Whether `groups` records `id` for the exact scan (#10204).
+fn is_recorded(groups: &[StrandedGroup], id: u64) -> bool {
+    groups.iter().any(|(_, ids)| ids.contains(&id))
 }
 
 /// Add every live stranded point to a graph arm's candidates, scored exactly.

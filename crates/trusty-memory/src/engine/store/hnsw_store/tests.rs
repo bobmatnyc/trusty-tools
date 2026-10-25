@@ -2056,6 +2056,47 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
     );
 }
 
+/// Why (#10204): the #10186 walk re-searched every point it reached, including
+/// points already recorded as stranded and everything behind them, on every
+/// upsert that evicted one. Seeding 20k drawers went from 430 s to 769 s.
+/// What: reports one drawer evicted from a list (its own, which never names
+/// it). Unrecorded, the walk searches for it once. Recorded, the walk runs no
+/// search at all.
+/// Test: this test itself is the verification.
+#[test]
+fn restrand_skips_a_point_already_recorded_as_stranded() {
+    let (_dir, store) = open_store(8);
+    for seed in 1..=4 {
+        store
+            .upsert(&format!("d{seed}"), &unit_vec(8, seed))
+            .expect("upsert");
+    }
+    let index = store.index.read();
+    let point = index
+        .get_point_indexation()
+        .get_layer_iterator(0)
+        .next()
+        .expect("a point");
+    let evicted = || {
+        let gone =
+            hnsw_rs::prelude::Neighbour::new(point.get_origin_id(), 0.0, point.get_point_id());
+        vec![(Arc::clone(&point), vec![gone])]
+    };
+    let id = point.get_origin_id() as u64;
+    assert!(!is_stranded(&store, id), "precondition: not yet recorded");
+    assert_eq!(
+        stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
+        1,
+        "an unrecorded evicted point is searched for once"
+    );
+    stranded::add_stranded(&mut store.stranded.write(), point.get_v(), id);
+    assert_eq!(
+        stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
+        0,
+        "a point already recorded as stranded must not be searched or walked again"
+    );
+}
+
 /// Uuids of `store`'s top `k` hits for `query`, in rank order.
 fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
     let hits = store.search(query, k).expect("search");

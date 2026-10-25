@@ -1,0 +1,2 @@
+Fixed
+- Upserts into a large palace slowed down as stranded points piled up: the post-upsert re-check searched again for every point already recorded as stranded, and for everything behind it, each time an upsert touched one. It now skips points already recorded for the exact scan. Seeding the 20k-drawer recall profile drops back to its 0.36.0 time ([#10204](https://github.com/bobmatnyc/trusty-tools/issues/10204))
