@@ -6,6 +6,9 @@
 # stdin JSON, appends one line to this supervisor project's inbox, and always
 # exits 0 fast. Must never block or fail the watched session: no network
 # calls, no long-running commands, best-effort only, fail silent.
+#
+# Run as `/bin/bash notify-supervisor.sh`; do not exec (D73, #10263). The
+# shebang stays for manual use only.
 
 set -u
 # Deliberately no `set -e` — every failure path below must still reach the
@@ -30,11 +33,12 @@ if [ -z "${NOTIFY_SUPERVISOR_REEXEC:-}" ]; then
   # process, so a kill-on-timeout makes timeout's own 124 THIS script's exit
   # code — breaking the "always exit 0" contract. Run the re-invocation as a
   # child instead and discard its exit status so this wrapper always exits 0.
+  # #10263: re-run through /bin/bash, never a direct #! exec of "$0" (D73).
   if command -v timeout >/dev/null 2>&1; then
-    timeout 4 "$0" "$@"
+    timeout 4 /bin/bash "$0" "$@"
     exit 0
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 4 "$0" "$@"
+    gtimeout 4 /bin/bash "$0" "$@"
     exit 0
   fi
 fi
