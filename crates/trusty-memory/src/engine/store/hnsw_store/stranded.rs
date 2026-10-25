@@ -182,9 +182,11 @@ pub(super) fn neighbourhoods_before_insert(
 /// reachable and so is everything it links to. A point stored under `new_id`
 /// — the new one, or a stale copy of it (#5171) — is not tested, and the walk
 /// goes on through it. A point `groups` already records, by id and vector, is
-/// neither tested nor walked through (#10204): it lost its path before this
-/// insert, so no path this insert broke ran through it. Returns how many
-/// [`reachable`] searches the walk ran.
+/// not searched again (#10204): the exact scan already answers for it. The walk
+/// still goes on through it, because a record is not proof that the graph lost
+/// the point — the [`SELF_SEARCH_EF`] self-search can miss a point the graph
+/// reaches, records are never re-checked — so a path this insert broke can run
+/// through it. Returns how many [`reachable`] searches the walk ran.
 /// Test: `an_upsert_that_strands_an_existing_drawer_still_finds_it`,
 /// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
 /// `restrand_skips_a_point_already_recorded_as_stranded`.
@@ -215,20 +217,19 @@ pub(super) fn restrand_evicted(
     while let Some(n) = walk.pop_front() {
         let id = n.d_id as u64;
         if id != new_id {
-            // #10204: re-walking recorded points re-searched whole stranded
-            // clumps on every upsert that touched one; seeding 20k drawers
-            // went from 430 s to 769 s.
             let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
                 continue;
             };
-            if is_recorded(&groups.read(), &vector, id) {
-                continue;
+            // #10204: re-searching recorded points cost seeding 20k drawers
+            // 430 s -> 769 s. A recorded point is already scanned, so it is
+            // not searched again, but the walk still goes on through it.
+            if !is_recorded(&groups.read(), &vector, id) {
+                searched += 1;
+                if reachable(index, &vector, id) {
+                    continue;
+                }
+                add_stranded(&mut groups.write(), &vector, id);
             }
-            searched += 1;
-            if reachable(index, &vector, id) {
-                continue;
-            }
-            add_stranded(&mut groups.write(), &vector, id);
         }
         // #10186: a miss may have held the only path to its out-neighbours.
         let points = layer
@@ -255,7 +256,7 @@ fn is_recorded(groups: &[StrandedGroup], vector: &[f32], id: u64) -> bool {
             .map(|x| x.to_bits())
             .eq(vector.iter().map(|x| x.to_bits()))
     };
-    groups.iter().any(|(v, ids)| ids.contains(&id) && same(v))
+    groups.iter().any(|(v, ids)| same(v) && ids.contains(&id))
 }
 
 /// Add every live stranded point to a graph arm's candidates, scored exactly.
