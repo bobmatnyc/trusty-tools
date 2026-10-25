@@ -308,7 +308,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
+            "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
         ),
         (
             "architect-macos",
@@ -329,7 +329,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 12] = [
+    const FIRST_RELEASE: [&str; 11] = [
         "architect-tmux-ops",
         "architect-search-memory",
         "architect-github",
@@ -337,7 +337,6 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
-        "architect-project-provision",
         "architect-macos",
         "architect-improvements",
         "architect-host-admin",

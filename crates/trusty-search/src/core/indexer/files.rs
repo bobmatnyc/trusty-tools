@@ -501,8 +501,11 @@ impl CodeIndexer {
             // Multi-word queries are not symbol names; skip the exact-match path.
             return None;
         }
-        self.ensure_chunks_loaded().await;
-        self.ensure_bm25_entities_loaded().await;
+        // #10193: a query lane — the short query wait, not the 9 s writer
+        // wait. A cold index injects nothing this query.
+        if !self.await_corpus_for_query().await {
+            return None;
+        }
         let entities = self.entities.read().await;
         let chunks = self.chunks.read().await;
         for (file, ents) in entities.iter() {

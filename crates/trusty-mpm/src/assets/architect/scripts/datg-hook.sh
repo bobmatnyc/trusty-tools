@@ -1,5 +1,6 @@
 #!/bin/sh
 # datg-hook.sh: SessionStart and PreToolUse(Agent|Task) hook for a DATG pilot PM (the owner D93, 2026-10-09).
+# Run as `/bin/sh datg-hook.sh <session>`; do not exec (D73, #10263). The shebang stays for manual use only.
 # Why: the PM must see its goal rules at session start and be warned (later blocked) when a
 # dispatch names no goal id. Never writes state; a warn-mode warning is appended to datg/log.jsonl (kind hook_warning).
 # What: passes the hook JSON on stdin to `datg.py hook`; prints its JSON or nothing. Every

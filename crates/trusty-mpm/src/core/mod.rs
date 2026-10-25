@@ -204,10 +204,15 @@ pub mod git_identity;
 // #8511: keep the harness's own files out of every registered project's `git status`.
 pub(crate) mod harness_exclude;
 pub mod harness_root;
+// #10263: the doctor's `$HOME` walk — skips synced folders and other devices.
+pub mod home_settings_walk;
 pub mod home_trust_seed;
 // #8545: a test binary's fence around the operator's home config paths.
 pub mod home_write_fence;
 pub mod hook;
+// #10263: bare-script hook commands — detect, and add the interpreter.
+pub mod hook_interpreter;
+pub mod hook_interpreter_doctor;
 pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
