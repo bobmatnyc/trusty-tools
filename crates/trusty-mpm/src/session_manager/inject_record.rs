@@ -14,7 +14,7 @@
 //! isolated daemon, the supervisor — nothing is recorded.
 //! Test: `inject_record_tests.rs`.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 
@@ -48,7 +48,67 @@ pub trait InjectRecorder: Send + Sync {
     fn delivered(&self, delivery: &Delivery<'_>);
 }
 
+/// A recorder that is attached after its holder is built, shared by clones.
+///
+/// Why: the control-plane `TmuxBackend` types into a pane without a
+/// `SessionManager`, and the registry that builds it exists before the daemon
+/// attaches its bus producer (#9167 AC5).
+/// What: set once; [`Self::record`] is a no-op until then.
+/// Test: `a_delivered_send_is_one_message_event_9167`.
+#[derive(Clone, Default)]
+pub struct InjectSlot(Arc<OnceLock<Arc<dyn InjectRecorder>>>);
+
+impl std::fmt::Debug for InjectSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("InjectSlot")
+            .field(&self.0.get().is_some())
+            .finish()
+    }
+}
+
+impl InjectSlot {
+    /// Keep `recorder`; `false` when one is already kept.
+    pub fn set(&self, recorder: Arc<dyn InjectRecorder>) -> bool {
+        self.0.set(recorder).is_ok()
+    }
+
+    /// Report `text`, just typed into the pane of `tmux_name`; no-op when empty.
+    pub fn record(&self, tmux_name: &str, text: &str) {
+        if let Some(recorder) = self.0.get() {
+            recorder.delivered(&Delivery {
+                at: Utc::now(),
+                tmux_name,
+                claude_session_id: None,
+                text,
+            });
+        }
+    }
+}
+
 impl SessionManager {
+    /// Report an answer just typed into `id`'s pane (the claimed-decision path).
+    ///
+    /// What: names the receiving Claude session when the record is readable;
+    /// an unreadable record still records, without it. No-op with no recorder.
+    /// Test: `a_delivered_answer_is_one_message_event_9167`.
+    pub(super) async fn record_answer_delivery(
+        &self,
+        id: &super::ManagedSessionId,
+        tmux_name: &str,
+        text: &str,
+    ) {
+        let Some(recorder) = self.inject_recorder.get() else {
+            return;
+        };
+        let claude = self.get(id).await.ok().and_then(|r| r.claude_session_id);
+        recorder.delivered(&Delivery {
+            at: Utc::now(),
+            tmux_name,
+            claude_session_id: claude.as_deref(),
+            text,
+        });
+    }
+
     /// Install the recorder the inject path reports to; once only.
     ///
     /// Test: `installing_an_inject_recorder_twice_keeps_the_first_9167`.

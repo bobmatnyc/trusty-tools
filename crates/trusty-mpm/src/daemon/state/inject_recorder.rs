@@ -25,6 +25,10 @@ impl DaemonState {
         {
             return false;
         }
+        // #9167 AC5: the control-plane tmux backends type into panes too.
+        self.session_registry
+            .inject_slot()
+            .set(Arc::clone(&recorder));
         if let Some(mgr) = self.managed_sessions.get() {
             mgr.install_inject_recorder(recorder);
         }

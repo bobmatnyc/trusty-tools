@@ -644,3 +644,43 @@ fn answered_by_is_clipped_and_defaults_to_the_transport() {
     let e = AnswerClaim::from_wire(Some("nope"), None, "http").expect_err("bad id");
     assert!(e.contains("\"nope\""), "{e}");
 }
+
+/// Records the text of every delivery it is handed (#9167 AC5).
+#[derive(Default)]
+struct Texts(Mutex<Vec<String>>);
+
+impl super::inject_record::InjectRecorder for Texts {
+    fn delivered(&self, d: &super::inject_record::Delivery<'_>) {
+        self.0.lock().unwrap().push(d.text.to_owned());
+    }
+}
+
+/// #9167 AC5: an answer typed into the pane is one `message` event.
+#[tokio::test]
+async fn a_delivered_answer_is_one_message_event_9167() {
+    let f = fixture(ManagedSessionState::Active).await;
+    let texts = Arc::new(Texts::default());
+    assert!(f.mgr.install_inject_recorder(texts.clone()));
+    f.ask("merge or rebase?").await;
+
+    f.answer("merge", AnswerClaim::by("alice"))
+        .await
+        .expect("delivered");
+
+    assert_eq!(*texts.0.lock().unwrap(), ["merge".to_string()]);
+}
+
+/// #9167 AC5: an answer whose send failed was not typed, so records nothing.
+#[tokio::test]
+async fn a_failed_answer_send_records_nothing_9167() {
+    let f = fixture(ManagedSessionState::Active).await;
+    let texts = Arc::new(Texts::default());
+    assert!(f.mgr.install_inject_recorder(texts.clone()));
+    f.driver.hooks.lock().unwrap().fail = true;
+    f.ask("merge or rebase?").await;
+
+    let r = f.answer("merge", AnswerClaim::by("alice")).await;
+
+    assert!(matches!(r, Err(ManagedError::DeliveryFailed(_))), "{r:?}");
+    assert!(texts.0.lock().unwrap().is_empty());
+}
