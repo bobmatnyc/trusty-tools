@@ -217,3 +217,97 @@ async fn a_failed_durable_id_read_fails_the_remove_and_a_retry_removes_the_file(
     assert!(removed > 0);
     assert!(idx.chunk_ids_for_file("src/a.rs").await.is_empty());
 }
+
+/// #10209 watcher error arm: when `index_file` fails and the landed-id read
+/// fails too, the watcher tracks the ids the file parsed into, so a later
+/// delete still reaches any chunk that landed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_failed_landed_id_read_tracks_the_parsed_ids() {
+    use crate::core::registry::IndexId;
+    use crate::service::watch_loop::{handle_modified, handle_removed};
+    use crate::service::IndexedFiles;
+    use tokio::sync::RwLock;
+
+    const PARTIAL: &str = "pub fn one_10209() {}\npub fn two_10209() {}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("base.rs"), "pub fn base_10209() {}\n").unwrap();
+    let mut idx = CodeIndexer::new("watcher-id-read-10209", &root);
+    let store = tempfile::tempdir().unwrap();
+    idx.set_corpus_store(Arc::new(
+        CorpusStore::open(&store.path().join("index.redb")).expect("open corpus"),
+    ));
+    let id = idx.index_id.clone();
+    let index_id = IndexId::new(id.as_str());
+    let indexer = Arc::new(RwLock::new(idx));
+    let tracked = IndexedFiles::new();
+    let event = |name: &str| root.join(name);
+
+    handle_modified(
+        &event("base.rs"),
+        &index_id,
+        &root,
+        &root,
+        &indexer,
+        &tracked,
+    )
+    .await;
+    {
+        let g = indexer.read().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        g.evict_bm25_entities_if_idle(Duration::from_nanos(1)).await;
+        g.evict_chunks_if_idle(Duration::from_nanos(1)).await;
+        assert!(g.corpus_evicted(), "precondition: the corpus is evicted");
+    }
+    let _wait = ShortRehydrateWait::set();
+    // Every rehydrate fails before its publish, so the map stays evicted and
+    // both id reads (the write's own and the error arm's) reach the seam.
+    let panic = super::idle_evict::CommitPhasePanicArmed::arm(&*indexer.read().await);
+    TEST_FAIL_FILE_ID_READ.lock().unwrap().push(id.clone());
+    std::fs::write(root.join("partial.rs"), PARTIAL).unwrap();
+    handle_modified(
+        &event("partial.rs"),
+        &index_id,
+        &root,
+        &root,
+        &indexer,
+        &tracked,
+    )
+    .await;
+    TEST_FAIL_FILE_ID_READ.lock().unwrap().retain(|i| i != &id);
+    drop(panic);
+
+    let mut parsed: Vec<String> = crate::core::chunk_ast("partial.rs", PARTIAL)
+        .0
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    parsed.sort();
+    let mut recorded = tracked
+        .take(std::path::Path::new("partial.rs"))
+        .await
+        .expect("a failed write with an unreadable id set must still be tracked");
+    recorded.sort();
+    assert_eq!(recorded, parsed, "tracking must hold the parsed ids");
+
+    // Removing ids that never landed is harmless.
+    tracked.record("partial.rs".into(), recorded).await;
+    std::fs::remove_file(root.join("partial.rs")).unwrap();
+    handle_removed(
+        &event("partial.rs"),
+        &index_id,
+        &root,
+        &root,
+        &indexer,
+        &tracked,
+    )
+    .await;
+    assert_eq!(
+        tracked.paths().await,
+        vec![std::path::PathBuf::from("base.rs")],
+        "the delete must consume the partial.rs entry"
+    );
+    let base = indexer.read().await.chunk_ids_for_file("base.rs").await;
+    assert!(!base.is_empty(), "the delete must not touch another file");
+}

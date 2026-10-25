@@ -606,13 +606,15 @@ pub async fn handle_modified_in_root(
         // (the quarantine refusal, an embed failure) return an empty set and
         // record nothing, which is also correct — the stale-removal pass above
         // already took this file's prior entry.
-        // #10209: an unreadable corpus records nothing and says so; the
-        // write itself already failed, and a rescan retries the file.
-        let landed = idx
-            .file_chunk_ids(&path_str)
-            .await
-            .inspect_err(|e| tracing::warn!(?path, "landed-chunk read failed: {e:#}"))
-            .unwrap_or_default();
+        // #10209: an unreadable corpus falls back to the parsed ids, a
+        // superset of what landed; removing an id that never landed is harmless.
+        let landed = idx.file_chunk_ids(&path_str).await.unwrap_or_else(|e| {
+            tracing::warn!(
+                ?path,
+                "landed-chunk read failed; tracking parsed ids: {e:#}"
+            );
+            new_ids
+        });
         drop(idx);
         if !landed.is_empty() {
             indexed_files
