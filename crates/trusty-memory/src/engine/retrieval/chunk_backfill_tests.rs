@@ -1218,3 +1218,95 @@ async fn a_failed_later_embed_call_commits_no_partial_group() {
     assert_eq!(shape(&h, id), Some((1, 0)), "the legacy row is untouched");
     assert_eq!(ledger_ids(dir.path()), vec![id], "the drawer is ledgered");
 }
+
+/// Lets each drawer's first group through, then fails, or wedges when
+/// `wedge`, every later group; counts the groups that returned vectors.
+struct LaterGroup {
+    inner: MockEmbedder,
+    wedge: bool,
+    done: AtomicUsize,
+}
+
+fn later_group(wedge: bool) -> Arc<LaterGroup> {
+    Arc::new(LaterGroup {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        wedge,
+        done: AtomicUsize::new(0),
+    })
+}
+
+#[async_trait]
+impl Embedder for LaterGroup {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if !texts[0].starts_with("w0 ") {
+            if self.wedge {
+                std::future::pending::<()>().await;
+            }
+            anyhow::bail!("simulated failure on a later paced group");
+        }
+        let v = self.inner.embed_batch(texts).await?;
+        self.done.fetch_add(1, Ordering::SeqCst);
+        Ok(v)
+    }
+    delegate!();
+}
+
+/// `repair_one`, then `backfill_with`, against `e`: both fail closed.
+async fn assert_repair_fails_closed(e: Arc<LaterGroup>) {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let text = words(PACED_WORDS);
+    let id = legacy(&h, &text, 0.5).await;
+    let emb: Emb = e.clone();
+    let out = h
+        .repair_one(
+            &emb,
+            id,
+            &text,
+            &RetryPolicy::instant(1),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        matches!(
+            out,
+            Repair::Failed(super::deferred_embed::EmbedLoss::Embed { .. })
+        ),
+        "{out:?}"
+    );
+    assert_eq!(e.done.load(Ordering::SeqCst), 1, "the first group finished");
+    assert_eq!(shape(&h, id), Some((1, 0)), "the legacy row is untouched");
+    let report = h
+        .backfill_with(backfill_opts(1, Duration::ZERO), &emb)
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.repaired, report.still_failing),
+        (0, 1),
+        "{report:?}"
+    );
+    assert_eq!(shape(&h, id), Some((1, 0)), "no chunk row is stored");
+    assert_eq!(ledger_ids(dir.path()), vec![id], "the drawer is ledgered");
+}
+
+#[tokio::test]
+async fn a_failed_later_repair_embed_call_commits_no_partial_group() {
+    assert_repair_fails_closed(later_group(false)).await;
+}
+
+#[tokio::test]
+async fn a_repair_embed_timing_out_on_a_later_group_commits_no_partial_group() {
+    let _env = crate::env_test_lock::env_test_lock().lock().await;
+    // SAFETY: serialised by `env_test_lock`, held for the whole test.
+    // A 1 s bound over the whole paced embed: the first group finishes, the
+    // second wedges, and the timeout fires.
+    unsafe {
+        std::env::set_var("TRUSTY_EMBED_BATCH_TIMEOUT_SECS", "1");
+        std::env::set_var("TRUSTY_EMBED_CHUNKED_CAP_SECS", "1");
+    }
+    assert_repair_fails_closed(later_group(true)).await;
+    unsafe {
+        std::env::remove_var("TRUSTY_EMBED_BATCH_TIMEOUT_SECS");
+        std::env::remove_var("TRUSTY_EMBED_CHUNKED_CAP_SECS");
+    }
+}

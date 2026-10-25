@@ -643,7 +643,9 @@ impl PalaceHandle {
 /// `embed_and_store`); each embed attempt runs under the scaled, clamped bound,
 /// paced by [`embed_planned_paced`] (#10008).
 /// Test: `backfill_embed_and_retry_sleeps_run_outside_write_mutex`,
-/// `repair_embed_calls_carry_at_most_the_background_cap`.
+/// `repair_embed_calls_carry_at_most_the_background_cap`,
+/// `a_failed_later_repair_embed_call_commits_no_partial_group`,
+/// `a_repair_embed_timing_out_on_a_later_group_commits_no_partial_group`.
 pub(crate) async fn embed_outside(
     embedder: &Arc<dyn Embedder + Send + Sync>,
     text: &str,
