@@ -2060,8 +2060,8 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
 /// points already recorded as stranded and everything behind them, on every
 /// upsert that evicted one. Seeding 20k drawers went from 430 s to 769 s.
 /// What: reports one drawer evicted from a list (its own, which never names
-/// it). Unrecorded, the walk searches for it once. Recorded, the walk runs no
-/// search at all.
+/// it). Unrecorded, or recorded under another vector, the walk searches for it
+/// once. Recorded under its own vector, the walk runs no search at all.
 /// Test: this test itself is the verification.
 #[test]
 fn restrand_skips_a_point_already_recorded_as_stranded() {
@@ -2088,6 +2088,15 @@ fn restrand_skips_a_point_already_recorded_as_stranded() {
         stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
         1,
         "an unrecorded evicted point is searched for once"
+    );
+    let mut stale = point.get_v().to_vec();
+    stale[0] += 1.0;
+    stranded::add_stranded(&mut store.stranded.write(), &stale, id);
+    assert_eq!(
+        stranded::restrand_evicted(&index, evicted(), u64::MAX, &store.stranded),
+        1,
+        "a record of the id under another vector (a re-upsert's stale copy) \
+         does not stand for this point"
     );
     stranded::add_stranded(&mut store.stranded.write(), point.get_v(), id);
     assert_eq!(
