@@ -2078,7 +2078,6 @@ fn transitive_strand(pre_record: bool) {
 
 /// Why (#10204): the #10186 walk re-searched every point it reached, including
 /// points already recorded as stranded, on every upsert that evicted one.
-/// Seeding 20k drawers went from 430 s to 769 s.
 /// What: reports one drawer evicted from a list (its own, which never names
 /// it). Unrecorded, the walk searches for it once. With every point recorded
 /// under its own vector, the walk runs no search. With the drawer recorded

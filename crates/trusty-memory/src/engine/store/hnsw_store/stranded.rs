@@ -220,9 +220,8 @@ pub(super) fn restrand_evicted(
             let Some(vector) = index.get_point_indexation().get_point_data(&n.p_id) else {
                 continue;
             };
-            // #10204: re-searching recorded points cost seeding 20k drawers
-            // 430 s -> 769 s. A recorded point is already scanned, so it is
-            // not searched again, but the walk still goes on through it.
+            // #10204: a recorded point is already scanned, so it is not
+            // searched again; the walk still goes on through it.
             if !is_recorded(&groups.read(), &vector, id) {
                 searched += 1;
                 if reachable(index, &vector, id) {
