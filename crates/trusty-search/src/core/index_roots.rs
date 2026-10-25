@@ -162,6 +162,26 @@ pub fn is_within_any(primary: &Path, additional: &[PathBuf], path: &Path) -> boo
     path.starts_with(primary) || additional.iter().any(|r| path.starts_with(r))
 }
 
+/// The part of the absolute `path` under `root`, or `None` outside it.
+///
+/// Why: a root and a caller's path can name the same tree through different
+/// spellings (macOS `/var` vs `/private/var`). `remove-file` (#9236) and
+/// search's `path_prefix` (#10282) must relativize both the same way.
+/// What: strips the raw root, then the canonical root, component-wise by
+/// text. `path` itself is never canonicalized, so an in-root symlink keeps its
+/// own name. One `realpath` syscall, only when the raw strip fails.
+/// Test: `remove_file_by_a_symlinked_path_removes_the_link_key_9236`,
+/// `test_normalizes_symlink_spelled_root_10282`.
+pub fn strip_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    path.strip_prefix(&canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
 /// One index's ordered root table: the primary root plus its additional roots.
 ///
 /// Why: the reindex pipeline threads the root set through several structs

@@ -1,0 +1,2 @@
+Fixed
+- `path_prefix` on search and `list_chunks` now matches when the absolute prefix spells the index root through a symlink, such as `/var/...` against a root stored as `/private/var/...` on macOS, or the reverse. It used to match nothing. The prefix is relativized against the root as spelled, then its canonical form, then any ancestor that resolves to the root; the prefix itself is never resolved, so an in-root symlink keeps its own name. An absolute prefix that only shares the root's text (`<root>X/...`) no longer maps to `X/...` (#10282).
