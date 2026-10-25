@@ -431,14 +431,13 @@ fn rust_build_env_steps(
 /// missing file as nothing to do. An unresolvable home contributes nothing
 /// rather than aborting the repair.
 ///
-/// This walk is the reason it belongs to `--fix` and not to `tm doctor` itself:
-/// the diagnostic must stay fast, so its `hooks_build_tree_binary` probe stays
-/// scoped to the projects the daemon tracks (see
-/// `daemon::doctor_hooks_hygiene::candidate_settings_files`), while the repair
-/// the operator explicitly asked for pays the cost once.
+/// Plain `tm doctor` walks it too: the `hook-interpreter` row reads this list,
+/// so the diagnostic pays the machine-wide walk on every run. The
+/// `hooks_build_tree_binary` probe still stays scoped to the projects the
+/// daemon tracks (see `daemon::doctor_hooks_hygiene::candidate_settings_files`).
 /// `home` is the walk root (`None` contributes nothing).
 /// Test: `machine_wide_settings_files_includes_the_cwd_project`.
-// #10263: also the file list the `hook-interpreter` doctor row reads.
+// #10263: plain `tm doctor` now walks this list for the `hook-interpreter` row.
 pub(crate) fn machine_wide_settings_files(
     project_dir: Option<&std::path::Path>,
     home: Option<&std::path::Path>,

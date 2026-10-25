@@ -45,22 +45,48 @@ pub enum Verdict {
     Rewrite { new: String, missing_session: bool },
     /// A bare-script shape tm will not rewrite; the string says why.
     Refused(String),
+    /// A `.sh` command whose script basename is outside
+    /// [`INTERPRETER_TABLE`] — not tm's to judge, so neither reported nor
+    /// rewritten (#10263: claude-mpm and project hooks).
+    OutOfScope,
 }
 
 /// Classify one hook or `statusLine` command.
 ///
 /// Why (#10263): the rewrite must be exact for the two seeded scripts and must
-/// never guess for anything else, so every shape it cannot prove safe is a
-/// refusal the operator sees rather than a silent skip.
+/// never guess for anything else. A table script in a shape it cannot prove
+/// safe is a refusal the operator sees; a script tm did not seed is out of
+/// scope, so thousands of foreign hooks never hold the row at Warn.
 /// What: `Clean` unless the first token ends in `.sh` (or an env assignment
-/// precedes a `.sh` token). Refused: env-var prefix, `~` or relative path,
-/// shell metacharacters in the path or arguments, a basename outside
-/// [`INTERPRETER_TABLE`], a script missing on disk. Otherwise `Rewrite` to
-/// `<interp> "<abs>" <args…>`, arguments preserved.
+/// precedes a `.sh` token). `OutOfScope` when no token names a table
+/// basename. Refused: env-var prefix, `~` or relative path, shell
+/// metacharacters in the path or arguments, a script missing on disk.
+/// Otherwise `Rewrite` to `<interp> "<abs>" <args…>`, arguments preserved.
 /// Test: `a_bare_table_script_is_rewritten_with_its_interpreter`,
 /// `every_unsafe_shape_is_refused`, `interpreter_shaped_commands_are_clean`,
-/// `a_datg_hook_without_a_session_is_flagged`.
+/// `a_datg_hook_without_a_session_is_flagged`,
+/// `a_script_outside_the_table_is_out_of_scope`.
 pub fn classify_command(cmd: &str) -> Verdict {
+    match classify_shape(cmd) {
+        // #10263: a refusal is only tm's to report for a script it seeded.
+        Verdict::Refused(_) if !names_table_script(cmd) => Verdict::OutOfScope,
+        verdict => verdict,
+    }
+}
+
+/// Whether any token of `cmd` has a basename in [`INTERPRETER_TABLE`].
+///
+/// Deliberately loose (any token, quotes and `$VAR/` prefixes ignored) so a
+/// table script in an odd shape still refuses rather than drops out of scope.
+fn names_table_script(cmd: &str) -> bool {
+    cmd.split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .map(|t| t.rsplit('/').next().unwrap_or(t))
+        .any(|base| interpreter_for(base).is_some())
+}
+
+/// [`classify_command`] before the out-of-scope filter.
+fn classify_shape(cmd: &str) -> Verdict {
     let trimmed = cmd.trim();
     if !trimmed.contains(".sh") {
         return Verdict::Clean;
@@ -90,9 +116,7 @@ pub fn classify_command(cmd: &str) -> Verdict {
     }
     let base = script.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let Some(interp) = interpreter_for(base) else {
-        return Verdict::Refused(format!(
-            "`{base}` is outside the interpreter table (notify-supervisor.sh, datg-hook.sh)"
-        ));
+        return Verdict::OutOfScope;
     };
     if !script.is_file() {
         return Verdict::Refused("the script is missing on disk".to_string());
@@ -174,6 +198,8 @@ pub struct FileFindings {
     pub rewrites: Vec<(String, String)>,
     /// `(command, reason)` for every bare-script shape refused.
     pub refusals: Vec<(String, String)>,
+    /// How many `.sh` commands name a script outside the table (left alone).
+    pub out_of_scope: usize,
     /// The rewritten `datg-hook.sh` commands that carry no session argument.
     pub missing_session: Vec<String>,
     /// Every absolute `notify-supervisor.sh` a command names.
@@ -262,6 +288,7 @@ fn read_and_rewrite(path: &Path) -> Result<(Value, FileFindings), FileError> {
         }
         match classify_command(&cmd) {
             Verdict::Clean => {}
+            Verdict::OutOfScope => findings.out_of_scope += 1,
             Verdict::Refused(why) => findings.refusals.push((cmd, why)),
             Verdict::Rewrite {
                 new,

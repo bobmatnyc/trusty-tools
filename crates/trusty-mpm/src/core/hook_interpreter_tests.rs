@@ -83,8 +83,6 @@ fn a_datg_hook_without_a_session_is_flagged() {
 fn every_unsafe_shape_is_refused() {
     let (dir, notify, _datg) = seeded();
     let n = notify.display().to_string();
-    let other = dir.path().join("scripts").join("statusline-tee.sh");
-    std::fs::write(&other, "#!/bin/bash\n").expect("other script");
     let missing = dir.path().join("gone").join("notify-supervisor.sh");
     let cases = [
         (format!("FOO=1 {n}"), "env-var"),
@@ -95,7 +93,6 @@ fn every_unsafe_shape_is_refused() {
         (format!("{n} a|b"), "metacharacters"),
         (format!("\"{n}\"x"), "metacharacters"),
         (format!("\"{n}"), "unbalanced"),
-        (other.display().to_string(), "outside the interpreter table"),
         (missing.display().to_string(), "missing on disk"),
     ];
     for (cmd, want) in cases {
@@ -104,6 +101,73 @@ fn every_unsafe_shape_is_refused() {
             v => panic!("{cmd:?} must be refused, got {v:?}"),
         }
     }
+}
+
+/// #10263 code-critic: a script tm did not seed is out of scope in every
+/// shape — absolute, relative, `$CLAUDE_PROJECT_DIR`-prefixed, env-prefixed.
+#[test]
+fn a_script_outside_the_table_is_out_of_scope() {
+    let (dir, _notify, _datg) = seeded();
+    let other = dir.path().join("scripts").join("claude-hook-fast.sh");
+    std::fs::write(&other, "#!/bin/bash\n").expect("other script");
+    for cmd in [
+        other.display().to_string(),
+        format!("{} --flag", other.display()),
+        "hooks/statusline.sh".to_string(),
+        "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/x.sh".to_string(),
+        "~/bin/claude-hook-fast.sh".to_string(),
+        "FOO=1 /opt/x.sh".to_string(),
+        "/no/such/dir/claude-hook-fast.sh".to_string(),
+    ] {
+        assert_eq!(classify_command(&cmd), Verdict::OutOfScope, "{cmd:?}");
+    }
+    // A table basename in the same shapes still refuses.
+    for cmd in [
+        "\"$CLAUDE_PROJECT_DIR\"/scripts/notify-supervisor.sh",
+        "scripts/datg-hook.sh tm-x",
+    ] {
+        assert!(
+            matches!(classify_command(cmd), Verdict::Refused(_)),
+            "{cmd:?}"
+        );
+    }
+}
+
+/// #10263 code-critic: foreign scripts leave the row `Ok` and plan no step;
+/// a table script with a relative path beside them still keeps it non-OK.
+#[test]
+fn out_of_scope_scripts_leave_the_row_ok_and_plan_no_step() {
+    let dir = tempfile::tempdir().expect("dir");
+    let abs = dir.path().join("claude-hook-fast.sh");
+    std::fs::write(&abs, "#!/bin/bash\n").expect("script");
+    let abs = abs.display().to_string();
+    let foreign = [
+        abs.as_str(),
+        "hooks/statusline.sh",
+        "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/x.sh",
+    ];
+    let path = settings(dir.path(), &hooks_doc(&foreign));
+    let row = hook_row(std::slice::from_ref(&path));
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert!(
+        row.message.contains("3 script command(s) outside"),
+        "{}",
+        row.message
+    );
+    for mode in [RepairMode::DryRun, RepairMode::Apply] {
+        let steps = repair_hook_interpreter(std::slice::from_ref(&path), mode);
+        assert!(steps.is_empty(), "{mode:?}: {steps:?}");
+    }
+
+    let mixed = settings(
+        &dir.path().join("p2"),
+        &hooks_doc(&[abs.as_str(), "scripts/notify-supervisor.sh"]),
+    );
+    let row = hook_row(std::slice::from_ref(&mixed));
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    let steps = repair_hook_interpreter(&[mixed], RepairMode::DryRun);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(matches!(steps[0].status, StepStatus::Refused(_)));
 }
 
 #[test]

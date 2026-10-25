@@ -40,12 +40,14 @@ const NAMED_LIMIT: usize = 3;
 /// keeps the row non-OK so the operator sees what `--fix` will not touch.
 /// What: scans every file in `files` read-only. `Ok` only when no bare-script
 /// command, refusal, or file error was found; `Warn` for rewritable or refused
-/// commands and session-less `datg-hook.sh` entries; `Unknown` when a file
-/// could not be read or parsed. The second row is [`notify_asset_row`] over
+/// table-script commands and session-less `datg-hook.sh` entries; `Unknown`
+/// when a file could not be read or parsed. Scripts outside the table are
+/// counted in the message and never change the status. The second row is [`notify_asset_row`] over
 /// every `notify-supervisor.sh` a command names.
 /// Test: `the_row_is_ok_only_when_nothing_is_found`,
 /// `a_refusal_keeps_the_row_non_ok`, `an_unparseable_file_keeps_the_row_non_ok`,
-/// `an_unreadable_file_keeps_the_row_non_ok`.
+/// `an_unreadable_file_keeps_the_row_non_ok`,
+/// `out_of_scope_scripts_leave_the_row_ok_and_plan_no_step`.
 pub fn hook_interpreter_rows(files: &[PathBuf]) -> Vec<DoctorCheck> {
     let mut tally = Tally::default();
     for path in files {
@@ -67,6 +69,7 @@ struct Tally {
     scanned: usize,
     rewrites: usize,
     rewrite_files: usize,
+    out_of_scope: usize,
     refusals: Vec<String>,
     missing_session: Vec<String>,
     errors: Vec<String>,
@@ -81,6 +84,7 @@ impl Tally {
             self.rewrites += findings.rewrites.len();
             self.rewrite_files += 1;
         }
+        self.out_of_scope += findings.out_of_scope;
         for (cmd, why) in findings.refusals {
             self.refusals
                 .push(format!("{}: `{cmd}` ({why})", path.display()));
@@ -127,14 +131,20 @@ impl Tally {
                 named(&self.errors)
             ));
         }
-        let message = if parts.is_empty() {
-            format!(
+        if parts.is_empty() {
+            parts.push(format!(
                 "no bare-script hook commands in {} settings file(s)",
                 self.scanned
-            )
-        } else {
-            parts.join("; ")
-        };
+            ));
+        }
+        // #10263: an aggregate count only — never a status or a `--fix` step.
+        if self.out_of_scope > 0 {
+            parts.push(format!(
+                "{} script command(s) outside the interpreter table left alone",
+                self.out_of_scope
+            ));
+        }
+        let message = parts.join("; ");
         DoctorCheck::new(HOOK_INTERPRETER_CHECK, status, message)
     }
 }
@@ -218,10 +228,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// What: per file — one `Planned`/`Applied` step for its rewrites (with the
 /// backup path), one `Refused` step per refused command and per session-less
 /// `datg-hook.sh` entry, `Refused` for an unparseable file and `Failed` for an
-/// unreadable or unwritable one. A file with nothing to say adds no step, so a
+/// unreadable or unwritable one. A script outside the table adds no step. A file with nothing to say adds no step, so a
 /// second run after an apply plans nothing.
 /// Test: `repair_applies_backs_up_and_is_idempotent`,
-/// `repair_dry_run_writes_nothing`, `repair_refuses_an_unparseable_file`.
+/// `repair_dry_run_writes_nothing`, `repair_refuses_an_unparseable_file`,
+/// `out_of_scope_scripts_leave_the_row_ok_and_plan_no_step`.
 pub fn repair_hook_interpreter(files: &[PathBuf], mode: RepairMode) -> Vec<RepairStep> {
     let mut steps = Vec::new();
     for path in files {
