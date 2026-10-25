@@ -142,15 +142,20 @@ impl SmDispatcher {
 /// What: constructs the agent + control + (feature-gated) goal store rooted under
 /// the daemon's SM data root, then runs [`run_stdio_loop`] forwarding each request
 /// to [`SmDispatcher::dispatch`]. Returns `Ok(())` on stdin EOF.
+/// #9167 AC5: this process types into panes itself (`sm.session.send`), so
+/// it records each delivered inject on its own bus producer, flushed at EOF.
 /// Test: the dispatch logic is covered by `tests.rs`; this thin wiring is
 /// exercised at runtime via `tm sm serve --stdio`.
 pub async fn run_sm_stdio(state: Arc<crate::daemon::state::DaemonState>) -> anyhow::Result<()> {
-    let dispatcher = Arc::new(build_dispatcher(state).await?);
-    run_stdio_loop(move |req| {
+    crate::daemon::action_events::inject::start_with_injects(&state).await;
+    let dispatcher = Arc::new(build_dispatcher(Arc::clone(&state)).await?);
+    let served = run_stdio_loop(move |req| {
         let dispatcher = dispatcher.clone();
         async move { dispatcher.dispatch(req).await }
     })
-    .await
+    .await;
+    state.action_events().shutdown().await;
+    served
 }
 
 /// Build the production [`SmDispatcher`] from the daemon state.

@@ -14,6 +14,8 @@
 //! record also marks its session's transcript due ([`received`]); the flush
 //! task reads due transcripts off the hook path and buffers one `received`
 //! `message` event per cross-session message that arrived.
+//! #9167 AC5: [`inject`] records each text the session manager types into
+//! a pane, on the same buffer.
 //! [`start`] attaches a publisher and its flush task at serve start;
 //! [`ActionEvents::shutdown`], called from both exit paths, ends the task,
 //! reads every tracked transcript once more, and runs one final flush, all within
@@ -33,6 +35,8 @@ use trusty_common::control_bus::{PushClient, PushFlushOutcome};
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
 
+// #9167 AC5: each delivered inject, on the same buffer.
+pub mod inject;
 // #9167: inter-session messages, projected beside the actions.
 pub mod message;
 pub mod projection;
