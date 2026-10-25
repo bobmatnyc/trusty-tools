@@ -905,6 +905,40 @@ fn the_seeded_instructions_never_hard_code_the_poller_session() {
     );
 }
 
+/// #10263 (D73): the seeded provision skill tells the PM to write each hook
+/// command as an explicit interpreter plus a quoted absolute path, and the
+/// seeded `notify-supervisor.sh` re-runs itself through `/bin/bash`, never by
+/// a direct `#!` exec of `$0`.
+#[test]
+fn seeded_hook_commands_run_through_an_explicit_interpreter() {
+    let seeded = |dest: &str| {
+        seeded_files()
+            .into_iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest} is not seeded"))
+            .contents
+    };
+    let skill = seeded(".claude/skills/architect-project-provision/SKILL.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        r#"`/bin/bash "<abs>/scripts/notify-supervisor.sh"`"#,
+        r#"`/bin/sh "<abs>/scripts/datg-hook.sh" <session>`"#,
+    ] {
+        assert!(skill.contains(needle), "provision skill lacks {needle}");
+    }
+    assert!(!skill.contains("command is the absolute path"), "{skill}");
+    let notify = seeded("scripts/notify-supervisor.sh");
+    for needle in [
+        r#"  timeout 4 /bin/bash "$0" "$@""#,
+        r#"  gtimeout 4 /bin/bash "$0" "$@""#,
+    ] {
+        assert!(notify.contains(needle), "notify-supervisor.sh lacks {needle}");
+    }
+    assert!(!notify.contains(r#"timeout 4 "$0""#), "{notify}");
+}
+
 /// The fail-closed arm: a start script that fails is an error naming its
 /// exit status and output, never a pass.
 #[test]
