@@ -1,0 +1,2 @@
+Fixed
+- The index walker and single-file admission no longer skip hidden paths under the default `respect_gitignore: true`, so files such as `.github/workflows/ci.yml` and `.pre-commit-config.yaml` are indexed. Built-in skip dirs (`.git`, `.venv`, `.cache`, `.claude`, `.idea`, `.vscode`, ...) and `.gitignore` / `.ignore` / `.git/info/exclude` still exclude paths. An existing index adds these files on its next reindex; the watcher also adds a hidden file when it is saved (#10273).

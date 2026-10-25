@@ -499,6 +499,30 @@ mod tests {
             .is_empty());
     }
 
+    /// #10273: single-file admission agrees with the walker on hidden paths —
+    /// a hidden source dir is admitted, a gitignored hidden file is not.
+    /// Fails against `standard_filters` called after `hidden(false)`.
+    #[test]
+    fn admission_admits_a_hidden_dir_file_the_walker_yields() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for rel in [".github/workflows/ci.yml", ".private/notes.yml"] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "on: push\n").unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), ".private/\n").unwrap();
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("hidden", &root)));
+        let handle = IndexHandle::bare(IndexId::new("hidden"), indexer, root.clone());
+        let ci = root.join(".github/workflows/ci.yml");
+        assert_eq!(walk(&handle).files, vec![ci.clone()]);
+        assert_eq!(admits(&handle, &ci), Admission::Included);
+        assert_eq!(
+            admits(&handle, &root.join(".private/notes.yml")),
+            Admission::Excluded
+        );
+    }
+
     /// #8922: a walk error along the path answers `Undetermined`, never
     /// `Excluded`; a clean walk that misses the file is still an exclusion.
     /// Fails with `walk_verdict` dropping errors as `filter_map(Result::ok)` did.

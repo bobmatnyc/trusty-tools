@@ -774,18 +774,7 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
     // belt-and-braces for callers that bypass the HTTP entry point.
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
-    // Configure the `ignore` crate. `standard_filters(true)` is a shorthand
-    // that flips on all the ripgrep-equivalent ignore sources at once
-    // (`.gitignore`, `.git/info/exclude`, global gitignore, `.ignore`, hidden
-    // files); we then explicitly re-enable each source we care about so a
-    // future `ignore` release that changes the standard-filter defaults
-    // doesn't silently flip behaviour.
-    //
-    // `hidden(false)` keeps dotfiles in the walk so e.g. `.github/workflows/*`
-    // remain indexable — the original `walkdir`-based walker did not skip
-    // hidden entries; the only hidden-directory exclusions came from
-    // SKIP_DIRS (`.git`, `.cargo`, ...). Honouring `.gitignore` is what
-    // prunes `.venv` / `.cache` / `.aws-sam` on projects that gitignore them.
+    // Ignore sources and hidden-file handling: see `configured_builder`.
     let builder = configured_builder(&canonical_root, opts);
 
     for entry in builder.build() {
@@ -877,12 +866,24 @@ pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> boo
 }
 
 /// Use the same ignore sources for walking and single-file admission.
+///
+/// Why: the walker and `index_admission::admits` must agree on every path,
+/// including hidden ones such as `.github/workflows/ci.yml`.
+/// What: honours `.gitignore`, `.git/info/exclude`, the global gitignore and
+/// `.ignore` when `respect_gitignore` is set, and never prunes a path for
+/// being hidden. Hidden noise (`.git`, `.venv`, `.cache`, ...) is pruned by
+/// [`SKIP_DIRS`] in [`path_admitted`], or by the project's ignore files.
+/// Test: `test_walker_yields_hidden_dir_files_under_default_options`,
+/// `test_walker_hidden_dirs_with_gitignore_disabled`,
+/// `admission_admits_a_hidden_dir_file_the_walker_yields`.
 pub(crate) fn configured_builder(root: &Path, opts: &WalkOptions) -> ignore::WalkBuilder {
     let mut builder = ignore::WalkBuilder::new(root);
+    // #10273: `standard_filters(yes)` also calls `hidden(yes)`, so it must run
+    // before `hidden(false)`; the other way round, hidden paths were pruned.
     builder
         .follow_links(opts.follow_links)
-        .hidden(false)
         .standard_filters(opts.respect_gitignore)
+        .hidden(false)
         .git_ignore(opts.respect_gitignore)
         .git_exclude(opts.respect_gitignore)
         .git_global(opts.respect_gitignore)
@@ -2034,6 +2035,88 @@ mod tests {
             !names.iter().any(|n| n == "blob.rs"),
             ".git/ leaked into walk: {names:?}"
         );
+    }
+
+    /// Fixture for #10273: a hidden source dir, two hidden `SKIP_DIRS`, and a
+    /// gitignored hidden file. Returns the root-relative paths the walk yields.
+    fn walk_hidden_fixture(root: &Path, opts: &WalkOptions) -> Vec<String> {
+        for (rel, content) in [
+            (".github/workflows/ci.yml", "on: push\n"),
+            (".husky/pre-commit.sh", "echo hook\n"),
+            (".git/hooks/pre-push.sh", "echo git\n"),
+            (".venv/lib/x.py", "x = 1\n"),
+            (".private/notes.yml", "secret: 1\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        fs::write(root.join(".gitignore"), ".private/\n").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        walk_source_files_with_options(&root, opts)
+            .files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// #10273: under default options a hidden source dir is walked, while
+    /// `SKIP_DIRS` and `.gitignore` still prune hidden paths.
+    /// Fails against `standard_filters` called after `hidden(false)`.
+    #[test]
+    fn test_walker_yields_hidden_dir_files_under_default_options() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rels = walk_hidden_fixture(tmp.path(), &WalkOptions::default());
+        for kept in [
+            ".github/workflows/ci.yml",
+            ".husky/pre-commit.sh",
+            "src/main.rs",
+        ] {
+            assert!(
+                rels.iter().any(|r| r == kept),
+                "{kept} not walked: {rels:?}"
+            );
+        }
+        for pruned in [
+            ".git/hooks/pre-push.sh",
+            ".venv/lib/x.py",
+            ".private/notes.yml",
+        ] {
+            assert!(
+                !rels.iter().any(|r| r == pruned),
+                "{pruned} walked: {rels:?}"
+            );
+        }
+    }
+
+    /// #10273: `respect_gitignore: false` keeps walking hidden dirs and stops
+    /// honouring `.gitignore`, as before; `SKIP_DIRS` still prune.
+    #[test]
+    fn test_walker_hidden_dirs_with_gitignore_disabled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let opts = WalkOptions {
+            respect_gitignore: false,
+            ..WalkOptions::default()
+        };
+        let rels = walk_hidden_fixture(tmp.path(), &opts);
+        for kept in [".github/workflows/ci.yml", ".private/notes.yml"] {
+            assert!(
+                rels.iter().any(|r| r == kept),
+                "{kept} not walked: {rels:?}"
+            );
+        }
+        for pruned in [".git/hooks/pre-push.sh", ".venv/lib/x.py"] {
+            assert!(
+                !rels.iter().any(|r| r == pruned),
+                "{pruned} walked: {rels:?}"
+            );
+        }
     }
 
     // --- Issue #2923: office document (pdf/docx/pptx/xlsx) walker wiring ---
