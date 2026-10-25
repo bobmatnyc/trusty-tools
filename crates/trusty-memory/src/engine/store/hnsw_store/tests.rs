@@ -1992,6 +1992,24 @@ fn step_off(from: &[f32], axis: usize) -> Vec<f32> {
 /// Test: this test itself is the verification.
 #[test]
 fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
+    transitive_strand(false);
+}
+
+/// Why (#10186, #10204): a self-search with `ef` 64 can record a point the
+/// graph still reaches, and a record is never re-checked. A walk that stopped
+/// at, or skipped past, a recorded point would leave the points behind it
+/// unscanned.
+/// What: [`transitive_strand`] with `first` recorded as stranded before the
+/// upserts that evict it, while the graph still reaches it and `behind`.
+/// Test: this test itself is the verification.
+#[test]
+fn a_drawer_behind_a_recorded_but_reachable_one_is_still_found() {
+    transitive_strand(true);
+}
+
+/// The #10186 scenario: 32 upserts evict `first`, the only path to `behind`.
+/// `pre_record` records `first` as stranded before those upserts.
+fn transitive_strand(pre_record: bool) {
     let dim = 20;
     let flat = |seed: u64| {
         let mut v = spread_vec(dim - 2, seed);
@@ -2027,6 +2045,14 @@ fn a_drawer_reachable_only_through_a_stranded_one_is_still_found() {
         graph_reaches(&store, behind_id, &behind) && !is_stranded(&store, behind_id),
         "precondition: the graph reaches behind and the store did not record it"
     );
+    if pre_record {
+        // #10204: recorded yet reachable, so the walk must still pass through it.
+        assert!(
+            graph_reaches(&store, first_id, &first),
+            "precondition: the graph reaches first before it is recorded"
+        );
+        stranded::add_stranded(&mut store.stranded.write(), &first, first_id);
+    }
     for (j, v) in around(&entry, &[&first, &behind], 0.02, 2 * HNSW_MAX_NB_CONNECTION)
         .iter()
         .enumerate()
