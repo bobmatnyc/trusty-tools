@@ -29,7 +29,8 @@ use trusty_mpm::core::standalone::hooks::cleanup::clean_settings_file;
 /// (existence is checked later by [`clean_settings_file`], not here).
 /// Without it, delegates to
 /// [`trusty_common::claude_config::discover_claude_settings`] under the
-/// resolved home directory.
+/// resolved home directory, which skips synced home folders and other
+/// devices (#10267).
 /// Test: `resolve_targets_with_explicit_path_returns_both_settings_files`.
 fn resolve_targets(path: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(p) = path {
