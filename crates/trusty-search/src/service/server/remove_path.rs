@@ -160,13 +160,11 @@ fn names_an_in_root_file(key: &str, root: &Path) -> bool {
 /// directory-alias path still maps. A path ending in `..` is `None`.
 /// Test: `remove_file_by_a_symlinked_path_removes_the_link_key_9236`.
 fn absolute_key(root: &Path, path: &Path) -> Option<String> {
-    if let Ok(rel) = path.strip_prefix(root) {
+    // #10282: the raw/canonical text strips are shared with search's path_prefix.
+    if let Some(rel) = crate::core::index_roots::strip_root(root, path) {
         return Some(rel.to_string_lossy().into_owned());
     }
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    if let Ok(rel) = path.strip_prefix(&canonical_root) {
-        return Some(rel.to_string_lossy().into_owned());
-    }
     // #9236: resolve the parent only; the last component may be a symlink
     // whose own key is the one asked for.
     let name = path.file_name()?;

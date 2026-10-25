@@ -54,9 +54,10 @@
 //! `core::store::path_match`'s own tests pin the boundary/colon-leak
 //! behaviour directly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::super::SearchQuery;
+use crate::core::index_roots::strip_root;
 
 /// `true` when the query carries an active path/repo filter. Callers use
 /// this to skip filtering work entirely on the (overwhelmingly common)
@@ -85,20 +86,50 @@ pub(crate) fn normalized_path_prefix(query: &SearchQuery, root_path: &Path) -> O
 /// Why (#7677): `list_chunks` takes `path_prefix` as a query parameter, so it
 /// never builds a `SearchQuery`. Both surfaces must resolve an absolute prefix
 /// the same way or the two tools would disagree about what `path_prefix` means.
-/// What: strips `root_path` (and any leading `/`) from an absolute prefix that
-/// falls under the root; returns a relative prefix, or an absolute one outside
-/// the root, unchanged.
-/// Test: `test_path_prefix_matches_and_rejects` covers the matching rules;
+/// What: relativizes an absolute prefix against the root as spelled, then its
+/// canonical form ([`strip_root`]), then any symlink spelling of the root
+/// ([`strip_root_alias`]); a trailing `/` is kept. A relative prefix, or an
+/// absolute one outside the root, is returned unchanged.
+/// Test: `test_normalizes_symlink_spelled_root_10282`,
+/// `test_normalizes_absolute_prefix_under_root`;
 /// `list_chunks_path_prefix_scopes_the_page` covers the `list_chunks` caller.
 pub(crate) fn normalize_prefix(prefix: &str, root_path: &Path) -> String {
     if !prefix.starts_with('/') {
         return prefix.to_string();
     }
-    let root = root_path.to_string_lossy();
-    match prefix.strip_prefix(root.as_ref()) {
-        Some(rest) => rest.trim_start_matches('/').to_string(),
-        None => prefix.to_string(),
+    // #10282: a `/var`-spelled prefix against a `/private/var` root matched nothing.
+    let path = Path::new(prefix);
+    let Some(rel) = strip_root(root_path, path).or_else(|| strip_root_alias(root_path, path))
+    else {
+        return prefix.to_string();
+    };
+    let mut rel = rel.to_string_lossy().into_owned();
+    if prefix.ends_with('/') && !rel.is_empty() {
+        rel.push('/');
     }
+    rel
+}
+
+/// The part of `path` under the first of its ancestors that resolves to the
+/// canonical root, or `None` when none does.
+///
+/// Why (#10282): a root stored canonical (`/private/var/...`) and a prefix
+/// spelled through a symlink (`/var/...`, or any alias of the root) share no
+/// text. The prefix itself is never canonicalized, so an in-root symlink keeps
+/// its own name, and a prefix that does not exist still maps.
+/// What: walks `path`'s ancestors shortest first and strips the first one
+/// whose `realpath` equals the root's. One syscall per ancestor; only reached
+/// once the text strips have failed.
+/// Test: `test_normalizes_symlink_spelled_root_10282`.
+fn strip_root_alias(root: &Path, path: &Path) -> Option<PathBuf> {
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    ancestors
+        .into_iter()
+        .find(|a| std::fs::canonicalize(a).is_ok_and(|c| c == canonical_root))
+        .and_then(|a| path.strip_prefix(a).ok())
+        .map(Path::to_path_buf)
 }
 
 /// Test whether `candidate` — a CHUNK ID — satisfies the filter described by
@@ -251,6 +282,51 @@ mod tests {
             normalized_path_prefix(&q, root).as_deref(),
             Some("vendor/acme")
         );
+    }
+
+    /// #10282: a prefix that spells the root through a symlink (macOS `/var`
+    /// vs `/private/var`, or an explicit alias) resolves like the canonical
+    /// spelling, in both directions, without resolving in-root components.
+    #[cfg(unix)]
+    #[test]
+    fn test_normalizes_symlink_spelled_root_10282() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let canon_tmp = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+        let root = canon_tmp.join("root");
+        std::fs::create_dir_all(root.join("vendor/acme")).expect("mkdir");
+        let alias = canon_tmp.join("alias");
+        std::os::unix::fs::symlink(&root, &alias).expect("symlink");
+        // An in-root symlinked directory keeps its own (link) name.
+        std::os::unix::fs::symlink(root.join("vendor/acme"), root.join("linked"))
+            .expect("in-root symlink");
+
+        let cases = [
+            // Canonical root, prefix through an explicit alias.
+            (&root, alias.join("vendor/acme"), "vendor/acme"),
+            (&root, alias.join("linked"), "linked"),
+            (&root, alias.join("vendor/"), "vendor/"),
+            // Canonical root, prefix through the raw tempdir spelling (on
+            // macOS `/var/folders/...` against `/private/var/folders/...`).
+            (&root, tmp.path().join("root/vendor/acme"), "vendor/acme"),
+            // Alias-spelled root, canonical prefix.
+            (&alias, root.join("vendor/acme"), "vendor/acme"),
+        ];
+        for (root_path, prefix, want) in cases {
+            let got = normalize_prefix(&prefix.to_string_lossy(), root_path);
+            assert_eq!(got, want, "root {root_path:?}, prefix {prefix:?}");
+        }
+        // The normalized form filters like the index-relative prefix.
+        let got = normalize_prefix(&alias.join("vendor/acme").to_string_lossy(), &root);
+        assert!(matches_file("vendor/acme/src/lib.rs", Some(&got), &[]));
+        assert!(!matches_file("vendor/acmex/src/lib.rs", Some(&got), &[]));
+
+        // Outside the root: still passed through unchanged, so it matches nothing.
+        let outside = canon_tmp.join("elsewhere/vendor");
+        let outside = outside.to_string_lossy();
+        assert_eq!(normalize_prefix(&outside, &root), outside);
+        // A sibling sharing the root's text prefix is outside too.
+        let sibling = format!("{}X/vendor", root.to_string_lossy());
+        assert_eq!(normalize_prefix(&sibling, &root), sibling);
     }
 
     #[test]
