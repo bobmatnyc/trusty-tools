@@ -6,7 +6,8 @@
 //! 47 s on a quiet host missed a 90 s probe at load 6.6-8.8. Split from
 //! `supervisor.rs` for the 500-SLOC cap.
 //! What: [`kill_sidecar`] (shared by the wedge kill and the hard-limit kill),
-//! [`startup_probe_timeout`] and its pure core [`scaled_startup_timeout`].
+//! [`startup_probe_timeout`], its pure core [`scaled_startup_timeout`], and
+//! [`SupervisorConfig::first_spawn_probe_timeout`] for callers outside the crate.
 //! Test: `supervisor_recycle_tests.rs`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -51,8 +52,10 @@ pub(crate) fn startup_probe_timeout(config: &SupervisorConfig, kind: SpawnKind) 
 /// What: `max(base, RESPAWN_STARTUP_FLOOR)` for [`SpawnKind::Respawn`],
 /// `base` for [`SpawnKind::First`], times `clamp(1 + load, 1, scale_max)`.
 /// An unreadable, negative or non-finite load counts as an idle host;
-/// `scale_max` 0 or 1 turns the scaling off.
-/// Test: `startup_timeout_scales_with_load_and_floors_respawns`.
+/// `scale_max` 0 or 1 turns the scaling off. A product too large for a
+/// `Duration` returns the unscaled base.
+/// Test: `startup_timeout_scales_with_load_and_floors_respawns`,
+/// `startup_timeout_with_an_extreme_base_does_not_panic`.
 pub(crate) fn scaled_startup_timeout(
     base: Duration,
     kind: SpawnKind,
@@ -66,7 +69,31 @@ pub(crate) fn scaled_startup_timeout(
     let load = load_per_cpu
         .filter(|l| l.is_finite() && *l >= 0.0)
         .unwrap_or(0.0);
-    base.mul_f64((1.0 + load).clamp(1.0, f64::from(scale_max.max(1))))
+    let factor = (1.0 + load).clamp(1.0, f64::from(scale_max.max(1)));
+    // #10207: `mul_f64` panics on overflow; a base too large to scale is
+    // already effectively unbounded, so it is used as-is.
+    Duration::try_from_secs_f64(base.as_secs_f64() * factor).unwrap_or(base)
+}
+
+impl SupervisorConfig {
+    /// The supervisor's first-spawn startup-probe timeout under
+    /// `load_per_cpu` (pass [`crate::sys_metrics::load_per_cpu`]).
+    ///
+    /// Why (#10207): a caller that wraps the first spawn in its own timeout
+    /// (trusty-search's python bootstrap) has to scale it the same way, or it
+    /// fires before the probe on a loaded host.
+    /// What: [`scaled_startup_timeout`] of `startup_timeout_secs` for a first
+    /// spawn, capped by `recycle.startup_load_scale_max`.
+    /// Test: `startup_timeout_with_an_extreme_base_does_not_panic`.
+    #[must_use]
+    pub fn first_spawn_probe_timeout(&self, load_per_cpu: Option<f64>) -> Duration {
+        scaled_startup_timeout(
+            Duration::from_secs(self.startup_timeout_secs),
+            SpawnKind::First,
+            load_per_cpu,
+            self.recycle.startup_load_scale_max,
+        )
+    }
 }
 
 /// Kill and reap the live sidecar, then clear the published pid.

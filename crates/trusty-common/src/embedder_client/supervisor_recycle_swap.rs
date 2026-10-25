@@ -152,7 +152,10 @@ pub(crate) async fn perform_recycle(
 }
 
 /// #10207: resolve with the footprint once `pid` reads over the hard limit,
-/// checked every check interval; never resolves when the limit is off.
+/// checked every check interval; never resolves when the limit is off. A
+/// failed read counts in `footprint_read_errors`.
+/// Test: `hard_limit_abandons_a_hanging_replacement_spawn`,
+/// `failed_footprint_read_during_a_hanging_replacement_is_counted`.
 async fn hard_breach(ctx: &RecycleCtx<'_>, pid: u32) -> u64 {
     let limit = ctx.config.recycle.effective_hard_footprint_mb();
     let Some(limit) = limit.filter(|_| pid != 0) else {
@@ -161,10 +164,15 @@ async fn hard_breach(ctx: &RecycleCtx<'_>, pid: u32) -> u64 {
     let mut tick = tokio::time::interval(ctx.config.recycle.effective_check_interval());
     loop {
         tick.tick().await;
-        if let Some(mb) = (ctx.hooks.sampler)(pid)
-            && mb > limit
-        {
-            return mb;
+        match (ctx.hooks.sampler)(pid) {
+            Some(mb) if mb > limit => return mb,
+            Some(_) => {}
+            None => {
+                ctx.hooks
+                    .stats
+                    .footprint_read_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }

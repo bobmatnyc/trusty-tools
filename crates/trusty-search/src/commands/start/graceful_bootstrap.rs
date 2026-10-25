@@ -352,6 +352,39 @@ pub(super) fn probe_budget(base: Duration, attempt: u32) -> ProbeBudget {
     }
 }
 
+/// Slack the outer readiness-probe timeout keeps over the supervisor's own
+/// startup probe, whose clock starts later (at the spawn).
+const OUTER_PROBE_GRACE: Duration = Duration::from_secs(5);
+
+/// The outer readiness-probe timeout for an attempt whose budget is `budget`.
+///
+/// Why (#10207): the supervisor scales its first-spawn startup probe by host
+/// load. An unscaled outer timeout fired first on a loaded host and failed a
+/// cold start the scaled probe would have allowed.
+/// What: the supervisor's first-spawn timeout for `budget` (in whole seconds,
+/// rounded up, as [`adapter_supervisor_config`] hands it over) under
+/// `load_per_cpu` and `scale_max`, plus [`OUTER_PROBE_GRACE`]; saturating.
+/// Test: `outer_probe_timeout_scales_with_host_load` in `start/tests_9949.rs`.
+pub(super) fn outer_probe_timeout(
+    budget: Duration,
+    scale_max: u32,
+    load_per_cpu: Option<f64>,
+) -> Duration {
+    let secs = budget
+        .as_secs()
+        .saturating_add(u64::from(budget.subsec_nanos() > 0));
+    let mut recycle = trusty_common::embedder_client::RecycleConfig::default();
+    recycle.startup_load_scale_max = scale_max;
+    let supervisor = trusty_common::embedder_client::SupervisorConfig {
+        startup_timeout_secs: secs.max(1),
+        recycle,
+        ..Default::default()
+    };
+    supervisor
+        .first_spawn_probe_timeout(load_per_cpu)
+        .saturating_add(OUTER_PROBE_GRACE)
+}
+
 /// Resolve `TRUSTY_PY_BOOTSTRAP_RETRIES` (default 2, clamped to a minimum of
 /// 1 — a malformed or zero value falls back to the default rather than
 /// silently never retrying).
@@ -679,12 +712,18 @@ async fn try_bootstrap_once(
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
     // load + one real embed THROUGH the supervisor, bounded by the budget.
+    // #10207: scaled by host load like the supervisor's own startup probe.
+    let outer = outer_probe_timeout(
+        budget.timeout,
+        trusty_common::embedder_client::RecycleConfig::from_env().startup_load_scale_max,
+        trusty_common::sys_metrics::load_per_cpu(),
+    );
     set_phase(switchable, BootstrapPhase::Probing);
     let probe = tokio::select! {
         biased;
         () = cancel.cancelled() => None,
         probed = tokio::time::timeout(
-            budget.timeout,
+            outer,
             adapter.embed_batch(&["trusty readiness probe"]),
         ) => Some(probed),
     };
@@ -703,8 +742,8 @@ async fn try_bootstrap_once(
             FailedStep::Probe,
             anyhow::anyhow!(
                 "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
-             base budget{})",
-                budget.timeout.as_secs(),
+             base budget{}, scaled for host load)",
+                outer.as_secs(),
                 budget.multiplier,
                 base.as_secs(),
                 if budget.capped {

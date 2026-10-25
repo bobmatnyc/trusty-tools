@@ -563,8 +563,9 @@ impl RecycleWatch {
     /// #10207: the hard limit is checked first, on every tick of every
     /// generation: during a back-off hold, after failed replacement spawns,
     /// and on a generation's first tick. One footprint read serves both
-    /// limits.
+    /// limits, and every failed read counts in `footprint_read_errors`.
     /// Test: `hard_limit_fires_during_a_backoff_hold`,
+    /// `failed_footprint_read_during_a_hold_is_counted`,
     /// `hard_limit_kills_a_sidecar_whose_replacement_cannot_start`.
     pub(crate) fn due(
         &mut self,
@@ -576,6 +577,14 @@ impl RecycleWatch {
         let hard = cfg.effective_hard_footprint_mb();
         let read = (pid != 0 && (cfg.footprint_ceiling_mb > 0 || hard.is_some()))
             .then(|| (hooks.sampler)(pid));
+        // #10207: counted here, before the hold and first-tick returns, so a
+        // hard limit that cannot read the sidecar is visible in `/health`.
+        if read == Some(None) {
+            hooks
+                .stats
+                .footprint_read_errors
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if let (Some(limit), Some(Some(mb))) = (hard, read)
             && mb > limit
         {
@@ -633,10 +642,6 @@ impl RecycleWatch {
                     }
                 }
                 None => {
-                    hooks
-                        .stats
-                        .footprint_read_errors
-                        .fetch_add(1, Ordering::Relaxed);
                     self.read_failures += 1;
                     if !self.warned_read_failure {
                         self.warned_read_failure = true;

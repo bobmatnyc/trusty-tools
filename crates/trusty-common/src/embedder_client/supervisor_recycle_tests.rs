@@ -28,7 +28,7 @@ fn write_mock() -> (tempfile::TempDir, PathBuf) {
         r#"#!/bin/sh
 here=$(dirname "$0")
 [ -e "$here/fail" ] && exit 1
-[ -e "$here/hang" ] && exec sleep 600
+[ -e "$here/hang" ] && { echo $$ >> "$here/hang.pids"; exec sleep 600; }
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] || id=1
@@ -673,6 +673,34 @@ fn startup_timeout_scales_with_load_and_floors_respawns() {
     assert_eq!(long, Duration::from_secs(180));
 }
 
+/// #10207: a base too large to scale is returned unscaled, never a panic.
+#[test]
+fn startup_timeout_with_an_extreme_base_does_not_panic() {
+    use supervisor_hard_limit::{SpawnKind, scaled_startup_timeout};
+    for base in [Duration::MAX, Duration::from_secs(u64::MAX)] {
+        for kind in [SpawnKind::First, SpawnKind::Respawn] {
+            assert_eq!(scaled_startup_timeout(base, kind, Some(3.0), 4), base);
+        }
+    }
+    // The first-spawn helper callers outside the crate use agrees.
+    let cfg = SupervisorConfig {
+        startup_timeout_secs: u64::MAX,
+        ..SupervisorConfig::default()
+    };
+    assert_eq!(
+        cfg.first_spawn_probe_timeout(Some(3.0)),
+        Duration::from_secs(u64::MAX)
+    );
+    let cfg = SupervisorConfig {
+        startup_timeout_secs: 90,
+        ..SupervisorConfig::default()
+    };
+    assert_eq!(
+        cfg.first_spawn_probe_timeout(Some(0.5)),
+        Duration::from_secs(135)
+    );
+}
+
 /// A `cat` child wrapped as a tracked client, so `RecycleWatch::due` can be
 /// judged without a mock sidecar. The child is killed on drop.
 fn cat_tracked() -> (tokio::process::Child, Arc<TrackedClient>) {
@@ -722,6 +750,30 @@ async fn hard_limit_fires_during_a_backoff_hold() {
     // Off, the same breach is held like any other trigger.
     cfg.hard_footprint_mb = Some(0);
     assert_eq!(watch.due(&cfg, &hooks, pid, &tracked), None);
+    drop(child);
+}
+
+/// #10207 error arm: a footprint read that fails during a back-off hold is
+/// counted, so a hard limit that cannot see the sidecar shows in `/health`.
+#[tokio::test]
+async fn failed_footprint_read_during_a_hold_is_counted() {
+    let (child, tracked) = cat_tracked();
+    let pid = child.id().expect("cat pid");
+    let mut cfg = quiet_recycle();
+    cfg.footprint_ceiling_mb = 100;
+    cfg.check_interval = Duration::from_secs(30);
+    let (_now, clock) = manual_clock();
+    let hooks = RecycleHooks {
+        sampler: Arc::new(|_| None),
+        clock,
+        stats: Arc::new(RecycleStats::new()),
+    };
+    let mut watch = supervisor_recycle::RecycleWatch::new(&hooks);
+    watch.after_spawn_failure(&cfg, &hooks);
+    for _ in 0..3 {
+        assert_eq!(watch.due(&cfg, &hooks, pid, &tracked), None, "held");
+    }
+    assert_eq!(hooks.stats.snapshot().footprint_read_errors, 3);
     drop(child);
 }
 
@@ -839,6 +891,14 @@ async fn hard_limit_abandons_a_hanging_replacement_spawn() {
         "the hard limit waited behind a hanging replacement: {:?}",
         stats.snapshot()
     );
+    // The abandoned replacement is gone too, not left running.
+    let pids = std::fs::read_to_string(dir.path().join("hang.pids")).expect("replacement pid");
+    let pids: Vec<u32> = pids.lines().map(|l| l.parse().expect("pid")).collect();
+    assert!(!pids.is_empty());
+    assert!(
+        wait_until(3, || pids.iter().all(|&p| !process_alive(p))).await,
+        "an abandoned replacement is still running: {pids:?}"
+    );
     assert!(
         wait_until(5, || {
             let pid = pid_slot.load(Ordering::Acquire);
@@ -851,6 +911,51 @@ async fn hard_limit_abandons_a_hanging_replacement_spawn() {
     assert!(client.embed_batch(vec!["back".into()]).await.is_ok());
     assert_eq!(stats.snapshot().hard_footprint_kills, 1);
     assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// #10207 error arm: while a replacement spawn hangs, failed footprint reads
+/// of the old sidecar are counted rather than read as "under the limit".
+#[tokio::test]
+async fn failed_footprint_read_during_a_hanging_replacement_is_counted() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let (supervisor, _client_slot, _pid_slot) =
+        EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+            .await
+            .expect("spawn_stdio");
+    let hang = dir.path().join("hang");
+    std::fs::write(&hang, b"").expect("write hang marker");
+    let stats = Arc::new(RecycleStats::new());
+    // 0 = the read fails.
+    let footprint = Arc::new(AtomicU64::new(150));
+    let read = Arc::clone(&footprint);
+    let (_now, clock) = manual_clock();
+    let handle = supervisor
+        .with_recycle_hooks(RecycleHooks {
+            sampler: Arc::new(move |_| Some(read.load(Ordering::Acquire)).filter(|&mb| mb > 0)),
+            clock,
+            stats: Arc::clone(&stats),
+        })
+        .start_supervisor_task();
+    // The first judged check (~100 ms) starts a replacement that never answers.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    footprint.store(0, Ordering::Release);
+    assert!(
+        wait_until(3, || stats.snapshot().footprint_read_errors >= 3).await,
+        "failed reads behind a hanging replacement were not counted: {:?}",
+        stats.snapshot()
+    );
+    assert_eq!(stats.snapshot().spawn_failures, 0, "the spawn still hangs");
+    // Free the loop: a hard breach abandons the hanging replacement.
+    std::fs::remove_file(&hang).expect("remove hang marker");
+    footprint.store(250, Ordering::Release);
+    assert!(
+        wait_until(3, || stats.snapshot().hard_footprint_kills == 1).await,
+        "{:?}",
+        stats.snapshot()
+    );
     handle.shutdown().await;
 }
 
