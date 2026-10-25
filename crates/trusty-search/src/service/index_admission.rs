@@ -523,6 +523,39 @@ mod tests {
         );
     }
 
+    /// #10273: single-file admission refuses ungitignored credential files
+    /// that the walker also skips; hidden CI config is still admitted.
+    /// Fails against b8103ecdc2, which admitted every credential file.
+    #[test]
+    fn admission_refuses_credential_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let creds = [
+            ".ssh/config.json",
+            ".aws/credentials.toml",
+            ".kube/config.yml",
+            ".config/gh/hosts.yml",
+            ".streamlit/secrets.toml",
+        ];
+        for rel in creds.iter().chain([".github/workflows/ci.yml"].iter()) {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "k = 1\n").unwrap();
+        }
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("creds", &root)));
+        let handle = IndexHandle::bare(IndexId::new("creds"), indexer, root.clone());
+        let ci = root.join(".github/workflows/ci.yml");
+        assert_eq!(walk(&handle).files, vec![ci.clone()]);
+        assert_eq!(admits(&handle, &ci), Admission::Included);
+        for rel in creds {
+            assert_eq!(
+                admits(&handle, &root.join(rel)),
+                Admission::Excluded,
+                "{rel}"
+            );
+        }
+    }
+
     /// #8922: a walk error along the path answers `Undetermined`, never
     /// `Excluded`; a clean walk that misses the file is still an exclusion.
     /// Fails with `walk_verdict` dropping errors as `filter_map(Result::ok)` did.

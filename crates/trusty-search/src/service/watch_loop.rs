@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 
 use crate::core::file_events::FileEventKind;
 use crate::service::indexed_files::IndexedFiles;
-use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::walker::{path_in_skipped_dir, rel_path_is_credential, should_skip_path};
 use crate::service::watch_rescan::RescanFollowUp;
 // #7434: which root a watch covers, and its slot in the index's root table.
 use crate::service::watch_roots::WatchedRoot;
@@ -489,6 +489,13 @@ pub async fn handle_modified_in_root(
     // text-mode coverage.
     if path_in_skipped_dir(path) || should_skip_path(path) {
         tracing::debug!(?path, "skip excluded file");
+        return;
+    }
+    // #10273: the credential rule is judged root-relative, as the walk does;
+    // a hidden segment of the root itself must not count.
+    let rel = watcher_relative_path(watched.canonical(), watched.raw(), path);
+    if Path::new(&rel).is_relative() && rel_path_is_credential(Path::new(&rel)) {
+        tracing::debug!(?path, "skip credential path");
         return;
     }
 
@@ -1081,5 +1088,31 @@ mod tests {
             zip.finish().expect("finish docx zip");
         }
         docx_bytes
+    }
+
+    /// #10273: a saved credential file is never indexed by the watcher, even
+    /// under a root whose own path has a hidden segment (the macOS `.tmpXXXX`
+    /// tempdir); a hidden CI file and a `secrets/` source dir still are.
+    /// Fails against b8103ecdc2, which indexed both credential files.
+    #[tokio::test]
+    async fn watcher_never_indexes_credential_saves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("w10273", &root)));
+        let tracker = IndexedFiles::new();
+        let id = crate::core::registry::IndexId::new("w10273");
+        for (rel, indexed) in [
+            (".aws/credentials.toml", false),
+            (".streamlit/secrets.toml", false),
+            (".github/workflows/ci.yml", true),
+            ("secrets/prod.yml", true),
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "key: value\n").unwrap();
+            handle_modified(&path, &id, &root, &root, &indexer, &tracker).await;
+            let ids = indexer.read().await.chunk_ids_for_file(rel).await;
+            assert_eq!(!ids.is_empty(), indexed, "{rel}");
+        }
     }
 }
