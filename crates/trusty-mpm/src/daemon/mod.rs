@@ -246,7 +246,7 @@ pub async fn serve_with_shutdown(
     // the socket drains its in-flight requests (#6288 S3a).
     let cancel = tokio_util::sync::CancellationToken::new();
     // #6849, #9167 AC5: hook records and delivered injects reach the bus.
-    action_events::inject::start_with_injects(&state).await;
+    action_events::inject::start_with_injects(&state);
 
     // Spawn the multi-session file watcher as a background task.
     // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.

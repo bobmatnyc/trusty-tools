@@ -34,6 +34,7 @@ use trusty_common::control_bus::{PushClient, PushFlushOutcome};
 
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
+use crate::session_manager::inject_record::InjectRecorder;
 
 // #9167 AC5: each delivered inject, on the same buffer.
 pub mod inject;
@@ -71,6 +72,8 @@ const DROP_WARN_EVERY: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub struct ActionEvents {
     publisher: OnceLock<Arc<ActionPublisher>>,
+    /// The inject recorder the session manager takes when it is built (#9167).
+    inject_recorder: OnceLock<Arc<dyn InjectRecorder>>,
     flush_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -98,6 +101,16 @@ impl ActionEvents {
     /// The attached publisher, if any.
     pub fn publisher(&self) -> Option<&Arc<ActionPublisher>> {
         self.publisher.get()
+    }
+
+    /// Keep `recorder` for the session manager; `false` when one is kept.
+    pub fn set_inject_recorder(&self, recorder: Arc<dyn InjectRecorder>) -> bool {
+        self.inject_recorder.set(recorder).is_ok()
+    }
+
+    /// The recorder the session manager is to take, if one was set.
+    pub fn inject_recorder(&self) -> Option<&Arc<dyn InjectRecorder>> {
+        self.inject_recorder.get()
     }
 
     /// End the flush task, then run the final flush within

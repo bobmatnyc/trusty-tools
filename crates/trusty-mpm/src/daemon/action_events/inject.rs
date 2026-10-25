@@ -11,8 +11,9 @@
 //! [`message_event`] (credential scan, then `bytes` and `sha256` of the scanned
 //! text, body only when bodies are on). The event names the receiving Claude
 //! session when the record knows it, and is a child of that session's root
-//! when one was projected. [`install`] hands the attached publisher to the
-//! session manager.
+//! when one was projected (none is, under `tm sm serve --stdio`). [`install`]
+//! hands the attached publisher to the session manager, which takes it when it
+//! is built.
 //!
 //! A bus write never fails on this path: `PushClient::send` only buffers. A
 //! flush that cannot reach the bus keeps the event buffered for the next tick;
@@ -85,25 +86,29 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
 ///
 /// Why: the daemon and `tm sm serve --stdio` both inject; each records on
 /// its own producer, under the same `bus_allowed` rule.
-pub async fn start_with_injects(state: &DaemonState) -> bool {
+pub fn start_with_injects(state: &DaemonState) -> bool {
     super::start(state);
-    install(state).await
+    install(state)
 }
 
-/// Install the attached publisher as `state`'s inject recorder.
+/// Make the attached publisher `state`'s inject recorder.
 ///
+/// Why: building the session manager reconciles the shared store
+/// (`reconcile_on_boot`); a `tm sm serve --stdio` run that never touches a
+/// session must not do that just to record injects.
 /// What: `false`, installing nothing, when no publisher is attached (a
-/// disallowed or unresolvable bus) or a recorder is already installed.
-/// Test: `install_needs_an_attached_publisher_9167`.
-pub async fn install(state: &DaemonState) -> bool {
+/// disallowed or unresolvable bus) or a recorder is already set. Otherwise
+/// the recorder is kept on `state`, and `DaemonState::session_manager` hands
+/// it to the manager when it builds one; a manager already built takes it
+/// now. This never builds the manager.
+/// Test: `install_needs_an_attached_publisher_9167`,
+/// `installing_the_recorder_does_not_build_the_session_manager_9167`.
+pub fn install(state: &DaemonState) -> bool {
     let Some(publisher) = state.action_events().publisher() else {
         return false;
     };
     let recorder: Arc<dyn InjectRecorder> = Arc::clone(publisher) as Arc<dyn InjectRecorder>;
-    state
-        .session_manager()
-        .await
-        .install_inject_recorder(recorder)
+    state.set_inject_recorder(recorder)
 }
 
 #[cfg(test)]

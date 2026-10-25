@@ -69,7 +69,7 @@ async fn installed(mgr: &Arc<SessionManager>, sock: &Path) -> (DaemonState, Arc<
     let state = DaemonState::with_session_manager(Arc::clone(mgr));
     let publisher = Arc::new(ActionPublisher::new(sock));
     assert!(state.action_events().attach(Arc::clone(&publisher)));
-    assert!(install(&state).await, "the recorder installs");
+    assert!(install(&state), "the recorder installs");
     (state, publisher)
 }
 
@@ -202,7 +202,7 @@ async fn install_needs_an_attached_publisher_9167() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mgr, _id) = active(&dir, "claude-1").await;
     let state = DaemonState::with_session_manager(Arc::clone(&mgr));
-    assert!(!install(&state).await);
+    assert!(!install(&state));
     let publisher = Arc::new(ActionPublisher::new(dir.path().join("bus.sock")));
     assert!(mgr.install_inject_recorder(publisher));
 }
@@ -241,4 +241,25 @@ async fn an_idle_nudge_is_one_message_event_9167() {
     assert_eq!(found.len(), 1, "{frames:?}");
     assert_eq!(found[0].1.sha256, sha(&cfg.message));
     assert_eq!(found[0].1.to, mgr.list().await[0].tmux_name);
+}
+
+/// Installing the recorder builds no session manager (so a goals-only stdio
+/// run never reconciles the shared store); the manager takes the recorder
+/// when something first builds it.
+#[tokio::test]
+async fn installing_the_recorder_does_not_build_the_session_manager_9167() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = DaemonState::with_root(crate::test_support::hermetic_temp_dir().keep());
+    let publisher = Arc::new(ActionPublisher::new(dir.path().join("bus.sock")));
+    assert!(state.action_events().attach(publisher));
+
+    assert!(install(&state));
+
+    assert!(!state.session_manager_built(), "install built the manager");
+    let mgr = state.session_manager().await;
+    let second = Arc::new(ActionPublisher::new(dir.path().join("other.sock")));
+    assert!(
+        !mgr.install_inject_recorder(second),
+        "the built manager already holds the recorder"
+    );
 }
