@@ -237,3 +237,36 @@ pub(crate) async fn embed_planned(
     );
     Ok(vectors)
 }
+
+/// Most chunks one background `embed_batch` call carries.
+///
+/// #10008: `FastEmbedder` holds its model lock for a whole call, so a 64-chunk
+/// background call held it about 1.25 s on EVO and a 1-item recall query
+/// waited behind it. 8 chunks hold it about 160 ms.
+pub(crate) const BACKGROUND_EMBED_CALL_CAP: usize = 8;
+
+/// [`embed_planned`] in calls of at most [`BACKGROUND_EMBED_CALL_CAP`] chunks.
+///
+/// Why (#10008): a background re-embed must not hold the shared model lock
+/// long enough to stall a foreground query embed.
+/// What: one [`embed_planned`] per group of chunks, in order, with a yield
+/// between calls (the lock is free once a call returns). The first failing
+/// call fails the whole embed and no vector is returned, so a caller never
+/// commits a partial group. Callers keep their own timeout over the whole
+/// embed, sized by [`chunked_embed_timeout`] for every chunk.
+/// Test: `slice_embed_calls_carry_at_most_the_background_cap`,
+/// `repair_embed_calls_carry_at_most_the_background_cap`,
+/// `a_failed_later_embed_call_commits_no_partial_group`.
+pub(crate) async fn embed_planned_paced(
+    embedder: &dyn Embedder,
+    chunks: &[String],
+) -> Result<Vec<Vec<f32>>> {
+    let mut vectors = Vec::with_capacity(chunks.len());
+    for (i, group) in chunks.chunks(BACKGROUND_EMBED_CALL_CAP).enumerate() {
+        if i > 0 {
+            tokio::task::yield_now().await;
+        }
+        vectors.extend(embed_planned(embedder, group).await?);
+    }
+    Ok(vectors)
+}

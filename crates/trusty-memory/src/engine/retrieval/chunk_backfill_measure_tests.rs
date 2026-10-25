@@ -7,15 +7,17 @@
 //! What: one `#[ignore]` test that prints `MEASURE` lines: the wall time of a
 //! 64-chunk embed, the chunks that fit in 120 s, slice wall times on a palace
 //! of legacy drawers, and query-embed p50/p95/max in both phases. It asserts
-//! only that the real slice repairs every drawer; the numbers are a report.
+//! that the real slice repairs every drawer and (#10008) that the query-embed
+//! p95 beside a paced background embed is at most [`MAX_CONTENTION_RATIO`]
+//! times the idle p95.
 //! Run alone, so the shared embedder is the real one:
 //! `cargo test -p trusty-memory --lib -- --ignored
-//! --exact memory_core::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured
+//! --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured
 //! --nocapture`.
 //! Test: this file IS the test.
 
 use super::chunk_backfill::SliceBounds;
-use super::embed_store::{embed_planned, plan_chunks};
+use super::embed_store::{embed_planned, embed_planned_paced, plan_chunks};
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
 use crate::engine::embed::Embedder;
@@ -33,6 +35,8 @@ const QUERIES: usize = 200;
 /// Drawers in the slice palace; each splits into about `DRAWER_CHUNKS`.
 const DRAWERS: usize = 16;
 const DRAWER_CHUNKS: usize = 8;
+/// #10008: the Architect's bar, contention p95 over idle p95 (about 175 ms on EVO).
+const MAX_CONTENTION_RATIO: f64 = 10.0;
 
 /// `n` distinct prose sentences tagged with `tag`.
 fn prose(tag: &str, n: usize) -> String {
@@ -131,6 +135,18 @@ async fn slice_defaults_and_recall_contention_measured() {
     println!(
         "MEASURE embed_64_chunks runs={runs:?} per_chunk={per_chunk:?} chunks_in_120s={fit:.0}"
     );
+    // #10008: the same 64 chunks as the slice embeds them, paced.
+    let mut paced = Vec::new();
+    for r in 0..3 {
+        let cap = cap_chunks(e.as_ref(), &format!("paced{r}"));
+        let t = Instant::now();
+        assert_eq!(
+            embed_planned_paced(e.as_ref(), &cap).await.unwrap().len(),
+            64
+        );
+        paced.push(t.elapsed());
+    }
+    println!("MEASURE embed_64_chunks_paced runs={paced:?}");
 
     // Real slices on legacy drawers, default bounds bar min_age.
     let dir = tempfile::tempdir().unwrap();
@@ -179,7 +195,8 @@ async fn slice_defaults_and_recall_contention_measured() {
         "every legacy drawer must end with its full group"
     );
 
-    // Gap 14: query-embed latency at idle, then beside a looping 64-chunk embed.
+    // Gap 14: query-embed latency at idle, then beside a looping 64-chunk embed
+    // paced as the slice paces it (#10008).
     let idle = report("idle", query_latencies(&e, "idle").await);
     let stop = Arc::new(AtomicBool::new(false));
     let bg = {
@@ -188,7 +205,7 @@ async fn slice_defaults_and_recall_contention_measured() {
             let mut batches = 0usize;
             while !stop.load(Ordering::Relaxed) {
                 let cap = cap_chunks(e.as_ref(), &format!("bg{batches}"));
-                embed_planned(e.as_ref(), &cap).await.unwrap();
+                embed_planned_paced(e.as_ref(), &cap).await.unwrap();
                 batches += 1;
             }
             batches
@@ -200,4 +217,9 @@ async fn slice_defaults_and_recall_contention_measured() {
     let ratio = busy.as_secs_f64() / idle.as_secs_f64();
     let flag = if ratio > 2.0 { "FLAG" } else { "ok" };
     println!("MEASURE contention_p95_over_idle_p95={ratio:.2} bg_batches={batches} verdict={flag}");
+    assert!(
+        ratio <= MAX_CONTENTION_RATIO,
+        "#10008: contention p95 {busy:?} is {ratio:.2}x idle p95 {idle:?}; \
+         the bar is {MAX_CONTENTION_RATIO}x"
+    );
 }

@@ -248,6 +248,9 @@ open = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# #10008: Tokio's paused clock lets a repair-path timeout test reach the
+# default embed bound without setting a process-global env var.
+tokio = { workspace = true, features = ["test-util"] }
 # libc: the #5267 TTY-gated notice can only be exercised by giving the child a
 # REAL terminal on stdin, which needs openpty(3). A pipe proves the silent half
 # of the contract; only a pty proves the human-facing half.
