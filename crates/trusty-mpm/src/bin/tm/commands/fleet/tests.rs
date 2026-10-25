@@ -934,7 +934,10 @@ fn seeded_hook_commands_run_through_an_explicit_interpreter() {
         r#"  timeout 4 /bin/bash "$0" "$@""#,
         r#"  gtimeout 4 /bin/bash "$0" "$@""#,
     ] {
-        assert!(notify.contains(needle), "notify-supervisor.sh lacks {needle}");
+        assert!(
+            notify.contains(needle),
+            "notify-supervisor.sh lacks {needle}"
+        );
     }
     assert!(!notify.contains(r#"timeout 4 "$0""#), "{notify}");
 }
