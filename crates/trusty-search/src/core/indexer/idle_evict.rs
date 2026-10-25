@@ -198,8 +198,9 @@ mod bm25_off_lock_tests;
 
 #[cfg(test)]
 pub(crate) use rehydrate_task::{
-    Bm25BuildDelayArmed, CommitPhasePanicArmed, RehydrateScanCounter, TEST_DELAY_BEFORE_COMMIT_MS,
-    TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS, TEST_REHYDRATE_DELAY_MS,
+    Bm25BuildDelayArmed, CommitPhasePanicArmed, RehydrateScanCounter, RehydrateScanPause,
+    TEST_DELAY_BEFORE_COMMIT_MS, TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS,
+    TEST_REHYDRATE_DELAY_MS,
 };
 
 /// Default bound on how long a SINGLE `ensure_corpus_rehydrated` call waits

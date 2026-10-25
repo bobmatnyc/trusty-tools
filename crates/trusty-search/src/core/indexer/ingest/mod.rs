@@ -300,6 +300,7 @@ impl CodeIndexer {
         }
 
         let bm25_text = Self::bm25_doc_text(&chunk);
+        let _fence = self.rehydrate_write_fence().await; // #10209
         self.bm25.write().await.upsert_document(&id, &bm25_text);
 
         self.chunks.write().await.insert(id, chunk);
@@ -473,7 +474,7 @@ impl CodeIndexer {
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
         // left them searchable beside the new content.
-        let superseded = self.superseded_chunk_ids(file_path, &chunks).await;
+        let superseded = self.superseded_chunk_ids(file_path, &chunks).await?;
 
         // #3048: a vector-disabled index must not embed on the incremental
         // path either. All-`None` embeddings are exactly what
@@ -526,10 +527,14 @@ impl CodeIndexer {
             .enrich_with_nlp_entities(file_path, content, &chunk_contents, entities)
             .await;
 
-        self.entities
-            .write()
-            .await
-            .insert(file_path.to_string(), all_entities);
+        {
+            // #10209: a rehydrate must not overwrite this list with its scan.
+            let _fence = self.rehydrate_write_fence().await;
+            self.entities
+                .write()
+                .await
+                .insert(file_path.to_string(), all_entities);
+        }
         // #3048: skip_kg parity — `_graph_write` is `None` for a skip_kg
         // index, so this path never marks (or later rebuilds) its graph. Gated
         // here rather than inside `rebuild_symbol_graph`, the shared choke

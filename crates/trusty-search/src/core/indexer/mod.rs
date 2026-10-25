@@ -63,6 +63,8 @@ pub(crate) mod promotion_state;
 pub use promotion_state::PromotionDeferred;
 mod persist_hnsw;
 mod quarantine;
+// #10209: writes and a rehydrate's scan-then-publish never interleave.
+mod rehydrate_fence;
 mod search;
 // #9459: a corpus closed for a normal stop refuses later writes.
 mod shutdown_detach;
@@ -92,6 +94,8 @@ mod bm25_truncation_tests;
 mod cost_scaled_threshold_tests;
 #[cfg(test)]
 mod rehydrate_tests;
+#[cfg(test)]
+mod rehydrate_writes_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -370,9 +374,12 @@ pub struct CodeIndexer {
     /// itself) in `indexer::rehydrate_tests`.
     pub(super) rehydrate_generation: Arc<Mutex<u64>>,
 
-    /// #10110: the detached rehydrate holds the read side across its scan and
-    /// publish; a batch removal holds the write side, so a scan never reads
+    /// #10110: a batch removal holds the write side, so a scan never reads
     /// rows a batch is deleting. See `batch_remove` for the 503 it answers.
+    /// #10209: every scan-then-publish (the detached rehydrate, the redb
+    /// loaders) also holds the write side, and every other write holds the
+    /// read side via `rehydrate_write_fence`, so no write lands between a
+    /// scan and its publish.
     pub(super) corpus_scan_gate: Arc<tokio::sync::RwLock<()>>,
 
     /// `true` when the most recent `bm25_search` / `grep_fallback_search`

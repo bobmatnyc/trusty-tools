@@ -85,21 +85,23 @@ impl PathWriteLocks {
 impl CodeIndexer {
     /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.
     ///
-    /// What: the file's current ids minus `fresh`'s ids. The in-memory map
-    /// mirrors redb here: `chunk_ids_for_file` rehydrates an evicted map from
-    /// redb, and [`Self::remove_superseded_chunks`] leaves memory untouched
-    /// when the redb delete fails, so a retry finds the same ids.
+    /// What: the file's current ids minus `fresh`'s ids. `file_chunk_ids`
+    /// reads redb when the map is still evicted (#10209), and
+    /// [`Self::remove_superseded_chunks`] leaves memory untouched when the
+    /// redb delete fails, so a retry finds the same ids. A failed redb read
+    /// is an `Err`.
     pub(super) async fn superseded_chunk_ids(
         &self,
         file_path: &str,
         fresh: &[RawChunk],
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>> {
         let keep: std::collections::HashSet<&str> = fresh.iter().map(|c| c.id.as_str()).collect();
-        self.chunk_ids_for_file(file_path)
-            .await
+        Ok(self
+            .file_chunk_ids(file_path)
+            .await?
             .into_iter()
             .filter(|id| !keep.contains(id.as_str()))
-            .collect()
+            .collect())
     }
 
     /// Remove every chunk id from the HNSW store, corpus, embedding cache,
@@ -120,6 +122,7 @@ impl CodeIndexer {
         match mode {
             #[cfg(test)]
             RedbChunkDelete::WarnOnly => {
+                let _fence = self.rehydrate_write_fence().await; // #10209
                 self.drop_chunk_ids_from_memory(ids).await;
                 // Issue #28: mirror the deletion into the durable redb corpus.
                 self.delete_chunks_from_redb(ids).await;
@@ -140,6 +143,9 @@ impl CodeIndexer {
         if ids.is_empty() {
             return Ok(());
         }
+        // #10209: a rehydrate that read these rows must not publish them
+        // back after they leave, so the delete waits for it to finish.
+        let _fence = self.rehydrate_write_fence().await;
         self.try_delete_chunks_from_redb(ids).await?;
         self.drop_chunk_ids_from_memory(ids).await;
         Ok(())

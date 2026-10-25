@@ -295,6 +295,94 @@ fn sleep_if_bm25_build_delayed(key: usize) {
     }
 }
 
+/// Test-only state of one armed [`RehydrateScanPause`].
+#[cfg(test)]
+#[derive(Default)]
+struct ScanPauseState {
+    scanned: Notify,
+    released: StdMutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ScanPauseState {
+    fn release(&self) {
+        *self.released.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.wake.notify_all();
+    }
+}
+
+/// Test-only per-indexer scan pauses, keyed like the #9513 panic hook.
+#[cfg(test)]
+static TEST_SCAN_PAUSES: StdMutex<Vec<(usize, Arc<ScanPauseState>)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+fn scan_pauses() -> std::sync::MutexGuard<'static, Vec<(usize, Arc<ScanPauseState>)>> {
+    TEST_SCAN_PAUSES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Test-only: holds ONE indexer's rehydrate after its redb read, before its
+/// publish, until released or dropped (#10209).
+///
+/// Why: the #10209 regression tests issue a write inside that window and
+/// must know, without a sleep, that the scan already read the old rows.
+/// What: the blocking scan signals [`Self::scanned`] after reading redb, then
+/// blocks until [`Self::release`]. Dropping the guard releases it, so a
+/// failed test never strands a blocking thread.
+/// Test: `indexer::rehydrate_writes_tests`.
+#[cfg(test)]
+pub(crate) struct RehydrateScanPause {
+    key: usize,
+    state: Arc<ScanPauseState>,
+}
+
+#[cfg(test)]
+impl RehydrateScanPause {
+    /// Pause `indexer`'s next rehydrate after its redb read.
+    pub(crate) fn arm(indexer: &CodeIndexer) -> Self {
+        let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
+        let state = Arc::new(ScanPauseState::default());
+        let mut pauses = scan_pauses();
+        pauses.retain(|(k, _)| *k != key);
+        pauses.push((key, Arc::clone(&state)));
+        Self { key, state }
+    }
+
+    /// Resolves once the paused rehydrate has read redb.
+    pub(crate) async fn scanned(&self) {
+        self.state.scanned.notified().await;
+    }
+
+    /// Let the paused rehydrate publish.
+    pub(crate) fn release(&self) {
+        self.state.release();
+    }
+}
+
+#[cfg(test)]
+impl Drop for RehydrateScanPause {
+    fn drop(&mut self) {
+        scan_pauses().retain(|(k, _)| *k != self.key);
+        self.state.release();
+    }
+}
+
+#[cfg(test)]
+fn pause_if_scan_paused(key: usize) {
+    let state = scan_pauses()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, s)| Arc::clone(s));
+    let Some(state) = state else {
+        return;
+    };
+    state.scanned.notify_one();
+    let mut released = state.released.lock().unwrap_or_else(|e| e.into_inner());
+    while !*released {
+        released = state.wake.wait(released).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
 /// Build a BM25 index from id-sorted `chunks`, counting refused documents.
 ///
 /// Why: #10193 — the rehydrate used to upsert every chunk into the LIVE
@@ -414,9 +502,11 @@ impl CodeIndexer {
                 gate: inflight_gate,
                 notify,
             };
-            // #10110: scan and publish under the read side, so a batch removal
-            // (write side) never deletes rows this scan already read.
-            let _scan_gate = scan_gate.read().await;
+            // #10110: scan and publish under the gate, so a batch removal
+            // never deletes rows this scan already read. #10209: the write
+            // side, so a single-file write (read side, `rehydrate_write_fence`)
+            // lands before the scan or after the publish, never between.
+            let _scan_gate = scan_gate.write().await;
 
             // #10192: time the whole rehydrate (scan, sort, BM25, maps,
             // commit) for `cost_scaled_idle_threshold`. Starts after the
@@ -437,6 +527,8 @@ impl CodeIndexer {
                 // over-cap corpus is the same every rehydrate.
                 chunks.sort_by(|a, b| a.id.cmp(&b.id));
                 let entities = corpus.load_all_entities()?;
+                #[cfg(test)]
+                pause_if_scan_paused(commit_panic_key);
                 // #10193: build BM25 here, off the live index's write guard
                 // and off the async workers.
                 #[cfg(test)]

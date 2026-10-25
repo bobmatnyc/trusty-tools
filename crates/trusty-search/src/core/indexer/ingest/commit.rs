@@ -122,6 +122,7 @@ impl CodeIndexer {
 
         let chunk_total = all_chunks.len();
         if chunk_total == 0 {
+            let _fence = self.rehydrate_write_fence().await; // #10209
             self.commit_entities(entities_by_file).await;
             return Ok(CommitTimings {
                 chunks_dropped_by_cap: pre_filter_dropped,
@@ -133,6 +134,10 @@ impl CodeIndexer {
         self.commit_vectors_batch(&all_chunks, &embeddings).await?;
         let vector_upsert_ms = vec_start.elapsed().as_millis() as u64;
 
+        // #10209: BM25, redb, the chunk map and entities land wholly before a
+        // rehydrate's scan or wholly after its publish, never in between.
+        // Released before the graph rebuild, which can take a minute.
+        let fence = self.rehydrate_write_fence().await;
         let bm25_start = std::time::Instant::now();
         self.commit_bm25_batch(&all_chunks).await;
         let bm25_ms = bm25_start.elapsed().as_millis() as u64;
@@ -150,6 +155,7 @@ impl CodeIndexer {
         // Its count must reach the caller or that race is a silent drop.
         let late_dropped = self.commit_corpus(&mut all_chunks).await;
         self.commit_entities(entities_by_file).await;
+        drop(fence);
 
         let kg_ms = if defer_graph_rebuild {
             0

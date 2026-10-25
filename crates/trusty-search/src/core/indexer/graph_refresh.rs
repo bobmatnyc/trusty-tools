@@ -290,7 +290,7 @@ impl CodeIndexer {
         file_path: &str,
     ) -> anyhow::Result<Option<GraphWriteGuard<'_>>> {
         if self.skip_kg
-            || (self.chunk_ids_for_file(file_path).await.is_empty()
+            || (self.file_chunk_ids(file_path).await?.is_empty()
                 && !self.entities.read().await.contains_key(file_path))
         {
             return Ok(None);

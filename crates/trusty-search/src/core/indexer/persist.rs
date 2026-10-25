@@ -275,6 +275,8 @@ impl CodeIndexer {
         let Some(corpus) = self.corpus.clone() else {
             return Ok(0);
         };
+        // #10209: no write may land between this scan and its publish.
+        let scan_gate = self.corpus_scan_gate.write().await;
         // redb's transaction API is synchronous; do the (potentially large)
         // deserialize on a blocking worker so we don't pin a runtime thread.
         let (chunks, entities) = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
@@ -316,6 +318,7 @@ impl CodeIndexer {
                 emap.insert(file, ents);
             }
         }
+        drop(scan_gate);
         // Phase 4: bring the symbol graph back online. Issue #41 phase 2:
         // prefer the persisted graph (O(nodes + edges) load) over a full
         // `build_from_chunks` rebuild (O(N chunks)). A `None`/empty persisted
@@ -489,6 +492,8 @@ impl CodeIndexer {
         let Some(corpus) = self.corpus.clone() else {
             return Ok(0);
         };
+        // #10209: no write may land between this scan and its publish.
+        let _scan_gate = self.corpus_scan_gate.write().await;
         // Load the updated corpus on a blocking worker.
         let (chunks, entities) = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
             let chunks = corpus.load_all_chunks()?;
