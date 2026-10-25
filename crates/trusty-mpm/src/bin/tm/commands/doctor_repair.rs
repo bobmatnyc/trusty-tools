@@ -420,15 +420,15 @@ fn rust_build_env_steps(
 /// whichever project that session was pointed at — on 2026-09-10 that was eight
 /// projects, none of them the cwd of the operator who ran `tm doctor`. A
 /// cwd-scoped repair leaves seven of them broken and reports success, which is
-/// why the fix had to be done by hand with `sed`. The sweep therefore uses the
-/// same `$HOME`-wide discovery `tm hooks clean` (no `--path`) already owns
-/// rather than a second enumerator, plus the cwd, which a `$HOME` walk misses
-/// when the project lives outside the home directory.
+/// why the fix had to be done by hand with `sed`. The sweep therefore walks
+/// `$HOME`, plus the cwd, which a `$HOME` walk misses when the project lives
+/// outside the home directory.
 /// What: the deduplicated union of `<cwd>/.claude/{settings.json,
 /// settings.local.json}` and
-/// [`trusty_common::claude_config::discover_claude_settings`] under the resolved
-/// home. Existence is not checked here — [`repair_build_tree_binary`] treats a
-/// missing file as nothing to do. An unresolvable home contributes nothing
+/// [`trusty_mpm::core::home_settings_walk::discover_home_settings`] under the
+/// resolved home, which never enters a top-level synced folder or another
+/// device. Existence is not checked here — [`repair_build_tree_binary`] treats
+/// a missing file as nothing to do. An unresolvable home contributes nothing
 /// rather than aborting the repair.
 ///
 /// Plain `tm doctor` walks it too: the `hook-interpreter` row reads this list,
@@ -450,11 +450,15 @@ pub(crate) fn machine_wide_settings_files(
     }
     // #9293: `home` is supplied, never resolved here, so the walk root is the
     // caller's; production passes `dirs::home_dir()`, a test passes a temp dir.
+    // #10263: tm's own walk, which never enters iCloud-synced home folders or
+    // another device — a read there froze a session.
     if let Some(home) = home {
-        set.extend(trusty_common::claude_config::discover_claude_settings(
-            home,
-            trusty_common::claude_config::default_settings_max_depth(),
-        ));
+        set.extend(
+            trusty_mpm::core::home_settings_walk::discover_home_settings(
+                home,
+                trusty_common::claude_config::default_settings_max_depth(),
+            ),
+        );
     }
     set.into_iter().collect()
 }
@@ -783,9 +787,19 @@ mod tests {
         std::fs::create_dir_all(&home_project).expect("plant project");
         let planted = home_project.join("settings.json");
         std::fs::write(&planted, "{}").expect("plant settings");
+        // #10263: an iCloud-synced top-level folder is never walked.
+        let synced = home.path().join("Documents").join("proj").join(".claude");
+        std::fs::create_dir_all(&synced).expect("plant synced project");
+        std::fs::write(synced.join("settings.json"), "{}").expect("plant synced settings");
 
         let project = std::path::Path::new("/srv/projects/acme");
         let files = machine_wide_settings_files(Some(project), Some(home.path()));
+        assert!(
+            files
+                .iter()
+                .all(|f| !f.starts_with(home.path().join("Documents"))),
+            "a file under <home>/Documents was returned: {files:?}"
+        );
 
         for name in ["settings.json", "settings.local.json"] {
             let expected = project.join(".claude").join(name);
