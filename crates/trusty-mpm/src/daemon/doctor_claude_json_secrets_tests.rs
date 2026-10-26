@@ -106,8 +106,16 @@ fn row_fails_on_a_plaintext_credential() {
     let row = check_claude_json_secrets(Some(dir.path()));
 
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
-    assert!(row.message.contains("slack-mcp.SLACK_BOT_TOKEN"), "{}", row.message);
-    assert!(!row.message.contains(FAKE_TOKEN), "value leaked: {}", row.message);
+    assert!(
+        row.message.contains("slack-mcp.SLACK_BOT_TOKEN"),
+        "{}",
+        row.message
+    );
+    assert!(
+        !row.message.contains(FAKE_TOKEN),
+        "value leaked: {}",
+        row.message
+    );
 }
 
 #[test]
@@ -165,7 +173,9 @@ fn fix_migrates_the_token_and_keeps_the_server_working() {
     let steps = repair_with_store(dir.path(), RepairMode::Apply, &store);
 
     assert!(
-        steps.iter().all(|s| matches!(s.status, StepStatus::Applied { .. })),
+        steps
+            .iter()
+            .all(|s| matches!(s.status, StepStatus::Applied { .. })),
         "{steps:?}"
     );
     let text = std::fs::read_to_string(&path).unwrap();
@@ -174,8 +184,14 @@ fn fix_migrates_the_token_and_keeps_the_server_working() {
     let slack = &after["mcpServers"]["slack-mcp"];
     assert_eq!(slack["command"], "slack-mcp");
     assert_eq!(slack["env"], json!({ "RUST_LOG": "info" }));
-    assert_eq!(after["mcpServers"]["trusty-search"]["args"], json!(["serve"]));
-    assert_eq!(after["oauthAccount"]["emailAddress"], "someone@example.invalid");
+    assert_eq!(
+        after["mcpServers"]["trusty-search"]["args"],
+        json!(["serve"])
+    );
+    assert_eq!(
+        after["oauthAccount"]["emailAddress"],
+        "someone@example.invalid"
+    );
     assert_eq!(store.get("slack").as_deref(), Some(FAKE_TOKEN));
     assert_eq!(mode(&path), 0o600);
     assert!(!format!("{steps:?}").contains(FAKE_TOKEN));
@@ -197,7 +213,9 @@ fn fix_leaves_the_file_untouched_when_the_store_refuses() {
     let steps = repair_with_store(dir.path(), RepairMode::Apply, &store);
 
     assert!(
-        steps.iter().any(|s| matches!(s.status, StepStatus::Failed(_))),
+        steps
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Failed(_))),
         "{steps:?}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -245,7 +263,10 @@ fn fix_dry_run_writes_nothing() {
 
     let steps = repair_with_store(dir.path(), RepairMode::DryRun, &store);
 
-    assert!(steps.iter().all(|s| s.status == StepStatus::Planned), "{steps:?}");
+    assert!(
+        steps.iter().all(|s| s.status == StepStatus::Planned),
+        "{steps:?}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(mode(&path), 0o644);
     assert!(store.list().is_empty());

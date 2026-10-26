@@ -251,7 +251,10 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
         ));
     }
     if f.too_wide() {
-        problems.push(format!("the file is mode {}, readable beyond its owner", f.mode_text()));
+        problems.push(format!(
+            "the file is mode {}, readable beyond its owner",
+            f.mode_text()
+        ));
     }
     if !f.wide_siblings.is_empty() {
         let list: Vec<String> = f
@@ -286,7 +289,11 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
         );
     }
     if !f.exists {
-        return DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, format!("{path} does not exist"));
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            format!("{path} does not exist"),
+        );
     }
     DoctorCheck::new(
         CHECK_NAME,

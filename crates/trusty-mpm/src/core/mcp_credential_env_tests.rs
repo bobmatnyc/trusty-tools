@@ -60,7 +60,10 @@ fn a_mapped_credential_moves_to_the_store_and_out_of_env() {
     let moved = store_credential_env(&mut env, &store).expect("stored");
 
     assert_eq!(moved, vec!["SLACK_BOT_TOKEN".to_string()]);
-    assert!(!env.contains_key("SLACK_BOT_TOKEN"), "the value stayed in env");
+    assert!(
+        !env.contains_key("SLACK_BOT_TOKEN"),
+        "the value stayed in env"
+    );
     assert_eq!(env.get("RUST_LOG"), Some(&json!("info")));
     assert_eq!(store.get("slack").as_deref(), Some(FAKE_TOKEN));
 }

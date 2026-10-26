@@ -191,8 +191,10 @@ pub(crate) fn add_cmd(
             // #10041: a credential goes to the store, never into the env block.
             // A store failure aborts the add before any config is written.
             let store = trusty_common::credentials::default_store();
-            let moved =
-                trusty_mpm::core::mcp_credential_env::store_credential_env(&mut env, store.as_ref())?;
+            let moved = trusty_mpm::core::mcp_credential_env::store_credential_env(
+                &mut env,
+                store.as_ref(),
+            )?;
             for key in &moved {
                 println!(
                     "Stored {key} in the credential store; '{name}' reads it from there at \

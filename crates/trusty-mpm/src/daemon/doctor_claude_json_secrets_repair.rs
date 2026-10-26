@@ -163,7 +163,11 @@ fn migrate(f: &ClaudeJsonFinding, mode: RepairMode, store: &dyn KeyStore) -> Rep
     }
     let bytes = match serde_json::to_string_pretty(&root) {
         Ok(s) => s,
-        Err(e) => return fail(format!("could not serialise the result ({e}); left untouched")),
+        Err(e) => {
+            return fail(format!(
+                "could not serialise the result ({e}); left untouched"
+            ));
+        }
     };
     // #10041: tighten first, so the atomic rename publishes a 0600 file. A
     // failure here is not swallowed: the caller re-reads the mode after this
@@ -230,6 +234,10 @@ fn tighten(path: &Path, mode: RepairMode, note: &str) -> RepairStep {
     }
     match set_owner_only(path) {
         Ok(()) => step(path, what, StepStatus::Applied { backup: None }),
-        Err(e) => step(path, what, StepStatus::Failed(format!("chmod failed: {}", e.kind()))),
+        Err(e) => step(
+            path,
+            what,
+            StepStatus::Failed(format!("chmod failed: {}", e.kind())),
+        ),
     }
 }

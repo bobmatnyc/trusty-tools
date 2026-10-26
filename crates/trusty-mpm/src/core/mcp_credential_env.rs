@@ -56,7 +56,10 @@ struct Planned {
 /// `a_read_back_mismatch_is_an_error`,
 /// `an_unmapped_credential_key_is_refused_before_any_write`,
 /// `ordinary_env_pairs_are_left_alone`.
-pub fn store_credential_env(env: &mut Map<String, Value>, store: &dyn KeyStore) -> Result<Vec<String>> {
+pub fn store_credential_env(
+    env: &mut Map<String, Value>,
+    store: &dyn KeyStore,
+) -> Result<Vec<String>> {
     let mut planned = Vec::new();
     for (key, value) in env.iter() {
         let value = value.as_str().unwrap_or_default();
