@@ -863,3 +863,75 @@ async fn tied_filename_hits_are_ordered_by_lane_score_not_chunk_id() {
             .collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn every_file_carrying_an_identifier_survives_overlapping_chunks_of_one_file() {
+    // Why: #7675 / #10203 parity probe — overlapping chunks of ONE file (a
+    // parent impl chunk and its child fn chunks, 89-811 and 89-188) all carry
+    // the literal, so they filled the floored page and pushed other files'
+    // single-occurrence carriers past `top_k`. ripgrep finds every file.
+    // What: one declaring file contributes a parent chunk plus six child
+    // chunks; four other files mention the identifier once. rg counts 10
+    // matching lines, so the parity bar is `top_k = 10` and every file must
+    // appear; the declaration must still rank first.
+    // Test: this test.
+    const IDENT: &str = "planted_recall_ident";
+    let idx = make_indexer();
+    let file = "src/core/planted.rs";
+    let children: Vec<String> = (0..6)
+        .map(|i| {
+            if i == 0 {
+                format!("fn {IDENT}(x: u32) -> u32 {{ x }}")
+            } else {
+                format!("fn caller_{i}() -> u32 {{ {IDENT}({i}) }}")
+            }
+        })
+        .collect();
+    let mut parent = raw(
+        "a_parent",
+        file,
+        &format!("impl Planted {{\n{}\n}}", children.join("\n")),
+    );
+    parent.start_line = 1;
+    parent.end_line = 8;
+    idx.add_chunk(parent).await.unwrap();
+    for (i, body) in children.iter().enumerate() {
+        let mut child = raw(&format!("a_child_{i}"), file, body);
+        child.start_line = 2 + i;
+        child.end_line = 2 + i;
+        child.parent_chunk_id = Some("a_parent".to_string());
+        idx.add_chunk(child).await.unwrap();
+    }
+    let others = [
+        "src/service/socket.rs",
+        "src/rpc/lanes_tests.rs",
+        "src/core/docs_penalty.rs",
+        "docs/notes.md",
+    ];
+    for (i, other) in others.iter().enumerate() {
+        idx.add_chunk(raw(
+            &format!("z_other_{i}"),
+            other,
+            &format!("// see {IDENT} for the rule\nfn unrelated_{i}() {{}}"),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let results = idx.search(&query(IDENT, 10)).await.unwrap();
+    let files: std::collections::HashSet<&str> = results.iter().map(|r| r.file.as_str()).collect();
+    let missing: Vec<&str> = std::iter::once(file)
+        .chain(others)
+        .filter(|f| !files.iter().any(|got| got.ends_with(f)))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "every file carrying `{IDENT}` must reach the top 10; missing {missing:?}, got {:?}",
+        results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        results[0].content.contains(&format!("fn {IDENT}")),
+        "the declaration must still rank first, got {}",
+        results[0].id
+    );
+}
