@@ -94,6 +94,30 @@ EVO p95 is noisy under fleet load, so a latency crossing can fire on noise. One 
 
 `scripts/perf_compare_selftest.sh` runs both scripts against fixtures in `scripts/test-data/perf-compare/`, cut from the two committed EVO files. Compared the same way, the 2026-10-23 file is an alert against 2026-10-17: `seeded_in` is +56.48%.
 
+## Weekly runner
+
+`scripts/perf_weekly_memory.sh` runs the four suites above on EVO, builds one envelope from the medians, compares it with the committed baseline and writes the status file. Run it from a committed, clean linked worktree; `evo-gate-log` refuses a dirty tree. Each run of each suite is one `evo-gate-log --tag perf-weekly --gate perf-<suite>` gate through `mpm-utils/scripts/evo`, with toolchain `+1.99.0`.
+
+```
+scripts/perf_weekly_memory.sh [--baseline FILE] [--out-dir DIR] [--status-file PATH]
+  [--runs-eval N] [--runs-profile N] [--runs-concurrent N] [--runs-slice N]
+  [--suite-timeout S] [--settle-s S] [--toolchain V]
+```
+
+Defaults: eval x1, profile x5, `concurrent_perf` x3, slice measure x3; 2400 s per run; baseline `2026-10-17-0.36.0-evo.json`.
+
+It fails closed:
+
+- Idle gate. Before each run it reads the EVO 1-minute load over ssh. A load of 2 or more that does not fall below 2 within `--settle-s` (default 300 s), or no reading, ends the whole run as `skipped`. No later suite runs and nothing is compared. The load after each run is recorded in `load.after`, not gated, because the run's own cargo job raises it.
+- A run that exits non-zero, times out, or prints no parseable figure ends the whole run as `failed`. A suite with fewer parsed runs than it ran is a failure, never a shorter median. A `concurrent_perf` block whose fields are missing or repeated (interleaved output) is a missing figure.
+- A `perf_compare.sh` error is `failed`.
+
+Exit codes: 0 ok, 10 warn, 11 alert (the compare verdict), 20 failed, 30 skipped, 2 bad usage. Every exit but 2 writes the `trusty-memory` entry of `.trusty-mpm/perf/status.json`.
+
+Output goes to the gitignored `.trusty-mpm/perf/memory/weekly/<UTC stamp>/` (or `--out-dir`, which must be ignored if it is inside the repository): one log per run (`eval1.log`, `profile1.log`, ...), `load.tsv`, `runs.jsonl` (parsed figures per run), `envelope.json`, `compare.json` and `runner.log`. The envelope records the toolchain and every command in `notes`. A run never writes a committed baseline; promotion is a PR the Architect clears.
+
+`scripts/perf_weekly_memory_selftest.sh` drives the runner with stubbed suite, load and host commands (the `PERF_RUN_CMD`, `PERF_LOAD_CMD` and `PERF_HOST_CMD` hooks) and the logs in `scripts/test-data/perf-weekly/`. It needs no EVO and no cargo. CI runs it and `perf_compare_selftest.sh` in the `changes` job of `ci.yml`.
+
 ## Live collector (read-only)
 
 `scripts/memory_perf_collect.sh` takes the storage, indexing and dream-score rows from a running or stopped trusty-memory data root and prints one envelope (schema 1) on stdout. It adds two fields to the envelope: `idle_gate` (`passed`, `failed` or `skipped`) and `sampled_palaces`. Palace rows carry `palace` (a size-rank label `p01`, `p02`, ...) and, for file rows, `file` (a basename).
