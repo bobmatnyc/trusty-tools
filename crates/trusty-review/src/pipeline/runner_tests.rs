@@ -1347,6 +1347,29 @@ async fn run_review_degraded_approve_is_capped_at_approve_with_reservations() {
     assert_eq!(healthy.verdict, Verdict::Approve);
 }
 
+/// #10226 cond2: the cap moves only a Degraded APPROVE; the grade is untouched.
+#[test]
+fn cap_degraded_approve_only_moves_a_degraded_approve() {
+    use crate::pipeline::runner_helpers::cap_degraded_approve;
+    let cases = [
+        (ReviewStatus::Degraded, Verdict::Approve, Verdict::ApproveWithReservations),
+        (ReviewStatus::Degraded, Verdict::ApproveWithReservations, Verdict::ApproveWithReservations),
+        (ReviewStatus::Degraded, Verdict::RequestChanges, Verdict::RequestChanges),
+        (ReviewStatus::Degraded, Verdict::Block, Verdict::Block),
+        (ReviewStatus::Degraded, Verdict::Unknown, Verdict::Unknown),
+        (ReviewStatus::Completed, Verdict::Approve, Verdict::Approve),
+    ];
+    for (status, verdict, want) in cases {
+        let mut result = crate::models::ReviewResult::new("o", "r", 1, "t", "u");
+        result.status = status;
+        result.verdict = verdict.clone();
+        result.grade = Some("A".to_string());
+        cap_degraded_approve(&mut result);
+        assert_eq!(result.verdict, want, "{status:?} {verdict:?}");
+        assert_eq!(result.grade.as_deref(), Some("A"), "{status:?} {verdict:?}");
+    }
+}
+
 /// #2994 re-review, finding #2: the persisted (degraded) review body must
 /// contain the `--source-root`-specific notice text — e.g. the actionable
 /// "Run `trusty-search index <dir>`" hint — not just a generic "trusty-search
