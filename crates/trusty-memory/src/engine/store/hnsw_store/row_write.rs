@@ -72,9 +72,11 @@ impl HnswStore {
     /// its own vector does not reach it (#9174). #10271: that upkeep runs only
     /// above [`EXHAUSTIVE_SCAN_MAX_POINTS`] graph points, the only size at which
     /// the graph arm reads the set; the insert that crosses the threshold
-    /// rebuilds the set with [`stranded::stranded_points`], as open does.
+    /// rebuilds the set with [`stranded::stranded_points`], as open does,
+    /// under the set's write lock.
     /// Test: `upsert_and_search_round_trips`,
     /// `upsert_skips_stranded_upkeep_until_the_graph_crosses_the_threshold`,
+    /// `a_row_committed_ahead_of_the_graph_never_hides_a_stranded_drawer`,
     /// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
     /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`,
     /// `upsert_chunks_replaces_the_group_and_shrinks`.
@@ -102,17 +104,25 @@ impl HnswStore {
         // #9487: both waits are bounded; a timeout trips the breaker.
         let _gate = self.bounded_gate("upsert")?;
         let index = self.bounded_graph("upsert")?;
-        // #10271: at or below the threshold the exact scan answers every
-        // search and the stranded set is unread, so skip its upkeep (3.5-4.5x
-        // the insert). `get_nb_point` never falls and is at least the live
-        // count the graph arm tests, so the crossing rebuild precedes any read.
-        if index.get_nb_point() <= EXHAUSTIVE_SCAN_MAX_POINTS {
-            quiet_insert::insert_quietly(&index, vector, vector_id as usize)
-                .map_err(HnswStoreError::StdoutGuard)?;
+        // #10271: while the graph holds at most the threshold, `ranked` takes
+        // the exact scan whatever the live count, so the stranded set is
+        // unread: skip its upkeep (3.5-4.5x the insert). The gate serialises
+        // inserts, and the graph count never falls.
+        let points = index.get_nb_point();
+        if points < EXHAUSTIVE_SCAN_MAX_POINTS {
+            return quiet_insert::insert_quietly(&index, vector, vector_id as usize)
+                .map_err(HnswStoreError::StdoutGuard);
+        }
+        if points == EXHAUSTIVE_SCAN_MAX_POINTS {
+            // #10271: this insert can cross. Hold the set's write lock across
+            // the insert and the rebuild, so a search that sees the new count
+            // waits for the rebuilt set. Lock order graph, then set, as `ranked`.
+            let mut set = self.stranded.write();
+            let inserted = quiet_insert::insert_quietly(&index, vector, vector_id as usize);
             if index.get_nb_point() > EXHAUSTIVE_SCAN_MAX_POINTS {
-                *self.stranded.write() = stranded::stranded_points(&index);
+                *set = stranded::stranded_points(&index);
             }
-            return Ok(());
+            return inserted.map_err(HnswStoreError::StdoutGuard);
         }
         // #9174: the lists this insert can evict from, read before it runs.
         let before = stranded::neighbourhoods_before_insert(&index, vector);
