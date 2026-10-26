@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-10-26
+
+### Breaking
+
+- `trusty_secrets::server::backends_for` takes a third parameter, `sandbox: &SandboxEnv`, so the factory and the server agree on whose machine config enables a backend (#9793). Pass the same `SandboxEnv` the binary reads at start and gives `StartEnv`.
+
+### Added
+
+- `secrets.copy` to `github-actions` pushes the named keys into the checkout's origin repository's Actions secrets through `gh` (DOC-74 S6, `cli-backends` builds). The value reaches `gh` on stdin only. A key is reported copied only when GitHub's `updated_at` for the secret advanced after the push; a signed-out `gh` is `backend_locked` and nothing is pushed (Refs #9069).
+- A push needs an explicit key list (`invalid_params` otherwise) and is refused with `agent_use_refused` for a caller with a Claude Code ancestor, or on the console bridge when the console judged its client an agent; each refusal and each key leaves an audit record naming the target (Refs #9069).
+- The target opens only when the account's own machine config has a `secrets.github_actions:` section; `program` pins `gh` (otherwise the fixed system directories, never `PATH`) and `config_path` becomes `GH_CONFIG_DIR`. Every inherited `GH_*`, `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` variable is removed from `gh`'s environment (Refs #9069).
+- `secrets.doctor` lists a `github-actions` row, judged without running `gh`. A sync target is never read back, never swept by `secrets.delete`, and never written to the names-only index (Refs #9069).
+- `BackendId::GITHUB_ACTIONS`, `BackendId::VERCEL`, `BackendId::is_sync_target`, `store::sync_targets`, `store::open_sync_target_at`, `store::RemoteIdentity`, `ScopeSet::derive_with_identity`, `ProjectContext::identity`, `CliCommand::env_remove`, the `github_actions` field on `MachineSecretsConfig`, and the `github_actions` and `vercel` fields on `ProjectSecretsConfig` (Refs #9069).
+- `trusty_secrets::granted`, the tier-3 client (DOC-74 S9): a process `tm secrets exec` started reads one granted value with `granted::resolve(&key)` or a `GrantedClient`. It reads the grant token from the fd named by `TRUSTY_SECRETS_TOKEN_FD` with `pread` at offset 0, which consumes nothing and changes nothing about the fd, refuses a socket whose directory is not 0700 or which is not 0600 and owned by this user, and waits 135 s, the server's resolve deadline plus its client margin. It resolves only: it never grants, revokes or starts a server. Every failure is a typed `GrantedError`; a refusal carries the wire code and kind. Unix only, blocking, under the existing `api` feature, which now also enables the already-optional `serde_json` and `libc` (Refs #9071).
+- The token fd must be a read-only fd on an unlinked regular file holding exactly 64 lowercase hex digits, the form `tm secrets exec` hands down (DOC-74 S10). Every process that inherits it resolves, siblings included: both commands in `sh -c 'migrate && serve'`. A pipe, a named or writable file, a socket or a directory is `GrantedError::TokenUnreadable`; any other content is `GrantedError::InvalidToken` (Refs #9071, #9072).
+- `trusty_secrets::api::TOKEN_FD_ENV`, the one name for the variable that carries the grant token's fd number (Refs #9071).
+- Under `TRUSTY_SANDBOX=1`, with `TRUSTY_DATA_DIR_OVERRIDE` an existing absolute directory and `$HOME` not the account's home, the server reads `file` consent from `$HOME/.trusty-tools/trusty-common/config.yaml`, so a sandbox can write `file` values (Refs #9793).
+- Under `TRUSTY_SANDBOX=1` the server opens only the `file` backend: the Keychain and the CLI backends answer `backend_not_enabled` for every operation, and an active sandbox's delete sweep skips them; with the flag set but `$HOME` the account's own, the delete is refused and the index row kept (Refs #9793).
+
+### Security
+
+- A tracked project file's `secrets.github_actions:` or `secrets.vercel:` section is refused with `tracked_cli_setting_refused`, so a repository cannot aim a push at a destination of its choosing; a sync target named as the project `secrets.backend` or the machine `secrets.default_backend` is refused with `config_invalid` (Refs #9069).
+
 ## [0.1.6] — 2026-10-11
 
 ### Breaking
