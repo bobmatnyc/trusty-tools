@@ -74,7 +74,8 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "core/gh_keyring_token.rs",
         "\"/usr/bin/security\"",
         "`--account` / `--account-token-stdin` CLI only; WRITES a proven gh token into gh's \
-         keyring entry instead of a plaintext hosts.yml, and refuses when sandboxed (#10037)",
+         keyring entry instead of a plaintext hosts.yml; refuses in a process that latched the \
+         #9121 sandbox (#10037)",
     ),
 ];
 

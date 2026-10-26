@@ -47,20 +47,43 @@ pub(crate) trait GhKeyringWriter {
 /// What: refuses a value it cannot quote ([`quoted`]); writes; reads back
 /// with the same tool and compares. Bounded by
 /// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`] per call, since a locked
-/// keychain hangs (#6867). A unit-test build, or a tm inside the #9121
-/// sandbox, never touches the keyring.
-/// Test: none directly (a real keyring); the decisions it feeds are covered
+/// keychain hangs (#6867). A unit-test build never touches the keyring, and
+/// neither does a process that has latched the #9121 sandbox
+/// ([`crate::secret_source::sandboxed`]).
+/// Test: the gate order is `the_system_keyring_refuses_a_sandboxed_store_first`;
+/// the rest needs a real keyring, so the decisions it feeds are covered
 /// through `TableKeyring` in `gh_keyring_token_tests.rs`.
 pub(crate) struct SystemGhKeyring;
 
 impl GhKeyringWriter for SystemGhKeyring {
     fn store(&self, host: &str, login: &str, token: &str) -> Result<(), String> {
+        Self::store_gated(crate::secret_source::sandboxed(), host, login, token)
+    }
+}
+
+/// `Err` when `sandboxed`: such a process never reaches the per-user keyring.
+///
+/// Why (#9121): a pure decision, so a test covers both arms without setting
+/// the process-wide latch under its parallel siblings.
+/// Test: `refuse_in_sandbox_refuses_only_when_sandboxed`.
+pub(crate) fn refuse_in_sandbox(sandboxed: bool) -> Result<(), String> {
+    if sandboxed {
+        return Err("a sandboxed tm never writes the keyring (#9121)".to_string());
+    }
+    Ok(())
+}
+
+impl SystemGhKeyring {
+    /// [`GhKeyringWriter::store`] with the sandbox state injected.
+    ///
+    /// What: the sandbox refusal runs first, then the unit-test refusal, so a
+    /// test reaches the sandbox arm.
+    /// Test: `the_system_keyring_refuses_a_sandboxed_store_first`,
+    /// `the_system_keyring_is_never_written_by_a_test`.
+    fn store_gated(sandboxed: bool, host: &str, login: &str, token: &str) -> Result<(), String> {
+        refuse_in_sandbox(sandboxed)?;
         if cfg!(test) {
             return Err("a unit-test build never writes the keyring (#10037)".to_string());
-        }
-        // #9121: a sandboxed tm never reaches the per-user keyring.
-        if crate::secret_source::sandboxed() {
-            return Err("a sandboxed tm never writes the keyring (#9121)".to_string());
         }
         let service = keyring_service(host);
         let (svc, user, secret) = (

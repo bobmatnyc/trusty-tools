@@ -271,7 +271,29 @@ fn the_system_keyring_is_never_written_by_a_test() {
     let err = SystemGhKeyring
         .store("github.com", "octo-new", "tok-in")
         .expect_err("a test build never writes the keyring");
-    assert!(err.contains("never writes the keyring"), "{err}");
+    assert!(err.contains("unit-test build"), "{err}");
+}
+
+/// The sandbox decision refuses only a sandboxed process; neither arm sets
+/// the process-wide latch.
+#[test]
+fn refuse_in_sandbox_refuses_only_when_sandboxed() {
+    let err = refuse_in_sandbox(true).expect_err("a sandboxed process is refused");
+    assert!(err.contains("#9121"), "{err}");
+    assert_eq!(refuse_in_sandbox(false), Ok(()));
+}
+
+/// #9121: the production writer checks the sandbox before the unit-test
+/// guard, so the sandbox refusal is reachable from a test.
+#[test]
+fn the_system_keyring_refuses_a_sandboxed_store_first() {
+    let err = SystemGhKeyring::store_gated(true, "github.com", "octo-new", "tok-in")
+        .expect_err("a sandboxed store is refused");
+    assert!(
+        err.contains("sandboxed tm never writes the keyring (#9121)"),
+        "{err}"
+    );
+    assert!(!err.contains("tok-in"), "{err}");
 }
 
 /// FAIL-OPEN CHECK: a value that could end its quotes or a `security -i` line
