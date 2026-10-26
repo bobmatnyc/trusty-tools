@@ -39,7 +39,7 @@ Run each suite from a committed clean linked worktree through `mpm-utils/scripts
 
 | Test | File | Profile | Runs | Measures |
 |---|---|---|---|---|
-| `recall_eval_holds_the_recorded_baseline` and its red arm `recall_eval_goes_red_with_demotion_or_retirement_off` | `crates/trusty-memory/tests/recall_eval.rs` | debug (ranks are deterministic) | x2 at baseline | hit@1 and superseded-above-current over 32 queries; per-query ranks give MRR and hit@k |
+| `recall_eval_holds_the_recorded_baseline` and its red arm `recall_eval_goes_red_with_demotion_or_retirement_off` | `crates/trusty-memory/tests/recall_eval.rs` | debug (ranks are deterministic) | x1 | hit@1 and superseded-above-current over 32 queries; per-query ranks give MRR and hit@k |
 | `recall_supersession_latency_profile` | `crates/trusty-memory/tests/recall_supersession.rs` | release | x5 | end-to-end `memory_recall` p50/p95 at 20,000 drawers, rulings leg off and on, plus `seeded_in` |
 | `concurrent_perf` (all `#[ignore]` tests) | `crates/trusty-memory/tests/concurrent_perf.rs` | release | x3 | latency distribution under concurrent reads, read/write mix, burst and sustained load |
 | `engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured` | `crates/trusty-memory/src/engine/retrieval/chunk_backfill_measure_tests.rs` | release | x3 | ONNX embed time per chunk, slice wall time, query-embed p50/p95/max idle and under a running slice |
@@ -69,16 +69,23 @@ Record the toolchain (`rustc -V` and the `+toolchain` used) and the exact comman
 Each report names its threshold in `threshold`.
 
 - Eval: hit@1 below 27/32, or any superseded-above-current, fails the build. That is a test failure, not an analysis finding.
-- Latency: p95 up more than 10% over the pinned baseline, in the median of 5 runs, same host and toolchain.
+- Latency and indexing: p95, `seeded_in` or an embed time at +25% or more over the pinned baseline is a warn; +50% or more is an alert. Use the median of the runs, same host and toolchain. These levels come from the Architect ruling of 2026-10-23 on [#10210](https://github.com/bobmatnyc/trusty-tools/issues/10210) (Q5). They replace the earlier 10% latency and 25% indexing lines. `scripts/perf_compare.sh` applies them (see Compare and status file).
 - Latency, HIGH: p95 up more than 2x, a breach of a ruled budget (E12 +5 ms at 20k rows; [#9141](https://github.com/bobmatnyc/trusty-tools/issues/9141) AC1 1 s resident), or an error rate above zero in `concurrent_perf`.
 - Storage: weekly growth more than 2x the trailing 4-week median, a single palace over 500 MB, or `reclaimable_bytes` above 25% of `kg.redb`.
 - Storage, HIGH: missing vectors above 0 with a clean alias audit (findable-data loss).
-- Indexing: embed time per chunk or build time up more than 25%.
 - Freshness above 1 s: no threshold until a baseline exists.
 
 A crossing goes to the Architect. The analysis files no issues and posts no comments.
 
-EVO p95 is noisy under fleet load, so the 10% latency threshold can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
+EVO p95 is noisy under fleet load, so a latency crossing can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
+
+## Compare and status file
+
+`scripts/perf_compare.sh BASELINE CURRENT` compares two schema-1 envelopes of the same `tool` and `label`. It grades `p95` where both rows have one, and `value` for `indexing` rows (`seeded_in`, embed times). Effectiveness rows are not graded; the eval gate is a test. The delta is `(current - baseline) / baseline` in percent, rounded to 0.01. Both levels include their boundary: exactly +25.00% is a warn and exactly +50.00% is an alert. A baseline row missing from the current envelope is listed under `missing` and does not change the verdict. The report is JSON on stdout. Exit codes: 0 ok, 10 warn, 11 alert, 12 error (missing or malformed file, schema other than 1, tool or label mismatch).
+
+`scripts/perf_status_write.sh` records the latest run per tool in the gitignored `.trusty-mpm/perf/status.json` that the Architect poller reads. Pass `--compare <report>` for a compared run, or `--verdict failed|skipped --reason <text>` for a run that produced no comparison. Each entry carries `ts`, `verdict` (ok, warn, alert, failed or skipped), the graded metrics with their baseline deltas, and `skipped_streak`. The reader warns on the first skipped run and alerts on the second in a row. The writer refuses a path inside the repository that git does not ignore.
+
+`scripts/perf_compare_selftest.sh` runs both scripts against fixtures in `scripts/test-data/perf-compare/`, cut from the two committed EVO files. Compared the same way, the 2026-10-23 file is an alert against 2026-10-17: `seeded_in` is +56.48%.
 
 ## Live collector (read-only)
 
