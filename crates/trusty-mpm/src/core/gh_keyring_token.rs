@@ -256,7 +256,8 @@ fn mapping_at<'a>(map: &'a mut Mapping, key: &str) -> Option<&'a mut Mapping> {
 /// Does gh `hosts.yml` text hold a non-empty `oauth_token` for any host?
 ///
 /// What: a host-level `oauth_token` or any `users.<login>.oauth_token`.
-/// `Err` when the text is not YAML; never carries a value.
+/// A blank file holds none. `Err` when the text is not YAML or not a
+/// mapping; never carries a value.
 /// Test: `holds_token_sees_host_and_user_tokens`.
 pub(crate) fn hosts_yml_holds_token(text: &str) -> Result<bool, String> {
     let doc: Value = serde_yaml::from_str(text).map_err(|_| "is not YAML".to_string())?;
@@ -264,8 +265,13 @@ pub(crate) fn hosts_yml_holds_token(text: &str) -> Result<bool, String> {
         v.and_then(Value::as_str)
             .is_some_and(|t| !t.trim().is_empty())
     };
+    // #10037 fail-open check: a file gh cannot read as hosts is unknown, not clean.
     let Some(hosts) = doc.as_mapping() else {
-        return Ok(false);
+        return if doc.is_null() {
+            Ok(false)
+        } else {
+            Err("is not a gh hosts.yml mapping".to_string())
+        };
     };
     Ok(hosts.values().any(|host| {
         present(host.get("oauth_token"))

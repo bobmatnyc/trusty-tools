@@ -233,6 +233,8 @@ fn holds_token_sees_host_and_user_tokens() {
         Ok(false)
     );
     assert!(hosts_yml_holds_token(":: [").is_err());
+    assert!(hosts_yml_holds_token("- tok-x\n").is_err(), "a list is not clean");
+    assert_eq!(hosts_yml_holds_token(""), Ok(false));
 }
 
 /// The doctor scan names token-holding and unparsable files and skips clean
