@@ -1,0 +1,2 @@
+Fixed
+- A kill between the two snapshot renames no longer leaves chunks without vectors until a forced reindex. On load, `hnsw.keys.json` entries whose key the HNSW graph lacks are dropped (one WARN line reports the count), so the next deferred or catch-up embed pass re-embeds those ids. The check is read-only on an mmap view and the sidecar format is unchanged. A sidecar that cannot cover the graph after the check (the graph holds keys no entry names) discards the snapshot, as other torn pairings do (#10301).
