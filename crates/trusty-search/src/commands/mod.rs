@@ -25,6 +25,8 @@ pub(crate) mod doctor_pipeline;
 pub mod format;
 pub mod index_resolve;
 pub mod log_rotation;
+// #10297: every consumer is macOS-only; `test` keeps its pure tests running on Linux.
+#[cfg(any(target_os = "macos", test))]
 pub mod log_rotation_keep;
 pub mod reindex_engine;
 pub(crate) mod reindex_ui;
