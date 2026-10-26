@@ -9,7 +9,8 @@
 //! What: [`prepare_session_account`] is the pre-spawn gate the CLI runs. It
 //! builds or reuses the per-account dir, refuses a dir it cannot trust, proves
 //! a token for the login with `GET /user` ([`crate::core::gh_account_proof`]),
-//! and writes that token into the dir's 0600 `hosts.yml` itself. It never runs
+//! and stores that token in gh's keyring entry for the login itself (#10037:
+//! never in the dir's `hosts.yml`, [`crate::core::gh_keyring_token`]). It never runs
 //! or suggests `gh auth login`: gh's login activates the account in the
 //! machine-wide keyring slot. [`session_spawn_env`] is the daemon-side env
 //! builder: every config-dir pin gets a verified credential (#9750: the gh
@@ -28,6 +29,7 @@ use crate::core::gh_account_proof::{
     CliTokenProbe, GhTokenProbe, GhUserCheck, HttpUserCheck, api_base_url, identity_token_vars,
     origin_host, prove_account_token,
 };
+use crate::core::gh_keyring_token::{GhKeyringWriter, SystemGhKeyring, store_in_keyring};
 use crate::core::gh_session_shim::PinnedCredential;
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 
@@ -42,15 +44,16 @@ pub(crate) const GH_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 ///
 /// Why: `gh auth login`, even with `GH_CONFIG_DIR` and `--insecure-storage`,
 /// activates the account in the machine-wide keyring slot, so tm never names
-/// it. A token on stdin touches no keyring.
+/// it. A token on stdin never activates a keyring slot.
 /// What: rerun with `--account-token-stdin`; tm proves the token with
-/// `GET /user` and stores it in `<dir>/hosts.yml`.
+/// `GET /user` and stores it in gh's keyring entry for the login. #10037:
+/// `<dir>/hosts.yml` names the login and holds no token.
 /// Test: `no_refusal_names_a_gh_auth_login_command`.
 pub(crate) fn setup_hint(login: &str, dir: &Path) -> String {
     format!(
         "rerun the tm command with `--account {login} --account-token-stdin` and a token that \
          authenticates as '{login}' on stdin (`... < token-file`); tm proves it with `GET /user` \
-         and stores it in {}/hosts.yml, mode 0600",
+         and stores it in the keyring entry gh reads for '{login}' (never in {}/hosts.yml)",
         dir.display()
     )
 }
@@ -85,8 +88,9 @@ pub fn prepare_session_account(
     let operator_dir = crate::core::gh_account::gh_config_dir()
         .unwrap_or_else(|| PathBuf::from(".config").join("gh"));
     let origin = session_origin(login, origin, &SshHostAliases::for_current_user())?;
+    let keyring = SystemGhKeyring;
     if let Some(token) = stdin_token {
-        store_supplied_token(&state_root, login, &origin, token, &HttpUserCheck)?;
+        store_supplied_token(&state_root, login, &origin, token, &HttpUserCheck, &keyring)?;
     }
     prepare_session_account_with(
         &state_root,
@@ -95,6 +99,7 @@ pub fn prepare_session_account(
         &origin,
         &StoredTokenFirst(&CliTokenProbe),
         &HttpUserCheck,
+        &keyring,
     )
 }
 
@@ -122,7 +127,7 @@ pub(crate) fn session_origin(
 }
 
 /// Build or reuse `login`'s per-account `gh` dir, prove a token for it, and
-/// store that token in the dir's `hosts.yml`.
+/// store that token in gh's keyring entry for the login (#10037).
 ///
 /// Why: a session started with `--account` must run as that account or not
 /// start. Starting it with no identity is the #8914 defect.
@@ -133,17 +138,21 @@ pub(crate) fn session_origin(
 /// its `hosts.yml` must parse and name `login`. The dir is set to 0700 and its
 /// `hosts.yml`/`config.yml` to 0600. A token for `login` from the dir or from
 /// `operator_gh_config_dir` must pass `GET /user` on the origin's host; it is
-/// then written as `users.<login>.oauth_token` ([`store_token`]). Returns the
-/// dir. Every `Err` is [`refusal`] text.
+/// then stored through `keyring` and the dir's `hosts.yml` is left naming the
+/// login with no token ([`store_in_keyring`]). A legacy #8914 `hosts.yml`
+/// token is migrated that way; a keyring failure refuses and keeps the file as
+/// it was. Returns the dir. Every `Err` is [`refusal`] text.
 /// Test: `a_logged_in_login_gets_a_private_proven_dir`,
-/// `a_proven_token_is_stored_in_the_private_hosts_yml`,
 /// `an_unknown_login_is_refused_with_the_setup_command`,
 /// `a_token_for_another_account_is_refused_not_used`,
 /// `an_unreadable_account_dir_is_refused`,
 /// `a_malformed_hosts_yml_is_refused`,
 /// `a_missing_hosts_yml_for_an_unknown_login_is_refused`,
 /// `a_malformed_config_yml_is_refused`,
-/// `a_reused_dir_is_made_private`.
+/// `a_reused_dir_is_made_private`,
+/// `a_proven_token_never_lands_in_hosts_yml`,
+/// `a_legacy_hosts_yml_token_is_migrated_to_the_keyring`,
+/// `a_keyring_failure_refuses_the_pin_and_keeps_hosts_yml`.
 pub(crate) fn prepare_session_account_with(
     state_root: &Path,
     operator_gh_config_dir: &Path,
@@ -151,6 +160,7 @@ pub(crate) fn prepare_session_account_with(
     origin: &str,
     probe: &dyn GhTokenProbe,
     check: &dyn GhUserCheck,
+    keyring: &dyn GhKeyringWriter,
 ) -> Result<PathBuf, String> {
     origin_host(origin).map_err(|e| format!("cannot pin gh account '{login}': {e}"))?;
     let dir = tm_account_dir(state_root, login)?;
@@ -186,21 +196,26 @@ pub(crate) fn prepare_session_account_with(
         ))
     })?;
     // #8914 HIGH 1: tm stores the proven token itself; no `gh auth login`.
-    store_token(&dir, &proven.host, &canonical, proven.secret()).map_err(refuse)?;
+    // #10037: in gh's keyring entry, never in hosts.yml.
+    store_in_keyring(&dir, &proven.host, &canonical, proven.secret(), keyring).map_err(refuse)?;
+    make_private(&dir).map_err(refuse)?;
     Ok(dir)
 }
 
-/// Prove a token the operator piped on stdin and store it in `login`'s
-/// per-account dir (#8914 HIGH 1).
+/// Prove a token the operator piped on stdin and store it in gh's keyring
+/// entry for `login` (#8914 HIGH 1, #10037).
 ///
 /// Why: when the operator's own gh cannot yield `login`'s token (the #5851
-/// keyring shape), stdin is the setup path that touches no keyring.
+/// keyring shape), stdin is the setup path that activates no keyring slot.
 /// What: the token must be non-empty and `GET /user` on the origin's host must
 /// answer `login`, BEFORE anything is written. Then the dir is created 0700,
-/// its `config.yml` declares `version: "1"`, and the token is written with
-/// [`store_token`]. Every `Err` is [`refusal`] text; a refused token writes
-/// nothing. Returns the dir.
+/// its `config.yml` declares `version: "1"`, and [`store_in_keyring`] puts the
+/// token in the keyring and leaves `hosts.yml` naming the login with no token.
+/// Every `Err` is [`refusal`] text; a refused token writes nothing, and a
+/// keyring failure writes no `hosts.yml`. Returns the dir.
 /// Test: `a_stdin_token_is_proven_then_stored`,
+/// `a_stdin_token_never_lands_in_hosts_yml`,
+/// `a_stdin_keyring_failure_never_falls_back_to_hosts_yml`,
 /// `a_stdin_token_for_another_account_is_refused_and_not_stored`,
 /// `a_stdin_token_whose_proof_fails_is_refused_and_not_stored`,
 /// `an_empty_stdin_token_is_refused`.
@@ -210,6 +225,7 @@ pub(crate) fn store_supplied_token(
     origin: &str,
     token: &str,
     check: &dyn GhUserCheck,
+    keyring: &dyn GhKeyringWriter,
 ) -> Result<PathBuf, String> {
     let host = origin_host(origin).map_err(|e| format!("cannot pin gh account '{login}': {e}"))?;
     let dir = tm_account_dir(state_root, login)?;
@@ -231,7 +247,8 @@ pub(crate) fn store_supplied_token(
         .map_err(|e| refuse(format!("cannot create {} ({e})", dir.display())))?;
     make_private(&dir).map_err(refuse)?;
     ensure_config_version(&dir).map_err(refuse)?;
-    store_token(&dir, &host, &actual, token).map_err(refuse)?;
+    // #10037: the keyring, never hosts.yml; a keyring failure writes no file.
+    store_in_keyring(&dir, &host, &actual, token, keyring).map_err(refuse)?;
     make_private(&dir).map_err(refuse)?;
     Ok(dir)
 }
@@ -261,71 +278,9 @@ fn require_hosts_yml_names(dir: &Path, login: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{} does not name '{login}'", path.display()))
 }
 
-/// Write `token` into `<dir>/hosts.yml` as gh's insecure-storage layout for
-/// `host`: `users.<login>.oauth_token`, plus `user` and `oauth_token` (#8914).
-///
-/// Why: tm's per-account dir must hold its account's own credential, or gh
-/// under it reads the machine-wide keyring slot.
-/// What: every other key is kept. A file already holding exactly this is not
-/// rewritten. The write is atomic ([`trusty_common::atomic_file::write_atomic`])
-/// and the file ends 0600. A file that is not a YAML mapping is refused, never
-/// replaced.
-/// Test: `a_proven_token_is_stored_in_the_private_hosts_yml`,
-/// `a_hosts_yml_that_is_not_a_mapping_is_refused_and_kept`.
-fn store_token(dir: &Path, host: &str, login: &str, token: &str) -> Result<(), String> {
-    use serde_yaml::{Mapping, Value};
-    let path = dir.join("hosts.yml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("{} is unreadable ({e})", path.display())),
-    };
-    let original: Value = if text.trim().is_empty() {
-        Value::Mapping(Mapping::new())
-    } else {
-        serde_yaml::from_str(&text).map_err(|_| format!("{} is not YAML", path.display()))?
-    };
-    let mut doc = original.clone();
-    let not_a_map = || format!("{} is not a gh hosts.yml mapping", path.display());
-    let host_map = mapping_at(&mut doc, host).ok_or_else(not_a_map)?;
-    let users = mapping_at_value(host_map, "users").ok_or_else(not_a_map)?;
-    mapping_at_value(users, login)
-        .ok_or_else(not_a_map)?
-        .insert("oauth_token".into(), token.into());
-    host_map.insert("user".into(), login.into());
-    host_map.insert("oauth_token".into(), token.into());
-    if doc != original {
-        let rendered = serde_yaml::to_string(&doc)
-            .map_err(|e| format!("cannot render {} ({e})", path.display()))?;
-        trusty_common::atomic_file::write_atomic(&path, rendered.as_bytes())
-            .map_err(|e| format!("cannot write {} ({e})", path.display()))?;
-    }
-    make_private(dir)
-}
-
-/// The mapping at top-level key `key` of `doc`, created when absent or null.
-fn mapping_at<'a>(
-    doc: &'a mut serde_yaml::Value,
-    key: &str,
-) -> Option<&'a mut serde_yaml::Mapping> {
-    mapping_at_value(doc.as_mapping_mut()?, key)
-}
-
-/// The mapping under `key` in `map`, created when absent or null.
-fn mapping_at_value<'a>(
-    map: &'a mut serde_yaml::Mapping,
-    key: &str,
-) -> Option<&'a mut serde_yaml::Mapping> {
-    let slot = map.entry(key.into()).or_insert(serde_yaml::Value::Null);
-    if slot.is_null() {
-        *slot = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    slot.as_mapping_mut()
-}
-
 /// Set `dir` to 0700 and its `hosts.yml`/`config.yml`, when present, to 0600.
 ///
-/// Why: the dir holds a token (#8914), and a dir the operator's own
+/// Why: the dir may still hold a legacy #8914 token, and a dir the operator's own
 /// `gh auth login` created keeps gh's modes.
 #[cfg(unix)]
 fn make_private(dir: &Path) -> Result<(), String> {
@@ -376,7 +331,8 @@ pub(crate) fn git_credential_pin(host: &str, helper: &str) -> Vec<(String, Strin
 /// The token `<dir>/hosts.yml` stores for `login` on `host`, if any (#8914).
 ///
 /// Why: `gh auth token -u <login>` reads the keyring BEFORE `hosts.yml`, so a
-/// stale keyring slot would shadow the token tm stored and proved.
+/// stale keyring slot would shadow the token tm stored and proved. #10037: tm
+/// no longer writes one; this reads a legacy one so the next pin migrates it.
 /// What: `<host>.users.<login>.oauth_token` (login matched case-insensitively),
 /// non-empty; `None` for a missing, unreadable or unparsable file.
 /// Test: `a_stored_token_is_read_before_gh_is_asked`.

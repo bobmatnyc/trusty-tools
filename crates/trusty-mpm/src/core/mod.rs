@@ -186,6 +186,8 @@ pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #9091: asks gh about a login in the daemon's env and in tm's account dirs.
 pub(crate) mod gh_login_probe;
+// #10037: a proven gh token goes to gh's keyring entry, never `hosts.yml`.
+pub(crate) mod gh_keyring_token;
 // #9750: the launch-time keyring login check for a pinned project (D6e).
 pub mod gh_login_verify;
 // #9091: `[accounts]` org → gh account map and the one account resolver.

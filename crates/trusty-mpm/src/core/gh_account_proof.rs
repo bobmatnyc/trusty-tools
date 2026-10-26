@@ -311,8 +311,9 @@ impl ProvenToken {
         identity_token_vars(Some((&self.host, &self.token)))
     }
 
-    /// The proven token itself, for tm's own 0600 `hosts.yml` (#8914).
-    /// Test: `a_proven_token_is_stored_in_the_private_hosts_yml`.
+    /// The proven token itself, for gh's keyring entry (#8914; #10037: never
+    /// a `hosts.yml`).
+    /// Test: `a_proven_token_never_lands_in_hosts_yml`.
     pub(crate) fn secret(&self) -> &str {
         &self.token
     }
