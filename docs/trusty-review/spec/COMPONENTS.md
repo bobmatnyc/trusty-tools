@@ -210,6 +210,7 @@ Opus is intentionally excluded (not access-granted in the target account).
 - `Completed` (default) — ran with full required context; verdict is **authoritative**
 - `Skipped` — a REQUIRED context dep (trusty-search/trusty-analyze) was unavailable; **no real verdict** was produced (CLI exits non-zero; service never posts)
 - `Degraded` — opted-in context-free run; the verdict is present but explicitly **non-authoritative** (loudly labelled in `review_body`); an APPROVE is capped at `APPROVE_WITH_RESERVATIONS`, the grade is kept (#10226)
+  - The kept letter may sit above the C+ ceiling `verdict_to_grade` applies to `APPROVE_WITH_RESERVATIONS` (e.g. A beside APPROVE*). This pairing is intentional: owner ruling D06 keeps the model's grade on a Degraded run (#10226)
 - helpers: `is_authoritative()` (only `Completed`), `is_skipped()`
 
 **`ReviewResult`** — complete output of a PR review pass:
