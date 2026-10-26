@@ -52,33 +52,25 @@ use std::path::PathBuf;
 use super::backend::{ChildIssue, EpicBackend, NewIssue, PUBLISH_REF};
 use super::plan::{self, EpicPlan};
 use super::render;
+use crate::commands::issue::board::attach::{AttachOutcome, attach_or_waive};
+use crate::commands::issue::board::error::BoardError;
 use crate::commands::issue::config::{ModelSource, StateModel};
 use crate::commands::issue::standard_live::one_line;
 
-/// The comment prefix recording on the issue why it carries no project.
-///
-/// Shaped after the standard's `no-milestone:` and `no-component-label:`
-/// hatches, and read the same way by THIS verb — which skips posting a second
-/// one — but by nothing else: `core::issue_audit`'s project row has no waiver
-/// arm, so this is a record for a human reader rather than something that turns
-/// an audit FAIL into a SKIP. Kept byte-for-byte anyway, so a future reader on
-/// either side matches it literally.
-pub(crate) const NO_PROJECT_PREFIX: &str = "no-project:";
+// #10276: the prefix and the scope classifier moved to the one Projects
+// module (epic #10274, D2); `board add` and this verb share them.
+#[cfg(test)]
+pub(crate) use crate::commands::issue::board::attach::NO_PROJECT_PREFIX;
 
 /// Whether an attach failure is the token's project scope refusing.
 ///
-/// Why: this is the ONE attach failure that degrades to a waiver comment
-/// instead of failing the run, so the line between it and everything else has
-/// to be drawn on the error text rather than on "an attach failed". A 502 or a
-/// rate limit is retryable, and writing `no-project: …502…` onto every issue
-/// would make a transient outage a permanent record.
-/// What: matches gh's handled wording (`your authentication token is missing
-/// required scopes [project]`) and the raw GraphQL message it wraps, both of
-/// which carry `required scopes`, case-insensitively.
+/// Why: kept as this verb's name for the classifier its tests pin.
+/// What: `AttachFailure::MissingScope` from `board::attach::classify`.
 /// Test: `a_scope_refusal_is_recognised_in_both_wordings`.
+#[cfg(test)]
 pub(crate) fn is_scope_refusal(text: &str) -> bool {
-    let lowered = text.to_lowercase();
-    lowered.contains("required scopes") || lowered.contains("missing required scope")
+    use crate::commands::issue::board::attach::{AttachFailure, classify};
+    classify(text) == AttachFailure::MissingScope
 }
 
 /// Everything `tm issue epic create` needs beyond the plan document.
@@ -357,29 +349,28 @@ fn attach_project_or_waive<B: EpicBackend>(
     let Some(number) = project else {
         return Ok(());
     };
-    let Err(e) = backend.attach_project(repo, issue, number) else {
-        return Ok(());
+    // #10276: the D10 degrade lives in `board::attach::attach_or_waive`, the
+    // one function whose missing-scope arm alone posts the waiver.
+    let failed = |what: &'static str| {
+        move |e: anyhow::Error| BoardError::Command {
+            what: what.to_string(),
+            detail: format!("{e:#}"),
+        }
     };
-    let reason = one_line(&e);
-    // #8447: only a scope refusal degrades. A 502 or a rate limit is retryable,
-    // and `no-project: …502…` on every issue would outlive the outage.
-    if !is_scope_refusal(&reason) {
-        return Err(e.context(format!(
-            "could not attach #{issue} to project {number}, and the failure is not the token's \
-             project scope — refusing to record a retryable outage as a permanent \
-             `{NO_PROJECT_PREFIX}` comment"
-        )));
+    let outcome = attach_or_waive(
+        issue,
+        number,
+        || {
+            backend
+                .attach_project(repo, issue, number)
+                .map_err(failed("gh project attach"))
+        },
+        || backend.comments(issue).map_err(failed("comments")),
+        |body| backend.comment(issue, body).map_err(failed("comment")),
+    )?;
+    if let AttachOutcome::Waived { reason, .. } = outcome {
+        waived.push(format!("#{issue}: {reason}"));
     }
-    // #8447: a second run with the scope still missing must not post a second
-    // waiver. The backend has a comment read for exactly this check.
-    let already = backend
-        .comments(issue)?
-        .iter()
-        .any(|c| c.trim_start().starts_with(NO_PROJECT_PREFIX));
-    if !already {
-        backend.comment(issue, &format!("{NO_PROJECT_PREFIX} {reason}"))?;
-    }
-    waived.push(format!("#{issue}: {reason}"));
     Ok(())
 }
 

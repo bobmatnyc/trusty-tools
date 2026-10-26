@@ -698,9 +698,9 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     }
     // #7274: the PR half of the labels/project/milestone standard, applied
     // after the PR exists because every step needs its number.
-    // #9749: a closed inherited project falls back to the configured default.
-    let fallback = ticketing.default_project.as_deref();
-    missing.extend(metadata_apply::apply(gh, args, pre, number, &plan.body, fallback).missing());
+    // #10276: a PR is not a board item (epic #10274, D7), so no
+    // `default_project` replaces a closed inherited project any more.
+    missing.extend(metadata_apply::apply(gh, args, pre, number, &plan.body).missing());
     // #7275: record the PR so the daemon can clean up after it merges.
     record_for_cleanup(pre, url, number);
 

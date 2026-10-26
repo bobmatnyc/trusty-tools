@@ -2289,11 +2289,11 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
         .on_fail("pr edit 4242", "'mpm 1.6' not found");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
 
-    let missing =
-        match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"), None) {
-            ApplyOutcome::Partial(missing) => missing,
-            ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
-        };
+    let missing = match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"))
+    {
+        ApplyOutcome::Partial(missing) => missing,
+        ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
+    };
     let joined = missing.join("; ");
     assert!(joined.contains("milestone \"mpm 1.6\""), "{joined}");
     assert!(joined.contains("inherited from #7274"), "{joined}");
@@ -2336,10 +2336,12 @@ fn pr_9749_a_closed_inherited_project_does_not_fail_the_open() {
     );
 }
 
-/// #9749: the skipped closed project is replaced by the configured
-/// `agents.ticketing.default_project`, and only a closed one is skipped.
+/// #10276 (epic #10274, D7): a PR is not a board item, so a skipped closed
+/// project is no longer replaced by `agents.ticketing.default_project` —
+/// this rewrites #9749's fallback test — and PR open never runs
+/// `project item-add`. Only a closed project is skipped.
 #[test]
-fn pr_9749_a_closed_project_falls_back_to_the_default_project() {
+fn pr_10276_a_closed_project_is_skipped_and_no_default_project_is_added() {
     let gh = FakeGh::new()
         .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
         .on("project list", CLOSED_PROJECT_LIST_JSON)
@@ -2350,21 +2352,24 @@ fn pr_9749_a_closed_project_falls_back_to_the_default_project() {
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
     let body = body_linking("Refs #7274");
 
-    let outcome =
-        metadata_apply::apply(&gh, &args, &pre, "4242", &body, Some("trusty-tools-master"));
+    let outcome = metadata_apply::apply(&gh, &args, &pre, "4242", &body);
     assert_eq!(outcome, ApplyOutcome::Applied);
     let calls: Vec<String> = gh.calls().into_iter().map(|c| c.join(" ")).collect();
     assert!(
         calls
             .iter()
             .any(|c| c == "project list --owner o --closed -L 200 --format json"),
-        "the owner comes from --repo: {calls:?}"
+        "the closed project is still recognised: {calls:?}"
     );
     assert!(
-        calls
+        !calls
             .iter()
-            .any(|c| c == "pr edit 4242 --repo o/r --add-project trusty-tools-master"),
-        "{calls:?}"
+            .any(|c| c.contains("--add-project trusty-tools-master")),
+        "no default_project is added to a PR: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("project item-add")),
+        "PR open never runs `project item-add`: {calls:?}"
     );
 
     // An open project that fails stays missing: only a closed one is skipped.
@@ -2374,7 +2379,7 @@ fn pr_9749_a_closed_project_falls_back_to_the_default_project() {
         .on_fail("--add-project Harness", "'Harness' not found")
         .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
         .on("pr edit 4242", "");
-    let missing = metadata_apply::apply(&gh, &args, &pre, "4242", &body, None);
+    let missing = metadata_apply::apply(&gh, &args, &pre, "4242", &body);
     assert_eq!(
         missing,
         ApplyOutcome::Partial(vec![

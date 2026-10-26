@@ -72,20 +72,19 @@ impl ApplyOutcome {
 /// [`apply_plan`]. Prints what applied and one line per thing the standard
 /// wanted and this PR could not get. The phase tag ([`phase_title::decide`],
 /// #9571) joins the same edit; an issue too unreadable to decide it is missing.
-/// `fallback` is `agents.ticketing.default_project`, the project that replaces
-/// a closed inherited one (#9749).
+/// A closed inherited project is skipped (#9749) and nothing replaces it: a PR
+/// is not a board item (#10276, D7).
 /// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
 /// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
 /// `open_notes_an_unreadable_refs_issue`, `pr_9571_open_tags_a_phase_pr_title`,
 /// `pr_9571_an_unreadable_issue_reports_the_title_missing`,
-/// `pr_9749_a_closed_project_falls_back_to_the_default_project`.
+/// `pr_10276_a_closed_project_is_skipped_and_no_default_project_is_added`.
 pub(crate) fn apply<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
     pre: &P,
     pr: &str,
     body: &str,
-    fallback: Option<&str>,
 ) -> ApplyOutcome {
     // #7274 round 2: a failed read reaches `plan` as its own state, so the note
     // it prints names the failure rather than blaming an empty answer.
@@ -115,7 +114,7 @@ pub(crate) fn apply<R: GhRunner, P: Preflight>(
         TitleDecision::Warn(w) => eprintln!("  warning: {w}"),
         TitleDecision::Unknown(what) => unknown = Some(what),
     }
-    let outcome = apply_plan(gh, args, pr, &meta, fallback);
+    let outcome = apply_plan(gh, args, pr, &meta);
     for note in &meta.notes {
         println!("  {note}");
     }
@@ -199,18 +198,12 @@ fn is_not_an_issue(err: &anyhow::Error) -> bool {
 /// What: the combined edit first. On failure, a warning naming every field, its
 /// value and the issue it was inherited from, then one edit per field. A field
 /// that fails twice is reported missing, never applied (the fail-open rule) —
-/// except a project the owner has closed, which is skipped and replaced by
-/// `fallback` when one is set (#9749).
+/// except a project the owner has closed, which is skipped (#9749); nothing
+/// replaces it, since a PR is not a board item (#10276, D7).
 /// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`,
 /// `pr_9749_a_closed_inherited_project_does_not_fail_the_open`,
 /// `open_applies_pr_metadata`, `open_survives_a_failed_metadata_edit`.
-fn apply_plan<R: GhRunner>(
-    gh: &R,
-    args: &PrOpenArgs,
-    pr: &str,
-    meta: &PrMetadata,
-    fallback: Option<&str>,
-) -> ApplyOutcome {
+fn apply_plan<R: GhRunner>(gh: &R, args: &PrOpenArgs, pr: &str, meta: &PrMetadata) -> ApplyOutcome {
     if meta.is_empty() {
         return ApplyOutcome::Applied;
     }
@@ -231,7 +224,6 @@ fn apply_plan<R: GhRunner>(
     eprintln!("  retrying once, one field at a time");
     let mut missing = Vec::new();
     let mut closed: Option<Vec<String>> = None;
-    let mut skipped = Vec::new();
     for (what, one) in steps(meta) {
         let a = metadata::edit_argv(pr, args.repo.as_deref(), &one);
         match gh.run(&a) {
@@ -239,7 +231,6 @@ fn apply_plan<R: GhRunner>(
             // #9749: a closed project cannot be added; skip it, not fail.
             Ok(_) | Err(_) if is_closed_project(gh, args, &one, &mut closed) => {
                 println!("  skipped closed {what}");
-                skipped.extend(one.projects);
             }
             Ok(out) => {
                 eprintln!("  warning: {what} still failed: {}", out.stderr.trim());
@@ -250,9 +241,6 @@ fn apply_plan<R: GhRunner>(
                 missing.push(what);
             }
         }
-    }
-    if !skipped.is_empty() {
-        missing.extend(apply_fallback(gh, args, pr, meta, fallback));
     }
     if missing.is_empty() {
         ApplyOutcome::Applied
@@ -285,50 +273,6 @@ fn is_closed_project<R: GhRunner>(
         })
     });
     titles.iter().any(|t| t == project)
-}
-
-/// Put the PR on `fallback` after a closed inherited project was skipped
-/// (#9749).
-///
-/// What: no call when `fallback` is unset (a note names the config key) or is
-/// one of the inherited projects, which the retry already tried. Otherwise one
-/// `gh pr edit --add-project`; its failure is returned as missing.
-fn apply_fallback<R: GhRunner>(
-    gh: &R,
-    args: &PrOpenArgs,
-    pr: &str,
-    meta: &PrMetadata,
-    fallback: Option<&str>,
-) -> Option<String> {
-    let Some(fallback) = fallback.map(str::trim).filter(|f| !f.is_empty()) else {
-        println!(
-            "  note: no `agents.ticketing.default_project` is configured, so no project \
-             replaces the closed one"
-        );
-        return None;
-    };
-    if meta.projects.iter().any(|p| p == fallback) {
-        return None;
-    }
-    let one = PrMetadata {
-        projects: vec![fallback.to_string()],
-        ..PrMetadata::default()
-    };
-    let what = format!("project \"{fallback}\" (agents.ticketing.default_project)");
-    match gh.run(&metadata::edit_argv(pr, args.repo.as_deref(), &one)) {
-        Ok(out) if out.success => {
-            println!("  applied in place of the closed project: {what}");
-            None
-        }
-        Ok(out) => {
-            eprintln!("  warning: {what} failed: {}", out.stderr.trim());
-            Some(what)
-        }
-        Err(e) => {
-            eprintln!("  warning: {what} could not be applied: {e:#}");
-            Some(what)
-        }
-    }
 }
 
 /// One human description per field the plan would apply (#7646).

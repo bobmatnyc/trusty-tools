@@ -9,7 +9,7 @@
 //! view` — then `gh project list --owner <o> --closed`, and returns the titles
 //! of the closed projects.
 //! Test: `pr_9749_a_closed_inherited_project_does_not_fail_the_open`,
-//! `pr_9749_a_closed_project_falls_back_to_the_default_project`.
+//! `pr_10276_a_closed_project_is_skipped_and_no_default_project_is_added`.
 
 use serde::Deserialize;
 
