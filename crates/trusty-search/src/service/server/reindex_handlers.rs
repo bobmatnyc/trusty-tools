@@ -280,7 +280,7 @@ pub(crate) async fn reindex_report(
                 // every root-relative chunk path is joined against to produce
                 // the absolute `CodeChunk::file` — must move with it. Left
                 // stale, materialization joined against the OLD root while
-                // `search_handler`'s `file_is_within_root` post-filter compared
+                // `search_report`'s `file_is_within_root` post-filter compared
                 // against the NEW one, so every candidate was discarded and
                 // search returned `results: []` with `stale_index_root: true`
                 // on an index reporting `status: ready` and 85k chunks.
@@ -288,7 +288,7 @@ pub(crate) async fn reindex_report(
                 // Review MEDIUM: the guard is held across `registry.register`
                 // below, not dropped right after the write. A search that grabs
                 // the indexer read lock in between would otherwise materialize
-                // against the NEW indexer root while `search_handler`'s
+                // against the NEW indexer root while `search_report`'s
                 // post-filter still holds the OLD handle — the same divergence,
                 // narrowed to a race window instead of made permanent.
                 let indexer_for_guard = Arc::clone(&indexer);

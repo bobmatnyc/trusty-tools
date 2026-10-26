@@ -2,9 +2,7 @@
 use super::routing::RoutingMode;
 use super::status::GraphQueryParams;
 use super::*;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 
 /// Shared base for `GlobalSearchRequest` test literals — every field except
 /// `query` / `top_k` at its neutral no-op value. Keeps each test's `Json(...)`
@@ -291,10 +289,9 @@ async fn global_search_fans_out_and_merges() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(value) =
-        global_search_handler(State(state), Json(base_global_search_request("alpha", 10)))
-            .await
-            .expect("handler ok");
+    let value = global_search_report(&state, base_global_search_request("alpha", 10))
+        .await
+        .expect("handler ok");
 
     let total = value["total_indexes"].as_u64().expect("total_indexes");
     assert_eq!(total, 2, "both indexes counted");
@@ -340,12 +337,9 @@ async fn global_search_fans_out_and_merges() {
 async fn global_search_empty_registry_returns_empty_results() {
     use crate::core::registry::IndexRegistry;
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(base_global_search_request("anything", 5)),
-    )
-    .await
-    .expect("handler ok");
+    let value = global_search_report(&state, base_global_search_request("anything", 5))
+        .await
+        .expect("handler ok");
     assert_eq!(value["total_indexes"].as_u64(), Some(0));
     assert!(value["results"].as_array().unwrap().is_empty());
     assert!(value["indexes_searched"].as_array().unwrap().is_empty());
@@ -383,12 +377,12 @@ async fn global_search_restricts_to_named_indexes() {
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
+    let value = global_search_report(
+        &state,
+        GlobalSearchRequest {
             indexes: Some(vec!["proj-a".into(), "proj-c".into()]),
             ..base_global_search_request("alpha", 10)
-        }),
+        },
     )
     .await
     .expect("handler ok");

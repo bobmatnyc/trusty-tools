@@ -236,7 +236,7 @@ pub struct PersistedIndex {
     /// Why: `TRUSTY_WARMBOOT_MAX_INDEXES` ranks indexes by recency to decide which
     /// to warm-boot eagerly. Sort key = `max(last_queried_unix, last_indexed_unix)`.
     /// `None` means never queried (first-run / pre-upgrade).
-    /// What: updated fire-and-forget in `search_handler` (rate-limited ≤ 60 s).
+    /// What: updated fire-and-forget in `search_report` (rate-limited ≤ 60 s).
     /// Warm-boot defers an entry older than `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (#8275).
     /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -817,7 +817,7 @@ pub fn load_index_registry_at(path: &Path) -> Result<Vec<PersistedIndex>> {
 /// Serializes every `indexes.toml` read-modify-write in this process (#4871).
 ///
 /// Why: each mutation is a load → mutate → whole-file save, and nothing
-/// ordered them. `search_handler` alone spawns a fire-and-forget
+/// ordered them. `search_report` alone spawns a fire-and-forget
 /// `update_last_queried_unix` per query, so a busy daemon runs many of these
 /// concurrently against the same file, alongside registration handlers and the
 /// boot reaper. Any write landing between another task's load and its save was

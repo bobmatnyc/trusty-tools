@@ -319,7 +319,7 @@ pub(super) fn corpus_read_failure_response(
 /// Why: `index_status`, `chunks`, and `grep` each grew their own version of
 /// this three-way check, and two of them returned a bare `StatusCode` — an MCP
 /// caller saw `returned 503 Service Unavailable: ` with empty text and had
-/// nothing to branch on. Worse, the three disagreed with `search_handler`,
+/// nothing to branch on. Worse, the three disagreed with `search_report`,
 /// which reloads a cold-parked index transparently. A caller polling `status`
 /// therefore saw a permanent-looking 503 for an index a plain `search` would
 /// have restored on the spot. One builder means the four endpoints report the
@@ -342,7 +342,7 @@ pub(super) fn residency_miss_response(
     index_id: &IndexId,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = &index_id.0;
-    // #5061: failed-before-cold, matching `search_handler`'s precedence — an id
+    // #5061: failed-before-cold, matching `search_report`'s precedence — an id
     // can sit in BOTH sets (nothing clears `failed_entries`, and re-registering
     // re-adds to `entries`).
     if cold_store.is_failed(index_id) {

@@ -297,10 +297,6 @@ use std::sync::Arc;
 use indexes::create_index_handler;
 #[cfg(test)]
 use reindex_handlers::reindex_handler;
-#[cfg(test)]
-use search::search_handler;
-#[cfg(test)]
-use search_global::global_search_handler;
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,

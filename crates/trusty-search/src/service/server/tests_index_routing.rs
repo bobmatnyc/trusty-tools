@@ -20,7 +20,6 @@ use crate::core::registry::{
     IndexHandle, IndexId, IndexRegistry, IndexStages, StageState, StageStatus,
 };
 use crate::service::persistence::PersistedIndex;
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,13 +69,9 @@ async fn semantic_stage_on_skip_vector_index_is_503_not_degraded_200() {
     let state = state_with_handle("vec-off", |h| {
         h.skip_vector = true;
     });
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-off".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect_err("a semantic search against a vector-less index must not succeed");
+    let (code, body) = super::search_report(&state, "vec-off", semantic_query())
+        .await
+        .expect_err("a semantic search against a vector-less index must not succeed");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "vector_unavailable");
@@ -104,13 +99,9 @@ async fn semantic_stage_before_embed_completes_is_503_retryable() {
     let state = state_with_handle("vec-pending", |h| {
         h.skip_vector = false;
     });
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-pending".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect_err("an unbuilt vector lane cannot serve a semantic search");
+    let (code, body) = super::search_report(&state, "vec-pending", semantic_query())
+        .await
+        .expect_err("an unbuilt vector lane cannot serve a semantic search");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "vector_unavailable");
@@ -166,13 +157,9 @@ async fn unpinned_search_reports_vector_unavailable_in_meta() {
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "authentication" }))
             .expect("plain SearchQuery");
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("vec-meta".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect("an unpinned query degrades rather than failing");
+    let body = super::search_report(&state, "vec-meta", query)
+        .await
+        .expect("an unpinned query degrades rather than failing");
 
     assert_eq!(
         body["meta"]["vector_unavailable"], true,
@@ -484,13 +471,9 @@ async fn search_residency_bodies_match_the_shared_contract() {
 
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&failed)),
-        axum::extract::Path("search-failed".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect_err("a permanently-failed index cannot be searched");
+    let (code, body) = super::search_report(&failed, "search-failed", query)
+        .await
+        .expect_err("a permanently-failed index cannot be searched");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_restore_failed");
@@ -523,13 +506,9 @@ async fn search_unknown_index_404_carries_index_id() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let query: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-        axum::Json(query),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, body) = super::search_report(&state, "never-existed", query)
+        .await
+        .expect_err("genuinely unknown");
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown index: never-existed");

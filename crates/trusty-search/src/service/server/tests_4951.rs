@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::reindex_handlers::{reindex_handler, ReindexRequest};
-use super::search::search_handler;
+use super::search::search_report;
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::{CodeIndexer, SearchMode, SearchQuery, SearchStage};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -57,7 +57,7 @@ fn probe_query(text: &str) -> SearchQuery {
 /// Why: this is the whole defect, reproduced end to end. The override rebuilds
 /// the handle around the SAME indexer `Arc`. The indexer's `root_path` is the
 /// base every stored root-relative chunk path is joined against to build the
-/// absolute `CodeChunk::file`; `search_handler` then post-filters those
+/// absolute `CodeChunk::file`; `search_report` then post-filters those
 /// absolute paths against the HANDLE's `root_path` (`file_is_within_root`,
 /// added for #64/#541). Leaving the indexer on the old root put every
 /// materialized path outside the new root, so 100% of candidates were dropped
@@ -120,13 +120,9 @@ async fn reindex_root_override_still_returns_search_results() {
 
     // Sanity: the index answers BEFORE the override. If this ever fails the
     // test is broken, not the fix — the assertions below would be vacuous.
-    let Json(before) = search_handler(
-        State(Arc::clone(&state)),
-        Path("atlassian".to_string()),
-        Json(probe_query("onboarding")),
-    )
-    .await
-    .expect("search before the override must succeed");
+    let before = search_report(&state, "atlassian", probe_query("onboarding"))
+        .await
+        .expect("search before the override must succeed");
     assert!(
         !before["results"]
             .as_array()
@@ -154,13 +150,9 @@ async fn reindex_root_override_still_returns_search_results() {
         "the override must be accepted — the defect is silent, not a rejection"
     );
 
-    let Json(after) = search_handler(
-        State(Arc::clone(&state)),
-        Path("atlassian".to_string()),
-        Json(probe_query("onboarding")),
-    )
-    .await
-    .expect("search after the override must succeed");
+    let after = search_report(&state, "atlassian", probe_query("onboarding"))
+        .await
+        .expect("search after the override must succeed");
 
     let results = after["results"].as_array().expect("results array");
     assert!(
@@ -306,13 +298,9 @@ async fn reindex_root_override_is_refused_when_the_corpus_disagrees() {
 
     // And search still resolves to a file that EXISTS. A lexical containment
     // check cannot tell a real hit from a dangling one, so assert the disk.
-    let Json(after) = search_handler(
-        State(Arc::clone(&state)),
-        Path("atlassian-guard".to_string()),
-        Json(probe_query("onboarding")),
-    )
-    .await
-    .expect("search must still work");
+    let after = search_report(&state, "atlassian-guard", probe_query("onboarding"))
+        .await
+        .expect("search must still work");
     let results = after["results"].as_array().expect("results array");
     assert!(!results.is_empty(), "index must still serve: {after}");
     let file = results[0]["file"].as_str().expect("file field");

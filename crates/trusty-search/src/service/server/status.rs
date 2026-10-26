@@ -123,7 +123,7 @@ fn index_storage_dirs(index_id: &str, root_path: &std::path::Path) -> Vec<std::p
 
 /// Freshness only, skipping the directory-size walk (#4706 review).
 ///
-/// Why: `search_handler` needs `last_indexed` for its response `meta` on EVERY
+/// Why: `search_report` needs `last_indexed` for its response `meta` on EVERY
 /// query and discards the byte count. Routing it through `index_disk_and_mtime`
 /// made each search pay a blocking, recursive `dir_size_bytes` walk of both
 /// storage directories — on a large index that is a walk of the entire redb +

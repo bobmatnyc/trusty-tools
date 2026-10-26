@@ -113,7 +113,7 @@ impl SearchAppState {
             ),
             shutdown_tx: Arc::new(shutdown_tx),
             // PR #1103: in-memory rate-limit gate replacing the sync disk read
-            // that `search_handler` previously did on every warm query.
+            // that `search_report` previously did on every warm query.
             last_queried_write_cache: Arc::new(DashMap::new()),
             // Issue #1621: empty until indexes register; populated by the
             // warm-boot restore + `POST /indexes` paths.

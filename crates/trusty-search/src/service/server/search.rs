@@ -3,17 +3,11 @@
 //! Why: Groups the per-index search and delete paths together. Global fan-out
 //! search lives in `search_global.rs` (extracted to keep both files under the
 //! 500-line cap after issue #993 added cold-store lazy-load logic here).
-//! What: `delete_index_report`, `search_handler`. Routing helpers
+//! What: `delete_index_report`, `search_report`. Routing helpers
 //! (`RoutingMode`, `compute_context_weights`) and `search_similar_report`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    Json,
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -639,18 +633,6 @@ pub(super) async fn unregister_index(
     }
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn search_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(query): Json<SearchQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    search_report(&state, &id, query)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/search` serves, without the transport
 /// (#6285 slice 3).
 ///
@@ -658,7 +640,7 @@ pub(super) async fn search_handler(
 /// the daemon's most-read body — the lazy cold-load, the facet routing (#5069),
 /// the lane down-shift, the five drop counters and the whole `meta` block. Two
 /// implementations of it would diverge on the first change to any of them.
-/// What: [`search_handler`]'s whole former body. A refusal keeps its HTTP status
+/// What: the whole single-index search path. A refusal keeps its HTTP status
 /// beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so `vector_unavailable`'s `retryable` split reaches a socket caller as

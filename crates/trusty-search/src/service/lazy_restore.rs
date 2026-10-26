@@ -134,7 +134,7 @@ pub(crate) async fn restore_index_on_demand(
             // re-allocates the HNSW arena on EVERY query — the unbounded
             // restore storm `ColdIndexStore::mark_failed`'s policy exists to
             // prevent. The operator's remedy (restart or re-register) is the
-            // one `search_handler`'s 503 already names.
+            // one `search_report`'s 503 already names.
             tracing::error!(
                 "lazy-load: index '{}' permanently failed — indexer build failed: {e}",
                 entry.id

@@ -3,7 +3,7 @@
 //!
 //! Why: the MCP layer reads a 404 on the index it advertised as this session's
 //! default and reports `INDEX_NOT_READY` — "never built". That is only true if
-//! the handler's 404 rules out the cold store too. `search_handler` always did;
+//! the handler's 404 rules out the cold store too. `search_report` always did;
 //! `index_status_report`, `index_chunks_report`, and `grep_report`
 //! did a bare hot-registry lookup, so a cold-parked index — a real index that
 //! merely is not resident — would have been reported as one that never existed.
@@ -136,7 +136,7 @@ async fn cold_parked_index_grep_is_503_not_404() {
 }
 
 /// A permanently-failed restore never clears on its own, so grep's body must
-/// name the operator action (`search_handler`'s wording) rather than telling
+/// name the operator action (`search_report`'s wording) rather than telling
 /// the caller to wait.
 ///
 /// The state built here is the OVERLAP — in both `entries` and

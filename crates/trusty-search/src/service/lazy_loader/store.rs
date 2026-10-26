@@ -415,7 +415,7 @@ impl ColdIndexStore {
 
     /// Count how many cold entries are in the provided id set.
     ///
-    /// Why: `global_search_handler` (PR #1103) needs to count cold indexes
+    /// Why: `global_search_report` (PR #1103) needs to count cold indexes
     /// that a restricted fan-out caller requested but that were skipped because
     /// they are not yet hot. Providing a method here keeps the caller from
     /// iterating `entries` directly and coupling to the internal DashMap type.

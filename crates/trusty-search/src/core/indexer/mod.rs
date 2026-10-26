@@ -402,7 +402,7 @@ pub struct CodeIndexer {
     /// see `search::lanes::bm25_search` / `grep_fallback_search`) is the
     /// machine-readable signal that closes that gap, surfaced in the search
     /// HTTP response's `meta.bm25_lane_degraded` field
-    /// (`service::server::search::search_handler`) mirroring how
+    /// (`service::server::search::search_report`) mirroring how
     /// `WarmBootSummary.warm_boot_degraded` is surfaced on `/health`.
     /// What: set `true` by either lane's retry-exhausted tail; reset to
     /// `false` by `idle_evict::spawn_detached_rehydrate`'s commit-success

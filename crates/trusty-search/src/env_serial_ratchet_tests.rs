@@ -177,7 +177,6 @@ const REGISTRY_REACHING: &[&str] = &[
     "spawn_deferred_embed_pass",
     "update_last_queried_unix",
     "update_last_indexed_unix",
-    "search_handler",
     "search_report",
     "create_index_handler",
     "create_index_report",

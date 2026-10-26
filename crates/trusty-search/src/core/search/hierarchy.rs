@@ -10,7 +10,7 @@
 //!
 //! What: `IndexHierarchy` is computed once per fan-out call from the live
 //! `IndexRegistry`.  It records parent→children and child→parent maps,
-//! and exposes helpers consumed by `global_search_handler`.
+//! and exposes helpers consumed by `global_search_report`.
 //!
 //! Test: `hierarchy_from_root_paths_*` unit tests in this module cover
 //! basic containment, deep nesting, symlink-resolved paths, and the no-op

@@ -1,7 +1,7 @@
 //! The one place a request turns an index id into a live `IndexHandle`,
 //! loading a cold-parked index on the way (#993, #5349).
 //!
-//! Why: this flow used to exist only inside `search_handler`, so `search` was
+//! Why: this flow used to exist only inside `search_report`, so `search` was
 //! the only endpoint that could bring a cold-parked index back. `index-file`
 //! and `remove-file` did a bare hot-registry lookup and answered
 //! `503 index_not_resident` against the identical daemon state (#5349) — the

@@ -179,7 +179,7 @@ fn colocated_dir_without_a_redb_is_not_counted_as_a_corpus() {
 
 /// #4706 review — the mtime-only helper agrees with the full one.
 ///
-/// Why: `search_handler` was paying a recursive two-directory size walk per
+/// Why: `search_report` was paying a recursive two-directory size walk per
 /// query for a byte count it discarded. Splitting the mtime path out is only
 /// safe if it reports the identical value; this pins that equivalence so the
 /// two cannot drift.

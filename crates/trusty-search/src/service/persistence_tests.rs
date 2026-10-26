@@ -809,7 +809,7 @@ fn corrupt_registry_is_an_error_and_is_never_overwritten() {
 /// another writer's stale snapshot.
 ///
 /// Why: every mutation is load → mutate → whole-file save and nothing ordered
-/// them. A busy daemon runs many concurrently (`search_handler` spawns a
+/// them. A busy daemon runs many concurrently (`search_report` spawns a
 /// fire-and-forget `update_last_queried_unix` per query alongside the
 /// registration handlers), so a write landing between another task's load and
 /// its save was silently erased — the observed 80 → 88 → byte-identical-80

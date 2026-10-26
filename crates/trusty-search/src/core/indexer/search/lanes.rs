@@ -61,7 +61,7 @@ use super::path_filter;
 /// request-timeout ceiling. PROVIDED the degrade is observable: see
 /// [`CodeIndexer::lane_degraded`] and the `trusty_bm25_lane_degraded` gauge
 /// it drives (surfaced in the search HTTP response as
-/// `meta.bm25_lane_degraded` — `service::server::search::search_handler`),
+/// `meta.bm25_lane_degraded` — `service::server::search::search_report`),
 /// plus the `trusty_bm25_lane_degraded_total` / `trusty_grep_fallback_lane_degraded_total`
 /// counters, at the bottom of `bm25_search` / `grep_fallback_search`. These
 /// are the load-bearing signals distinguishing "degraded, rehydrate still
@@ -350,7 +350,7 @@ impl CodeIndexer {
         // genuinely-empty corpus at the HTTP layer. Finding 3(a): flip the
         // sticky per-index flag AND set the gauge —
         // together these are `meta.bm25_lane_degraded` in the search HTTP
-        // response (`service::server::search::search_handler`) and the
+        // response (`service::server::search::search_report`) and the
         // `trusty_bm25_lane_degraded` Prometheus signal, so both a single
         // caller and a dashboard can tell this apart from a true empty
         // result without tailing logs. Reset (finding 5) happens in
