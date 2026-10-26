@@ -363,7 +363,7 @@ pub(super) async fn unregister_index(
     // path holds its SHARED side for the span of its write, so acquiring it means
     // no writer of any kind is in flight. Round 1 of this fix waited on
     // `index_semaphore` instead, which covers only the three long-running
-    // writers — `index_file_handler`, `remove_file_handler`, `ingest_graph_handler`,
+    // writers — `index_file_report`, `remove_file_report`, `ingest_graph_report`,
     // the watch loop, boot reconcile, and relocate hold no permit, so that wait
     // returned instantly and reported a false `quiesced: true`. Held across teardown.
     let quiesce_permit = tokio::time::timeout(

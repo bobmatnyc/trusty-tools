@@ -391,14 +391,14 @@ async fn index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled() 
 ///
 /// Why: this is the CRITICAL the first round missed. `unregister_index` waited
 /// on `index_semaphore`, which only `run_reindex`, `defer_embed_queue`, and the
-/// PATCH config handler ever acquire. `index_file_handler` writes straight to
+/// PATCH config handler ever acquire. `index_file_report` writes straight to
 /// `handle.indexer` after a bare `registry.get()`, so the delete's acquire
 /// succeeded instantly against zero contention, reported `quiesced: true`, and
 /// `remove_dir_all` ran while the write was still landing in the same redb and
 /// HNSW files. Five sibling paths had the same hole — see the table on
 /// `INDEX_TEARDOWN_LOCKS`.
 ///
-/// What: takes the teardown lock's SHARED side exactly as `index_file_handler`
+/// What: takes the teardown lock's SHARED side exactly as `index_file_report`
 /// now does, and asserts the delete blocks until it is released. Against the
 /// round-1 commit this fails as a real assertion failure — the delete returned
 /// immediately because that writer held no semaphore permit.
@@ -412,7 +412,7 @@ async fn delete_waits_for_an_ungated_index_file_write() {
     let marker = data_dir.join("corpus.marker");
     let index_id = IndexId::new(ID);
 
-    // Exactly what `index_file_handler` holds for the span of its write.
+    // Exactly what `index_file_report` holds for the span of its write.
     let write_guard = index_teardown_lock(&index_id).read_owned().await;
     let write_finished = Arc::new(AtomicBool::new(false));
     let flag = write_finished.clone();

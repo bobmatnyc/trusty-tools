@@ -36,9 +36,6 @@ mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
 mod files;
-// #9214 (D1): the `files` handlers, test-only; tests call them directly.
-#[cfg(test)]
-mod files_http;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
 mod health;
@@ -293,8 +290,6 @@ use std::sync::Arc;
 // `super::*`.
 #[cfg(test)]
 use admin::{admin_stop_handler, logs_tail_handler};
-#[cfg(test)]
-use files::{get_index_chunks_handler, global_grep_handler, grep_handler};
 #[cfg(test)]
 use health::health_handler;
 #[cfg(test)]

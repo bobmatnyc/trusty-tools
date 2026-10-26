@@ -1,9 +1,8 @@
 //! Tests for the grep endpoint handlers.
+use super::files::{global_grep_report, grep_report};
 use super::*;
 use crate::core::registry::IndexId;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use tokio::sync::RwLock;
 /// Test: consumed by the `grep_*` tests below and by `tests_grep_glob_7674`.
 pub(super) async fn stage_grep_index(
@@ -73,13 +72,9 @@ async fn grep_endpoint_returns_matches() {
     ])
     .await;
 
-    let Json(resp) = grep_handler(
-        State(state),
-        Path("grep-test".to_string()),
-        Json(grep_req("authenticate")),
-    )
-    .await
-    .expect("200");
+    let resp = grep_report(&state, "grep-test", grep_req("authenticate"))
+        .await
+        .expect("200");
 
     assert_eq!(resp.total, 1);
     assert!(!resp.truncated);
@@ -100,9 +95,7 @@ async fn grep_endpoint_honours_glob() {
 
     let mut req = grep_req("target");
     req.glob = Some("**/*.rs".to_string());
-    let Json(resp) = grep_handler(State(state), Path("grep-test".to_string()), Json(req))
-        .await
-        .expect("200");
+    let resp = grep_report(&state, "grep-test", req).await.expect("200");
     assert_eq!(resp.total, 1);
     assert_eq!(resp.matches[0].file, "src/auth.rs");
 }
@@ -112,15 +105,11 @@ async fn grep_endpoint_honours_glob() {
 #[serial_test::parallel]
 async fn grep_endpoint_bad_regex_is_400() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
-    let err = grep_handler(
-        State(state),
-        Path("grep-test".to_string()),
-        Json(grep_req("(unclosed")),
-    )
-    .await
-    .expect_err("400");
+    let err = grep_report(&state, "grep-test", grep_req("(unclosed"))
+        .await
+        .expect_err("400");
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
-    assert!(err.1 .0.get("error").is_some());
+    assert!(err.1.get("error").is_some());
 }
 
 /// An unknown index id yields `404 Not Found`.
@@ -128,13 +117,9 @@ async fn grep_endpoint_bad_regex_is_400() {
 #[serial_test::parallel]
 async fn grep_endpoint_unknown_index_is_404() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
-    let err = grep_handler(
-        State(state),
-        Path("does-not-exist".to_string()),
-        Json(grep_req("x")),
-    )
-    .await
-    .expect_err("404");
+    let err = grep_report(&state, "does-not-exist", grep_req("x"))
+        .await
+        .expect_err("404");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
@@ -143,7 +128,7 @@ async fn grep_endpoint_unknown_index_is_404() {
 #[serial_test::parallel]
 async fn grep_global_fans_out() {
     let (state, _id, _tmp) = stage_grep_index(&[("src/auth.rs", "fn authenticate() {}\n")]).await;
-    let Json(resp) = global_grep_handler(State(state), Json(grep_req("authenticate")))
+    let resp = global_grep_report(&state, grep_req("authenticate"))
         .await
         .expect("200");
     assert_eq!(resp.total, 1);
@@ -158,9 +143,7 @@ async fn grep_global_respects_index_filter() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
     let mut req = grep_req("x");
     req.index_id = Some("nope".to_string());
-    let Json(resp) = global_grep_handler(State(state), Json(req))
-        .await
-        .expect("200");
+    let resp = global_grep_report(&state, req).await.expect("200");
     assert_eq!(resp.total, 0);
     assert!(!resp.truncated);
 }
