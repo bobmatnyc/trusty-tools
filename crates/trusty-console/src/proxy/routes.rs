@@ -772,24 +772,29 @@ mod tests {
 
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::TcpSocket;
 
-    /// Reserve a loopback port, then release it so nothing is listening.
+    /// Reserve a loopback port that refuses connections until it is listened on.
     ///
-    /// Why: The restart tests need a port that is *initially* refusing
-    /// connections (mimicking a daemon that is down) but that a test server can
-    /// later bind.  Binding then dropping a listener yields such a port.
-    /// What: Binds `127.0.0.1:0`, reads the assigned port, drops the listener,
-    /// and returns the port.
-    /// Test: Used by the two connect-retry tests below.
-    async fn reserve_free_port() -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let port = l.local_addr().expect("local_addr").port();
-        drop(l);
-        port
+    /// Why: the restart tests need a port that refuses connects at first (a
+    /// daemon that is down) and accepts later. #3674: dropping a listener and
+    /// rebinding the bare port number raced the rest of the suite for that
+    /// port — a sibling's outgoing connect, or a child a sibling forked while
+    /// the listener was open, held it and the rebind failed with `AddrInUse`.
+    /// What: binds a socket to `127.0.0.1:0` and never listens on it, so the
+    /// kernel refuses connects while the test keeps the port. The caller turns
+    /// it into a listener with [`serve_one_ok`]; the port is never released.
+    /// Test: used by the three connect-retry tests below.
+    fn reserve_refusing_port() -> (TcpSocket, u16) {
+        let socket = TcpSocket::new_v4().expect("socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("loopback addr"))
+            .expect("bind");
+        let port = socket.local_addr().expect("local_addr").port();
+        (socket, port)
     }
 
-    /// Accept exactly one connection on `port`, drain the request, and reply 200.
+    /// Accept exactly one connection on `socket`, drain the request, and reply 200.
     ///
     /// Why: A minimal HTTP/1.1 responder is enough to prove the proxy client can
     /// reach a freshly-(re)bound upstream; pulling in a full server would add
@@ -798,17 +803,17 @@ mod tests {
     /// instant `bind()` returns Ok (i.e. the kernel is provably accepting on
     /// `port`), so a caller can assert the upstream truly came up instead of
     /// hoping a bare sleep landed before the retry connected.
-    /// What: Binds `port`; if `ready` is `Some`, signals it once the listener is
-    /// accepting; then accepts one socket, reads one buffer of the request
-    /// (headers + tiny body), writes a fixed `200 OK` response and closes.
+    /// What: Listens on the already-bound `socket` from
+    /// [`reserve_refusing_port`]; if `ready` is `Some`, signals it once the
+    /// listener is accepting; then accepts one socket, reads one buffer of the
+    /// request (headers + tiny body), writes a fixed `200 OK` response and closes.
     /// Test: Used by both connect-retry recovery tests below.
-    async fn serve_one_ok(port: u16, ready: Option<tokio::sync::oneshot::Sender<()>>) {
-        let l = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .expect("rebind test server");
-        // `bind()` returned Ok → socket()+bind()+listen() have completed and the
-        // kernel now accepts connections on `port`.  Signalling here (before the
-        // blocking `accept()`) lets the caller prove readiness deterministically.
+    async fn serve_one_ok(socket: TcpSocket, ready: Option<tokio::sync::oneshot::Sender<()>>) {
+        // #3674: listen on the socket that has held the port all along — no rebind.
+        let l = socket.listen(16).expect("listen on reserved port");
+        // `listen()` returned Ok → the kernel now accepts connections on the
+        // port.  Signalling here (before the blocking `accept()`) lets the
+        // caller prove readiness deterministically.
         if let Some(tx) = ready {
             let _ = tx.send(());
         }
@@ -829,13 +834,13 @@ mod tests {
     /// Test: this test itself.
     #[tokio::test]
     async fn test_connect_retry_recovers() {
-        let port = reserve_free_port().await;
+        let (socket, port) = reserve_refusing_port();
         let url = format!("http://127.0.0.1:{port}/api/v1/sessions/managed");
 
         // Bring the upstream up shortly after the first attempt will have failed.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            serve_one_ok(port, None).await;
+            serve_one_ok(socket, None).await;
         });
 
         let client = reqwest::Client::builder()
@@ -872,7 +877,7 @@ mod tests {
     /// Test: this test itself.
     #[tokio::test]
     async fn test_connect_retry_recovers_on_second_attempt() {
-        let port = reserve_free_port().await;
+        let (socket, port) = reserve_refusing_port();
         let url = format!("http://127.0.0.1:{port}/api/v1/sessions/managed");
 
         // Bind the upstream after the first retry has already failed (100 ms) but
@@ -881,7 +886,7 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            serve_one_ok(port, Some(ready_tx)).await;
+            serve_one_ok(socket, Some(ready_tx)).await;
         });
 
         let client = reqwest::Client::builder()
@@ -916,7 +921,9 @@ mod tests {
     /// Test: this test itself.
     #[tokio::test]
     async fn test_connect_retry_gives_up() {
-        let port = reserve_free_port().await;
+        // #3674: hold the never-listening socket for the whole test, so no
+        // sibling can take the port and answer the connect.
+        let (_socket, port) = reserve_refusing_port();
         let url = format!("http://127.0.0.1:{port}/health");
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(0)
