@@ -52,7 +52,9 @@ pub(crate) const GITHUB_NOREPLY_DOMAIN: &str = "users.noreply.github.com";
 /// least two letters, and carries at most [`MAX_ACRONYM_LEN`] leading
 /// capitals; the mean word length is at least [`MIN_MEAN_CAMEL_WORD_LEN`]
 /// and at least [`MIN_VOWEL_PERCENT`] of the letters are vowels.
+/// #9748: also names the file a `:line` reference points at.
 /// Test: `identifier_file_name_clause_boundaries_after_277`,
+/// `ordinary_paths_and_urls_are_accepted_after_9748`.
 /// `random_stems_as_file_names_stay_flagged_after_277`.
 pub(crate) fn is_identifier_word_run(run: &str) -> bool {
     let mut words = 0usize;
@@ -121,8 +123,10 @@ pub(crate) fn is_identifier_file_segment(seg: &str) -> bool {
 /// lowercase letters or digits, opening with a letter; the stem is non-empty,
 /// alphanumeric plus [`IDENTIFIER_DELIMITERS`]; `seg` carries no
 /// [`super::SECRET_PREFIXES`] entry or AWS key id ([`is_provider_key`]).
-/// Test: `identifier_file_name_clause_boundaries_after_277`.
-fn file_name_stem(seg: &str) -> Option<&str> {
+/// #9748: also names the file a `:line` reference points at.
+/// Test: `identifier_file_name_clause_boundaries_after_277`,
+/// `ordinary_paths_and_urls_are_accepted_after_9748`.
+pub(crate) fn file_name_stem(seg: &str) -> Option<&str> {
     let (stem, ext) = seg.rsplit_once('.')?;
     let ext_ok = (1..=MAX_FILE_EXTENSION_LEN).contains(&ext.len())
         && ext.bytes().next().is_some_and(|b| b.is_ascii_lowercase())

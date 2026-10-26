@@ -1,0 +1,2 @@
+Security
+- The secret gate refuses a URL that carries a credential in its userinfo (`https://user:pass@host/path?x=1`), its query string or its fragment: a value under a credential parameter name (`token`, `access_token`, `api_key`, `X-Amz-Signature`, `X-Amz-Credential` and others) or any parameter value that is itself credential-shaped. Before, a `?`, `&` or `#` in the URL let these through ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
