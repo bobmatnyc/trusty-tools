@@ -70,7 +70,6 @@ Each report names its threshold in `threshold`.
 
 - Eval: hit@1 below 27/32, or any superseded-above-current, fails the build. That is a test failure, not an analysis finding.
 - Latency and indexing: p95, `seeded_in` or an embed time at +25% or more over the pinned baseline is a warn; +50% or more is an alert. Use the median of the runs, same host and toolchain. These levels come from the Architect ruling of 2026-10-23 on [#10210](https://github.com/bobmatnyc/trusty-tools/issues/10210) (Q5). They replace the earlier 10% latency and 25% indexing lines. `scripts/perf_compare.sh` applies them (see Compare and status file).
-- Latency, HIGH: p95 up more than 2x, a breach of a ruled budget (E12 +5 ms at 20k rows; [#9141](https://github.com/bobmatnyc/trusty-tools/issues/9141) AC1 1 s resident), or an error rate above zero in `concurrent_perf`.
 - Storage: weekly growth more than 2x the trailing 4-week median, a single palace over 500 MB, or `reclaimable_bytes` above 25% of `kg.redb`.
 - Storage, HIGH: missing vectors above 0 with a clean alias audit (findable-data loss).
 - Freshness above 1 s: no threshold until a baseline exists.
