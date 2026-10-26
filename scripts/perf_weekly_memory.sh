@@ -18,7 +18,11 @@
 #   whole run as `skipped`: no further suite runs and nothing is compared. The
 #   load after each run is recorded, not gated: the run's own cargo job raises
 #   it. A run with a non-zero exit, a timeout, or a missing or malformed figure
-#   ends the whole run as `failed`. Otherwise it parses each run's log, takes
+#   ends the whole run as `failed`. A timed-out run also stops what it left on
+#   EVO (scripts/perf_weekly_evo_reap.sh: its job scope and any queued waiter)
+#   and names in the reason what it could not stop. A host probe that fails on
+#   a reachable EVO is `failed`, on an unreachable one `skipped`. Otherwise it
+#   parses each run's log, takes
 #   the median over runs, writes a schema-1 envelope, runs perf_compare.sh
 #   against --baseline and records the verdict with perf_status_write.sh.
 #   Every output file goes to the gitignored --out-dir.
@@ -36,6 +40,8 @@
 #   PERF_RUN_CMD   run as `$PERF_RUN_CMD <gate> cargo <args>` instead of evo
 #   PERF_LOAD_CMD  prints the 1-minute load; non-zero exit = EVO unreachable
 #   PERF_HOST_CMD  prints 5 lines: OS, CPU model, vCPUs, RAM GB, rustc -V
+#   PERF_REAP_CMD  run as `$PERF_REAP_CMD KEY MAX_AGE SHA -- ARGS` instead of
+#                  the reap script over ssh; PERF_EVO_KEY sets KEY (else stub)
 #
 # Exit: 0 ok, 10 warn, 11 alert (perf_compare.sh verdict), 20 failed,
 #   30 skipped, 2 bad usage or missing tool. Every exit but 2 writes status.
@@ -146,7 +152,27 @@ if [ -z "${PERF_RUN_CMD:-}" ]; then
 	[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] ||
 		finish failed "worktree is dirty; evo-gate-log needs a committed clean tree"
 	[ -x "$MPM_UTILS/evo-gate-log" ] || finish failed "evo-gate-log not found in $MPM_UTILS"
+	evo_key="$(cd "$REPO_ROOT" && "$MPM_UTILS/evo" key)" || finish failed "evo key failed in $REPO_ROOT"
+else
+	evo_key="${PERF_EVO_KEY:-stub}"
 fi
+commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+# #10210 critic: a timeout kills only the Mac side; stop this run's EVO job.
+# Prints one line per action; non-zero when something may be left.
+reap_evo() { # $1 = seconds since the run started; rest = cargo argv
+	local age=$(($1 + 30))
+	shift
+	if [ -n "${PERF_REAP_CMD:-}" ]; then
+		$PERF_REAP_CMD "$evo_key" "$age" "$commit" -- "$@"
+	elif [ -n "${PERF_RUN_CMD:-}" ]; then
+		echo "stubbed run and no PERF_REAP_CMD: nothing reaped"
+		return 1
+	else
+		"$TIMEOUT" -k 10 120 "${EVO_SSH[@]}" "bash -s -- $(printf '%q ' "$evo_key" "$age" "$commit" -- "$@")" \
+			<"$SCRIPT_DIR/perf_weekly_evo_reap.sh"
+	fi
+}
 
 # The command that runs one gate, as an array: the stub or evo-gate-log + evo.
 run_cmd() { # $1 = gate name; sets cmd=(...)
@@ -279,7 +305,16 @@ host_probe() {
 			\$HOME/.cargo/bin/rustc +$toolchain -V"
 	fi
 }
-host_txt="$(host_probe 2>/dev/null)" || finish skipped "EVO unreachable: host probe failed"
+# #10210 critic: only an unreachable EVO is skipped; a probe that fails on a
+# reachable one (a missing toolchain) is a failure of this run.
+host_rc=0
+host_txt="$(host_probe 2>"$out_dir/host.err")" || host_rc=$?
+if [ "$host_rc" -ne 0 ]; then
+	host_why="$(grep -m 1 . "$out_dir/host.err" || true)"
+	read_load >/dev/null 2>&1 ||
+		finish skipped "EVO unreachable: host probe exited $host_rc and no load reading${host_why:+ ($host_why)}"
+	finish failed "host probe exited $host_rc on a reachable EVO: ${host_why:-no stderr}"
+fi
 [ "$(printf '%s\n' "$host_txt" | grep -c .)" -ge 5 ] || finish failed "host probe printed fewer than 5 lines"
 
 runs_json="$out_dir/runs.jsonl"
@@ -304,10 +339,20 @@ EOF
 		log "run $block ($k/$count)"
 		rc=0
 		run_cmd "perf-$suite"
-		"$TIMEOUT" "$suite_timeout" "${cmd[@]}" "${args[@]}" >"$run_log" 2>&1 </dev/null || rc=$?
+		t0=$SECONDS
+		"$TIMEOUT" -k 30 "$suite_timeout" "${cmd[@]}" "${args[@]}" >"$run_log" 2>&1 </dev/null || rc=$?
+		took=$((SECONDS - t0))
 		after="$(read_load 2>/dev/null || echo unreachable)"
 		printf '%s\tafter\t%s\t%s\n' "$block" "$(date -u +%H:%M:%SZ)" "$after" >>"$loads"
-		[ "$rc" -ne 124 ] || finish failed "$block timed out after ${suite_timeout}s (log $run_log)"
+		# 137 after the deadline is the -k SIGKILL; earlier it is EVO's own rc.
+		if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ "$took" -ge "$suite_timeout" ]; }; then
+			why="$block timed out after ${suite_timeout}s (log $run_log)"
+			reap_rc=0
+			reap_out="$(reap_evo "$took" "+$toolchain" "${args[@]}" 2>&1)" || reap_rc=$?
+			reap_out="$(printf '%s\n' "$reap_out" | awk 'NF {printf "%s%s", sep, $0; sep = "; "}')"
+			[ "$reap_rc" -eq 0 ] || reap_out="${reap_out:+$reap_out; }EVO cleanup exited $reap_rc; check by hand: ssh evo-linux \"systemctl --user list-units 'evo-job-*'; pgrep -af 'evo-run --key $evo_key'\""
+			finish failed "$why; EVO cleanup: ${reap_out:-no output}"
+		fi
 		[ "$rc" -eq 0 ] || finish failed "$block exited $rc (log $run_log)"
 		parsed="$(parse_run "$suite" "$run_log")" ||
 			finish failed "$block exited 0 but printed no parseable figure (log $run_log)"
@@ -325,7 +370,6 @@ vcpu="$(sed -n 3p <<<"$host_txt")"
 ram="$(sed -n 4p <<<"$host_txt")"
 rustc_v="$(sed -n 5p <<<"$host_txt")"
 case "$ram" in '' | *[!0-9]*) finish failed "host probe RAM is not a number: '$ram'" ;; esac
-commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 version="$(awk -F'"' '/^version *=/ {print $2; exit}' "$REPO_ROOT/crates/trusty-memory/Cargo.toml")"
 jq -s --arg commit "$commit" --arg version "$version" --arg date "$(date -u +%Y-%m-%d)" \
 	--arg os "$os" --arg cpu "$cpu ($vcpu vCPU)" --argjson ram "$ram" \
