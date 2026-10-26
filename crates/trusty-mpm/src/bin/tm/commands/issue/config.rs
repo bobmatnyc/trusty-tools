@@ -55,8 +55,8 @@ pub(crate) const SUPPORTED_VERSION: u32 = 1;
 /// Why: the single deserialization target for the whole contract; everything
 /// `tm issue` does is driven by these fields, never by hardcoded label strings.
 /// What: schema `version`, the `label_config` family prefixes, the ordered
-/// `states`, the non-state `extra_labels`, the `transitions` graph, and the
-/// `assignee_model`.
+/// `states`, the non-state `extra_labels`, the `transitions` graph, the
+/// `assignee_model`, and the optional `project:` board block (#10275).
 /// Test: `embedded_default_parses` deserializes the full factory model.
 ///
 /// `Eq` is intentionally NOT derived: `AssigneeModel` carries opaque
@@ -76,6 +76,12 @@ pub(crate) struct StateModel {
     pub(crate) transitions: Vec<Transition>,
     /// Per-state assignee / identity model.
     pub(crate) assignee_model: AssigneeModel,
+    /// The repo's own GitHub Projects board, if it names one.
+    // #10275: the attach target and the repo's departures from board-v1.yaml;
+    // an unknown key in the block fails the load. Phase 2 is the first reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) project: Option<super::board::project::ProjectBlock>,
 }
 
 /// Configurable label-family prefixes.

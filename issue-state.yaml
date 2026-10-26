@@ -167,3 +167,19 @@ assignee_model:
   # the `status:in-progress` label plus the dispatch comment.
   strategy: unchanged
   per_state: {}
+
+# #10275: this repo's GitHub Projects board. The board's standard fields come
+# from board-v1.yaml (crates/trusty-mpm/examples/issue-state/); this block names
+# the board and this repo's departures from that standard. `drop_options` lists
+# Status options the board omits; `extra_fields` lists non-standard fields the
+# board carries, which the board check (#10274 Phase 2) treats as repo extras,
+# not drift.
+# An unknown key here fails every `tm issue` load. Not copied into
+# status-lifecycle.yaml: other repos must not attach to this board.
+project:
+  owner: bobmatnyc
+  number: 45
+  drop_options: []
+  extra_fields:
+    - Crate
+    - Agents
