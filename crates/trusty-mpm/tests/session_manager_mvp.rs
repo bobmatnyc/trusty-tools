@@ -2638,7 +2638,8 @@ impl Drop for KillSessionGuard<'_> {
 /// new ACTIVE pane), then sends a marker line via `TmuxDriver::send_line`
 /// with a pane-scoped `TmuxTarget` addressing the ORIGINAL (now inactive)
 /// pane. Asserts the marker landed in the original pane's `capture-pane`
-/// output and did NOT land in the sibling's. Also exercises
+/// output (wrapped lines joined, scrollback included, polled to a deadline)
+/// and did NOT land in the sibling's. Also exercises
 /// `TmuxDriver::pane_exists`: `true` for the real original pane, `false` for
 /// a fabricated pane id within the same (still-alive) session — the exact
 /// signal `SessionManager::resume` relies on to distinguish "pane gone" from
@@ -2709,22 +2710,41 @@ fn live_pane_scoped_send_targets_original_pane_not_sibling() {
         .send_line(&TmuxTarget::pane(&session_name, &original_pane), marker)
         .expect("pane-scoped send_line must succeed against the ORIGINAL pane");
 
-    // Give tmux a moment to render the sent keys into the pane buffer before
-    // capturing (send-keys itself is synchronous, but the shell's own echo
-    // of the typed line can lag by a beat under load).
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let original_capture = driver
-        .capture(&TmuxTarget::pane(&session_name, &original_pane), None)
-        .expect("capture original pane");
+    // #10231: read the pane's whole history with wrapped lines joined, and
+    // poll it to a deadline, instead of one visible-screen read after 200 ms.
+    // In env_serial the private tmux server is started by whichever earlier
+    // test first resolves tmux, under that test's scratch `$HOME`
+    // (`owner_config_8988` in a full run), and every later pane inherits that
+    // deleted `$HOME`. The pane's login shell then prints a ~25-line MOTD that
+    // can scroll the echoed marker off the 80x24 screen, and its prompt shows
+    // the full cwd, so the redrawn marker wraps across two rows. Either one
+    // hid the marker from a plain visible-screen capture.
+    let capture_joined = |pane: &str| -> String {
+        let out = std::process::Command::new("tmux")
+            .args(["capture-pane", "-p", "-J", "-S", "-", "-t", pane])
+            .output()
+            .expect("spawn tmux capture-pane");
+        assert!(
+            out.status.success(),
+            "tmux capture-pane -t {pane} must succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let original_capture = loop {
+        let captured = capture_joined(&original_pane);
+        if captured.contains(marker) || std::time::Instant::now() >= deadline {
+            break captured;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     assert!(
         original_capture.contains(marker),
         "marker must land in the ORIGINAL pane; captured: {original_capture:?}"
     );
 
-    let sibling_capture = driver
-        .capture(&TmuxTarget::pane(&session_name, &sibling_pane), None)
-        .expect("capture sibling pane");
+    let sibling_capture = capture_joined(&sibling_pane);
     assert!(
         !sibling_capture.contains(marker),
         "marker must NOT land in the sibling pane (that is the hijack this test \
