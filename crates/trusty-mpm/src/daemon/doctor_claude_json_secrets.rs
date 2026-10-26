@@ -19,6 +19,7 @@ use trusty_common::credential_registry::provider_for_env_var;
 use trusty_common::launchd_secrets::is_credential_env_key;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::mcp_credential_env::reads_credential_store;
 
 /// The `tm doctor` row name, shared by the check and every repair step.
 pub(crate) const CHECK_NAME: &str = "claude_json_secrets";
@@ -42,6 +43,18 @@ impl EnvCredential {
     }
 }
 
+/// How `--fix` may treat one env credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialClass {
+    /// Registry-mapped, on a server that reads the store: `--fix` moves it.
+    Migratable,
+    /// No registry mapping: there is no store slot for it.
+    Unmapped,
+    /// Registry-mapped, but the server never reads tm's store (#10041), so
+    /// moving it would launch the server without it.
+    ThirdParty,
+}
+
 /// What the managed `.claude.json` and its siblings were found to hold.
 ///
 /// Why: the row and the repair share one scan so they cannot disagree.
@@ -57,10 +70,14 @@ pub struct ClaudeJsonFinding {
     pub exists: bool,
     /// Unix permission bits, when readable.
     pub mode: Option<u32>,
-    /// Registry-mapped credentials — `--fix` migrates these.
+    /// Registry-mapped credentials of store-reading servers — `--fix`
+    /// migrates these.
     pub migratable: Vec<EnvCredential>,
     /// Credential-shaped keys with no store slot — reported, never stripped.
     pub unmapped: Vec<EnvCredential>,
+    /// Registry-mapped credentials of servers that never read tm's store —
+    /// reported, never stripped (#10041).
+    pub third_party: Vec<EnvCredential>,
     /// Why the file could not be judged.
     pub unreadable: Option<String>,
     /// `.claude.json*` siblings wider than 0600, with their modes.
@@ -103,11 +120,11 @@ pub(crate) fn mode_of(path: &Path) -> Option<u32> {
 
 /// Every credential-keyed env entry in a parsed `.claude.json`.
 ///
-/// What: walks `mcpServers.*.env` and returns `(entry, value, mapped)` for each
-/// non-empty string value whose key is credential-shaped; `mapped` is whether
-/// the registry has a store slot for it. Values are returned for the repair
-/// only; the scan drops them.
-pub(crate) fn credential_entries(root: &Value) -> Vec<(EnvCredential, String, bool)> {
+/// What: walks `mcpServers.*.env` and returns `(entry, value, class)` for each
+/// non-empty string value whose key is credential-shaped or registry-mapped;
+/// `class` is [`CredentialClass`]. Values are returned for the repair only; the
+/// scan drops them.
+pub(crate) fn credential_entries(root: &Value) -> Vec<(EnvCredential, String, CredentialClass)> {
     let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -116,6 +133,11 @@ pub(crate) fn credential_entries(root: &Value) -> Vec<(EnvCredential, String, bo
         let Some(env) = entry.get("env").and_then(Value::as_object) else {
             continue;
         };
+        // #10041: only a store-reading trusty server may lose its env credential.
+        let reads_store = entry
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(reads_credential_store);
         for (key, value) in env {
             let Some(value) = value.as_str().filter(|v| !v.is_empty()) else {
                 continue;
@@ -126,7 +148,12 @@ pub(crate) fn credential_entries(root: &Value) -> Vec<(EnvCredential, String, bo
                     server: server.clone(),
                     key: key.clone(),
                 };
-                out.push((cred, value.to_string(), mapped));
+                let class = match (mapped, reads_store) {
+                    (false, _) => CredentialClass::Unmapped,
+                    (true, true) => CredentialClass::Migratable,
+                    (true, false) => CredentialClass::ThirdParty,
+                };
+                out.push((cred, value.to_string(), class));
             }
         }
     }
@@ -162,11 +189,11 @@ pub fn scan_claude_json(config_dir: &Path) -> ClaudeJsonFinding {
     finding.mode = mode_of(&path);
     match serde_json::from_str::<Value>(&text) {
         Ok(root) => {
-            for (cred, _value, mapped) in credential_entries(&root) {
-                if mapped {
-                    finding.migratable.push(cred);
-                } else {
-                    finding.unmapped.push(cred);
+            for (cred, _value, class) in credential_entries(&root) {
+                match class {
+                    CredentialClass::Migratable => finding.migratable.push(cred),
+                    CredentialClass::Unmapped => finding.unmapped.push(cred),
+                    CredentialClass::ThirdParty => finding.third_party.push(cred),
                 }
             }
         }
@@ -230,11 +257,12 @@ pub(crate) fn check_claude_json_secrets(config_dir: Option<&Path>) -> DoctorChec
 pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
     let path = f.path.display();
     let mut problems = Vec::new();
-    if !f.migratable.is_empty() || !f.unmapped.is_empty() {
+    if !f.migratable.is_empty() || !f.unmapped.is_empty() || !f.third_party.is_empty() {
         let keys: Vec<String> = f
             .migratable
             .iter()
             .chain(&f.unmapped)
+            .chain(&f.third_party)
             .map(EnvCredential::label)
             .collect();
         problems.push(format!(
@@ -247,6 +275,14 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
         problems.push(format!(
             "`--fix` will NOT move {} — no credential provider is registered for it; move it to \
              `.env.local` by hand",
+            keys.join(", ")
+        ));
+    }
+    if !f.third_party.is_empty() {
+        let keys: Vec<String> = f.third_party.iter().map(EnvCredential::label).collect();
+        problems.push(format!(
+            "`--fix` will NOT move {} — the server does not read tm's credential store, so it \
+             would launch without it; supply it outside the MCP config by hand",
             keys.join(", ")
         ));
     }

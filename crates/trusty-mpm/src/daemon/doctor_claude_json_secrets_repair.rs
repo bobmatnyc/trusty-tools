@@ -22,8 +22,8 @@ use trusty_common::credentials::{KeyStore, default_store};
 use trusty_common::launchd_secrets::{PlistCredentialEntry, PlistSecret};
 
 use super::doctor_claude_json_secrets::{
-    CHECK_NAME, ClaudeJsonFinding, EnvCredential, credential_entries, is_wide, mode_of,
-    scan_claude_json,
+    CHECK_NAME, ClaudeJsonFinding, CredentialClass, EnvCredential, credential_entries, is_wide,
+    mode_of, scan_claude_json,
 };
 use super::doctor_launchd_secrets_repair::import_all;
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
@@ -42,7 +42,8 @@ pub fn repair_claude_json_secrets(config_dir: &Path, mode: RepairMode) -> Vec<Re
 /// `fix_leaves_the_file_untouched_when_the_store_refuses`,
 /// `fix_leaves_the_original_bytes_when_the_rewrite_fails`,
 /// `fix_dry_run_writes_nothing`, `fix_tightens_a_wide_file_and_its_backups`,
-/// `fix_is_silent_on_a_clean_dir`.
+/// `fix_is_silent_on_a_clean_dir`,
+/// `fix_never_strips_a_third_party_servers_credential`.
 pub(crate) fn repair_with_store(
     config_dir: &Path,
     mode: RepairMode,
@@ -67,6 +68,24 @@ pub(crate) fn repair_with_store(
             StepStatus::Refused(
                 "no credential provider is registered for it, so there is no store slot to move \
                  it to and removing it would break the server — move it to `.env.local` by hand \
+                 and rotate it"
+                    .to_string(),
+            ),
+        ));
+    }
+    // #10041: a server that never reads tm's store keeps its credential.
+    if !finding.third_party.is_empty() {
+        let keys: Vec<String> = finding
+            .third_party
+            .iter()
+            .map(EnvCredential::label)
+            .collect();
+        steps.push(step(
+            &finding.path,
+            format!("move {} out of the MCP env block", keys.join(", ")),
+            StepStatus::Refused(
+                "the server does not read tm's credential store, so removing it would launch \
+                 the server without its credential — supply it outside the MCP config by hand \
                  and rotate it"
                     .to_string(),
             ),
@@ -137,8 +156,9 @@ fn migrate(f: &ClaudeJsonFinding, mode: RepairMode, store: &dyn KeyStore) -> Rep
 
     let mut moved = Vec::new();
     let mut blocked = Vec::new();
-    for (cred, value, mapped) in credential_entries(&root) {
-        if !mapped {
+    for (cred, value, class) in credential_entries(&root) {
+        // #10041: never strip an unmapped or third-party server's credential.
+        if class != CredentialClass::Migratable {
             continue;
         }
         let entry = PlistCredentialEntry {

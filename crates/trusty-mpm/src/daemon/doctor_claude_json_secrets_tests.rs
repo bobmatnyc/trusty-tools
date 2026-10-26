@@ -296,3 +296,48 @@ fn fix_is_silent_on_a_clean_dir() {
 
     assert!(steps.is_empty(), "{steps:?}");
 }
+
+/// #10041: a third-party server reads only its process env, so `--fix` must
+/// never strip its credential — it is reported `Refused` and the file keeps it.
+#[test]
+fn fix_never_strips_a_third_party_servers_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = json!({
+        "mcpServers": {
+            "github": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github"],
+                "env": { "GITHUB_TOKEN": "ghp_10041notarealtoken" }
+            }
+        }
+    });
+    let path = write_config(dir.path(), &config, 0o600);
+    let before = std::fs::read(&path).unwrap();
+    let store = MemoryKeyStore::new();
+
+    let finding = scan_claude_json(dir.path());
+    let steps = repair_with_store(dir.path(), RepairMode::Apply, &store);
+
+    assert_eq!(finding.third_party.len(), 1, "{finding:?}");
+    assert!(finding.migratable.is_empty(), "{finding:?}");
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Refused(_))
+                && s.what.contains("github.GITHUB_TOKEN")),
+        "{steps:?}"
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Applied { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(store.list().is_empty(), "the credential reached the store");
+    assert!(!format!("{steps:?}").contains("ghp_10041notarealtoken"));
+    let row = check_claude_json_secrets(Some(dir.path()));
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("does not read"), "{}", row.message);
+}
