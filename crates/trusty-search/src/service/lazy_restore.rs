@@ -70,7 +70,7 @@ pub(crate) async fn restore_index_on_demand(
     // yet, so neither check would see the other's restore in flight, and a
     // naive cold-vs-cold check could fail the LEGITIMATE winner just as
     // easily as the loser. The `corpus_open_failed` ground-truth check below
-    // (mirroring `create_index_handler`/`relocate_index_handler`) is the
+    // (mirroring `create_index_report`/`relocate_index_report`) is the
     // correct backstop for that race instead: redb's real single-open
     // semantics deterministically decide the actual winner, so only the
     // restore that truly lost the race is ever marked failed.
@@ -150,7 +150,7 @@ pub(crate) async fn restore_index_on_demand(
     indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
 
     // Issue #3993 second round (adversarial BLOCK) ground-truth backstop:
-    // `create_index_handler` and `relocate_index_handler` both check
+    // `create_index_report` and `relocate_index_report` both check
     // `indexer.corpus_open_failed` after building — the best-effort collision
     // guard above is a check-then-act race (same accepted-race shape as
     // #2519's review for those two handlers), so redb's real single-open

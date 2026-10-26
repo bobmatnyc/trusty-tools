@@ -1,7 +1,7 @@
 //! The #2178 root-move trust gate, as one decision both callers share.
 //!
 //! Why: the gate has two call sites — `runner::run_reindex` (at spawn time) and
-//! `server::reindex_handlers::reindex_handler` (at request time, added by
+//! `server::reindex_handlers::reindex_report` (at request time, added by
 //! #4951). Each carried its own copy of the read-compare-refuse sequence, and
 //! both copies degraded to "trusted" when either input failed to read:
 //! `read_indexed_root().unwrap_or(None)` turned a redb error into "no prior
@@ -153,7 +153,7 @@ pub(crate) fn evaluate_root_move(
 
 /// Move the indexer onto the candidate root now that the gate has trusted it.
 ///
-/// Why: `reindex_handler` used to apply the override's `set_root_path` at
+/// Why: `reindex_report` used to apply the override's `set_root_path` at
 /// request time, minutes before this gate re-read `indexes.toml` behind the
 /// reindex semaphores (#4951). A registry write landing in between let the
 /// handler accept a move the runner then refused, leaving the indexer on a root

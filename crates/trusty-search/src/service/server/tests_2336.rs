@@ -2,28 +2,25 @@
 //! guard.
 //!
 //! Why: review finding (HIGH) on the #2305 warm-boot dedup fix — the boot path
-//! was fixed, but `create_index_report` and `relocate_index_handler` guarded
+//! was fixed, but `create_index_report` and `relocate_index_report` guarded
 //! only *id* collisions, never *root_path* collisions. Two live registrations
 //! sharing one colocated root resolve to the SAME on-disk
 //! `<root>/.trusty-search/index.redb` (redb is single-open); the second
 //! registration's corpus open would silently fail (`corpus_open_failed`)
 //! while the handler still returned `200 {"created": true}` for the broken
 //! handle — recreating the #2305 hazard at runtime.
-//! What: exercises `create_index_report` and `relocate_index_handler`
+//! What: exercises `create_index_report` and `relocate_index_report`
 //! directly (no running daemon or real embedder needed — `MockEmbedder`
 //! stands in), asserting a second registration over the same canonical root
 //! is rejected with `409 Conflict` naming the existing index, while a
 //! same-id re-create and a same-root PATCH-to-self remain unaffected.
 //! Test: run with `cargo test -p trusty-search tests_2336`.
 
-use super::test_support::create_answer;
+use super::test_support::{create_answer, relocate_answer};
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::body::to_bytes;
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// Build a `CreateIndexRequest` with every optional field defaulted, varying
@@ -57,7 +54,7 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
 // (issue #3955).
 
 /// Build a fresh, empty registry with a mock embedder installed — enough for
-/// `create_index_report` / `relocate_index_handler` to run without a live
+/// `create_index_report` / `relocate_index_report` to run without a live
 /// daemon or network.
 async fn mock_state_async() -> Arc<SearchAppState> {
     let state = SearchAppState::new(IndexRegistry::new());
@@ -146,14 +143,14 @@ async fn create_index_distinct_roots_both_succeed() {
     assert_eq!(state.registry.list().len(), 2);
 }
 
-// ── relocate_index_handler root_path collision guard ──────────────────────
+// ── relocate_index_report root_path collision guard ──────────────────────
 
 /// `PATCH /indexes/:id` that would relocate onto a root_path already owned by
 /// a DIFFERENT registered index must be rejected with `409 Conflict`.
 #[tokio::test]
 #[serial_test::serial]
 async fn relocate_index_rejects_root_path_owned_by_another_index() {
-    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use super::indexes_relocate::RelocateIndexRequest;
 
     let state = mock_state_async().await;
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-2336-relocate-a-");
@@ -166,21 +163,20 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
     assert_eq!(create_b.0, StatusCode::OK);
 
     // Attempt to relocate index-b onto index-a's root — must be rejected.
-    let relocate = relocate_index_handler(
-        State(Arc::clone(&state)),
-        Path("index-b-2336".to_string()),
-        Json(RelocateIndexRequest {
+    let relocate = relocate_answer(
+        &state,
+        "index-b-2336",
+        RelocateIndexRequest {
             root_path: root_a.clone(),
-        }),
+        },
     )
     .await;
     assert_eq!(
-        relocate.status(),
+        relocate.0,
         StatusCode::CONFLICT,
         "relocating onto another index's root_path must be rejected with 409"
     );
-    let body = to_bytes(relocate.into_body(), 4096).await.expect("body");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let v = relocate.1;
     assert_eq!(
         v.get("existing_id").and_then(|x| x.as_str()),
         Some("index-a-2336"),
@@ -203,7 +199,7 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
 #[tokio::test]
 #[serial_test::serial]
 async fn relocate_index_onto_own_current_root_is_not_a_collision() {
-    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use super::indexes_relocate::RelocateIndexRequest;
 
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-relocate-self-");
@@ -211,16 +207,16 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
     let create = create_answer(&state, create_req("self-relocate-2336", root.clone())).await;
     assert_eq!(create.0, StatusCode::OK);
 
-    let relocate = relocate_index_handler(
-        State(Arc::clone(&state)),
-        Path("self-relocate-2336".to_string()),
-        Json(RelocateIndexRequest {
+    let relocate = relocate_answer(
+        &state,
+        "self-relocate-2336",
+        RelocateIndexRequest {
             root_path: root.clone(),
-        }),
+        },
     )
     .await;
     assert_eq!(
-        relocate.status(),
+        relocate.0,
         StatusCode::OK,
         "relocating an index onto its own current root must succeed, not 409"
     );

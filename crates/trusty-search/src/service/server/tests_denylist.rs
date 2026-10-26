@@ -4,15 +4,14 @@
 //! Why: keeping these tests in a sibling file prevents `tests_index.rs`
 //! from exceeding the 500-line cap while keeping every assertion co-located
 //! with the server module they validate.
-//! What: covers daemon-side denylist rejection via `create_index_handler`
+//! What: covers daemon-side denylist rejection via `create_index_report`
 //! and directly via `super::helpers::validate_root_path`; also covers the
 //! symlink-bypass prevention and safe-path acceptance.
 //! Test: all tests in this file are collected by `cargo test -p trusty-search`.
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// The denylist must block ~/.ssh even when called directly through the
@@ -21,7 +20,7 @@ use std::sync::Arc;
 /// Why: defense-in-depth — a direct `POST /indexes` call (bypassing the CLI)
 /// must also be refused. This test pins the server-side behavior so a refactor
 /// of `validate_root_path` can never silently remove the guard.
-/// What: calls `create_index_handler` with root_path = ~/.ssh; asserts 400 and
+/// What: calls `create_index_report` with root_path = ~/.ssh; asserts 400 and
 /// an error body containing "indexing refused".
 /// Test: this test.
 // #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
@@ -43,9 +42,9 @@ async fn validate_root_path_denylist_rejects_ssh() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "sensitive-ssh".into(),
             root_path: ssh_path,
@@ -65,18 +64,15 @@ async fn validate_root_path_denylist_rejects_ssh() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
     assert_eq!(
-        resp.status(),
+        resp.0,
         StatusCode::BAD_REQUEST,
         "~/.ssh must be refused with 400"
     );
-    let body = axum::body::to_bytes(resp.into_body(), 65536)
-        .await
-        .expect("body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let json = resp.1;
     let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         err.contains("indexing refused"),
@@ -221,7 +217,7 @@ async fn validate_root_path_accepts_safe_project_dir() {
     // If none of the well-known paths exist (unusual CI environment), skip gracefully.
 }
 
-/// By default, `create_index_handler` still refuses a real directory living
+/// By default, `create_index_report` still refuses a real directory living
 /// under an OS-temp prefix (`allow_sensitive_path` omitted / `false`) —
 /// unchanged behaviour (owner directive: auto/broad indexing keeps the
 /// denylist).
@@ -231,7 +227,7 @@ async fn validate_root_path_accepts_safe_project_dir() {
 /// CLI, MCP) must still be refused for a scratch directory unless it
 /// explicitly opts in.
 /// What: creates a REAL directory under `/tmp` (a `SENSITIVE_PATH_PREFIXES`
-/// entry, independent of `$TMPDIR`, #9527), calls `create_index_handler` with `allow_sensitive_path: false`,
+/// entry, independent of `$TMPDIR`, #9527), calls `create_index_report` with `allow_sensitive_path: false`,
 /// and asserts 400 with "indexing refused".
 /// Test: this test.
 #[tokio::test]
@@ -246,9 +242,9 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "scratch-default-denied".into(),
             root_path: tmp_root,
@@ -268,18 +264,15 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
     assert_eq!(
-        resp.status(),
+        resp.0,
         StatusCode::BAD_REQUEST,
         "a temp-dir root must still be refused by default"
     );
-    let body = axum::body::to_bytes(resp.into_body(), 65536)
-        .await
-        .expect("body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let json = resp.1;
     let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         err.contains("indexing refused"),
@@ -287,7 +280,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
     );
 }
 
-/// `create_index_handler` ACCEPTS a real directory under an OS-temp prefix
+/// `create_index_report` ACCEPTS a real directory under an OS-temp prefix
 /// when the request opts in via `allow_sensitive_path: true` (owner
 /// directive: an explicit index request may name a scratch working
 /// directory — e.g. tcode's bake-off project root).
@@ -296,7 +289,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
 /// `ensure_project_indexed` could never register a tempdir-backed project,
 /// even though the caller named that exact root on purpose.
 /// What: creates a REAL directory via `tempfile::tempdir()`, calls
-/// `create_index_handler` with `allow_sensitive_path: true`, and asserts
+/// `create_index_report` with `allow_sensitive_path: true`, and asserts
 /// `200 {"created": true}` plus that the registry stores the canonicalized
 /// temp-dir root.
 /// Test: this test.
@@ -317,9 +310,9 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "scratch-explicitly-allowed".into(),
             root_path: tmp.path().to_path_buf(),
@@ -339,11 +332,11 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: true,
-        }),
+        },
     )
     .await;
     assert_eq!(
-        resp.status(),
+        resp.0,
         StatusCode::OK,
         "a temp-dir root must be accepted when allow_sensitive_path is true"
     );

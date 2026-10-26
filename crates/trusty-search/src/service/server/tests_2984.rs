@@ -1,5 +1,5 @@
 //! Handler-level regression test for issue #313 / #2984 (Phase 0 follow-up):
-//! `create_index_handler` must honor `skip_kg` on the re-register door, not
+//! `create_index_report` must honor `skip_kg` on the re-register door, not
 //! just via `build_indexer_from_entry` in isolation.
 //!
 //! Why: the code-critic re-review of PR #2988 flagged that the existing
@@ -8,30 +8,29 @@
 //! calls `build_indexer_from_entry` directly — the shared helper that was
 //! ALREADY correct before this PR's delta (it has always honored
 //! `entry.skip_kg`). The actual bug (and actual fix, `indexes.rs:314-324`)
-//! lived one layer up: `create_index_handler` built its `init_entry` with
+//! lived one layer up: `create_index_report` built its `init_entry` with
 //! `..Default::default()` (`skip_kg = false`) BEFORE the real `skip_kg`
 //! value was computed further down the handler. A revert of that ordering
 //! fix (e.g. someone moving the `skip_kg` computation back below
 //! `init_entry`'s construction) would slip past every existing test, because
-//! none of them call `create_index_handler` itself with `skip_kg: Some(true)`.
-//! What: registers an index via `create_index_handler` with `skip_kg: Some(false)`,
+//! none of them call `create_index_report` itself with `skip_kg: Some(true)`.
+//! What: registers an index via `create_index_report` with `skip_kg: Some(false)`,
 //! indexes real content with a caller→callee edge so a non-empty symbol
 //! graph is built and persisted to the colocated redb corpus, unregisters
 //! the in-memory handle (simulating the id becoming eligible for the
 //! create/re-register door again — the in-memory "already exists" idempotent
 //! branch is checked before `skip_kg` ever comes into play, so this step is
 //! required to reach the code path under test), then re-POSTs the SAME
-//! `id`/`root_path` through `create_index_handler` with `skip_kg: Some(true)`
+//! `id`/`root_path` through `create_index_report` with `skip_kg: Some(true)`
 //! and asserts the newly registered handle's symbol graph is empty despite
 //! the persisted graph on disk.
 //! Test: this module. Run with `cargo test -p trusty-search tests_2984`.
 
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::{IndexId, IndexRegistry};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// Build a `CreateIndexRequest` with every optional field defaulted except
@@ -73,7 +72,7 @@ fn create_req_with_skip_kg(
 // (issue #3955).
 
 /// Build a fresh, empty registry with a mock embedder installed — enough for
-/// `create_index_handler` to run without a live daemon or network.
+/// `create_index_report` to run without a live daemon or network.
 async fn mock_state_async() -> Arc<SearchAppState> {
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
@@ -81,7 +80,7 @@ async fn mock_state_async() -> Arc<SearchAppState> {
     Arc::new(state)
 }
 
-/// The actual #2984 Phase-0 follow-up regression: `create_index_handler`
+/// The actual #2984 Phase-0 follow-up regression: `create_index_report`
 /// itself must not load a persisted symbol graph when re-registering an id
 /// with `skip_kg: Some(true)`.
 #[tokio::test]
@@ -94,13 +93,13 @@ async fn create_index_handler_honors_skip_kg_on_reregister() {
     // Phase 1: create the index with skip_kg=false and index real content
     // with a caller -> callee edge, so a genuinely non-empty symbol graph is
     // built and persisted to the colocated redb corpus.
-    let first = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req_with_skip_kg(&id.0, root.clone(), Some(false))),
+    let first = create_answer(
+        &state,
+        create_req_with_skip_kg(&id.0, root.clone(), Some(false)),
     )
     .await;
     assert_eq!(
-        first.status(),
+        first.0,
         StatusCode::OK,
         "first create (skip_kg=false) must succeed"
     );
@@ -126,7 +125,7 @@ async fn create_index_handler_honors_skip_kg_on_reregister() {
             "sanity: normal indexing must build a non-empty symbol graph"
         );
     }
-    // Stop the filesystem watcher `create_index_handler` spawned for this
+    // Stop the filesystem watcher `create_index_report` spawned for this
     // index (`state.watcher_manager.spawn_for_index`, indexes.rs) — it holds
     // its own `Arc<IndexHandle>` clone in a detached background task, so
     // without stopping it first the corpus Arc (and the redb file lock it
@@ -136,7 +135,7 @@ async fn create_index_handler_honors_skip_kg_on_reregister() {
     // Drop the in-memory handle so its corpus Arc (and the redb file lock it
     // holds) is released before the re-register phase reopens the same
     // colocated redb file. Unregistering also clears the "already exists"
-    // idempotent short-circuit at the top of `create_index_handler`, which
+    // idempotent short-circuit at the top of `create_index_report`, which
     // is checked BEFORE `skip_kg` is ever consulted — without this step the
     // re-POST below would return early and never exercise the fix.
     assert!(
@@ -144,18 +143,18 @@ async fn create_index_handler_honors_skip_kg_on_reregister() {
         "index must have been registered to unregister"
     );
 
-    // Phase 2: re-POST the SAME id/root_path through create_index_handler
+    // Phase 2: re-POST the SAME id/root_path through create_index_report
     // with skip_kg=true. This is the exact door the code-critic flagged:
     // `init_entry` must carry the real skip_kg value, not the
     // `..Default::default()` false it would get if the ordering fix were
     // reverted.
-    let second = super::indexes::create_index_handler(
-        State(Arc::clone(&state)),
-        Json(create_req_with_skip_kg(&id.0, root.clone(), Some(true))),
+    let second = create_answer(
+        &state,
+        create_req_with_skip_kg(&id.0, root.clone(), Some(true)),
     )
     .await;
     assert_eq!(
-        second.status(),
+        second.0,
         StatusCode::OK,
         "re-register (skip_kg=true) must succeed"
     );
@@ -168,14 +167,14 @@ async fn create_index_handler_honors_skip_kg_on_reregister() {
     assert_eq!(
         graph.node_count(),
         0,
-        "#2984: create_index_handler with skip_kg=true must not load a \
+        "#2984: create_index_report with skip_kg=true must not load a \
          persisted symbol graph on re-register, even when one already \
          exists on disk"
     );
     assert_eq!(
         graph.edge_count(),
         0,
-        "#2984: create_index_handler with skip_kg=true must not load \
+        "#2984: create_index_report with skip_kg=true must not load \
          persisted graph edges either"
     );
 }

@@ -157,7 +157,7 @@ pub struct SearchAppState {
     /// `GET /indexes/:id/reindex/stream`. Lazily populated.
     pub reindex_progress: Arc<DashMap<IndexId, Arc<ReindexProgress>>>,
     /// Issue #120: per-index timestamp of the most recent reindex that
-    /// aborted at the memory limit. Used by `reindex_handler` to apply a
+    /// aborted at the memory limit. Used by `reindex_report` to apply a
     /// cooldown (`TRUSTY_REINDEX_COOLDOWN_SECS`, default 300 s) before
     /// honouring another reindex request — re-running immediately would
     /// hit the same limit and produce a tight loop.
@@ -168,7 +168,7 @@ pub struct SearchAppState {
     /// operators time to lower batch size / raise the limit before another
     /// attempt.
     /// What: written by `spawn_reindex_with_cleanup` when `mem_limit_hit`
-    /// is true; read by `reindex_handler` before queuing.
+    /// is true; read by `reindex_report` before queuing.
     /// Test: covered by `reindex_handler_rejects_within_cooldown` in
     /// `src/service/server.rs#tests`.
     pub last_reindex_aborted_at: Arc<DashMap<IndexId, std::time::Instant>>,

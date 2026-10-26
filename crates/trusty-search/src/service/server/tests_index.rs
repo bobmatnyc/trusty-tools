@@ -1,12 +1,11 @@
 //! Tests for disk/mtime helpers, resource fields, logs, admin, and create_index.
 use super::admin::MAX_LOGS_TAIL_N;
 use super::status::{first_existing_mtime_rfc3339, index_disk_and_mtime};
+use super::test_support::create_answer;
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 #[test]
 #[serial_test::parallel]
 fn index_disk_and_mtime_handles_missing_dir() {
@@ -360,7 +359,6 @@ async fn admin_stop_returns_ok() {
 #[serial_test::parallel]
 async fn create_index_rejects_relative_root_path() {
     use crate::core::registry::IndexRegistry;
-    use axum::body::to_bytes;
 
     let state = SearchAppState::new(IndexRegistry::new());
     // Install a working embedder so we get past the readiness gate and
@@ -368,9 +366,9 @@ async fn create_index_rejects_relative_root_path() {
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
-    let resp = create_index_handler(
-        State(state_arc),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "rel-bad".into(),
             root_path: std::path::PathBuf::from("claude-mpm"),
@@ -390,12 +388,11 @@ async fn create_index_rejects_relative_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let (status, v) = resp;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
     assert!(err.contains("absolute"), "got: {err}");
 }
@@ -408,15 +405,14 @@ async fn create_index_rejects_relative_root_path() {
 #[serial_test::parallel]
 async fn create_index_rejects_nonexistent_root_path() {
     use crate::core::registry::IndexRegistry;
-    use axum::body::to_bytes;
 
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
-    let resp = create_index_handler(
-        State(state_arc),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "ghost".into(),
             root_path: std::path::PathBuf::from(
@@ -438,12 +434,11 @@ async fn create_index_rejects_nonexistent_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
-    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let (status, v) = resp;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
     assert!(err.contains("does not exist"), "got: {err}");
 }
@@ -489,9 +484,9 @@ async fn create_index_canonicalizes_symlinked_root_path() {
     let _ = std::fs::remove_file(&link_path);
     symlink(&real_root, &link_path).expect("create symlink");
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "symlinked".into(),
             // Register via the SYMLINK path — the registry should still
@@ -514,11 +509,11 @@ async fn create_index_canonicalizes_symlinked_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
     let _ = std::fs::remove_file(&link_path); // cleanup symlink (TempDir drops real_dir)
-    assert_create_ok(resp).await;
+    assert_create_ok(resp);
 
     let handle = state_arc
         .registry
@@ -553,9 +548,9 @@ async fn create_index_accepts_valid_absolute_root_path() {
     // TempDir under an allowlist-safe base — RAII cleanup on drop.
     let (_test_dir, test_root) = super::test_support::allowlisted_index_root("ts-valid-abs-");
 
-    let resp = create_index_handler(
-        State(Arc::clone(&state_arc)),
-        Json(CreateIndexRequest {
+    let resp = create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "valid-abs".into(),
             root_path: test_root,
@@ -575,25 +570,20 @@ async fn create_index_accepts_valid_absolute_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
     // _test_dir is dropped here → RAII cleanup
-    assert_create_ok(resp).await;
+    assert_create_ok(resp);
 }
 
-/// #9233: a non-200 from `create_index_handler` panics with the response
+/// #9233: a non-200 from `create_index_report` panics with the response
 /// body, so a recurrence names the failing step instead of a bare
 /// `500 != 200`.
-async fn assert_create_ok(resp: axum::response::Response) {
-    let status = resp.status();
+fn assert_create_ok((status, body): (StatusCode, serde_json::Value)) {
     if status == StatusCode::OK {
         return;
     }
-    let body = match axum::body::to_bytes(resp.into_body(), 1 << 20).await {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(e) => format!("<body unreadable: {e}>"),
-    };
     panic!("create_index returned {status}, expected 200 OK; body: {body}");
 }
 // Denylist tests live in `tests_denylist.rs` (split to keep this file ≤ 500 lines).

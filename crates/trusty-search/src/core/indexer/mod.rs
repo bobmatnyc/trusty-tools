@@ -1302,7 +1302,7 @@ impl CodeIndexer {
     /// boot-race fix, PR #3784 review finding 1).
     ///
     /// Why: `restore_one_index` / `restore_index_on_demand` /
-    /// `create_index_handler` / the relocate handler all resolve the pool
+    /// `create_index_report` / the relocate handler all resolve the pool
     /// via `state.current_embed_pool()` at construction time — but
     /// `install_embedder` (which unblocks these handlers) completes strictly
     /// BEFORE `install_embed_pool` in `commands/start/daemon.rs`, so a

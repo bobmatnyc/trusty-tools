@@ -259,13 +259,13 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 /// | `POST /indexes/:id/index-file` | `server::files::index_file_report` | read side, added #3049 rd2 |
 /// | `POST /indexes/:id/remove-file` | `server::files::remove_file_report` | read side, added #3049 rd2 |
 /// | `POST /indexes/:id/graph` | `server::contrib_graph::ingest_graph_report` | read side, added #3049 rd2 |
-/// | `PATCH /indexes/:id` (relocate) | `server::indexes_relocate::relocate_index_handler` | read side, added #3049 rd2 |
+/// | `PATCH /indexes/:id` (relocate) | `server::indexes_relocate::relocate_index_report` | read side, added #3049 rd2 |
 /// | filesystem watcher | `service::watch_loop::{handle_modified, handle_removed}` | read side, added #3049 rd2; `handle_modified` widened to cover its stale-chunk removal in rd4 |
 /// | boot reconcile | `service::reconcile` | read side, added #3049 rd2 |
 /// | full reindex | `reindex::runner::run_reindex` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
 /// | deferred embed | `reindex::defer_embed_queue` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
 /// | `PATCH /indexes/:id/config` catch-up | `server::components::spawn_component_catch_up` | read side, added #3049 rd3 (also holds [`INDEX_LOCKS`]) |
-/// | `POST /indexes` (recreate) | `server::indexes::create_index_handler` | read side, added #3049 rd3 |
+/// | `POST /indexes` (recreate) | `server::indexes::create_index_report` | read side, added #3049 rd3 |
 /// | startup schema migration | `commands::start::daemon` spawn → `core::migration::run_migrations` | read side, added #3049 rd4 |
 ///
 /// `create_index` is not a writer of an existing index, but it registers a

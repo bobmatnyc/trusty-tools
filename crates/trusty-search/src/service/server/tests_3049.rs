@@ -25,6 +25,7 @@
 //! Test: this module. Run with `cargo test -p trusty-search tests_3049`.
 
 use super::search::unregister_index;
+use super::test_support::create_answer;
 use super::tests_components::IsolatedDataDir;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -448,7 +449,7 @@ async fn delete_waits_for_an_ungated_index_file_write() {
 /// whose delete is still tearing it down.
 ///
 /// Why: `unregister_index` removes the hot registry entry partway through its
-/// teardown, and `create_index_handler`'s only guard was
+/// teardown, and `create_index_report`'s only guard was
 /// `state.registry.get(&id).is_some()`. A create landing after that removal but
 /// before teardown finished registered a fresh handle and could spawn a reindex
 /// into the directory the delete was about to `remove_dir_all` — and, once the
@@ -471,13 +472,9 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
         Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
 
-    // Generation 1, registered through the real handler.
-    let created = super::indexes::create_index_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::Json(create_req(ID, root.clone())),
-    )
-    .await;
-    assert_eq!(created.status(), axum::http::StatusCode::OK, "gen-1 create");
+    // Generation 1, registered through the real create core.
+    let created = create_answer(&state, create_req(ID, root.clone())).await;
+    assert_eq!(created.0, axum::http::StatusCode::OK, "gen-1 create");
 
     // An in-flight writer keeps the delete parked long enough for the create to
     // be issued squarely inside the teardown window. Both arrivals are WAITED
@@ -505,11 +502,7 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
     let create_order = Arc::clone(&order);
     let create_root = root.clone();
     let create = tokio::spawn(async move {
-        let resp = super::indexes::create_index_handler(
-            axum::extract::State(create_state),
-            axum::Json(create_req(ID, create_root)),
-        )
-        .await;
+        let resp = create_answer(&create_state, create_req(ID, create_root)).await;
         create_order.lock().expect("order lock").push("create");
         resp
     });
@@ -537,7 +530,7 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
          index (issue #3049)"
     );
     assert_eq!(
-        recreated.status(),
+        recreated.0,
         axum::http::StatusCode::OK,
         "once teardown is done the recreate is an ordinary create and must succeed"
     );

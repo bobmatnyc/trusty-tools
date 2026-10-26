@@ -18,14 +18,13 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::reindex_handlers::{reindex_handler, ReindexRequest};
+use super::reindex_handlers::{reindex_report, ReindexRequest};
 use super::search::search_report;
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::{CodeIndexer, SearchMode, SearchQuery, SearchStage};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
 use crate::service::server::state::SearchAppState;
-use axum::extract::{Json, Path, State};
 
 /// A lexical query for the seeded chunk, with every optional knob at its
 /// documented default so the test asserts the ordinary search path.
@@ -133,14 +132,14 @@ async fn reindex_root_override_still_returns_search_results() {
     );
 
     // The real override path.
-    let Json(queued) = reindex_handler(
-        State(Arc::clone(&state)),
-        Path("atlassian".to_string()),
-        Some(Json(ReindexRequest {
+    let queued = reindex_report(
+        &state,
+        "atlassian",
+        Some(ReindexRequest {
             root_path: Some(root_new.clone()),
             force: None,
             background: None,
-        })),
+        }),
     )
     .await
     .expect("override onto an unclaimed sub-root must be accepted");
@@ -256,18 +255,18 @@ async fn reindex_root_override_is_refused_when_the_corpus_disagrees() {
     let state = Arc::new(SearchAppState::new(registry).with_registry_path(registry_toml.clone()));
     state.install_embedder(Arc::clone(&embedder)).await;
 
-    let result = reindex_handler(
-        State(Arc::clone(&state)),
-        Path("atlassian-guard".to_string()),
-        Some(Json(ReindexRequest {
+    let result = reindex_report(
+        &state,
+        "atlassian-guard",
+        Some(ReindexRequest {
             root_path: Some(root_new.clone()),
             force: None,
             background: None,
-        })),
+        }),
     )
     .await;
 
-    let err = result.err().map(|(status, Json(body))| (status, body));
+    let err = result.err();
     let (status, body) = err.expect(
         "#4951 HIGH-1: an override whose target disagrees with the corpus's \
          indexed_root must be refused — accepting it re-points the indexer at a \

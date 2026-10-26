@@ -39,7 +39,10 @@
 //! [`delete_answer`] is the second helper: the delete-route tests' one call
 //! into `delete_index_report` (#9535). [`create_answer`] is the third: the
 //! create-route tests' call into `create_index_report` (#9939).
+//! [`relocate_answer`] is the fourth: the relocate-route tests' call into
+//! `relocate_index_report` (#9939).
 
+use super::indexes_relocate::{relocate_index_report, RelocateIndexRequest};
 use super::router::CreateIndexRequest;
 use super::{create_index_report, delete_index_report, DeleteIndexParams, SearchAppState};
 use axum::http::StatusCode;
@@ -134,6 +137,22 @@ pub(super) async fn create_answer(
     req: CreateIndexRequest,
 ) -> (StatusCode, serde_json::Value) {
     match create_index_report(state, req).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(refusal) => refusal,
+    }
+}
+
+/// `PATCH /indexes/{id}`'s answer as `(status, body)`, from its transport-free
+/// core (#9939).
+///
+/// `Ok` maps to `200`, as the former `relocate_index_handler`'s `Json` wrapper
+/// did. A refusal keeps the status and body the core returned.
+pub(super) async fn relocate_answer(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    req: RelocateIndexRequest,
+) -> (StatusCode, serde_json::Value) {
+    match relocate_index_report(state, id, req).await {
         Ok(body) => (StatusCode::OK, body),
         Err(refusal) => refusal,
     }

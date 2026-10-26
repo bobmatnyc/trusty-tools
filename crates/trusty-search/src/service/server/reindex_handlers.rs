@@ -3,18 +3,12 @@
 //! Why: The `POST /indexes/:id/reindex` trigger and
 //! `GET /indexes/:id/reindex/stream` SSE endpoint share reindex-progress
 //! types and cooldown logic; grouping them here keeps reindex concerns isolated.
-//! What: `ReindexRequest`, `reindex_report`, and the test-only `reindex_handler`.
+//! What: `ReindexRequest` and `reindex_report`.
 //! Test: `reindex_handler_rejects_within_cooldown` and
 //! `reindex_status_aborted_memory_serializes_lowercase`.
 use axum::http::StatusCode;
 use serde::Deserialize;
 use std::sync::Arc;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    Json,
-};
 
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{
@@ -42,18 +36,6 @@ pub struct ReindexRequest {
     pub background: Option<bool>,
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn reindex_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    body: Option<Json<ReindexRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    reindex_report(&state, &id, body.map(|Json(req)| req))
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/reindex` serves, without the transport
 /// (#6285 slice 4).
 ///
@@ -65,8 +47,8 @@ pub(super) async fn reindex_handler(
 /// must not claim. #8105 adds the write-quarantine refusal, which runs first.
 /// #8889 adds the one-reindex-per-index claim, taken before the root override.
 /// The SSE progress stream stays on HTTP until slice 5.
-/// What: [`reindex_handler`]'s whole former body, taking the already-decoded
-/// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
+/// What: the whole `POST /indexes/{id}/reindex` body, taking the
+/// already-decoded request. `None` is the empty-body form.
 /// Test: `reindex_over_the_socket_matches_the_http_body`,
 /// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport`,
 /// `a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport`
@@ -192,7 +174,7 @@ pub(crate) async fn reindex_report(
             // below would silently re-point this index onto a root_path a
             // DIFFERENT live index already owns, the same #2305/#2336 hazard
             // (two ids claiming one on-disk `<root>/.trusty-search/index.redb`
-            // corpus) `create_index_handler` and `relocate_index_handler`
+            // corpus) `create_index_report` and `relocate_index_report`
             // already guard against. Reuse the exact same primitive rather
             // than adding a fourth collision mechanism.
             //
@@ -365,8 +347,8 @@ pub(crate) async fn reindex_report(
                 // Issue #3995 round 5 (CRITICAL): snapshot the cold-store
                 // entry (if any) parked under `index_id` BEFORE registering
                 // the override handle below — the "expected" half of the
-                // identity guard, mirrored from `create_index_handler` /
-                // `relocate_index_handler`. See `mark_loaded_if` below.
+                // identity guard, mirrored from `create_index_report` /
+                // `relocate_index_report`. See `mark_loaded_if` below.
                 let cold_entry_before_register = state.cold_store.entry_token(&index_id);
                 handle = state.registry.register(new_handle);
                 // Both roots are now the new one; readers may proceed.
@@ -375,7 +357,7 @@ pub(crate) async fn reindex_report(
                 // consistency with create/relocate): reap any stale
                 // `state.cold_store` record parked under this SAME id. Same
                 // no-op-under-correct-operation reasoning as
-                // `relocate_index_handler`: reaching this branch already
+                // `relocate_index_report`: reaching this branch already
                 // required `state.registry.get(&index_id)` to succeed at the
                 // top of this handler (404 otherwise), so `id` was already
                 // live before the override ran and cannot simultaneously be
@@ -384,7 +366,7 @@ pub(crate) async fn reindex_report(
                 // can only ever touch this id's own record.
                 //
                 // Issue #3995 round 5 (CRITICAL): identity-guarded against
-                // `cold_entry_before_register` — see `create_index_handler`'s
+                // `cold_entry_before_register` — see `create_index_report`'s
                 // identical comment and `ColdIndexStore::mark_loaded_if` for
                 // the race this closes.
                 state

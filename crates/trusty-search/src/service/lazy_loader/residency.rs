@@ -372,8 +372,8 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// registration is either gone or no longer what we thought it was.
 ///
 /// **Concurrent-write guard (issue #3995 round 4, HIGH; identity-guarded
-/// reap added round 5, CRITICAL):** `create_index_handler`,
-/// `relocate_index_handler`, and `reindex_handler`'s `root_path` override all
+/// reap added round 5, CRITICAL):** `create_index_report`,
+/// `relocate_index_report`, and `reindex_report`'s `root_path` override all
 /// call `cold_store.mark_loaded_if` immediately after each registers a FRESH
 /// `IndexHandle` under `id` (issue #3993 round 3, reaping a stale cold-store
 /// record left over from before the id was re-created). That makes each of
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     /// Deterministic reproduction of the round-4 HIGH finding on PR #3995:
-    /// `create_index_handler` / `relocate_index_handler` / `reindex_handler`'s
+    /// `create_index_report` / `relocate_index_report` / `reindex_report`'s
     /// override, right after each registers a fresh handle (issue #3993
     /// round 3), reap the stale cold-store record for the same id — an
     /// uncoordinated SECOND writer of `cold_store.entries`, racing this
@@ -1159,8 +1159,8 @@ mod tests {
             mk_entry("race-swap", Some(1)),
             || false,
             move || {
-                // Mirrors `relocate_index_handler` / `create_index_handler` /
-                // `reindex_handler`'s override arm, post-issue-#3995-round-5:
+                // Mirrors `relocate_index_report` / `create_index_report` /
+                // `reindex_report`'s override arm, post-issue-#3995-round-5:
                 // snapshot the cold entry token BEFORE registering (this
                 // observes THIS function's step-1 insertion, since the hook
                 // fires right after it), register a brand-new handle under
@@ -1277,8 +1277,8 @@ mod tests {
     /// Fixed counterpart of
     /// `cold_park_index_handler_naive_reap_before_park_orphans_index`: same
     /// exact interleaving, but the handler's reap uses the issue #3995
-    /// round-5 pattern every real call site (`create_index_handler`,
-    /// `relocate_index_handler`, `reindex_handler`'s override) now follows —
+    /// round-5 pattern every real call site (`create_index_report`,
+    /// `relocate_index_report`, `reindex_report`'s override) now follows —
     /// snapshot `cold_store.entry_token(id)` BEFORE the handler's own
     /// `register` call, then reap via `mark_loaded_if` afterward instead of
     /// an unconditional `mark_loaded`.

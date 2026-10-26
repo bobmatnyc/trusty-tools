@@ -2,9 +2,7 @@
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 #[tokio::test]
 #[serial_test::parallel]
 async fn install_embedder_error_surfaces_in_health() {
@@ -31,7 +29,6 @@ async fn install_embedder_error_surfaces_in_health() {
 #[serial_test::parallel]
 async fn create_index_returns_503_with_error_when_embedder_failed() {
     use crate::core::registry::IndexRegistry;
-    use axum::body::to_bytes;
 
     let state = SearchAppState::new(IndexRegistry::new());
     state
@@ -45,9 +42,9 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
     // the sensitive-root denylist — use `test_support::allowlisted_index_root`
     // instead (issue #3955).
     let (_test_dir, test_root) = super::test_support::allowlisted_index_root("ts-embedder-fail-");
-    let resp = create_index_handler(
-        State(state_arc),
-        Json(CreateIndexRequest {
+    let (status, body) = super::test_support::create_answer(
+        &state_arc,
+        CreateIndexRequest {
             roots: None,
             id: "demo".to_string(),
             root_path: test_root,
@@ -67,14 +64,10 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
-        }),
+        },
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body_bytes = to_bytes(resp.into_body(), 64 * 1024)
-        .await
-        .expect("read body");
-    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid json");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let err_str = body
         .get("error")
         .and_then(|v| v.as_str())
@@ -158,7 +151,7 @@ async fn switchable_embedder_installed_alongside_embedder() {
 /// had no content-hash entry yet, pushes RSS over the limit again, and
 /// aborts again.
 /// What: stages an index, records a memory-abort timestamp, calls
-/// `reindex_handler` and asserts the 429 + JSON body shape. Then resets
+/// `reindex_report` and asserts the 429 + JSON body shape. Then resets
 /// the cooldown env to 0 s, removes the entry, and verifies the next
 /// call queues successfully.
 /// Test: this test.
@@ -188,29 +181,20 @@ async fn reindex_handler_rejects_within_cooldown() {
         .insert(id.clone(), std::time::Instant::now());
 
     // Default cooldown is 300 s — handler must refuse with 429.
-    let result = reindex_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cooldown-test".to_string()),
-        None,
-    )
-    .await;
+    let result = reindex_report(&state, "cooldown-test", None).await;
     let err = result.expect_err("expected 429 inside cooldown window");
     assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
-    let body = err.1 .0;
+    let body = err.1;
     assert!(body.get("retry_after_secs").is_some());
     assert!(body.get("hint").is_some());
     assert_eq!(body["index_id"], "cooldown-test");
 
     // Drop the abort entry and verify the next call queues successfully.
     state.last_reindex_aborted_at.remove(&id);
-    let ok = reindex_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cooldown-test".to_string()),
-        None,
-    )
-    .await
-    .expect("queued");
-    assert_eq!(ok.0["queued"], serde_json::Value::Bool(true));
+    let ok = reindex_report(&state, "cooldown-test", None)
+        .await
+        .expect("queued");
+    assert_eq!(ok["queued"], serde_json::Value::Bool(true));
 }
 
 /// Issue #120: the `AbortedMemory` variant must serialize to the

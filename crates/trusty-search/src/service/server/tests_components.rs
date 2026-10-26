@@ -24,7 +24,6 @@ use super::index_config::{patch_index_config_report, PatchIndexConfigRequest};
 use super::state::SearchAppState;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
-use axum::body::to_bytes;
 use axum::http::StatusCode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -76,11 +75,6 @@ impl Drop for IsolatedDataDir {
     fn drop(&mut self) {
         unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
     }
-}
-
-pub(super) async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
-    serde_json::from_slice(&bytes).expect("json")
 }
 
 /// Poll `handle.stages` up to 2s until `pred` is true. Mirrors the polling

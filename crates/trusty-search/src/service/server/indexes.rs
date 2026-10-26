@@ -3,19 +3,13 @@
 //! Why: Groups the core index registry endpoints (`GET /indexes`, `POST /indexes`)
 //! with their request/response types. The `PATCH /indexes/:id` relocate handler
 //! lives in `indexes_relocate` to keep this file under the 500-line cap.
-//! What: `list_indexes_report`, `create_index_handler`, and the types they use
+//! What: `list_indexes_report`, `create_index_report`, and the types they use
 //! (`ListIndexesParams`, `IndexDetailEntry`).
-//! Issue #2336: `create_index_handler` also guards against registering a
+//! Issue #2336: `create_index_report` also guards against registering a
 //! second index over a `root_path` already owned by a different registered
 //! id (409), and refuses to register a handle whose corpus open failed.
 //! Test: `create_index_rejects_relative_root_path`, `tests_2336.rs`, and
 //! related tests.
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::State,
-    response::{IntoResponse, Json, Response},
-};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -289,17 +283,6 @@ pub(crate) async fn list_indexes_report(
     }
 }
 
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn create_index_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Json(req): Json<CreateIndexRequest>,
-) -> Response {
-    match create_index_report(&state, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
 /// The body `POST /indexes` serves, without the transport (#6285 slice 4).
 ///
 /// Why: `search.index.create` registers an index over the socket, and this is
@@ -307,7 +290,7 @@ pub(super) async fn create_index_handler(
 /// where the registration must NOT happen. One core is what stops the socket
 /// registering an index the HTTP route would have refused, or reporting
 /// `created: true` for a registration that did not land.
-/// What: [`create_index_handler`]'s whole former body. A refusal keeps its HTTP
+/// What: the whole `POST /indexes` body. A refusal keeps its HTTP
 /// status beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code.

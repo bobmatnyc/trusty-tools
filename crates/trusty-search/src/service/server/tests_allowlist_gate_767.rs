@@ -11,20 +11,17 @@
 //! Every test here fails against the pre-fix commit: `create_index_handler`
 //! answered `200 {"created": true}` for an un-allowlisted root.
 //!
-//! What: drives `create_index_report` and `relocate_index_handler` directly
+//! What: drives `create_index_report` and `relocate_index_report` directly
 //! with `AllowlistPaths` pointed at tempdir fixtures, so the verdict never
 //! depends on the developer's real config or `tm` registry.
 //! Test: `cargo test -p trusty-search tests_allowlist_gate_767`.
 
-use super::test_support::create_answer;
+use super::test_support::{create_answer, relocate_answer};
 use super::*;
 use crate::allowlist::{AllowlistConfig, AllowlistEntry, AllowlistPaths};
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -94,15 +91,6 @@ async fn state_with(paths: AllowlistPaths) -> Arc<SearchAppState> {
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
     Arc::new(state)
-}
-
-async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), 65536).await.expect("body");
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-    )
 }
 
 /// THE fail-open regression: an un-allowlisted root must be refused.
@@ -367,15 +355,15 @@ async fn relocate_refuses_unlisted_root() {
     let resp = create_answer(&state, create_req("reloc", approved.clone())).await;
     assert_eq!(resp.0, StatusCode::OK, "setup: create must succeed");
 
-    let resp = super::indexes_relocate::relocate_index_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("reloc".to_string()),
-        Json(super::indexes_relocate::RelocateIndexRequest {
+    let resp = relocate_answer(
+        &state,
+        "reloc",
+        RelocateIndexRequest {
             root_path: elsewhere.clone(),
-        }),
+        },
     )
     .await;
-    let (status, json) = body_json(resp).await;
+    let (status, json) = resp;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
