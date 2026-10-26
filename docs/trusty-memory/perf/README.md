@@ -74,6 +74,14 @@ Each report names its threshold in `threshold`.
 - Storage, HIGH: missing vectors above 0 with a clean alias audit (findable-data loss).
 - Freshness above 1 s: no threshold until a baseline exists.
 
+### Ruled budgets (not graded by perf_compare.sh)
+
+A breach of a ruled budget is HIGH:
+
+- E12: +5 ms at 20k rows.
+- [#9141](https://github.com/bobmatnyc/trusty-tools/issues/9141) AC1: 1 s resident.
+- An error rate above 0 in `concurrent_perf` is HIGH.
+
 A crossing goes to the Architect. The analysis files no issues and posts no comments.
 
 EVO p95 is noisy under fleet load, so a latency crossing can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
