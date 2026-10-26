@@ -47,7 +47,8 @@ pub(crate) trait GhKeyringWriter {
 /// What: refuses a value it cannot quote ([`quoted`]); writes; reads back
 /// with the same tool and compares. Bounded by
 /// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`] per call, since a locked
-/// keychain hangs (#6867). A unit-test build never touches the keyring.
+/// keychain hangs (#6867). A unit-test build, or a tm inside the #9121
+/// sandbox, never touches the keyring.
 /// Test: none directly (a real keyring); the decisions it feeds are covered
 /// through `TableKeyring` in `gh_keyring_token_tests.rs`.
 pub(crate) struct SystemGhKeyring;
@@ -56,6 +57,10 @@ impl GhKeyringWriter for SystemGhKeyring {
     fn store(&self, host: &str, login: &str, token: &str) -> Result<(), String> {
         if cfg!(test) {
             return Err("a unit-test build never writes the keyring (#10037)".to_string());
+        }
+        // #9121: a sandboxed tm never reaches the per-user keyring.
+        if crate::secret_source::sandboxed() {
+            return Err("a sandboxed tm never writes the keyring (#9121)".to_string());
         }
         let service = keyring_service(host);
         let (svc, user, secret) = (

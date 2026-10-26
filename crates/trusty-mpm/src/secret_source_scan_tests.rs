@@ -70,6 +70,12 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "\"/usr/bin/security\"",
         "`tm env set` CLI only; reads its value from the login Keychain by design (#8939)",
     ),
+    (
+        "core/gh_keyring_token.rs",
+        "\"/usr/bin/security\"",
+        "`--account` / `--account-token-stdin` CLI only; WRITES a proven gh token into gh's \
+         keyring entry instead of a plaintext hosts.yml, and refuses when sandboxed (#10037)",
+    ),
 ];
 
 /// Files allowed to construct a `Configurator`, each over `credential_store()`.
