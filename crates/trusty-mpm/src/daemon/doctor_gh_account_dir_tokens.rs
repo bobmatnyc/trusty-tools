@@ -100,11 +100,18 @@ mod doctor_gh_account_dir_tokens_tests {
     #[test]
     fn a_host_with_no_account_dirs_is_ok() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        write(tmp.path(), "clean", "github.com:\n    users:\n        clean:\n    user: clean\n");
+        write(
+            tmp.path(),
+            "clean",
+            "github.com:\n    users:\n        clean:\n    user: clean\n",
+        );
         let check = check_gh_account_dir_tokens(tmp.path());
         assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
         let empty = tempfile::tempdir().expect("tempdir");
-        assert_eq!(check_gh_account_dir_tokens(empty.path()).status, CheckStatus::Ok);
+        assert_eq!(
+            check_gh_account_dir_tokens(empty.path()).status,
+            CheckStatus::Ok
+        );
     }
 
     /// 🔴 #10037: a legacy token file warns, naming the path, never the token.
@@ -118,7 +125,11 @@ mod doctor_gh_account_dir_tokens_tests {
         );
         let check = check_gh_account_dir_tokens(tmp.path());
         assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
-        assert!(check.message.contains(&path.display().to_string()), "{}", check.message);
+        assert!(
+            check.message.contains(&path.display().to_string()),
+            "{}",
+            check.message
+        );
         assert!(!check.message.contains("tok-fake"), "{}", check.message);
     }
 

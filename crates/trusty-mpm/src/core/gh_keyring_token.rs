@@ -63,7 +63,12 @@ impl GhKeyringWriter for SystemGhKeyring {
             quoted("login", login)?,
             quoted("token", token)?,
         );
-        platform_write(&service, login, token, &format!("{svc} -a {user} -w {secret}"))?;
+        platform_write(
+            &service,
+            login,
+            token,
+            &format!("{svc} -a {user} -w {secret}"),
+        )?;
         // #10037: the keyring must answer with this token before hosts.yml loses it.
         if platform_read(&service, login)?.trim() != token {
             return Err(format!(
@@ -102,7 +107,9 @@ fn run_keyring_tool(
     if !out.status.success() {
         return Err(format!(
             "the keyring {what} failed (exit {})",
-            out.status.code().map_or("signal".to_string(), |c| c.to_string())
+            out.status
+                .code()
+                .map_or("signal".to_string(), |c| c.to_string())
         ));
     }
     Ok(out.stdout)
@@ -110,7 +117,12 @@ fn run_keyring_tool(
 
 /// macOS: `security -i` reads `add-generic-password -U -s ...` from stdin.
 #[cfg(target_os = "macos")]
-fn platform_write(_service: &str, _login: &str, _token: &str, operands: &str) -> Result<(), String> {
+fn platform_write(
+    _service: &str,
+    _login: &str,
+    _token: &str,
+    operands: &str,
+) -> Result<(), String> {
     let mut cmd = std::process::Command::new("/usr/bin/security");
     cmd.arg("-i");
     let line = format!("add-generic-password -U -s {operands}\n");
@@ -130,7 +142,9 @@ fn platform_read(service: &str, login: &str) -> Result<String, String> {
 fn platform_write(service: &str, login: &str, token: &str, _operands: &str) -> Result<(), String> {
     let mut cmd = std::process::Command::new("secret-tool");
     let label = format!("Password for '{login}' on '{service}'");
-    cmd.args(["store", "--label", &label, "service", service, "username", login]);
+    cmd.args([
+        "store", "--label", &label, "service", service, "username", login,
+    ]);
     run_keyring_tool(cmd, Some(token.as_bytes().to_vec()), "write").map(drop)
 }
 
@@ -205,8 +219,8 @@ fn login_only_hosts_yml(path: &Path, host: &str, login: &str) -> Result<Option<S
     };
     let mut doc = original.clone();
     let not_a_map = || format!("{} is not a gh hosts.yml mapping", path.display());
-    let host_map = mapping_at(doc.as_mapping_mut().ok_or_else(not_a_map)?, host)
-        .ok_or_else(not_a_map)?;
+    let host_map =
+        mapping_at(doc.as_mapping_mut().ok_or_else(not_a_map)?, host).ok_or_else(not_a_map)?;
     host_map.remove("oauth_token");
     host_map.insert("user".into(), login.into());
     let users = mapping_at(host_map, "users").ok_or_else(not_a_map)?;
@@ -241,7 +255,10 @@ fn mapping_at<'a>(map: &'a mut Mapping, key: &str) -> Option<&'a mut Mapping> {
 /// Test: `holds_token_sees_host_and_user_tokens`.
 pub(crate) fn hosts_yml_holds_token(text: &str) -> Result<bool, String> {
     let doc: Value = serde_yaml::from_str(text).map_err(|_| "is not YAML".to_string())?;
-    let present = |v: Option<&Value>| v.and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+    let present = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty())
+    };
     let Some(hosts) = doc.as_mapping() else {
         return Ok(false);
     };

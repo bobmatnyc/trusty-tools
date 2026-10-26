@@ -87,13 +87,19 @@ fn a_stored_token_reaches_the_keyring_and_never_hosts_yml() {
     let keyring = TableKeyring::default();
     store_in_keyring(tmp.path(), "github.com", "octo-new", "tok-in", &keyring)
         .expect("a working keyring stores the token");
-    assert_eq!(keyring.token("github.com", "octo-new").as_deref(), Some("tok-in"));
+    assert_eq!(
+        keyring.token("github.com", "octo-new").as_deref(),
+        Some("tok-in")
+    );
     let text = std::fs::read_to_string(tmp.path().join("hosts.yml")).expect("hosts.yml");
     assert!(!text.contains("tok-"), "hosts.yml holds a token: {text}");
     assert_eq!(hosts_yml_holds_token(&text), Ok(false));
     let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("yaml");
     assert_eq!(doc["github.com"]["user"].as_str(), Some("octo-new"));
-    assert!(doc["github.com"]["users"].get("octo-new").is_some(), "{text}");
+    assert!(
+        doc["github.com"]["users"].get("octo-new").is_some(),
+        "{text}"
+    );
 }
 
 /// 🔴 #10037 migration: a legacy github.com token moves to the keyring and
@@ -103,8 +109,14 @@ fn a_legacy_hosts_yml_token_is_migrated_and_other_hosts_kept() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join("hosts.yml"), LEGACY).expect("hosts.yml");
     let keyring = TableKeyring::default();
-    store_in_keyring(tmp.path(), "github.com", "octo-pinned", "tok-legacy", &keyring)
-        .expect("migration succeeds");
+    store_in_keyring(
+        tmp.path(),
+        "github.com",
+        "octo-pinned",
+        "tok-legacy",
+        &keyring,
+    )
+    .expect("migration succeeds");
     assert_eq!(
         keyring.token("github.com", "octo-pinned").as_deref(),
         Some("tok-legacy")
@@ -130,15 +142,30 @@ fn a_keyring_failure_writes_no_token_to_hosts_yml() {
     let err = store_in_keyring(fresh.path(), "github.com", "octo-new", "tok-in", &keyring)
         .expect_err("a refused keyring write must refuse");
     assert!(err.contains("locked") && !err.contains("tok-"), "{err}");
-    assert!(!fresh.path().join("hosts.yml").exists(), "hosts.yml was written");
+    assert!(
+        !fresh.path().join("hosts.yml").exists(),
+        "hosts.yml was written"
+    );
 
     let legacy = tempfile::tempdir().expect("tempdir");
     std::fs::write(legacy.path().join("hosts.yml"), LEGACY).expect("hosts.yml");
-    store_in_keyring(legacy.path(), "github.com", "octo-pinned", "tok-new", &keyring)
-        .expect_err("a refused keyring write must refuse");
+    store_in_keyring(
+        legacy.path(),
+        "github.com",
+        "octo-pinned",
+        "tok-new",
+        &keyring,
+    )
+    .expect_err("a refused keyring write must refuse");
     let kept = std::fs::read_to_string(legacy.path().join("hosts.yml")).expect("hosts.yml");
-    assert_eq!(kept, LEGACY, "a failed migration must keep the file as it was");
-    assert!(!kept.contains("tok-new"), "the new token fell back to hosts.yml");
+    assert_eq!(
+        kept, LEGACY,
+        "a failed migration must keep the file as it was"
+    );
+    assert!(
+        !kept.contains("tok-new"),
+        "the new token fell back to hosts.yml"
+    );
 }
 
 /// 🔴 FAIL-OPEN CHECK (#10037): a `hosts.yml` rewrite that fails after the
@@ -157,13 +184,20 @@ fn a_failed_hosts_yml_rewrite_leaves_the_file_whole() {
     let keyring = TableKeyring::default();
     let err = store_in_keyring(&dir, "github.com", "octo-pinned", "tok-legacy", &keyring)
         .expect_err("a failed rewrite must refuse");
-    assert!(err.contains("cannot write") && !err.contains("tok-"), "{err}");
+    assert!(
+        err.contains("cannot write") && !err.contains("tok-"),
+        "{err}"
+    );
     assert_eq!(std::fs::read_to_string(&real).expect("real"), LEGACY);
     let names: Vec<_> = std::fs::read_dir(&dir)
         .expect("ls")
         .map(|e| e.expect("entry").file_name())
         .collect();
-    assert_eq!(names, vec![std::ffi::OsString::from("hosts.yml")], "a staging file was left");
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("hosts.yml")],
+        "a staging file was left"
+    );
 }
 
 /// FAIL-OPEN CHECK: a `hosts.yml` that is not a gh mapping is refused before
@@ -176,7 +210,10 @@ fn a_hosts_yml_that_is_not_a_mapping_is_refused_before_the_keyring() {
     let err = store_in_keyring(tmp.path(), "github.com", "octo-new", "tok-in", &keyring)
         .expect_err("a non-mapping hosts.yml must be refused");
     assert!(err.contains("not a gh hosts.yml mapping"), "{err}");
-    assert!(keyring.token("github.com", "octo-new").is_none(), "the keyring was written");
+    assert!(
+        keyring.token("github.com", "octo-new").is_none(),
+        "the keyring was written"
+    );
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("hosts.yml")).expect("hosts.yml"),
         "- a list\n"
@@ -207,7 +244,10 @@ fn plaintext_token_files_names_holding_and_unreadable_files() {
     let root = tmp.path().join("gh-accounts");
     for (login, text) in [
         ("legacy", LEGACY),
-        ("clean", "github.com:\n    users:\n        clean:\n    user: clean\n"),
+        (
+            "clean",
+            "github.com:\n    users:\n        clean:\n    user: clean\n",
+        ),
         ("broken", ":: ["),
     ] {
         std::fs::create_dir_all(root.join(login)).expect("dir");

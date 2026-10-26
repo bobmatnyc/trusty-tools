@@ -138,7 +138,10 @@ fn a_proven_token_never_lands_in_hosts_yml() {
 fn assert_no_token_in_hosts_yml(dir: &Path, login: &str) {
     let text = std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml");
     assert!(!text.contains("tok-"), "hosts.yml holds a token: {text}");
-    assert!(!text.contains("oauth_token"), "hosts.yml holds a token key: {text}");
+    assert!(
+        !text.contains("oauth_token"),
+        "hosts.yml holds a token key: {text}"
+    );
     let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("yaml");
     assert_eq!(doc["github.com"]["user"].as_str(), Some(login), "{text}");
 }
@@ -426,8 +429,15 @@ fn a_stdin_token_is_proven_then_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-in", Ok("Octo-New"));
     let keyring = TableKeyring::default();
-    let dir = store_supplied_token(&state_root, "octo-new", ORIGIN, " tok-in\n", &check, &keyring)
-        .expect("a proven stdin token is stored");
+    let dir = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        " tok-in\n",
+        &check,
+        &keyring,
+    )
+    .expect("a proven stdin token is stored");
     assert_eq!(dir, account_dir(&state_root, "octo-new"));
     assert_eq!(
         keyring.token("github.com", "Octo-New").as_deref(),
@@ -490,8 +500,15 @@ fn a_stdin_keyring_failure_never_falls_back_to_hosts_yml() {
 fn a_stdin_token_for_another_account_is_refused_and_not_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-active", Ok("octo-active"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-active", &check, &TableKeyring::default())
-        .expect_err("another account's token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-active",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("another account's token must be refused");
     assert!(err.contains("authenticates as 'octo-active'"), "{err}");
     assert!(!err.contains("tok-"), "a refusal carries a token: {err}");
     assert!(!account_dir(&state_root, "octo-new").exists());
@@ -503,8 +520,15 @@ fn a_stdin_token_for_another_account_is_refused_and_not_stored() {
 fn a_stdin_token_whose_proof_fails_is_refused_and_not_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-in", Err("did not answer in time"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check, &TableKeyring::default())
-        .expect_err("an unproven token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-in",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("an unproven token must be refused");
     assert!(err.contains("did not answer in time"), "{err}");
     assert!(!account_dir(&state_root, "octo-new").exists());
 }
@@ -514,8 +538,15 @@ fn a_stdin_token_whose_proof_fails_is_refused_and_not_stored() {
 fn an_empty_stdin_token_is_refused() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default();
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, " \n", &check, &TableKeyring::default())
-        .expect_err("an empty token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        " \n",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("an empty token must be refused");
     assert!(err.contains("empty"), "{err}");
     assert!(check.calls().is_empty(), "GET /user ran");
 }
@@ -529,8 +560,15 @@ fn a_hosts_yml_that_is_not_a_mapping_is_refused_and_kept() {
     std::fs::create_dir_all(&dir).expect("dir");
     std::fs::write(dir.join("hosts.yml"), "- a list\n").expect("hosts.yml");
     let check = TableCheck::default().answer(API, "tok-in", Ok("octo-new"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check, &TableKeyring::default())
-        .expect_err("a non-mapping hosts.yml must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-in",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("a non-mapping hosts.yml must be refused");
     assert!(err.contains("not a gh hosts.yml mapping"), "{err}");
     assert_eq!(
         std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml"),
