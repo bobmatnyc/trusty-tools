@@ -62,6 +62,24 @@ impl Default for AutoPruneConfig {
     }
 }
 
+/// Settings for the launchd `stderr.log` rotation (issue #10297).
+///
+/// Why: `ROTATION_KEEP = 7` silently dropped the 8th archive, and an operator
+///      whose policy is keep-more had no setting for it.
+/// What: `keep` is the number of rotated archives newsyslog retains. `None`
+///       means "not configured": the default (7) applies, or the count
+///       already in the installed newsyslog conf. Kept as `i64` so a zero or
+///       negative value loads and is reported by
+///       `commands::log_rotation_keep::resolve_keep` instead of failing the
+///       whole config parse.
+/// Test: `log_rotation_config_roundtrip` in this module.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogRotationConfig {
+    /// Archives to keep. Valid range `1..=MAX_KEEP`; see `log_rotation_keep`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<i64>,
+}
+
 /// Top-level configuration document.
 ///
 /// Why: keeps two distinct kinds of user state side-by-side: directories to scan
@@ -93,6 +111,14 @@ pub struct GlobalConfig {
     /// load without error — they simply see the report-only defaults.
     #[serde(default)]
     pub auto_prune: AutoPruneConfig,
+
+    /// `stderr.log` rotation settings (issue #10297). Absent = defaults.
+    #[serde(default, skip_serializing_if = "is_default_log_rotation")]
+    pub log_rotation: LogRotationConfig,
+}
+
+fn is_default_log_rotation(c: &LogRotationConfig) -> bool {
+    *c == LogRotationConfig::default()
 }
 
 /// One explicit collection entry — a named index pointing at a directory.
@@ -304,6 +330,19 @@ mod tests {
         let err = GlobalConfig::load_from(&path).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("YAML") || msg.contains("yaml"), "msg={msg}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_rotation_config_roundtrip() {
+        let dir = unique_tmp("logrot");
+        let path = dir.join("config.yaml");
+        fs::write(&path, "log_rotation:\n  keep: 30\n").unwrap();
+        let cfg = GlobalConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.log_rotation.keep, Some(30));
+        assert_eq!(GlobalConfig::default().log_rotation.keep, None);
+        cfg.save_to(&path).unwrap();
+        assert_eq!(GlobalConfig::load_from(&path).unwrap(), cfg);
         let _ = fs::remove_dir_all(&dir);
     }
 

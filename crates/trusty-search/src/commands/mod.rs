@@ -25,6 +25,7 @@ pub(crate) mod doctor_pipeline;
 pub mod format;
 pub mod index_resolve;
 pub mod log_rotation;
+pub mod log_rotation_keep;
 pub mod reindex_engine;
 pub(crate) mod reindex_ui;
 

@@ -34,16 +34,12 @@ pub const ROTATION_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::SEARCH_L
 /// Rotation policy constants (issue #127 acceptance criteria).
 ///
 /// `SIZE_KB` — rotate once the log exceeds 1 MiB.
-/// `KEEP` — retain at most 7 compressed archives.
+/// Archive count — default 7, set by `log_rotation.keep` (#10297).
 /// Total on-disk footprint is therefore bounded at roughly
 /// `1 MiB (current) + 7 × ~1 MiB (archives)` ≈ 8 MiB before gzip, and far
 /// less once the archives are compressed.
 #[cfg(target_os = "macos")]
 pub const ROTATION_SIZE_KB: u32 = 1024;
-
-/// Number of rotated archives to keep.
-#[cfg(target_os = "macos")]
-pub const ROTATION_KEEP: u32 = 7;
 
 /// Resolve `~/Library/Logs/trusty-search/stderr.log` — the file launchd
 /// writes the daemon's stderr to (see `service.rs::launchd_plist_body`).
@@ -85,19 +81,19 @@ pub fn rotation_plist_path() -> Result<std::path::PathBuf> {
 /// The one newsyslog data line for the given `stderr.log` path.
 ///
 /// What: `<logfile> <mode> <count> <size> <when> <flags>` — rotates at
-/// `ROTATION_SIZE_KB`, keeps `ROTATION_KEEP` archives, also rotates daily
+/// `ROTATION_SIZE_KB`, keeps `keep` archives, also rotates daily
 /// (`when = $D0`, midnight) so an idle daemon's log still ages out, compresses
 /// archives (`J`), and signals no process (`N`), so there is no pidfile
 /// column. The daemon detects the rename itself (#8270). newsyslog columns
 /// cannot be quoted, so the path may not contain a space.
 /// Test: `newsyslog_conf_sends_no_signal_and_names_no_pidfile`.
 #[cfg(target_os = "macos")]
-pub fn newsyslog_data_line(stderr_log: &std::path::Path) -> String {
+pub fn newsyslog_data_line(stderr_log: &std::path::Path, keep: u32) -> String {
     format!(
         "{path}    644  {keep}  {size}  $D0  JN",
         path = stderr_log.display(),
         size = ROTATION_SIZE_KB,
-        keep = ROTATION_KEEP,
+        keep = keep,
     )
 }
 
@@ -111,7 +107,7 @@ pub fn newsyslog_data_line(stderr_log: &std::path::Path) -> String {
 /// Test: `newsyslog_conf_sends_no_signal_and_names_no_pidfile`,
 /// `installed_matches_rejects_a_stale_install`.
 #[cfg(target_os = "macos")]
-pub fn newsyslog_conf_body(stderr_log: &std::path::Path) -> String {
+pub fn newsyslog_conf_body(stderr_log: &std::path::Path, keep: u32) -> String {
     format!(
         "# trusty-search log rotation (issues #127, #8270) — managed by `trusty-search doctor --fix`.\n\
          # Columns: logfile_name  mode  count  size  when  flags\n\
@@ -119,8 +115,8 @@ pub fn newsyslog_conf_body(stderr_log: &std::path::Path) -> String {
          # Signals nothing (N): the daemon reopens its log once the path names a new file.\n\
          {line}\n",
         size = ROTATION_SIZE_KB,
-        keep = ROTATION_KEEP,
-        line = newsyslog_data_line(stderr_log),
+        keep = keep,
+        line = newsyslog_data_line(stderr_log, keep),
     )
 }
 
@@ -215,9 +211,10 @@ pub fn rotation_status() -> RotationStatus {
         return RotationStatus::NotConfigured;
     };
     let system = std::path::Path::new(SYSTEM_NEWSYSLOG_CONF);
+    let keep = effective_keep();
     if system.exists() {
         let text = std::fs::read_to_string(system).unwrap_or_default();
-        return if conf_has_current_line(&text, &log) {
+        return if conf_has_current_line(&text, &log, keep) {
             RotationStatus::Configured
         } else {
             RotationStatus::SystemConfStale(system.to_path_buf())
@@ -226,7 +223,7 @@ pub fn rotation_status() -> RotationStatus {
     let (Ok(conf), Ok(plist)) = (newsyslog_conf_path(), rotation_plist_path()) else {
         return RotationStatus::NotConfigured;
     };
-    if installed_matches(&conf, &newsyslog_conf_body(&log))
+    if installed_matches(&conf, &newsyslog_conf_body(&log, keep))
         && installed_matches(&plist, &rotation_plist_body(&conf))
     {
         RotationStatus::Configured
@@ -235,12 +232,39 @@ pub fn rotation_status() -> RotationStatus {
     }
 }
 
+/// The keep count `doctor` compares against: config, else installed, else 7.
+///
+/// Why: #10297: a status read must agree with what `doctor --fix` would write,
+/// or a configured count reads as drift and is "fixed" back.
+/// What: resolves like [`write_rotation_files`], but cannot fail. An unreadable
+/// config or an invalid `log_rotation.keep` logs a WARN and yields the
+/// default; `install_rotation` is where those are refused as errors.
+/// Test: `resolve_keep_*` in `log_rotation_keep`; the `write_rotation_files_*`
+/// tests cover the same resolution on the write path.
+#[cfg(target_os = "macos")]
+pub fn effective_keep() -> u32 {
+    use super::log_rotation_keep::{resolve_keep, DEFAULT_KEEP};
+    let configured = crate::config::GlobalConfig::load()
+        .map(|c| c.log_rotation.keep)
+        .unwrap_or_else(|e| {
+            tracing::warn!("log rotation: ignoring unreadable config.yaml: {e:#}");
+            None
+        });
+    let installed = newsyslog_conf_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    resolve_keep(configured, installed.as_deref()).unwrap_or_else(|e| {
+        tracing::warn!("log rotation: {e}; using the default of {DEFAULT_KEEP}");
+        DEFAULT_KEEP
+    })
+}
+
 /// True when some data line of `conf` has exactly the columns of
 /// [`newsyslog_data_line`] for `log`. Comments, blank lines and spacing are
 /// ignored.
 #[cfg(target_os = "macos")]
-fn conf_has_current_line(conf: &str, log: &std::path::Path) -> bool {
-    let want = newsyslog_data_line(log);
+fn conf_has_current_line(conf: &str, log: &std::path::Path, keep: u32) -> bool {
+    let want = newsyslog_data_line(log, keep);
     let want: Vec<&str> = want.split_whitespace().collect();
     conf.lines()
         .filter(|l| !l.trim_start().starts_with('#'))
@@ -251,6 +275,41 @@ fn conf_has_current_line(conf: &str, log: &std::path::Path) -> bool {
 #[cfg(target_os = "macos")]
 fn installed_matches(path: &std::path::Path, expected: &str) -> bool {
     std::fs::read_to_string(path).is_ok_and(|s| s == expected)
+}
+
+/// Write the newsyslog conf and the rotation plist; no `launchctl`.
+///
+/// Why: the file-writing half of [`install_rotation`], split out so a test can
+/// point it at a tempdir (#10297).
+/// What: resolves the keep count (config value, else the count already in
+/// `conf_path`, else the default), then writes both files.
+/// Test: `write_rotation_files_uses_configured_keep`,
+/// `write_rotation_files_keeps_existing_count`.
+#[cfg(target_os = "macos")]
+pub fn write_rotation_files(
+    stderr_log: &std::path::Path,
+    conf_path: &std::path::Path,
+    plist_path: &std::path::Path,
+    configured: Option<i64>,
+) -> Result<()> {
+    // #10297: an invalid count is refused, not replaced by the default.
+    let installed = std::fs::read_to_string(conf_path).ok();
+    let keep = super::log_rotation_keep::resolve_keep(configured, installed.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(parent) = conf_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(conf_path, newsyslog_conf_body(stderr_log, keep))
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", conf_path.display()))?;
+
+    if let Some(parent) = plist_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(plist_path, rotation_plist_body(conf_path))
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", plist_path.display()))?;
+    Ok(())
 }
 
 /// Install the user-level newsyslog config + rotation LaunchAgent.
@@ -267,20 +326,9 @@ pub fn install_rotation() -> Result<()> {
     let stderr_log = stderr_log_path()?;
     let conf_path = newsyslog_conf_path()?;
     let plist_path = rotation_plist_path()?;
-
-    if let Some(parent) = conf_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&conf_path, newsyslog_conf_body(&stderr_log))
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", conf_path.display()))?;
-
-    if let Some(parent) = plist_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&plist_path, rotation_plist_body(&conf_path))
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", plist_path.display()))?;
+    // #10297: the keep count comes from `log_rotation.keep` in config.yaml.
+    let configured = crate::config::GlobalConfig::load()?.log_rotation.keep;
+    write_rotation_files(&stderr_log, &conf_path, &plist_path, configured)?;
 
     // (Re)load the LaunchAgent so the schedule takes effect and the
     // RunAtLoad pass rotates immediately if the log already exceeds 1 MB.
@@ -320,6 +368,7 @@ pub fn install_rotation() -> Result<()> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    use super::super::log_rotation_keep::DEFAULT_KEEP;
     use super::*;
 
     #[test]
@@ -357,7 +406,7 @@ mod tests {
     #[test]
     fn newsyslog_conf_sends_no_signal_and_names_no_pidfile() {
         let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
-        let body = newsyslog_conf_body(log);
+        let body = newsyslog_conf_body(log, DEFAULT_KEEP);
         let data: Vec<&str> = body
             .lines()
             .filter(|l| !l.trim_start().starts_with('#'))
@@ -369,7 +418,7 @@ mod tests {
             [
                 "/Users/test/Library/Logs/trusty-search/stderr.log",
                 "644",
-                &ROTATION_KEEP.to_string(),
+                &DEFAULT_KEEP.to_string(),
                 &ROTATION_SIZE_KB.to_string(),
                 "$D0",
                 "JN",
@@ -389,7 +438,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let conf = dir.path().join("newsyslog.conf");
         let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
-        let current = newsyslog_conf_body(log);
+        let current = newsyslog_conf_body(log, DEFAULT_KEEP);
         assert!(!installed_matches(&conf, &current), "nothing installed");
         let original_127 = "# trusty-search log rotation (issue #127) — managed by `trusty-search doctor --fix`.\n\
              # Columns: logfile_name  mode  count  size  when  flags\n\
@@ -414,15 +463,15 @@ mod tests {
     #[test]
     fn system_conf_must_match_the_current_form() {
         let log = std::path::Path::new("/Users/test/Library/Logs/trusty-search/stderr.log");
-        let current =
-            format!("# operator comment\n\n{}\n", newsyslog_data_line(log)).replace("    ", "\t");
-        assert!(conf_has_current_line(&current, log), "{current}");
+        let current = format!("# operator comment\n\n{}\n", newsyslog_data_line(log, 7))
+            .replace("    ", "\t");
+        assert!(conf_has_current_line(&current, log, 7), "{current}");
         let signalling = "/Users/test/Library/Logs/trusty-search/stderr.log 644 7 1024 $D0 J \
              /Users/test/Library/Logs/trusty-search/trusty-search.pid 1\n";
-        assert!(!conf_has_current_line(signalling, log));
-        let other_user = newsyslog_data_line(std::path::Path::new("/Users/else/stderr.log"));
-        assert!(!conf_has_current_line(&other_user, log));
-        assert!(!conf_has_current_line("", log));
+        assert!(!conf_has_current_line(signalling, log, 7));
+        let other_user = newsyslog_data_line(std::path::Path::new("/Users/else/stderr.log"), 7);
+        assert!(!conf_has_current_line(&other_user, log, 7));
+        assert!(!conf_has_current_line("", log, 7));
     }
 
     #[test]
@@ -444,7 +493,82 @@ mod tests {
     #[test]
     fn rotation_keep_count_bounds_disk_footprint() {
         // Acceptance criterion: at most 7 archives, rotate at 1 MB.
-        assert_eq!(ROTATION_KEEP, 7);
+        assert_eq!(DEFAULT_KEEP, 7);
         assert_eq!(ROTATION_SIZE_KB, 1024);
+    }
+
+    fn seam_paths(
+        dir: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        (
+            std::path::PathBuf::from("/Users/test/Library/Logs/trusty-search/stderr.log"),
+            dir.join("newsyslog.conf"),
+            dir.join("rotate.plist"),
+        )
+    }
+
+    fn written_count(conf: &std::path::Path) -> String {
+        let body = std::fs::read_to_string(conf).expect("conf written");
+        let line = body
+            .lines()
+            .find(|l| !l.trim_start().starts_with('#'))
+            .expect("one data line");
+        line.split_whitespace()
+            .nth(2)
+            .expect("count column")
+            .to_string()
+    }
+
+    /// #10297: the count in `config.yaml` is what `doctor --fix` writes.
+    /// Test: this test.
+    #[test]
+    fn write_rotation_files_uses_configured_keep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (log, conf, plist) = seam_paths(dir.path());
+        write_rotation_files(&log, &conf, &plist, Some(30)).expect("write");
+        assert_eq!(written_count(&conf), "30");
+    }
+
+    /// #10297: with nothing in config.yaml, a count already in the installed
+    /// conf survives a re-run of `doctor --fix`.
+    /// Test: this test.
+    #[test]
+    fn write_rotation_files_keeps_existing_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (log, conf, plist) = seam_paths(dir.path());
+        std::fs::write(
+            &conf,
+            format!(
+                "{}\n",
+                newsyslog_data_line(&log, 7).replace("  7  ", "  45  ")
+            ),
+        )
+        .expect("seed");
+        write_rotation_files(&log, &conf, &plist, None).expect("write");
+        assert_eq!(written_count(&conf), "45");
+    }
+
+    /// #10297: nothing configured and nothing installed writes the default.
+    /// Test: this test.
+    #[test]
+    fn write_rotation_files_defaults_to_seven() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (log, conf, plist) = seam_paths(dir.path());
+        write_rotation_files(&log, &conf, &plist, None).expect("write");
+        assert_eq!(written_count(&conf), "7");
+    }
+
+    /// #10297: zero, negative and oversized counts are refused with an error
+    /// and leave the installed conf untouched.
+    /// Test: this test.
+    #[test]
+    fn write_rotation_files_rejects_invalid_keep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (log, conf, plist) = seam_paths(dir.path());
+        for bad in [0, -3, 1001] {
+            let err = write_rotation_files(&log, &conf, &plist, Some(bad)).expect_err("refused");
+            assert!(err.to_string().contains("log_rotation.keep"), "{err}");
+            assert!(!conf.exists(), "nothing written for {bad}");
+        }
     }
 }

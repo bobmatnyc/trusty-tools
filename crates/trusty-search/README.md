@@ -748,6 +748,17 @@ Run `trusty-search doctor` for a 6-check diagnostic. Common causes:
 
 During an initial index or reindex, embedding is the GPU-heavy stage — `btop` (or Activity Monitor → GPU) shows the load, and the search dashboard's per-collection panel can pause embedding.
 
+**Keeping more rotated logs**
+
+On macOS the launchd `stderr.log` rotates at 1 MB or daily and keeps 7 compressed archives. To keep more, set `log_rotation.keep` in `~/.config/trusty-search/config.yaml`, then run `trusty-search doctor --fix`:
+
+```yaml
+log_rotation:
+  keep: 30   # whole number, 1 to 1000; default 7
+```
+
+`doctor --fix` writes that count into the newsyslog conf, and a count already in the installed conf (for example a hand edit) survives a re-run when `config.yaml` sets none. A value outside 1 to 1000 (zero, negative, non-numeric, too large) is refused with an error and nothing is written.
+
 **Embedder stuck on "initializing"**
 
 The ONNX Runtime initializes the model on first start and may take 30–60 seconds on slower machines. If it hangs indefinitely, increase the timeout:

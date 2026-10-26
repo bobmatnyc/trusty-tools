@@ -207,8 +207,9 @@ fn fix_log_rotation() {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 println!(
-                    "  {} Installed log rotation for stderr.log (1 MB × 7 archives, daily check)",
-                    "✓".green()
+                    "  {} Installed log rotation for stderr.log (1 MB × {} archives, daily check)",
+                    "✓".green(),
+                    crate::commands::log_rotation::effective_keep()
                 );
                 println!("    {} {}", "·".dimmed(), conf.dimmed());
             }

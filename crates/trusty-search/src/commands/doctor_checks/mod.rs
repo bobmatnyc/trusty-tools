@@ -391,9 +391,10 @@ pub fn check_log_rotation() -> CheckResult {
         use super::log_rotation::RotationStatus;
         use super::log_rotation::{newsyslog_data_line, rotation_status, stderr_log_path};
         match rotation_status() {
-            RotationStatus::Configured => {
-                CheckResult::Ok("Log rotation configured for stderr.log (1 MB × 7 archives)".into())
-            }
+            RotationStatus::Configured => CheckResult::Ok(format!(
+                "Log rotation configured for stderr.log (1 MB × {} archives)",
+                super::log_rotation::effective_keep()
+            )),
             // #8270: deliberately NOT the "no rotation policy" wording, so
             // `--fix` does not install a second, user-level rotation of the
             // same file. Editing `/etc` needs sudo; say what to write.
@@ -402,7 +403,7 @@ pub fn check_log_rotation() -> CheckResult {
                  or send a signal, #8270); replace its entry with: {} (needs sudo)",
                 path.display(),
                 stderr_log_path()
-                    .map(|log| newsyslog_data_line(&log))
+                    .map(|log| newsyslog_data_line(&log, super::log_rotation::effective_keep()))
                     .unwrap_or_else(|_| "<could not resolve $HOME>".into()),
             )),
             RotationStatus::NotConfigured => CheckResult::Warn(
