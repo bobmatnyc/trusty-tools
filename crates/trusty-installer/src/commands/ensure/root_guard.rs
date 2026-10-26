@@ -19,6 +19,14 @@ resolve the daemons under root's data directory. Re-run it as your normal user. 
 If a file is already root-owned (for example ./.mcp.json or ./.mcp.json.bak), \
 fix it with: sudo chown $USER <file>";
 
+/// Warning `tctl install` prints when its verify tail skips the project stages
+/// as root (#10320); install itself still runs.
+pub const INSTALL_ROOT_SKIP: &str = "tctl install: running as root (effective uid 0); \
+skipped the project .mcp.json patch and the search-index / memory-palace setup so no \
+root-owned files are written here. Run `tctl ensure` as your normal user afterwards. \
+If a file is already root-owned (for example ./.mcp.json or ./.mcp.json.bak), \
+fix it with: sudo chown $USER <file>";
+
 /// Decide whether `ensure` may run under the given effective uid.
 ///
 /// Why: the decision must be testable without real root, so it takes the uid
