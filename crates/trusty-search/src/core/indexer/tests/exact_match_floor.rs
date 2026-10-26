@@ -1012,9 +1012,11 @@ async fn a_filename_querys_named_file_stays_first_when_content_hits_exist() {
         .search(&query("session_mcp_scope.rs", 10))
         .await
         .unwrap();
-    assert_eq!(
-        results.first().map(|r| r.file.as_str()),
-        Some(NAMED_FILE),
+    // A result's `file` is absolute under the index root.
+    assert!(
+        results
+            .first()
+            .is_some_and(|r| r.file.ends_with(NAMED_FILE)),
         "the named file must rank first, got {:?}",
         results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
     );
@@ -1049,8 +1051,8 @@ async fn a_filename_querys_content_hits_rank_after_every_path_hit() {
             .map(|(i, _)| i)
             .collect()
     };
-    let path_pos = pos(&|f| f == NAMED_FILE);
-    let mention_pos = pos(&|f| f.starts_with("src/other/"));
+    let path_pos = pos(&|f| f.ends_with(NAMED_FILE));
+    let mention_pos = pos(&|f| f.contains("/src/other/"));
     let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(
         mention_pos.len(),
@@ -1132,7 +1134,7 @@ async fn a_filename_query_with_no_content_hits_returns_only_its_path_hits() {
         .await
         .unwrap();
     assert!(
-        results.iter().take(3).all(|r| r.file == NAMED_FILE),
+        results.iter().take(3).all(|r| r.file.ends_with(NAMED_FILE)),
         "the named file fills the top of the page, got {:?}",
         results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
     );
