@@ -1623,7 +1623,11 @@ async fn run_review_mapreduce_synthesis_two_mediums_not_refloored() {
     // #10226 cond2: the run is partial (Degraded), so APPROVE is capped; a
     // re-floored REQUEST_CHANGES would still fail this assertion.
     assert_eq!(result.status, ReviewStatus::Degraded, "{result:?}");
-    assert_eq!(result.verdict, Verdict::ApproveWithReservations, "{result:?}");
+    assert_eq!(
+        result.verdict,
+        Verdict::ApproveWithReservations,
+        "{result:?}"
+    );
 }
 
 /// #9310: with synthesis not answering (the mechanical path), a chunk reply
