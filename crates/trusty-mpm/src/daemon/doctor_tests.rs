@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_seventy_eight_checks() {
+async fn run_doctor_produces_seventy_nine_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -481,6 +481,7 @@ async fn run_doctor_produces_seventy_eight_checks() {
     // #10042 adds events (seventy-five → seventy-six).
     // #8390 adds content_requires (seventy-six → seventy-seven).
     // #8928 step 3 adds sccache_socket (seventy-seven → seventy-eight).
+    // #10037 adds gh_account_dir_tokens (seventy-eight → seventy-nine).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -518,6 +519,8 @@ async fn run_doctor_produces_seventy_eight_checks() {
         // #9018: whether `[pm_guard] enabled = false` turned the guard off.
         "pm_guard",
         "org_accounts",
+        // #10037: a plaintext gh token left in a tm account dir.
+        "gh_account_dir_tokens",
         // #7616: whether the instruction fold saved this project anything, or
         // is inactive — the state a daemon-log line used to be the only
         // evidence of. Named `instruction_fold` since #7867.

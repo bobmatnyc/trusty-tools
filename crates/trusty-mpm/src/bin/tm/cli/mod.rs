@@ -148,10 +148,11 @@ pub(crate) struct Cli {
     /// Read a token for `--account` from stdin (#8914).
     ///
     /// Why: when this machine's own gh cannot yield the account's token, a
-    /// token on stdin is the setup that touches no keyring. `gh auth login`
-    /// activates the account in the machine-wide keyring slot.
-    /// What: tm proves the token with `GET /user` and stores it in its 0600
-    /// per-account `hosts.yml` before any session starts.
+    /// token on stdin is the setup that never activates the account in the
+    /// machine-wide keyring slot, as `gh auth login` does.
+    /// What: tm proves the token with `GET /user` and stores it in gh's
+    /// keyring entry for the account before any session starts. #10037: its
+    /// per-account `hosts.yml` names the account and holds no token.
     /// Test: `cli_account_token_stdin_requires_an_account`.
     #[arg(long, global = true, requires = "account")]
     pub(crate) account_token_stdin: bool,
