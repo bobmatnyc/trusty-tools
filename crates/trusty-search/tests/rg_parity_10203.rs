@@ -7,8 +7,15 @@
 //! What: for each query in [`PARITY_QUERIES`], `rg --count --fixed-strings`
 //! lists the files carrying the literal; files outside the indexer's own walk
 //! universe (`walker::walk_source_files`) are set aside, not counted as
-//! misses. The daemon then answers a default hybrid `search.query` with
+//! misses, and so are query-list holders (below). The daemon then answers a default hybrid `search.query` with
 //! `top_k = K`, where K is [`top_k_for`] of rg's matching-line count.
+//!
+//! **Query-list holders are never rg hits.** The corpus holds this very file,
+//! which spells out every query literal, so rg always finds it and hybrid
+//! rarely ranks it. A file that rg matches for EVERY query in
+//! [`PARITY_QUERIES`] has no reason to match except that it holds the query
+//! list; [`query_list_holders`] finds such files and [`compare`] drops them
+//! from the expected set, from the line count behind K, and from the misses.
 //!
 //! **Pass bar:** every rg file in the walk universe appears among the files of
 //! the top-K hybrid hits, with K = max(10, rg matching lines). A chunk carrying
@@ -105,6 +112,26 @@ fn parse_rg_counts(stdout: &str) -> Result<BTreeMap<String, usize>, String> {
     Ok(out)
 }
 
+/// Files rg matches for every query: they hold the query list itself.
+///
+/// Why: this test's own source lists every literal, so it is an rg hit for
+/// every query by construction, not because it is relevant to any of them.
+/// What: the intersection of the per-query rg file sets; empty for no queries.
+/// A file relevant to one identifier is not a hit for all of them.
+/// Test: `query_list_holders_are_files_matching_every_query`.
+// #10203: keep the test's own source (and any copy of the query list) out of the comparison.
+fn query_list_holders(per_query: &[BTreeMap<String, usize>]) -> BTreeSet<String> {
+    let mut iter = per_query
+        .iter()
+        .map(|m| m.keys().cloned().collect::<BTreeSet<_>>());
+    let Some(first) = iter.next() else {
+        return BTreeSet::new();
+    };
+    iter.fold(first, |acc, next| {
+        acc.intersection(&next).cloned().collect()
+    })
+}
+
 /// A root-relative path with any leading `./` removed.
 fn normalize_rel(path: &str) -> String {
     path.trim_start_matches("./").to_string()
@@ -134,6 +161,8 @@ struct Parity {
     missed: BTreeSet<String>,
     /// rg files the indexer never walks; reported, not counted.
     unindexed: BTreeSet<String>,
+    /// Query-list holders; reported, never counted as rg hits.
+    holders: BTreeSet<String>,
 }
 
 /// Compare rg's file set with the hybrid top-K files.
@@ -142,17 +171,22 @@ struct Parity {
 /// are not a parity failure, and a file the walker excludes by design is not
 /// a search miss.
 /// What: splits `rg_files` into `expected` (in `universe`) and `unindexed`,
-/// then `missed = expected − hybrid_files`.
+/// then `missed = expected − hybrid_files`. A file in `holders` is set aside
+/// first, so it is never expected and never missed (#10203).
 /// Test: `a_missing_rg_file_is_a_miss_and_extra_hybrid_files_are_not`,
-/// `rg_files_outside_the_walk_universe_are_set_aside_not_missed`.
+/// `rg_files_outside_the_walk_universe_are_set_aside_not_missed`,
+/// `query_list_holders_are_excluded_from_expected_and_missed`.
 fn compare(
     rg_files: &BTreeMap<String, usize>,
     universe: &BTreeSet<String>,
+    holders: &BTreeSet<String>,
     hybrid_files: &BTreeSet<String>,
 ) -> Parity {
     let mut parity = Parity::default();
     for file in rg_files.keys() {
-        if universe.contains(file) {
+        if holders.contains(file) {
+            parity.holders.insert(file.clone());
+        } else if universe.contains(file) {
             parity.expected.insert(file.clone());
             if !hybrid_files.contains(file) {
                 parity.missed.insert(file.clone());
@@ -173,7 +207,14 @@ fn rg_counts(root: &Path, literal: &str) -> Result<BTreeMap<String, usize>, Stri
     let bin = std::env::var_os(RG_BIN_ENV).unwrap_or_else(|| "rg".into());
     let output = Command::new(&bin)
         .current_dir(root)
-        .args(["--count", "--fixed-strings", "--no-config", "--", literal, "."])
+        .args([
+            "--count",
+            "--fixed-strings",
+            "--no-config",
+            "--",
+            literal,
+            ".",
+        ])
         .output()
         .map_err(|e| {
             format!(
@@ -225,11 +266,16 @@ async fn hybrid_search_finds_every_rg_file_for_literal_queries() {
         "query", "rg_files", "lines", "K", "hybrid", "missed"
     );
     let mut failures = Vec::new();
-    for (query, literal) in PARITY_QUERIES {
-        let rg = rg_counts(&fx.corpus, literal).unwrap_or_else(|e| panic!("{e}"));
+    let rg_all: Vec<_> = PARITY_QUERIES
+        .iter()
+        .map(|(_, literal)| rg_counts(&fx.corpus, literal).unwrap_or_else(|e| panic!("{e}")))
+        .collect();
+    let holders = query_list_holders(&rg_all);
+    println!("query-list holders (never counted): {holders:?}");
+    for ((query, _), rg) in PARITY_QUERIES.iter().zip(&rg_all) {
         let lines: usize = rg
             .iter()
-            .filter(|(f, _)| universe.contains(*f))
+            .filter(|(f, _)| universe.contains(*f) && !holders.contains(*f))
             .map(|(_, n)| n)
             .sum();
         let Some(top_k) = top_k_for(lines) else {
@@ -253,7 +299,7 @@ async fn hybrid_search_finds_every_rg_file_for_literal_queries() {
                     .collect()
             })
             .unwrap_or_default();
-        let parity = compare(&rg, &universe, &hybrid);
+        let parity = compare(rg, &universe, &holders, &hybrid);
         println!(
             "{:<40} {:>8} {:>5} {:>4} {:>7} {:>6}",
             query,
@@ -330,18 +376,42 @@ mod tests {
     fn a_missing_rg_file_is_a_miss_and_extra_hybrid_files_are_not() {
         let rg = BTreeMap::from([("a.rs".to_string(), 2), ("b.rs".to_string(), 1)]);
         let universe = set(&["a.rs", "b.rs", "c.rs"]);
-        let parity = compare(&rg, &universe, &set(&["a.rs", "c.rs"]));
+        let parity = compare(&rg, &universe, &set(&[]), &set(&["a.rs", "c.rs"]));
         assert_eq!(parity.missed, set(&["b.rs"]));
-        let parity = compare(&rg, &universe, &set(&["a.rs", "b.rs", "c.rs"]));
+        let parity = compare(&rg, &universe, &set(&[]), &set(&["a.rs", "b.rs", "c.rs"]));
         assert!(parity.missed.is_empty());
     }
 
     #[test]
     fn rg_files_outside_the_walk_universe_are_set_aside_not_missed() {
         let rg = BTreeMap::from([("a.rs".to_string(), 1), ("vendor/x.rs".to_string(), 1)]);
-        let parity = compare(&rg, &set(&["a.rs"]), &set(&["a.rs"]));
+        let parity = compare(&rg, &set(&["a.rs"]), &set(&[]), &set(&["a.rs"]));
         assert_eq!(parity.expected, set(&["a.rs"]));
         assert_eq!(parity.unindexed, set(&["vendor/x.rs"]));
         assert!(parity.missed.is_empty());
+    }
+
+    // #10203: the test's own source holds every query, so it must never count.
+    #[test]
+    fn query_list_holders_are_files_matching_every_query() {
+        let own = "crates/t/tests/rg_parity_10203.rs";
+        let q1 = BTreeMap::from([(own.to_string(), 1), ("a.rs".to_string(), 2)]);
+        let q2 = BTreeMap::from([(own.to_string(), 1), ("b.rs".to_string(), 1)]);
+        assert_eq!(query_list_holders(&[q1, q2]), set(&[own]));
+        assert!(query_list_holders(&[]).is_empty());
+    }
+
+    #[test]
+    fn query_list_holders_are_excluded_from_expected_and_missed() {
+        let own = "crates/t/tests/rg_parity_10203.rs";
+        let rg = BTreeMap::from([(own.to_string(), 5), ("a.rs".to_string(), 1)]);
+        let universe = set(&[own, "a.rs"]);
+        let parity = compare(&rg, &universe, &set(&[own]), &set(&["a.rs"]));
+        assert_eq!(parity.expected, set(&["a.rs"]));
+        assert_eq!(parity.holders, set(&[own]));
+        assert!(parity.missed.is_empty());
+        // Without the exclusion the same inputs are a miss.
+        let parity = compare(&rg, &universe, &set(&[]), &set(&["a.rs"]));
+        assert_eq!(parity.missed, set(&[own]));
     }
 }
