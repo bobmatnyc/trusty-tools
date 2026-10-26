@@ -760,8 +760,8 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     quoted string; a single identifier carrying an underscore, `::` or a
     camelCase boundary (optionally behind `fn`/`struct`/`const`); a bare
     filename or path-shaped suffix (`session_mcp_scope.rs`,
-    `indexer/search/exact.rs`), matched against each chunk's path rather than
-    its content; and an issue reference (`#7675`), matched verbatim. An
+    `indexer/search/exact.rs`), matched against each chunk's path and then
+    against content; and an issue reference (`#7675`), matched verbatim. An
     UNQUOTED multi-word phrase earns nothing — it is a conceptual query, and
     flooring one let a prose sentence occurring verbatim in a single doc line
     take the top slot from every semantically-relevant chunk. A bare word and
@@ -781,7 +781,10 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     (#7675 round 3), and a single query's floor contribution from this shape
     is capped at a small constant (`FILENAME_HIT_CAP`, 8) so a basename as
     common as `mod.rs` cannot flood the page with an arbitrary subset of
-    unrelated files.
+    unrelated files. A filename query also floors the chunks whose content
+    names the file (owner ruling 2026-10-26, #7675): they rank below every
+    path hit, are interleaved by file, and take their own cap
+    (`FILENAME_CONTENT_HIT_CAP`, 8), which never changes the path-hit count.
   - `meta.exact_match_degraded` / `meta.exact_match_full_scan` (#7675): the
     lane's own honesty bits. `exact_match_degraded` is `true` when the lane
     could not read the corpus at all (the same bounded-rehydrate exhaustion
@@ -790,9 +793,9 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `exact_match_full_scan` is `true` when the BM25 postings prefilter was
     unavailable — an evicted or corpus-capped lexical index, where
     `bm25.len() < chunks.len()` means the postings can miss a chunk — and the
-    lane matched the literal against every chunk's content instead. A filename
-    query compares path basenames and never scans content, so it reports
-    `false`.
+    lane matched the literal against every chunk's content instead. For a
+    filename query it describes the content pass; path matching always reads
+    every chunk's path.
   - `meta.embedder` (#9970): `{active, intended, bootstrap, note}`. `active`
     is the backend that embedded this query (`ort`, `python`, ...);
     `intended` is the one the host is configured or defaulted to (`python`

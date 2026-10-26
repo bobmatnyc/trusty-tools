@@ -18,7 +18,7 @@
 
 use super::*;
 use crate::core::indexer::search::exact::{
-    extract_exact_literal, literal_regex, LiteralShape, FILENAME_HIT_CAP,
+    extract_exact_literal, literal_regex, LiteralShape, FILENAME_CONTENT_HIT_CAP, FILENAME_HIT_CAP,
 };
 
 /// The L1 literal from the spike — a WARN string that tokenizes entirely into
@@ -459,8 +459,9 @@ fn extract_exact_literal_reads_the_query_shapes() {
 async fn a_filename_query_floors_the_chunks_of_that_file() {
     // Why: ripgrep finds `session_mcp_scope.rs` trivially; the identifier gate
     // rejected it outright because of the dot. Round-2 MEDIUM. #7675.
-    // What: the floor matches the chunk's path basename, not its content, so a
-    // chunk merely MENTIONING the filename is not floored.
+    // What: the floor matches the chunk's path basename first; since the
+    // 2026-10-26 owner ruling a chunk MENTIONING the filename is floored too,
+    // after the file itself (#7675).
     // Test: this test.
     let idx = make_indexer();
     idx.add_chunk(raw(
@@ -491,12 +492,12 @@ async fn a_filename_query_floors_the_chunks_of_that_file() {
         .await;
     assert_eq!(
         lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
-        vec!["file:target"],
-        "a filename query floors the file itself, not chunks that mention it"
+        vec!["file:target", "file:mention"],
+        "a filename query floors the file itself, then the chunks that mention it"
     );
     assert!(
         !lane.full_scan,
-        "a filename query matches paths, so it is not the content-scan fallback"
+        "a filename query's content pass uses the postings prefilter"
     );
 }
 
@@ -933,5 +934,206 @@ async fn every_file_carrying_an_identifier_survives_overlapping_chunks_of_one_fi
         results[0].content.contains(&format!("fn {IDENT}")),
         "the declaration must still rank first, got {}",
         results[0].id
+    );
+}
+
+/// The named file of the four #7675 filename-content tests below.
+const NAMED_FILE: &str = "src/core/session_mcp_scope.rs";
+
+/// Plant the named file as `chunks` chunks and `mentions` other files whose
+/// content names it once, plus decoys dense in the filename's own words.
+///
+/// Why: the decoys share every BM25 token of `session_mcp_scope.rs` without
+/// the literal, so only the floor can rank a mention above them.
+async fn filename_fixture(chunks: usize, mentions: usize) -> CodeIndexer {
+    let idx = make_indexer();
+    for i in 0..chunks {
+        idx.add_chunk(raw(
+            &format!("named:{i:02}"),
+            NAMED_FILE,
+            &format!("fn scope_step_{i}(project: &Project) -> Result<()> {{ Ok(()) }}"),
+        ))
+        .await
+        .unwrap();
+    }
+    for i in 0..mentions {
+        idx.add_chunk(raw(
+            &format!("mention:{i:02}"),
+            &format!("src/other/user_{i}.rs"),
+            &format!(
+                "fn unrelated_work_{i}(input: &str) -> usize {{\n\
+                 // the rules live in session_mcp_scope.rs\n\
+                 input.len()\n}}"
+            ),
+        ))
+        .await
+        .unwrap();
+    }
+    for i in 0..12 {
+        idx.add_chunk(raw(
+            &format!("decoy:{i:02}"),
+            &format!("src/decoy/session_{i}.rs"),
+            "// session mcp scope rs session mcp scope rs session mcp scope",
+        ))
+        .await
+        .unwrap();
+    }
+    idx
+}
+
+/// The ids the exact-match lane returns for the named file's basename.
+async fn filename_lane_ids(idx: &CodeIndexer, want: usize) -> Vec<(String, bool)> {
+    let lit = extract_exact_literal("session_mcp_scope.rs").expect("filename");
+    let re = literal_regex(&lit).expect("regex");
+    idx.exact_match_lane(
+        &lit,
+        &re,
+        want,
+        crate::core::indexer::SearchMode::All,
+        None,
+        None,
+    )
+    .await
+    .hits
+    .into_iter()
+    .map(|h| (h.id, h.content_only))
+    .collect()
+}
+
+#[tokio::test]
+async fn a_filename_querys_named_file_stays_first_when_content_hits_exist() {
+    // Why: owner ruling 2026-10-26 (#7675) — content matches join a filename
+    // query, and the file it names must keep rank 1.
+    // What: three chunks of the named file, five files mentioning it, and
+    // token-dense decoys; the default `search` must put the named file first.
+    // Test: this test.
+    let idx = filename_fixture(3, 5).await;
+    let results = idx
+        .search(&query("session_mcp_scope.rs", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        results.first().map(|r| r.file.as_str()),
+        Some(NAMED_FILE),
+        "the named file must rank first, got {:?}",
+        results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_filename_querys_content_hits_rank_after_every_path_hit() {
+    // Why: owner ruling 2026-10-26 (#7675) — ripgrep lists every file that
+    // mentions `session_mcp_scope.rs`; the floor dropped them all (7 of 7 in
+    // the #10203 A/B). They must appear, below every path hit.
+    // What: the lane returns the path hits, then the content hits; the page
+    // carries every mentioning file, each one below every named-file chunk.
+    // Test: this test.
+    let idx = filename_fixture(3, 5).await;
+    let lane = filename_lane_ids(&idx, 40).await;
+    let flags: Vec<bool> = lane.iter().map(|(_, content)| *content).collect();
+    assert_eq!(
+        flags,
+        [vec![false; 3], vec![true; 5]].concat(),
+        "path hits first, then one content hit per mentioning file; got {lane:?}"
+    );
+
+    let results = idx
+        .search(&query("session_mcp_scope.rs", 10))
+        .await
+        .unwrap();
+    let pos = |pred: &dyn Fn(&str) -> bool| -> Vec<usize> {
+        results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| pred(&r.file))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let path_pos = pos(&|f| f == NAMED_FILE);
+    let mention_pos = pos(&|f| f.starts_with("src/other/"));
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        mention_pos.len(),
+        5,
+        "every mentioning file must be on the page, got {ids:?}"
+    );
+    assert!(
+        path_pos.iter().max() < mention_pos.iter().min(),
+        "every path hit must outrank every content hit, got {ids:?}"
+    );
+    assert_eq!(
+        mention_pos.iter().max().copied(),
+        Some(path_pos.len() + mention_pos.len() - 1),
+        "content hits must sit directly below the path hits, above every decoy, got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_filename_querys_content_hits_are_capped_apart_from_its_path_hits() {
+    // Why: owner ruling 2026-10-26 (#7675) — content hits take their own cap,
+    // `FILENAME_CONTENT_HIT_CAP`, and must never cost a path hit its slot.
+    // What: more named-file chunks than `FILENAME_HIT_CAP` and more mentioning
+    // files than `FILENAME_CONTENT_HIT_CAP`; each cap holds on its own, and
+    // the path-hit count matches a corpus with no mentions at all.
+    // Test: this test.
+    let flooded = filename_fixture(FILENAME_HIT_CAP + 2, FILENAME_CONTENT_HIT_CAP + 3).await;
+    let lane = filename_lane_ids(&flooded, 100).await;
+    let path = lane.iter().filter(|(_, content)| !content).count();
+    let content = lane.iter().filter(|(_, content)| *content).count();
+    assert_eq!(
+        content, FILENAME_CONTENT_HIT_CAP,
+        "content cap must hold, got {lane:?}"
+    );
+    assert_eq!(path, FILENAME_HIT_CAP, "path cap must hold, got {lane:?}");
+    assert!(
+        lane.iter().take(path).all(|(_, content)| !content),
+        "path hits come first, got {lane:?}"
+    );
+
+    let unmentioned = filename_fixture(FILENAME_HIT_CAP + 2, 0).await;
+    let baseline = filename_lane_ids(&unmentioned, 100).await;
+    assert_eq!(
+        baseline.len(),
+        path,
+        "content hits must not change the path-hit count"
+    );
+}
+
+#[tokio::test]
+async fn a_filename_query_with_no_content_hits_returns_only_its_path_hits() {
+    // Why: owner ruling 2026-10-26 (#7675) — with nothing mentioning the file,
+    // a filename query must behave exactly as before the ruling.
+    // What: the lane returns only the named file's chunks, through the
+    // postings prefilter, and `search` still ranks the named file first.
+    // Test: this test.
+    let idx = filename_fixture(3, 0).await;
+    let lit = extract_exact_literal("session_mcp_scope.rs").expect("filename");
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(
+            &lit,
+            &re,
+            40,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["named:00", "named:01", "named:02"],
+    );
+    assert!(
+        !lane.full_scan,
+        "a complete BM25 index serves the content pass"
+    );
+    let results = idx
+        .search(&query("session_mcp_scope.rs", 10))
+        .await
+        .unwrap();
+    assert!(
+        results.iter().take(3).all(|r| r.file == NAMED_FILE),
+        "the named file fills the top of the page, got {:?}",
+        results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
     );
 }

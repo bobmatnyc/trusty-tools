@@ -23,12 +23,16 @@
 //! Test: `crates/trusty-search/src/core/indexer/tests/exact_match_floor.rs`.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
 use regex::Regex;
 
+#[allow(unused_imports)] // `CodeIndexer` is named by intra-doc links only.
 use super::super::{CodeChunk, CodeIndexer, RawChunk};
+
+// #7675: the corpus lane lives in its own file to keep this one under the
+// 500-SLOC cap; as a child module it still reads this module's private items.
+mod lane;
 
 /// Keywords that introduce a declaration in the languages this crate chunks.
 const DEF_KEYWORDS: &[&str] = &[
@@ -73,6 +77,19 @@ const DEF_KEYWORDS: &[&str] = &[
 /// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
 pub(crate) const FILENAME_HIT_CAP: usize = 8;
 
+/// Upper bound on how many content hits a single `Filename` query may float
+/// to the floor, below its path hits (#7675).
+///
+/// Why: owner ruling 2026-10-26 — a filename query also returns the chunks
+/// that MENTION the file, the way ripgrep would list them. A filename that is
+/// mentioned everywhere (`Cargo.toml`, `mod.rs`) must not flood the page with
+/// mentions, and the mentions must never take a slot from the file itself.
+/// What: applied in [`CodeIndexer::exact_match_lane`] to the content hits
+/// alone, after [`FILENAME_HIT_CAP`] has capped the path hits; the two caps
+/// are independent, so this one never changes how many path hits survive.
+/// Test: `a_filename_querys_content_hits_are_capped_apart_from_its_path_hits`.
+pub(crate) const FILENAME_CONTENT_HIT_CAP: usize = 8;
+
 /// Extensions a bare token must carry to read as a filename rather than prose.
 ///
 /// Why: `session_mcp_scope.rs` typed as a query means "show me that file", and
@@ -101,9 +118,10 @@ pub(crate) enum LiteralShape {
     /// Text the caller quoted explicitly.
     Quoted,
     /// A bare filename (`session_mcp_scope.rs`) or a path-shaped suffix
-    /// (`indexer/search/exact.rs`). Matched against each chunk's path, never
-    /// its content — a path-shaped literal requires the chunk's whole path to
-    /// end with that multi-segment suffix; a bare one matches the basename.
+    /// (`indexer/search/exact.rs`). Matched first against each chunk's path —
+    /// a path-shaped literal requires the chunk's whole path to end with that
+    /// multi-segment suffix; a bare one matches the basename — and then
+    /// against content, whose hits rank after every path hit (#7675).
     /// See [`filename_match_tier`] for the two-tier rule #7675 round 3 added
     /// so a precise path-suffix match outranks a same-basename-only one.
     Filename,
@@ -284,8 +302,9 @@ fn is_identifier_shaped(tok: &str) -> bool {
 /// takes a trailing boundary and no leading one. Quoted text gets escaped text
 /// whose internal whitespace runs become `\s+`. A [`LiteralShape::Filename`]
 /// literal is matched against the chunk's PATH, never its content, so the regex
-/// returned for it is the escaped text and is never consulted — it exists so
-/// the pipeline carries one uniform `Option<Regex>`.
+/// returned for it — the same boundary-anchored text an identifier gets — is
+/// consulted only for its content hits, the chunks that mention the file
+/// (#7675, owner ruling 2026-10-26).
 /// Test: `literal_regex_anchors_an_identifier_at_word_boundaries`.
 pub(crate) fn literal_regex(lit: &ExactLiteral) -> Option<Regex> {
     let pattern = match lit.shape {
@@ -391,6 +410,10 @@ pub(crate) struct HitInput<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct ExactHit {
     pub(crate) id: String,
+    /// `true` only for a [`LiteralShape::Filename`] hit whose content names
+    /// the file but whose path does not match it; such a hit always sorts
+    /// after every path hit (#7675). `false` for every other shape.
+    pub(crate) content_only: bool,
     pub(crate) is_definition: bool,
     pub(crate) occurrences: usize,
     pub(crate) on_branch: bool,
@@ -449,16 +472,6 @@ fn filename_match_tier(file: &str, lit_text: &str) -> Option<bool> {
     }
 }
 
-/// How many times `lit` occurs in one chunk — content for every shape except
-/// [`LiteralShape::Filename`], which matches the chunk's path via
-/// [`filename_match_tier`] rather than its content.
-fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize {
-    match lit.shape {
-        LiteralShape::Filename => usize::from(filename_match_tier(input.file, &lit.text).is_some()),
-        _ => re.find_iter(input.content).count(),
-    }
-}
-
 /// Score every literal-carrying chunk in `items` against `lit`.
 ///
 /// Why: shared by the corpus lane (recall) and the floor (ranking) so the two
@@ -470,9 +483,11 @@ fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize
 /// What: matches each chunk against `lit`, counting occurrences and flagging
 /// declarations; returns hits ordered by (declaration, live-before-downranked,
 /// caller-declared branch preference, occurrence count, chunk id) — every key
-/// lane-independent, so the order is fully deterministic. For every shape but
-/// `Filename`, [`interleave_by_file`] then lifts each file's best hit ahead of
-/// any file's second hit, so every carrying file fits a page. `downranked` sits
+/// lane-independent, so the order is fully deterministic. A `Filename`
+/// query's content hits (`content_only`) sort after all its path hits, ahead
+/// of every other key. [`interleave_by_file`] then lifts each file's best
+/// content hit ahead of any file's second one, so every carrying file fits a
+/// page; a `Filename` query's path hits are not interleaved. `downranked` sits
 /// directly after `is_definition` so an archived or stale duplicate of a
 /// declaration can never outrank the live one; it reuses the verdict
 /// `apply_archive_downrank` already computed rather than reclassifying.
@@ -501,7 +516,9 @@ fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize
 /// `an_archived_duplicate_ranks_below_the_live_definition`,
 /// `test_branch_boost_applied_to_matching_chunks`,
 /// `a_path_shaped_query_returns_its_file_first`,
-/// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
+/// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`,
+/// `a_filename_querys_named_file_stays_first_when_content_hits_exist`,
+/// `a_filename_querys_content_hits_rank_after_every_path_hit`.
 fn rank_hits<'a, I>(items: I, lit: &ExactLiteral, re: &Regex) -> Vec<ExactHit>
 where
     I: Iterator<Item = HitInput<'a>>,
@@ -512,32 +529,47 @@ where
     let scored_shape = matches!(lit.shape, LiteralShape::Filename);
     let mut hits: Vec<(ExactHit, &'a str)> = items
         .filter_map(|input| {
-            let occurrences = occurrences_of(lit, re, &input);
+            let path_tier = match lit.shape {
+                LiteralShape::Filename => filename_match_tier(input.file, &lit.text),
+                _ => None,
+            };
+            // #7675: a filename query also matches chunks whose CONTENT names
+            // the file (owner ruling 2026-10-26); those rank after path hits.
+            let content_only = scored_shape && path_tier.is_none();
+            let occurrences = match path_tier {
+                Some(_) => 1,
+                None => re.find_iter(input.content).count(),
+            };
             if occurrences == 0 {
                 return None;
             }
             let is_definition = match lit.shape {
-                LiteralShape::Filename => {
-                    filename_match_tier(input.file, &lit.text).unwrap_or(false)
-                }
+                LiteralShape::Filename => path_tier.unwrap_or(false),
                 _ => definition
                     .as_ref()
                     .is_some_and(|d| d.matches(input.content, input.function_name)),
             };
             let hit = ExactHit {
                 id: input.id.to_string(),
+                content_only,
                 is_definition,
                 occurrences,
                 on_branch: input.on_branch,
                 downranked: input.downranked,
-                tie_score: if scored_shape { input.tie_score } else { 0.0 },
+                // A content hit is ordered like any content shape: no score.
+                tie_score: if scored_shape && !content_only {
+                    input.tie_score
+                } else {
+                    0.0
+                },
             };
             Some((hit, input.file))
         })
         .collect();
     hits.sort_by(|(a, _), (b, _)| {
-        b.is_definition
-            .cmp(&a.is_definition)
+        a.content_only
+            .cmp(&b.content_only)
+            .then_with(|| b.is_definition.cmp(&a.is_definition))
             .then_with(|| a.downranked.cmp(&b.downranked))
             .then_with(|| b.on_branch.cmp(&a.on_branch))
             .then_with(|| b.occurrences.cmp(&a.occurrences))
@@ -546,11 +578,19 @@ where
             .then_with(|| b.tie_score.total_cmp(&a.tie_score))
             .then_with(|| a.id.cmp(&b.id))
     });
-    // #7675: a `Filename` hit is the file itself, so only the content shapes
-    // need every carrying file ahead of a second chunk of one file.
-    if !matches!(lit.shape, LiteralShape::Filename) {
-        interleave_by_file(&mut hits);
-    }
+    // #7675: a `Filename` path hit is the file itself, so only content hits —
+    // every hit of a content shape, the tail of a filename query — are
+    // interleaved by file. Path hits keep their order and stay in front.
+    let split = if scored_shape {
+        hits.iter()
+            .position(|(h, _)| h.content_only)
+            .unwrap_or(hits.len())
+    } else {
+        0
+    };
+    let mut content = hits.split_off(split);
+    interleave_by_file(&mut content);
+    hits.append(&mut content);
     hits.into_iter().map(|(hit, _)| hit).collect()
 }
 
@@ -686,180 +726,4 @@ pub(crate) struct ExactLaneOutcome {
     pub(crate) hits: Vec<ExactHit>,
     pub(crate) degraded: bool,
     pub(crate) full_scan: bool,
-}
-
-/// Which chunks the lane has to look at.
-enum Candidates {
-    /// The BM25 postings intersection — a superset of the verbatim matches.
-    Postings(Vec<String>),
-    /// Every chunk in the map, because no usable candidate set was derivable.
-    AllChunks,
-}
-
-impl CodeIndexer {
-    /// Chunk ids whose BM25 postings carry every token of `lit`.
-    ///
-    /// Why: matching the literal against every chunk's content is `O(corpus)`
-    /// in bytes and was the lane's whole cost — on a 100k-chunk index that is
-    /// tens of milliseconds against a documented sub-10ms p50 target. A chunk
-    /// containing a literal verbatim necessarily contains all of its tokens, so
-    /// the postings intersection is a sound candidate set to verify.
-    /// What: tokenizes the literal with the same tokenizer the corpus was
-    /// indexed with, intersects the postings, and returns the ids beside the
-    /// BM25 live-document count the caller checks completeness against.
-    /// `None` whenever the prefilter cannot be trusted — a path-matched
-    /// filename, a literal that tokenizes to nothing, or an empty/evicted BM25
-    /// index — and the caller then scans.
-    ///
-    /// Read OUTSIDE the `chunks` read lock deliberately: nesting the two read
-    /// guards would order this lane's locks against the ingest path's.
-    /// Test: `the_postings_candidate_path_and_the_full_scan_agree`.
-    async fn exact_postings_candidates(&self, lit: &ExactLiteral) -> Option<(Vec<String>, usize)> {
-        if matches!(lit.shape, LiteralShape::Filename) {
-            return None;
-        }
-        let terms = trusty_common::bm25::tokenize(&lit.text);
-        if terms.is_empty() {
-            return None;
-        }
-        // #10193: the query's short rehydrate wait; a cold index scans instead.
-        if !self.await_corpus_for_query().await {
-            return None;
-        }
-        let bm25 = self.bm25.read().await;
-        if bm25.is_empty() {
-            return None;
-        }
-        let ids = bm25.docs_containing_all(&terms)?;
-        let live = bm25.len();
-        Some((ids.into_iter().map(str::to_string).collect(), live))
-    }
-
-    /// Corpus lane: every chunk carrying `lit`, best-first, capped at `want`.
-    ///
-    /// Why: BM25 cannot be relied on to RANK a literal — it splits compound
-    /// identifiers into common words and scores a chunk that merely shares those
-    /// words above the one chunk that carries the identifier whole. Verifying
-    /// the literal directly is the only lane that cannot miss. See #7675.
-    /// What: takes candidates from the BM25 postings when they are complete
-    /// (`bm25.len() >= chunks.len()`, so no chunk was dropped by the corpus
-    /// cap) and falls back to every chunk otherwise, reporting that fallback as
-    /// `full_scan`. Mirrors `grep_fallback_search`'s rehydrate-race handling,
-    /// honours the same path/repo `filter` every other lane takes, and reports
-    /// an exhausted rehydrate as `degraded` rather than as an empty lane.
-    ///
-    /// It also applies `mode`'s own file-type and docstring rules HERE rather
-    /// than leaving them to `apply_archive_downrank`, which runs after
-    /// truncation: a promoted hit the mode filter then deletes costs a `top_k`
-    /// slot and returns nothing in its place, which is how this lane first
-    /// emptied `test_code_mode_source_outranks_changelog_pre_truncation`.
-    ///
-    /// `tie_scores` (#7775) looks a candidate's fused lane score up by chunk
-    /// id. It orders same-tier [`LiteralShape::Filename`] hits — and nothing
-    /// else, see [`rank_hits`] — so the `FILENAME_HIT_CAP` truncation below
-    /// keeps the best-ranked members of a tie rather than the
-    /// alphabetically-first ones. `None` (every caller that has no fused list
-    /// yet) leaves every hit at `0.0`, which is the pre-#7775 chunk-id order.
-    /// Test: `conceptual_ranking_is_unchanged_by_the_floor`,
-    /// `exact_match_lane_degrades_observably_on_exhausted_retries`,
-    /// `the_postings_candidate_path_and_the_full_scan_agree`,
-    /// `test_code_mode_source_outranks_changelog_pre_truncation`,
-    /// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
-    pub(crate) async fn exact_match_lane(
-        &self,
-        lit: &ExactLiteral,
-        re: &Regex,
-        want: usize,
-        mode: super::super::SearchMode,
-        filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
-        tie_scores: Option<&(dyn Fn(&str) -> f32 + Send + Sync)>,
-    ) -> ExactLaneOutcome {
-        if want == 0 {
-            return ExactLaneOutcome::default();
-        }
-        let tie_score = |id: &str| tie_scores.map_or(0.0, |f| f(id));
-        let mode_admits = |raw: &RawChunk| {
-            if matches!(mode, super::super::SearchMode::Code)
-                && matches!(raw.chunk_type, crate::core::chunker::ChunkType::Docstring)
-            {
-                return false;
-            }
-            super::docs_penalty::is_allowed_for_mode(&raw.file, mode)
-        };
-        let admitted = |raw: &RawChunk| filter.is_none_or(|f| f(&raw.id)) && mode_admits(raw);
-        let postings = self.exact_postings_candidates(lit).await;
-        for _ in 0..super::lanes::REHYDRATE_RACE_RETRIES {
-            // #10193: the query's short rehydrate wait, shared with the other lanes.
-            if !self.await_corpus_for_query().await {
-                break;
-            }
-            let chunks = self.chunks.read().await;
-            if chunks.is_empty() && self.chunks_evicted.load(Ordering::Relaxed) {
-                continue;
-            }
-            // A corpus-capped BM25 index holds fewer documents than the chunk
-            // map, so its postings can miss a literal outright. Completeness is
-            // the precondition for using them at all.
-            let candidates = match &postings {
-                Some((ids, live)) if *live >= chunks.len() => Candidates::Postings(ids.clone()),
-                _ => Candidates::AllChunks,
-            };
-            let mut hits = match &candidates {
-                Candidates::Postings(ids) => rank_hits(
-                    ids.iter()
-                        .filter_map(|id| chunks.get(id.as_str()))
-                        .filter(|raw| admitted(raw))
-                        .map(|raw| as_hit_input(raw, tie_score(&raw.id))),
-                    lit,
-                    re,
-                ),
-                Candidates::AllChunks => rank_hits(
-                    chunks
-                        .values()
-                        .filter(|raw| admitted(raw))
-                        .map(|raw| as_hit_input(raw, tie_score(&raw.id))),
-                    lit,
-                    re,
-                ),
-            };
-            // #7675 round 3: a `Filename` match gets the small, dedicated
-            // `FILENAME_HIT_CAP` on top of (never instead of) `want` — see
-            // that constant's doc comment for why `want` alone does not
-            // bound an ambiguous basename's flood.
-            let cap = if matches!(lit.shape, LiteralShape::Filename) {
-                want.min(FILENAME_HIT_CAP)
-            } else {
-                want
-            };
-            hits.truncate(cap);
-            return ExactLaneOutcome {
-                hits,
-                degraded: false,
-                // A filename query never scans content at all — it compares
-                // path basenames — so it is not the fallback this reports.
-                full_scan: matches!(candidates, Candidates::AllChunks)
-                    && !matches!(lit.shape, LiteralShape::Filename),
-            };
-        }
-        // The chunk map never rehydrated within the bounded waits. #7675: the
-        // sibling lanes (`bm25_search`, `grep_fallback_search`) flip the sticky
-        // per-index flag and the shared gauge here, because an empty lane is
-        // otherwise bit-for-bit indistinguishable from "the literal is absent".
-        // This lane makes exactly the same claim and owes the same signal.
-        self.lane_degraded.store(true, Ordering::Relaxed);
-        metrics::gauge!("trusty_bm25_lane_degraded", "index" => self.index_id.clone()).set(1.0);
-        metrics::counter!("trusty_exact_match_lane_degraded_total", "index" => self.index_id.clone())
-            .increment(1);
-        tracing::warn!(
-            "index '{}': chunk rehydrate still not ready within the query's rehydrate wait — \
-             returning an empty exact-match lane for this query (degraded, not a literal that \
-             is absent; issues #7675, #10193)",
-            self.index_id
-        );
-        ExactLaneOutcome {
-            hits: Vec::new(),
-            degraded: true,
-            full_scan: false,
-        }
-    }
 }
