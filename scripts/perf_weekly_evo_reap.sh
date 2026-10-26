@@ -28,7 +28,7 @@
 # Exit: 0 nothing of this run is left, 1 a leftover, 2 bad usage.
 # EVO_REAP_ROOT moves ~/evo (tests). ps, pkill, kill and systemctl come from PATH.
 #
-# Test: scripts/perf_weekly_memory_selftest.sh, cases timeout, timeout-stuck.
+# Test: scripts/perf_weekly_memory_selftest.sh, cases timeout-reaped, timeout-stuck.
 
 set -u
 [ "$#" -ge 4 ] && [ "$4" = -- ] || { echo "usage: perf_weekly_evo_reap.sh KEY MAX_AGE SHA -- ARGS..." >&2; exit 2; }

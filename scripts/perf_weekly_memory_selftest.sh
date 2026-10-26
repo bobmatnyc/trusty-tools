@@ -239,7 +239,7 @@ kill -TERM 4343
 systemctl stop $OUR"
 while IFS="$TAB" read -r name envset want_reason; do
 	export "${envset?}"
-	STUB_HANG=eval run_case "$name" 0.5 --suite-timeout 1
+	STUB_HANG="eval" run_case "$name" 0.5 --suite-timeout 1
 	unset "${envset%%=*}"
 	got="$rc $(verdict) $(ran)"
 	miss=""
