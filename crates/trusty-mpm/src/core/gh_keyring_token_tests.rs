@@ -267,6 +267,7 @@ fn plaintext_token_files_names_holding_and_unreadable_files() {
 /// The production writer refuses in a unit-test build, so no test reaches the
 /// real keyring.
 #[test]
+#[serial_test::serial]
 fn the_system_keyring_is_never_written_by_a_test() {
     let err = SystemGhKeyring
         .store("github.com", "octo-new", "tok-in")
