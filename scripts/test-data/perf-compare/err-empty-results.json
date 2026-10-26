@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "tool": "trusty-memory",
+  "version": "0.36.0",
+  "commit": "68ab813f07b6c3ca8bafddabbf995d0bd3e62869",
+  "label": "evo",
+  "date": "2026-10-17",
+  "fixture": "baseline.json with empty results: no graded row, error",
+  "results": []
+}
