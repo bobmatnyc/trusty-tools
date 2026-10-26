@@ -2720,13 +2720,16 @@ fn live_pane_scoped_send_targets_original_pane_not_sibling() {
     // the full cwd, so the redrawn marker wraps across two rows. Either one
     // hid the marker from a plain visible-screen capture.
     let capture_joined = |pane: &str| -> String {
+        // #10231: render the target through the exact-target helper (#8443);
+        // a `%N` pane id comes back unchanged.
+        let target = trusty_mpm::core::tmux::exact_pane_target(&session_name, pane);
         let out = std::process::Command::new("tmux")
-            .args(["capture-pane", "-p", "-J", "-S", "-", "-t", pane])
+            .args(["capture-pane", "-p", "-J", "-S", "-", "-t", &target])
             .output()
             .expect("spawn tmux capture-pane");
         assert!(
             out.status.success(),
-            "tmux capture-pane -t {pane} must succeed: {}",
+            "tmux capture-pane of {target} must succeed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
