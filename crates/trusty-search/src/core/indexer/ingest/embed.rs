@@ -187,6 +187,7 @@ pub(crate) struct EmbedRun {
 /// store (BM25-only), matching the old early return. `created_at` and
 /// `last_activity_ms` are the indexer's idle clock (#8761).
 /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+#[derive(Clone)]
 pub(crate) struct EmbedContext {
     index_id: String,
     embedder: Option<Arc<dyn crate::core::embed::Embedder>>,
