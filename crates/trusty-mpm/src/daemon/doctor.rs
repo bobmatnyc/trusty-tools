@@ -482,7 +482,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_nine_checks`,
+/// Test: `run_doctor_produces_eighty_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -918,7 +918,7 @@ pub async fn run_doctor_for_manager(
 /// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_nine_checks`.
+/// this wiring is covered by `run_doctor_produces_eighty_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
