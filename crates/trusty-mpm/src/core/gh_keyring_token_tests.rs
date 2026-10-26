@@ -296,6 +296,45 @@ fn the_system_keyring_refuses_a_sandboxed_store_first() {
     assert!(!err.contains("tok-in"), "{err}");
 }
 
+/// #10037: the production writer refuses in a tm CLI that runs in the #9121
+/// sandbox environment, or that dials a sandbox daemon's socket, before the
+/// unit-test guard and without naming the token.
+#[test]
+#[serial_test::serial]
+fn the_system_keyring_refuses_a_sandbox_cli_or_a_sandbox_daemon_target() {
+    use crate::secret_source::test_env::EnvVarGuard;
+    use trusty_common::DATA_DIR_OVERRIDE_ENV;
+    use trusty_common::credentials::SANDBOX_ENV_VAR;
+    use trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV;
+
+    let home = crate::test_support::hermetic_temp_dir();
+    let _home = EnvVarGuard::set("HOME", home.path());
+    let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+    let _flag = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+    // (a) the CLI is clean, but its pin names a sandbox daemon's socket.
+    let sandbox_sock = home.path().join("sbx/data/trusty-mpm/trusty-mpm.sock");
+    let socket = EnvVarGuard::set(TRUSTY_MPM_SOCKET_ENV, &sandbox_sock);
+    let err = SystemGhKeyring
+        .store("github.com", "octo-new", "tok-in")
+        .expect_err("a sandbox daemon target is refused");
+    assert!(
+        err.contains("TRUSTY_MPM_SOCKET") && err.contains("#9121"),
+        "{err}"
+    );
+    assert!(!err.contains("tok-in"), "{err}");
+    drop(socket);
+    // (b) the CLI itself runs in the sandbox environment.
+    let _flag = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+    let err = SystemGhKeyring
+        .store("github.com", "octo-new", "tok-in")
+        .expect_err("a sandbox CLI is refused");
+    assert!(
+        err.contains("sandbox environment") && err.contains("#9121"),
+        "{err}"
+    );
+    assert!(!err.contains("tok-in"), "{err}");
+}
+
 /// FAIL-OPEN CHECK: a value that could end its quotes or a `security -i` line
 /// is refused, and the refusal never quotes it.
 #[test]

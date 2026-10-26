@@ -49,16 +49,68 @@ pub(crate) trait GhKeyringWriter {
 /// [`crate::core::gh_account::GH_ENFORCE_TIMEOUT`] per call, since a locked
 /// keychain hangs (#6867). A unit-test build never touches the keyring, and
 /// neither does a process that has latched the #9121 sandbox
-/// ([`crate::secret_source::sandboxed`]).
-/// Test: the gate order is `the_system_keyring_refuses_a_sandboxed_store_first`;
+/// ([`crate::secret_source::sandboxed`]), runs in a #9121 sandbox environment,
+/// or dials a daemon socket other than the host's ([`refuse_sandbox_cli`]).
+/// Test: the gate order is `the_system_keyring_refuses_a_sandboxed_store_first`
+/// and `the_system_keyring_refuses_a_sandbox_cli_or_a_sandbox_daemon_target`;
 /// the rest needs a real keyring, so the decisions it feeds are covered
 /// through `TableKeyring` in `gh_keyring_token_tests.rs`.
 pub(crate) struct SystemGhKeyring;
 
 impl GhKeyringWriter for SystemGhKeyring {
     fn store(&self, host: &str, login: &str, token: &str) -> Result<(), String> {
+        // #10037: the tm CLI stores this token, and only `tm daemon --sandbox`
+        // latches the sandbox, so the CLI reads the sandbox signals itself.
+        refuse_sandbox_cli(
+            crate::core::discovery::isolated_environment(),
+            crate::client::http_client::resolve_daemon_socket().map_err(|e| format!("{e:#}")),
+            trusty_common::daemon_socket_path("trusty-mpm").map_err(|e| format!("{e:#}")),
+        )?;
         Self::store_gated(crate::secret_source::sandboxed(), host, login, token)
     }
+}
+
+/// `Err` when a tm CLI runs in, or targets, a #9121 sandbox (#10037).
+///
+/// Why: `scripts/sandbox_daemon.sh` latches the sandbox in the daemon only;
+/// a CLI that reaches that daemon through its `TRUSTY_MPM_SOCKET` pin would
+/// otherwise write the operator's keyring for a sandbox session.
+/// What: refuses when `isolated`
+/// ([`crate::core::discovery::isolated_environment`]); else when the socket
+/// the CLI dials (`target`) is not this host's own daemon socket (`host`),
+/// both resolved through symlinks where they exist; else when either cannot
+/// be resolved. The text names the reason and the socket paths only.
+/// Test: `the_system_keyring_refuses_a_sandbox_cli_or_a_sandbox_daemon_target`.
+pub(crate) fn refuse_sandbox_cli(
+    isolated: bool,
+    target: Result<PathBuf, String>,
+    host: Result<PathBuf, String>,
+) -> Result<(), String> {
+    if isolated {
+        return Err(
+            "this tm runs in a sandbox environment (TRUSTY_SANDBOX=1 or \
+             TRUSTY_DATA_DIR_OVERRIDE is set), and a sandbox never writes the keyring (#9121)"
+                .to_string(),
+        );
+    }
+    let unresolved = |what: &str, e: String| {
+        format!(
+            "{what} daemon socket cannot be resolved ({e}), so tm cannot show it targets the \
+             host daemon (#9121)"
+        )
+    };
+    let target = target.map_err(|e| unresolved("the target", e))?;
+    let host = host.map_err(|e| unresolved("this host's", e))?;
+    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if resolve(&target) != resolve(&host) {
+        return Err(format!(
+            "this tm targets the daemon socket {} (TRUSTY_MPM_SOCKET), not this host's daemon \
+             socket {}; tm never writes the keyring for a sandbox daemon (#9121)",
+            target.display(),
+            host.display()
+        ));
+    }
+    Ok(())
 }
 
 /// `Err` when `sandboxed`: such a process never reaches the per-user keyring.
