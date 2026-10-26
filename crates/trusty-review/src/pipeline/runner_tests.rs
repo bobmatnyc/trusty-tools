@@ -1302,6 +1302,51 @@ async fn run_review_search_down_degraded_when_optout() {
     assert!(err.contains("degraded"), "reason must say degraded: {err}");
 }
 
+/// #10226 cond2 (owner ruling D06): a Degraded single-pass run whose model says
+/// APPROVE emits APPROVE_WITH_RESERVATIONS, keeps its grade and its banner; the
+/// same APPROVE on a healthy run stays APPROVE.
+#[tokio::test]
+async fn run_review_degraded_approve_is_capped_at_approve_with_reservations() {
+    let run = |search: Arc<dyn SearchClient>| async move {
+        let (source, _tmp) = local_diff_source("+fn x() {}\n");
+        let mut config = default_config();
+        config.context.require_search = Some(false);
+        let input = ReviewInput {
+            diff_source: source,
+            reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+            write_log: false,
+            print_result: false,
+            trigger: TriggerDecision::None,
+            run_mode: RunMode::Cli,
+            allow_posting: false,
+            caller_context: CallerContext::default(),
+            surface: InvocationSurface::default(),
+        };
+        let deps = ReviewDeps {
+            llm: Arc::new(FakeLlm::approves()),
+            verifier: None,
+            search,
+            analyze: Some(Arc::new(ReadyAnalyze)),
+            dedup: None,
+        };
+        run_review(&config, input, deps).await
+    };
+
+    let degraded = run(Arc::new(FailingSearch)).await;
+    assert_eq!(degraded.status, ReviewStatus::Degraded);
+    assert_eq!(degraded.verdict, Verdict::ApproveWithReservations);
+    assert!(degraded.grade.is_some(), "grade must be kept: {degraded:?}");
+    assert!(
+        degraded.review_body.contains("NOT AUTHORITATIVE"),
+        "banner must be kept: {:?}",
+        degraded.review_body
+    );
+
+    let healthy = run(Arc::new(FakeSearch)).await;
+    assert_eq!(healthy.status, ReviewStatus::Completed);
+    assert_eq!(healthy.verdict, Verdict::Approve);
+}
+
 /// #2994 re-review, finding #2: the persisted (degraded) review body must
 /// contain the `--source-root`-specific notice text — e.g. the actionable
 /// "Run `trusty-search index <dir>`" hint — not just a generic "trusty-search

@@ -1214,6 +1214,29 @@ async fn run_review_mapreduce_both_degraded_triggers_partial_coverage_reason_win
     );
 }
 
+/// #10226 cond2 (owner ruling D06): a Degraded map-reduce run whose chunks and
+/// synthesis all APPROVE emits APPROVE_WITH_RESERVATIONS, keeps its grade and
+/// keeps the NOT AUTHORITATIVE banner.
+#[tokio::test]
+async fn run_review_mapreduce_degraded_approve_is_capped_at_approve_with_reservations() {
+    let (diff, _) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(RecordingReviewer::approving());
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(false); // explicit opt-out (#590)
+
+    let result = run_review(&config, input(source), deps_with_failing_search(llm)).await;
+
+    assert_eq!(result.status, ReviewStatus::Degraded);
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
+    assert!(result.grade.is_some(), "grade must be kept: {result:?}");
+    assert!(
+        result.review_body.contains("NOT AUTHORITATIVE"),
+        "banner must be kept: {:?}",
+        result.review_body
+    );
+}
+
 // ── #8904: every chunk's findings are verified ─────────────────────────────
 
 /// Files in [`chunked_diff`]; together they exceed the unified-path cap.
