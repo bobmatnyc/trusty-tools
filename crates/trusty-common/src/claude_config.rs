@@ -303,8 +303,10 @@ pub fn mcp_server_entry(command: &str, args: &[&str]) -> Value {
 /// serialising a read-modify-write cycle is the caller's job (`trusty-mpm`'s
 /// `core::claude_json_guard` does it in-process) — but they can no longer
 /// corrupt. A staged file is removed if its own write or rename fails, so a
-/// failed call leaves `path` byte-for-byte as it was and drops no litter.
+/// failed call leaves `path` byte-for-byte as it was and drops no litter. An
+/// existing target's permission bits carry over to the new file (#10041).
 /// Test: `write_json_atomic_creates_and_backs_up` (`#[ignore]`, real fs),
+/// `write_json_atomic_keeps_the_targets_mode` (#10041),
 /// `concurrent_writers_never_publish_a_torn_file` (#4077),
 /// `concurrent_writers_never_tear_the_backup` (#4077),
 /// `failed_rename_leaves_destination_and_no_staging_file`,
@@ -332,9 +334,17 @@ pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
         .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
     }
 
+    // #10041: a rewrite keeps the target's mode. The staged file is a fresh
+    // create, so without this every write republished a 0600 `.claude.json`
+    // at the umask default (0644), readable by every local user.
+    let prior_mode = std::fs::metadata(path).ok().map(|m| m.permissions());
     let staged = append_extension(path, &format!("tmp.{stamp}"));
     stage_then_publish(&staged, path, |dest| {
-        std::fs::write(dest, serialized.as_bytes())
+        std::fs::write(dest, serialized.as_bytes())?;
+        match prior_mode {
+            Some(perms) => std::fs::set_permissions(dest, perms),
+            None => Ok(()),
+        }
     })
     .with_context(|| format!("atomically write {}", path.display()))
 }
@@ -1076,6 +1086,23 @@ mod tests {
         let current = std::fs::read_to_string(&path).unwrap();
         assert!(current.contains("\"v\": 2"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #10041: a 0600 `.claude.json` stays 0600 across a rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomic_keeps_the_targets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("atomic-mode");
+        let path = dir.join(".claude.json");
+        write_json_atomic(&path, &json!({ "v": 1 })).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_json_atomic(&path, &json!({ "v": 2 })).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the rewrite widened the file to {mode:04o}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

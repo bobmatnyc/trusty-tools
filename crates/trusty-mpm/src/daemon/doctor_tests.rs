@@ -482,6 +482,7 @@ async fn run_doctor_produces_seventy_nine_checks() {
     // #8390 adds content_requires (seventy-six → seventy-seven).
     // #8928 step 3 adds sccache_socket (seventy-seven → seventy-eight).
     // #10037 adds gh_account_dir_tokens (seventy-eight → seventy-nine).
+    // #10041 adds claude_json_secrets (seventy-nine → eighty).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -568,6 +569,8 @@ async fn run_doctor_produces_seventy_nine_checks() {
         "issue_audit_recent",
         "oauth_token",
         "launchd_secrets",
+        // #10041: the managed `.claude.json` env blocks and mode.
+        "claude_json_secrets",
         "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",

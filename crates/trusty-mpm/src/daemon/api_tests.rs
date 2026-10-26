@@ -1424,6 +1424,8 @@ async fn doctor_endpoint_returns_report() {
         "issue_audit_recent",
         "oauth_token",
         "launchd_secrets",
+        // #10041: the managed `.claude.json` env blocks and mode.
+        "claude_json_secrets",
         "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",

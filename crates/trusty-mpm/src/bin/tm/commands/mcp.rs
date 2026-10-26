@@ -187,7 +187,18 @@ pub(crate) fn add_cmd(
                 );
                 eprintln!("warning: '{command}' not found on PATH — adding '{name}' anyway");
             }
-            let env = parse_env(env)?;
+            let mut env = parse_env(env)?;
+            // #10041: a credential goes to the store, never into the env block.
+            // A store failure aborts the add before any config is written.
+            let store = trusty_common::credentials::default_store();
+            let moved =
+                trusty_mpm::core::mcp_credential_env::store_credential_env(&mut env, store.as_ref())?;
+            for key in &moved {
+                println!(
+                    "Stored {key} in the credential store; '{name}' reads it from there at \
+                     launch, so it is not written to the MCP config"
+                );
+            }
             build_stdio_entry(command, args, &env)
         }
         McpTransportArg::Http | McpTransportArg::Sse => {

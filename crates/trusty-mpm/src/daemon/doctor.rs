@@ -685,6 +685,13 @@ pub(crate) async fn run_doctor_with_claims(
     // Read-only and key-only — it never prints a credential value.
     // `tm doctor --fix` removes the entries.
     checks.push(crate::daemon::doctor_launchd_secrets::check_launchd_plist_secrets(&home));
+    // #10041: and the managed `.claude.json` — a credential in an MCP env
+    // block, or a file (or backup) readable beyond its owner.
+    checks.push(
+        crate::daemon::doctor_claude_json_secrets::check_claude_json_secrets(
+            crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+        ),
+    );
     // #8236 item 8: and now the other half — once the value is OUT of the
     // plist, can the daemon's own resolver still get it? Bounded, so this row
     // cannot hang on a Keychain approval dialog either.

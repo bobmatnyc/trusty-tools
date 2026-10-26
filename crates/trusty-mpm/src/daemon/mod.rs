@@ -43,6 +43,10 @@ pub mod doctor_launchd_secrets;
 // #8236: the repair half, split from the row so neither file approaches the
 // 500-SLOC cap. `pub` for the same reason.
 pub mod doctor_launchd_secrets_repair;
+// #10041: credentials and loose modes in the managed `.claude.json`. `pub`
+// because `tm doctor --fix` calls the repair from the `tm` binary.
+pub mod doctor_claude_json_secrets;
+pub mod doctor_claude_json_secrets_repair;
 // #8236: `tm doctor --fix-launchd-secrets` — that repair alone, plus the chmod.
 pub mod doctor_launchd_secrets_scoped;
 // #8236 item 8: can the DAEMON's own resolver reach each credential it needs?
