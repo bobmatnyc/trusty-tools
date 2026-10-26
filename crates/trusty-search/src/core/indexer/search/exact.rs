@@ -470,7 +470,9 @@ fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize
 /// What: matches each chunk against `lit`, counting occurrences and flagging
 /// declarations; returns hits ordered by (declaration, live-before-downranked,
 /// caller-declared branch preference, occurrence count, chunk id) — every key
-/// lane-independent, so the order is fully deterministic. `downranked` sits
+/// lane-independent, so the order is fully deterministic. For every shape but
+/// `Filename`, [`interleave_by_file`] then lifts each file's best hit ahead of
+/// any file's second hit, so every carrying file fits a page. `downranked` sits
 /// directly after `is_definition` so an archived or stale duplicate of a
 /// declaration can never outrank the live one; it reuses the verdict
 /// `apply_archive_downrank` already computed rather than reclassifying.
@@ -508,7 +510,7 @@ where
     let definition = DefinitionMatcher::new(lit);
     // #7775: only the path-matching shape may consult the lane score.
     let scored_shape = matches!(lit.shape, LiteralShape::Filename);
-    let mut hits: Vec<ExactHit> = items
+    let mut hits: Vec<(ExactHit, &'a str)> = items
         .filter_map(|input| {
             let occurrences = occurrences_of(lit, re, &input);
             if occurrences == 0 {
@@ -522,17 +524,18 @@ where
                     .as_ref()
                     .is_some_and(|d| d.matches(input.content, input.function_name)),
             };
-            Some(ExactHit {
+            let hit = ExactHit {
                 id: input.id.to_string(),
                 is_definition,
                 occurrences,
                 on_branch: input.on_branch,
                 downranked: input.downranked,
                 tie_score: if scored_shape { input.tie_score } else { 0.0 },
-            })
+            };
+            Some((hit, input.file))
         })
         .collect();
-    hits.sort_by(|a, b| {
+    hits.sort_by(|(a, _), (b, _)| {
         b.is_definition
             .cmp(&a.is_definition)
             .then_with(|| a.downranked.cmp(&b.downranked))
@@ -543,7 +546,37 @@ where
             .then_with(|| b.tie_score.total_cmp(&a.tie_score))
             .then_with(|| a.id.cmp(&b.id))
     });
-    hits
+    // #7675: a `Filename` hit is the file itself, so only the content shapes
+    // need every carrying file ahead of a second chunk of one file.
+    if !matches!(lit.shape, LiteralShape::Filename) {
+        interleave_by_file(&mut hits);
+    }
+    hits.into_iter().map(|(hit, _)| hit).collect()
+}
+
+/// Reorder sorted hits so each file's best hit precedes any file's second hit.
+///
+/// Why: #7675 / #10203 — overlapping chunks of one file (a parent impl chunk
+/// and its child fn chunks) each carry the literal, so they filled the floored
+/// page and pushed other files' carriers past `top_k`, where ripgrep lists
+/// every file. No hit is dropped; only the order inside the floor moves.
+/// What: a stable sort on each hit's per-file rank (0 for a file's first hit in
+/// the existing order, 1 for its second, ...). Round 0 keeps the existing
+/// order, so the top hit is unchanged.
+/// Test: `every_file_carrying_an_identifier_survives_overlapping_chunks_of_one_file`.
+fn interleave_by_file(hits: &mut Vec<(ExactHit, &str)>) {
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut keyed: Vec<(usize, (ExactHit, &str))> = hits
+        .drain(..)
+        .map(|entry| {
+            let round = seen.entry(entry.1).or_insert(0);
+            let key = *round;
+            *round += 1;
+            (key, entry)
+        })
+        .collect();
+    keyed.sort_by_key(|(round, _)| *round);
+    hits.extend(keyed.into_iter().map(|(_, entry)| entry));
 }
 
 /// Move every id in `exact_ids` to the front of the fused candidate list.

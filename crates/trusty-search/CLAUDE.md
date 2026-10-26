@@ -772,7 +772,10 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     Ordering inside the floored group is lane-independent (declaration, then
     live-before-archived, then the caller's `on_branch` preference, then
     occurrence count, then chunk id), which is what makes `search` and
-    `search_lexical` agree on top-1 for an identifier. For the filename shape,
+    `search_lexical` agree on top-1 for an identifier. For every shape but
+    the filename one, that order is then interleaved by file: each file's
+    best hit precedes any file's second hit, so overlapping chunks of one file
+    cannot push another carrying file off the page (#7675, #10203). For the filename shape,
     "declaration" is repurposed as "exact path-suffix match" (a chunk whose
     whole path ends with the query) outranking a same-basename-only match
     (#7675 round 3), and a single query's floor contribution from this shape
