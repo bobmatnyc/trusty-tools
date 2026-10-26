@@ -16,12 +16,11 @@
 
 use super::quantize_handlers::{quantize_report, QuantizeRequest};
 use super::state::SearchAppState;
-use super::status::index_status_handler;
+use super::status::index_status_report;
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
-use axum::extract::{Json, Path, State};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -79,7 +78,7 @@ async fn seeded(
 #[serial_test::parallel]
 async fn status_reports_the_live_vector_quantization() {
     let (state, _root, _snap, _store) = seeded("q-status").await;
-    let Json(body) = index_status_handler(State(state), Path("q-status".to_string()))
+    let body = index_status_report(&state, "q-status")
         .await
         .expect("status must succeed");
     assert_eq!(

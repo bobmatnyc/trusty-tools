@@ -260,23 +260,17 @@ async fn index_status_reports_indexing_then_ready() {
     let state = Arc::new(SearchAppState::new(registry));
 
     // No progress entry yet → idle index reports "ready".
-    let Json(idle) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let idle = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(idle["status"], "ready", "idle index must report ready");
 
     // A Running reindex must surface "indexing".
     let progress = Arc::new(ReindexProgress::new()); // defaults to Running
     state.reindex_progress.insert(id.clone(), progress.clone());
-    let Json(running) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let running = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(
         running["status"], "indexing",
         "running reindex must report indexing"
@@ -284,12 +278,9 @@ async fn index_status_reports_indexing_then_ready() {
 
     // A terminal state maps back to "ready".
     progress.status.store(ReindexStatus::Complete);
-    let Json(done) = index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("status-test".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let done = super::status::index_status_report(&state, "status-test")
+        .await
+        .expect("status 200");
     assert_eq!(
         done["status"], "ready",
         "completed reindex must report ready"
@@ -640,12 +631,9 @@ async fn index_status_reports_the_embed_window_counters() {
         tmp.path().to_path_buf(),
     ));
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(body) = index_status_handler(
-        State(state),
-        axum::extract::Path("window-status".to_string()),
-    )
-    .await
-    .expect("status 200");
+    let body = super::status::index_status_report(&state, "window-status")
+        .await
+        .expect("status 200");
     let window = &body["embed_window"];
     assert_eq!(window["window"], 8);
     assert_eq!(window["truncated"], 1);

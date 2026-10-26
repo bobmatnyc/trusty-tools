@@ -295,7 +295,7 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// (issue #2161).
 ///
 /// Why: `IndexRegistry::unregister` / `remove_and_get` are otherwise only ever
-/// paired with PERMANENT deletion (`delete_index_handler`, the orphan-reaper
+/// paired with PERMANENT deletion (`delete_index_report`, the orphan-reaper
 /// ticker) — that path also scrubs `indexes.toml`, scrubs `roots.toml`, and
 /// destroys the on-disk data directory. The residency cap needs a distinct
 /// "detach from memory only, everything on disk stays put" operation so a

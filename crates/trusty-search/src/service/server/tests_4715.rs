@@ -4,7 +4,7 @@
 //! Why: the MCP layer reads a 404 on the index it advertised as this session's
 //! default and reports `INDEX_NOT_READY` — "never built". That is only true if
 //! the handler's 404 rules out the cold store too. `search_handler` always did;
-//! `index_status_handler`, `index_chunks_report`, and `grep_report`
+//! `index_status_report`, `index_chunks_report`, and `grep_report`
 //! did a bare hot-registry lookup, so a cold-parked index — a real index that
 //! merely is not resident — would have been reported as one that never existed.
 //! That is the same class of lie #4715 exists to remove, pointed the other way.
@@ -22,7 +22,6 @@
 use super::*;
 use crate::core::registry::{IndexId, IndexRegistry};
 use crate::service::persistence::PersistedIndex;
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::path::PathBuf;
 
@@ -63,12 +62,9 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 #[serial_test::parallel]
 async fn cold_parked_index_status_is_503_not_404() {
     let state = state_with_cold_index("cold-a");
-    let err = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-a".to_string()),
-    )
-    .await
-    .expect_err("a non-resident index cannot be reported");
+    let err = super::status::index_status_report(&state, "cold-a")
+        .await
+        .expect_err("a non-resident index cannot be reported");
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -85,12 +81,9 @@ async fn restore_failed_index_status_is_503_not_404() {
     state.cold_store.mark_failed(&id);
     assert!(state.cold_store.is_failed(&id));
 
-    let err = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("failed-a".to_string()),
-    )
-    .await
-    .expect_err("a failed index cannot be reported");
+    let err = super::status::index_status_report(&state, "failed-a")
+        .await
+        .expect_err("a failed index cannot be reported");
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -100,12 +93,9 @@ async fn restore_failed_index_status_is_503_not_404() {
 #[serial_test::parallel]
 async fn status_404_only_when_absent_from_every_store() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let err = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let err = super::status::index_status_report(&state, "never-existed")
+        .await
+        .expect_err("genuinely unknown");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
@@ -205,7 +195,7 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
 /// so the MCP layer could never again report `INDEX_NOT_READY` for the
 /// delete-then-reindex case (#4715).
 /// What: parks an index cold, deletes it through the real handler, then drives
-/// `index_status_handler`, `index_chunks_report`, and `grep_report` —
+/// `index_status_report`, `index_chunks_report`, and `grep_report` —
 /// the same three guards this file pins — asserting from each both the 404 and
 /// the `unknown index: <id>` body that names the absent-everywhere verdict.
 /// Pre-fix all three return 503.
@@ -218,10 +208,10 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     // #6363: the handler now answers 404 for an id in no store and no
     // `indexes.toml` row, so its return type is a `Result`. A cold-parked index
     // IS registered, so this call must land on the `Ok` arm.
-    let axum::Json(body) = super::search::delete_index_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-deleted".to_string()),
-        axum::extract::Query(serde_json::from_value(serde_json::json!({})).expect("params")),
+    let body = super::search::delete_index_report(
+        &state,
+        "cold-deleted",
+        serde_json::from_value(serde_json::json!({})).expect("params"),
     )
     .await
     .expect("deleting a cold-parked index must succeed");
@@ -236,12 +226,9 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     // so both arrive as `(StatusCode, Json<Value>)`. Assert the body too: the
     // code alone cannot tell the 404 verdict apart from a 503 body that still
     // advertises `restore_via`, which is the exact regression #5075 is about.
-    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-deleted".to_string()),
-    )
-    .await
-    .expect_err("a deleted index cannot be reported");
+    let (status_code, status_body) = super::status::index_status_report(&state, "cold-deleted")
+        .await
+        .expect_err("a deleted index cannot be reported");
     assert_eq!(
         status_code,
         StatusCode::NOT_FOUND,

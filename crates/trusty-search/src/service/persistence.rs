@@ -600,7 +600,7 @@ pub fn indexes_toml_path() -> Result<PathBuf> {
 ///
 /// Why: each index has its own subdir for its HNSW snapshot and chunks file.
 /// Centralising the layout here means `commit_parsed_batch`, the daemon's
-/// shutdown handler, and `delete_index_handler` all agree on the same paths.
+/// shutdown handler, and `delete_index_report` all agree on the same paths.
 /// What: returns `<data_dir>/indexes/<id>/` after creating the parent tree.
 /// Test: `tests::per_index_dir_created` checks the dir exists after the call.
 pub fn index_data_dir(index_id: &str) -> Result<PathBuf> {
@@ -1007,7 +1007,7 @@ pub fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Res
 /// next daemon restart re-registers the entry and pre-allocates an HNSW arena
 /// for it — production saw 60+ "deleted" indexes accumulate this way and pin
 /// 24 GB of RSS. This function is the persistence half of that fix; it is
-/// called from `delete_index_handler` so the removal survives restart.
+/// called from `delete_index_report` so the removal survives restart.
 /// What: load → filter out `id` → atomic save. No-op when id absent.
 /// Test: `tests::remove_index_persists_to_toml` registers two indexes, removes
 /// one, reloads the file, asserts only the survivor remains.

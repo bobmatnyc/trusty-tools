@@ -107,7 +107,7 @@ pub(super) fn allowlisted_index_root(prefix: &str) -> (TempDir, PathBuf) {
 /// `DELETE /indexes/{id}`'s answer as `(status, body)`, from its transport-free
 /// core (#9535).
 ///
-/// `Ok` maps to `200`, as `delete_index_handler`'s `Json` wrapper does, so a
+/// `Ok` maps to `200`, as the former `delete_index_handler`'s `Json` wrapper did, so a
 /// `200` assertion on the result means "the core answered `Ok`". A refusal keeps
 /// the status and body the core returned.
 pub(super) async fn delete_answer(

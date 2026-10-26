@@ -204,7 +204,7 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 
 /// The cold-parked 503 carries a body naming `search` as what restores it.
 ///
-/// Why (#5061): `index_status_handler` returned a bare `StatusCode`, so an MCP
+/// Why (#5061): `GET /status` returned a bare `StatusCode`, so an MCP
 /// caller saw `returned 503 Service Unavailable: ` — empty text, nothing to
 /// branch on, and no hint that a plain `search` against the same id reloads it
 /// while this endpoint stays 503 forever. Pre-fix the handler's error type was
@@ -215,12 +215,9 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 #[serial_test::parallel]
 async fn cold_parked_status_503_body_names_search_as_the_restore_path() {
     let state = state_with_cold_index("cold-body");
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-body".to_string()),
-    )
-    .await
-    .expect_err("a non-resident index cannot be reported");
+    let (code, body) = super::status::index_status_report(&state, "cold-body")
+        .await
+        .expect_err("a non-resident index cannot be reported");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_not_resident");
@@ -244,12 +241,9 @@ async fn restore_failed_status_503_body_is_not_retryable() {
     let id = IndexId::new("failed-body".to_string());
     state.cold_store.mark_failed(&id);
 
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("failed-body".to_string()),
-    )
-    .await
-    .expect_err("a permanently-failed index cannot be reported");
+    let (code, body) = super::status::index_status_report(&state, "failed-body")
+        .await
+        .expect_err("a permanently-failed index cannot be reported");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_restore_failed");
@@ -275,12 +269,9 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
     let params: super::files::ChunksParams =
         serde_json::from_value(serde_json::json!({})).expect("empty ChunksParams");
 
-    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-agree".to_string()),
-    )
-    .await
-    .expect_err("cold");
+    let (status_code, status_body) = super::status::index_status_report(&state, "cold-agree")
+        .await
+        .expect_err("cold");
     let (chunks_code, chunks_body) =
         super::files::index_chunks_report(&state, "cold-agree", &params)
             .await
@@ -381,12 +372,9 @@ async fn write_path_unknown_index_is_still_404() {
 #[serial_test::parallel]
 async fn residency_miss_is_404_only_when_absent_everywhere() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let (code, axum::Json(body)) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, body) = super::status::index_status_report(&state, "never-existed")
+        .await
+        .expect_err("genuinely unknown");
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown index: never-existed");
@@ -426,12 +414,9 @@ async fn status_semantic_coverage_reports_live_vector_count() {
         };
     }
 
-    let axum::Json(body) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("coverage".to_string()),
-    )
-    .await
-    .expect("a resident index reports status");
+    let body = super::status::index_status_report(&state, "coverage")
+        .await
+        .expect("a resident index reports status");
 
     assert_eq!(
         body["stages"]["semantic"]["embedded"], 0,
@@ -463,12 +448,9 @@ async fn status_semantic_coverage_reports_live_vector_count() {
 #[serial_test::parallel]
 async fn status_semantic_coverage_distinguishes_absent_from_unreadable() {
     let state = state_with_handle("no-store", |_| {});
-    let axum::Json(body) = super::status::index_status_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("no-store".to_string()),
-    )
-    .await
-    .expect("resident index reports status");
+    let body = super::status::index_status_report(&state, "no-store")
+        .await
+        .expect("resident index reports status");
 
     assert!(body["semantic_coverage"]["vectors_present"].is_null());
     assert_eq!(
@@ -522,12 +504,9 @@ async fn search_residency_bodies_match_the_shared_contract() {
     );
 
     // The same body the endpoint that pointed here would have produced.
-    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
-        State(Arc::clone(&failed)),
-        axum::extract::Path("search-failed".to_string()),
-    )
-    .await
-    .expect_err("failed");
+    let (status_code, status_body) = super::status::index_status_report(&failed, "search-failed")
+        .await
+        .expect_err("failed");
     assert_eq!(code, status_code);
     assert_eq!(body["error"], status_body["error"]);
     assert_eq!(body["retryable"], status_body["retryable"]);

@@ -296,15 +296,13 @@ use std::sync::Arc;
 #[cfg(test)]
 use health::health_handler;
 #[cfg(test)]
-use indexes::{create_index_handler, list_indexes_handler};
+use indexes::create_index_handler;
 #[cfg(test)]
 use reindex_handlers::reindex_handler;
 #[cfg(test)]
 use search::search_handler;
 #[cfg(test)]
 use search_global::global_search_handler;
-#[cfg(test)]
-use status::{graph_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,

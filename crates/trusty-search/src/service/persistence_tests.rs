@@ -50,7 +50,7 @@ fn registry_file_serde_roundtrip() {
 /// Why: production accumulated 60+ "deleted" indexes because the DELETE
 /// path only mutated the in-memory `DashMap`. Each empty entry replayed
 /// from disk pre-allocates an HNSW arena (80–150 MB). The fix wires
-/// `delete_index_handler` to `remove_index_registry_entry`; this test
+/// `delete_index_report` to `remove_index_registry_entry`; this test
 /// pins that behaviour at the persistence boundary by driving the
 /// load/save/remove pipeline against a tempfile and asserting the
 /// deleted id is absent from the rehydrated registry.
@@ -80,7 +80,7 @@ fn remove_index_persists_to_toml() {
     assert_eq!(load_index_registry_at(&path).unwrap().len(), 2);
 
     // Delete the second entry — this is the persistence call that
-    // `delete_index_handler` makes on the DELETE handler path.
+    // `delete_index_report` makes on the DELETE handler path.
     remove_index_registry_entry_at(&path, "drop").unwrap();
 
     // Rehydrate from disk (simulating a daemon restart) and confirm only

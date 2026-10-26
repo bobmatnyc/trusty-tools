@@ -337,7 +337,7 @@ pub fn apply_threshold_child_inclusion(
 /// parents so they can diagnose fan-out behaviour without grepping daemon logs.
 /// What: mirrors the flat index record but adds `parent_id` (null for roots)
 /// and `children` (list of direct child IDs).  Serialized to JSON by the
-/// `list_indexes_handler` when `?format=tree` is present.
+/// `list_indexes_report` when `?format=tree` is present.
 /// Test: `list_indexes_tree_format_shape` in server tests.
 #[derive(Debug, serde::Serialize)]
 pub struct IndexTreeEntry {
@@ -352,7 +352,7 @@ pub struct IndexTreeEntry {
 
 /// Build the `?format=tree` response body from the live registry.
 ///
-/// Why: `list_indexes_handler` needs to produce the nested view without
+/// Why: `list_indexes_report` needs to produce the nested view without
 /// duplicating hierarchy-computation logic.
 /// What: computes `IndexHierarchy` for all registered indexes, then maps each
 /// handle to an `IndexTreeEntry` carrying its parent/children.

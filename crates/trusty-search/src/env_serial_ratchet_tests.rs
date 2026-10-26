@@ -181,7 +181,6 @@ const REGISTRY_REACHING: &[&str] = &[
     "search_report",
     "create_index_handler",
     "create_index_report",
-    "delete_index_handler",
     "delete_index_report",
     "unregister_index",
     "unregister_with_map",

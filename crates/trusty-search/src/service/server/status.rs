@@ -4,17 +4,10 @@
 //! read-only inspectors that share disk-mtime helpers; grouping them keeps
 //! both the handlers and helpers together.
 //! What: `index_disk_and_mtime`, `first_existing_mtime_rfc3339`,
-//! `index_status_handler`, `graph_handler`, and the `*_report` cores.
+//! `index_status_report`, `graph_report`, and their helpers.
 //! Test: `index_disk_and_mtime_handles_missing_dir`,
-//! `graph_handler_exports_nodes_and_edges`, etc.
+//! `graph_report_exports_nodes_and_edges`, etc.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, Query, State},
-    response::{IntoResponse, Response},
-    Json,
-};
 use std::sync::Arc;
 
 use crate::core::registry::IndexId;
@@ -196,47 +189,30 @@ pub(super) fn first_existing_mtime_rfc3339(
         })
 }
 
-/// Report one index's stages, capabilities, and on-disk footprint.
-///
-/// Why: a bare hot-registry miss used to be a flat 404, which says the index
-/// never existed. A cold-parked or restore-failed index DOES exist — it is just
-/// not resident — and `search_handler` has always distinguished the two. #4715
-/// makes a 404 here mean what it means there, because the MCP layer now reads
-/// this endpoint's 404 as "never indexed" and would otherwise report a built
-/// index as one that was never built. #5061 then gave the 503 a body: it used
-/// to be a bare `StatusCode`, so an MCP caller saw `returned 503 Service
-/// Unavailable: ` with empty text and could neither tell cold-parked from
-/// restore-failed nor learn that a plain `search` reloads the former.
-/// What: delegates the miss to [`super::degraded::residency_miss_response`], the
-/// single builder `chunks` and `grep` share, so all three report a given daemon
-/// state identically.
-/// Test: `status_404_only_when_absent_from_every_store`,
-/// `cold_parked_index_status_is_503_not_404`, and
-/// `cold_parked_status_503_body_names_search_as_the_restore_path`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn index_status_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    index_status_report(&state, &id)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `GET /indexes/{id}/status` serves, without the transport
 /// (#6285 slice 2).
 ///
 /// Why: `search.index.status` answers the same question over the socket. One
 /// body is what stops the two transports reporting a different chunk count,
 /// stage snapshot, or residency verdict for the same index.
-/// What: [`index_status_handler`]'s whole former body. A refusal keeps its HTTP
+///
+/// #4715: a 404 here means "absent from every store", never "not resident":
+/// the MCP layer reads it as "never indexed". #5061 gave the 503 a body, so an
+/// MCP caller can tell cold-parked from restore-failed and learns that a plain
+/// `search` reloads the former. The miss goes through
+/// [`super::degraded::residency_miss_response`], the builder `chunks` and `grep`
+/// share, so all three report a given daemon state identically.
+/// What: reports one index's stages, capabilities, and on-disk footprint. A
+/// refusal keeps its HTTP
 /// status beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so one decision classifies the refusal on both transports.
 /// #9059: an index held by an invalid exclude glob reports `status: "held"`,
 /// and `last_walk_error` carries the hold reason naming the glob.
-/// Test: `index_status_over_the_socket_matches_the_http_body`,
+/// Test: `status_404_only_when_absent_from_every_store`,
+/// `cold_parked_index_status_is_503_not_404`,
+/// `cold_parked_status_503_body_names_search_as_the_restore_path`,
+/// `index_status_over_the_socket_matches_the_http_body`,
 /// `an_unknown_index_reports_not_found_on_every_index_scoped_read`,
 /// `a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it`.
 pub(crate) async fn index_status_report(
@@ -516,7 +492,7 @@ pub(crate) async fn index_status_report(
 /// D3/Cytoscape clients usually want a filtered subgraph. These let the caller
 /// narrow the export server-side instead of shipping the whole graph.
 /// What: all fields optional; absent params apply no filter.
-/// Test: covered by `test_graph_handler_filters` in `tests/integration_tests.rs`.
+/// Test: `graph_report_filters_by_edge_type`.
 #[derive(Debug, Default, serde::Deserialize)]
 pub(crate) struct GraphQueryParams {
     /// Comma-separated node `type` values to keep (e.g. `Symbol,File`).
@@ -534,7 +510,7 @@ pub(crate) struct GraphQueryParams {
 /// matched case-insensitively; this keeps the parsing in one place.
 /// What: returns `None` when the param is absent or empty (meaning "no
 /// filter"), otherwise the set of non-empty lower-cased tokens.
-/// Test: exercised via `graph_handler` integration tests.
+/// Test: exercised via the `graph_report_*` tests.
 fn parse_filter_set(raw: Option<&str>) -> Option<std::collections::HashSet<String>> {
     let raw = raw?;
     let set: std::collections::HashSet<String> = raw
@@ -555,7 +531,7 @@ fn parse_filter_set(raw: Option<&str>) -> Option<std::collections::HashSet<Strin
 /// the endpoint infers a coarse type from the name shape.
 /// What: returns `"File"` when the symbol looks like a file path (contains a
 /// `/` and has a file extension), otherwise `"Symbol"`.
-/// Test: covered indirectly by `graph_handler` integration tests.
+/// Test: covered indirectly by the `graph_report_*` tests.
 fn node_type_for_symbol(symbol: &str) -> &'static str {
     let looks_like_path = symbol.contains('/')
         && std::path::Path::new(symbol)
@@ -568,48 +544,19 @@ fn node_type_for_symbol(symbol: &str) -> &'static str {
     }
 }
 
-/// `GET /indexes/{id}/graph` — export the full SymbolGraph as D3/Cytoscape JSON.
-///
-/// Why: issue #128 — external visualisers (and the admin UI) need the whole
-/// knowledge graph, not just the BFS-scoped neighbours the search pipeline
-/// uses. This endpoint snapshots the graph and serialises every node and edge.
-/// What: snapshots the symbol graph (lock-free after the `Arc` clone), applies
-/// the optional `types` / `edge_types` / `min_weight` filters, and returns
-/// `{ nodes, edges, stats, generated_at }`. A 1-hour `Cache-Control` header is
-/// attached since the graph only changes on reindex.
-/// Test: covered by `test_graph_handler_*` in `tests/integration_tests.rs`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn graph_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<GraphQueryParams>,
-) -> Result<Response, StatusCode> {
-    // The HTTP 404 stays a bare status with no body, exactly as before: the
-    // body the core builds exists so the socket's error frame can carry a
-    // message, and adding one here would be a change to a route this slice is
-    // not moving.
-    let body = graph_report(&state, &id, &params)
-        .await
-        .map_err(|(status, _)| status)?;
-
-    let mut response = Json(body).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("max-age=3600"),
-    );
-    Ok(response)
-}
-
 /// The body `GET /indexes/{id}/graph` serves, without the transport
 /// (#6285 slice 2).
 ///
 /// Why: `search.graph.get` exports the same graph over the socket. Filtering
 /// (`types` / `edge_types` / `min_weight`) and the edge-endpoint drop rule are
-/// subtle enough that a second implementation would diverge silently.
-/// What: [`graph_handler`]'s whole former body up to the response. The
-/// `Cache-Control` header stays in the handler — it is an HTTP concern with no
-/// counterpart on a socket.
-/// Test: `graph_over_the_socket_matches_the_http_body`.
+/// subtle enough that a second implementation would diverge silently. Issue
+/// #128: external visualisers need the whole knowledge graph, not just the
+/// BFS-scoped neighbours the search pipeline uses.
+/// What: snapshots the graph and applies the filters. The route's former
+/// `Cache-Control` header was an HTTP concern with no counterpart on a socket,
+/// and went with the handler (#9939).
+/// Test: `graph_report_exports_nodes_and_edges`, `graph_report_unknown_index_returns_404`,
+/// `graph_report_filters_by_edge_type`, `graph_over_the_socket_matches_the_http_body`.
 pub(crate) async fn graph_report(
     state: &Arc<SearchAppState>,
     id: &str,

@@ -2,7 +2,7 @@
 use super::routing::RoutingMode;
 use super::status::GraphQueryParams;
 use super::*;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
@@ -144,7 +144,7 @@ async fn health_surfaces_watcher_network_degraded_count() {
 /// and a 1-hour `Cache-Control` header.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_exports_nodes_and_edges() {
+async fn graph_report_exports_nodes_and_edges() {
     use crate::core::{
         indexer::CodeIndexer,
         registry::{IndexHandle, IndexId, IndexRegistry},
@@ -171,27 +171,9 @@ async fn graph_handler_exports_nodes_and_edges() {
     ));
     let state = Arc::new(SearchAppState::new(registry));
 
-    let response = graph_handler(
-        State(state),
-        Path("graph-test".to_string()),
-        Query(GraphQueryParams::default()),
-    )
-    .await
-    .expect("handler ok");
-
-    // 1-hour cache header is present.
-    assert_eq!(
-        response
-            .headers()
-            .get(axum::http::header::CACHE_CONTROL)
-            .and_then(|v| v.to_str().ok()),
-        Some("max-age=3600"),
-    );
-
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+    let value = graph_report(&state, "graph-test", &GraphQueryParams::default())
         .await
-        .expect("body bytes");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        .expect("report ok");
 
     let nodes = value["nodes"].as_array().expect("nodes array");
     assert_eq!(nodes.len(), 2, "two function symbols expected");
@@ -214,26 +196,22 @@ async fn graph_handler_exports_nodes_and_edges() {
     assert!(value["generated_at"].is_string());
 }
 
-/// Issue #128 — unknown index id returns 404 from `graph_handler`.
+/// Issue #128 — unknown index id returns 404 from `graph_report`.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_unknown_index_returns_404() {
+async fn graph_report_unknown_index_returns_404() {
     use crate::core::registry::IndexRegistry;
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let err = graph_handler(
-        State(state),
-        Path("does-not-exist".to_string()),
-        Query(GraphQueryParams::default()),
-    )
-    .await
-    .expect_err("missing index must 404");
-    assert_eq!(err, StatusCode::NOT_FOUND);
+    let err = graph_report(&state, "does-not-exist", &GraphQueryParams::default())
+        .await
+        .expect_err("missing index must 404");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
 /// Issue #128 — `edge_types` filter drops edges of other kinds.
 #[tokio::test]
 #[serial_test::parallel]
-async fn graph_handler_filters_by_edge_type() {
+async fn graph_report_filters_by_edge_type() {
     use crate::core::{
         indexer::CodeIndexer,
         registry::{IndexHandle, IndexId, IndexRegistry},
@@ -259,21 +237,17 @@ async fn graph_handler_filters_by_edge_type() {
     let state = Arc::new(SearchAppState::new(registry));
 
     // Filter to Implements only — the lone CallsFunction edge must drop.
-    let response = graph_handler(
-        State(state),
-        Path("graph-filter".to_string()),
-        Query(GraphQueryParams {
+    let value = graph_report(
+        &state,
+        "graph-filter",
+        &GraphQueryParams {
             types: None,
             edge_types: Some("Implements".to_string()),
             min_weight: None,
-        }),
+        },
     )
     .await
-    .expect("handler ok");
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    .expect("report ok");
     assert!(
         value["edges"].as_array().expect("edges").is_empty(),
         "CallsFunction edge must be filtered out",

@@ -1,7 +1,7 @@
 //! Tests for list_indexes variants and global_search hierarchy.
 use super::indexes::ListIndexesParams;
 use super::*;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::Json;
 #[tokio::test]
 #[serial_test::parallel]
@@ -24,19 +24,15 @@ async fn list_indexes_flat_default_unchanged() {
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
     // No format param → flat list
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: false,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     // Must be strings (flat format)
     for item in arr {
@@ -91,19 +87,15 @@ async fn list_indexes_tree_format_shape() {
 
     let state = Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: Some("tree".to_string()),
             details: false,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 2);
     // Each entry must be an object with required fields.
@@ -171,19 +163,15 @@ async fn list_indexes_details_includes_size_bytes() {
     }
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 2);
     for entry in arr {
@@ -232,19 +220,15 @@ async fn list_indexes_details_includes_root_path() {
     ));
     let state = std::sync::Arc::new(SearchAppState::new(registry));
 
-    let resp = list_indexes_handler(
-        State(state),
-        Query(ListIndexesParams {
+    let value = super::indexes::list_indexes_report(
+        &state,
+        &ListIndexesParams {
             format: None,
             details: true,
             repo_identity: None,
-        }),
+        },
     )
     .await;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = value["indexes"].as_array().expect("indexes array");
     assert_eq!(arr.len(), 1, "expected exactly one index entry");
     let entry = &arr[0];

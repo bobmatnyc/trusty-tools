@@ -1169,7 +1169,7 @@ impl CodeIndexer {
     /// Why: the `GET /indexes/{id}/graph` endpoint needs to read the whole
     /// symbol graph without holding a lock.
     /// What: clones the inner `Arc<SymbolGraph>` while holding the read lock.
-    /// Test: covered by the `graph_handler` integration path.
+    /// Test: `graph_report_exports_nodes_and_edges`.
     pub async fn snapshot_symbol_graph(&self) -> Arc<SymbolGraph> {
         Arc::clone(&*self.symbol_graph.read().await)
     }
