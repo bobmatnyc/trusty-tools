@@ -366,7 +366,8 @@ jobs:
             # that error is the whole defect. trusty-memory depends on
             # trusty-common with `features = [... "embedder-bundled-ort" ...]`
             # (named directly since #9271; before that it came through
-            # trusty-common's `memory-core`), and `embedder-bundled-ort` ->
+            # trusty-common's `memory-core` feature, removed in #9272), and
+            # `embedder-bundled-ort` ->
             # `fastembed/ort-download-binaries-native-tls`, which links a
             # prebuilt ONNX Runtime static archive compiled against GNU
             # libstdc++. Under `cargo zigbuild` the link dies on
