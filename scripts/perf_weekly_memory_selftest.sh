@@ -39,7 +39,13 @@ cat >"$work/run" <<'EOF'
 suite="${1#perf-}"
 shift
 printf '%s %s\n' "$suite" "$*" >>"$STUB_CALLS"
-case " ${STUB_FAIL:-} " in *" $suite "*) echo "error: test failed, to rerun pass --test"; exit 101 ;; esac
+# A failing run still prints its figures: the exit code alone must fail it.
+case " ${STUB_FAIL:-} " in *" $suite "*)
+	cat "$STUB_FIX/$suite.log"
+	echo "error: test failed, to rerun pass --test"
+	exit 101
+	;;
+esac
 case " ${STUB_EMPTY:-} " in *" $suite "*) echo "test result: ok. 0 passed"; exit 0 ;; esac
 case " ${STUB_HANG:-} " in *" $suite "*) sleep 30 ;; esac
 if [ "$suite" = concurrent ] && [ -n "${STUB_DROP_SUSTAINED:-}" ]; then
