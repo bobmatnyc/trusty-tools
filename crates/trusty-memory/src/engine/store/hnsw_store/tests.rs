@@ -2082,6 +2082,64 @@ fn transitive_strand(pre_record: bool) {
     );
 }
 
+/// Why (#10271): each upsert re-tested stranded points at 3.5-4.5x the cost of
+/// the insert, yet only the graph arm, above the exhaustive threshold, reads
+/// the stranded set.
+/// What: seeds two rows short of the threshold and reopens. The two upserts
+/// that fill the graph to the threshold must run no stranded search. A record
+/// planted before the crossing upsert must be gone after it, leaving the set
+/// equal to what open computes. The next upsert, above the threshold, must
+/// run the per-upsert searches again.
+/// Test: this test itself is the verification.
+#[test]
+fn upsert_skips_stranded_upkeep_until_the_graph_crosses_the_threshold() {
+    let dim = 16;
+    let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS - 2;
+    let pool: Vec<Vec<f32>> = (0..n)
+        .map(|i| spread_vec(dim, 900_000 + i as u64))
+        .collect();
+    let (_dir, seeded) = open_store(dim);
+    seed_rows(&seeded.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seeded.db), dim).expect("reopen");
+    let searches = || stranded::UPKEEP_SEARCHES.with(|c| c.get());
+    let upsert = |j: u64| {
+        store
+            .upsert(&format!("late-{j}"), &spread_vec(dim, 950_000 + j))
+            .expect("upsert");
+    };
+
+    let at_start = searches();
+    upsert(0);
+    upsert(1);
+    assert_eq!(
+        store.index.read().get_nb_point(),
+        exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+        "precondition: the graph sits exactly at the threshold"
+    );
+    assert_eq!(
+        searches() - at_start,
+        0,
+        "upserts at or below the threshold ran stranded searches"
+    );
+
+    // A record no search would make: the crossing rebuild must drop it.
+    let planted = spread_vec(dim, 990_000);
+    stranded::add_stranded(&mut store.stranded.write(), &planted, u64::MAX);
+    upsert(2);
+    let expected = stranded::stranded_points(&store.index.read());
+    assert!(
+        *store.stranded.read() == expected,
+        "the crossing upsert left a stranded set unlike the one open computes"
+    );
+
+    let above = searches();
+    upsert(3);
+    assert!(
+        searches() > above,
+        "an upsert above the threshold skipped its stranded searches"
+    );
+}
+
 /// Uuids of `store`'s top `k` hits for `query`, in rank order.
 fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
     let hits = store.search(query, k).expect("search");

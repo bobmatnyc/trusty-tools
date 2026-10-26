@@ -9,7 +9,9 @@ use redb::ReadableTable;
 
 #[cfg(test)]
 use super::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS, allocate_vector_id};
-use super::{HnswStore, HnswStoreError, Result, quiet_insert, stranded};
+use super::{
+    EXHAUSTIVE_SCAN_MAX_POINTS, HnswStore, HnswStoreError, Result, quiet_insert, stranded,
+};
 
 impl HnswStore {
     /// Commit `vector` under `uuid` in one redb write transaction.
@@ -67,8 +69,12 @@ impl HnswStore {
     /// the bounded insert gate and graph lock (#9487, #9187), and records it —
     /// and any point the insert evicted from a neighbour list, or left
     /// reachable only through one (#10186) — for an exact scan if a search for
-    /// its own vector does not reach it (#9174).
+    /// its own vector does not reach it (#9174). #10271: that upkeep runs only
+    /// above [`EXHAUSTIVE_SCAN_MAX_POINTS`] graph points, the only size at which
+    /// the graph arm reads the set; the insert that crosses the threshold
+    /// rebuilds the set with [`stranded::stranded_points`], as open does.
     /// Test: `upsert_and_search_round_trips`,
+    /// `upsert_skips_stranded_upkeep_until_the_graph_crosses_the_threshold`,
     /// `a_drawer_reachable_only_through_a_stranded_one_is_still_found`,
     /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`,
     /// `upsert_chunks_replaces_the_group_and_shrinks`.
@@ -96,6 +102,18 @@ impl HnswStore {
         // #9487: both waits are bounded; a timeout trips the breaker.
         let _gate = self.bounded_gate("upsert")?;
         let index = self.bounded_graph("upsert")?;
+        // #10271: at or below the threshold the exact scan answers every
+        // search and the stranded set is unread, so skip its upkeep (3.5-4.5x
+        // the insert). `get_nb_point` never falls and is at least the live
+        // count the graph arm tests, so the crossing rebuild precedes any read.
+        if index.get_nb_point() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+            quiet_insert::insert_quietly(&index, vector, vector_id as usize)
+                .map_err(HnswStoreError::StdoutGuard)?;
+            if index.get_nb_point() > EXHAUSTIVE_SCAN_MAX_POINTS {
+                *self.stranded.write() = stranded::stranded_points(&index);
+            }
+            return Ok(());
+        }
         // #9174: the lists this insert can evict from, read before it runs.
         let before = stranded::neighbourhoods_before_insert(&index, vector);
         quiet_insert::insert_quietly(&index, vector, vector_id as usize)
