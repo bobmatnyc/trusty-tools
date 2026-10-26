@@ -1384,6 +1384,7 @@ async fn doctor_endpoint_returns_report() {
         // #9018: whether `[pm_guard] enabled = false` turned the guard off.
         "pm_guard",
         "org_accounts",
+        "gh_account_dir_tokens",
         // #7616: the instruction fold's measured saving, or INACTIVE.
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.

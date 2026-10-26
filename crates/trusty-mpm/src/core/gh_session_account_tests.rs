@@ -12,6 +12,7 @@ use super::*;
 use crate::core::gh_account::REFUSED_GH_TOKEN;
 use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe};
 use crate::core::gh_account_proof::ProvenToken;
+use crate::core::gh_keyring_token::gh_keyring_token_tests::TableKeyring;
 
 const ORIGIN: &str = "https://github.com/acme/itinerary";
 const API: &str = "https://api.github.com";
@@ -70,6 +71,7 @@ fn a_logged_in_login_gets_a_private_proven_dir() {
         ORIGIN,
         &probe,
         &check,
+        &TableKeyring::default(),
     )
     .expect("a logged-in, proven login is accepted");
     assert_eq!(got, dir);
@@ -93,6 +95,7 @@ fn an_unknown_login_is_refused_with_the_setup_command() {
         ORIGIN,
         &TableProbe::default(),
         &TableCheck::default(),
+        &TableKeyring::default(),
     )
     .expect_err("an unknown login must be refused");
     let dir = account_dir(&state_root, "octo-new");
@@ -101,15 +104,16 @@ fn an_unknown_login_is_refused_with_the_setup_command() {
     assert!(!dir.exists(), "a refused login must not get a dir");
 }
 
-/// 🔴 #8914 HIGH 1: tm itself writes the token it proved into the per-account
-/// dir's 0600 `hosts.yml`, as gh's insecure-storage layout. Here the dir
-/// yields nothing and the operator's default config yields the token.
+/// 🔴 #10037: tm stores the token it proved in gh's keyring entry for the
+/// login, and the per-account `hosts.yml` names the login with no token. Here
+/// the dir yields nothing and the operator's default config yields the token.
 #[test]
-fn a_proven_token_is_stored_in_the_private_hosts_yml() {
+fn a_proven_token_never_lands_in_hosts_yml() {
     let (_tmp, state_root, operator) = fixture();
     let dir = account_dir(&state_root, "octo-pinned");
     let probe = TableProbe::default().answer(&operator, "github.com", "octo-pinned", Ok("tok-p"));
     let check = TableCheck::default().answer(API, "tok-p", Ok("octo-pinned"));
+    let keyring = TableKeyring::default();
     prepare_session_account_with(
         &state_root,
         &operator,
@@ -117,21 +121,97 @@ fn a_proven_token_is_stored_in_the_private_hosts_yml() {
         ORIGIN,
         &probe,
         &check,
+        &keyring,
     )
     .expect("a token proven from the operator's gh is accepted");
-    let text = std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml");
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("yaml");
-    let host = &doc["github.com"];
+    assert_no_token_in_hosts_yml(&dir, "octo-pinned");
     assert_eq!(
-        host["users"]["octo-pinned"]["oauth_token"].as_str(),
+        keyring.token("github.com", "octo-pinned").as_deref(),
         Some("tok-p"),
-        "the dir must hold its account's own token"
+        "the keyring must hold the account's own token"
     );
-    assert_eq!(host["oauth_token"].as_str(), Some("tok-p"));
-    assert_eq!(host["user"].as_str(), Some("octo-pinned"));
     #[cfg(unix)]
     assert_eq!(mode(&dir.join("hosts.yml")), 0o600);
 }
+
+/// `<dir>/hosts.yml` names `login` as github.com's user and holds no token.
+fn assert_no_token_in_hosts_yml(dir: &Path, login: &str) {
+    let text = std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml");
+    assert!(!text.contains("tok-"), "hosts.yml holds a token: {text}");
+    assert!(
+        !text.contains("oauth_token"),
+        "hosts.yml holds a token key: {text}"
+    );
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("yaml");
+    assert_eq!(doc["github.com"]["user"].as_str(), Some(login), "{text}");
+}
+
+/// 🔴 #10037 migration: a `hosts.yml` #8914 wrote with a token is proven from
+/// that token, which then moves to the keyring and leaves the file.
+#[test]
+fn a_legacy_hosts_yml_token_is_migrated_to_the_keyring() {
+    let (_tmp, state_root, operator) = fixture();
+    let dir = account_dir(&state_root, "octo-pinned");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("hosts.yml"), LEGACY_HOSTS).expect("hosts.yml");
+    std::fs::write(dir.join("config.yml"), "version: \"1\"\n").expect("config.yml");
+    let check = TableCheck::default().answer(API, "tok-legacy", Ok("octo-pinned"));
+    let keyring = TableKeyring::default();
+    prepare_session_account_with(
+        &state_root,
+        &operator,
+        "octo-pinned",
+        ORIGIN,
+        &StoredTokenFirst(&TableProbe::default()),
+        &check,
+        &keyring,
+    )
+    .expect("a proven legacy token is migrated");
+    assert_no_token_in_hosts_yml(&dir, "octo-pinned");
+    assert_eq!(
+        keyring.token("github.com", "octo-pinned").as_deref(),
+        Some("tok-legacy")
+    );
+}
+
+/// 🔴 FAIL-OPEN CHECK (#10037): a keyring failure refuses the pin, and a
+/// legacy `hosts.yml` is kept byte-for-byte — the working account config is
+/// not lost and the token is not rewritten.
+#[test]
+fn a_keyring_failure_refuses_the_pin_and_keeps_hosts_yml() {
+    let (_tmp, state_root, operator) = fixture();
+    let dir = account_dir(&state_root, "octo-pinned");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("hosts.yml"), LEGACY_HOSTS).expect("hosts.yml");
+    std::fs::write(dir.join("config.yml"), "version: \"1\"\n").expect("config.yml");
+    let check = TableCheck::default().answer(API, "tok-legacy", Ok("octo-pinned"));
+    let err = prepare_session_account_with(
+        &state_root,
+        &operator,
+        "octo-pinned",
+        ORIGIN,
+        &StoredTokenFirst(&TableProbe::default()),
+        &check,
+        &TableKeyring::failing("the keychain is locked"),
+    )
+    .expect_err("a refused keyring write must refuse the pin");
+    assert!(err.contains("the keychain is locked"), "{err}");
+    assert!(!err.contains("tok-"), "a refusal carries a token: {err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml"),
+        LEGACY_HOSTS
+    );
+}
+
+/// A per-account `hosts.yml` as #8914 wrote it: the token at both levels.
+const LEGACY_HOSTS: &str = "\
+github.com:
+    users:
+        octo-pinned:
+            oauth_token: tok-legacy
+    user: octo-pinned
+    oauth_token: tok-legacy
+";
 
 /// 🔴 #8914 HIGH 1: no refusal names `gh auth login` or `gh auth switch`;
 /// both activate an account in the machine-wide keyring slot. Each names the
@@ -147,6 +227,7 @@ fn no_refusal_names_a_gh_auth_login_command() {
             ORIGIN,
             &TableProbe::default(),
             &TableCheck::default(),
+            &TableKeyring::default(),
         )
         .expect_err("no proven token must be refused")
     };
@@ -175,6 +256,7 @@ fn a_token_for_another_account_is_refused_not_used() {
         ORIGIN,
         &probe,
         &check,
+        &TableKeyring::default(),
     )
     .expect_err("another account's token must be refused");
     assert!(err.contains("authenticates as 'octo-active'"), "{err}");
@@ -211,6 +293,7 @@ fn an_unreadable_account_dir_is_refused() {
         ORIGIN,
         &TableProbe::default(),
         &TableCheck::default(),
+        &TableKeyring::default(),
     );
     assert_eq!(mode(&dir), 0o000, "the dir must not be repaired");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
@@ -233,6 +316,7 @@ fn a_malformed_hosts_yml_is_refused() {
         ORIGIN,
         &TableProbe::default(),
         &TableCheck::default(),
+        &TableKeyring::default(),
     )
     .expect_err("a malformed hosts.yml must be refused");
     assert!(err.contains("names no github.com account"), "{err}");
@@ -252,6 +336,7 @@ fn a_missing_hosts_yml_for_an_unknown_login_is_refused() {
         ORIGIN,
         &TableProbe::default(),
         &TableCheck::default(),
+        &TableKeyring::default(),
     )
     .expect_err("a dir with no hosts.yml and no login must be refused");
     assert!(err.contains("is not logged into gh"), "{err}");
@@ -279,6 +364,7 @@ fn a_malformed_config_yml_is_refused() {
         ORIGIN,
         &probe,
         &check,
+        &TableKeyring::default(),
     )
     .expect_err("a malformed config.yml must be refused");
     assert!(
@@ -326,6 +412,7 @@ fn a_reused_dir_is_made_private() {
         ORIGIN,
         &probe,
         &check,
+        &TableKeyring::default(),
     )
     .expect("a valid reused dir is accepted");
     assert_eq!(mode(&dir), 0o700);
@@ -334,20 +421,29 @@ fn a_reused_dir_is_made_private() {
 
 // ── #8914 HIGH 1: a token on stdin, proven, then stored ──────────────────────
 
-/// 🔴 #8914 HIGH 1: a token on stdin that `GET /user` proves is stored in the
-/// per-account dir, which is built private without the operator's gh knowing
-/// the login.
+/// 🔴 #8914 HIGH 1, #10037: a token on stdin that `GET /user` proves is
+/// stored in the keyring, and the per-account dir is built private without
+/// the operator's gh knowing the login.
 #[test]
 fn a_stdin_token_is_proven_then_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-in", Ok("Octo-New"));
-    let dir = store_supplied_token(&state_root, "octo-new", ORIGIN, " tok-in\n", &check)
-        .expect("a proven stdin token is stored");
+    let keyring = TableKeyring::default();
+    let dir = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        " tok-in\n",
+        &check,
+        &keyring,
+    )
+    .expect("a proven stdin token is stored");
     assert_eq!(dir, account_dir(&state_root, "octo-new"));
     assert_eq!(
-        stored_token(&dir, "github.com", "octo-new").as_deref(),
+        keyring.token("github.com", "Octo-New").as_deref(),
         Some("tok-in")
     );
+    assert_eq!(stored_token(&dir, "github.com", "octo-new"), None);
     let config = std::fs::read_to_string(dir.join("config.yml")).expect("config.yml");
     assert!(config.contains("version: \"1\""), "{config}");
     #[cfg(unix)]
@@ -357,14 +453,62 @@ fn a_stdin_token_is_proven_then_stored() {
     }
 }
 
+/// 🔴 #10037: the whole `--account-token-stdin` path — the stdin store, then
+/// the pin proof through the keyring the shim reads — leaves `hosts.yml`
+/// naming the login with no token. The keyring doubles as the `gh auth token`
+/// probe, as gh's machine-global keyring does.
+#[test]
+fn a_stdin_token_never_lands_in_hosts_yml() {
+    let (_tmp, state_root, operator) = fixture();
+    let check = TableCheck::default().answer(API, "tok-in", Ok("octo-new"));
+    let keyring = TableKeyring::default();
+    let dir = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check, &keyring)
+        .expect("a proven stdin token is stored");
+    assert_no_token_in_hosts_yml(&dir, "octo-new");
+    let pinned = prepare_session_account_with(
+        &state_root,
+        &operator,
+        "octo-new",
+        ORIGIN,
+        &StoredTokenFirst(&keyring),
+        &check,
+        &keyring,
+    )
+    .expect("the stdin token is proven through the keyring");
+    assert_eq!(pinned, dir);
+    assert_no_token_in_hosts_yml(&dir, "octo-new");
+}
+
+/// 🔴 FAIL-OPEN CHECK (#10037): a keyring write failure refuses the stdin
+/// token and never falls back to a plaintext `hosts.yml`.
+#[test]
+fn a_stdin_keyring_failure_never_falls_back_to_hosts_yml() {
+    let (_tmp, state_root, _operator) = fixture();
+    let check = TableCheck::default().answer(API, "tok-in", Ok("octo-new"));
+    let keyring = TableKeyring::failing("the keychain is locked");
+    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check, &keyring)
+        .expect_err("a refused keyring write must refuse the token");
+    assert!(err.contains("the keychain is locked"), "{err}");
+    assert!(!err.contains("tok-"), "a refusal carries a token: {err}");
+    let hosts = account_dir(&state_root, "octo-new").join("hosts.yml");
+    assert!(!hosts.exists(), "hosts.yml was written");
+}
+
 /// FAIL-OPEN CHECK: a stdin token for another account is refused, and nothing
 /// is written.
 #[test]
 fn a_stdin_token_for_another_account_is_refused_and_not_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-active", Ok("octo-active"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-active", &check)
-        .expect_err("another account's token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-active",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("another account's token must be refused");
     assert!(err.contains("authenticates as 'octo-active'"), "{err}");
     assert!(!err.contains("tok-"), "a refusal carries a token: {err}");
     assert!(!account_dir(&state_root, "octo-new").exists());
@@ -376,8 +520,15 @@ fn a_stdin_token_for_another_account_is_refused_and_not_stored() {
 fn a_stdin_token_whose_proof_fails_is_refused_and_not_stored() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default().answer(API, "tok-in", Err("did not answer in time"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check)
-        .expect_err("an unproven token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-in",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("an unproven token must be refused");
     assert!(err.contains("did not answer in time"), "{err}");
     assert!(!account_dir(&state_root, "octo-new").exists());
 }
@@ -387,8 +538,15 @@ fn a_stdin_token_whose_proof_fails_is_refused_and_not_stored() {
 fn an_empty_stdin_token_is_refused() {
     let (_tmp, state_root, _operator) = fixture();
     let check = TableCheck::default();
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, " \n", &check)
-        .expect_err("an empty token must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        " \n",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("an empty token must be refused");
     assert!(err.contains("empty"), "{err}");
     assert!(check.calls().is_empty(), "GET /user ran");
 }
@@ -402,8 +560,15 @@ fn a_hosts_yml_that_is_not_a_mapping_is_refused_and_kept() {
     std::fs::create_dir_all(&dir).expect("dir");
     std::fs::write(dir.join("hosts.yml"), "- a list\n").expect("hosts.yml");
     let check = TableCheck::default().answer(API, "tok-in", Ok("octo-new"));
-    let err = store_supplied_token(&state_root, "octo-new", ORIGIN, "tok-in", &check)
-        .expect_err("a non-mapping hosts.yml must be refused");
+    let err = store_supplied_token(
+        &state_root,
+        "octo-new",
+        ORIGIN,
+        "tok-in",
+        &check,
+        &TableKeyring::default(),
+    )
+    .expect_err("a non-mapping hosts.yml must be refused");
     assert!(err.contains("not a gh hosts.yml mapping"), "{err}");
     assert_eq!(
         std::fs::read_to_string(dir.join("hosts.yml")).expect("hosts.yml"),

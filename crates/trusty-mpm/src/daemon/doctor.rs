@@ -278,6 +278,10 @@ use doctor_egress_guard::check_egress_guard;
 #[path = "doctor_org_accounts.rs"]
 mod doctor_org_accounts;
 use doctor_org_accounts::check_org_accounts;
+// #10037: whether a tm per-account gh `hosts.yml` still holds a token.
+#[path = "doctor_gh_account_dir_tokens.rs"]
+mod doctor_gh_account_dir_tokens;
+use doctor_gh_account_dir_tokens::check_gh_account_dir_tokens;
 
 // #7616: the fold's decline was reported only as a one-time daemon-log line, so
 // nothing an operator reads said whether the instruction fold saves anything.
@@ -478,7 +482,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_eight_checks`,
+/// Test: `run_doctor_produces_seventy_nine_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -610,6 +614,8 @@ pub(crate) async fn run_doctor_with_claims(
         check_pm_guard(&home),
         // #9091: a broken table refuses clones and fails spawns closed.
         check_org_accounts(&home),
+        // #10037: a plaintext gh token #8914 left in a tm account dir.
+        check_gh_account_dir_tokens(&FrameworkPaths::default().root),
         // #7616: states whether the instruction fold is saving anything for this
         // project, so a daemon-log line stops being the only evidence.
         check_instruction_fold(project_dir),
@@ -905,7 +911,7 @@ pub async fn run_doctor_for_manager(
 /// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_eight_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_nine_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
