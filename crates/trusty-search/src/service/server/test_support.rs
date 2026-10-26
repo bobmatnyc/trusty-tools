@@ -37,9 +37,11 @@
 //! they must not use an allowlisted root.
 //!
 //! [`delete_answer`] is the second helper: the delete-route tests' one call
-//! into `delete_index_report` (#9535).
+//! into `delete_index_report` (#9535). [`create_answer`] is the third: the
+//! create-route tests' call into `create_index_report` (#9939).
 
-use super::{delete_index_report, DeleteIndexParams, SearchAppState};
+use super::router::CreateIndexRequest;
+use super::{create_index_report, delete_index_report, DeleteIndexParams, SearchAppState};
 use axum::http::StatusCode;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,6 +118,22 @@ pub(super) async fn delete_answer(
     params: DeleteIndexParams,
 ) -> (StatusCode, serde_json::Value) {
     match delete_index_report(state, id, params).await {
+        Ok(body) => (StatusCode::OK, body),
+        Err(refusal) => refusal,
+    }
+}
+
+/// `POST /indexes`'s answer as `(status, body)`, from its transport-free core
+/// (#9939).
+///
+/// `Ok` maps to `200`, as the former `create_index_handler`'s `Json` wrapper
+/// did, so a `200` assertion on the result means "the core answered `Ok`". A
+/// refusal keeps the status and body the core returned.
+pub(super) async fn create_answer(
+    state: &Arc<SearchAppState>,
+    req: CreateIndexRequest,
+) -> (StatusCode, serde_json::Value) {
+    match create_index_report(state, req).await {
         Ok(body) => (StatusCode::OK, body),
         Err(refusal) => refusal,
     }
