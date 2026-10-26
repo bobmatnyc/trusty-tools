@@ -14,7 +14,7 @@
 //! module records is avoided by construction rather than by a lock.
 //! Test: this module. Run with `cargo test -p trusty-search tests_quantize_6822`.
 
-use super::quantize_handlers::{quantize_handler, QuantizeRequest};
+use super::quantize_handlers::{quantize_report, QuantizeRequest};
 use super::state::SearchAppState;
 use super::status::index_status_handler;
 use crate::core::embed::{Embedder, MockEmbedder};
@@ -97,13 +97,13 @@ async fn status_reports_the_live_vector_quantization() {
 async fn quantize_converts_the_live_index_and_reports_the_chunk_count() {
     let (state, _root, _snap, store) = seeded("q-convert").await;
 
-    let Json(preview) = quantize_handler(
-        State(Arc::clone(&state)),
-        Path("q-convert".to_string()),
-        Some(Json(QuantizeRequest {
+    let preview = quantize_report(
+        &state,
+        "q-convert",
+        Some(QuantizeRequest {
             quant: Some("f32".to_string()),
             dry_run: Some(true),
-        })),
+        }),
     )
     .await
     .expect("dry run must succeed");
@@ -122,13 +122,13 @@ async fn quantize_converts_the_live_index_and_reports_the_chunk_count() {
         "a dry run must not touch the live index"
     );
 
-    let Json(applied) = quantize_handler(
-        State(Arc::clone(&state)),
-        Path("q-convert".to_string()),
-        Some(Json(QuantizeRequest {
+    let applied = quantize_report(
+        &state,
+        "q-convert",
+        Some(QuantizeRequest {
             quant: Some("f32".to_string()),
             dry_run: Some(false),
-        })),
+        }),
     )
     .await
     .expect("applied run must succeed");
@@ -147,7 +147,7 @@ async fn quantize_converts_the_live_index_and_reports_the_chunk_count() {
 #[serial_test::parallel]
 async fn quantize_defaults_to_the_env_default() {
     let (state, _root, _snap, _store) = seeded("q-default").await;
-    let Json(body) = quantize_handler(State(state), Path("q-default".to_string()), None)
+    let body = quantize_report(&state, "q-default", None)
         .await
         .expect("body-less POST must succeed");
     assert_eq!(body["report"]["target"], serde_json::json!("f16"));
@@ -164,13 +164,13 @@ async fn quantize_defaults_to_the_env_default() {
 #[serial_test::parallel]
 async fn quantize_rejects_an_unknown_precision() {
     let (state, _root, _snap, _store) = seeded("q-bad").await;
-    let err = quantize_handler(
-        State(state),
-        Path("q-bad".to_string()),
-        Some(Json(QuantizeRequest {
+    let err = quantize_report(
+        &state,
+        "q-bad",
+        Some(QuantizeRequest {
             quant: Some("fp8".to_string()),
             dry_run: Some(true),
-        })),
+        }),
     )
     .await
     .expect_err("an unknown precision must be refused");
@@ -200,20 +200,20 @@ async fn quantize_over_socket(
 }
 
 /// #6285: `search.index.quantize` is the socket twin of the HTTP route — a dry
-/// run over the socket answers the body the handler answers, and writes
+/// run over the socket answers the body `quantize_report` answers, and writes
 /// nothing.
 #[tokio::test]
 #[serial_test::parallel]
 async fn quantize_over_the_socket_matches_the_http_body() {
     let (state, _root, _snap, store) = seeded("q-socket").await;
 
-    let Json(http) = quantize_handler(
-        State(Arc::clone(&state)),
-        Path("q-socket".to_string()),
-        Some(Json(QuantizeRequest {
+    let http = quantize_report(
+        &state,
+        "q-socket",
+        Some(QuantizeRequest {
             quant: Some("f32".to_string()),
             dry_run: Some(true),
-        })),
+        }),
     )
     .await
     .expect("HTTP dry run succeeds");

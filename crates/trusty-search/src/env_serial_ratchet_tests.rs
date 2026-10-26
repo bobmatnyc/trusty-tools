@@ -188,7 +188,6 @@ const REGISTRY_REACHING: &[&str] = &[
     "relocate_index_handler",
     "relocate_index_report",
     "add_index_roots_report",
-    "patch_index_config_handler",
     "patch_index_config_report",
     "restore_index_on_demand",
     "resolve_or_load_index",

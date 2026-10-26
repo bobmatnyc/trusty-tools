@@ -4,7 +4,7 @@ use super::status::{first_existing_mtime_rfc3339, index_disk_and_mtime};
 use super::*;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 #[test]
@@ -286,7 +286,7 @@ async fn health_omits_embedder_info_when_bm25_only() {
 ///
 /// Why: operators inspect a running daemon via this endpoint; it must
 /// surface exactly what the shared `LogBuffer` holds and report `total`.
-/// What: attaches a `LogBuffer`, pushes three lines, calls the handler
+/// What: attaches a `LogBuffer`, pushes three lines, calls `logs_tail_report`
 /// with `n=2`, and asserts the tail + `total` count.
 /// Test: this test.
 #[tokio::test]
@@ -297,7 +297,7 @@ async fn logs_tail_returns_recent_lines() {
     buffer.push("line two".to_string());
     buffer.push("line three".to_string());
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()).with_log_buffer(buffer));
-    let Json(body) = logs_tail_handler(State(state), Query(LogsTailParams { n: 2 })).await;
+    let body = logs_tail_report(&state, &LogsTailParams { n: 2 });
     let lines = body["lines"].as_array().expect("lines array");
     assert_eq!(lines.len(), 2, "n=2 must return two lines");
     assert_eq!(lines[0].as_str(), Some("line two"));
@@ -321,17 +321,15 @@ async fn logs_tail_clamps_n() {
     }
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()).with_log_buffer(buffer));
     // n=0 clamps up to 1.
-    let Json(zero) =
-        logs_tail_handler(State(Arc::clone(&state)), Query(LogsTailParams { n: 0 })).await;
+    let zero = logs_tail_report(&state, &LogsTailParams { n: 0 });
     assert_eq!(zero["lines"].as_array().expect("lines").len(), 1);
     // n past MAX clamps down to the buffer length (5 here).
-    let Json(big) = logs_tail_handler(
-        State(state),
-        Query(LogsTailParams {
+    let big = logs_tail_report(
+        &state,
+        &LogsTailParams {
             n: MAX_LOGS_TAIL_N * 10,
-        }),
-    )
-    .await;
+        },
+    );
     assert_eq!(big["lines"].as_array().expect("lines").len(), 5);
 }
 
@@ -341,19 +339,14 @@ async fn logs_tail_clamps_n() {
 /// for the admin UI's stop button.
 /// What: subscribes to the shutdown channel — which is what `run_daemon` does
 /// before it serves, and what makes the send succeed (#6285 slice 5.6) — then
-/// calls `admin_stop_handler` and asserts the JSON body.
+/// calls `admin_stop_report` and asserts the JSON body.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
 async fn admin_stop_returns_ok() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let _driver = state.shutdown_tx.subscribe();
-    let resp = admin_stop_handler(State(state)).await;
-    assert_eq!(resp.status(), axum::http::StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-        .await
-        .expect("read the body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    let body = admin_stop_report(&state).expect("a subscribed driver accepts the stop");
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert_eq!(body["message"].as_str(), Some("shutting down"));
 }

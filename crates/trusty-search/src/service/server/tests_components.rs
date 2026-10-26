@@ -1,15 +1,15 @@
-//! Handler-level tests for the runtime KG/vector component toggle on
+//! Report-level tests for the runtime KG/vector component toggle on
 //! `PATCH /indexes/:id/config` (issue #2984 Phase 1).
 //!
 //! Why: `components.rs`'s `tests_pure` module covers the pure
 //! `resolve_component_toggle` decision function; these tests drive the real
-//! `patch_index_config_handler` end to end — soft-disable is instantaneous
+//! `patch_index_config_report` end to end — soft-disable is instantaneous
 //! and observable in the SAME response, soft-enable spawns a background
 //! catch-up that this module polls for completion (mirrors
 //! `service::reindex::defer_embed::tests`'s polling pattern), and the 409
 //! concurrency guard is exercised by holding the background semaphore permit
-//! before calling the handler.
-//! What: handler-level tests driving `patch_index_config_handler` against an
+//! before calling the report.
+//! What: report-level tests driving `patch_index_config_report` against an
 //! in-process registry. Every test that reaches a successful persist (any
 //! `kg`/`vector` field present) isolates `TRUSTY_DATA_DIR` to a tempdir AND
 //! is `#[serial_test::serial]` — mirrors `tests_index_config`'s
@@ -20,12 +20,12 @@
 //! too, not optional hardening.
 //! Test: this module.
 
-use super::index_config::{patch_index_config_handler, PatchIndexConfigRequest};
+use super::index_config::{patch_index_config_report, PatchIndexConfigRequest};
 use super::state::SearchAppState;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
 use axum::body::to_bytes;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use std::sync::Arc;
@@ -108,7 +108,7 @@ pub(super) async fn poll_stages<F: Fn(&crate::core::registry::IndexStages) -> bo
 /// symbol graph is dropped.
 ///
 /// Why: pins D2 (soft-disable is synchronous, on-disk data untouched) at the
-/// handler level.
+/// report level.
 /// What: PATCHes `kg: false`, asserts the response's `components.kg == false`
 /// and `catch_up_started == false`, and that the registered handle's
 /// `skip_kg` + graph stage reflect the disable immediately (no polling
@@ -119,17 +119,16 @@ pub(super) async fn poll_stages<F: Fn(&crate::core::registry::IndexStages) -> bo
 async fn patch_kg_off_is_instantaneous_soft_disable() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-kg-off");
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-kg-off".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-kg-off",
+        PatchIndexConfigRequest {
             kg: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(body["components"]["kg"].as_bool(), Some(false));
     assert_eq!(
         body["components"]["catch_up_started"].as_bool(),
@@ -158,17 +157,16 @@ async fn patch_kg_off_is_instantaneous_soft_disable() {
 async fn patch_vector_off_leaves_kg_untouched() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-vector-off");
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-vector-off".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-vector-off",
+        PatchIndexConfigRequest {
             vector: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(body["components"]["vector"].as_bool(), Some(false));
     assert_eq!(body["components"]["kg"].as_bool(), Some(true));
 
@@ -197,29 +195,28 @@ async fn patch_kg_on_spawns_catch_up_and_reaches_ready() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-kg-on");
     // First disable it.
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-kg-on".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-kg-on",
+        PatchIndexConfigRequest {
             kg: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
     // Now re-enable — must trigger a catch-up.
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-kg-on".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-kg-on",
+        PatchIndexConfigRequest {
             kg: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(body["components"]["kg"].as_bool(), Some(true));
     assert_eq!(body["components"]["catch_up_started"].as_bool(), Some(true));
 
@@ -242,28 +239,27 @@ async fn patch_kg_on_spawns_catch_up_and_reaches_ready() {
 async fn patch_vector_on_spawns_catch_up_and_reaches_ready() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-vector-on");
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-vector-on".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-vector-on",
+        PatchIndexConfigRequest {
             vector: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-vector-on".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-vector-on",
+        PatchIndexConfigRequest {
             vector: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(body["components"]["catch_up_started"].as_bool(), Some(true));
 
     let handle = state
@@ -298,16 +294,16 @@ async fn patch_component_turn_on_409s_when_same_index_catch_up_in_progress() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-409");
     // Disable KG first so the next PATCH is a turn-on (needs the permit).
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-409".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-409",
+        PatchIndexConfigRequest {
             kg: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
     // Hold THIS index's per-index permit for the duration of this block —
     // simulates a concurrent reindex or another in-flight catch-up on the
@@ -317,17 +313,17 @@ async fn patch_component_turn_on_409s_when_same_index_catch_up_in_progress() {
         .try_acquire_owned()
         .expect("semaphore must be free at test start");
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-409".to_string()),
-        Json(PatchIndexConfigRequest {
+    let (status, body) = patch_index_config_report(
+        &state,
+        "comp-409",
+        PatchIndexConfigRequest {
             kg: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body = body_json(resp).await;
+    .await
+    .expect_err("a held per-index permit refuses the turn-on");
+    assert_eq!(status, StatusCode::CONFLICT);
     assert!(
         body["error"]
             .as_str()
@@ -371,16 +367,16 @@ async fn patch_component_toggle_succeeds_for_different_index_while_global_backgr
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-other-index");
     // Disable KG first so the next PATCH is a turn-on (needs a permit).
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-other-index".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-other-index",
+        PatchIndexConfigRequest {
             kg: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
     // Hold the process-global background-reindex semaphore — simulates an
     // unrelated index's deferred-embed pass in flight elsewhere in the fleet.
@@ -388,22 +384,22 @@ async fn patch_component_toggle_succeeds_for_different_index_while_global_backgr
         .try_acquire()
         .expect("global semaphore must be free at test start");
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-other-index".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-other-index",
+        PatchIndexConfigRequest {
             kg: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "a toggle on an unrelated index must never be blocked by the \
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "{}: {e:?}",
+            "a toggle on an unrelated index must never be blocked by the \
          global background-reindex semaphore (#2984 Phase 1 CRITICAL finding 2)"
-    );
-    let body = body_json(resp).await;
+        )
+    });
     assert_eq!(body["components"]["catch_up_started"].as_bool(), Some(true));
 }
 
@@ -493,16 +489,16 @@ async fn patch_kg_on_reloads_persisted_graph_for_indexer_built_with_skip_kg_true
     registry.register(handle);
     let state = Arc::new(SearchAppState::new(registry));
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-kg-reload".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-kg-reload",
+        PatchIndexConfigRequest {
             kg: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
     let handle = state
         .registry
@@ -522,24 +518,23 @@ async fn patch_kg_on_reloads_persisted_graph_for_indexer_built_with_skip_kg_true
 /// A hygiene-only PATCH (no `kg`/`vector` fields) must never touch component
 /// state or require the semaphore — the no-op resolution
 /// (`resolve_component_toggle_no_op_when_fields_absent`, unit-tested in
-/// `components.rs`) must hold at the handler level too.
+/// `components.rs`) must hold at the report level too.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
 async fn patch_hygiene_only_leaves_components_untouched() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-hygiene-only");
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-hygiene-only".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-hygiene-only",
+        PatchIndexConfigRequest {
             include_docs: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(body["components"]["kg"].as_bool(), Some(true));
     assert_eq!(body["components"]["vector"].as_bool(), Some(true));
     assert_eq!(
@@ -559,17 +554,17 @@ async fn patch_hygiene_only_leaves_components_untouched() {
 async fn patch_component_toggle_persists_to_toml() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-persist");
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-persist".to_string()),
-        Json(PatchIndexConfigRequest {
+    patch_index_config_report(
+        &state,
+        "comp-persist",
+        PatchIndexConfigRequest {
             kg: Some(false),
             vector: Some(false),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    .await
+    .expect("PATCH is accepted");
 
     let entries = crate::service::persistence::load_index_registry().expect("load registry");
     let entry = entries

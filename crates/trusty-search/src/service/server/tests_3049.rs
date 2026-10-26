@@ -559,7 +559,7 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
 /// deleted index at the next warm boot. Against round 2 this fails for the right
 /// reason: the PATCH returns while the teardown guard is still held.
 /// What: holds the exclusive side exactly as `unregister_index` does, then
-/// asserts the handler has not answered while it is held and does once released.
+/// asserts the report has not answered while it is held and does once released.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
@@ -574,13 +574,13 @@ async fn patch_index_config_waits_for_an_in_flight_teardown() {
 
     let patch_state = Arc::clone(&state);
     let patch = tokio::spawn(async move {
-        super::index_config::patch_index_config_handler(
-            axum::extract::State(patch_state),
-            axum::extract::Path(ID.to_string()),
-            axum::Json(super::index_config::PatchIndexConfigRequest {
+        super::index_config::patch_index_config_report(
+            &patch_state,
+            ID,
+            super::index_config::PatchIndexConfigRequest {
                 include_docs: Some(false),
                 ..Default::default()
-            }),
+            },
         )
         .await
     });
@@ -594,10 +594,9 @@ async fn patch_index_config_waits_for_an_in_flight_teardown() {
 
     drop(teardown_guard);
     let resp = patch.await.expect("patch task");
-    assert_eq!(
-        resp.status(),
-        axum::http::StatusCode::OK,
-        "once teardown releases, the PATCH proceeds normally"
+    assert!(
+        resp.is_ok(),
+        "once teardown releases, the PATCH proceeds normally: {resp:?}"
     );
 }
 

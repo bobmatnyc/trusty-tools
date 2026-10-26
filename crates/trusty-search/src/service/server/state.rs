@@ -350,7 +350,7 @@ pub struct SearchAppState {
     /// Hard-exiting mid-write can corrupt the redb corpus (the B-tree file is not
     /// guaranteed to be in a consistent state if the write-half of a transaction
     /// is aborted by SIGKILL-equivalent). Using a `watch` channel lets
-    /// `admin_stop_handler` signal `run_daemon` (which holds the send half wrapped
+    /// `admin_stop_report` signal `run_daemon` (which holds the send half wrapped
     /// in `Arc`) to drop the axum server cleanly, flushing all data first.
     ///
     /// What: a `watch::Sender<bool>` whose receiver is polled by `run_daemon` as

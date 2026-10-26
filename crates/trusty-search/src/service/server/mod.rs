@@ -294,8 +294,6 @@ use std::sync::Arc;
 // #9214 (ruling D1): the handlers are test-only; tests reach them through
 // `super::*`.
 #[cfg(test)]
-use admin::{admin_stop_handler, logs_tail_handler};
-#[cfg(test)]
 use health::health_handler;
 #[cfg(test)]
 use indexes::{create_index_handler, list_indexes_handler};
