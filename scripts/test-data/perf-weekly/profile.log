@@ -1,0 +1,5 @@
+running 1 test
+test recall_supersession_latency_profile ... drawers=20000 rulings=40 queries=300 seeded_in=431.204551s memory_recall p50/p95 us: leg off = 14639/16383, leg on = 14736/16437
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 441.50s

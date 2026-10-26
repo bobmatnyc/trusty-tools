@@ -344,6 +344,14 @@ jobs:
       - name: Content-bundle packager selftest (#8389)
         run: bash scripts/package_content_selftest.sh
 
+      # #10210: the perf compare, status writer and weekly memory runner are
+      # pure shell over fixtures and stubbed suites; no EVO, no cargo. Same job,
+      # same reason as the steps above: no new required context, no toolchain.
+      - name: Perf compare + weekly runner selftests (#10210)
+        run: |
+          bash scripts/perf_compare_selftest.sh
+          bash scripts/perf_weekly_memory_selftest.sh
+
       # #8378: the relevance detector and the `CI gate` verdict decide which
       # required contexts do work and which skips are legitimate, so their
       # fixtures — and the table-equals-needs wiring check — run first.

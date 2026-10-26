@@ -1,0 +1,33 @@
+running 5 tests
+
+=== test_concurrent_reads (daemon v0.36.0) ===
+  tasks=50  per_task=20  total_ops=1000  errors=0
+  wall=1.65s  throughput=603.9 req/s
+  latency: n= 1000  min=412.1µs  mean= 21.3ms  p50=  1.982ms  p95=168.449ms  p99=175.2ms  max=182.514ms
+test test_concurrent_reads ... ok
+
+=== test_concurrent_rw (daemon v0.36.0) ===
+  writers=10×20=200  readers=40×20=800  total=1000
+  wall=33.2s  throughput=30.1 ops/s
+  WRITE: n=  200  min=  1.1s  mean=  1.3s  p50=1.324948s  p95=1.347473s  p99=  1.35s  max=1.350184s
+  WRITE errors=0  success_rate=100.00%
+  READ : n=  800  min=900µs  mean=  5.1ms  p50=  3.725ms  p95= 29.808ms  p99= 31.1ms  max= 32.447ms
+  READ  errors=0   success_rate=100.00%
+test test_concurrent_rw ... ok
+
+=== test_burst (daemon v0.36.0) ===
+  n=500  wall=16.9s  throughput=29.6 req/s
+  errors=0 (transport=0 rpc=0)  error_rate=0.00%
+  latency: n=  500  min=  2.1ms  mean=  4.2s  p50= 81.932ms  p95=15.098172s  p99=16.5s  max=16.821829s
+  success_rate=100.00%
+  post-burst /health.status = ok
+test test_burst ... ok
+
+=== test_sustained_load (daemon v0.36.0) ===
+  clients=8  wall=30.0s  ops=879  errors=0
+  throughput=29.3 ops/s  error_rate=0.00%
+  final /health.status = ok
+  post-load palace_list ok = true
+test test_sustained_load ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 70.10s

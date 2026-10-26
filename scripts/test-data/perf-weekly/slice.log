@@ -1,0 +1,12 @@
+running 1 test
+MEASURE embedder dim=384 window=Some(512)
+MEASURE embed_64_chunks runs=[1.251297s, 1.30001s, 1.24633s] per_chunk=19.474ms chunks_in_120s=6162
+MEASURE embed_64_chunks_paced runs=[1.9s, 1.95s, 1.92s]
+MEASURE slice n=0 wall=2.1s chunks=64 repaired=4 failed=0 stop=ChunkCap
+MEASURE groups keys=16 rows=[Some(5)]
+MEASURE query_embed phase=idle n=200 p50=16.592ms p95=17.605ms max=18.964ms
+MEASURE query_embed phase=contention n=200 p50=17.671ms p95=1.236305s max=1.266598s
+MEASURE contention_p95_over_idle_p95=70.22 bg_batches=9 verdict=FLAG
+test engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 60.00s
