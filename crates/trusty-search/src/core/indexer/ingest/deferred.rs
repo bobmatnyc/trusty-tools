@@ -24,7 +24,7 @@ use tokio::sync::RwLockReadGuard;
 use crate::core::chunker::RawChunk;
 
 use super::super::CodeIndexer;
-use super::embed::{EmbedContext, EmbedRun};
+use super::embed::{EmbedContext, EmbedPassState, EmbedRun};
 use super::EmbedCatchUp;
 
 /// How long a deferred-embed commit waits for an evicted chunk map to
@@ -84,13 +84,16 @@ impl DeferredEmbedPlan {
     /// What: the embeddings are 1:1 with the owed chunks; a pause, drain or
     /// no-progress abort leaves the tail `None` (#6524). #8600: an abort is
     /// carried in [`EmbedRun::stalled`], not an `Err`, so the completed waves
-    /// before it still reach [`CodeIndexer::commit_deferred_embed`].
+    /// before it still reach [`CodeIndexer::commit_deferred_embed`]. #10294:
+    /// `state` is the pass's, so the CoreML tripwire outlasts the wave.
     /// Test: `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`,
-    /// `a_stalled_wave_commits_the_waves_before_it`.
+    /// `a_stalled_wave_commits_the_waves_before_it`,
+    /// `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
     pub(crate) async fn embed(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        state: &mut EmbedPassState,
     ) -> Result<EmbedRun> {
         if self.to_embed.is_empty() {
             return Ok(EmbedRun {
@@ -99,8 +102,14 @@ impl DeferredEmbedPlan {
             });
         }
         self.embed
-            .embed_chunks_keeping_prefix(&self.to_embed, progress_tx, pause)
+            .embed_chunks_in_pass(&self.to_embed, progress_tx, pause, state)
             .await
+    }
+
+    /// A fresh embed state for a pass whose waves include this one (#10294).
+    /// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
+    pub(crate) fn embed_state(&self) -> EmbedPassState {
+        self.embed.pass_state()
     }
 }
 

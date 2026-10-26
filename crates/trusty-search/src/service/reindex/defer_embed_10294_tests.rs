@@ -348,3 +348,160 @@ async fn a_failed_checkpoint_fails_the_pass_instead_of_settling_ready() {
         "the pending marker must survive so the next boot embeds the remainder"
     );
 }
+
+/// An embedder that reports the CoreML provider, grows the process RSS on its
+/// first call, and records every call's batch size.
+struct CoreMlSpikeEmbedder {
+    sizes: Arc<Mutex<Vec<usize>>>,
+    spike: Mutex<Vec<Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for CoreMlSpikeEmbedder {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        std::future::pending().await
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let first = {
+            let mut sizes = self.sizes.lock().expect("sizes lock");
+            sizes.push(texts.len());
+            sizes.len() == 1
+        };
+        if first {
+            // Touched pages, so the RSS read after the wave sees them.
+            self.spike
+                .lock()
+                .expect("spike lock")
+                .push(vec![1u8; 64 << 20]);
+        }
+        Ok(texts
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (0..DIM).map(|d| (i + d + 1) as f32).collect())
+            .collect())
+    }
+    fn dimension(&self) -> usize {
+        DIM
+    }
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::ExecutionProvider::CoreML
+    }
+}
+
+/// Once the CoreML RSS tripwire halves the batch size, every later embed call
+/// of the same pass uses the halved size, including calls in later waves.
+///
+/// Pre-fix each wave started over at the full CoreML batch size, so the
+/// tripwire's jetsam guard lasted one wave.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass() {
+    // One sub-batch per inner wave, 8 chunks per CoreML call, 32 per pass wave.
+    let test_name = "service::reindex::defer_embed::tests_10294::\
+                     a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass";
+    if !crate::service::test_isolation::is_isolated_child() {
+        let data_dir = tempfile::tempdir().expect("child data dir");
+        crate::service::test_isolation::run_isolated(
+            test_name,
+            &[
+                ("TRUSTY_DATA_DIR", data_dir.path().as_os_str()),
+                ("TRUSTY_EMBED_INFLIGHT", "1".as_ref()),
+                ("TRUSTY_MAX_BATCH_SIZE", "32".as_ref()),
+                ("TRUSTY_COREML_BATCH_SIZE", "8".as_ref()),
+                ("TRUSTY_COREML_TRIPWIRE_MB", "1".as_ref()),
+            ],
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let n = 48;
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let embedder = Arc::new(CoreMlSpikeEmbedder {
+        sizes: Arc::clone(&sizes),
+        spike: Mutex::new(Vec::new()),
+    });
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let handle = handle_with("tripwire-10294", tmp.path(), embedder, store, n).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())),
+    )
+    .await
+    .expect("the pass must finish");
+
+    let sizes = sizes.lock().expect("sizes lock").clone();
+    assert_eq!(sizes.first(), Some(&8), "the pass starts at full size");
+    assert_eq!(sizes.iter().sum::<usize>(), n, "every chunk embedded once");
+    assert!(
+        sizes[1..].iter().all(|&s| s <= 4),
+        "after the tripwire fires, no call of the pass may return to the full \
+         batch size, including in the next wave: {sizes:?}"
+    );
+}
+
+/// A finished pass compacts a graph whose churn is due, as the forced persist
+/// it replaced did (#9450).
+///
+/// Pre-fix the pass wrote its own checkpoint, which never compacted, so the
+/// churn stayed until some unrelated persist ran.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_finished_pass_compacts_a_churned_graph() {
+    if !isolate(
+        "service::reindex::defer_embed::tests_10294::a_finished_pass_compacts_a_churned_graph",
+    ) {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let items: Vec<(String, Vec<f32>)> = (0..200)
+        .map(|i| {
+            (
+                format!("old{i}"),
+                (0..DIM).map(|d| (i + d + 1) as f32).collect(),
+            )
+        })
+        .collect();
+    store.upsert_batch(&items).await.expect("upsert");
+    for i in 0..60 {
+        store.remove(&format!("old{i}")).await.expect("remove");
+    }
+    let embedder = Arc::new(ParkingEmbedder {
+        park_at: usize::MAX,
+        park: Mutex::new(None),
+        calls: AtomicUsize::new(0),
+        answered: Arc::new(Mutex::new(Vec::new())),
+    });
+    let dyn_store: Arc<dyn VectorStore> = store.clone();
+    let handle = handle_with("compact-10294", tmp.path(), embedder, dyn_store, 4).await;
+    assert!(
+        store.churn_since_compact() >= 60,
+        "precondition: churn past the threshold"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())),
+    )
+    .await
+    .expect("the pass must finish");
+    assert_eq!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Ready
+    );
+
+    let deadline =
+        tokio::time::Instant::now() + store.compaction_quiet_window() + Duration::from_secs(10);
+    while store.churn_since_compact() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        store.churn_since_compact(),
+        0,
+        "#9450: a finished pass compacts the churned graph once writes stop"
+    );
+    assert_eq!(store.len().await.expect("len"), 144, "no vector lost");
+}
