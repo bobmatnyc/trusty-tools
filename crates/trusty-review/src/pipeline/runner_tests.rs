@@ -1352,9 +1352,21 @@ async fn run_review_degraded_approve_is_capped_at_approve_with_reservations() {
 fn cap_degraded_approve_only_moves_a_degraded_approve() {
     use crate::pipeline::runner_helpers::cap_degraded_approve;
     let cases = [
-        (ReviewStatus::Degraded, Verdict::Approve, Verdict::ApproveWithReservations),
-        (ReviewStatus::Degraded, Verdict::ApproveWithReservations, Verdict::ApproveWithReservations),
-        (ReviewStatus::Degraded, Verdict::RequestChanges, Verdict::RequestChanges),
+        (
+            ReviewStatus::Degraded,
+            Verdict::Approve,
+            Verdict::ApproveWithReservations,
+        ),
+        (
+            ReviewStatus::Degraded,
+            Verdict::ApproveWithReservations,
+            Verdict::ApproveWithReservations,
+        ),
+        (
+            ReviewStatus::Degraded,
+            Verdict::RequestChanges,
+            Verdict::RequestChanges,
+        ),
         (ReviewStatus::Degraded, Verdict::Block, Verdict::Block),
         (ReviewStatus::Degraded, Verdict::Unknown, Verdict::Unknown),
         (ReviewStatus::Completed, Verdict::Approve, Verdict::Approve),
