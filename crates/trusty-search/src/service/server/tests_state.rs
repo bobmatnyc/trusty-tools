@@ -15,10 +15,10 @@ async fn install_embedder_error_surfaces_in_health() {
         .install_embedder_error("init timed out after 60s")
         .await;
     let state_arc = Arc::new(state);
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "error");
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "error");
     assert_eq!(
-        resp.embedder_error.as_deref(),
+        resp["embedder_error"].as_str(),
         Some("init timed out after 60s"),
     );
 }
@@ -110,9 +110,9 @@ async fn install_embedder_clears_previous_error() {
     assert!(state.is_embedder_ready());
 
     let state_arc = Arc::new(state);
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "ready");
-    assert!(resp.embedder_error.is_none());
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "ready");
+    assert!(resp.get("embedder_error").is_none());
 }
 
 /// Epic #3524 slice 6 (PR 1/5): `install_switchable_embedder` must make the
@@ -293,23 +293,29 @@ async fn index_status_reports_indexing_then_ready() {
 /// Why: external probes and the admin UI render these; the JSON contract
 /// must remain stable. `rss_mb` is sampled live so it is asserted only
 /// for presence, not an exact value.
-/// What: builds a bare `SearchAppState`, calls `health_handler`, and
+/// What: builds a bare `SearchAppState`, calls `health_report`, and
 /// asserts every new field deserialises with a plausible value.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
 async fn health_includes_resource_fields() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     // rss_mb is sampled from the live test process; tolerate 0 only in
     // sandboxes where /proc is restricted, but it must be a sane unit.
-    assert!(resp.rss_mb < 1024 * 1024, "rss_mb unit must be MB");
+    assert!(
+        resp["rss_mb"].as_u64().expect("rss_mb is a u64") < 1024 * 1024,
+        "rss_mb unit must be MB"
+    );
     // cpu_pct is a non-negative percentage (first sample may be 0.0).
-    assert!(resp.cpu_pct >= 0.0, "cpu_pct must be non-negative");
+    assert!(
+        resp["cpu_pct"].as_f64().expect("cpu_pct is a number") >= 0.0,
+        "cpu_pct must be non-negative"
+    );
     // disk_bytes / rss_limit_mb are u64 — presence is the contract here;
     // the disk ticker has not run yet so disk_bytes is 0.
-    assert_eq!(resp.disk_bytes, 0, "disk ticker has not ticked yet");
-    let _ = resp.rss_limit_mb;
+    assert_eq!(resp["disk_bytes"], 0, "disk ticker has not ticked yet");
+    let _ = resp["rss_limit_mb"];
 }
 
 // ---------------------------------------------------------------------------
@@ -344,16 +350,16 @@ async fn health_non_blocking_when_embedder_slot_write_locked() {
         "try_current_embedder must return None when write lock is held"
     );
 
-    // Verify health_handler also completes without deadlock while
+    // Verify health_report also completes without deadlock while
     // the write lock is held (embedder_info block will be absent / None).
-    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let resp = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        resp.status, "ok",
+        resp["status"], "ok",
         "health must return ok even when embedder slot is write-locked"
     );
     // embedder_info is None because try_current_embedder returned None.
     assert!(
-        resp.embedder_info.is_none(),
+        resp.get("embedder_info").is_none(),
         "embedder_info must be absent when slot is write-locked (non-blocking fallback)",
     );
 }
@@ -361,7 +367,7 @@ async fn health_non_blocking_when_embedder_slot_write_locked() {
 /// Issue #1006 — Option B: once an embedder is installed, `/health`
 /// surfaces the embedder_info block via the non-blocking `try_current_embedder()`.
 ///
-/// Why: `health_handler` must still provide `embedder_info` when the
+/// Why: `health_report` must still provide `embedder_info` when the
 /// embedder slot is available (the common steady-state path). This test
 /// guards against accidentally always returning `None`.
 /// What: installs a `MockEmbedder` (384-dim), calls `/health`, and asserts
@@ -377,10 +383,10 @@ async fn health_includes_embedder_info_when_ready() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
-    assert_eq!(resp.embedder, "ready");
+    let resp = health_report(state_arc).await;
+    assert_eq!(resp["embedder"], "ready");
     assert!(
-        resp.embedder_info.is_some(),
+        resp.get("embedder_info").is_some(),
         "embedder_info must be present when embedder is installed and slot is uncontended"
     );
 }
@@ -431,7 +437,7 @@ async fn health_prefers_real_provider_readback_over_prediction() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
+    let resp = health_report(state_arc).await;
     // `EmbedderInfo`'s fields are `pub(super)` to the `health` module, not
     // visible from this sibling test module — round-trip through JSON
     // (the wire format external callers actually observe) instead.
@@ -461,7 +467,7 @@ async fn health_falls_back_to_predicted_provider_when_no_readback() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let Json(resp) = health_handler(State(state_arc)).await;
+    let resp = health_report(state_arc).await;
     let value = serde_json::to_value(&resp).expect("HealthResponse must serialize");
     let provider = value["embedder_info"]["provider"]
         .as_str()

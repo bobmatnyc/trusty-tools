@@ -415,7 +415,7 @@ pub struct SearchAppState {
     /// causes monitors that alert on `rss_mb == 0` to false-alarm. Caching the
     /// last good sample and returning it on contention prevents false alarms.
     /// What: an `AtomicU64` written on every successful `SysMetrics::sample()`
-    /// call; read by `health_handler` as a fallback when `try_lock()` fails.
+    /// call; read by `health_report` as a fallback when `try_lock()` fails.
     /// `0` only on the very first health poll before any sample has ever landed.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_rss_mb: Arc<std::sync::atomic::AtomicU64>,
@@ -446,7 +446,7 @@ pub struct SearchAppState {
     ///
     /// Why (issue #1016): same rationale as `last_rss_mb` — avoids returning
     /// `cpu_pct == 0.0` when the metrics lock is transiently contended.
-    /// What: stores `f32::to_bits()` in an `AtomicU32`; `health_handler` reads
+    /// What: stores `f32::to_bits()` in an `AtomicU32`; `health_report` reads
     /// it via `f32::from_bits()` on contention.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
@@ -475,7 +475,7 @@ pub struct SearchAppState {
     /// `embedder_last_ok_secs_ago` and `embedder_recent_timeout_count`.
     ///
     /// What: an `Arc<EmbedderStallTracker>` written by `EmbedPool::embed()` and
-    /// read by `health_handler`. The Arc is cloned into the embed pool on
+    /// read by `health_report`. The Arc is cloned into the embed pool on
     /// construction via `install_embed_pool`.
     /// Test: `health_reports_stalled_embedder` in tests_health.rs.
     pub embedder_stall_tracker: Arc<crate::service::stall_tracker::EmbedderStallTracker>,
@@ -502,7 +502,7 @@ pub struct SearchAppState {
     /// What: written by `reconcile_stale_indexes` as it runs (in-progress) and
     /// when it completes. Protected by `Mutex` because `ReconcileSummary` has
     /// non-atomic fields. Defaults to a zeroed/incomplete summary before the first
-    /// reconcile run. Read by `health_handler` on every `/health` poll.
+    /// reconcile run. Read by `health_report` on every `/health` poll.
     /// Test: `health_includes_reconcile_summary` in tests_health.rs verifies the
     /// field appears in the JSON response after reconcile runs.
     pub reconcile_summary: Arc<std::sync::Mutex<ReconcileSummary>>,
@@ -572,7 +572,7 @@ pub struct SearchAppState {
     ///
     /// Why: `crate::service::reindex::deferred_embed_completion_epoch()` is a
     /// process-global counter bumped every time the size-ordered catch-up
-    /// queue fully drains. `health_handler` compares the current epoch
+    /// queue fully drains. `health_report` compares the current epoch
     /// against this per-instance value on every poll; a mismatch means at
     /// least one drain happened since the last poll, so it re-derives
     /// `warmboot_summary.warm_boot_degraded` instead of leaving it sticky
@@ -747,7 +747,7 @@ pub struct WarmBootSummary {
     /// by index id at `debug!` in the daemon log) across consecutive polls,
     /// which is the signal an operator needs to notice a persistent miss
     /// rather than a one-off scheduling blip.
-    /// What: computed live on every `GET /health` poll in `health_handler`;
+    /// What: computed live on every `GET /health` poll in `health_report`;
     /// not persisted. Does not change the underlying fail-open behavior.
     /// Test: `health_stays_ok_when_no_corpus_failed` in `tests_health_degraded`
     /// covers the steady-state `0` case.

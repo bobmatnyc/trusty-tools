@@ -275,9 +275,9 @@ fn last_indexed_none_when_no_candidates_exist() {
 #[serial_test::parallel]
 async fn health_omits_embedder_info_when_bm25_only() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let Json(resp) = health_handler(State(state)).await;
+    let resp = health_report(state).await;
     assert!(
-        resp.embedder_info.is_none(),
+        resp.get("embedder_info").is_none(),
         "BM25-only daemon must omit embedder_info"
     );
 }

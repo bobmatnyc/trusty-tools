@@ -25,9 +25,7 @@ use super::state::SearchAppState;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
 use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -632,14 +630,14 @@ async fn health_surfaces_component_disabled_counts() {
     registry.register(catching_up);
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = super::health::health_handler(State(state)).await;
-    assert_eq!(resp.indexes_kg_disabled, 1, "only health-kg-off counts");
+    let resp = super::health::health_report(state).await;
+    assert_eq!(resp["indexes_kg_disabled"], 1, "only health-kg-off counts");
     assert_eq!(
-        resp.indexes_vector_disabled, 1,
+        resp["indexes_vector_disabled"], 1,
         "only health-vector-off counts"
     );
     assert_eq!(
-        resp.indexes_component_catch_up_in_progress, 1,
+        resp["indexes_component_catch_up_in_progress"], 1,
         "only health-catching-up (enabled + InProgress) counts"
     );
 }
@@ -685,9 +683,9 @@ async fn health_surfaces_indexes_without_embed_pool() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(resp) = super::health::health_handler(State(state)).await;
+    let resp = super::health::health_report(state).await;
     assert_eq!(
-        resp.indexes_embed_pool_missing, 1,
+        resp["indexes_embed_pool_missing"], 1,
         "only health-pool-missing (no set_embed_pool call) counts"
     );
 }

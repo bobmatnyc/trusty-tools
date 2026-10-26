@@ -623,23 +623,23 @@ async fn health_counts_a_real_corpus_and_excludes_a_corpus_failed_index() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
-    let axum::Json(resp) = super::health::health_handler(State(state)).await;
+    let resp = health_report(state).await;
 
-    assert_eq!(resp.indexes, 3, "all three are registered");
+    assert_eq!(resp["indexes"], 3, "all three are registered");
     assert_eq!(
-        resp.indexes_populated, 1,
+        resp["indexes_populated"], 1,
         "only the index with durable chunks counts as populated"
     );
     assert_eq!(
-        resp.indexes_empty, 1,
+        resp["indexes_empty"], 1,
         "the healthy-but-empty index counts as empty; the corpus-failed one does not"
     );
     assert_eq!(
-        resp.total_chunks, POPULATED as u64,
+        resp["total_chunks"], POPULATED as u64,
         "the fleet total comes from the durable corpus, not the in-memory map"
     );
     assert_eq!(
-        resp.indexes_populated + resp.indexes_empty,
+        resp["indexes_populated"].as_u64().unwrap() + resp["indexes_empty"].as_u64().unwrap(),
         2,
         "an index whose count is UNKNOWN must appear in neither counter — the \
          shortfall against `indexes` is the honest signal"
@@ -669,22 +669,22 @@ async fn health_reports_populated_and_empty_index_counts() {
         ));
     }
     let state = Arc::new(SearchAppState::new(registry));
-    let axum::Json(resp) = super::health::health_handler(State(state)).await;
+    let resp = health_report(state).await;
 
     assert_eq!(
-        resp.indexes, 2,
+        resp["indexes"], 2,
         "registration count is unchanged — it still counts slots"
     );
     assert_eq!(
-        resp.indexes_populated, 0,
+        resp["indexes_populated"], 0,
         "no chunks were ever committed to either index"
     );
     assert_eq!(
-        resp.indexes_empty, 2,
+        resp["indexes_empty"], 2,
         "both are registered but hold nothing"
     );
     assert_eq!(
-        resp.total_chunks, 0,
+        resp["total_chunks"], 0,
         "the fleet-wide corpus size makes a near-zero deployment visible at a glance"
     );
 }

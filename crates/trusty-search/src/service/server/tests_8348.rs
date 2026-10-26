@@ -125,9 +125,9 @@ async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailabl
         "the degraded response names the embedder failure: {body}"
     );
 
-    let axum::Json(health) = super::health::health_handler(State(Arc::clone(&state))).await;
+    let health = health_report(Arc::clone(&state)).await;
     assert_eq!(
-        health.embedder, "stalled",
+        health["embedder"], "stalled",
         "a failing embedder must not read as ready on /health"
     );
 }
