@@ -11,11 +11,12 @@ use super::*;
 /// An obviously fake Slack bot token.
 const FAKE_TOKEN: &str = "xoxb-10041-not-a-real-token";
 
-/// A store whose writes fail, or whose read-back after a write lies.
+/// A store whose reads or writes fail, or whose read-back after a write lies.
 struct BrokenStore {
     inner: MemoryKeyStore,
     fail_writes: bool,
     wrong_read_back: bool,
+    fail_reads: bool,
 }
 
 impl KeyStore for BrokenStore {
@@ -23,6 +24,12 @@ impl KeyStore for BrokenStore {
         self.try_get(provider).ok().flatten()
     }
     fn try_get(&self, provider: &str) -> Result<Option<String>, KeyStoreError> {
+        if self.fail_reads {
+            return Err(KeyStoreError::Io {
+                path: PathBuf::from("store.toml"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            });
+        }
         // Lies only once something was written, so the pre-write read sees
         // an empty slot.
         if self.wrong_read_back && self.inner.get(provider).is_some() {
@@ -84,6 +91,7 @@ fn a_store_write_failure_keeps_the_value_out_of_env_and_errors() {
         inner: MemoryKeyStore::new(),
         fail_writes: true,
         wrong_read_back: false,
+        fail_reads: false,
     };
     let mut env = env_of(&[("SLACK_BOT_TOKEN", FAKE_TOKEN)]);
     let before = env.clone();
@@ -97,12 +105,35 @@ fn a_store_write_failure_keeps_the_value_out_of_env_and_errors() {
     assert_eq!(env, before);
 }
 
+/// #10041: a store that cannot be read refuses the add; it is never treated
+/// as empty, so a stored credential cannot be overwritten unseen.
+#[test]
+fn a_store_read_failure_refuses_and_writes_nothing() {
+    let store = BrokenStore {
+        inner: MemoryKeyStore::new(),
+        fail_writes: false,
+        wrong_read_back: false,
+        fail_reads: true,
+    };
+    let mut env = env_of(&[("SLACK_BOT_TOKEN", FAKE_TOKEN)]);
+    let before = env.clone();
+
+    let err = store_credential_env(&mut env, &store, SLACK).expect_err("unreadable store refuses");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("could not read"), "{msg}");
+    assert!(!msg.contains(FAKE_TOKEN), "value leaked: {msg}");
+    assert!(store.inner.get("slack").is_none(), "nothing may be stored");
+    assert_eq!(env, before);
+}
+
 #[test]
 fn a_read_back_mismatch_is_an_error() {
     let store = BrokenStore {
         inner: MemoryKeyStore::new(),
         fail_writes: false,
         wrong_read_back: true,
+        fail_reads: false,
     };
     let mut env = env_of(&[("SLACK_BOT_TOKEN", FAKE_TOKEN)]);
 
@@ -225,6 +256,7 @@ fn an_equal_stored_value_is_a_no_op_success() {
         inner: MemoryKeyStore::new(),
         fail_writes: true,
         wrong_read_back: false,
+        fail_reads: false,
     };
     store.inner.set("slack", FAKE_TOKEN).expect("seed");
     let mut env = env_of(&[("SLACK_BOT_TOKEN", FAKE_TOKEN)]);
