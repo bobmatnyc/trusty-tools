@@ -112,6 +112,35 @@ rc=0
 "$COMPARE" "$FIX/baseline.json" >/dev/null 2>&1 || rc=$?
 expect "one argument exit=12" "$rc" 12
 
+# Fail closed (#10210 review): an ungradable or missing row raises the verdict,
+# and a figure with no meaningful percentage is an error.
+# baseline<TAB>current<TAB>exit<TAB>report check ("-": stdout must be empty)
+CLOSED="baseline${TAB}err-empty-results${TAB}12${TAB}-
+err-empty-results${TAB}baseline${TAB}12${TAB}-
+baseline${TAB}missing-renamed${TAB}10${TAB}.verdict == \"warn\" and .missing == [\"$OFF\"]
+baseline${TAB}unparsed-null-p95${TAB}10${TAB}.verdict == \"warn\" and .unparsed == [\"$OFF\"]
+baseline${TAB}unparsed-string-p95${TAB}10${TAB}.verdict == \"warn\" and .unparsed == [\"$OFF\"]
+err-zero-baseline${TAB}p95-plus24${TAB}12${TAB}-
+err-negative-baseline${TAB}baseline${TAB}12${TAB}-
+baseline${TAB}err-nan-p95${TAB}12${TAB}-
+err-nan-p95${TAB}baseline${TAB}12${TAB}-"
+while IFS="$TAB" read -r base cur want_exit check; do
+	name="$base vs $cur"
+	rc=0
+	"$COMPARE" "$FIX/$base.json" "$FIX/$cur.json" >"$work/closed.out" 2>/dev/null || rc=$?
+	if [ "$rc" != "$want_exit" ]; then
+		bad "$name" "exit $rc, want $want_exit"
+	elif [ "$check" = "-" ] && [ -s "$work/closed.out" ]; then
+		bad "$name" "stdout not empty on an error"
+	elif [ "$check" != "-" ] && ! jq -e "$check" "$work/closed.out" >/dev/null 2>&1; then
+		bad "$name" "report fails: $check"
+	else
+		pass "$name exit=$rc"
+	fi
+done <<EOF
+$CLOSED
+EOF
+
 # Status writer.
 rm -f "$status_file"
 "$STATUS" --tool trusty-search --verdict ok --status-file "$status_file" 2>/dev/null

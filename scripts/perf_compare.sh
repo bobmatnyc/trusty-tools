@@ -9,22 +9,28 @@
 #   2026-10-23 on #10210 (Q5): warn at +25% over baseline, alert at +50%.
 # What: validates both envelopes (parseable JSON, `schema` 1, a `results`
 #   array, same `tool`, same `label` — EVO is compared to EVO only), then pairs
-#   result rows by `dimension` + `metric` and compares:
-#     - `p95`, where both rows carry a numeric p95 (latency; lower is better);
-#     - `value`, for `indexing` rows with no p95 (`seeded_in`, embed times).
+#   result rows by `dimension` + `metric` and compares the baseline row's
+#   graded field:
+#     - `p95`, where the baseline row's p95 is not null (latency; lower is
+#       better);
+#     - `value`, for `indexing` rows with a null p95 (`seeded_in`, embed times).
 #   Effectiveness rows are not graded here: the recall eval gate is a test
 #   failure. delta_pct = (current - baseline) / baseline * 100, rounded to
 #   0.01, and the rounded figure decides. Both levels are INCLUSIVE:
-#   delta >= 25 is warn, delta >= 50 is alert. A baseline row with no current
-#   row is listed under `missing` and does not change the verdict. A zero
-#   baseline has no percentage and is graded `n/a`.
+#   delta >= 25 is warn, delta >= 50 is alert.
+#   Fails closed (#10210 review): a baseline row with no current row is listed
+#   under `missing`, and a current row whose field is null or not a number is
+#   listed under `unparsed`; either raises the verdict to at least warn. A
+#   baseline field that is not a positive finite number, a NaN, infinite or
+#   negative current field, or zero graded rows is an error.
 #   Prints one JSON report on stdout and one line per graded row plus a
 #   verdict line on stderr.
 #
 # Usage: scripts/perf_compare.sh [--warn-pct N] [--alert-pct N] BASELINE CURRENT
 #
-# Exit: 0 ok, 10 warn (breach), 11 alert (high), 12 error (bad usage, missing
-#   or malformed file, wrong schema, tool or label mismatch, jq missing).
+# Exit: 0 ok, 10 warn (breach, missing or unparsed row), 11 alert (high),
+#   12 error (bad usage, missing or malformed file, wrong schema, tool or label
+#   mismatch, zero/negative/NaN/infinite figure, no graded row, jq missing).
 #
 # Test: scripts/perf_compare_selftest.sh
 #
@@ -104,46 +110,59 @@ report="$(
 		--argjson warn "$warn_pct" --argjson alert "$alert_pct" '
 	def key: "\(.dimension)|\(.metric)";
 	def num: type == "number";
+	def finite: num and (isnan | not) and (isinfinite | not);
 	def field($row):
-		if ($row.p95 | num) then "p95"
-		elif $row.dimension == "indexing" and ($row.value | num) then "value"
+		if $row.p95 != null then "p95"
+		elif $row.dimension == "indexing" and $row.value != null then "value"
 		else null end;
 	def grade($d):
-		if $d == null then "n/a"
-		elif $d >= $alert then "alert"
+		if $d >= $alert then "alert"
 		elif $d >= $warn then "warn"
 		else "ok" end;
 	($b[0]) as $base | ($c[0]) as $cur
 	| ($cur.results | map({key: key, value: .}) | from_entries) as $cur_by_key
+	# #10210 review: every baseline figure must be a positive finite number.
 	| [ $base.results[]
 	    | . as $br
 	    | field($br) as $f
 	    | select($f != null)
+	    | $br[$f] as $bv
+	    | if ($bv | finite) and $bv > 0 then .
+	      else error("baseline \($br.metric) \($f) is \($bv | tojson), not a positive finite number")
+	      end
 	    | {row: $br, f: $f, cr: $cur_by_key[($br | key)]} ] as $pairs
+	| if ($pairs | length) == 0 then error("no graded row in the baseline") else . end
 	| [ $pairs[] | select(.cr == null) | .row.metric ] as $missing
+	| [ $pairs[] | select(.cr != null and (.cr[.f] | num | not)) | .row.metric ] as $unparsed
 	| [ $pairs[]
 	    | select(.cr != null and (.cr[.f] | num))
 	    | .row[.f] as $bv | .cr[.f] as $cv
-	    | (if $bv == 0 then null
-	       else ((($cv - $bv) / $bv * 100) * 100 | round) / 100 end) as $d
+	    | if ($cv | finite) and $cv >= 0 then .
+	      else error("current \(.row.metric) \(.f) is \($cv | tojson), not a finite non-negative number")
+	      end
+	    | (((($cv - $bv) / $bv * 100) * 100 | round) / 100) as $d
 	    | {dimension: .row.dimension, metric: .row.metric, field: .f,
 	       unit: .row.unit, baseline: $bv, current: $cv, delta_pct: $d,
 	       severity: grade($d)} ] as $rows
+	| if ($rows | length) == 0 then error("no baseline row could be graded against the current envelope") else . end
 	| ([ $rows[].severity ]) as $sev
 	| {schema: 1, kind: "perf_compare", tool: $base.tool, label: $base.label,
 	   baseline: ($base | {date, commit, version}),
 	   current: ($cur | {date, commit, version}),
 	   warn_pct: $warn, alert_pct: $alert,
+	   # A missing or unparsed row raises the verdict to warn; alert outranks it.
 	   verdict: (if ($sev | index("alert")) then "alert"
-	             elif ($sev | index("warn")) then "warn"
+	             elif ($sev | index("warn")) or ($missing | length) > 0
+	                  or ($unparsed | length) > 0 then "warn"
 	             else "ok" end),
-	   rows: $rows, missing: $missing}'
+	   rows: $rows, missing: $missing, unparsed: $unparsed}'
 )" || die "comparison failed"
 
 printf '%s\n' "$report"
 printf '%s\n' "$report" | jq -r '
 	(.rows[] | "\(.severity)\t\(.metric) \(.field)\t\(.baseline) -> \(.current)\t\(.delta_pct)%"),
 	(.missing[] | "missing\t\(.)"),
+	(.unparsed[] | "unparsed\t\(.)"),
 	"verdict\t\(.verdict)"' | sed 's/^/perf_compare: /' >&2
 
 case "$(printf '%s\n' "$report" | jq -r .verdict)" in
