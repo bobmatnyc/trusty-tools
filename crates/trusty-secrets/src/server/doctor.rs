@@ -210,7 +210,7 @@ impl StoragePosture {
 /// What a headless run of this server can use (#7519 P4, DOC-74 §13 Q4).
 ///
 /// Why: A4 — headless 1Password works only with a service-account token,
-/// and owner ruling Q1 lets doctor say only whether one was present.
+/// and doctor says only whether one was present.
 /// What: presence at server start, yes or no; never the value, its length
 /// or a prefix. Keeper's device approval is not detected (ruling 6).
 /// Test: `doctor_reports_token_presence_and_never_the_token`.

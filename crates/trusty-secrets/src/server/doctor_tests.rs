@@ -424,7 +424,7 @@ async fn doctor_reports_a_refused_tracked_setting_on_the_selected_row() {
     server.stop().await;
 }
 
-/// Why: #7519 P4 A10, owner ruling Q1 — doctor says whether a 1Password
+/// Why: #7519 P4 A10 — doctor says whether a 1Password
 /// service-account token was present at start, yes or no, and the token
 /// itself reaches no doctor reply, `Debug` output, audit record or error
 /// text. With `cli-backends`, the 1Password backend holds the token and its
@@ -514,7 +514,7 @@ struct OldDoctorResponse {
     posture: Option<StoragePosture>,
 }
 
-/// Why: #7519 P4, owner ruling Q5 — the reason fields are additive: an
+/// Why: #7519 P4 — the reason fields are additive: an
 /// older client decodes a new server's reply, and a new client decodes an
 /// older server's reply with every new field defaulted.
 /// Test: itself.

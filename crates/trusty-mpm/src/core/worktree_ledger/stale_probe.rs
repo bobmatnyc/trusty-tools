@@ -6,7 +6,7 @@
 //! cannot answer — never guess.
 //! What: [`GitGhStaleProbe`]. `pr_for` reads the reclaim sweep's per-repository
 //! `gh pr list` index ([`PrIndex`]), built once per repository per pass.
-//! `branch_state` applies owner ruling Q4 — the branch's recorded upstream is
+//! `branch_state` calls a branch gone when its recorded upstream is
 //! gone from `origin` after a `git fetch --prune` (once per repository per
 //! pass) AND no commit on the local branch is off every `origin` ref. Every
 //! git call is bounded and goes through the crate's hardened spawn. Read-only

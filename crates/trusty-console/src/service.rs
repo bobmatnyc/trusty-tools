@@ -342,7 +342,7 @@ mod tests {
         // 7070 and 7878 are not reserved by anything and listing them would
         // forbid a future daemon a free port.
         let known_siblings: &[(&str, u16, &str)] = &[
-            // #6288 S3a (owner ruling Q5): the daemon binds no TCP port and
+            // #6288 S3a: the daemon binds no TCP port and
             // `DEFAULT_DAEMON_ADDR` is gone. The row stays as collision
             // history (#2566): pre-S3a launchd plists still pass
             // `--addr 127.0.0.1:7880`, so the console must not take 7880.

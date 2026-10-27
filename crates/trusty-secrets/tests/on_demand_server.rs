@@ -267,7 +267,7 @@ async fn inherited_git_redirect_env_never_reaches_the_servers_git_calls() {
     );
 }
 
-/// Why: #7519 P4 A10, owner ruling Q1 — the real binary takes
+/// Why: #7519 P4 A10 — the real binary takes
 /// `OP_SERVICE_ACCOUNT_TOKEN` out of its environment at start, and doctor
 /// reports only that it was present (on a `cli-backends` build, the one
 /// that reads it). The token reaches neither the reply nor the server's

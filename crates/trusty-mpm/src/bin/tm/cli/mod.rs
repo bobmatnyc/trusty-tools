@@ -43,7 +43,7 @@ pub(crate) use crate::cli_manager::ManagerAction;
 pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 
 // #6288 S3a: `DEFAULT_ADDR`, the `daemon --addr` bind default, went with the
-// bind; the flag is accepted and ignored (owner ruling Q1).
+// bind; the flag is accepted and ignored (#6288).
 
 /// trusty-mpm command-line interface.
 ///
