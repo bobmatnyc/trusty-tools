@@ -177,6 +177,21 @@ async fn worktree_7619_a_stream_without_its_result_is_an_error() {
     assert!(err.to_string().contains("late"), "{err}");
 }
 
+/// 🔴 #7619 (d2), Fail-Open Check: a plain success to the stream request may
+/// mean the daemon ran it, so it is an error — never `Unsupported`, which
+/// would send the unary request and run the pass a second time.
+#[tokio::test]
+async fn worktree_7619_a_plain_success_is_never_a_fallback() {
+    let ran = RpcRouter::new().typed(PRUNE_STREAM_METHOD, |_: Value| async move {
+        Ok::<_, RpcError>(json!({"paths": ["/r/x"]}))
+    });
+    let (_dir, socket, _stop) = serve(ran);
+    let err = stream(&socket, false)
+        .await
+        .expect_err("a plain success is not a fallback");
+    assert!(err.to_string().contains("stream failed"), "{err}");
+}
+
 /// 🔴 #7619: an interrupt drops the socket — the daemon's channel closes,
 /// which is its cancel — and the error says a removal in flight finishes.
 #[tokio::test]

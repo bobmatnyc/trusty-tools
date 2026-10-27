@@ -12,6 +12,7 @@
 //! Test: `worktree_7619_the_plain_prune_prints_a_line_per_worktree`,
 //! `worktree_7619_a_daemon_without_the_stream_falls_back_to_unary`,
 //! `worktree_7619_a_stream_without_its_result_is_an_error`,
+//! `worktree_7619_a_plain_success_is_never_a_fallback`,
 //! `worktree_7619_an_interrupt_drops_the_stream_and_says_so`,
 //! `worktree_7619_detach_returns_on_the_acknowledgement`.
 
@@ -136,18 +137,19 @@ pub(crate) async fn stream_prune(
 /// Why a stream refusal means "this daemon does not stream the method".
 ///
 /// A daemon serving other streams answers [`CODE_STREAM_UNSUPPORTED`]; one
-/// serving none answers a plain response, usually [`CODE_METHOD_NOT_FOUND`].
+/// serving none answers a plain [`CODE_METHOD_NOT_FOUND`] response. #7619
+/// Fail-Open Check: any other plain answer, a success above all, may mean the
+/// daemon ran the request, so it is an error and never a reason to send the
+/// unary request as well.
 fn unsupported(e: &UdsRpcError) -> Option<String> {
+    let refused = |code: i64| code == CODE_STREAM_UNSUPPORTED || code == CODE_METHOD_NOT_FOUND;
     match e {
-        UdsRpcError::Stream { error, .. }
-            if error.code == CODE_STREAM_UNSUPPORTED || error.code == CODE_METHOD_NOT_FOUND =>
-        {
-            Some(error.message.clone())
-        }
-        UdsRpcError::NotAStream { response, .. } => Some(response.error.as_ref().map_or_else(
-            || "a non-streamed answer".to_string(),
-            |e| e.message.clone(),
-        )),
+        UdsRpcError::Stream { error, .. } if refused(error.code) => Some(error.message.clone()),
+        UdsRpcError::NotAStream { response, .. } => response
+            .error
+            .as_ref()
+            .filter(|error| error.code == CODE_METHOD_NOT_FOUND)
+            .map(|error| error.message.clone()),
         _ => None,
     }
 }
