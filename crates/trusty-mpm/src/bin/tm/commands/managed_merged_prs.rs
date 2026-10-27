@@ -214,6 +214,30 @@ fn prune_transport_error(e: trusty_mpm::client::DaemonCallError) -> anyhow::Erro
     )
 }
 
+/// [`session_prune_worktrees_with_detach`] without `--detach`: the shape the
+/// pre-#7619 tests drive.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session_prune_worktrees(
+    daemon: &trusty_mpm::client::DaemonClient,
+    dry_run: bool,
+    discard_dirty: bool,
+    merged_prs: bool,
+    invoking_session: Option<String>,
+    project_root: Option<String>,
+) -> anyhow::Result<()> {
+    session_prune_worktrees_with_detach(
+        daemon,
+        dry_run,
+        discard_dirty,
+        merged_prs,
+        invoking_session,
+        project_root,
+        false,
+    )
+    .await
+}
+
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
 ///
 /// Why: sessions decommissioned before Fix 1a (#1840), or where
@@ -241,6 +265,13 @@ fn prune_transport_error(e: trusty_mpm::client::DaemonCallError) -> anyhow::Erro
 /// discarding unsaved work as `only_discard_paths`. Each reply must echo the
 /// scope — a daemon that predates #8782 ignores it and runs daemon-global —
 /// and a `--force` run also needs every allowlist key echoed.
+///
+/// #7619: both requests go through
+/// [`send_prune`](super::prune_stream_client::send_prune) — the stream method
+/// first, so the operator sees each worktree and Ctrl-C stops the pass, and
+/// the unary request on a daemon without it. The `--force` banner states what
+/// Ctrl-C does on the transport in use. `detach` applies to the removal
+/// request only and returns once the daemon acknowledges it.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
@@ -249,39 +280,8 @@ fn prune_transport_error(e: trusty_mpm::client::DaemonCallError) -> anyhow::Erro
 /// `force_sends_only_the_previewed_paths`,
 /// `force_sends_nothing_after_a_reply_without_the_scope_echo`,
 /// `force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo`,
-/// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn session_prune_worktrees(
-    daemon: &trusty_mpm::client::DaemonClient,
-    dry_run: bool,
-    discard_dirty: bool,
-    merged_prs: bool,
-    invoking_session: Option<String>,
-    project_root: Option<String>,
-) -> anyhow::Result<()> {
-    session_prune_worktrees_with_detach(
-        daemon,
-        dry_run,
-        discard_dirty,
-        merged_prs,
-        invoking_session,
-        project_root,
-        false,
-    )
-    .await
-}
-
-/// [`session_prune_worktrees`], with `--detach` (#7619).
-///
-/// Why: #7619 streams the pass so the operator sees each worktree and Ctrl-C
-/// stops it; `--detach` keeps the old run-to-the-end behaviour on purpose.
-/// What: both requests go through
-/// [`send_prune`](super::prune_stream_client::send_prune): the stream method
-/// first, the unary request on a daemon without it. The `--force` banner
-/// states what Ctrl-C does on the transport in use. `detach` applies to the
-/// removal request only and returns once the daemon acknowledges it.
-/// Test: `worktree_7619_detach_without_the_stream_sends_nothing`, plus the
-/// tests of [`session_prune_worktrees`].
+/// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`; the
+/// #7619 transport by `worktree_7619_detach_without_the_stream_sends_nothing`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees_with_detach(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -472,7 +472,7 @@ fn heartbeat_line(elapsed: std::time::Duration) -> String {
 /// to every project would turn a mistyped directory into a daemon-global sweep.
 /// What: `--all-projects` sends no project root; otherwise the checkout owning
 /// `cwd`, and outside a repository an error before any request is sent. Then
-/// [`session_prune_worktrees`], with `--force` as "not a dry run".
+/// [`session_prune_worktrees_with_detach`], with `--force` as "not a dry run".
 /// Test: `prune_worktrees_outside_a_repository_posts_nothing`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prune_worktrees_from(
@@ -505,7 +505,7 @@ pub(crate) async fn prune_worktrees_from(
 
 /// Print one prune-worktrees reply: removed paths, dirty skips, merged-PR pass.
 ///
-/// Why: split from [`session_prune_worktrees`] by #8782, which prints a preview
+/// Why: split from [`session_prune_worktrees_with_detach`] by #8782, which prints a preview
 /// reply and a removal reply through the same renderer.
 /// What: under `dry_run` the orphan paths are not repeated — the preview has
 /// listed them — and only the count is printed. A removal reply prints each
