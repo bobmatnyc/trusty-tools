@@ -21,7 +21,11 @@
 #   ends the whole run as `failed`. A timed-out run also stops what it left on
 #   EVO (scripts/perf_weekly_evo_reap.sh: its job scope and any queued waiter)
 #   and names in the reason what it could not stop. A host probe that fails on
-#   a reachable EVO is `failed`, on an unreachable one `skipped`. Otherwise it
+#   a reachable EVO is `failed`, on an unreachable one `skipped`. A TERM or
+#   INT stops the running suite's local processes, stops its EVO job the same
+#   way as a timeout, and ends the run as `failed`. It runs from the repo
+#   root, so `evo` keys this worktree wherever it is started; relative path
+#   arguments mean the caller's directory. Otherwise it
 #   parses each run's log, takes
 #   the median over runs, writes a schema-1 envelope, runs perf_compare.sh
 #   against --baseline and records the verdict with perf_status_write.sh.
@@ -67,9 +71,11 @@ usage() {
 	exit 2
 }
 
+REAP_SLACK_S=120 # #10210 critic: added to the run's age when reaping EVO
+
 baseline="$REPO_ROOT/docs/trusty-memory/perf/2026-10-17-0.36.0-evo.json"
 out_dir=""
-status_args=()
+status_file=""
 runs_eval=1 runs_profile=5 runs_concurrent=3 runs_slice=3
 suite_timeout=2400 settle_s=300 settle_step=20 toolchain="1.99.0"
 while [ "$#" -gt 0 ]; do
@@ -77,7 +83,7 @@ while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--baseline) baseline="$2" ;;
 	--out-dir) out_dir="$2" ;;
-	--status-file) status_args=(--status-file "$2") ;;
+	--status-file) status_file="$2" ;;
 	--runs-eval) runs_eval="$2" ;;
 	--runs-profile) runs_profile="$2" ;;
 	--runs-concurrent) runs_concurrent="$2" ;;
@@ -98,6 +104,14 @@ done
 for t in jq awk git; do command -v "$t" >/dev/null 2>&1 || usage "$t not found"; done
 TIMEOUT="$(command -v timeout || command -v gtimeout || true)"
 [ -n "$TIMEOUT" ] || usage "timeout (GNU coreutils) not found"
+# #10210 critic: `evo` keys the cwd's worktree, so run from REPO_ROOT; a
+# relative path argument still names a path under the caller's cwd.
+abs_path() { case "$1" in '' | /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
+baseline="$(abs_path "$baseline")"
+out_dir="$(abs_path "$out_dir")"
+status_args=()
+[ -z "$status_file" ] || status_args=(--status-file "$(abs_path "$status_file")")
+cd "$REPO_ROOT" || usage "cannot cd to $REPO_ROOT"
 [ -f "$baseline" ] || usage "baseline not found: $baseline"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -117,6 +131,7 @@ log() { printf 'perf_weekly_memory: %s\n' "$*" | tee -a "$out_dir/runner.log" >&
 
 # Record a run that produced no comparison, then exit.
 finish() { # $1 = failed|skipped, $2 = reason
+	trap '' TERM INT # a late signal must not cut the status write short
 	local rc=20
 	[ "$1" = skipped ] && rc=30
 	log "$1: $2"
@@ -125,6 +140,27 @@ finish() { # $1 = failed|skipped, $2 = reason
 		log "status write failed"
 	exit "$rc"
 }
+
+# #10210 critic: a TERM/INT must not leave the suite's processes running or
+# last week's status in place. The suite runs as a background job, so `wait`
+# returns at once on a signal; timeout(1) passes the TERM to its process
+# group and its -k 30 bounds the wait here.
+block="" in_flight="" t0=0
+# shellcheck disable=SC2329 # invoked by the traps below
+on_signal() { # $1 = TERM|INT
+	trap '' TERM INT
+	local why="interrupted by SIG$1${block:+ during $block}" jobs_left
+	jobs_left="$(jobs -p)"
+	if [ -n "$jobs_left" ]; then
+		# shellcheck disable=SC2086 # one pid per word
+		kill -TERM $jobs_left 2>/dev/null || true
+		wait || true
+	fi
+	[ -z "$in_flight" ] || reap_and_fail "$why" $((SECONDS - t0))
+	finish failed "$why"
+}
+trap 'on_signal TERM' TERM
+trap 'on_signal INT' INT
 
 read_load() {
 	if [ -n "${PERF_LOAD_CMD:-}" ]; then
@@ -161,7 +197,7 @@ commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 # #10210 critic: a timeout kills only the Mac side; stop this run's EVO job.
 # Prints one line per action; non-zero when something may be left.
 reap_evo() { # $1 = seconds since the run started; rest = cargo argv
-	local age=$(($1 + 30))
+	local age=$(($1 + REAP_SLACK_S))
 	shift
 	if [ -n "${PERF_REAP_CMD:-}" ]; then
 		$PERF_REAP_CMD "$evo_key" "$age" "$commit" -- "$@"
@@ -172,6 +208,17 @@ reap_evo() { # $1 = seconds since the run started; rest = cargo argv
 		"$TIMEOUT" -k 10 120 "${EVO_SSH[@]}" "bash -s -- $(printf '%q ' "$evo_key" "$age" "$commit" -- "$@")" \
 			<"$SCRIPT_DIR/perf_weekly_evo_reap.sh"
 	fi
+}
+
+# Stop the suite's EVO job, then end the run as failed. The reason gets the
+# reap's lines and, when something may be left, the command to check by hand.
+reap_and_fail() { # $1 = reason, $2 = seconds since the run started; uses args
+	trap '' TERM INT # the cleanup runs to its end; the run is failed already
+	local reap_rc=0 reap_out
+	reap_out="$(reap_evo "$2" "+$toolchain" "${args[@]}" 2>&1)" || reap_rc=$?
+	reap_out="$(printf '%s\n' "$reap_out" | awk 'NF {printf "%s%s", sep, $0; sep = "; "}')"
+	[ "$reap_rc" -eq 0 ] || reap_out="${reap_out:+$reap_out; }EVO cleanup exited $reap_rc; check by hand: ssh evo-linux \"systemctl --user list-units 'evo-job-*'; pgrep -af 'evo-run --key $evo_key'\""
+	finish failed "$1; EVO cleanup: ${reap_out:-no output}"
 }
 
 # The command that runs one gate, as an array: the stub or evo-gate-log + evo.
@@ -340,18 +387,16 @@ EOF
 		rc=0
 		run_cmd "perf-$suite"
 		t0=$SECONDS
-		"$TIMEOUT" -k 30 "$suite_timeout" "${cmd[@]}" "${args[@]}" >"$run_log" 2>&1 </dev/null || rc=$?
+		in_flight=1
+		"$TIMEOUT" -k 30 "$suite_timeout" "${cmd[@]}" "${args[@]}" >"$run_log" 2>&1 </dev/null &
+		wait "$!" || rc=$?
+		in_flight=""
 		took=$((SECONDS - t0))
 		after="$(read_load 2>/dev/null || echo unreachable)"
 		printf '%s\tafter\t%s\t%s\n' "$block" "$(date -u +%H:%M:%SZ)" "$after" >>"$loads"
 		# 137 after the deadline is the -k SIGKILL; earlier it is EVO's own rc.
 		if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ "$took" -ge "$suite_timeout" ]; }; then
-			why="$block timed out after ${suite_timeout}s (log $run_log)"
-			reap_rc=0
-			reap_out="$(reap_evo "$took" "+$toolchain" "${args[@]}" 2>&1)" || reap_rc=$?
-			reap_out="$(printf '%s\n' "$reap_out" | awk 'NF {printf "%s%s", sep, $0; sep = "; "}')"
-			[ "$reap_rc" -eq 0 ] || reap_out="${reap_out:+$reap_out; }EVO cleanup exited $reap_rc; check by hand: ssh evo-linux \"systemctl --user list-units 'evo-job-*'; pgrep -af 'evo-run --key $evo_key'\""
-			finish failed "$why; EVO cleanup: ${reap_out:-no output}"
+			reap_and_fail "$block timed out after ${suite_timeout}s (log $run_log)" "$took"
 		fi
 		[ "$rc" -eq 0 ] || finish failed "$block exited $rc (log $run_log)"
 		parsed="$(parse_run "$suite" "$run_log")" ||
@@ -361,6 +406,7 @@ EOF
 		k=$((k + 1))
 	done
 done
+block=""
 
 # Assemble the envelope: medians over runs. A suite with fewer parsed runs
 # than it ran is a failure, never a shorter median.

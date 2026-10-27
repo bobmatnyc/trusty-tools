@@ -108,9 +108,12 @@ Defaults: eval x1, profile x5, `concurrent_perf` x3, slice measure x3; 2400 s pe
 
 It fails closed:
 
-- Idle gate. Before each run it reads the EVO 1-minute load over ssh. A load of 2 or more that does not fall below 2 within `--settle-s` (default 300 s), or no reading, ends the whole run as `skipped`. No later suite runs and nothing is compared. The load after each run is recorded in `load.after`, not gated, because the run's own cargo job raises it.
+- Idle gate. Before each run it reads the EVO 1-minute load over ssh. A load of 2 or more that does not fall below 2 within `--settle-s` (default 300 s), or no reading, ends the whole run as `skipped`. No later suite runs and nothing is compared. The load after each run is recorded in `load.after`, not gated, because the run's own cargo job raises it. A load reading that fails after a run is recorded there as `unreachable` and does not end the run.
 - A run that exits non-zero, times out, or prints no parseable figure ends the whole run as `failed`. A suite with fewer parsed runs than it ran is a failure, never a shorter median. A `concurrent_perf` block whose fields are missing or repeated (interleaved output) is a missing figure.
 - A `perf_compare.sh` error is `failed`.
+- A TERM or INT ends the run as `failed`. The runner stops the running suite's local processes, stops its EVO job the same way as a timeout, and records the interruption in the status reason, so the previous verdict never stays in place. A timed-out or interrupted run's EVO reap matches jobs no older than the run plus 120 s.
+
+The runner changes to the repository root before it runs anything, so `evo` keys this worktree wherever the runner is started. Relative `--baseline`, `--out-dir` and `--status-file` paths still mean the caller's directory.
 
 Exit codes: 0 ok, 10 warn, 11 alert (the compare verdict), 20 failed, 30 skipped, 2 bad usage. Every exit but 2 writes the `trusty-memory` entry of `.trusty-mpm/perf/status.json`.
 
