@@ -245,8 +245,8 @@ pub async fn serve_with_shutdown(
     // Each spawned loop receives a child token; the parent is cancelled after
     // the socket drains its in-flight requests (#6288 S3a).
     let cancel = tokio_util::sync::CancellationToken::new();
-    // #6849: hook records reach the trusty-events bus; never blocks a hook.
-    action_events::start(&state);
+    // #6849, #9167 AC5: hook records and delivered injects reach the bus.
+    action_events::inject::start_with_injects(&state);
 
     // Spawn the multi-session file watcher as a background task.
     // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.
