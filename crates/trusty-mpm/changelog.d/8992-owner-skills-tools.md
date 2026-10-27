@@ -1,5 +1,0 @@
-Added
-- The owner launch config (`<repos_root>/<owner>/.trusty-mpm-owner.toml`) gains `[skills] off` and `[tools] deny` (#8992). A PM launch under that owner gets each skill as `"off"` in `skillOverrides` and each tool in `permissions.deny`, through the same per-session `--settings` file as the `[mcp]` table. An owner can only turn skills off; there is no `on` key. `[tools] deny` takes bare tool names, `mcp__<server>` and `mcp__<server>__<tool>`; a parenthesised rule such as `Agent(engineer)` is a bad file.
-- Compiled-in tool and skill floors (#8992): `Agent`, `Task`, `TaskStop`, `Skill`, `Bash`, `Read` and the other tools agents and the PM prompt use, any `mcp__<floor server>` rule, every `tm-*` skill and every skill an agent preloads or a prompt loads by name. Naming one is a bad file, and a last-good record that names one has it dropped.
-- An Architect launch keeps every tool and skill: it gets the `[mcp]` part only. The floors and the validator still apply to the shared file.
-- The `owner_config` doctor row lists the skills and tools subtracted and warns on a `[skills] off` name that matches no installed skill.

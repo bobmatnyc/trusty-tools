@@ -1,2 +1,0 @@
-Added
-- `tm fleet init` seeds the PM intake scripts: `scripts/pm_intake.py`, which queues a PM message and classifies it as wake or hold, `scripts/pm-digest.py`, which prints the held messages since the last wake, `scripts/pm-notify.sh`, the command a PM runs to queue a message, and `scripts/notify-supervisor.sh`, a fallback `Notification` hook receiver that no hook entry wires; the shipped poller does not load them yet, and the `pm_intake.py` cursor verbs need `pm_cursor.py`, which lands later (Refs #10161)

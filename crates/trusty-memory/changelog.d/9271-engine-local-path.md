@@ -1,2 +1,0 @@
-Changed
-- trusty-memory's own code now names the storage engine as `crate::engine` (library) or `trusty_memory::engine` (binaries, tests, examples) instead of `trusty_common::memory_core`. No behaviour change; the `trusty_memory::engine` re-export is unchanged, and `scripts/check_engine_import_path.sh` now scans trusty-memory too, so the engine can move into this crate without another import sweep ([#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271))

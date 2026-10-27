@@ -164,6 +164,7 @@ name = "trusty-common"
 # 0.64.0 (Refs #9271): minor — breaking: the `memory_core` module moves to trusty-memory as `trusty_memory::engine`; `memory-core` becomes a no-op feature; `memory-core-test-support` is removed; hnsw_rs, git2, postcard, dashmap and unicode-normalization leave the dependency graph; adds `test-support`; subsumes the unpublished 0.63.1 (0.63.0 is live on crates.io).
 # 0.65.0 (Refs #9167): minor — breaking: `MessageEvent` gains a public `direction` field (`MessageDirection`), so a struct-literal construction no longer compiles; 0.64.0 is live on crates.io.
 # 0.65.1 (Refs #6637): patch — doc-only edit in daemon_token.rs; no API change; 0.65.0 is live on crates.io.
+# 0.66.0 (Refs #10207): minor — breaking: RecycleTrigger::HardFootprint, RecycleSnapshot.hard_footprint_kills; subsumes the unpublished 0.65.1 (0.65.0 is live on crates.io).
 version = "0.66.0"
 edition.workspace = true
 authors.workspace = true

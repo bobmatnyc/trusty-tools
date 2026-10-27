@@ -1,2 +1,0 @@
-Fixed
-- `palace_rename` now waits until redb has released the file lock on the palace's `kg.redb` and vector redb file, not only until the last in-process reference to the store is gone. redb unlocks the file at the end of `Database::drop`, after a trim commit and a flush, so on a loaded host the renamed palace could still reopen on a read-only snapshot. A lock still held when the wait expires, including one held by another process, is `Busy` with nothing changed ([#10035](https://github.com/bobmatnyc/trusty-tools/issues/10035))

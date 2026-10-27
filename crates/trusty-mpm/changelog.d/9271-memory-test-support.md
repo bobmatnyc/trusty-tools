@@ -1,2 +1,0 @@
-Added
-- New test-only `memory-test-support` feature turns on trusty-memory's mock embedder and palace fixtures for the `sm-memory` / `manager-memory` tests, which now run with `cargo test -p trusty-mpm --features sm-memory,manager-memory,memory-test-support`. A test build with either memory feature but without it stops with a `compile_error!` naming the missing feature. `sm-memory` and `manager-memory` now enable only the optional trusty-memory edge, since the engine moved there ([#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271))

@@ -1,2 +1,0 @@
-Fixed
-- `tm ls` and `tm session ls --json` no longer report a stopped session as `active` or `attached` when its tmux pane is alive but no pane in the session runs a live runtime. The runtime reaper leaves that pane alive on an idle shell after the runtime exits, and the listing now applies the reaper's own test to every pane of the session, so `state` agrees with `persisted_state` and MCP `session_list`. A split pane that runs the runtime, a runtime suspended behind its shell, or a pane listing that fails keeps the session `active` (#8241).

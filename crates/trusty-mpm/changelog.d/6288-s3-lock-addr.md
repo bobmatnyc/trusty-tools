@@ -1,2 +1,0 @@
-Changed
-- The daemon lock file (`~/.trusty-mpm/daemon.lock`) now writes `addr = ""` beside `socket_path`; the key stays so a `tm` built before this release still parses the lock. `core::daemon_identity::write_lock_at` / `write_lock` and `daemon::lock::write_lock` drop their `addr` parameter. The daemon no longer writes the `<data dir>/trusty-mpm/http_addr` discovery file and removes a stale one at start (#6288).

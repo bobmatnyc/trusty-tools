@@ -1,2 +1,0 @@
-Fixed
-- The background chunk backfill slice and the vector backfill repair send at most 8 chunks per `embed_batch` call and yield between calls, so the shared model lock is released between calls. A recall query embed no longer waits behind a whole drawer's embed; on EVO in the release profile its p95 beside a running backfill had risen about 70x over idle ([#10008](https://github.com/bobmatnyc/trusty-tools/issues/10008))

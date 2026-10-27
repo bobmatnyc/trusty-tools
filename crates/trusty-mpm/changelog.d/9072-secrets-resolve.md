@@ -1,2 +1,0 @@
-Added
-- `tm secrets resolve <KEY>` prints one granted key's value, for a program `tm secrets exec` started, in any language: it reads the grant token from the fd `TRUSTY_SECRETS_TOKEN_FD` names and asks the running trusty-secrets server. Stdout holds the value and nothing else, with no trailing newline. No grant, a bad token, a refused key or a server that is not running exits 1 with a fixed message that names no key, value, token or path, and prints nothing on stdout. It never starts a server (Refs #9072).

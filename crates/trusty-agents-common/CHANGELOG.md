@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.3] — 2026-10-26
+
+### Added
+
+- `agents::rule_marker` parses rule-id markers (a whole line `<!-- rule:<id> -->`, the id lowercase words joined by `-` or `/`), and `compose_agent` drops every marker line from each chain link, so a composed agent body carries no test metadata (#10058).
+
+### Fixed
+
+- The agent composer now carries a source card's `permissions:` block into the composed and deployed file verbatim, so a deployed trusty-code card keeps its `ask`/`deny` rules instead of running with every tool allowed. The block comes from the requested agent only and is not inherited through `extends:`. Its indented rule keys are no longer read as top-level frontmatter fields. An agent with no block deploys byte-identical to before. (#8199)
+- The agent-schema classifier lists `permissions:` as a key the composer emits and skips the rule keys indented under it, so a deployed agent that carries a block still classifies as trusty-mpm's own and stays eligible for the stale-tier quarantine. (#8199)
+- An empty or absent optional user skill tier (`~/.trusty-mpm/skills`) no longer logs "skill source directory is empty" once per deploy destination on every launch. An empty or missing bundled skill source still warns, and a user tier holding only a malformed skill is still reported (#9540).
+- `skills::deployer` writes a skill's `scripts/*` files (and any source file already executable) as mode 755 and restores the bit on an unchanged managed script; `agents::manifest::atomic_write_executable` and `skills::deployer::is_executable_skill_file` are the shared contract (Refs [#10211](https://github.com/bobmatnyc/trusty-tools/issues/10211))
+
 ## [0.9.2] — 2026-10-09
 
 ### Added

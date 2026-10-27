@@ -1,3 +1,0 @@
-Security
-- `tm hook --egress-guard`'s raw scan, used when the Bash walk gives up (for example after thousands of `:;` no-op segments), now reads a `tm` word's flags as bash splits them, so a flag value holding `$`, `{`, `=`, `,` or a quoted space (`tm --url "http://127.0.0.1:${TM_PORT}" slack send`, `tm --account "ops team" slack send`) no longer hides the `slack` or `gchat` subcommand (#9710).
-- When the Bash walk spends its step budget or meets a segment it cannot lex, a channel it had already found now denies the command; before, the raw scan judged the text alone and could allow it (#9710).

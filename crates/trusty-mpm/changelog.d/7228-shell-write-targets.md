@@ -1,3 +1,0 @@
-Fixed
-- `tm hook --pm-guard` now reads the destination of `cp`, `mv`, `install`, `rsync`, `dd of=` and the files edited by `sed -i` as write targets, so a worktree-isolated agent can no longer write main-checkout source through one of these commands. A directory destination resolves to the path the copy creates inside it. Copying out of the main checkout, and copies into the agent's own worktree, tm state directories, scratchpads, listed documents repos or non-source files, stay allowed (#7228).
-- A `cp`, `mv`, `install`, `rsync`, `dd` or `sed` command whose arguments cannot be lexed is now denied, as an unlexable `tee` already is (#7228).

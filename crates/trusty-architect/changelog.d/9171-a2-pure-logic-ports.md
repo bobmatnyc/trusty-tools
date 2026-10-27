@@ -1,5 +1,0 @@
-Added
-
-- Rust ports of the Architect prototype's pure logic, held to byte-identical JSON against the live prototype scripts: pane parsing, alert evaluation and dedup (`classify`, from the classifier inline in `fleet-poll.py`, the poller the live host runs — 22/25 ctx bar, timed agent rows anywhere on screen, `current_waiting`, and the `turn_active`, `account` and `rc_failed` fields), the input-box classifier (`classify_input`, from `input-state.py`), the quiet-session list (`quiet`), and the Architect's own context meter (`self_ctx`) ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
-- `input_state_for_send`, the fail-closed input-box reading for `send_guarded`: a capture it cannot positively read as an empty or suggestion box never reads as accepting input, and a suggestion is accepted only when every visible character in the box is dim ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
-- `to_python_json`, which writes JSON in Python's `json.dumps` form ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))

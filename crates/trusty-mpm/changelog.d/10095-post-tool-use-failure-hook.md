@@ -1,2 +1,0 @@
-Added
-- tm registers the `PostToolUseFailure` hook as its seventh lifecycle group (async, matcher `*`, timeout 60), so a failed, denied or interrupted tool call closes its `Tool::Started` span as `Tool::Errored` and a failed subagent dispatch ends `Failed` instead of staying live. Existing projects gain the group at the next session prepare or with `tm doctor --fix --yes`; until then `tm doctor`'s `hooks_missing_tm_group` check warns and names `PostToolUseFailure` (#10095).

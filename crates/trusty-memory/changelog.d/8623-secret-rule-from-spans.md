@@ -1,3 +1,0 @@
-Changed
-- The kuzu import reads each refusal's rule from trusty-common's `find_secret_spans` instead of guessing it from the token's shape with its own copy of the prefix lists. The `refusals by rule` line can now show `jwt` and `private_key_block`; a provider key written after `=` or `:` is counted as `provider_prefix` rather than `base64_blob` or `mixed_case_alnum`; the `other` label is gone ([#8623](https://github.com/bobmatnyc/trusty-tools/issues/8623))
-- `trusty-memory audit secrets` classifies the hits trusty-common reports for each refused drawer instead of re-tokenizing the drawer itself, so a PEM private-key block counts as one hit ([#8623](https://github.com/bobmatnyc/trusty-tools/issues/8623))

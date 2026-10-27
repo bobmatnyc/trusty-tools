@@ -1,2 +1,0 @@
-Added
-- New test-only features `embedder-test-support` (the engine's mock-embedder seam, `engine::retrieval::seed_shared_embedder_with_mock`) and `memory-core-test-support` (the format-0 and format-1 palace fixtures under `engine::store`), formerly trusty-common features. Enable them from `[dev-dependencies]` or a test-only feature, never in a production build ([#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271))

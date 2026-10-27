@@ -1,2 +1,0 @@
-Fixed
-- `memory.health` no longer reports `wedged` while a `memory_remember` holds the palace write lock inside its bounds. The wedge line is now the write's acquisition budget plus its pipeline ceiling plus the old wait line (`TRUSTY_WRITE_OP_BUDGET_SECS` + `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS` + 2 x max(open-queue, write-lock timeout)), 420 s at the defaults instead of 120 s. Raising any of those bounds raises the line; `TRUSTY_WEDGE_THRESHOLD_SECS` still overrides it, and a lock held past the line still reads as wedged (#9783).

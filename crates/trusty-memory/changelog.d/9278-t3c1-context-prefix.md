@@ -1,2 +1,0 @@
-Breaking
-- A KG, vector-store or verify-record error that a `PalaceHandle` write path wraps in a context message is its own `EngineError` variant (`Kg`, `Hnsw` or `VerifyNotStored`) and prints only its own text; the context prefix is dropped, as for `EngineError::Palace`. For example, a `KgError` from the drawer-metadata delete in `forget` is `EngineError::Kg` and no longer says `drawer NOT deleted`. `store::hnsw_store::op_budget::op_budget_error` also finds an op-budget error inside `EngineError::Hnsw`. ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
