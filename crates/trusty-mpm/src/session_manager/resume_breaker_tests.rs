@@ -322,6 +322,20 @@ async fn a_fast_death_after_an_auto_resume_counts() {
 // End to end, through the real SessionManager
 // -------------------------------------------------------------------------
 
+/// A relauncher that always reports a verified runtime.
+///
+/// #10356: `resume_auto` fails closed with no relauncher installed, so the
+/// breaker cycle needs one that succeeds. The pane is unchanged, so the
+/// session still dies again on the next reap.
+struct AlwaysRuns;
+
+#[async_trait::async_trait]
+impl super::relaunch::RuntimeRelauncher for AlwaysRuns {
+    async fn relaunch(&self, _record: &super::SessionRecord) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// A session workspace inside the test's own temp dir.
 ///
 /// #8838: every stop writes `<workspace>/.trusty-mpm/scrollback.txt`, so a
@@ -345,6 +359,7 @@ async fn seeded(dir: &tempfile::TempDir, k: u32) -> (Arc<SessionManager>, Manage
         max_consecutive: k,
     });
     let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
     let ws = fixture_workspace(dir);
     let record = mgr
         .create("flap-test".into(), Some(ws.clone()), None, None, None, None)
@@ -384,7 +399,9 @@ async fn attach(dir: &tempfile::TempDir, k: u32) -> Arc<SessionManager> {
         flap_window: Duration::from_secs(3600),
         max_consecutive: k,
     });
-    Arc::new(mgr)
+    let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
+    mgr
 }
 
 /// The production topology: the reaper and the poller are DIFFERENT processes.

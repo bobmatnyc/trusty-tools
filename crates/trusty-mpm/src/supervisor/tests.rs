@@ -162,7 +162,21 @@ impl LlmClassifier for StubClassifier {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build a session manager backed by a fake tmux driver under a temp dir.
+///
+/// #10356: `resume_auto` fails closed with no relauncher installed, so the
+/// manager carries one that always reports a runtime — the daemon's topology.
+/// A test that scripts its own relauncher uses [`make_bare_manager`].
 async fn make_manager(dir: &TempDir, tmux: Arc<FakeTmux>) -> Arc<SessionManager> {
+    let mgr = make_bare_manager(dir, tmux).await;
+    assert!(mgr.install_relauncher(Arc::new(ScriptedRelauncher {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        verdict: Ok(()),
+    })));
+    mgr
+}
+
+/// A manager with no relauncher installed.
+async fn make_bare_manager(dir: &TempDir, tmux: Arc<FakeTmux>) -> Arc<SessionManager> {
     Arc::new(
         SessionManager::new(dir.path(), tmux)
             .await
@@ -2158,7 +2172,7 @@ async fn one_failed_auto_resume_appends_exactly_one_error_note() {
     let dir = TempDir::new().unwrap();
     let ws = TempDir::new().unwrap();
     let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
+    let mgr = make_bare_manager(&dir, tmux.clone()).await;
     let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
     set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
     let relauncher = Arc::new(ScriptedRelauncher {
