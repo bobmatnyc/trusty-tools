@@ -696,10 +696,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     if created_partially {
         missing.extend(metadata_apply::retry_create_defaults(gh, args, number, &plan).missing());
     }
-    // #7274: the PR half of the labels/project/milestone standard, applied
-    // after the PR exists because every step needs its number.
-    // #10276: a PR is not a board item (epic #10274, D7), so no
-    // `default_project` replaces a closed inherited project any more.
+    // #7274: the PR half of the labels/milestone standard, applied after the
+    // PR exists because every step needs its number.
+    // #10276: a PR is not a board item (epic #10274, D7), so it joins no
+    // project — neither the linked issue's nor `default_project`.
     missing.extend(metadata_apply::apply(gh, args, pre, number, &plan.body).missing());
     // #7275: record the PR so the daemon can clean up after it merges.
     record_for_cleanup(pre, url, number);

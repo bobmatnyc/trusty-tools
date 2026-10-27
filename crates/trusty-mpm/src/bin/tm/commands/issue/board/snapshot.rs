@@ -84,7 +84,7 @@ pub(crate) struct Board {
     pub(crate) closed: bool,
     /// The README.
     pub(crate) readme: String,
-    /// Items on the board.
+    /// Items on the board, archived ones included (#10276).
     pub(crate) item_count: u64,
     /// Every field, built-in and custom.
     pub(crate) fields: Vec<BoardField>,
@@ -110,6 +110,13 @@ impl Board {
 
 const NAME: &str = "... on ProjectV2FieldCommon { name }";
 
+/// `ProjectV2.items`' filter naming archived and live items alike.
+///
+/// Why: #10276 — an archived item keeps its field values, so removing an
+/// option it uses clears it too; the schema's `archivedStates` argument lets
+/// the in-use count ask for both instead of relying on an undocumented default.
+pub(crate) const ALL_ITEM_STATES: &str = "archivedStates: [ARCHIVED, NOT_ARCHIVED]";
+
 /// Read one board by owner login and number.
 ///
 /// What: `repositoryOwner(login) { ... on ProjectV2Owner { projectV2(number) } }`
@@ -123,7 +130,7 @@ pub(crate) fn read_board(
     let doc = format!(
         "query BoardSnapshot($owner: String!, $number: Int!) {{ repositoryOwner(login: $owner) {{ \
          ... on ProjectV2Owner {{ projectV2(number: $number) {{ id number title url closed readme \
-         items {{ totalCount }} \
+         items({ALL_ITEM_STATES}) {{ totalCount }} \
          fields(first: 100) {{ nodes {{ ... on ProjectV2FieldCommon {{ id name dataType }} \
          ... on ProjectV2SingleSelectField {{ options {{ id name color description }} }} }} }} \
          views(first: 50) {{ nodes {{ id name layout filter \
@@ -232,10 +239,33 @@ pub(crate) fn board_items(
     project_id: &str,
     field: &str,
 ) -> Result<Vec<BoardItem>, BoardError> {
-    let doc = "query BoardItems($id: ID!, $field: String!, $cursor: String) { node(id: $id) { \
-               ... on ProjectV2 { items(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } \
-               nodes { id content { __typename ... on Issue { number repository { nameWithOwner } } } \
-               fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { optionId } } } } } } }";
+    read_items(client, project_id, field, "")
+}
+
+/// [`board_items`], archived items included ([`ALL_ITEM_STATES`]).
+///
+/// Test: `apply_refuses_to_remove_an_option_an_archived_item_uses_10276`.
+pub(crate) fn board_items_with_archived(
+    client: &BoardClient<'_>,
+    project_id: &str,
+    field: &str,
+) -> Result<Vec<BoardItem>, BoardError> {
+    read_items(client, project_id, field, &format!(", {ALL_ITEM_STATES}"))
+}
+
+fn read_items(
+    client: &BoardClient<'_>,
+    project_id: &str,
+    field: &str,
+    states: &str,
+) -> Result<Vec<BoardItem>, BoardError> {
+    let doc = format!(
+        "query BoardItems($id: ID!, $field: String!, $cursor: String) {{ node(id: $id) {{ \
+         ... on ProjectV2 {{ items(first: 100, after: $cursor{states}) {{ pageInfo {{ hasNextPage endCursor }} \
+         nodes {{ id content {{ __typename ... on Issue {{ number repository {{ nameWithOwner }} }} }} \
+         fieldValueByName(name: $field) {{ ... on ProjectV2ItemFieldSingleSelectValue {{ optionId }} }} }} }} }} }} }}"
+    );
+    let doc = doc.as_str();
     let mut items = Vec::new();
     let mut cursor: Option<String> = None;
     loop {

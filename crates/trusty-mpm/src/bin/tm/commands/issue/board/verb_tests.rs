@@ -870,3 +870,183 @@ fn every_board_error_variant_renders_its_value_10276() {
     let no_target = BoardError::NoAttachTarget("x".into());
     assert!(no_target.to_string().contains("no board to attach to: x"));
 }
+
+// ── #10276 Phase 2 review fixes ─────────────────────────────────────────
+
+/// The `project:` block at the tail of `text`, parsed and validated.
+fn printed_block(text: &str) -> ProjectBlock {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        project: ProjectBlock,
+    }
+    let yaml = &text[text.find("project:\n").expect("block printed")..];
+    let parsed: Wrapper = serde_yaml::from_str(yaml).expect("the block parses");
+    validate_project(&parsed.project, &spec()).expect("the block validates against the spec");
+    parsed.project
+}
+
+/// #10276: a mistyped `--drop-option` is refused, naming it, before any call —
+/// so no board is created whose printed block `validate_project` would refuse.
+#[test]
+fn init_refuses_a_mistyped_drop_option_before_any_call_10276() {
+    let gh = FakeGh::new(sim());
+    let err = init(
+        &BoardClient::new(&gh),
+        &spec(),
+        &init_opts(true, &["On preview"]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, BoardError::Spec(super::validate::BoardSpecError::UnknownDropOption(o)) if o == "On preview"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("`On preview`"), "{err}");
+    assert!(gh.mutations().is_empty(), "{:?}", gh.mutations());
+    assert!(
+        gh.calls().is_empty(),
+        "refused before any read: {:?}",
+        gh.calls()
+    );
+}
+
+/// #10276: `init --repo X` from a checkout of another repo is refused, naming
+/// both, before the dirty-file check reads the wrong issue-state.yaml.
+#[test]
+fn init_refuses_a_checkout_of_another_repo_naming_both_10276() {
+    let gh = FakeGh::new(sim());
+    let opts = InitOptions {
+        repo: "duettoresearch/model-usage-monitor".into(),
+        ..init_opts(true, &[])
+    };
+    let err = init(&BoardClient::new(&gh), &spec(), &opts).unwrap_err();
+    assert!(
+        matches!(&err, BoardError::WrongCheckout { repo, checkout }
+            if repo == "duettoresearch/model-usage-monitor" && checkout == "o/r"),
+        "{err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("`duettoresearch/model-usage-monitor`"),
+        "{text}"
+    );
+    assert!(text.contains("`o/r`"), "{text}");
+    assert!(gh.mutations().is_empty(), "{:?}", gh.mutations());
+    assert!(
+        !gh.calls().iter().any(|c| c.iter().any(|a| a == "status")),
+        "the dirty check never ran: {:?}",
+        gh.calls()
+    );
+}
+
+/// #10276: a step failing after `createProjectV2` exits non-zero naming the
+/// board's number and URL, printing the block and the recovery; `apply` with
+/// that block then finishes the board, views included.
+#[test]
+fn init_failing_after_the_create_names_the_board_and_apply_finishes_it_10276() {
+    let gh = FakeGh::new(sim());
+    gh.fail_once("createProjectV2View", "HTTP 502: Bad gateway");
+    let err = init(&BoardClient::new(&gh), &spec(), &init_opts(true, &[])).unwrap_err();
+    assert!(
+        matches!(&err, BoardError::InitIncomplete { number: 1, .. }),
+        "{err}"
+    );
+    let text = err.to_string();
+    for want in [
+        "created project #1 (https://github.com/orgs/o/projects/1)",
+        "502",
+        "tm issue board apply --apply",
+    ] {
+        assert!(text.contains(want), "{want} missing from: {text}");
+    }
+    let b = printed_block(&text);
+    assert_eq!(b, block(1, &[], &[]));
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    apply(&gh, &b, flags(true, false, false), &cursor_in(&dir)).expect("apply finishes it");
+    let views: Vec<String> = gh.sim.borrow().projects[0]
+        .views
+        .iter()
+        .map(|v| v.name.clone())
+        .collect();
+    for want in ["List", "Swimlanes", "Roadmap"] {
+        assert!(views.iter().any(|v| v == want), "{want} missing: {views:?}");
+    }
+    let report = check(&gh, &b, None);
+    assert!(report.clean(), "{}", report.render());
+    let mark = gh.mutations().len();
+    apply(&gh, &b, flags(true, false, false), &cursor_in(&dir)).expect("second apply");
+    assert_eq!(gh.mutations().len(), mark, "the board is finished");
+}
+
+/// #10276: a backfill that failed without `--status-from-labels` and is rerun
+/// with it starts from page one, so the issues already added get their Status.
+/// Red before the fix: the rerun resumed past page one, left #1–#100 with no
+/// Status, and cleared the cursor.
+#[test]
+fn backfill_rerun_with_another_status_flag_starts_from_page_one_10276() {
+    let gh = conformant(&[]);
+    {
+        let mut s = gh.sim.borrow_mut();
+        s.with_issues("o/r", 250);
+        s.issues.get_mut("o/r").expect("issues")[4].labels = vec!["status:coded".into()];
+    }
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cursor = cursor_in(&dir);
+    let b = block(1, &[], &[]);
+    gh.fail_once("contentId: \"ISSUE_150\"", "HTTP 502: Bad gateway");
+    apply(&gh, &b, flags(true, true, false), &cursor).unwrap_err();
+    assert!(cursor.0.exists(), "the failed run recorded a cursor");
+
+    let text = apply(&gh, &b, flags(true, true, true), &cursor).expect("rerun with the flag");
+    assert!(!text.contains("resumed"), "{text}");
+    assert!(text.contains("#5 → In PR"), "{text}");
+    let s = gh.sim.borrow();
+    let unset: Vec<u64> = s.projects[0]
+        .items
+        .iter()
+        .filter(|i| !i.values.contains_key("F_Status"))
+        .map(|i| i.issue.1)
+        .collect();
+    assert!(unset.is_empty(), "items with no Status: {unset:?}");
+    assert_eq!(s.projects[0].items.len(), 250);
+    assert!(!cursor.0.exists(), "a finished backfill clears its cursor");
+}
+
+/// #10276: an ARCHIVED item still holds its option, and removing the option
+/// clears it, so the in-use count reads archived items too.
+/// Red before the fix: the count read live items only and the remove went ahead.
+#[test]
+fn apply_refuses_to_remove_an_option_an_archived_item_uses_10276() {
+    let gh = conformant(&[]);
+    {
+        let mut s = gh.sim.borrow_mut();
+        s.projects[0]
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "Status")
+            .expect("Status")
+            .options
+            .push(super::fake_gh_tests::SimOption {
+                id: "O_todo".into(),
+                name: "Todo".into(),
+                color: "GREEN".into(),
+                description: String::new(),
+            });
+        s.put_item(0, "o/r", 1, Some("Todo"));
+        s.projects[0].items[0].archived = true;
+    }
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mark = gh.mutations().len();
+    let err = apply(
+        &gh,
+        &block(1, &[], &[]),
+        flags(true, false, false),
+        &cursor_in(&dir),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, BoardError::OptionInUse { in_use, .. } if in_use == &[("Todo".to_string(), 1)]),
+        "{err}"
+    );
+    assert_eq!(gh.mutations().len(), mark, "refused before any write");
+}

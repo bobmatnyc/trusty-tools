@@ -5,12 +5,15 @@
 //! What: [`backfill`] reads the board's items once, then walks the repo's open
 //! issues a page (100) at a time, oldest first. Each issue not on the board is
 //! added, with a [`Pacer`] pause between writes. After each page the next
-//! cursor is recorded in a [`CursorFile`]; a rerun after a failure resumes
-//! from it, and the membership read means no issue is added twice. With
-//! `status_from_labels` (D3's explicit flag) — and only then — each open
-//! issue's Status is set from its `status:*` label.
+//! cursor is recorded in a [`CursorFile`], with the run's
+//! `status_from_labels`; a rerun after a failure resumes from it when the flag
+//! matches and starts from page one when it does not, and the membership read
+//! means no issue is added twice. With `status_from_labels` (D3's explicit
+//! flag) — and only then — each open issue's Status is set from its
+//! `status:*` label.
 //! Test: `backfill_pages_paces_and_resumes_without_adding_twice_10276`,
-//! `backfill_writes_status_only_under_the_flag_10276`.
+//! `backfill_writes_status_only_under_the_flag_10276`,
+//! `backfill_rerun_with_another_status_flag_starts_from_page_one_10276`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -51,6 +54,11 @@ struct Cursor {
     number: u64,
     /// The cursor of the next page to read.
     after: String,
+    /// #10276: whether the run that recorded it set Status from labels. A
+    /// rerun with the other value starts from page one, so the pages already
+    /// walked get their Status (or keep none) under the rerun's flag.
+    #[serde(default)]
+    status_from_labels: bool,
 }
 
 /// Where the resume point lives.
@@ -75,23 +83,28 @@ impl CursorFile {
         }
     }
 
-    fn read(&self, repo: &str, number: u64) -> Result<Option<String>, BoardError> {
+    /// The recorded `after`, when it was recorded for this repo, board and
+    /// `status_from_labels`; any other cursor is discarded (page one).
+    fn read(&self, repo: &str, number: u64, status: bool) -> Result<Option<String>, BoardError> {
         if !self.0.exists() {
             return Ok(None);
         }
         let text = std::fs::read_to_string(&self.0).map_err(|e| self.err(e))?;
         let cursor: Cursor = serde_json::from_str(&text).map_err(|e| self.err(e))?;
-        Ok((cursor.repo == repo && cursor.number == number).then_some(cursor.after))
+        let same =
+            cursor.repo == repo && cursor.number == number && cursor.status_from_labels == status;
+        Ok(same.then_some(cursor.after))
     }
 
-    fn write(&self, repo: &str, number: u64, after: &str) -> Result<(), BoardError> {
+    fn write(&self, run: &BackfillRun<'_>, after: &str) -> Result<(), BoardError> {
         if let Some(dir) = self.0.parent() {
             std::fs::create_dir_all(dir).map_err(|e| self.err(e))?;
         }
         let cursor = Cursor {
-            repo: repo.to_string(),
-            number,
+            repo: run.repo.to_string(),
+            number: run.board.number,
             after: after.to_string(),
+            status_from_labels: run.status_from_labels,
         };
         let text = serde_json::to_string(&cursor).map_err(|e| self.err(e))?;
         let tmp = self.0.with_extension("json.tmp");
@@ -160,7 +173,10 @@ pub(crate) fn backfill(
                 _ => None,
             })
             .collect();
-    let mut after = run.cursor.read(run.repo, run.board.number)?;
+    // #10276: a cursor recorded under the other `status_from_labels` is not resumed.
+    let mut after = run
+        .cursor
+        .read(run.repo, run.board.number, run.status_from_labels)?;
     report.resumed = after.is_some();
     loop {
         let (issues, next) = open_issues_page(client, run.repo, after.as_deref())?;
@@ -188,7 +204,7 @@ pub(crate) fn backfill(
         match next {
             Some(cursor) => {
                 if !run.dry_run {
-                    run.cursor.write(run.repo, run.board.number, &cursor)?;
+                    run.cursor.write(run, &cursor)?;
                 }
                 after = Some(cursor);
             }

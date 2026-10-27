@@ -24,7 +24,6 @@ use anyhow::Context as _;
 use trusty_mpm::core::issue_audit::IssueFacts;
 use trusty_mpm::core::issue_audit_gh::view_argv;
 
-use super::closed_project;
 use super::metadata::{self, ChangedPaths, PrMetadata, RefKind, RefsIssue, RefsLookup};
 use super::open::{self, Preflight};
 use super::phase_title::{self, TitleDecision};
@@ -61,24 +60,23 @@ impl ApplyOutcome {
     }
 }
 
-/// Derive and apply the PR's component labels, milestone, projects and phase
-/// title tag.
+/// Derive and apply the PR's component labels, milestone and phase title tag.
 ///
-/// Why (#7274): the standard is one rule over issues and PRs, and a PR's share
-/// of it is entirely derived — labels from its own diff, project and milestone
-/// from the issue its link line names. None of the derivation is worth failing
-/// the CREATE over, which is why it runs after the PR exists.
+/// Why (#7274): a PR's share of the standard is entirely derived — labels from
+/// its own diff, milestone from the issue its link line names. None of the
+/// derivation is worth failing the CREATE over, which is why it runs after the
+/// PR exists.
 /// What: reads the diff and the link target, calls [`metadata::plan`], then
 /// [`apply_plan`]. Prints what applied and one line per thing the standard
 /// wanted and this PR could not get. The phase tag ([`phase_title::decide`],
 /// #9571) joins the same edit; an issue too unreadable to decide it is missing.
-/// A closed inherited project is skipped (#9749) and nothing replaces it: a PR
-/// is not a board item (#10276, D7).
+/// It adds the PR to no project, whatever boards the linked issue is on: pull
+/// requests are not board items (#10276, D7).
 /// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
 /// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
 /// `open_notes_an_unreadable_refs_issue`, `pr_9571_open_tags_a_phase_pr_title`,
 /// `pr_9571_an_unreadable_issue_reports_the_title_missing`,
-/// `pr_10276_a_closed_project_is_skipped_and_no_default_project_is_added`.
+/// `pr_10276_pr_open_makes_no_project_mutation_with_or_without_a_boarded_issue`.
 pub(crate) fn apply<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
@@ -129,12 +127,12 @@ pub(crate) fn apply<R: GhRunner, P: Preflight>(
     }
 }
 
-/// Read the link target's milestone and projects through `gh`.
+/// Read the link target's milestone and title through `gh`.
 ///
 /// Why (#7786): `--issue N` and a body's link line both take a bare number, and
 /// a number naming a PR made `gh issue view` 404 — after which the inherited
-/// half was abandoned with no second attempt, so the PR shipped with neither
-/// project nor milestone. `view_argv` is the issue audit's own field list, so
+/// half was abandoned with no second attempt, so the PR shipped with no
+/// milestone. `view_argv` is the issue audit's own field list, so
 /// an issue is read exactly the way `tm issue audit` reads it.
 /// What: `gh issue view` first; on the specific `Could not resolve to an Issue`
 /// answer, `gh pr view` with [`metadata::PR_VIEW_JSON_FIELDS`]. Any other
@@ -190,18 +188,15 @@ fn is_not_an_issue(err: &anyhow::Error) -> bool {
 /// Apply a [`PrMetadata`], retrying once field by field if the combined edit
 /// fails.
 ///
-/// Why (#7646): `gh pr edit` applies labels, milestone and projects in one
+/// Why (#7646): `gh pr edit` applies the title, labels and milestone in one
 /// call, so a milestone whose title `gh` cannot resolve — a closed one, which
 /// is exactly what PR #7639 inherited — failed the WHOLE edit and the PR ended
 /// up with no component label either. The retry costs one call per field and is
 /// bounded at one round, so a genuinely broken `gh` cannot become a loop.
 /// What: the combined edit first. On failure, a warning naming every field, its
 /// value and the issue it was inherited from, then one edit per field. A field
-/// that fails twice is reported missing, never applied (the fail-open rule) —
-/// except a project the owner has closed, which is skipped (#9749); nothing
-/// replaces it, since a PR is not a board item (#10276, D7).
+/// that fails twice is reported missing, never applied (the fail-open rule).
 /// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`,
-/// `pr_9749_a_closed_inherited_project_does_not_fail_the_open`,
 /// `open_applies_pr_metadata`, `open_survives_a_failed_metadata_edit`.
 fn apply_plan<R: GhRunner>(gh: &R, args: &PrOpenArgs, pr: &str, meta: &PrMetadata) -> ApplyOutcome {
     if meta.is_empty() {
@@ -223,15 +218,10 @@ fn apply_plan<R: GhRunner>(gh: &R, args: &PrOpenArgs, pr: &str, meta: &PrMetadat
     );
     eprintln!("  retrying once, one field at a time");
     let mut missing = Vec::new();
-    let mut closed: Option<Vec<String>> = None;
     for (what, one) in steps(meta) {
         let a = metadata::edit_argv(pr, args.repo.as_deref(), &one);
         match gh.run(&a) {
             Ok(out) if out.success => println!("  applied on retry: {what}"),
-            // #9749: a closed project cannot be added; skip it, not fail.
-            Ok(_) | Err(_) if is_closed_project(gh, args, &one, &mut closed) => {
-                println!("  skipped closed {what}");
-            }
             Ok(out) => {
                 eprintln!("  warning: {what} still failed: {}", out.stderr.trim());
                 missing.push(what);
@@ -249,39 +239,13 @@ fn apply_plan<R: GhRunner>(gh: &R, args: &PrOpenArgs, pr: &str, meta: &PrMetadat
     }
 }
 
-/// Is `step` a lone project step whose project is closed (#9749)?
-///
-/// Why: only a closed project earns a skip; any other failed step stays
-/// missing. The owner's closed list is read once per apply, on the first
-/// failed project step.
-/// What: `false` for a non-project step; else looks the title up in the
-/// cached [`closed_project::closed_titles`]. A list that cannot be read is
-/// warned about and treated as "not closed", which keeps the old behaviour.
-fn is_closed_project<R: GhRunner>(
-    gh: &R,
-    args: &PrOpenArgs,
-    step: &PrMetadata,
-    closed: &mut Option<Vec<String>>,
-) -> bool {
-    let [project] = step.projects.as_slice() else {
-        return false;
-    };
-    let titles = closed.get_or_insert_with(|| {
-        closed_project::closed_titles(gh, args.repo.as_deref()).unwrap_or_else(|e| {
-            eprintln!("  warning: could not read which projects are closed: {e:#}");
-            Vec::new()
-        })
-    });
-    titles.iter().any(|t| t == project)
-}
-
 /// One human description per field the plan would apply (#7646).
 ///
 /// Why: the failure warning has to say WHICH field carried WHICH value and
 /// where the value came from — `milestone "tm 1.3.5" (inherited from #4642)`,
 /// not `'tm 1.3.5' not found`.
-/// What: labels as one entry, then the milestone, then one entry per project.
-/// The inherited ones name their source issue.
+/// What: the title, then labels as one entry, then the milestone. The
+/// inherited ones name their source issue.
 /// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`.
 fn describe(meta: &PrMetadata) -> Vec<String> {
     steps(meta).into_iter().map(|(what, _)| what).collect()
@@ -291,9 +255,9 @@ fn describe(meta: &PrMetadata) -> Vec<String> {
 ///
 /// Why: the retry must not re-send the field that just failed alongside the
 /// ones that did not, which is the whole point of splitting (#7646).
-/// What: `(description, single-field plan)` pairs — all labels together (they
-/// share one `--add-label` repetition and cannot fail independently), then the
-/// milestone, then each project.
+/// What: `(description, single-field plan)` pairs — the title, all labels
+/// together (they share one `--add-label` repetition and cannot fail
+/// independently), then the milestone.
 /// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`.
 fn steps(meta: &PrMetadata) -> Vec<(String, PrMetadata)> {
     let source = meta
@@ -334,15 +298,6 @@ fn steps(meta: &PrMetadata) -> Vec<(String, PrMetadata)> {
             },
         ));
     }
-    for project in &meta.projects {
-        out.push((
-            format!("project \"{project}\"{source}"),
-            PrMetadata {
-                projects: vec![project.clone()],
-                ..PrMetadata::default()
-            },
-        ));
-    }
     out
 }
 
@@ -356,9 +311,6 @@ fn report_applied(meta: &PrMetadata) {
     }
     if let Some(milestone) = &meta.milestone {
         println!("  milestone: {milestone}");
-    }
-    if !meta.projects.is_empty() {
-        println!("  projects: {}", meta.projects.join(", "));
     }
 }
 

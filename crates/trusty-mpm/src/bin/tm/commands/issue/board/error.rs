@@ -84,6 +84,41 @@ pub(crate) enum BoardError {
         /// The file.
         path: String,
     },
+    /// `init`: the current checkout is not the `--repo` the board is for.
+    // #10276: the dirty-file check reads the current checkout, so it must be `--repo`'s.
+    #[error(
+        "`tm issue board init --repo {repo}` must run from a checkout of `{repo}`; this \
+         checkout is `{checkout}`, so its issue-state.yaml is not the one the printed \
+         `project:` block goes into"
+    )]
+    WrongCheckout {
+        /// The `--repo` slug.
+        repo: String,
+        /// The current checkout's `owner/repo`.
+        checkout: String,
+    },
+    /// `init --apply`: a step after `createProjectV2` failed; the board exists.
+    // #10276: name the board and the recovery, so the half-made board is not lost.
+    #[error(
+        "created project #{number} ({url}), but a later step failed: {detail}\n\nthe board \
+         exists and is not finished. To finish it, commit this block to {repo}'s \
+         issue-state.yaml through a PR, then run `tm issue board apply --apply` from that \
+         checkout (it creates the missing fields and views, links the repo and writes the \
+         README); a leftover GitHub default view `View 1` is listed by `check` and can be \
+         deleted by hand:\n\n{block}"
+    )]
+    InitIncomplete {
+        /// The created project's number.
+        number: u64,
+        /// The created project's URL.
+        url: String,
+        /// The repo the board is for.
+        repo: String,
+        /// The `project:` block to commit.
+        block: String,
+        /// The failure.
+        detail: String,
+    },
     /// Owner decision 2: an option an item still uses would be removed.
     #[error(
         "refusing to remove option(s) from `{field}` that items still use: {} — removing an option \

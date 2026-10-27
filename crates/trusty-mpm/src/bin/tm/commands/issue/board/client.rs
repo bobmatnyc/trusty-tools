@@ -282,12 +282,13 @@ impl<'a> BoardClient<'a> {
         Ok(data.get(field).cloned().unwrap_or(Value::Null))
     }
 
-    /// `createProjectV2` — returns the new project's node id and number.
+    /// `createProjectV2` — returns the new project's node id, number and URL
+    /// (#10276: a failure after the create names the URL).
     pub(crate) fn create_project(
         &self,
         owner_id: &str,
         title: &str,
-    ) -> Result<(String, u64), BoardError> {
+    ) -> Result<(String, u64, String), BoardError> {
         let input = Gql::Obj(vec![
             ("ownerId", Gql::s(owner_id)),
             ("title", Gql::s(title)),
@@ -295,7 +296,11 @@ impl<'a> BoardClient<'a> {
         let out = self.mutate("createProjectV2", input, "projectV2 { id number url }")?;
         let project = &out["projectV2"];
         match (project["id"].as_str(), project["number"].as_u64()) {
-            (Some(id), Some(number)) => Ok((id.to_string(), number)),
+            (Some(id), Some(number)) => Ok((
+                id.to_string(),
+                number,
+                project["url"].as_str().unwrap_or_default().to_string(),
+            )),
             _ => Err(BoardError::Parse {
                 what: "createProjectV2".into(),
                 detail: format!("no project id and number in {out}"),

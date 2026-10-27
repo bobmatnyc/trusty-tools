@@ -2,29 +2,36 @@
 //!
 //! Why: O1 — a repo adopting the workflow gets the standard board through the
 //! API, never by copying Project #45 (D5).
-//! What: [`init`] reads first — the owner's projects (a same-title one
-//! refuses), the repo's linked projects (any refuses), and whether
-//! `issue-state.yaml` has uncommitted changes (refuses). Without `apply` it
-//! stops there and prints the plan: reads only. With `apply` it creates the
-//! project, reconciles it to the spec (the three default Status options are
-//! replaced, Hold and the dates and the views are created, the repo linked,
-//! the README written), deletes GitHub's default view, and returns the
-//! `project:` block to commit.
+//! What: [`init`] first checks the `--drop-option` names against the spec,
+//! with no call made. Then it reads — that the current checkout is `--repo`,
+//! the owner's projects (a same-title one refuses), the repo's linked
+//! projects (any refuses), and whether `issue-state.yaml` has uncommitted
+//! changes (refuses). Without `apply` it stops there and prints the plan:
+//! reads only. With `apply` it creates the project, reconciles it to the spec
+//! (the three default Status options are replaced, Hold and the dates and the
+//! views are created, the repo linked, the README written), deletes GitHub's
+//! default view, and returns the `project:` block to commit. A failure after
+//! the create is [`BoardError::InitIncomplete`]: it names the board, carries
+//! the block, and says that `apply` finishes it.
 //! Test: `init_dry_run_makes_only_reads_10276`,
 //! `init_apply_refuses_a_same_title_project_10276`,
 //! `init_apply_refuses_a_repo_linked_project_10276`,
 //! `init_apply_refuses_a_dirty_issue_state_yaml_10276`,
-//! `init_apply_creates_the_board_and_prints_a_parseable_block_10276`.
+//! `init_apply_creates_the_board_and_prints_a_parseable_block_10276`,
+//! `init_refuses_a_mistyped_drop_option_before_any_call_10276`,
+//! `init_refuses_a_checkout_of_another_repo_naming_both_10276`,
+//! `init_failing_after_the_create_names_the_board_and_apply_finishes_it_10276`.
 
 use std::fmt::Write as _;
 
 use super::client::BoardClient;
 use super::error::BoardError;
-use super::project::ProjectBlock;
+use super::project::{ProjectBlock, validate_drop_options};
 use super::readme::manual_steps;
 use super::reconcile::{data_type, desired_options, execute, layout_name, plan_board};
 use super::snapshot::{owner_node, owner_projects, read_board, repo_projects};
 use super::spec::BoardSpec;
+use super::verbs::repo_slug;
 
 /// The `init` inputs.
 #[derive(Debug, Clone)]
@@ -97,6 +104,16 @@ pub(crate) fn init(
     spec: &BoardSpec,
     opts: &InitOptions,
 ) -> Result<InitReport, BoardError> {
+    // #10276: a mistyped option would print a block `validate_project` refuses.
+    validate_drop_options(&opts.drop_options, spec)?;
+    // #10276: the dirty-file check below reads the current checkout.
+    let checkout = repo_slug(client, None)?;
+    if !checkout.eq_ignore_ascii_case(opts.repo.trim()) {
+        return Err(BoardError::WrongCheckout {
+            repo: opts.repo.clone(),
+            checkout,
+        });
+    }
     if let Some(p) = owner_projects(client, &opts.owner)?
         .into_iter()
         .find(|p| p.title == opts.title)
@@ -123,7 +140,50 @@ pub(crate) fn init(
         return Ok(InitReport { number: None, text });
     }
     let owner_id = owner_node(client, &opts.owner)?;
-    let (_, number) = client.create_project(&owner_id, &opts.title)?;
+    let (_, number, url) = client.create_project(&owner_id, &opts.title)?;
+    let block = ProjectBlock {
+        owner: opts.owner.clone(),
+        number,
+        drop_options: opts.drop_options.clone(),
+        extra_fields: Vec::new(),
+    };
+    // #10276: past the create, every failure names the board and its recovery.
+    let (plan, writes, defaults) =
+        finish_board(client, spec, opts, number).map_err(|e| BoardError::InitIncomplete {
+            number,
+            url,
+            repo: opts.repo.clone(),
+            block: block_yaml(&block),
+            detail: e.to_string(),
+        })?;
+    let _ = writeln!(
+        text,
+        "created project #{number} \"{}\" for {} ({} change(s)):",
+        opts.title,
+        opts.repo,
+        writes + 1 + defaults
+    );
+    for step in &plan.steps {
+        let _ = writeln!(text, "  + {}", step.describe());
+    }
+    text.push_str(&manual_text(spec));
+    text.push_str("\ncommit this block to the repo's issue-state.yaml through a PR:\n\n");
+    text.push_str(&block_yaml(&block));
+    Ok(InitReport {
+        number: Some(number),
+        text,
+    })
+}
+
+/// Reconcile the just-created project `number` to the spec and delete
+/// GitHub's default view; returns the plan, its write count and how many
+/// default views went.
+fn finish_board(
+    client: &BoardClient<'_>,
+    spec: &BoardSpec,
+    opts: &InitOptions,
+    number: u64,
+) -> Result<(super::reconcile::Plan, usize, usize), BoardError> {
     let board = read_board(client, &opts.owner, number)?;
     let defaults: Vec<String> = board.views.iter().map(|v| v.id.clone()).collect();
     let plan = plan_board(client, spec, &opts.drop_options, &board, &opts.repo)?;
@@ -140,29 +200,7 @@ pub(crate) fn init(
     for id in &defaults {
         client.delete_view(id)?;
     }
-    let block = ProjectBlock {
-        owner: opts.owner.clone(),
-        number,
-        drop_options: opts.drop_options.clone(),
-        extra_fields: Vec::new(),
-    };
-    let _ = writeln!(
-        text,
-        "created project #{number} \"{}\" for {} ({} change(s)):",
-        opts.title,
-        opts.repo,
-        writes + 1 + defaults.len()
-    );
-    for step in &plan.steps {
-        let _ = writeln!(text, "  + {}", step.describe());
-    }
-    text.push_str(&manual_text(spec));
-    text.push_str("\ncommit this block to the repo's issue-state.yaml through a PR:\n\n");
-    text.push_str(&block_yaml(&block));
-    Ok(InitReport {
-        number: Some(number),
-        text,
-    })
+    Ok((plan, writes, defaults.len()))
 }
 
 /// The plan a dry run prints, from the spec alone.

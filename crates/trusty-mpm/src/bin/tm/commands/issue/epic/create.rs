@@ -17,7 +17,8 @@
 //! # Where failure is allowed to be partial
 //!
 //! Exactly one operation degrades instead of failing: a project attach the
-//! token's SCOPE refuses, which [`is_scope_refusal`] identifies by the message
+//! token's SCOPE refuses, which [`classify`](crate::commands::issue::board::attach::classify)
+//! identifies as `AttachFailure::MissingScope` by the message
 //! gh and GitHub both put it in. Any other attach failure — a 502, a rate
 //! limit, a bad project number — fails the run, because it is retryable and a
 //! waiver comment for it would be a permanent record of a transient outage.
@@ -330,7 +331,8 @@ fn retitle<B: EpicBackend>(backend: &B, tracker: u64, outcome: &str) -> anyhow::
 /// to one and the run exits 0. Every other attach failure is retryable, so it
 /// fails the run rather than writing a permanent record of a transient outage.
 /// What: `Ok` when there is no project to attach or the attach succeeded;
-/// `Err` when the failure is not [`is_scope_refusal`]; otherwise posts
+/// `Err` when [`classify`](crate::commands::issue::board::attach::classify)
+/// does not answer `AttachFailure::MissingScope`; otherwise posts
 /// `no-project: <reason>` — skipping the post when the issue already carries
 /// one, so two runs leave one waiver, not two — and records the degradation
 /// either way, so the report stays truthful about an issue with no project. A

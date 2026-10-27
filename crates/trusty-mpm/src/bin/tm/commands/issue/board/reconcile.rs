@@ -11,6 +11,7 @@
 //! fresh read for field ids, then views, the repo link and the README.
 //! Test: `apply_twice_records_no_mutation_on_the_second_run_10276`,
 //! `apply_refuses_to_remove_an_option_items_use_naming_it_and_the_count_10276`,
+//! `apply_refuses_to_remove_an_option_an_archived_item_uses_10276`,
 //! `apply_sends_every_existing_option_id_on_an_option_edit_10276`,
 //! `apply_dry_run_makes_no_mutation_10276`.
 
@@ -19,7 +20,7 @@ use std::collections::BTreeMap;
 use super::client::{BoardClient, OptionInput, color_name};
 use super::error::BoardError;
 use super::readme::render_readme;
-use super::snapshot::{Board, BoardField, board_items, read_board, repo_node};
+use super::snapshot::{Board, BoardField, board_items_with_archived, read_board, repo_node};
 use super::spec::{BoardSpec, FieldKind, FieldSpec, ViewLayout};
 use super::validate::STATUS_FIELD;
 
@@ -261,7 +262,8 @@ fn plan_options(
     }))
 }
 
-/// Items per option id of `field`; skipped (empty) on a board with no items.
+/// Items per option id of `field`, archived items included; skipped (empty)
+/// on a board with no items.
 fn option_usage(
     client: &BoardClient<'_>,
     board: &Board,
@@ -271,7 +273,8 @@ fn option_usage(
     if board.item_count == 0 {
         return Ok(usage);
     }
-    for item in board_items(client, &board.id, field)? {
+    // #10276: an archived item's value is cleared by an option remove too.
+    for item in board_items_with_archived(client, &board.id, field)? {
         if let Some(id) = item.option_id {
             *usage.entry(id).or_insert(0) += 1;
         }

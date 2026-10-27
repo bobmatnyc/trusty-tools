@@ -52,6 +52,8 @@ pub(super) struct SimItem {
     pub(super) id: String,
     pub(super) issue: (String, u64),
     pub(super) values: BTreeMap<String, String>,
+    /// #10276: archived; a read sees it only when it names both states.
+    pub(super) archived: bool,
 }
 
 /// A live project.
@@ -89,6 +91,8 @@ pub(super) struct Sim {
     /// `owner/repo` → its open issues.
     pub(super) issues: BTreeMap<String, Vec<SimIssue>>,
     pub(super) dirty: bool,
+    /// #10276: `gh repo view`'s answer; empty means `o/r`.
+    pub(super) checkout: String,
     /// stdout of `gh api --include repos/<repo>`, and whether it exits 0.
     pub(super) probe: (String, bool),
     pub(super) comments: BTreeMap<u64, Vec<String>>,
@@ -212,6 +216,7 @@ impl Sim {
             id,
             issue: (repo.to_string(), number),
             values,
+            archived: false,
         });
     }
 
@@ -417,7 +422,7 @@ fn names(list: &[String]) -> Value {
 }
 
 impl Sim {
-    fn snapshot(&self, owner: &str, number: u64) -> Value {
+    fn snapshot(&self, owner: &str, number: u64, all: bool) -> Value {
         let Some(p) = self
             .projects
             .iter()
@@ -461,7 +466,7 @@ impl Sim {
             "id": p.id, "number": p.number, "title": p.title,
             "url": format!("https://github.com/orgs/{}/projects/{}", p.owner, p.number),
             "closed": false, "readme": p.readme,
-            "items": {"totalCount": p.items.len()},
+            "items": {"totalCount": p.items.iter().filter(|i| all || !i.archived).count()},
             "fields": {"nodes": fields},
             "views": {"nodes": views},
             "repositories": {"nodes": p.repos.iter().map(|r| json!({"nameWithOwner": r})).collect::<Vec<_>>()},
@@ -469,10 +474,14 @@ impl Sim {
         }}})
     }
 
-    fn read(&self, name: &str, v: &BTreeMap<String, String>) -> Value {
+    /// `all`: the query names both archived states (#10276); otherwise an
+    /// archived item is hidden, the conservative reading of GitHub's default.
+    fn read(&self, name: &str, v: &BTreeMap<String, String>, all: bool) -> Value {
         let get = |k: &str| v.get(k).cloned().unwrap_or_default();
         match name {
-            "BoardSnapshot" => self.snapshot(&get("owner"), get("number").parse().unwrap_or(0)),
+            "BoardSnapshot" => {
+                self.snapshot(&get("owner"), get("number").parse().unwrap_or(0), all)
+            }
             "BoardItems" => {
                 let p = self.projects.iter().find(|p| p.id == get("id"));
                 let field_id = p
@@ -483,6 +492,7 @@ impl Sim {
                     .map(|p| {
                         p.items
                             .iter()
+                            .filter(|it| all || !it.archived)
                             .map(|it| {
                                 json!({
                                     "id": it.id,
@@ -575,7 +585,8 @@ impl Sim {
                 let number = self.projects.iter().map(|p| p.number).max().unwrap_or(0) + 1;
                 let p = self.new_project(&owner, number, &s("title"));
                 let id = self.projects[p].id.clone();
-                Ok(json!({"projectV2": {"id": id, "number": number, "url": "u"}}))
+                let url = format!("https://github.com/orgs/{owner}/projects/{number}");
+                Ok(json!({"projectV2": {"id": id, "number": number, "url": url}}))
             }
             "updateProjectV2Field" => {
                 let options = self.options_from(&input["singleSelectOptions"]);
@@ -734,7 +745,8 @@ impl CommandRunner for FakeGh {
             } else {
                 ""
             }),
-            ("gh", ["repo", "view", ..]) => ok("o/r\n"),
+            ("gh", ["repo", "view", ..]) if sim.checkout.is_empty() => ok("o/r\n"),
+            ("gh", ["repo", "view", ..]) => ok(format!("{}\n", sim.checkout)),
             ("gh", ["api", "--include", _]) => {
                 let (stdout, success) = sim.probe.clone();
                 CommandOutput {
@@ -764,7 +776,8 @@ impl CommandRunner for FakeGh {
                         .next()
                         .unwrap_or_default()
                         .to_string();
-                    ok(json!({"data": sim.read(&name, &vars(&call))}).to_string())
+                    let all = q.contains("archivedStates: [ARCHIVED, NOT_ARCHIVED]");
+                    ok(json!({"data": sim.read(&name, &vars(&call), all)}).to_string())
                 }
             }
             (
