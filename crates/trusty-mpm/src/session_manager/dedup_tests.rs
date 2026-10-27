@@ -976,7 +976,10 @@ fn plan_workspace_duplicates_owned_survivor_keeps_a_distinct_sibling() {
         "claude-b",
     );
     let losers = plan_workspace_duplicates(&[canonical, sibling], &HashSet::new());
-    assert!(losers.is_empty(), "no identity evidence, no loser: {losers:?}");
+    assert!(
+        losers.is_empty(),
+        "no identity evidence, no loser: {losers:?}"
+    );
 }
 
 /// #10351: a `pane_id` is unique per tmux server only, so an equal `%N` on a
@@ -987,19 +990,40 @@ fn plan_workspace_duplicates_pane_id_on_another_server_is_not_evidence() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().to_path_buf();
     let a = pane(
-        rec("tm-proj-01", Some("proj"), Some(&path), ManagedSessionState::Stopped, 1),
+        rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&path),
+            ManagedSessionState::Stopped,
+            1,
+        ),
         "%0",
         "100:1",
     );
     let b = pane(
-        rec("tm-proj-02", Some("proj"), Some(&path), ManagedSessionState::Stopped, 9),
+        rec(
+            "tm-proj-02",
+            Some("proj"),
+            Some(&path),
+            ManagedSessionState::Stopped,
+            9,
+        ),
         "%0",
         "200:2",
     );
-    let mut c = rec("tm-proj-03", Some("proj"), Some(&path), ManagedSessionState::Stopped, 5);
+    let mut c = rec(
+        "tm-proj-03",
+        Some("proj"),
+        Some(&path),
+        ManagedSessionState::Stopped,
+        5,
+    );
     c.pane_id = Some("%0".into());
     let losers = plan_workspace_duplicates(&[a, b, c], &HashSet::new());
-    assert!(losers.is_empty(), "a pane id across servers is not evidence: {losers:?}");
+    assert!(
+        losers.is_empty(),
+        "a pane id across servers is not evidence: {losers:?}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1156,7 +1180,10 @@ async fn reconcile_dedup_keeps_concurrent_sessions_sharing_one_checkout() {
             "concurrent session {id} on the shared checkout must not be decommissioned"
         );
     }
-    assert!(ws_dir.path().exists(), "the shared checkout must remain on disk");
+    assert!(
+        ws_dir.path().exists(),
+        "the shared checkout must remain on disk"
+    );
 }
 
 // ---------------------------------------------------------------------
