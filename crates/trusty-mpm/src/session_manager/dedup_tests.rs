@@ -620,6 +620,21 @@ fn owned(mut r: SessionRecord) -> SessionRecord {
     r
 }
 
+/// Give a record a Claude session id — same-identity evidence (#10351).
+fn claude(mut r: SessionRecord, id: &str) -> SessionRecord {
+    r.claude_session_id = Some(id.into());
+    r
+}
+
+/// Give a record a tmux pane identity on server `server` — the other kind of
+/// same-identity evidence (#10351). A renamed or re-adopted #3396 phantom
+/// keeps its pane, so it carries the same pane identity as its survivor.
+fn pane(mut r: SessionRecord, pane_id: &str, server: &str) -> SessionRecord {
+    r.pane_id = Some(pane_id.into());
+    r.tmux_server = Some(server.into());
+    r
+}
+
 /// THE #3396 regression case: two non-`Decommissioned` records resolve to
 /// the LITERAL SAME existing workspace directory. One's `tmux_name` is live,
 /// the other's is not (its tmux session was renamed/replaced out from under
@@ -633,20 +648,29 @@ fn owned(mut r: SessionRecord) -> SessionRecord {
 #[test]
 fn plan_workspace_duplicates_collapses_dead_sibling_of_live_record() {
     let dir = TempDir::new().unwrap();
-    let live = rec(
-        "tm-tcode-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        1,
+    let live = pane(
+        rec(
+            "tm-tcode-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            1,
+        ),
+        "%5",
+        "100:1",
     );
-    let stale = rec(
-        "tm-tm-tcode-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        50, // more recently "active" per the record, but must not matter —
-            // the live tmux_name always wins over recency.
+    // #10351: the phantom is the same pane re-adopted under a new name.
+    let stale = pane(
+        rec(
+            "tm-tm-tcode-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            50, // more recently "active" per the record, but must not matter —
+                // the live tmux_name always wins over recency.
+        ),
+        "%5",
+        "100:1",
     );
     let live_id = live.id;
     let stale_id = stale.id;
@@ -662,26 +686,35 @@ fn plan_workspace_duplicates_collapses_dead_sibling_of_live_record() {
     assert!(!losers.contains(&live_id), "the live record must survive");
 }
 
-/// Two records at the same literal path, NEITHER currently live: the most
-/// recently active/created one survives (mirrors `plan_dedup`'s /unknown
-/// tie-break), the other is the loser.
+/// Two records at the same literal path, NEITHER currently live, sharing one
+/// `claude_session_id`: the most recently active/created one survives
+/// (mirrors `plan_dedup`'s /unknown tie-break), the other is the loser.
+///
+/// Why (#10351): this is the guard for the evidence rule — shared identity
+/// still collapses to exactly one loser.
 /// Test: this function IS the test.
 #[test]
 fn plan_workspace_duplicates_picks_most_recent_when_none_live() {
     let dir = TempDir::new().unwrap();
-    let older = rec(
-        "tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        1,
+    let older = claude(
+        rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            1,
+        ),
+        "claude-a",
     );
-    let newer = rec(
-        "tm-proj-02",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        99,
+    let newer = claude(
+        rec(
+            "tm-proj-02",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            99,
+        ),
+        "claude-a",
     );
     let older_id = older.id;
     let newer_id = newer.id;
@@ -698,19 +731,25 @@ fn plan_workspace_duplicates_picks_most_recent_when_none_live() {
 #[test]
 fn plan_workspace_duplicates_leaves_two_live_records_untouched() {
     let dir = TempDir::new().unwrap();
-    let a = rec(
-        "tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        1,
+    let a = claude(
+        rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            1,
+        ),
+        "claude-a",
     );
-    let b = rec(
-        "tm-proj-02",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        99,
+    let b = claude(
+        rec(
+            "tm-proj-02",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            99,
+        ),
+        "claude-a",
     );
     let mut live_names = HashSet::new();
     live_names.insert("tm-proj-01".to_string());
@@ -730,19 +769,27 @@ fn plan_workspace_duplicates_leaves_two_live_records_untouched() {
 #[test]
 fn plan_workspace_duplicates_owned_record_is_permanent_survivor() {
     let dir = TempDir::new().unwrap();
-    let canonical = owned(rec(
-        "tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        1,
-    ));
-    let phantom = rec(
-        "tm-tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        99, // more recent — must not matter, ownership always wins.
+    let canonical = pane(
+        owned(rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            1,
+        )),
+        "%3",
+        "100:1",
+    );
+    let phantom = pane(
+        rec(
+            "tm-tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            99, // more recent — must not matter, ownership always wins.
+        ),
+        "%3",
+        "100:1",
     );
     let canonical_id = canonical.id;
     let phantom_id = phantom.id;
@@ -767,19 +814,27 @@ fn plan_workspace_duplicates_owned_record_is_permanent_survivor() {
 #[test]
 fn plan_workspace_duplicates_owned_record_never_kills_live_duplicate() {
     let dir = TempDir::new().unwrap();
-    let canonical = owned(rec(
-        "tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        1,
-    ));
-    let live_dupe = rec(
-        "tm-tm-proj-01",
-        Some("proj"),
-        Some(&dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        99,
+    let canonical = pane(
+        owned(rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            1,
+        )),
+        "%3",
+        "100:1",
+    );
+    let live_dupe = pane(
+        rec(
+            "tm-tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            99,
+        ),
+        "%3",
+        "100:1",
     );
     let mut live_names = HashSet::new();
     live_names.insert("tm-tm-proj-01".to_string());
@@ -863,6 +918,90 @@ fn plan_workspace_duplicates_singleton_untouched() {
     assert!(plan_workspace_duplicates(&[only], &HashSet::new()).is_empty());
 }
 
+/// Build `n` Stopped, unowned records on one checkout, each with its own
+/// Claude session id and pane (#10351).
+fn concurrent_sessions_on(dir: &std::path::Path, n: usize) -> Vec<SessionRecord> {
+    (0..n)
+        .map(|i| {
+            let r = rec(
+                &format!("tm-proj-{i:02}"),
+                Some("proj"),
+                Some(&dir.to_path_buf()),
+                ManagedSessionState::Stopped,
+                i as i64,
+            );
+            pane(claude(r, &format!("claude-{i}")), &format!("%{i}"), "100:1")
+        })
+        .collect()
+}
+
+/// #10351: concurrent sessions that share one main checkout (no per-session
+/// worktree, ADR-0037) carry no same-identity evidence, so none is a loser.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_keeps_distinct_sessions_sharing_one_checkout() {
+    let dir = TempDir::new().unwrap();
+    let records = concurrent_sessions_on(dir.path(), 5);
+    let losers = plan_workspace_duplicates(&records, &HashSet::new());
+    assert!(
+        losers.is_empty(),
+        "distinct sessions on one checkout must never be losers: {losers:?}"
+    );
+}
+
+/// #10351, owned-survivor arm: a dead unowned sibling with a different
+/// identity from the owned record is a concurrent session, not a duplicate.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_owned_survivor_keeps_a_distinct_sibling() {
+    let dir = TempDir::new().unwrap();
+    let canonical = claude(
+        owned(rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            1,
+        )),
+        "claude-a",
+    );
+    let sibling = claude(
+        rec(
+            "tm-proj-02",
+            Some("proj"),
+            Some(&dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            99,
+        ),
+        "claude-b",
+    );
+    let losers = plan_workspace_duplicates(&[canonical, sibling], &HashSet::new());
+    assert!(losers.is_empty(), "no identity evidence, no loser: {losers:?}");
+}
+
+/// #10351: a `pane_id` is unique per tmux server only, so an equal `%N` on a
+/// different (or unknown) server is not same-identity evidence.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_pane_id_on_another_server_is_not_evidence() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    let a = pane(
+        rec("tm-proj-01", Some("proj"), Some(&path), ManagedSessionState::Stopped, 1),
+        "%0",
+        "100:1",
+    );
+    let b = pane(
+        rec("tm-proj-02", Some("proj"), Some(&path), ManagedSessionState::Stopped, 9),
+        "%0",
+        "200:2",
+    );
+    let mut c = rec("tm-proj-03", Some("proj"), Some(&path), ManagedSessionState::Stopped, 5);
+    c.pane_id = Some("%0".into());
+    let losers = plan_workspace_duplicates(&[a, b, c], &HashSet::new());
+    assert!(losers.is_empty(), "a pane id across servers is not evidence: {losers:?}");
+}
+
 // ---------------------------------------------------------------------
 // `reconcile_on_boot` — end-to-end wiring for exact-workspace duplicates.
 // ---------------------------------------------------------------------
@@ -881,19 +1020,27 @@ async fn reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record() {
     fake.seeded_names.lock().unwrap().push("tm-tcode-01".into());
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
-    let live = rec(
-        "tm-tcode-01",
-        Some("proj"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        1,
+    let live = pane(
+        rec(
+            "tm-tcode-01",
+            Some("proj"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            1,
+        ),
+        "%5",
+        "100:1",
     );
-    let stale = rec(
-        "tm-tm-tcode-01",
-        Some("proj"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        50,
+    let stale = pane(
+        rec(
+            "tm-tm-tcode-01",
+            Some("proj"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            50,
+        ),
+        "%5",
+        "100:1",
     );
     let live_id = live.id;
     let stale_id = stale.id;
@@ -932,19 +1079,27 @@ async fn reconcile_dedup_collapses_dead_duplicate_of_owned_record() {
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
-    let canonical = owned(rec(
-        "tm-proj-01",
-        Some("proj"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        1,
-    ));
-    let phantom = rec(
-        "tm-tm-proj-01",
-        Some("proj"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        99,
+    let canonical = pane(
+        owned(rec(
+            "tm-proj-01",
+            Some("proj"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            1,
+        )),
+        "%3",
+        "100:1",
+    );
+    let phantom = pane(
+        rec(
+            "tm-tm-proj-01",
+            Some("proj"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            99,
+        ),
+        "%3",
+        "100:1",
     );
     let canonical_id = canonical.id;
     let phantom_id = phantom.id;
@@ -972,6 +1127,38 @@ async fn reconcile_dedup_collapses_dead_duplicate_of_owned_record() {
     );
 }
 
+/// #10351 end-to-end: five concurrent sessions that share one main checkout,
+/// all Stopped and unowned, none live in tmux, each with its own Claude
+/// session and pane. Boot reconcile must decommission none of them.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_dedup_keeps_concurrent_sessions_sharing_one_checkout() {
+    let dir = TempDir::new().unwrap();
+    let ws_dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let records = concurrent_sessions_on(ws_dir.path(), 5);
+    let ids: Vec<ManagedSessionId> = records.iter().map(|r| r.id).collect();
+    {
+        let mut store = mgr.store.write().await;
+        for r in records {
+            store.upsert(r).await.unwrap();
+        }
+    }
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    for id in &ids {
+        assert_ne!(
+            mgr.get(id).await.unwrap().state,
+            ManagedSessionState::Decommissioned,
+            "concurrent session {id} on the shared checkout must not be decommissioned"
+        );
+    }
+    assert!(ws_dir.path().exists(), "the shared checkout must remain on disk");
+}
+
 // ---------------------------------------------------------------------
 // Fail-open: an unobservable tmux must never be read as an empty tmux.
 //
@@ -993,7 +1180,7 @@ async fn reconcile_dedup_collapses_dead_duplicate_of_owned_record() {
 // ---------------------------------------------------------------------
 
 /// Seed the incident shape: two unowned records at one literal existing path,
-/// the first of them live in tmux.
+/// the first of them live in tmux, sharing one `claude_session_id`.
 ///
 /// Why: every refusal test below needs the same fixture, and the fixture is
 /// the point — a different shape would exercise a different `plan_*` arm.
@@ -1008,19 +1195,28 @@ async fn seed_same_path_pair(
 ) -> (SessionManager, ManagedSessionId, ManagedSessionId, TempDir) {
     let ws_dir = TempDir::new().unwrap();
     let mgr = SessionManager::new(dir.path(), tmux).await.unwrap();
-    let live = rec(
-        "tm-dogfood",
-        Some("bobmatnyc/trusty-tools"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Active,
-        1,
+    // #10351: both carry one Claude session id, so the planner WOULD pick a
+    // loser here; without it the identity rule alone would protect the pair
+    // and the refusal tests would pass for the wrong reason.
+    let live = claude(
+        rec(
+            "tm-dogfood",
+            Some("bobmatnyc/trusty-tools"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Active,
+            1,
+        ),
+        "claude-dogfood",
     );
-    let other = rec(
-        "tm-dogfood-02",
-        Some("bobmatnyc/trusty-tools"),
-        Some(&ws_dir.path().to_path_buf()),
-        ManagedSessionState::Stopped,
-        900,
+    let other = claude(
+        rec(
+            "tm-dogfood-02",
+            Some("bobmatnyc/trusty-tools"),
+            Some(&ws_dir.path().to_path_buf()),
+            ManagedSessionState::Stopped,
+            900,
+        ),
+        "claude-dogfood",
     );
     let live_id = live.id;
     let other_id = other.id;
