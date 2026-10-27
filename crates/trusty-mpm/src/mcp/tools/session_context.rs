@@ -14,12 +14,6 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Client cut: a description longer than this is truncated by the client (#10300).
-const CLIENT_DESCRIPTION_CUT: usize = 4096;
-
-/// The #10300 closure budget for each context-tool description.
-const CONTEXT_DESCRIPTION_BUDGET: usize = 700;
-
 /// Build the two PM pause/resume context tool descriptors.
 ///
 /// Why: they replace the bash `tm session catchup` / git / snapshot-file
@@ -151,6 +145,12 @@ pub(super) fn session_context_tools() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Client cut: a description longer than this is truncated by the client (#10300).
+    const CLIENT_DESCRIPTION_CUT: usize = 4096;
+
+    /// The #10300 closure budget for each context-tool description.
+    const CONTEXT_DESCRIPTION_BUDGET: usize = 700;
 
     /// #10300: both descriptions stay under the client cut and the ~600 B budget.
     #[test]
