@@ -1,3 +1,0 @@
-Fixed
-- `tm sessctl run` and `mpm.control.run` no longer pass `--workdir` to the stream-json worker. `claude` has no such option and exited with `error: unknown option '--workdir'` before the worker started; the workdir now reaches `claude` as its working directory only (#9704).
-- A control-plane run now writes the project's tm hooks, the `tm hook --egress-guard` entry included, into `<workdir>/.claude/settings.json` before it starts a worker, on the stream-json and tmux backends. The run is refused with no worker started and no session number used when the hooks cannot be written, or when an existing `settings.json` cannot be parsed and so cannot be updated (#9704).

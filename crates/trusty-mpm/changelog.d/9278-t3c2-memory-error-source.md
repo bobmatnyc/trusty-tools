@@ -1,3 +1,0 @@
-Changed
-- The `source` of a `SmMemoryError::Operation` from `recall` or `recall_deep`, and of a `PortfolioMemoryError::Operation` from `recall`, now wraps trusty-memory's `engine::EngineError`. The field is still an `anyhow::Error`; an embedder that cannot be built is `EngineError::Embed`, and its text no longer starts with `acquire shared embedder for ...` ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
-- The `source` of a `SmMemoryError::Operation` from `remember` changes the same way: an embedder that cannot be built is now `EngineError::Embed` (it was `Other`), and its text no longer starts with `acquire shared embedder for remember:`.

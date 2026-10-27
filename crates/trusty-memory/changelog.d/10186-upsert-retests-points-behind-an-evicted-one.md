@@ -1,2 +1,0 @@
-Fixed
-- Above the exhaustive-scan threshold, a drawer could go missing from a search for its own text after an upsert elsewhere, until the palace reopened. The upsert re-tested only the point it evicted from a neighbour list, not the points the graph reached only through that one; it now walks on from every evicted point its search misses and scans each point behind it that the graph no longer reaches ([#10186](https://github.com/bobmatnyc/trusty-tools/issues/10186))

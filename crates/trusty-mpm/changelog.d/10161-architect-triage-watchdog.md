@@ -1,2 +1,0 @@
-Added
-- `tm fleet init` seeds `scripts/alert_triage.py`, which sorts poller alerts into wake and log by fixed rules and holds and sends the rest to one batched Haiku call that fails open to wake, and `scripts/architect-watchdog.py`, which classifies the Architect session as dead, frozen, silent or ok and decides on a debounced relaunch; the shipped poller does not load either module yet (Refs #10161)

@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.1] — 2026-10-26
+
+### Added
+
+- `LoadReport` has a new public `fingerprint: u64` field. A report from a `PolicyLoader` whose load settled carries a nonzero digest of the sources it was loaded from, and the digest changes whenever the loader reloads. A load that did not settle (#9808), a one-shot load and the placeholder report carry 0, which means a cache must never key on that report (#8454).
+- A new `trusty_channels::audit` module exposes the channel audit record and log that gchat already writes: `AuditRecord`, `AuditEvent`, `AuditLog`, `clip` and `StateError`. `AuditRecord` gains `channel`, `project`, `commit`, `author`, `committed_at` and `routes` fields and `AuditEvent` gains `RouteChanged`; both are `#[non_exhaustive]`. `AuditLog::record_all` appends a batch with one write and one fsync, and `AuditLog::owner_only` creates its file 0600 and narrows an existing one; when an owner-only append fails partway, the file is cut back to its length before the write, so every line stays a complete record. gchat's own state files keep their mode (Refs #9832, #8433).
+- `FileStatus` has a new `verified_commit` field: the default-branch commit the load gate verified an `Effective` file's bytes against, `None` for any other state. `policy::commit_author` returns the author and commit time of the last commit at or before a given commit that changed `.trusty-channels/routes.toml`; it accepts only a 40 or 64 character lowercase-hex object id (Refs #9832).
+
+### Fixed
+
+- An owner-only `AuditLog` append now holds an exclusive file lock from the length read through the write, the fsync and any cut-back. A failed append no longer truncates away a record another writer appended to the same file in between. When the file ends in a torn line, the next owner-only append starts on a line of its own instead of joining the fragment (Refs #8433).
+- `PolicyLoader` now samples its fingerprint after a load reads the files, and keeps it only when it equals the sample taken before the read and matches the host text, the canonical-path verdict and every project file the load read. Otherwise it keeps none, so the next `refresh` reloads. Before, a route or host change that was reverted before the next `refresh` left the changed policy published until the files changed again (#9808).
+- `slack_read_canvas` and `slack_read_file` work again. The Slack client now sends `files.info` and the other read methods it calls (`conversations.info`, `conversations.history`, `conversations.replies`, `conversations.members`, `users.info`, `reactions.get`, `emoji.list`) as a GET with URL-query parameters. Slack ignored the POST JSON arguments on these methods and answered `invalid_arguments`. A `files.info` failure now names the method, e.g. `invalid_arguments (from files.info)` (Refs #9919).
+
 ## [0.1.0] — 2026-10-11
 
 First release. Refs [#8454](https://github.com/bobmatnyc/trusty-tools/issues/8454).

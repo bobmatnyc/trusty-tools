@@ -1,2 +1,0 @@
-Fixed
-- `PolicyLoader` now samples its fingerprint after a load reads the files, and keeps it only when it equals the sample taken before the read and matches the host text, the canonical-path verdict and every project file the load read. Otherwise it keeps none, so the next `refresh` reloads. Before, a route or host change that was reverted before the next `refresh` left the changed policy published until the files changed again (#9808).

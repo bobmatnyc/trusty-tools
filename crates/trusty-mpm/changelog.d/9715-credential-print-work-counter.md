@@ -1,2 +1,0 @@
-Fixed
-- The pm-guard credential-print test `wide_bracket_runs_scan_in_linear_work` no longer asserts a 5 s wall-clock limit, which failed on a saturated CI shard. It now counts the bytes the scan's slice readers walk, in a test-only `scan_work` counter, and asserts at most 8 per command byte and linear growth. The arithmetic-reader byte count moves into the same counter. The release binary and the guard's verdicts are unchanged (#9715).
