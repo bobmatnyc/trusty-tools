@@ -86,7 +86,7 @@ Effective mode = call field, else route `mode`, else `bot`. A result outside the
 | Slack | Bot token `xoxb-` (registry `slack`); Socket Mode app token `slack-app` is receive-only, not a `bot_ref` | User token `xoxp-` (registry `slack-user`, exists) | [tokens](https://docs.slack.dev/authentication/tokens) |
 | Notion | Internal connection token, `bot.owner.type = workspace` (keys `notion-companion`, `notion-aria`, `notion-cto`) | Personal access token acting as its creator (key `notion-user`, De6) | [authorization](https://developers.notion.com/guides/get-started/authorization), [PAT guide](https://developers.notion.com/guides/get-started/personal-access-tokens) |
 | Google Chat | Workspace service account (`key_file`) | OAuth user credential (key `gchat-user`, new row) | [Chat auth](https://developers.google.com/workspace/chat/authenticate-authorize) |
-| Google Docs | Workspace service account, with docs shared to it | User OAuth credential (key to be named; `google-oauth` is a client secret, not a user token) | [Docs API auth](https://developers.google.com/workspace/docs/api/auth) |
+| Google Docs | Workspace service account, with docs shared to it | User OAuth credential (key to be named; `google-oauth` is a client secret, not a user token) | [Docs API auth](https://developers.google.com/workspace/docs/api/auth) (OAuth user flow), [service accounts](https://developers.google.com/identity/protocols/oauth2/service-account) |
 | Telegram | Bot API token (registry `telegram`) | User-account (MTProto) session (key `telegram-user`, new row) | [Bot API](https://core.telegram.org/bots/api), [API](https://core.telegram.org/api) |
 
 Gaps, as of 2026-10-27:
