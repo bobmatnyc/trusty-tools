@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.66.0] — 2026-10-26
+
+### Breaking
+
+- `embedder_client::RecycleTrigger` gains the `HardFootprint` variant and `RecycleSnapshot` gains the `hard_footprint_kills` field (#10207); an exhaustive `match` on the enum or a struct literal of the snapshot outside this crate no longer compiles. `RecycleConfig` gains `hard_footprint_mb` and `startup_load_scale_max` (it is `#[non_exhaustive]`, so no caller breaks).
+
+### Added
+
+- `uds::send_framed_stream_request_with(path, request, open_timeout, frame_timeout)` takes separate budgets for the dial and request write and for each frame read. `send_framed_stream_request` and `send_framed_stream_request_capped` keep their signatures and pass their one figure to both (#7216).
+- `uds::test_support::bind_hardened_stub(dir)`, behind the new `uds-test-support` feature, binds a test stub at `dir/stub.sock` with `dir` at `0700` and the socket at `0600`, so `connect_hardened` accepts it. It returns `Result<(UnixListener, PathBuf), UdsSecurityError>` (#7215).
+- `embedder_client::SupervisorConfig::first_spawn_probe_timeout(load_per_cpu)` returns the load-scaled first-spawn startup-probe timeout, for a caller that wraps the first spawn in its own timeout (#10207).
+- `claude_config::discover_claude_settings_with(home, depth, on_home_device)` runs the settings walk with the device check supplied as a predicate; `HOME_SKIP_DIRS` and `same_device` are public alongside it ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Fixed
+
+- `EmbedderSupervisor` bounds the sidecar footprint when a footprint recycle cannot start its replacement (#10207). A hard limit, `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` (default twice the recycle ceiling, `0` disables, a value not above the ceiling is ignored with a WARN), is checked on every recycle tick, during a recycle back-off hold, and while a replacement is starting. Over it, the sidecar is killed through the crash path and respawned with no back-off delay; the kill counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS` (not as a wedge restart), and `/health` `embedder_recycle.hard_footprint_kills` counts it.
+- The sidecar startup probe scales with host load: the timeout is multiplied by `1 + load1/ncpu`, capped by `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` (default 4), and a recycle replacement or crash respawn gets at least 120 s before scaling (#10207).
+- New `sys_metrics::load_per_cpu()` returns the one-minute load average per CPU.
+- Every failed sidecar footprint read counts in `/health` `embedder_recycle.footprint_read_errors`, including reads during a recycle back-off hold, on a generation's first tick, and while a replacement is starting, so a hard limit that cannot read the sidecar is visible (#10207). A startup timeout too large to scale (for example a huge `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`) is used unscaled instead of panicking.
+- `discover_claude_settings` and `discover_claude_projects` no longer enter `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Pictures`, `~/Movies` or `~/Music`, and never cross onto another device; a directory whose device cannot be read is skipped. A read in an iCloud-synced folder could freeze the walk ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Documentation
+
+- `daemon_token`'s module docs describe `trusty-code serve --http` as retired rather than as a running listener ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+
 ## [0.65.0] — 2026-10-22
 
 ### Breaking
