@@ -160,11 +160,15 @@ async fn an_auto_resume_without_a_relauncher_fails_closed() {
         .await
         .expect_err("an auto-resume with no relauncher must fail, not report Ok");
     assert!(
-        matches!(err, crate::session_manager::ManagedError::AutoResumeRecorded(_)),
+        matches!(
+            err,
+            crate::session_manager::ManagedError::AutoResumeRecorded(_)
+        ),
         "the failure is already on the record, so the poller must not add a second note: {err:?}"
     );
     assert!(
-        err.to_string().contains("no runtime relauncher is installed"),
+        err.to_string()
+            .contains("no runtime relauncher is installed"),
         "{err}"
     );
 
