@@ -38,6 +38,15 @@
 //!   all-dead) keeps the most-recently-active/created member and
 //!   decommissions the rest — there is nothing on disk to lose in that case.
 //!
+//! **Exact-path pass (#3396, narrowed by #10351):** [`plan_workspace_duplicates`]
+//! is the one exception to resolved-existing immunity. It groups records by
+//! canonical `workspace_path`, but several concurrent sessions legitimately
+//! share one main checkout (no per-session worktree, #5274 / ADR-0037), so a
+//! shared path alone proves nothing. A same-path record is a loser only with
+//! positive same-identity evidence against the survivor: an equal non-`None`
+//! `claude_session_id`, or an equal non-`None` `pane_id` on the same
+//! `tmux_server`. No evidence, no loser.
+//!
 //! An unresolved/dead loser is additionally rechecked against the SAME
 //! [`is_resolved_existing`] predicate immediately before decommission runs
 //! (belt-and-suspenders against a TOCTOU race); a loser that fails the
@@ -52,8 +61,10 @@
 //! [`SessionManager::observed_live_managed_names`], which refuses rather than
 //! reporting an empty set it cannot stand behind.
 //!
-//! Test: `plan_dedup_*`, `is_resolved_existing_*`, and `reconcile_dedup_*` in
-//! `dedup_tests.rs`; the refusal contract in `dedup_refuses_*`.
+//! Test: `plan_dedup_*`, `is_resolved_existing_*`, `plan_workspace_duplicates_*`
+//! and `reconcile_dedup_*` in `dedup_tests.rs` (the #10351 shape in
+//! `reconcile_dedup_keeps_concurrent_sessions_sharing_one_checkout`); the
+//! refusal contract in `dedup_refuses_*`.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -171,7 +182,7 @@ impl SessionManager {
 
         // #3396: also collapse EXACT-workspace_path duplicates — two+
         // non-Decommissioned records resolving to the literal SAME on-disk
-        // worktree. `plan_dedup` above deliberately never touches this shape
+        // worktree AND carrying same-identity evidence (#10351). `plan_dedup` above deliberately never touches this shape
         // (its `source_id` grouping is per-repository, and a
         // resolved-existing member is categorically immune there — both
         // correct for the LEGITIMATE concurrent-worktree case, which is why
@@ -450,30 +461,47 @@ pub(crate) fn plan_dedup(
     losers
 }
 
+/// True when `a` and `b` carry positive evidence of one session identity.
+///
+/// Why (#10351): a shared `workspace_path` is not that evidence — concurrent
+/// sessions share one main checkout by design.
+/// What: equal non-`None` `claude_session_id`, or equal non-`None` `pane_id`
+/// together with an equal non-`None` `tmux_server` (a `%N` is unique per
+/// server only, #9004).
+/// Test: `plan_workspace_duplicates_picks_most_recent_when_none_live`,
+/// `plan_workspace_duplicates_pane_id_on_another_server_is_not_evidence`.
+fn same_identity(a: &SessionRecord, b: &SessionRecord) -> bool {
+    fn eq(x: &Option<String>, y: &Option<String>) -> bool {
+        matches!((x, y), (Some(x), Some(y)) if x == y)
+    }
+    eq(&a.claude_session_id, &b.claude_session_id)
+        || (eq(&a.pane_id, &b.pane_id) && eq(&a.tmux_server, &b.tmux_server))
+}
+
 /// Plan losers among records that share the IDENTICAL, resolved-existing
-/// `workspace_path` (#3396).
+/// `workspace_path` (#3396), given same-identity evidence (#10351).
 ///
 /// Why: [`plan_dedup`]'s `source_id` grouping is per-REPOSITORY by design
 /// (see the module docs) — it deliberately never touches two
 /// resolved-existing records with DIFFERENT `workspace_path`s, because that
 /// shape is the legitimate concurrent-worktree-sessions case, and it treats
 /// ANY resolved-existing member as categorically immune regardless of group
-/// size. But two records pointing at the exact SAME `workspace_path` are
-/// never that: a single worktree directory hosts at most one live managed
-/// identity, so a group of 2+ non-`Decommissioned` records sharing one
-/// resolved-existing path is ALWAYS a duplicate-identity bug (#3396 — e.g. a
+/// size. Two records pointing at the exact SAME `workspace_path` MAY be a
+/// duplicate-identity bug (#3396 — e.g. a
 /// live tmux session renamed/replaced out from under its record, then
 /// re-discovered and adopted under a different name against the same cwd by
 /// [`super::reconcile::SessionManager::reconcile_on_boot`]'s external-adopt
 /// loop, before that loop's own #3396 duplicate-prevention check existed).
+/// They may equally be distinct concurrent sessions in one main checkout
+/// (#10351, ADR-0037), so the path is only the grouping key; the loser test is
+/// [`same_identity`] with the survivor.
 /// `plan_dedup`'s live-group guard ("skip the WHOLE group if ANY member is
 /// live") and its resolved-existing categorical immunity both, correctly,
 /// refuse to touch this shape — which is exactly why a #3396 stale duplicate
 /// persists across every `plan_dedup`-only pass. This function is the
 /// narrowly-scoped exact-path counterpart: it groups by canonicalized
-/// `workspace_path` alone (ignoring `source_id`), and — because "same
-/// directory" is unambiguous where "same repository" is not — is allowed to
-/// pick a survivor even when one member is currently live.
+/// `workspace_path` alone (ignoring `source_id`) and may pick a survivor even
+/// when one member is currently live.
 /// What: groups non-`Decommissioned`, resolved-existing (per
 /// [`is_resolved_existing`]) records by canonicalized `workspace_path`, then
 /// for each group of 2+:
@@ -484,9 +512,9 @@ pub(crate) fn plan_dedup(
 ///   members sharing one path should structurally never happen; rather than
 ///   guess, that shape leaves the WHOLE group untouched.
 /// - Exactly one owned member: it is the automatic survivor, and every
-///   `workspace_owned = false` sibling whose `tmux_name` is currently DEAD is
-///   a loser (a live one is left alone too — never decommission a currently
-///   active session).
+///   `workspace_owned = false` sibling whose `tmux_name` is currently DEAD and
+///   that has [`same_identity`] with the owned record is a loser (a live one
+///   is left alone too — never decommission a currently active session).
 /// - Zero owned members: the survivor is chosen among the unowned members —
 ///   if exactly one has a live `tmux_name` it survives; if none are live, the
 ///   most recently active/created one survives (mirrors `plan_dedup`'s
@@ -494,12 +522,16 @@ pub(crate) fn plan_dedup(
 ///   is left untouched — two genuinely-live panes pointed at the same
 ///   directory is ambiguous enough that guessing a survivor risks tearing
 ///   down a real session, so this defers to the operator rather than picking
-///   one.
+///   one. Either way only a member with [`same_identity`] to the survivor is
+///   a loser.
 ///
-/// A loser selected here therefore always has both `workspace_owned = false`
-/// (decommission never deletes the directory) and a currently-DEAD
-/// `tmux_name` (decommission never kills a live tmux session).
-/// Test: the `plan_workspace_duplicates_*` tests in `dedup_tests.rs`.
+/// A loser selected here therefore always has `workspace_owned = false`
+/// (decommission never deletes the directory), a currently-DEAD `tmux_name`
+/// (decommission never kills a live tmux session), and same-identity evidence
+/// against its survivor (#10351: fail closed without it).
+/// Test: the `plan_workspace_duplicates_*` tests in `dedup_tests.rs`;
+/// `plan_workspace_duplicates_keeps_distinct_sessions_sharing_one_checkout` and
+/// `reconcile_dedup_keeps_concurrent_sessions_sharing_one_checkout` (#10351).
 pub(crate) fn plan_workspace_duplicates(
     records: &[SessionRecord],
     live_names: &HashSet<String>,
@@ -534,13 +566,16 @@ pub(crate) fn plan_workspace_duplicates(
             // do not guess which is "real" — leave the whole group alone.
             continue;
         }
-        if owned.len() == 1 {
-            // The owned record is the permanent survivor. Every unowned
-            // sibling that is NOT currently live is a duplicate of it.
+        if let [survivor] = owned.as_slice() {
+            // The owned record is the permanent survivor. An unowned sibling
+            // that is NOT currently live is a duplicate of it only with
+            // same-identity evidence.
+            // #10351: a shared checkout alone is no evidence; fail closed.
             losers.extend(
                 unowned
                     .iter()
                     .filter(|r| !live_names.contains(&r.tmux_name))
+                    .filter(|r| same_identity(r, survivor))
                     .map(|r| r.id),
             );
             continue;
@@ -555,20 +590,22 @@ pub(crate) fn plan_workspace_duplicates(
             .copied()
             .filter(|r| live_names.contains(&r.tmux_name))
             .collect();
-        match live_candidates.len() {
-            0 => {
-                if let Some(survivor) = unowned.iter().copied().max_by(|a, b| by_recency(a, b)) {
-                    losers.extend(unowned.iter().filter(|r| r.id != survivor.id).map(|r| r.id));
-                }
-            }
-            1 => {
-                let survivor_id = live_candidates[0].id;
-                losers.extend(unowned.iter().filter(|r| r.id != survivor_id).map(|r| r.id));
-            }
-            _ => {
-                // 2+ simultaneously-live candidates for one directory: leave
-                // the whole group untouched (see doc above).
-            }
+        let survivor = match live_candidates.as_slice() {
+            [] => unowned.iter().copied().max_by(|a, b| by_recency(a, b)),
+            [live] => Some(*live),
+            // 2+ simultaneously-live candidates for one directory: leave the
+            // whole group untouched (see doc above).
+            _ => None,
+        };
+        if let Some(survivor) = survivor {
+            // #10351: only a same-identity sibling is a duplicate of the
+            // survivor; distinct sessions sharing one checkout are kept.
+            losers.extend(
+                unowned
+                    .iter()
+                    .filter(|r| r.id != survivor.id && same_identity(r, survivor))
+                    .map(|r| r.id),
+            );
         }
     }
     losers
