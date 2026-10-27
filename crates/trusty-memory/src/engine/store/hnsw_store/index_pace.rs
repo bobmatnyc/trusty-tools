@@ -10,8 +10,11 @@
 //! `a_stall_inside_a_large_group_trips_one_budget_after_the_stall`.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+
+/// A step-mode pace's ends: where each point's index goes, and its go signal.
+type StepEnds = (Sender<usize>, Arc<Mutex<Receiver<()>>>);
 
 struct Pace {
     delay: Duration,
@@ -20,6 +23,39 @@ struct Pace {
     next: usize,
     reached: Option<Sender<()>>,
     release: Option<Receiver<()>>,
+    /// #10335: step mode; every point reports its index and waits for a go.
+    step: Option<StepEnds>,
+}
+
+/// The test's end of a step-mode pace (#10335): `reached` yields each
+/// point's index as the loop stops before it; one send on `go` lets it index
+/// that point. Dropping `go` lets every remaining point run.
+pub(crate) struct Steps {
+    pub(crate) reached: Receiver<usize>,
+    pub(crate) go: Sender<()>,
+}
+
+/// Stop before every point of `drawer`'s next group writes until the test
+/// sends a go (#10335), so a test decides what the clock reads between ticks.
+pub(crate) fn arm_steps(drawer: &str) -> Steps {
+    let (reached_tx, reached) = channel();
+    let (go, go_rx) = channel();
+    let pace = Pace {
+        delay: Duration::ZERO,
+        park_at: None,
+        next: 0,
+        reached: None,
+        release: None,
+        step: Some((reached_tx, Arc::new(Mutex::new(go_rx)))),
+    };
+    install(drawer, pace);
+    Steps { reached, go }
+}
+
+fn install(drawer: &str, pace: Pace) {
+    let mut paces = PACES.lock().unwrap_or_else(PoisonError::into_inner);
+    paces.retain(|(d, _)| d != drawer);
+    paces.push((drawer.to_string(), pace));
 }
 
 static PACES: Mutex<Vec<(String, Pace)>> = Mutex::new(Vec::new());
@@ -42,16 +78,15 @@ pub(crate) fn arm(drawer: &str, delay: Duration, park_at: Option<usize>) -> Park
         next: 0,
         reached: Some(reached_tx),
         release: Some(release_rx),
+        step: None,
     };
-    let mut paces = PACES.lock().unwrap_or_else(PoisonError::into_inner);
-    paces.retain(|(d, _)| d != drawer);
-    paces.push((drawer.to_string(), pace));
+    install(drawer, pace);
     Parked { reached, release }
 }
 
 /// Called by the index loop before each point of `drawer`.
 pub(super) fn pace(drawer: &str) {
-    let (delay, park) = {
+    let (delay, park, step) = {
         let mut paces = PACES.lock().unwrap_or_else(PoisonError::into_inner);
         let Some((_, p)) = paces.iter_mut().find(|(d, _)| d == drawer) else {
             return;
@@ -59,8 +94,18 @@ pub(super) fn pace(drawer: &str) {
         let n = p.next;
         p.next += 1;
         let park = (p.park_at == Some(n)).then(|| (p.reached.take(), p.release.take()));
-        (p.delay, park)
+        let step = p
+            .step
+            .as_ref()
+            .map(|(tx, go)| (n, tx.clone(), Arc::clone(go)));
+        (p.delay, park, step)
     };
+    if let Some((n, reached, go)) = step {
+        // A dropped receiver or sender means the test is done; run freely.
+        if reached.send(n).is_ok() {
+            let _ = go.lock().unwrap_or_else(PoisonError::into_inner).recv();
+        }
+    }
     if let Some((reached, release)) = park {
         if let Some(reached) = reached {
             let _ = reached.send(());
