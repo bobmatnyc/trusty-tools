@@ -8,13 +8,17 @@
 //! ends with the unary reply body, a detach acknowledgement, or
 //! [`StreamReply::Unsupported`] when the daemon predates the method, so the
 //! caller falls back to the unary request. An interrupt drops the socket,
-//! which the daemon reads as cancel.
+//! which the daemon reads as cancel. [`Interrupt`] latches one Ctrl-C for the
+//! whole command, so none is lost between awaits.
 //! Test: `worktree_7619_the_plain_prune_prints_a_line_per_worktree`,
 //! `worktree_7619_a_daemon_without_the_stream_falls_back_to_unary`,
 //! `worktree_7619_a_stream_without_its_result_is_an_error`,
 //! `worktree_7619_a_plain_success_is_never_a_fallback`,
 //! `worktree_7619_an_interrupt_drops_the_stream_and_says_so`,
-//! `worktree_7619_detach_returns_on_the_acknowledgement`.
+//! `worktree_7619_detach_returns_on_the_acknowledgement`,
+//! `worktree_7619_an_interrupt_during_the_unary_fallback_ends_the_command`,
+//! `worktree_7619_an_interrupt_before_a_request_sends_nothing`,
+//! `worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed`.
 
 use std::future::Future;
 use std::time::Duration;
@@ -73,27 +77,31 @@ pub(crate) async fn stream_prune(
         "method": PRUNE_STREAM_METHOD,
         "params": body,
     });
-    let mut stream = trusty_common::uds::send_framed_stream_request_with::<_, Value>(
+    tokio::pin!(interrupt);
+    let open = trusty_common::uds::send_framed_stream_request_with::<_, Value>(
         socket,
         &frame,
         OPEN_TIMEOUT,
         IDLE_BUDGET,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("prune-worktrees: could not open the daemon stream: {e}"))?;
-    tokio::pin!(interrupt);
+    );
+    // #7619: the dial and the request write race the interrupt too, and an
+    // interrupt already observed wins before anything is written.
+    let opened = tokio::select! {
+        biased;
+        () = &mut interrupt => anyhow::bail!(STREAM_INTERRUPTED),
+        opened = open => opened,
+    };
+    let mut stream = opened
+        .map_err(|e| anyhow::anyhow!("prune-worktrees: could not open the daemon stream: {e}"))?;
     let mut seen_item = false;
     loop {
         let next = tokio::select! {
-            next = stream.next_frame() => next,
+            biased;
             () = &mut interrupt => {
                 drop(stream);
-                anyhow::bail!(
-                    "prune-worktrees interrupted (#7619): the daemon stops before its next \
-                     worktree, and a removal in flight finishes. Re-run without `--force` to \
-                     see what remains."
-                );
+                anyhow::bail!(STREAM_INTERRUPTED);
             }
+            next = stream.next_frame() => next,
         };
         let item = match next {
             Some(Ok(item)) => item,
@@ -133,6 +141,11 @@ pub(crate) async fn stream_prune(
         }
     }
 }
+
+/// What an interrupted stream tells the operator (#7619).
+const STREAM_INTERRUPTED: &str = "prune-worktrees interrupted (#7619): the daemon stops before \
+     its next worktree, and a removal in flight finishes. Re-run without `--force` to see what \
+     remains.";
 
 /// Why a stream refusal means "this daemon does not stream the method".
 ///
@@ -177,21 +190,35 @@ fn stream_error(e: UdsRpcError) -> anyhow::Error {
 /// stderr, and `unary` sends the request instead. `Ok(None)` is a detached
 /// pass. A detach request without the stream is refused before `unary` runs,
 /// because the unary request cannot report that the daemon kept going.
+/// #7619: `interrupt` is checked before anything is sent — an interrupt in
+/// the gap after the preview sends no removal — and raced against the stream
+/// and the unary call alike.
 /// Test: `worktree_7619_a_daemon_without_the_stream_falls_back_to_unary`,
-/// `worktree_7619_detach_without_the_stream_sends_nothing`.
+/// `worktree_7619_detach_without_the_stream_sends_nothing`,
+/// `worktree_7619_an_interrupt_before_a_request_sends_nothing`,
+/// `worktree_7619_an_interrupt_during_the_unary_fallback_ends_the_command`.
 pub(crate) async fn send_prune<F, Fut>(
     daemon: &trusty_mpm::client::DaemonClient,
     payload: Value,
     detach: bool,
     streaming: &mut bool,
+    interrupt: &Interrupt,
     unary: F,
 ) -> anyhow::Result<Option<Value>>
 where
     F: FnOnce(Value) -> Fut,
     Fut: Future<Output = anyhow::Result<Value>>,
 {
+    // #7619: an interrupt observed since the last request ends the command
+    // here, before this request exists.
+    if interrupt.is_set() {
+        anyhow::bail!(
+            "prune-worktrees interrupted (#7619): no further request was sent. Re-run without \
+             `--force` to see what remains."
+        );
+    }
     if *streaming {
-        match stream_prune(daemon, payload.clone(), detach, ctrl_c(), |l| {
+        match stream_prune(daemon, payload.clone(), detach, interrupt.fired(), |l| {
             eprintln!("{l}")
         })
         .await?
@@ -214,16 +241,82 @@ where
              request was sent. Re-run without `--detach`."
         );
     }
-    unary(payload).await.map(Some)
+    // #7619: the banner says Ctrl-C ends this command on this transport.
+    tokio::select! {
+        biased;
+        () = interrupt.fired() => anyhow::bail!(
+            "prune-worktrees interrupted (#7619): this daemon does not stream, so its pass runs \
+             to the end. Re-run without `--force` to see what remains."
+        ),
+        reply = unary(payload) => reply.map(Some),
+    }
 }
 
-/// The interrupt the CLI listens for: Ctrl-C.
+/// A Ctrl-C observed at any point of one prune command (#7619).
 ///
-/// A handler that cannot be installed never fires, so the default SIGINT
-/// still ends the process — which closes the socket, the same cancel.
-pub(crate) async fn ctrl_c() {
-    if tokio::signal::ctrl_c().await.is_err() {
-        std::future::pending::<()>().await;
+/// Why: once tokio listens for SIGINT the default action is gone for the rest
+/// of the process, so a Ctrl-C that arrived while no listener was awaited was
+/// lost — during the unary fallback, and in the gap between the preview and
+/// the `--force` request.
+/// What: one listener, registered synchronously by [`Interrupt::ctrl_c`],
+/// latches a flag for the whole command; [`Interrupt::is_set`] reads it and
+/// [`Interrupt::fired`] resolves once it is set, however long ago.
+/// Test: `worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed`,
+/// `worktree_7619_an_interrupt_before_a_request_sends_nothing`.
+#[derive(Clone, Debug)]
+pub(crate) struct Interrupt {
+    seen: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Interrupt {
+    /// Listen for Ctrl-C from now until the process ends.
+    ///
+    /// A listener that cannot be registered leaves SIGINT's default action in
+    /// place, so Ctrl-C still kills the CLI and the closed socket cancels the
+    /// stream: the pre-#7619 behaviour, reported on stderr.
+    pub(crate) fn ctrl_c() -> Self {
+        let (latch, seen) = tokio::sync::watch::channel(false);
+        #[cfg(unix)]
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+            Ok(mut sigint) => {
+                tokio::spawn(async move {
+                    if sigint.recv().await.is_some() {
+                        let _ = latch.send(true);
+                    }
+                });
+            }
+            Err(e) => eprintln!(
+                "warning: prune-worktrees: cannot listen for Ctrl-C ({e}); Ctrl-C kills this \
+                 command instead (#7619)"
+            ),
+        }
+        #[cfg(not(unix))]
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = latch.send(true);
+            }
+        });
+        Self { seen }
+    }
+
+    /// An interrupt a test fires through the returned sender.
+    #[cfg(test)]
+    pub(crate) fn manual() -> (tokio::sync::watch::Sender<bool>, Self) {
+        let (latch, seen) = tokio::sync::watch::channel(false);
+        (latch, Self { seen })
+    }
+
+    /// Whether an interrupt has been observed.
+    pub(crate) fn is_set(&self) -> bool {
+        *self.seen.borrow()
+    }
+
+    /// Resolve once an interrupt has been observed; never, if none can be.
+    pub(crate) async fn fired(&self) {
+        let mut seen = self.seen.clone();
+        if seen.wait_for(|set| *set).await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 

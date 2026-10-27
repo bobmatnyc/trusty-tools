@@ -14,7 +14,7 @@ use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_unt
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::daemon::managed_routes::prune_stream::PRUNE_STREAM_METHOD;
 
-use super::{StreamReply, send_prune, stream_prune};
+use super::{Interrupt, StreamReply, send_prune, stream_prune};
 use crate::cli::{Cli, Command, SessionAction};
 use crate::commands::managed_merged_prs::force_banner;
 
@@ -141,6 +141,7 @@ async fn worktree_7619_a_daemon_without_the_stream_falls_back_to_unary() {
             json!({"dry_run": true}),
             false,
             &mut streaming,
+            &Interrupt::manual().1,
             |payload| {
                 sent.set(sent.get() + 1);
                 async move { Ok(json!({"unary": payload})) }
@@ -283,6 +284,7 @@ async fn worktree_7619_detach_without_the_stream_sends_nothing() {
         json!({"dry_run": false}),
         true,
         &mut streaming,
+        &Interrupt::manual().1,
         |_| {
             sent.set(true);
             async { Ok(json!({})) }
@@ -315,4 +317,91 @@ fn cli_prune_worktrees_detach_requires_force() {
         }) => assert!(detach && force),
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }
+}
+
+/// 🔴 #7619 critic HIGH (a): on a daemon without the stream, Ctrl-C during
+/// the unary call ends the command, as the banner says. Fails on 745603bbc3,
+/// where nothing listened during the unary call and the Ctrl-C was lost.
+#[tokio::test]
+async fn worktree_7619_an_interrupt_during_the_unary_fallback_ends_the_command() {
+    let client = DaemonClient::new("http://127.0.0.1:1");
+    let (latch, interrupt) = Interrupt::manual();
+    let mut streaming = true;
+    let sent = send_prune(
+        &client,
+        json!({"dry_run": true}),
+        false,
+        &mut streaming,
+        &interrupt,
+        |_| {
+            // The interrupt lands while the unary request is in flight.
+            let _ = latch.send(true);
+            std::future::pending::<anyhow::Result<Value>>()
+        },
+    );
+    let err = tokio::time::timeout(Duration::from_secs(10), sent)
+        .await
+        .expect("the interrupt must end the unary wait")
+        .expect_err("an interrupt is an error");
+    assert!(err.to_string().contains("interrupted"), "{err}");
+}
+
+/// 🔴 #7619 critic HIGH (b): an interrupt observed before a request — the
+/// gap between the preview and `--force` — sends nothing to the daemon.
+/// Fails on 745603bbc3's shape: the stream dialled and wrote the request
+/// before it first looked at the interrupt.
+#[tokio::test]
+async fn worktree_7619_an_interrupt_before_a_request_sends_nothing() {
+    let asked = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&asked);
+    let router = RpcRouter::new().typed_stream(PRUNE_STREAM_METHOD, move |_: Value| {
+        seen.store(true, Ordering::SeqCst);
+        async move {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    });
+    let (_dir, socket, _stop) = serve(router);
+    let (latch, interrupt) = Interrupt::manual();
+    let _ = latch.send(true);
+    let client = DaemonClient::over_socket(&socket);
+    let unary_ran = std::cell::Cell::new(false);
+    let mut streaming = true;
+    let err = send_prune(
+        &client,
+        json!({"dry_run": false}),
+        false,
+        &mut streaming,
+        &interrupt,
+        |_| {
+            unary_ran.set(true);
+            async { Ok(json!({})) }
+        },
+    )
+    .await
+    .expect_err("an interrupt before the request is an error");
+    assert!(err.to_string().contains("interrupted"), "{err}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !asked.load(Ordering::SeqCst),
+        "the daemon received a request"
+    );
+    assert!(!unary_ran.get(), "the unary request was sent");
+}
+
+/// 🔴 #7619 critic HIGH: a real SIGINT that arrives while nothing awaits the
+/// listener is still observed — the latch, not a live await, records it.
+#[cfg(unix)]
+#[tokio::test]
+async fn worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed() {
+    let interrupt = Interrupt::ctrl_c();
+    let status = std::process::Command::new("kill")
+        .args(["-INT", &std::process::id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(status.success());
+    tokio::time::timeout(Duration::from_secs(10), interrupt.fired())
+        .await
+        .expect("the SIGINT must be latched");
+    assert!(interrupt.is_set());
 }

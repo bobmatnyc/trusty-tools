@@ -292,7 +292,10 @@ pub(crate) async fn session_prune_worktrees_with_detach(
     project_root: Option<String>,
     detach: bool,
 ) -> anyhow::Result<()> {
-    use super::prune_stream_client::send_prune;
+    use super::prune_stream_client::{Interrupt, send_prune};
+    // #7619: one Ctrl-C listener for the whole command, so an interrupt in
+    // the unary fallback or between the preview and `--force` is observed.
+    let interrupt = Interrupt::ctrl_c();
     let body = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
         serde_json::json!({
             "dry_run": dry_run,
@@ -357,9 +360,16 @@ pub(crate) async fn session_prune_worktrees_with_detach(
     let mut streaming = true;
     // #8782: every run previews first. A `--force` run needs the echo too: a
     // daemon without it would ignore the allowlists as well as the scope.
-    let preview = send_prune(daemon, body(true, None), false, &mut streaming, unary)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the daemon detached a preview (#7619)"))?;
+    let preview = send_prune(
+        daemon,
+        body(true, None),
+        false,
+        &mut streaming,
+        &interrupt,
+        unary,
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("the daemon detached a preview (#7619)"))?;
     let project = project_root.as_deref();
     super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
     if !dry_run {
@@ -393,6 +403,8 @@ pub(crate) async fn session_prune_worktrees_with_detach(
         body(false, Some(&planned)),
         detach,
         &mut streaming,
+        // #7619: an interrupt since the preview sends no removal.
+        &interrupt,
         unary,
     )
     .await?
