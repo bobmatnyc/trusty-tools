@@ -1696,29 +1696,34 @@ fn refs_issue() -> RefsIssue {
         number: 7274,
         kind: RefKind::Issue,
         milestone: Some("mpm 1.6".to_string()),
-        projects: vec!["trusty-mpm".to_string()],
         title: String::new(),
     }
 }
 
-/// The `gh pr view --json number,milestone,projectItems` payload for a link
-/// line that names a PULL REQUEST rather than an issue (#7786).
+/// The `gh pr view` payload for a link line that names a PULL REQUEST rather
+/// than an issue (#7786). It still carries `projectItems`, so a test can show
+/// that a boarded ref copies no project onto the PR (#10276, D7).
 const PR_REF_JSON: &str =
     r#"{"number":7782,"milestone":{"title":"mpm 1.6"},"projectItems":[{"title":"Harness"}]}"#;
 
 /// The verbatim GraphQL answer `gh issue view <pr-number>` gives (#7786).
 const NOT_AN_ISSUE: &str = "GraphQL: Could not resolve to an Issue with the number of 7782";
 
+/// #10276 (D7): an issue on two boards gives the PR its milestone and no
+/// project — pull requests are not board items.
 #[test]
-fn metadata_inherits_milestone_and_projects() {
+fn metadata_inherits_the_milestone_and_no_project() {
+    let facts = serde_json::from_str(ISSUE_JSON).expect("the fixture parses");
+    let boarded = RefsIssue::from_facts(7274, RefKind::Issue, &facts);
     let meta = metadata::plan(
-        RefsLookup::Found(&refs_issue()),
+        RefsLookup::Found(&boarded),
         ChangedPaths::Read(&["crates/trusty-mpm/src/lib.rs"]),
         &test_ownership(),
     );
     assert_eq!(meta.labels, vec!["trusty-mpm".to_string()]);
     assert_eq!(meta.milestone.as_deref(), Some("mpm 1.6"));
-    assert_eq!(meta.projects, vec!["trusty-mpm".to_string()]);
+    let argv = metadata::edit_argv("1", None, &meta).join(" ");
+    assert!(!argv.contains("--add-project"), "{argv}");
     assert!(
         meta.notes.is_empty(),
         "nothing was missing: {:?}",
@@ -1775,7 +1780,7 @@ fn metadata_notes_an_unreadable_refs_issue() {
     );
     let notes = meta.notes.join("\n");
     assert!(
-        notes.contains("no project or milestone: issue #7274 could not be read"),
+        notes.contains("no milestone: issue #7274 could not be read"),
         "{notes}"
     );
     assert!(
@@ -1783,7 +1788,6 @@ fn metadata_notes_an_unreadable_refs_issue() {
         "the body carried one; that is what triggered the lookup: {notes}"
     );
     assert!(meta.milestone.is_none());
-    assert!(meta.projects.is_empty());
     // The component label is unaffected — the diff was still read.
     assert_eq!(meta.labels, vec!["trusty-mpm".to_string()]);
 }
@@ -1813,7 +1817,6 @@ fn metadata_notes_an_issue_with_no_milestone() {
         number: 99,
         kind: RefKind::Issue,
         milestone: None,
-        projects: Vec::new(),
         title: String::new(),
     };
     let meta = metadata::plan(
@@ -1826,12 +1829,9 @@ fn metadata_notes_an_issue_with_no_milestone() {
         notes.contains("no milestone: issue #99 carries none"),
         "{notes}"
     );
-    assert!(
-        notes.contains("no project: issue #99 joins none"),
-        "{notes}"
-    );
+    // #10276 (D7): a PR owes no project, so a missing one is no gap to note.
+    assert!(!notes.contains("no project"), "{notes}");
     assert!(meta.milestone.is_none());
-    assert!(meta.projects.is_empty());
 }
 
 #[test]
@@ -1839,10 +1839,6 @@ fn metadata_parses_a_gh_issue_view_payload() {
     let facts = serde_json::from_str(ISSUE_JSON).expect("the fixture parses");
     let issue = RefsIssue::from_facts(7274, RefKind::Issue, &facts);
     assert_eq!(issue.milestone.as_deref(), Some("mpm 1.6"));
-    assert_eq!(
-        issue.projects,
-        vec!["trusty-mpm".to_string(), "Harness".to_string()]
-    );
 }
 
 #[test]
@@ -1850,7 +1846,6 @@ fn metadata_edit_argv_carries_every_field() {
     let meta = PrMetadata {
         labels: vec!["trusty-mpm".to_string()],
         milestone: Some("mpm 1.6".to_string()),
-        projects: vec!["trusty-mpm".to_string()],
         notes: Vec::new(),
         inherited_from: Some(7274),
         title: Some("feat(x): [EPIC_12 PHASE_2] add X".to_string()),
@@ -1863,7 +1858,7 @@ fn metadata_edit_argv_carries_every_field() {
     );
     assert!(argv.contains("--add-label trusty-mpm"), "{argv}");
     assert!(argv.contains("--milestone mpm 1.6"), "{argv}");
-    assert!(argv.contains("--add-project trusty-mpm"), "{argv}");
+    assert!(!argv.contains("--add-project"), "#10276 D7: {argv}");
 }
 
 #[test]
@@ -1936,8 +1931,8 @@ fn open_applies_pr_metadata() {
     assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
     assert!(edit.contains("--add-label trusty-agents-common"), "{edit}");
     assert!(edit.contains("--milestone mpm 1.6"), "{edit}");
-    assert!(edit.contains("--add-project trusty-mpm"), "{edit}");
-    assert!(edit.contains("--add-project Harness"), "{edit}");
+    // #10276 (D7): the issue's two boards are not copied onto the PR.
+    assert!(!edit.contains("--add-project"), "{edit}");
 }
 
 #[test]
@@ -2112,7 +2107,7 @@ fn pr_7869_a_closes_link_inherits_the_issues_metadata() {
         edit.contains("--milestone mpm 1.6"),
         "a `Closes #N` body inherits the milestone too: {edit}"
     );
-    assert!(edit.contains("--add-project trusty-mpm"), "{edit}");
+    assert!(!edit.contains("--add-project"), "#10276 D7: {edit}");
     assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
 }
 
@@ -2186,10 +2181,10 @@ fn pr_7869_a_create_that_fails_with_no_url_is_still_an_error() {
 
 /// REGRESSION (#7786): `tm pr open --issue N` where N names a PULL REQUEST made
 /// `gh issue view` 404 (`Could not resolve to an Issue with the number of
-/// 7782`), and the milestone and projects that PR carried were abandoned after
-/// the one failed read — PR #7784 shipped with neither.
+/// 7782`), and the milestone that PR carried was abandoned after the one
+/// failed read — PR #7784 shipped without it.
 /// Red before the fix: no `gh pr view 7782` runs, and the `gh pr edit` carries
-/// no `--milestone` and no `--add-project`.
+/// no `--milestone`.
 #[test]
 fn pr_7786_a_pr_ref_inherits_through_gh_pr_view() {
     let (_d, path) = scratch_body(&body_linking("Refs #7782"));
@@ -2214,17 +2209,18 @@ fn pr_7786_a_pr_ref_inherits_through_gh_pr_view() {
     );
     let edit = first_edit(&gh).expect("a `gh pr edit` ran");
     assert!(edit.contains("--milestone mpm 1.6"), "{edit}");
-    assert!(edit.contains("--add-project Harness"), "{edit}");
+    assert!(!edit.contains("--add-project"), "#10276 D7: {edit}");
 }
 
-/// #7786: the fallback asks only for the three fields a PR can answer.
+/// #7786: the fallback asks only for fields a PR can answer, and (#10276, D7)
+/// not for `projectItems`, which nothing reads any more.
 /// `issue_audit::AUDIT_JSON_FIELDS` includes `parent`, `blockedBy` and
 /// `subIssues`, which `gh pr view` rejects outright — reusing it would turn the
 /// fallback into a second guaranteed failure.
 #[test]
 fn metadata_pr_view_argv_asks_only_for_pr_fields() {
     let argv = metadata::pr_view_argv(7782).join(" ");
-    assert_eq!(argv, "pr view 7782 --json number,milestone,projectItems");
+    assert_eq!(argv, "pr view 7782 --json number,milestone");
     for issue_only in ["parent", "blockedBy", "subIssues"] {
         assert!(!argv.contains(issue_only), "{argv}");
     }
@@ -2289,11 +2285,11 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
         .on_fail("pr edit 4242", "'mpm 1.6' not found");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
 
-    let missing =
-        match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"), None) {
-            ApplyOutcome::Partial(missing) => missing,
-            ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
-        };
+    let missing = match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"))
+    {
+        ApplyOutcome::Partial(missing) => missing,
+        ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
+    };
     let joined = missing.join("; ");
     assert!(joined.contains("milestone \"mpm 1.6\""), "{joined}");
     assert!(joined.contains("inherited from #7274"), "{joined}");
@@ -2307,80 +2303,63 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
 const CLOSED_PROJECT_ISSUE_JSON: &str = r#"{"number":7274,"milestone":{"title":"mpm 1.6"},
     "projectItems":[{"title":"trusty-mpm"}],"labels":[],"comments":[],"state":"OPEN"}"#;
 
-/// The owner's project list with `--closed`: the inherited one is closed.
-const CLOSED_PROJECT_LIST_JSON: &str = r#"{"projects":[
-    {"number":25,"title":"trusty-mpm","closed":true},
-    {"number":45,"title":"trusty-tools-master","closed":false}],"totalCount":2}"#;
-
-/// REGRESSION (#9749): `gh pr edit --add-project` cannot resolve a closed
-/// project, so a PR linking an issue still on #22/#25 exited 3 every time.
-/// Red before the fix: the project step fails twice and the run exits
-/// `EXIT_PARTIAL`.
-#[test]
-fn pr_9749_a_closed_inherited_project_does_not_fail_the_open() {
-    let (_d, path) = scratch_body(&body_linking("Refs #7274"));
-    let args = open_args(&path.to_string_lossy());
-    let gh = FakeGh::new()
-        .on("pr create", "https://github.com/o/r/pull/7639\n")
-        .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
-        .on("repo view", "o\n")
-        .on("project list", CLOSED_PROJECT_LIST_JSON)
-        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
-        .on("pr edit 7639", "");
-    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
-
-    assert_eq!(
-        open::run(&gh, &args, &pre).expect("the PR exists"),
-        super::EXIT_OK,
-        "a closed inherited project is skipped, not a partial apply"
-    );
+/// Does this `gh` argv put anything on, or read anything from, a project?
+fn is_project_call(call: &str) -> bool {
+    call.contains("--add-project")
+        || call.starts_with("project ")
+        || call.contains("item-add")
+        || call.contains("addProjectV2ItemById")
 }
 
-/// #9749: the skipped closed project is replaced by the configured
-/// `agents.ticketing.default_project`, and only a closed one is skipped.
+/// #10276 (epic #10274, D7, owner decision 2026-10-27): pull requests are not
+/// board items, so `tm pr open` makes no project call at all — whether the
+/// linked issue is on two boards, on a closed one (this replaces #9749's
+/// closed-project skip, which no longer has a project step to skip), names a
+/// boarded PR, or the body links nothing.
+/// Red before the fix: the boarded arms' `gh pr edit` carries `--add-project`.
 #[test]
-fn pr_9749_a_closed_project_falls_back_to_the_default_project() {
-    let gh = FakeGh::new()
-        .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
-        .on("project list", CLOSED_PROJECT_LIST_JSON)
-        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
-        .on("pr edit 4242", "");
-    let mut args = open_args("unused");
-    args.repo = Some("o/r".to_string());
-    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
-    let body = body_linking("Refs #7274");
+fn pr_10276_pr_open_makes_no_project_mutation_with_or_without_a_boarded_issue() {
+    let arms: [(&str, Option<(&str, &str)>); 4] = [
+        ("two boards", Some(("issue view 7274", ISSUE_JSON))),
+        (
+            "a closed board",
+            Some(("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)),
+        ),
+        ("a boarded PR ref", Some(("pr view 7782", PR_REF_JSON))),
+        ("no link", None),
+    ];
+    for (arm, read) in arms {
+        let body = match read {
+            Some((route, _)) if route.starts_with("pr view") => body_linking("Refs #7782"),
+            Some(_) => body_linking("Refs #7274"),
+            None => full_body(),
+        };
+        let (_d, path) = scratch_body(&body);
+        let args = open_args(&path.to_string_lossy());
+        let mut gh = FakeGh::new()
+            .on("pr create", "https://github.com/o/r/pull/4242\n")
+            .on_fail("issue view 7782", NOT_AN_ISSUE);
+        if let Some((route, json)) = read {
+            gh = gh.on(route, json);
+        }
+        let gh = gh.on("pr edit 4242", "");
+        let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
 
-    let outcome =
-        metadata_apply::apply(&gh, &args, &pre, "4242", &body, Some("trusty-tools-master"));
-    assert_eq!(outcome, ApplyOutcome::Applied);
-    let calls: Vec<String> = gh.calls().into_iter().map(|c| c.join(" ")).collect();
-    assert!(
-        calls
-            .iter()
-            .any(|c| c == "project list --owner o --closed -L 200 --format json"),
-        "the owner comes from --repo: {calls:?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|c| c == "pr edit 4242 --repo o/r --add-project trusty-tools-master"),
-        "{calls:?}"
-    );
-
-    // An open project that fails stays missing: only a closed one is skipped.
-    let gh = FakeGh::new()
-        .on("issue view 7274", ISSUE_JSON)
-        .on("project list", CLOSED_PROJECT_LIST_JSON)
-        .on_fail("--add-project Harness", "'Harness' not found")
-        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
-        .on("pr edit 4242", "");
-    let missing = metadata_apply::apply(&gh, &args, &pre, "4242", &body, None);
-    assert_eq!(
-        missing,
-        ApplyOutcome::Partial(vec![
-            "project \"Harness\" (inherited from #7274)".to_string()
-        ])
-    );
+        assert_eq!(
+            open::run(&gh, &args, &pre).expect("the PR opens"),
+            super::EXIT_OK,
+            "{arm}"
+        );
+        let calls: Vec<String> = gh.calls().into_iter().map(|c| c.join(" ")).collect();
+        assert!(
+            !calls.iter().any(|c| is_project_call(c)),
+            "{arm}: PR open made a project call: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("pr edit 4242")),
+            "{arm}: the label edit still ran: {calls:?}"
+        );
+    }
 }
 
 /// REGRESSION (#7868): `tm pr merge` re-ran the nine-field OPEN gate, so a body

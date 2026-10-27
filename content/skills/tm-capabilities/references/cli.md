@@ -71,6 +71,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
   - `audit` — Verify a filed issue carries a project, a milestone, and a component label (#7097)
+  - `board` — Create, reconcile, check and attach to the repo's standard GitHub Projects board (#10276)
+    - `add` — Add issue N to the board the repo's `project:` block names
+    - `apply` — Reconcile the repo's board to the spec (dry run unless --apply)
+    - `check` — Report drift between the repo's board and the spec (read-only)
+    - `init` — Create a standard board for a repo from nothing (dry run unless --apply)
+    - `show` — Print the embedded board spec and its version
   - `current` — Report an issue's current state, derived from its labels
   - `epic` — File and maintain an epic tracker and its phase issues (#8447)
     - `close` — Close a tracker once every phase is closed, posting the outcome→evidence comment (#8448)

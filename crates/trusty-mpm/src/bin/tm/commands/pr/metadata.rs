@@ -1,20 +1,19 @@
-//! The PR side of the labels/project/milestone standard (#7274).
+//! The PR side of the labels/milestone standard (#7274).
 //!
 //! Why: until the owner ruling of 2026-09-09 the standard reached issues only.
 //! A PR `tm pr open` created carried the assignee, `trusty-mpm` and
 //! `ws/<session>` and nothing else — no component label for the crates its own
-//! diff touched, and no project or milestone from the issue its `Refs #N`
-//! named. The two artifacts then sorted differently on every board they shared.
-//! Neither value is typed by anyone: the component labels are read off the
-//! diff and the project and milestone are read off the issue, so both belong
-//! in one derivation the command runs rather than in a checklist an agent
-//! remembers.
+//! diff touched, and no milestone from the issue its `Refs #N` named. Neither
+//! value is typed by anyone: the component labels are read off the diff and
+//! the milestone is read off the issue, so both belong in one derivation the
+//! command runs rather than in a checklist an agent remembers. A PR joins no
+//! project: pull requests are not board items (#10276, epic #10274, D7).
 //!
 //! What: [`first_linked_issue`] finds the issue the body links, and [`plan`] is
-//! the whole decision — a pure function of (that issue's milestone and
-//! projects, the changed paths, the workspace's crate ownership) with no `gh`
-//! and no filesystem in it. Every gap it finds becomes a note the caller
-//! prints, never a failure: a PR that cannot inherit a milestone still opens.
+//! the whole decision — a pure function of (that issue's milestone, the
+//! changed paths, the workspace's crate ownership) with no `gh` and no
+//! filesystem in it. Every gap it finds becomes a note the caller prints,
+//! never a failure: a PR that cannot inherit a milestone still opens.
 //! [`edit_argv`] renders the single `gh pr edit` that applies the result.
 //!
 //! Test: the sibling `tests.rs` — `metadata_*`, `open_applies_pr_metadata`,
@@ -29,7 +28,7 @@ use super::argv;
 ///
 /// Why (#7786): `tm pr open --issue N` and a body's own link line both take a
 /// bare number, and a number that names a PR made `gh issue view` 404 — so the
-/// milestone and projects that PR carried were never read. Knowing which of
+/// milestone that PR carried was never read. Knowing which of
 /// the two was read is what lets the notes name the right artifact instead of
 /// calling a pull request an issue.
 /// What: the noun the notes and warnings print.
@@ -56,8 +55,8 @@ impl RefKind {
 ///
 /// Why: `plan` must be testable without a `gh`, so the issue arrives as data.
 /// What: the number, which artifact it turned out to be, its single milestone,
-/// and its project titles.
-/// Test: `metadata_inherits_milestone_and_projects`.
+/// and its title. Its projects are not read: a PR joins none (#10276, D7).
+/// Test: `metadata_inherits_the_milestone_and_no_project`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefsIssue {
     /// The number the body's first link line names.
@@ -66,15 +65,13 @@ pub(crate) struct RefsIssue {
     pub(crate) kind: RefKind,
     /// That artifact's milestone title, or `None` when it carries none.
     pub(crate) milestone: Option<String>,
-    /// That artifact's project titles, in the order `gh` reported them.
-    pub(crate) projects: Vec<String>,
     /// #9571: the issue's title, read for its `[EPIC_N PHASE_M]` tag; empty for
     /// a pull request, whose view does not ask for it.
     pub(crate) title: String,
 }
 
 impl RefsIssue {
-    /// Read the milestone and projects out of a `gh … view --json` payload.
+    /// Read the milestone and title out of a `gh … view --json` payload.
     ///
     /// Why: `IssueFacts` is already this crate's model of that payload (the
     /// issue audit's), so parsing it a second way here would be a second
@@ -93,12 +90,6 @@ impl RefsIssue {
                 .as_ref()
                 .map(|m| m.title.trim().to_string())
                 .filter(|t| !t.is_empty()),
-            projects: facts
-                .project_items
-                .iter()
-                .map(|p| p.title.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect(),
             title: facts.title.trim().to_string(),
         }
     }
@@ -139,7 +130,7 @@ pub(crate) enum ChangedPaths<'a, S: AsRef<str>> {
     Unreadable,
 }
 
-/// The labels, milestone and projects a PR earns, plus what it could not get.
+/// The labels and milestone a PR earns, plus what it could not get.
 ///
 /// Why: the caller needs both halves — what to apply, and what to say it could
 /// not apply — and computing them together is what keeps a silent gap from
@@ -154,11 +145,9 @@ pub(crate) struct PrMetadata {
     pub(crate) labels: Vec<String>,
     /// The milestone inherited from the `Refs` issue.
     pub(crate) milestone: Option<String>,
-    /// The projects inherited from the `Refs` issue.
-    pub(crate) projects: Vec<String>,
     /// One line per thing the standard wanted and this PR could not get.
     pub(crate) notes: Vec<String>,
-    /// The issue (or PR) the milestone and projects were inherited from.
+    /// The issue (or PR) the milestone was inherited from.
     ///
     /// Why (#7646): a `gh pr edit` that fails on an inherited value has to name
     /// where the value came from — a milestone closed two releases ago is only
@@ -174,25 +163,23 @@ pub(crate) struct PrMetadata {
 impl PrMetadata {
     /// Whether anything at all would be applied.
     pub(crate) fn is_empty(&self) -> bool {
-        self.labels.is_empty()
-            && self.milestone.is_none()
-            && self.projects.is_empty()
-            && self.title.is_none()
+        self.labels.is_empty() && self.milestone.is_none() && self.title.is_none()
     }
 }
 
-/// Decide a PR's component labels, milestone and projects.
+/// Decide a PR's component labels and milestone.
 ///
 /// Why: this is the standard itself, stated once as code. Both inputs are
-/// derived — the labels from the diff, the milestone and projects from the
-/// linked issue — so there is nothing here for a caller to override, and
-/// nothing that needs a network to decide.
+/// derived — the labels from the diff, the milestone from the linked issue —
+/// so there is nothing here for a caller to override, and nothing that needs
+/// a network to decide.
 /// What: component labels are the crates the changed paths touch. A `Found`
-/// issue contributes its milestone and its projects. Each gap adds a note
-/// rather than an error — a PR whose diff no crate owns, or whose issue has no
-/// milestone, still opens — and the note names the actual cause, so a failed
-/// read never reads as an empty answer (#7274 round 2).
-/// Test: `metadata_inherits_milestone_and_projects`,
+/// issue contributes its milestone and nothing else: its projects are never
+/// copied, because a pull request is not a board item (#10276, D7). Each gap
+/// adds a note rather than an error — a PR whose diff no crate owns, or whose
+/// issue has no milestone, still opens — and the note names the actual cause,
+/// so a failed read never reads as an empty answer (#7274 round 2).
+/// Test: `metadata_inherits_the_milestone_and_no_project`,
 /// `metadata_without_refs_applies_nothing`, `metadata_multi_crate_diff`,
 /// `metadata_notes_an_issue_with_no_milestone`,
 /// `metadata_notes_an_unreadable_diff`, `metadata_notes_an_unreadable_refs_issue`.
@@ -219,16 +206,15 @@ pub(crate) fn plan<S: AsRef<str>>(
         RefsLookup::Found(issue) => issue,
         RefsLookup::Absent => {
             out.notes.push(
-                "no project or milestone: the body carries no `Refs #N`, so there is no issue \
-                 to inherit them from"
+                "no milestone: the body carries no `Refs #N`, so there is no issue to inherit \
+                 it from"
                     .to_string(),
             );
             return out;
         }
         RefsLookup::Unreadable(number) => {
-            out.notes.push(format!(
-                "no project or milestone: issue #{number} could not be read"
-            ));
+            out.notes
+                .push(format!("no milestone: issue #{number} could not be read"));
             return out;
         }
     };
@@ -242,15 +228,7 @@ pub(crate) fn plan<S: AsRef<str>>(
             issue.number
         )),
     }
-    if issue.projects.is_empty() {
-        out.notes.push(format!(
-            "no project: {} #{} joins none",
-            issue.kind.noun(),
-            issue.number
-        ));
-    } else {
-        out.projects = issue.projects.clone();
-    }
+    // #10276 (D7): the issue's projects are not copied; a PR is not a board item.
     out
 }
 
@@ -258,11 +236,11 @@ pub(crate) fn plan<S: AsRef<str>>(
 ///
 /// Why: one call rather than three keeps the apply atomic from the operator's
 /// point of view — either the PR ends up carrying the standard or the one
-/// warning names what failed. `gh pr edit` takes `--add-label`, `--milestone`
-/// and `--add-project` together (gh 2.98), so the split would buy nothing.
+/// warning names what failed. `gh pr edit` takes `--add-label` and
+/// `--milestone` together (gh 2.98), so the split would buy nothing.
 /// What: `gh pr edit <pr> [--repo r] [--title t] [--add-label l]…
-/// [--milestone m] [--add-project p]…`. Callers must not call it on an empty
-/// plan.
+/// [--milestone m]` — never `--add-project` (#10276, D7). Callers must not
+/// call it on an empty plan.
 /// Test: `metadata_edit_argv_carries_every_field`.
 pub(crate) fn edit_argv(pr: &str, repo: Option<&str>, meta: &PrMetadata) -> Vec<String> {
     let mut out = argv(&["pr", "edit", pr]);
@@ -282,10 +260,6 @@ pub(crate) fn edit_argv(pr: &str, repo: Option<&str>, meta: &PrMetadata) -> Vec<
     if let Some(milestone) = &meta.milestone {
         out.push("--milestone".to_string());
         out.push(milestone.clone());
-    }
-    for project in &meta.projects {
-        out.push("--add-project".to_string());
-        out.push(project.clone());
     }
     out
 }
@@ -359,16 +333,17 @@ pub(crate) fn first_linked_issue(body: &str) -> Option<u64> {
 ///
 /// Why: `issue_audit::AUDIT_JSON_FIELDS` cannot be reused for a PR —
 /// `parent`, `blockedBy` and `subIssues` are issue-only, and `gh pr view`
-/// rejects the whole call when asked for one. These three are exactly what
-/// [`RefsIssue::from_facts`] reads.
+/// rejects the whole call when asked for one. These two are exactly what
+/// [`RefsIssue::from_facts`] reads from a PR; `projectItems` is not asked for,
+/// since nothing copies a project onto a PR (#10276, D7).
 /// Test: `metadata_pr_view_argv_asks_only_for_pr_fields`.
-pub(crate) const PR_VIEW_JSON_FIELDS: &str = "number,milestone,projectItems";
+pub(crate) const PR_VIEW_JSON_FIELDS: &str = "number,milestone";
 
 /// The `gh pr view` that reads a linked pull request's inheritable metadata.
 ///
 /// Why (#7786): a link line may name a PR rather than an issue, and
 /// `gh issue view` answers that with `Could not resolve to an Issue` — so the
-/// milestone and projects that PR carried were dropped with no second attempt.
+/// milestone that PR carried was dropped with no second attempt.
 /// What: `pr view <n> --json <PR_VIEW_JSON_FIELDS>`.
 /// Test: `metadata_pr_view_argv_asks_only_for_pr_fields`,
 /// `pr_7786_a_pr_ref_inherits_through_gh_pr_view`.
