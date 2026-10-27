@@ -9,7 +9,6 @@ fn issue(title: &str) -> RefsIssue {
         number: 9572,
         kind: RefKind::Issue,
         milestone: None,
-        projects: Vec::new(),
         title: title.to_string(),
     }
 }

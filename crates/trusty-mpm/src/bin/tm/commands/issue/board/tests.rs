@@ -432,3 +432,34 @@ fn a_view_naming_a_repo_extra_is_refused_10275() {
         Err(BoardSpecError::Parse(_))
     ));
 }
+
+/// #10276 (PR #10287 review): a `project:` block in a host-level model (the
+/// configured or user-level file) is not inherited by a repo without its own;
+/// the same file named by `--config` keeps it.
+#[test]
+fn a_host_level_project_block_is_not_inherited_10276() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("repo dir");
+    let host = dir.path().join("host-issue-state.yaml");
+    let yaml = format!("{STATUS_LIFECYCLE_YAML}\nproject:\n  owner: o\n  number: 9\n");
+    std::fs::write(&host, yaml).expect("write host model");
+    let (model, _) = load_model_in(&repo, None, Some(&host)).expect("loads");
+    assert!(model.project.is_none(), "{:?}", model.project);
+    let (model, _) = load_model_in(&repo, Some(&host), None).expect("loads");
+    assert_eq!(model.project.map(|p| p.number), Some(9));
+}
+
+/// #10276 (PR #10287 review): `validate_project` runs at load.
+#[test]
+fn a_project_block_is_validated_at_load_10276() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("issue-state.yaml");
+    let yaml = format!("{STATUS_LIFECYCLE_YAML}\nproject:\n  owner: o\n  number: 0\n");
+    std::fs::write(&path, yaml).expect("write model");
+    let err = load_model_in(dir.path(), Some(&path), None).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("`project.number` must be"),
+        "{err:#}"
+    );
+}

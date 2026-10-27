@@ -172,6 +172,10 @@ pub(crate) struct ViewSpec {
     /// The field a board layout groups its columns by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) vertical_group_by: Option<String>,
+    /// The view filter; empty for none.
+    // #10276: owner decision 1 — `init` and `apply` set a view's filter.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) filter: String,
 }
 
 /// GitHub's ProjectV2 view layouts.

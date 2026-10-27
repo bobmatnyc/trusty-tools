@@ -73,7 +73,7 @@ pub(crate) use env::EnvAction;
 pub(crate) use fleet::FleetAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
-pub(crate) use issue::{EpicCmd, IssueCmd};
+pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;

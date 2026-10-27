@@ -57,15 +57,30 @@ pub(crate) fn validate_project(
     if block.number == 0 {
         return Err(BoardSpecError::ZeroProjectNumber);
     }
+    validate_drop_options(&block.drop_options, spec)?;
+    if let Some(extra) = block.extra_fields.iter().find(|e| spec.field(e).is_some()) {
+        return Err(BoardSpecError::ExtraIsStandard(extra.clone()));
+    }
+    Ok(())
+}
+
+/// Refuse a `drop_options` name that is not a Status option of `spec`.
+///
+/// Why: #10276 — `init` must refuse a mistyped `--drop-option` before it
+/// creates anything, by the same rule [`validate_project`] later applies to
+/// the block it prints.
+/// Test: `init_refuses_a_mistyped_drop_option_before_any_call_10276`,
+/// `the_project_block_is_checked_against_the_spec_10275`.
+pub(crate) fn validate_drop_options(
+    drop_options: &[String],
+    spec: &BoardSpec,
+) -> Result<(), BoardSpecError> {
     let status = spec.field(STATUS_FIELD);
-    for dropped in &block.drop_options {
+    for dropped in drop_options {
         let known = status.is_some_and(|f| f.options.iter().any(|o| &o.name == dropped));
         if !known {
             return Err(BoardSpecError::UnknownDropOption(dropped.clone()));
         }
-    }
-    if let Some(extra) = block.extra_fields.iter().find(|e| spec.field(e).is_some()) {
-        return Err(BoardSpecError::ExtraIsStandard(extra.clone()));
     }
     Ok(())
 }

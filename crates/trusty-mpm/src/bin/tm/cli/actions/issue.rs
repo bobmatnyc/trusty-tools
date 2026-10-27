@@ -3,7 +3,8 @@
 //! Why: extracted from `cli.rs` (issue #2603) to keep the top-level file
 //! under the 500-SLOC production cap.
 //! What: [`IssueCmd`] — `seed-labels`/`transition`/`current`/`states`/
-//! `standard`/`seed-config`/`repair`/`audit`.
+//! `standard`/`seed-config`/`repair`/`audit`/`epic`, and [`BoardCmd`]
+//! (`tm issue board`, #10276).
 //! Test: `cli_parses_issue_*` in `tests.rs`.
 
 use clap::Subcommand;
@@ -90,6 +91,9 @@ pub(crate) enum IssueCmd {
     /// File and maintain an epic tracker and its phase issues (#8447).
     #[command(subcommand)]
     Epic(EpicCmd),
+    /// Create, reconcile, check and attach to the repo's standard GitHub Projects board (#10276).
+    #[command(subcommand)]
+    Board(BoardCmd),
     /// Resolve a mid-transition issue carrying multiple state labels.
     Repair {
         /// Issue number.
@@ -170,5 +174,80 @@ pub(crate) enum EpicCmd {
         /// `O<n>: <what proves it>` — exactly one per outcome the tracker body declares. Repeatable.
         #[arg(long, value_name = "O<n>: TEXT")]
         evidence: Vec<String>,
+    },
+}
+
+/// Verbs for the `tm issue board` command group (#10276).
+///
+/// Why: each repo adopting the workflow gets the standard board
+/// (`board-v1.yaml`) created from nothing, kept in step, and checked; issues
+/// the workflow files are put on it by code (epic #10274).
+/// What: `Init` (create the board; dry run unless `--apply`), `Apply`
+/// (idempotent reconcile, optional backfill; dry run unless `--apply`),
+/// `Check` (read-only drift report), `Show` (print the embedded spec) and
+/// `Add` (put one issue on the repo's board).
+/// Test: `cli_parses_issue_board_verbs_10276` in `board/verb_tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum BoardCmd {
+    /// Create a standard board for a repo from nothing (dry run unless --apply).
+    Init {
+        /// Owner of the new board: an organisation or user login.
+        #[arg(long, value_name = "LOGIN")]
+        owner: String,
+        /// The repository to link, as `owner/repo`.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: String,
+        /// Board title; defaults to the repository name.
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// A Status option this repo's board omits. Repeatable.
+        #[arg(long, value_name = "OPTION")]
+        drop_option: Vec<String>,
+        /// Create the board. Without it, print the plan and make no change.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Reconcile the repo's board to the spec (dry run unless --apply).
+    Apply {
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// The repository, as `owner/repo`; defaults to the current checkout's.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: Option<String>,
+        /// Make the changes. Without it, print the plan and make no change.
+        #[arg(long)]
+        apply: bool,
+        /// Also add the repo's open issues to the board (paged, paced, resumable).
+        #[arg(long)]
+        backfill: bool,
+        /// With --backfill: set each issue's Status from its status:* label.
+        #[arg(long, requires = "backfill")]
+        status_from_labels: bool,
+        /// Pause between backfill writes, in milliseconds.
+        #[arg(long, value_name = "MS", default_value_t = 1000)]
+        pace_ms: u64,
+    },
+    /// Report drift between the repo's board and the spec (read-only).
+    Check {
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// The repository, as `owner/repo`; defaults to the current checkout's.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: Option<String>,
+    },
+    /// Print the embedded board spec and its version.
+    Show,
+    /// Add issue N to the board the repo's `project:` block names.
+    Add {
+        /// Issue number.
+        issue: u64,
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// The repository, as `owner/repo`; defaults to the current checkout's.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: Option<String>,
     },
 }
