@@ -238,6 +238,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tm compress` unit tests that stub the `rtk` binary no longer fail intermittently: each stub gets a path unique per call, and a `/bin/sh` child writes it so no concurrent fork inherits a writable fd and hits `ETXTBSY` on exec. Test-only change (#10232).
 - Bare `tm` in a checkout with a non-GitHub origin (GitLab, Gitea, Bitbucket) now names the manual route in both its notice and its error: `tm connect <repo root>`, which runs the session directly in the live checkout, not in an isolated managed clone. It used to say only "use an explicit `tm` subcommand". `tm` still refuses and exits non-zero (#10255).
 - `tm hooks clean` without `--path` no longer walks `~/Documents`, `~/Desktop` and the other synced home folders, or onto another device, and `tm doctor`'s machine-wide settings sweep now uses that same shared walk. A project kept under `~/Documents` or `~/Desktop` is no longer found by default; pass it with `--path` ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+- Boot reconcile no longer decommissions concurrent sessions that share one main checkout. The exact-path dedup pass now treats a same-path record as a duplicate only when it carries the same `claude_session_id`, or the same `pane_id` on the same tmux server, as the record it keeps. Records with no such evidence are left alone, so they are no longer hard-deleted by retention a day later (#10351).
 
 ### Changed
 
