@@ -16,8 +16,9 @@
 //! pinned `gh` identity needs the daemon's project registry, which
 //! `session_manager` sits below; the daemon supplies an implementation that
 //! runs the SAME adapter path and the SAME post-send verification the
-//! interactive resume uses. With no relauncher installed — every hermetic test,
-//! and any embedder that drives resumes itself — behaviour is exactly as before.
+//! interactive resume uses. With no relauncher installed — the standalone
+//! `tm supervisor`, for one — `resume_auto` fails closed and marks the record
+//! `Errored` (#10356).
 //!
 //! The manager never marks a record `Active` and walks away: `resume_auto`
 //! demotes it to `Errored` when the relaunch does not produce a verified
@@ -60,7 +61,7 @@ impl super::SessionManager {
 
     /// The installed relauncher, if any.
     ///
-    /// Test: `an_auto_resume_without_a_relauncher_behaves_as_before`.
+    /// Test: `an_auto_resume_without_a_relauncher_fails_closed`.
     pub(crate) fn relauncher(&self) -> Option<Arc<dyn RuntimeRelauncher>> {
         self.relauncher.get().cloned()
     }

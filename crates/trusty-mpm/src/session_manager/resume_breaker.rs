@@ -444,9 +444,12 @@ impl super::SessionManager {
     /// What: [`super::SessionManager::resume`]'s shared body, followed by
     /// [`ResumeBreakerStore::note_auto_resume`]. The caller still owns the
     /// `is_auto_resumable` gate — this does not re-check it, exactly as `resume`
-    /// does not.
+    /// does not. With no relauncher installed (#10356) it marks the record
+    /// `Errored`, does not stamp the breaker, and returns
+    /// `ManagedError::AutoResumeRecorded`.
     /// Test: `the_supervisor_parks_a_flapping_session_after_k_cycles` in
-    /// `resume_breaker_tests.rs`.
+    /// `resume_breaker_tests.rs`; `an_auto_resume_without_a_relauncher_fails_closed`
+    /// in `relaunch_tests.rs`.
     ///
     /// #8233 (owner ruling 2026-09-18): `resume_inner` only prepares the PANE.
     /// It marked the record `Active` and returned, so an auto-resume whose pane
@@ -468,14 +471,24 @@ impl super::SessionManager {
         // poller future.
         let _in_flight = self.begin_resume(id)?;
         let record = self.resume_inner(id).await?;
+        // #10356: no relauncher means nothing can put a runtime in the pane.
+        // Fail closed before the breaker stamp, so the attempt neither stays
+        // `Active` nor counts toward the #6568 flap streak.
+        let Some(relauncher) = self.relauncher() else {
+            let msg = "auto-resume refused: no runtime relauncher is installed in this \
+                       process, so no runtime can be launched in the pane"
+                .to_owned();
+            if let Err(e) = self.mark_errored(id, &msg).await {
+                tracing::error!(id = %id, "could not mark an unlaunchable auto-resume errored: {e}");
+            }
+            return Err(super::manager::ManagedError::AutoResumeRecorded(msg));
+        };
         self.resume_breaker
             .write()
             .await
             .note_auto_resume(id, Utc::now())
             .await;
-        if let Some(relauncher) = self.relauncher()
-            && let Err(msg) = relauncher.relaunch(&record).await
-        {
+        if let Err(msg) = relauncher.relaunch(&record).await {
             let msg = format!("auto-resume relaunch did not take: {msg}");
             // Fail-closed: the record must not stay `Active` behind a pane with
             // nothing in it. `mark_errored` is best-effort in the sense that a

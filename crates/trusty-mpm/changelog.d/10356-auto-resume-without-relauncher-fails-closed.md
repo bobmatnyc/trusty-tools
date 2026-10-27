@@ -1,0 +1,2 @@
+Fixed
+- An automatic resume in a process with no runtime relauncher installed, such as the standalone `tm supervisor`, now marks the session `Errored` with "no runtime relauncher is installed in this process" and fails. Before, it marked the session `Active` over a pane with no runtime and counted the attempt toward the auto-resume circuit breaker, so after a reboot every session was stopped by the reaper and then parked as flapping. The failed attempt no longer stamps the breaker (#10356).
