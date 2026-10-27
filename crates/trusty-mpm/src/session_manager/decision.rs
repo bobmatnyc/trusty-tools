@@ -587,6 +587,10 @@ impl SessionManager {
                 .send_line_to_pane(tmux_name, &pane, answer)
                 .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
         });
+        // #9167 AC5: a delivered answer is one `message` event; a failed send, none.
+        if sent.is_ok() {
+            self.record_answer_delivery(id, tmux_name, answer).await;
+        }
         let decision_id = claim.decision_id;
         let outcome = match sent {
             Ok(()) => AnswerOutcome::Delivered,

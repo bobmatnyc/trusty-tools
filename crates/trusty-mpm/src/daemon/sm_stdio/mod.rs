@@ -35,6 +35,7 @@ use crate::core::sm::{SessionManagerAgent, SessionManagerConfig};
 mod control;
 mod dispatch;
 mod methods;
+mod signal;
 
 pub use control::{DaemonSessionControl, LaunchParams, SessionControl, SessionControlError};
 
@@ -142,15 +143,26 @@ impl SmDispatcher {
 /// What: constructs the agent + control + (feature-gated) goal store rooted under
 /// the daemon's SM data root, then runs [`run_stdio_loop`] forwarding each request
 /// to [`SmDispatcher::dispatch`]. Returns `Ok(())` on stdin EOF.
-/// Test: the dispatch logic is covered by `tests.rs`; this thin wiring is
-/// exercised at runtime via `tm sm serve --stdio`.
+/// #9167 AC5: this process types into panes itself (`sm.session.send`), so
+/// it records each delivered inject on its own bus producer, flushed at EOF
+/// and, on SIGTERM or SIGINT, within the daemon's signal budget before exit.
+/// Test: the dispatch logic is covered by `tests.rs`; the signal flush by
+/// `signal_tests.rs::a_signal_flushes_the_buffered_inject_event_9167`.
 pub async fn run_sm_stdio(state: Arc<crate::daemon::state::DaemonState>) -> anyhow::Result<()> {
-    let dispatcher = Arc::new(build_dispatcher(state).await?);
-    run_stdio_loop(move |req| {
+    crate::daemon::action_events::inject::start_with_injects(&state);
+    let dispatcher = Arc::new(build_dispatcher(Arc::clone(&state)).await?);
+    let serve = run_stdio_loop(move |req| {
         let dispatcher = dispatcher.clone();
         async move { dispatcher.dispatch(req).await }
-    })
-    .await
+    });
+    match signal::serve_until(&state, signal::shutdown_signal(), serve).await {
+        signal::Ended::Served(served) => {
+            state.action_events().shutdown().await;
+            served
+        }
+        // The stdin read is a blocking task a normal return would wait on.
+        signal::Ended::Signalled => std::process::exit(0),
+    }
 }
 
 /// Build the production [`SmDispatcher`] from the daemon state.

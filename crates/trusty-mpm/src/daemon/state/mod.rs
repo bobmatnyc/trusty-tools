@@ -17,6 +17,7 @@
 mod channel_policy;
 // #8433 P2: the channel question table the daemon holds.
 mod core;
+mod inject_recorder;
 mod overseer;
 pub(crate) mod pending_stops;
 #[cfg(feature = "channels")]

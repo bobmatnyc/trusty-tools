@@ -33,6 +33,8 @@ pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
+// #9167 AC5: the inject path's `message` record.
+pub mod inject_record;
 /// The cross-process JSON-file mechanism `sessions.json` and its siblings share.
 pub(crate) mod json_file;
 #[cfg(test)]
