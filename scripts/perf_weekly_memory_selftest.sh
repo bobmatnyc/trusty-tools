@@ -176,13 +176,20 @@ prep_case() {
 }
 # Replace this (sub)shell with the runner and its stubs, started in CASE_CWD
 # (default: here). Rest = runner flags; later flags override the defaults.
+# CASE_STATUS_ENV, when set, is passed as PERF_STATUS_FILE instead of
+# --status-file.
 runner_exec() {
 	cd "${CASE_CWD:-.}" || exit 99
+	local st=(--status-file "$status")
+	if [ -n "${CASE_STATUS_ENV:-}" ]; then
+		st=()
+		export PERF_STATUS_FILE="$CASE_STATUS_ENV"
+	fi
 	STUB_CALLS="$calls" STUB_FIX="$FIX" STUB_LOAD="$load" STUB_EVO="$work/$name/evo" STUB_REAPED="$reaped" \
 		STUB_PWD="$pwds" STUB_PIDS="$pids" \
 		PERF_RUN_CMD="$work/run" PERF_LOAD_CMD="$work/load" PERF_HOST_CMD="$work/host" \
 		PERF_REAP_CMD="$work/reap" PERF_EVO_KEY="$KEY" \
-		exec "$RUNNER" --out-dir "$out" --status-file "$status" --settle-s 0 \
+		exec "$RUNNER" --out-dir "$out" ${st[@]+"${st[@]}"} --settle-s 0 \
 		--baseline "$BASELINE" "$@" >"$work/$name/stdout" 2>"$work/$name/stderr"
 }
 # Run the runner with stubs to its end. $1 = case name, $2 = load, rest =
@@ -344,6 +351,17 @@ elif [ ! -f "$elsewhere/rel-out/envelope.json" ]; then
 	bad "outside cwd" "no envelope under the caller's rel-out"
 else
 	pass "outside cwd: suites ran in the repo root; relative out-dir and status file under the caller's cwd"
+fi
+# A relative PERF_STATUS_FILE also means the caller's cwd, not the repo root
+# (where perf_status_write.sh refuses a path git does not ignore).
+CASE_CWD="$elsewhere" CASE_STATUS_ENV=rel-env-status/status.json run_case outside-env 0.5 --out-dir rel-out-env
+status="$elsewhere/rel-env-status/status.json"
+rmdir "$repo/rel-env-status" 2>/dev/null || true
+got="$rc $(verdict)"
+if [ "$got" = "0 ok" ]; then
+	pass "outside cwd: relative PERF_STATUS_FILE lands under the caller's cwd"
+else
+	bad "outside cwd env" "got '$got', want '0 ok' ($(tail -n 1 "$work/outside-env/stderr"))"
 fi
 
 # 16-17. A TERM or INT mid-suite stops the suite's processes, stops its EVO

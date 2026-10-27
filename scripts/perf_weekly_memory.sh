@@ -111,6 +111,13 @@ baseline="$(abs_path "$baseline")"
 out_dir="$(abs_path "$out_dir")"
 status_args=()
 [ -z "$status_file" ] || status_args=(--status-file "$(abs_path "$status_file")")
+# The same holds for path env inputs: perf_status_write.sh reads
+# PERF_STATUS_FILE, this script MPM_UTILS_SCRIPTS (as MPM_UTILS).
+if [ -n "${PERF_STATUS_FILE:-}" ]; then
+	PERF_STATUS_FILE="$(abs_path "$PERF_STATUS_FILE")"
+	export PERF_STATUS_FILE
+fi
+MPM_UTILS="$(abs_path "$MPM_UTILS")"
 cd "$REPO_ROOT" || usage "cannot cd to $REPO_ROOT"
 [ -f "$baseline" ] || usage "baseline not found: $baseline"
 
