@@ -1,2 +1,0 @@
-Added
-- `instructions/architect/skills/tm-fleet-check.md`, `instructions/architect/skills/tm-context-refresh.md` and `instructions/architect/templates/CLAUDE.md`: the Architect's seed skills and `CLAUDE.md` template, moved out of the `tm` binary. The skills declare `metadata: {version: "0.1.0"}`; their text is otherwise unchanged, and an untouched copy seeded from the old text is refreshed on the next Architect launch (#9132).
