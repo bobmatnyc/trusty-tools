@@ -599,6 +599,7 @@ async fn a_session_that_dies_slowly_is_never_parked() {
         max_consecutive: 2,
     });
     let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
     let ws = fixture_workspace(&tmp);
     let record = mgr
         .create("slow".into(), Some(ws.clone()), None, None, None, None)
