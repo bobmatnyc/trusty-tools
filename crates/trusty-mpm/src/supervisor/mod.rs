@@ -1,9 +1,9 @@
-//! Unattended supervisor: 24/7 fleet observer + auto-resumer.
+//! Unattended supervisor: 24/7 fleet observer.
 //!
 //! Why: the session manager normally needs a live calling agentic process to keep
 //! a fleet moving. For overnight / unattended operation (#1206) we need an
-//! always-on, lightweight supervisor that auto-resumes enduring (`stopped`)
-//! sessions, observes session health without a caller, surfaces `pending_decision`s
+//! always-on, lightweight supervisor that observes session health without a
+//! caller, surfaces `pending_decision`s
 //! for a human, and survives reboots under launchd/systemd. It is a PASSIVE
 //! observer — it never makes autonomy decisions and never auto-answers a decision;
 //! it feeds fleet state back to a human or a higher-level fleet manager.
@@ -12,6 +12,9 @@
 //! sweep ([`poller::run_tick`]), folds the result into [`SupervisorRunStats`],
 //! and publishes a fresh [`FleetMetrics`] snapshot to
 //! `<framework root>/supervisor-metrics.json` for the daemon to read (#6288).
+//! #10356 (owner ruling D74): it no longer auto-resumes. The daemon does, in
+//! `crate::daemon::auto_resume_loop`, over [`poller::resume_sweep`], because
+//! only the daemon installs the runtime relauncher a resume needs.
 //! Test: `super::tests` covers config parsing, metrics derivation, the per-tick
 //! sweep (including an N-session fleet), and the publish/read round trip.
 //!
@@ -27,7 +30,8 @@ pub mod poller;
 pub mod pr_cleanup_tick;
 pub mod publish;
 // #8335: step bounds, the heartbeat watchdog and the loop-exit report.
-mod watchdog;
+// #10356: `pub(crate)` so the daemon's auto-resume loop shares `DetachedSweep`.
+pub(crate) mod watchdog;
 
 #[cfg(test)]
 mod tests;
@@ -39,13 +43,12 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
-use crate::core::auto_resume;
 use crate::core::paths::FrameworkPaths;
 use crate::session_manager::SessionManager;
 
 pub use config::SupervisorConfig;
 pub use metrics::{FleetMetrics, PendingDecision, SupervisorRunStats};
-pub use poller::{TickReport, run_tick};
+pub use poller::{TickReport, resume_sweep, run_tick};
 pub use publish::{PublishedMetrics, SupervisorMetricsStatus};
 
 /// The unattended fleet supervisor.
@@ -60,20 +63,14 @@ pub use publish::{PublishedMetrics, SupervisorMetricsStatus};
 pub struct Supervisor<C: LlmClassifier> {
     /// The session manager whose fleet this supervisor watches.
     mgr: Arc<SessionManager>,
-    /// Immutable BOOT configuration (cadence + policy). `auto_resume` here is
-    /// the boot-time env / CLI value; the flag actually in force each sweep is
-    /// [`Self::resolve_auto_resume`]'s result (#5208).
+    /// Immutable configuration (cadence + policy). #10356: its `auto_resume`
+    /// is ignored here; the daemon owns auto-resume.
     cfg: SupervisorConfig,
     /// Optional activity classifier for idle `active` sessions; shared so the
     /// sweep can run on the blocking pool (#8335).
     monitor: Option<Arc<ActivityMonitor<C>>>,
     /// Cumulative counters across every sweep this run.
     stats: SupervisorRunStats,
-    /// #5208: the console-written desired-state file, re-read every sweep.
-    auto_resume_path: PathBuf,
-    /// #5208: the last override read successfully, so a transient read failure
-    /// cannot silently flip auto-resume off.
-    last_override: Option<bool>,
     /// #6288: where each sweep's snapshot is published for the daemon to read.
     metrics_path: PathBuf,
     /// #7275: when the post-merge cleanup sweep last ran, so its cadence is
@@ -114,10 +111,6 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
             cfg,
             monitor: monitor.map(Arc::new),
             stats: SupervisorRunStats::default(),
-            // #5208: default to the same `~/.trusty-mpm/auto_resume` the console
-            // writes, so production wiring needs no extra call.
-            auto_resume_path: auto_resume::desired_path(&FrameworkPaths::default()),
-            last_override: None,
             // #6288: the same `~/.trusty-mpm` root the daemon reads from, so
             // production wiring needs no extra call.
             metrics_path: publish::metrics_path(&FrameworkPaths::default()),
@@ -145,19 +138,6 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
         self
     }
 
-    /// Point the supervisor at a specific auto-resume desired-state file.
-    ///
-    /// Why: `new` resolves the real `~/.trusty-mpm/auto_resume`, which would make
-    /// every supervisor test depend on the developer's own console toggle. Tests
-    /// pin a temp path instead; production keeps the default.
-    /// What: replaces [`Self::auto_resume_path`] and returns `self` for chaining.
-    /// Test: `supervisor_honours_console_desired_state_without_restart`.
-    #[must_use]
-    pub fn with_auto_resume_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.auto_resume_path = path.into();
-        self
-    }
-
     /// Point the supervisor at a specific published-metrics file (#6288).
     ///
     /// Why: `new` resolves the real `~/.trusty-mpm/supervisor-metrics.json`, so a
@@ -178,60 +158,6 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
         &self.metrics_path
     }
 
-    /// Resolve the auto-resume flag in force for the sweep about to run.
-    ///
-    /// Why: #5208 — an operator toggling auto-resume in the console wrote
-    /// `~/.trusty-mpm/auto_resume` and nothing read it, so the write reported
-    /// success while the running supervisor kept its boot-time behavior. Reading
-    /// the file every sweep is what makes the console control real without a
-    /// process restart.
-    /// What: applies the documented precedence — persisted file when present >
-    /// boot-time `TRUSTY_MPM_AUTO_RESUME` / `--auto-resume` > off — logging each
-    /// transition once rather than every sweep. On a read error it holds the last
-    /// value it observed (falling back to the boot flag) and logs at `error`; it
-    /// never fails open to `false`, which would re-create the original defect one
-    /// layer out by letting an unreadable file disable an enabled supervisor.
-    /// Test: `supervisor_honours_console_desired_state_without_restart`,
-    /// `supervisor_console_disable_overrides_env_enabled`,
-    /// `supervisor_absent_desired_file_keeps_boot_flag`,
-    /// `supervisor_unreadable_desired_file_does_not_disable_resume`.
-    fn resolve_auto_resume(&mut self) -> bool {
-        match auto_resume::read_override_at(&self.auto_resume_path) {
-            Ok(Some(desired)) => {
-                if self.last_override != Some(desired) {
-                    info!(
-                        desired,
-                        path = %self.auto_resume_path.display(),
-                        "supervisor: auto-resume desired state applied from console"
-                    );
-                    self.last_override = Some(desired);
-                }
-                desired
-            }
-            Ok(None) => {
-                if self.last_override.is_some() {
-                    info!(
-                        boot_flag = self.cfg.auto_resume,
-                        path = %self.auto_resume_path.display(),
-                        "supervisor: auto-resume override removed; reverting to boot flag"
-                    );
-                    self.last_override = None;
-                }
-                self.cfg.auto_resume
-            }
-            Err(e) => {
-                let held = self.last_override.unwrap_or(self.cfg.auto_resume);
-                error!(
-                    path = %self.auto_resume_path.display(),
-                    auto_resume = held,
-                    "supervisor: cannot read auto-resume desired state: {e}; \
-                     holding the last known value (NOT failing open to off)"
-                );
-                held
-            }
-        }
-    }
-
     /// Borrow the current cumulative run stats.
     ///
     /// Why: tests and the metrics snapshot need read access to the counters the
@@ -247,24 +173,22 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
     /// Why: the timer loop and the tests both need "do exactly one sweep and
     /// update stats" as an atomic step; exposing it separately keeps the loop a
     /// trivial timer wrapper and lets tests advance the supervisor deterministically.
-    /// What: re-resolves the auto-resume flag from the console's persisted
-    /// desired-state file (#5208 — [`Self::resolve_auto_resume`]), calls
-    /// [`poller::run_tick`] with the resulting per-sweep config, increments
-    /// `sweeps`, and adds the tick's resumed / failure / classified counts into
-    /// `self.stats`; returns the [`TickReport`] for the caller to inspect. #8335:
+    /// What: calls [`poller::run_tick`], increments `sweeps`, and adds the
+    /// tick's classified count into `self.stats`; returns the [`TickReport`]
+    /// for the caller to inspect. #10356: the sweep resumes nothing, so
+    /// `auto_resumed` and `resume_failures` stay at zero here. #8335:
     /// the sweep runs on the blocking pool under `cfg.tick_timeout`
     /// ([`watchdog::DetachedSweep`]); one that does not complete returns an
     /// empty report, is not counted in `sweeps`, and bumps `sweeps_abandoned`
     /// and `consecutive_sweeps_abandoned`.
-    /// Test: `supervisor_tick_updates_stats`, `supervisor_fleet_resume_e2e`,
-    /// `supervisor_honours_console_desired_state_without_restart`,
+    /// Test: `supervisor_tick_updates_stats`, `the_supervisor_tick_no_longer_resumes`,
     /// `a_wedged_sweep_times_out_and_the_loop_continues`,
     /// `abandoned_fleet_sweeps_are_counted_and_read_as_stale`.
     pub async fn tick(&mut self) -> TickReport {
-        // #5208: the console toggle is re-read every sweep, so an operator's
-        // change takes effect within one interval instead of never.
+        // #10356 (owner ruling D74): this process installs no runtime
+        // relauncher, so it must never auto-resume. The daemon owns that.
         let cfg = SupervisorConfig {
-            auto_resume: self.resolve_auto_resume(),
+            auto_resume: false,
             ..self.cfg.clone()
         };
         // #8335: a sweep blocked in a tmux call held this task, so no timeout
@@ -279,8 +203,6 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
         self.stats.consecutive_sweeps_abandoned = 0;
         self.pr_cleanup_tick().await;
         self.stats.sweeps += 1;
-        self.stats.auto_resumed += report.resumed.len() as u64;
-        self.stats.resume_failures += report.resume_failures as u64;
         self.stats.classified += report.classified as u64;
         report
     }
@@ -387,12 +309,10 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
 
     /// Run the supervisor loop until an OS shutdown signal arrives.
     ///
-    /// Why: this is the unattended heartbeat — it keeps the fleet moving (auto-
-    /// resume), keeps observing (classification), and keeps the published
-    /// snapshot fresh, with no live caller. Per the project's connection-safe
-    /// restart convention (CLAUDE.md #534) it must stop *cleanly* on SIGTERM /
-    /// Ctrl-C: never killed mid-sweep, so a `cargo install` + restart cannot
-    /// interrupt a half-applied auto-resume.
+    /// Why: this is the unattended heartbeat — it keeps observing
+    /// (classification) and keeps the published snapshot fresh, with no live
+    /// caller. Per the project's connection-safe restart convention (CLAUDE.md
+    /// #534) it must stop *cleanly* on SIGTERM / Ctrl-C: never killed mid-sweep.
     /// What: delegates to [`Self::run_until`] with a shutdown future that resolves
     /// on `SIGTERM` (unix) or Ctrl-C, so the loop finishes the in-flight sweep,
     /// emits a final tracing line, and returns `Ok(())`.
@@ -420,25 +340,11 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
     /// Test: `supervisor_run_until_stops_cleanly`,
     /// `a_wedged_sweep_times_out_and_the_loop_continues`.
     pub async fn run_until(mut self, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
-        // #5208: report the flag actually in force at boot, not just the env one —
-        // the persisted console override outranks it and is consulted every sweep.
-        let boot_auto_resume = self.resolve_auto_resume();
         info!(
             interval_secs = self.cfg.interval.as_secs(),
-            auto_resume = boot_auto_resume,
-            auto_resume_env = self.cfg.auto_resume,
-            auto_resume_path = %self.auto_resume_path.display(),
             classify_idle = self.cfg.classify_idle,
-            "supervisor loop starting"
+            "supervisor loop starting (observe-only; the daemon owns auto-resume, #10356)"
         );
-        if !boot_auto_resume {
-            warn!(
-                "supervisor: auto-resume DISABLED ({}=1, or the console toggle writing {}, \
-                 to enable); running as observe-only",
-                config::ENV_AUTO_RESUME,
-                self.auto_resume_path.display()
-            );
-        }
         let mut timer = tokio::time::interval(self.cfg.interval);
         // #6288: publish an initial snapshot before the first sleep so the
         // console sees the supervisor immediately on startup rather than after
@@ -460,7 +366,6 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
                     exit_guard.disarm();
                     info!(
                         sweeps = self.stats.sweeps,
-                        auto_resumed = self.stats.auto_resumed,
                         "supervisor received shutdown signal; stopping cleanly"
                     );
                     return Ok(());

@@ -1,8 +1,8 @@
 //! Auto-resume circuit breaker for a session whose runtime keeps dying (#6568).
 //!
 //! Why: `runtime_reap` marks a session `Stopped` when the pane's runtime exits,
-//! and the supervisor poller auto-resumes any `Stopped` record whose stop nobody
-//! asked for. For a session whose pane SURVIVED the runtime exit, `resume` takes
+//! and the daemon's auto-resume sweep (the `tm supervisor` poller before
+//! #10356) auto-resumes any `Stopped` record whose stop nobody asked for. For a session whose pane SURVIVED the runtime exit, `resume` takes
 //! the #2148 re-attach branch — it verifies the pane is alive and flips the
 //! record back to `Active` WITHOUT relaunching anything in that pane. The pane
 //! is still the bare shell the reaper just classified, so the next reap tick
@@ -32,6 +32,10 @@
 //! `tm supervisor` process are separate processes, so it must be persisted, but
 //! losing the file only costs a session one extra resume cycle. The PARK itself
 //! lives on the record, so a lost sidecar can never un-park anything.
+//!
+//! #10356 (owner ruling D73): for `boot_grace` after the manager starts, a
+//! runtime exit is not counted at all, so a cold-start storm cannot park the
+//! fleet. See [`DEFAULT_BOOT_GRACE_SECS`] for the default.
 //!
 //! Test: `resume_breaker_tests.rs`.
 
@@ -65,13 +69,34 @@ pub const ENV_FLAP_WINDOW_SECS: &str = "TRUSTY_MPM_RESUME_FLAP_WINDOW_SECS";
 /// Environment override for [`DEFAULT_MAX_CONSECUTIVE`].
 pub const ENV_MAX_CONSECUTIVE: &str = "TRUSTY_MPM_RESUME_FLAP_THRESHOLD";
 
+/// Default boot grace: runtime exits this soon after the manager starts do not
+/// count toward the breaker (#10356, owner ruling D73).
+///
+/// Why: on 2026-10-27 a reboot brought the whole fleet back at once. Each boot
+/// recreate-to-reap cycle took about 30 seconds, and the breaker parked every
+/// session after about 5 minutes (5 cycles). A cold start races slow host
+/// services (login keychain, network, a loaded CPU) that a healthy session
+/// rides out within minutes, so the boot storm must not spend the flap budget.
+/// 600 seconds is twice the observed time to park, so the 10-27 boot would have
+/// parked nothing. The cost is bounded: a session that really flaps runs about
+/// ten extra cycles (one per sweep-plus-reap, about 60 seconds) before its
+/// streak starts counting, and is then parked on the normal schedule.
+/// What: the `boot_grace` default in [`ResumeBreakerConfig::default`].
+/// Test: `config_defaults`.
+pub const DEFAULT_BOOT_GRACE_SECS: u64 = 600;
+
+/// Environment override for [`DEFAULT_BOOT_GRACE_SECS`]. Zero disables the
+/// grace window.
+pub const ENV_BOOT_GRACE_SECS: &str = "TRUSTY_MPM_RESUME_BOOT_GRACE_SECS";
+
 /// The breaker's two tunables.
 ///
 /// Why: N and K have to be settable without a rebuild — the right values depend
 /// on how long a healthy session on this host takes to come up — and settable
 /// from a test without touching the process environment.
 /// What: `flap_window` is N (how soon after an auto-resume a death counts) and
-/// `max_consecutive` is K (how many in a row park the session).
+/// `max_consecutive` is K (how many in a row park the session). `boot_grace`
+/// (#10356) is how long after the manager starts a death is not counted.
 /// Test: `config_defaults`, `config_env_parsing`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeBreakerConfig {
@@ -79,6 +104,8 @@ pub struct ResumeBreakerConfig {
     pub flap_window: Duration,
     /// Consecutive flaps that park the session. `0` is normalised to `1`.
     pub max_consecutive: u32,
+    /// #10356: deaths inside this long of manager start are not counted.
+    pub boot_grace: Duration,
 }
 
 impl Default for ResumeBreakerConfig {
@@ -86,6 +113,7 @@ impl Default for ResumeBreakerConfig {
         Self {
             flap_window: Duration::from_secs(DEFAULT_FLAP_WINDOW_SECS),
             max_consecutive: DEFAULT_MAX_CONSECUTIVE,
+            boot_grace: Duration::from_secs(DEFAULT_BOOT_GRACE_SECS),
         }
     }
 }
@@ -106,7 +134,7 @@ impl ResumeBreakerConfig {
     /// What: an absent or unparsable value keeps the default. A zero window is
     /// honoured (it disables the breaker); a zero threshold is normalised to
     /// `1`, because parking on the zeroth flap would park a session that never
-    /// flapped.
+    /// flapped. A zero boot grace is honoured (no grace).
     /// Test: `config_defaults`, `config_env_parsing`,
     /// `a_zero_window_disables_the_breaker`.
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
@@ -119,9 +147,14 @@ impl ResumeBreakerConfig {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .map(|k| k.max(1))
             .unwrap_or(defaults.max_consecutive);
+        let boot_grace = get(ENV_BOOT_GRACE_SECS)
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.boot_grace);
         Self {
             flap_window,
             max_consecutive,
+            boot_grace,
         }
     }
 }
@@ -259,6 +292,9 @@ pub struct ResumeBreakerStore {
     path: PathBuf,
     tmp_path: PathBuf,
     states: HashMap<String, FlapState>,
+    /// #10356: when this store was opened, which is when its manager started.
+    /// The boot grace window is measured from here.
+    opened_at: std::time::Instant,
 }
 
 impl ResumeBreakerStore {
@@ -278,6 +314,7 @@ impl ResumeBreakerStore {
             path,
             tmp_path,
             states: HashMap::new(),
+            opened_at: std::time::Instant::now(),
         };
         store.reload().await;
         store
@@ -318,6 +355,22 @@ impl ResumeBreakerStore {
                 path = %self.path.display(),
                 "resume-breaker: sidecar unreadable ({e}); keeping the counters already in memory"
             ),
+        }
+    }
+
+    /// Whether `grace` has not yet run out since this store was opened (#10356).
+    ///
+    /// Test: `deaths_inside_the_boot_grace_are_not_counted`.
+    pub fn in_boot_grace(&self, grace: Duration) -> bool {
+        self.opened_at.elapsed() < grace
+    }
+
+    /// Move the boot instant `by` into the past, so a test can end the grace
+    /// window without sleeping (#10356).
+    #[cfg(test)]
+    pub(crate) fn backdate_boot(&mut self, by: Duration) {
+        if let Some(earlier) = self.opened_at.checked_sub(by) {
+            self.opened_at = earlier;
         }
     }
 
@@ -528,15 +581,29 @@ impl super::SessionManager {
     /// [`StopCause::ResumeFlapping`](super::record::StopCause::ResumeFlapping);
     /// `Counting` and `Reset` both return
     /// [`StopCause::Unexpected`](super::record::StopCause::Unexpected), which is
-    /// the pre-#6568 behavior.
+    /// the pre-#6568 behavior. Inside the boot grace window (#10356) it records
+    /// nothing and returns `Unexpected`.
     /// Test: `the_supervisor_parks_a_flapping_session_after_k_cycles`,
-    /// `a_session_that_dies_slowly_is_never_parked`.
+    /// `a_session_that_dies_slowly_is_never_parked`,
+    /// `deaths_inside_the_boot_grace_are_not_counted`,
+    /// `a_flapper_is_still_parked_after_the_grace_window`.
     pub(crate) async fn runtime_exit_stop_cause(
         &self,
         id: &ManagedSessionId,
         tmux_name: &str,
     ) -> super::record::StopCause {
         use super::record::StopCause;
+        // #10356 (owner ruling D73): a death inside the boot grace window is
+        // part of the cold-start storm, not a flap. It neither counts nor resets.
+        if self.in_resume_boot_grace().await {
+            tracing::debug!(
+                id = %id,
+                name = %tmux_name,
+                grace_secs = self.resume_breaker_cfg.boot_grace.as_secs(),
+                "runtime-reap: runtime exit inside the boot grace window; not counted (#10356)"
+            );
+            return StopCause::Unexpected;
+        }
         let verdict = self
             .resume_breaker
             .write()
@@ -568,6 +635,29 @@ impl super::SessionManager {
             }
             BreakerVerdict::Reset => StopCause::Unexpected,
         }
+    }
+
+    /// Whether this manager is still inside its breaker boot grace (#10356).
+    ///
+    /// Why: the reaper must not count a cold-start death, and the daemon's
+    /// parked-sessions notice must wait until the window closes, so both read
+    /// one clock.
+    /// What: true while less than `resume_breaker_cfg.boot_grace` has passed
+    /// since the manager opened its breaker store.
+    /// Test: `deaths_inside_the_boot_grace_are_not_counted`,
+    /// `the_park_notice_waits_for_the_grace_window_and_fires_once`.
+    pub async fn in_resume_boot_grace(&self) -> bool {
+        self.resume_breaker
+            .read()
+            .await
+            .in_boot_grace(self.resume_breaker_cfg.boot_grace)
+    }
+
+    /// End the boot grace window now, for a test (#10356).
+    #[cfg(test)]
+    pub(crate) async fn end_resume_boot_grace(&self) {
+        let grace = self.resume_breaker_cfg.boot_grace;
+        self.resume_breaker.write().await.backdate_boot(grace);
     }
 
     /// Override the breaker tunables on an already-built manager.

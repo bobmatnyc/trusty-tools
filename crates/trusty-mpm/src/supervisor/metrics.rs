@@ -90,9 +90,12 @@ pub struct PendingDecision {
 pub struct SupervisorRunStats {
     /// Number of fleet sweeps completed since the supervisor started.
     pub sweeps: u64,
-    /// Number of `stopped` sessions auto-resumed across all sweeps.
+    /// Number of `stopped` sessions auto-resumed across all sweeps. #10356:
+    /// always zero from `tm supervisor`; the daemon owns auto-resume. Kept so
+    /// the published file keeps its shape.
     pub auto_resumed: u64,
-    /// Number of resume attempts that failed across all sweeps.
+    /// Number of resume attempts that failed across all sweeps. Zero since
+    /// #10356, as `auto_resumed`.
     pub resume_failures: u64,
     /// Number of idle `active` sessions classified across all sweeps.
     pub classified: u64,
