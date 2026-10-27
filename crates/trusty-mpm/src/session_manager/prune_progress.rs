@@ -8,13 +8,16 @@
 //! What: [`PruneCancel`], a readable stop state with one fail-closed rule:
 //! anything but a clear "keep going" stops the pass. Cancel is read only
 //! BETWEEN candidates, never inside a removal, so a stop never leaves a new
-//! half-removed tree. The progress sink of #7619's streaming method lands here
-//! too, in a later change.
+//! half-removed tree. The same handle carries the progress sink of the
+//! streaming method `mpm.managed.prune_worktrees_stream` (#7619 PR 2): on that
+//! path a closed progress channel IS the cancel signal, so the two travel
+//! together.
 //! Test: `worktree_7619_a_cancelled_orphan_sweep_stops_after_the_first_removal`,
 //! `worktree_7619_a_cancelled_reclaim_stops_after_the_first_removal`,
 //! `worktree_7619_cancel_during_a_removal_lets_that_removal_finish`,
 //! `worktree_7619_a_partial_removal_is_never_also_cancelled_unstarted`,
-//! `worktree_7619_an_unreadable_or_early_cancel_removes_nothing`.
+//! `worktree_7619_an_unreadable_or_early_cancel_removes_nothing`,
+//! `worktree_7619_progress_lines_reach_the_sink_and_never_cancel`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -39,6 +42,9 @@ pub(crate) const CANCELLED_BEFORE_INSPECTION: &str =
 #[derive(Clone)]
 pub struct PruneCancel {
     state: Arc<dyn Fn() -> Option<bool> + Send + Sync>,
+    // #7619 PR 2: where the loops report each phase and candidate; `None`
+    // for every caller that streams nothing.
+    progress: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl PruneCancel {
@@ -52,6 +58,26 @@ impl PruneCancel {
     pub fn from_probe(probe: impl Fn() -> Option<bool> + Send + Sync + 'static) -> Self {
         Self {
             state: Arc::new(probe),
+            progress: None,
+        }
+    }
+
+    /// This signal, also reporting each phase and candidate to `sink` (#7619).
+    ///
+    /// Why: the streaming method shows the operator which worktree the pass is
+    /// on; the loops already hold this handle, so it carries the sink.
+    /// What: `sink` receives one human-readable line per call to
+    /// [`Self::progress`]. It never affects [`Self::stop_requested`].
+    /// Test: `worktree_7619_progress_lines_reach_the_sink_and_never_cancel`.
+    pub fn with_progress(mut self, sink: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.progress = Some(Arc::new(sink));
+        self
+    }
+
+    /// Report one progress line; `line` is built only when a sink listens.
+    pub(crate) fn progress(&self, line: impl FnOnce() -> String) {
+        if let Some(sink) = &self.progress {
+            sink(line());
         }
     }
 

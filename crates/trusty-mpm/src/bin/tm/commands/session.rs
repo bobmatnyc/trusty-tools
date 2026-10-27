@@ -422,6 +422,7 @@ pub(crate) async fn session(
             discard_dirty,
             merged_prs,
             all_projects,
+            detach,
         } => {
             // #8782: scoped to this checkout unless `--all-projects`; outside a
             // repository there is no project to scope to, so it refuses.
@@ -441,6 +442,8 @@ pub(crate) async fn session(
                 merged_prs,
                 all_projects,
                 std::env::var("TM_MANAGED_SESSION_ID").ok(),
+                // #7619: `--detach` — run the removal without this command.
+                detach,
             )
             .await?
         }

@@ -259,10 +259,42 @@ pub(crate) async fn session_prune_worktrees(
     invoking_session: Option<String>,
     project_root: Option<String>,
 ) -> anyhow::Result<()> {
-    // #6288: no client resolves the console gateway any more, so the #8347
-    // gateway bypass is gone with it; the post goes to `daemon` as given.
-    let post = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
-        let mut request = daemon.post(PRUNE_WORKTREES_PATH).json(&serde_json::json!({
+    session_prune_worktrees_with_detach(
+        daemon,
+        dry_run,
+        discard_dirty,
+        merged_prs,
+        invoking_session,
+        project_root,
+        false,
+    )
+    .await
+}
+
+/// [`session_prune_worktrees`], with `--detach` (#7619).
+///
+/// Why: #7619 streams the pass so the operator sees each worktree and Ctrl-C
+/// stops it; `--detach` keeps the old run-to-the-end behaviour on purpose.
+/// What: both requests go through
+/// [`send_prune`](super::prune_stream_client::send_prune): the stream method
+/// first, the unary request on a daemon without it. The `--force` banner
+/// states what Ctrl-C does on the transport in use. `detach` applies to the
+/// removal request only and returns once the daemon acknowledges it.
+/// Test: `worktree_7619_detach_without_the_stream_sends_nothing`, plus the
+/// tests of [`session_prune_worktrees`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session_prune_worktrees_with_detach(
+    daemon: &trusty_mpm::client::DaemonClient,
+    dry_run: bool,
+    discard_dirty: bool,
+    merged_prs: bool,
+    invoking_session: Option<String>,
+    project_root: Option<String>,
+    detach: bool,
+) -> anyhow::Result<()> {
+    use super::prune_stream_client::send_prune;
+    let body = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
+        serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,
             // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
@@ -277,7 +309,12 @@ pub(crate) async fn session_prune_worktrees(
             "only_orphan_paths": planned.map(|p| &p.orphan),
             "only_merged_paths": planned.map(|p| &p.merged),
             "only_discard_paths": planned.map(|p| &p.discard),
-        }));
+        })
+    };
+    // #6288: no client resolves the console gateway any more, so the #8347
+    // gateway bypass is gone with it; the post goes to `daemon` as given.
+    let post = |payload: serde_json::Value| {
+        let mut request = daemon.post(PRUNE_WORKTREES_PATH).json(&payload);
         if merged_prs {
             // #5830: the merged-PR survey runs synchronously in the handler and
             // takes minutes, so the client's 10s default aborted every invocation.
@@ -292,19 +329,21 @@ pub(crate) async fn session_prune_worktrees(
         }
     };
     if merged_prs {
-        // The wait is long and the daemon streams nothing, so say what is
-        // happening — an operator with no output cannot tell a running survey
-        // from a wedged one.
-        // #8301: the preview is now bounded, and a heartbeat proves it is alive.
+        // The wait is long, so say what is happening — an operator with no
+        // output cannot tell a running survey from a wedged one.
+        // #8301: the preview is bounded. #7619: the stream prints each
+        // worktree; an older daemon gets the heartbeat instead.
         eprintln!(
             "merged-PR pass: surveying the registered worktrees in scope (classify, then \
              byte-walk) — the daemon stops classifying after 10 minutes and reports what it did \
-             not reach as not inspected (kept); a heartbeat prints every {}s (#5830, #8301)",
+             not reach as not inspected (kept); progress prints per worktree, or a heartbeat \
+             every {}s on a daemon that does not stream (#5830, #8301, #7619)",
             SURVEY_HEARTBEAT.as_secs()
         );
     }
-    // #8301: a merged-PR request is the long one, so it carries the heartbeat.
-    let wait = |fut| async move {
+    // #8301: a unary merged-PR request is the long one, so it carries the heartbeat.
+    let unary = |payload| async move {
+        let fut = post(payload);
         if merged_prs {
             with_heartbeat(fut, SURVEY_HEARTBEAT, |elapsed| {
                 eprintln!("{}", heartbeat_line(elapsed));
@@ -314,9 +353,13 @@ pub(crate) async fn session_prune_worktrees(
             fut.await
         }
     };
+    // #7619: decided by the preview, reused by `--force`.
+    let mut streaming = true;
     // #8782: every run previews first. A `--force` run needs the echo too: a
     // daemon without it would ignore the allowlists as well as the scope.
-    let preview = wait(post(true, None)).await?;
+    let preview = send_prune(daemon, body(true, None), false, &mut streaming, unary)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the daemon detached a preview (#7619)"))?;
     let project = project_root.as_deref();
     super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
     if !dry_run {
@@ -337,11 +380,55 @@ pub(crate) async fn session_prune_worktrees(
         print_prune_reply(&preview, true, merged_prs);
         return Ok(());
     }
-    let body = wait(post(false, Some(&planned))).await?;
+    eprintln!(
+        "{}",
+        force_banner(
+            planned.orphan.len() + planned.merged.len(),
+            streaming,
+            detach
+        )
+    );
+    let Some(body) = send_prune(
+        daemon,
+        body(false, Some(&planned)),
+        detach,
+        &mut streaming,
+        unary,
+    )
+    .await?
+    else {
+        println!(
+            "--force --detach: the daemon accepted the removal and runs it without this \
+             command; re-run without `--force` to see what remains (#7619)"
+        );
+        return Ok(());
+    };
     super::prune_preview::check_scope_echo(&body, project, true)?;
     super::prune_preview::check_allowlist_echo(&body, Some(&planned))?;
     print_prune_reply(&body, false, merged_prs);
     Ok(())
+}
+
+/// The line `--force` prints before its removal request (#7619).
+///
+/// Why: the issue's second closure option — the CLI says up front what
+/// interrupting it does, which differs by transport.
+/// Test: `worktree_7619_the_force_banner_states_what_ctrl_c_does`.
+pub(crate) fn force_banner(count: usize, streaming: bool, detach: bool) -> String {
+    match (streaming, detach) {
+        (true, true) => format!(
+            "--force --detach: the daemon removes {count} previewed worktree(s) in the \
+             background and keeps going after this command exits (#7619)"
+        ),
+        (true, false) => format!(
+            "--force: removing {count} previewed worktree(s). Ctrl-C stops new removals; a \
+             removal in flight finishes (#7619)"
+        ),
+        (false, _) => format!(
+            "--force: removing {count} previewed worktree(s). This daemon does not stream: \
+             Ctrl-C ends this command, not the daemon's pass (#7619)"
+        ),
+    }
 }
 
 /// How often a merged-PR request prints that it is still waiting (#8301).
@@ -396,19 +483,22 @@ pub(crate) async fn prune_worktrees_from(
     merged_prs: bool,
     all_projects: bool,
     invoking_session: Option<String>,
+    // #7619: keep the removal running after this command exits.
+    detach: bool,
 ) -> anyhow::Result<()> {
     let project_root = if all_projects {
         None
     } else {
         Some(super::prune_preview::project_root_from(cwd)?)
     };
-    session_prune_worktrees(
+    session_prune_worktrees_with_detach(
         daemon,
         !force,
         discard_dirty,
         merged_prs,
         invoking_session,
         project_root,
+        detach,
     )
     .await
 }
