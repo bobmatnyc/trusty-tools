@@ -23,12 +23,14 @@
 #   Output, in the gitignored --out-dir: `samples.ndjson` (one row per
 #   sample) and `envelope.json` (schema 1, same top-level keys for both
 #   tools; `results` holds p50/p95/max per metric over the good samples).
+#   A run removes any earlier envelope from --out-dir before its first sample.
 #   Outcomes, fail-closed:
 #     ok       every sample good, ran to --duration-s or --max-samples
 #     stopped  L1 > --load-stop after at least one good sample (partial)
 #     skipped  L1 > --load-stop before the first sample; no call made
 #     failed   load unreadable, no daemon socket, no reply, an RPC error, a
-#              reply that is not JSON, or a required figure missing, not a
+#              reply that is not JSON or whose result is not an object
+#              (#10210), or a required figure missing, not a
 #              number, or zero where zero is impossible (RSS, RAM, disk).
 #              The first failed sample ends the run.
 #   A failed or skipped run has empty `results`; it never carries a summary.
@@ -123,6 +125,11 @@ if git -C "$out_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 samples="$out_dir/samples.ndjson"
 : >"$samples"
+# #10210: a reused --out-dir must not keep an earlier envelope; a run killed
+# before `finish` would leave it beside this run's samples, read as today's.
+rm -f "$out_dir/envelope.json" "$out_dir/envelope.json.tmp"
+[ ! -e "$out_dir/envelope.json" ] && [ ! -e "$out_dir/envelope.json.tmp" ] ||
+	usage "cannot remove the earlier envelope from the output dir"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/perf_sampler.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 ranks="$scratch/ranks.tsv" # id <TAB> label; never copied to the output
@@ -190,15 +197,22 @@ rank_map() {
 	jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}' <"$ranks"
 }
 
+# #10210: true only for a JSON object; empty or non-object input is false.
+is_object() { jq -e 'type == "object"' >/dev/null 2>&1 <<<"$1"; }
+
 # Required figures: present, numeric and finite; the `pos` list must be > 0.
+# Prints the bad names; empty output means all present, and it is never empty
+# for a non-object input or a jq failure.
 check_fields() { # $1 = metrics JSON, $2 = required names, $3 = positive names
+	# #10210: an empty or non-object input printed nothing, read as "all present".
+	is_object "$1" || { echo "(metrics not an object)"; return 1; }
 	jq -r --arg req "$2" --arg pos "$3" '
 		. as $m
 		| [($req | split(" ")[] | select(. != "")) as $k
 		   | select(($m[$k] | type) != "number" or ($m[$k] | isinfinite) or ($m[$k] | isnan)) | $k]
 		  + [($pos | split(" ")[] | select(. != "")) as $k
 		   | select(($m[$k] | type) == "number" and $m[$k] <= 0) | "\($k)=0"]
-		| join(" ")' <<<"$1"
+		| join(" ")' <<<"$1" || { echo "(metrics check failed)"; return 1; }
 }
 
 sample_memory() { # sets metrics, per_rank, version, residency
@@ -209,19 +223,29 @@ sample_memory() { # sets metrics, per_rank, version, residency
 		fail_reason="$(rpc_reason console_metrics "$code" "$cm")"
 		return 1
 	}
-	cm="$(jq -c '.content[0].text // empty | fromjson? // empty' <<<"$cm")"
+	# #10210: these jq calls run under `|| ok_sample=0`, so set -e is off; a
+	# non-object reply must fail here, not leave an empty `metrics` behind.
+	is_object "$status" || { fail_reason="memory.status: result is not an object"; return 1; }
+	cm="$(jq -c '.content[0].text // empty | fromjson? // empty' <<<"$cm" 2>/dev/null)" || cm=""
 	[ -n "$cm" ] || { fail_reason="console_metrics: reply carries no metrics report"; return 1; }
+	jq -e '.metrics | type == "object"' >/dev/null 2>&1 <<<"$cm" ||
+		{ fail_reason="console_metrics: metrics is not an object"; return 1; }
 	metrics="$(jq -c --argjson s "$status" '.metrics
 		| {ram_bytes, ram_heap_bytes, ram_file_backed_bytes, disk_bytes, palace_count,
 		   cached_palace_count, total_drawers, total_vectors, total_kg_triples, total_rooms,
 		   status_palace_count: $s.palace_count, status_cached_palace_count: $s.cached_palace_count,
-		   status_total_drawers: $s.total_drawers, status_total_vectors: $s.total_vectors}' <<<"$cm")"
-	missing="$(check_fields "$metrics" "ram_bytes disk_bytes palace_count cached_palace_count total_drawers total_vectors total_kg_triples status_palace_count status_total_drawers" "ram_bytes disk_bytes")"
+		   status_total_drawers: $s.total_drawers, status_total_vectors: $s.total_vectors}' <<<"$cm")" ||
+		{ fail_reason="memory: figures could not be read from the reply"; return 1; }
+	missing="$(check_fields "$metrics" "ram_bytes disk_bytes palace_count cached_palace_count total_drawers total_vectors total_kg_triples status_palace_count status_total_drawers" "ram_bytes disk_bytes")" || true
 	[ -z "$missing" ] || { fail_reason="memory: required figure missing, not a number or zero: $missing"; return 1; }
-	jq -c '[.metrics.palaces[]? | {id: (.id // .name), size: .disk_bytes}]' <<<"$cm" >"$scratch/list"
-	map="$(rank_map p <"$scratch/list")"
-	per_rank="$(jq -c --argjson map "$map" '[.metrics.palaces[]? | {label: $map[(.id // .name)],
-		disk_bytes, drawer_count, vector_count, kg_triple_count}] | sort_by(.label)' <<<"$cm")"
+	# #10210: an unreadable palace list fails the sample too.
+	if ! { jq -c '[.metrics.palaces[]? | {id: (.id // .name), size: .disk_bytes}]' <<<"$cm" >"$scratch/list" &&
+		map="$(rank_map p <"$scratch/list")" &&
+		per_rank="$(jq -c --argjson map "$map" '[.metrics.palaces[]? | {label: $map[(.id // .name)],
+			disk_bytes, drawer_count, vector_count, kg_triple_count}] | sort_by(.label)' <<<"$cm")"; }; then
+		fail_reason="console_metrics: palace list could not be read"
+		return 1
+	fi
 	version="$(jq -r '.version // "unknown"' <<<"$status")"
 	residency="$(jq -c '{cached: .cached_palace_count, total: .palace_count}' <<<"$metrics")"
 }
@@ -251,6 +275,9 @@ sample_search() { # sets metrics, per_rank, version, residency
 		fail_reason="$(rpc_reason search.indexes.list "$code" "$list")"
 		return 1
 	}
+	# #10210: set -e is off here too (see sample_memory); fail on a non-object.
+	is_object "$health" || { fail_reason="search.health: result is not an object"; return 1; }
+	is_object "$list" || { fail_reason="search.indexes.list: result is not an object"; return 1; }
 	dpid="$(daemon_pid)" || { fail_reason="search: daemon pid not found for ps"; return 1; }
 	rss="$(read_rss "$dpid")" || { fail_reason="search: ps gave no RSS for the daemon"; return 1; }
 	metrics="$(jq -c --argjson rss "$rss" --argjson list "$list" '
@@ -258,16 +285,24 @@ sample_search() { # sets metrics, per_rank, version, residency
 		 indexes_populated, indexes_empty, total_chunks, disk_bytes,
 		 background_reindex_queue_depth, deferred_embed_queue_depth,
 		 embedder_recent_timeout_count, listed_indexes: ($list.indexes | length),
-		 health_ok: (if .status == "ok" then 1 else 0 end)}' <<<"$health")"
-	missing="$(check_fields "$metrics" "daemon_rss_kb cpu_pct uptime_secs indexes total_chunks listed_indexes" "daemon_rss_kb")"
+		 health_ok: (if .status == "ok" then 1 else 0 end)}' <<<"$health")" ||
+		{ fail_reason="search: figures could not be read from the reply"; return 1; }
+	missing="$(check_fields "$metrics" "daemon_rss_kb cpu_pct uptime_secs indexes total_chunks listed_indexes" "daemon_rss_kb")" || true
 	[ -z "$missing" ] || { fail_reason="search: required figure missing, not a number or zero: $missing"; return 1; }
-	jq -c '[.indexes[]? | if type == "object" then {id, size: .size_bytes} else {id: ., size: 0} end]' \
-		<<<"$list" >"$scratch/list"
-	map="$(rank_map i <"$scratch/list")"
-	per_rank="$(jq -c --argjson map "$map" '[.indexes[]? | select(type == "object")
-		| {label: $map[.id], size_bytes}] | sort_by(.label)' <<<"$list")"
+	# #10210: an unreadable index list or residency fails the sample too.
+	if ! { jq -c '[.indexes[]? | if type == "object" then {id, size: .size_bytes} else {id: ., size: 0} end]' \
+		<<<"$list" >"$scratch/list" &&
+		map="$(rank_map i <"$scratch/list")" &&
+		per_rank="$(jq -c --argjson map "$map" '[.indexes[]? | select(type == "object")
+			| {label: $map[.id], size_bytes}] | sort_by(.label)' <<<"$list")"; }; then
+		fail_reason="search.indexes.list: index list could not be read"
+		return 1
+	fi
 	version="$(jq -r '.version // "unknown"' <<<"$health")"
-	residency="$(jq -c '{cached: .warmboot_summary.indexes_loaded, total: .indexes}' <<<"$health")"
+	local res
+	res="$(jq -c '{cached: (.warmboot_summary | if type == "object" then .indexes_loaded else null end),
+		total: .indexes}' <<<"$health")" || { fail_reason="search.health: residency could not be read"; return 1; }
+	residency="$res"
 }
 
 if [ "$OS" = Darwin ]; then
@@ -353,6 +388,11 @@ while :; do
 		jq -cn --argjson seq "$seq" --argjson l1 "$l1" --argjson l15 "$l15" --arg r "$fail_reason" \
 			'{seq: $seq, load1: $l1, load15: $l15, status: "failed", reason: $r}' >>"$samples"
 		finish failed "sample $seq: $fail_reason"
+	fi
+	# #10210: backstop; a bad shape that slipped past a sampler fails the run
+	# (exit 20, envelope) instead of killing it at --argjson (exit 2).
+	if ! is_object "$metrics" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$per_rank"; then
+		finish failed "sample $seq: reply could not be turned into figures"
 	fi
 	good=$((good + 1))
 	jq -cn --argjson seq "$seq" --argjson t "$(($(date +%s) - start_s))" --argjson l1 "$l1" \

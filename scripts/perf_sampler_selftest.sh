@@ -16,7 +16,10 @@
 #   first sample (skipped) and after one (stopped), and one failed case per
 #   failure branch: load unreadable, no reply, not JSON, an RPC error whose
 #   message names a path, a missing figure, a zero RAM figure, an unreadable
-#   RSS and a zero RSS.
+#   RSS, a zero RSS, and a string result from memory.status, console_metrics
+#   `.metrics` and search.indexes.list. A last case kills the sampler with
+#   SIGKILL in a reused --out-dir holding an earlier ok envelope and checks
+#   none is left.
 #   `--live` instead starts one sandbox daemon per tool with
 #   scripts/sandbox_memory_daemon.sh and scripts/sandbox_search_daemon.sh
 #   (search pinned to TRUSTY_EMBEDDER=stdio, so no python venv download),
@@ -146,6 +149,13 @@ case " ${STUB_BREAK:-} " in
 *" noreply "*) exit 0 ;;
 *" notjson "*) echo "<html>bad gateway</html>"; exit 0 ;;
 *" rpcerror "*) echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no project root at /Users/stub/zz-p4-secret-palace"}}'; exit 0 ;;
+# #10210: a hard kill mid-run (case 17); the sampler's own processes only.
+*" kill "*) kill -KILL "$(cat "$STUB_PIDFILE")"; exit 0 ;;
+esac
+# #10210: a result that is a JSON string instead of an object (case 7-14 table).
+case " ${STUB_BREAK:-} $m " in
+*" strstatus memory.status "* | *" strlist search.indexes.list "*)
+	echo '{"jsonrpc":"2.0","id":1,"result":"zz-p4-secret not an object"}'; exit 0 ;;
 esac
 case "$m" in
 memory.status) r='{"cached_palace_count":1,"data_root":"/Users/stub/Library/Application Support/trusty-memory","palace_count":2,"total_drawers":40,"total_kg_triples":9,"total_vectors":40,"version":"9.9.9"}' ;;
@@ -161,6 +171,7 @@ tools/call:console_metrics)
 		 {id: "zz-p4-secret-big", name: "zz-p4-secret-big", disk_bytes: 4000, drawer_count: 30,
 		  vector_count: 30, kg_triple_count: 7}]}}')"
 	case " ${STUB_BREAK:-} " in *" missing "*) rep="$(jq -c 'del(.metrics.total_vectors)' <<<"$rep")" ;; esac
+	case " ${STUB_BREAK:-} " in *" strmetrics "*) rep="$(jq -c '.metrics = "zz-p4-secret"' <<<"$rep")" ;; esac
 	r="$(jq -cn --arg t "$rep" '{content: [{type: "text", text: $t}]}')"
 	;;
 search.health) r='{"status":"ok","version":"0.61.0","rss_mb":20,"cpu_pct":1.5,"uptime_secs":100,"indexes":2,"indexes_populated":2,"indexes_empty":0,"total_chunks":300,"disk_bytes":9000,"background_reindex_queue_depth":0,"deferred_embed_queue_depth":0,"embedder_recent_timeout_count":0,"transport":{"socket_path":"/Users/stub/.trusty/trusty-search.sock"},"warmboot_summary":{"indexes_loaded":2}}' ;;
@@ -183,7 +194,13 @@ cat >"$work/rss" <<'EOF'
 case " ${STUB_BREAK:-} " in *" norss "*) exit 1 ;; *" zerorss "*) echo 0; exit 0 ;; esac
 echo 51200
 EOF
-chmod +x "$work/rpc" "$work/load" "$work/rss"
+cat >"$work/launch" <<'EOF'
+#!/usr/bin/env bash
+# Records the sampler's pid for the kill stub; exec keeps the pid.
+echo $$ >"$STUB_PIDFILE"
+exec "$@"
+EOF
+chmod +x "$work/rpc" "$work/load" "$work/rss" "$work/launch"
 
 # run_case NAME TOOL LOADS [sampler flags]; sets rc, out, env (envelope), calls.
 run_case() {
@@ -195,10 +212,10 @@ run_case() {
 	: >"$calls"
 	echo 0 >"$work/$name/loadn"
 	rc=0
-	STUB_CALLS="$calls" STUB_LOADS="$loads" STUB_LOADN="$work/$name/loadn" \
+	STUB_CALLS="$calls" STUB_PIDFILE="$work/$name/pid" STUB_LOADS="$loads" STUB_LOADN="$work/$name/loadn" \
 		PERF_SAMPLER_RPC_CMD="$work/rpc" PERF_SAMPLER_LOAD_CMD="$work/load" \
 		PERF_SAMPLER_RSS_CMD="$work/rss" PERF_SAMPLER_SLEEP_CMD=true \
-		"$SAMPLER" --tool "$tool" --socket "$work/none.sock" --pid 4242 --out-dir "$out" \
+		"$work/launch" "$SAMPLER" --tool "$tool" --socket "$work/none.sock" --pid 4242 --out-dir "$out" \
 		--max-samples 3 "$@" >"$work/$name/stdout" 2>"$work/$name/stderr" || rc=$?
 	env="$out/envelope.json"
 }
@@ -270,7 +287,10 @@ rpc-error${TAB}memory${TAB}1.00${TAB}rpcerror${TAB}memory.status: daemon returne
 missing-figure${TAB}memory${TAB}1.00${TAB}missing${TAB}required figure missing, not a number or zero: total_vectors
 zero-ram${TAB}memory${TAB}1.00${TAB}zeroram${TAB}required figure missing, not a number or zero: ram_bytes=0
 no-rss${TAB}search${TAB}1.00${TAB}norss${TAB}search: ps gave no RSS for the daemon
-zero-rss${TAB}search${TAB}1.00${TAB}zerorss${TAB}required figure missing, not a number or zero: daemon_rss_kb=0"
+zero-rss${TAB}search${TAB}1.00${TAB}zerorss${TAB}required figure missing, not a number or zero: daemon_rss_kb=0
+str-status${TAB}memory${TAB}1.00${TAB}strstatus${TAB}memory.status: result is not an object
+str-metrics${TAB}memory${TAB}1.00${TAB}strmetrics${TAB}console_metrics: metrics is not an object
+str-list${TAB}search${TAB}1.00${TAB}strlist${TAB}search.indexes.list: result is not an object"
 while IFS="$TAB" read -r name tool loads brk want; do
 	STUB_BREAK="${brk#-}" run_case "$name" "$tool" "$loads"
 	if [ "$rc" != 20 ] || ! jq -e '.outcome == "failed" and .results == [] and .sampling.good == 0' "$env" >/dev/null; then
@@ -292,6 +312,18 @@ if [ "$rc" = 20 ] && jq -e '.outcome == "failed" and .results == [] and .samplin
 	pass "failure after 2 good samples: exit 20, failed, no summary"
 else
 	bad "late failure" "got '$rc $(summary)'"
+fi
+
+# 17. #10210: a reused --out-dir holding an earlier ok envelope (and a stray
+# .tmp), then a hard kill mid-run: no ok envelope may be left to read as today's.
+mkdir -p "$work/stale-kill/out"
+echo '{"schema":1,"outcome":"ok","reason":null,"results":[]}' >"$work/stale-kill/out/envelope.json"
+cp "$work/stale-kill/out/envelope.json" "$work/stale-kill/out/envelope.json.tmp"
+STUB_BREAK="kill" run_case stale-kill memory "1.00"
+if [ -e "$env" ] || [ -e "$env.tmp" ]; then
+	bad "stale envelope after kill" "exit $rc; left: $(cd "$out" && echo *) ($(summary))"
+else
+	pass "stale envelope after kill: exit $rc, no envelope.json or envelope.json.tmp left"
 fi
 
 # 16. The interval floor is 10 s (#10210).
