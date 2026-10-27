@@ -389,19 +389,59 @@ async fn worktree_7619_an_interrupt_before_a_request_sends_nothing() {
     assert!(!unary_ran.get(), "the unary request was sent");
 }
 
+/// Set in the child process [`worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed`]
+/// re-executes; its presence selects the half that raises the SIGINT.
+#[cfg(unix)]
+const SIGINT_CHILD_ENV: &str = "TM_TEST_7619_SIGINT_CHILD";
+
 /// 🔴 #7619 critic HIGH: a real SIGINT that arrives while nothing awaits the
 /// listener is still observed — the latch, not a live await, records it.
+///
+/// #7619 delta critic: the SIGINT goes to a CHILD process, never to this one.
+/// Every tokio SIGINT listener in a shared test process hears a signal sent
+/// to it, so other tests could see the interrupt. The parent re-runs this
+/// test alone in a child; the child latches, raises SIGINT on itself and
+/// awaits `fired()`. A child killed by the signal — the lazily registered
+/// shape — fails the parent's exit-status assertion.
 #[cfg(unix)]
-#[tokio::test]
-async fn worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed() {
-    let interrupt = Interrupt::ctrl_c();
-    let status = std::process::Command::new("kill")
-        .args(["-INT", &std::process::id().to_string()])
-        .status()
-        .expect("kill runs");
-    assert!(status.success());
-    tokio::time::timeout(Duration::from_secs(10), interrupt.fired())
-        .await
-        .expect("the SIGINT must be latched");
-    assert!(interrupt.is_set());
+#[test]
+fn worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed() {
+    if std::env::var_os(SIGINT_CHILD_ENV).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let interrupt = Interrupt::ctrl_c();
+            let status = std::process::Command::new("kill")
+                .args(["-INT", &std::process::id().to_string()])
+                .status()
+                .expect("kill runs");
+            assert!(status.success());
+            tokio::time::timeout(Duration::from_secs(10), interrupt.fired())
+                .await
+                .expect("the SIGINT must be latched");
+            assert!(interrupt.is_set());
+        });
+        return;
+    }
+    // The test's own path, without the crate name the harness omits.
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let name = format!("{module}::worktree_7619_a_ctrl_c_with_no_waiter_is_still_observed");
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+        .env(SIGINT_CHILD_ENV, "1")
+        .output()
+        .expect("the child runs");
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success(),
+        "the child must latch the SIGINT and exit 0, got {:?}\n{stdout}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must run exactly this test: {stdout}"
+    );
 }
