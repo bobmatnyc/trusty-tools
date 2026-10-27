@@ -1,0 +1,2 @@
+Fixed
+- Boot reconcile no longer decommissions concurrent sessions that share one main checkout. The exact-path dedup pass now treats a same-path record as a duplicate only when it carries the same `claude_session_id`, or the same `pane_id` on the same tmux server, as the record it keeps. Records with no such evidence are left alone, so they are no longer hard-deleted by retention a day later (#10351).
