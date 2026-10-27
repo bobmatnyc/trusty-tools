@@ -336,7 +336,10 @@ fn tm_capabilities_workflows_carries_the_context_tool_field_reference() {
     // #10300: the session_context_* MCP descriptions point here for the
     // field reference they no longer carry; losing it strands every caller.
     let workflows = skill_text("skills/tm-capabilities/references/workflows.md");
-    assert!(workflows.contains("## 6. PM Pause and Resume"), "section 6 missing");
+    assert!(
+        workflows.contains("## 6. PM Pause and Resume"),
+        "section 6 missing"
+    );
     for field in [
         "snapshot_publish",
         "ref_error",
