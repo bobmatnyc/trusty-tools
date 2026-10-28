@@ -161,7 +161,16 @@ readme = "README.md"
 homepage = "https://trustytools.dev"
 keywords = ["orchestration", "multi-agent", "cli", "daemon", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.claude/", "/.trusty-mpm/", "/CLAUDE.md"]
+# See #10373: crates.io 10 MiB upload limit (1.9.0 got HTTP 413). CHANGELOG.md
+# and tests/ are not read by any include_str!/build.rs; the [[test]] targets
+# still run from the repo.
+exclude = [
+    "/.claude/",
+    "/.trusty-mpm/",
+    "/CLAUDE.md",
+    "/tests/",
+    "/CHANGELOG.md",
+]
 # #8345: every `tests/*.rs` file is a module of one of the two `[[test]]`
 # targets declared below, not a binary of its own — linking ~60 test binaries
 # dominated this crate's CI shard. `every_integration_target_arms_the_home_write_fence`
