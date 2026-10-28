@@ -79,7 +79,7 @@ fn embedded_spec_has_the_version_and_the_six_standard_fields_10275() {
             ("Backlog", Gray, "Issue created"),
             ("Ready for Development", Blue, "Selected for work"),
             ("In Development", Yellow, "Engineer session claimed it"),
-            ("In PR", Orange, "PR open, `Refs #N`"),
+            ("In PR", Orange, "PR open, Refs #N"),
             (
                 "On Preview",
                 Yellow,
@@ -106,6 +106,27 @@ fn embedded_spec_has_the_version_and_the_six_standard_fields_10275() {
             "{date}"
         );
     }
+
+    // #10277: the `List` columns are Project #45's `configuration.visibleFields`
+    // order minus the repo extra Crate. `ProjectV2View.fields` returns project
+    // field order, not column order, and misplaced Milestone and Sub-issues.
+    let list = spec.views.iter().find(|v| v.name == "List").expect("List");
+    assert_eq!(
+        list.fields,
+        [
+            "Title",
+            "Assignees",
+            "Status",
+            "Linked pull requests",
+            "Sub-issues progress",
+            "Milestone",
+            "Created",
+            "Start date",
+            "Target date",
+            "Deployed on",
+            "Published on",
+        ]
+    );
 
     // A field outside the standard set is refused, naming it.
     for extra in ["Crate", "Agents"] {

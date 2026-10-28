@@ -123,7 +123,7 @@ The readme opens with a statement that the board tracks every open issue in `bob
 | 2 | Swimlanes | `BOARD_LAYOUT` | empty | none | Status | none |
 | 3 | Roadmap | `ROADMAP_LAYOUT` | empty | none | none | none |
 
-Visible fields, in the order the API returned them:
+Visible fields, in the order `ProjectV2View.fields` returned them. That order is project field order, not the view's column order (#10277). The column order is in `configuration.visibleFields`; for `List` it puts Sub-issues progress before Milestone. The table below keeps the field-order capture as recorded:
 
 | # | View | Visible fields |
 |---|---|---|
@@ -183,7 +183,7 @@ Status options, in order:
 | 1 | Backlog | GRAY | Issue created | `f75ad846` |
 | 2 | Ready for Development | BLUE | Selected for work | `b8a5db32` |
 | 3 | In Development | YELLOW | Engineer session claimed it | `47fc9ee4` |
-| 4 | In PR | ORANGE | PR open, `Refs #N` | `92d8f3aa` |
+| 4 | In PR | ORANGE | PR open, Refs #N | `92d8f3aa` |
 | 5 | On Preview | YELLOW | Per-PR preview deploy is up and checked | `93887173` |
 | 6 | Merged | GREEN | PR squash-merged | `0a17db94` |
 | 7 | On Prod | PINK | Runs in production or as the installed binary, with live evidence | `21c81169` |
@@ -255,7 +255,7 @@ Facts the spec ([#10275](https://github.com/bobmatnyc/trusty-tools/issues/10275)
 
 Views. Three, all with an empty filter, no group-by on rows and no sort:
 
-- `List`: layout TABLE. Visible fields in order: Title, Assignees, Status, Linked pull requests, Milestone, Sub-issues progress, Created, Start date, Target date, Crate, Deployed on, Published on. Crate is a repo extra per decision D6 in the plan, so a board without it has a shorter List.
+- `List`: layout TABLE. Visible fields in column order (`configuration.visibleFields`, #10277): Title, Assignees, Status, Linked pull requests, Sub-issues progress, Milestone, Created, Start date, Target date, Deployed on, Published on, with Crate also visible. Crate is a repo extra per decision D6 in the plan, so a board without it has a shorter List.
 - `Swimlanes`: layout BOARD. Vertical group-by Status. Visible fields: Title, Assignees, Status, Linked pull requests, Sub-issues progress.
 - `Roadmap`: layout ROADMAP. Visible fields: Title, Assignees, Status, Linked pull requests, Sub-issues progress. Its date-field mapping and zoom were not read.
 
