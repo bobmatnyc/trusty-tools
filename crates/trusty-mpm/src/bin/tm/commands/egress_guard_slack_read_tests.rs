@@ -56,6 +56,14 @@ fn judge(
     lift(first, &read, &table, project.map(Path::as_os_str), load)
 }
 
+/// One fault case: name, `CLAUDE_PROJECT_DIR`, load result, wanted text.
+type Case<'a> = (
+    &'a str,
+    Option<&'a Path>,
+    Result<SlackReadAllowlist, HostError>,
+    &'a str,
+);
+
 /// The deny reason, panicking on an allow.
 fn denied(out: &(Verdict, Option<Allowed>), case: &str) -> String {
     match out {
@@ -126,12 +134,7 @@ fn slack_read_faults_keep_the_deny() {
     let unknown = fx
         .yaml()
         .replace("name: tm-apex", "name: tm-apex\n      all: true");
-    let cases: Vec<(
-        &str,
-        Option<&Path>,
-        Result<SlackReadAllowlist, HostError>,
-        &str,
-    )> = vec![
+    let cases: Vec<Case<'_>> = vec![
         (
             "another project",
             Some(&other),

@@ -64,7 +64,7 @@ impl Allowed {
 /// match: `slack_read_canvas` must not pass as `slack_read_channel`.
 /// Test: `slack_read_posting_tools_stay_refused` (the mutation proof).
 fn listed(entry: &SlackReadEntry, tool: &str) -> bool {
-    entry.tools().iter().any(|t| *t == tool)
+    entry.tools().contains(&tool)
 }
 
 /// `(server, tool)` of `mcp__<server>__<tool>` when the server is exactly one
