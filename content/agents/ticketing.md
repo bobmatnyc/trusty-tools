@@ -213,9 +213,8 @@ lifecycle label was called absent on a repo carrying `unicorn:done`.
 The milestone and the project are the standard's
 ("The Labels, Project, Milestone Standard" in `tm-ticketing`); the
 relationships are the issue side's
-alone. The milestone and relationships are set with the call that creates the
-issue, natively, never in prose and never in a follow-up pass. The project is
-attached by `tm issue board add <N>` right after the issue is created.
+alone. The milestone and relationships are set at creation, natively, never in
+prose or a follow-up pass.
 
 🔴 **`tm issue standard` is the source of truth.** It prints
 `milestone_required`, `project_required`, the configured `default_project`, and
@@ -227,7 +226,6 @@ name is the failure this replaces.
 gh issue create --title "…" --body "…" \
   --milestone "Backlog · mpm/core" --parent 7067 \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-mpm
-tm issue board add 7070
 gh issue edit 7070 --milestone "mpm 1.4"
 ```
 
@@ -262,25 +260,9 @@ gh issue view 7070 --json milestone,projectItems
 A `null` milestone with no `no-milestone` comment, or an empty `projectItems`,
 is yours to fix now.
 
-### Attach the issue to the board — `tm issue board add`
-
-🔴 **Run `tm issue board add <N>` right after `gh issue create` returns the
-issue number.** It attaches issue `<N>` to the board named by the `project:`
-block of the repo's `issue-state.yaml`. Never attach a project through a `gh`
-flag. Read the exit code:
-
-- **Exit 0, "added #N to …":** the issue is on the board.
-- **Exit 0, "not added: the token lacks the project scope":** the command
-  posted one `no-project:` comment on the issue (or found it already there),
-  which records the missing scope. Continue the filing and mention it in your
-  report.
-- **Non-zero exit:** the issue is filed but not on the board. Do not retry in
-  a loop and do not post a `no-project:` comment yourself. Report the issue
-  number and the error text so the PM can re-run `tm issue board add <N>`.
-- **No `project:` block in `issue-state.yaml`:** the command falls back to the
-  project whose title is `agents.ticketing.default_project`. With neither set
-  it exits non-zero with "no board to attach to". Handle that as the
-  non-zero case: report that the repo has no board configured.
+🔴 After `gh issue create`, run `tm issue board add <N>` (no `gh` project
+flag). Exit 0: continue; `no-project:` means the missing scope was recorded.
+Non-zero: report the issue number and error; do not retry.
 
 Run `tm issue audit <N>` after filing and paste its output into your report; it
 exits 1 on a violation (#7097).
@@ -301,7 +283,7 @@ a `gh`-authenticated repo — this is the common case), use `gh` directly:
 gh issue create --title "Title" --body "Details" \
   --milestone "Backlog · search/core" \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-search
-tm issue board add 4070   # the number gh issue create printed
+tm issue board add 4070
 gh issue edit 4069 --add-label refactor --add-label trusty-common
 gh issue list --search "search terms" --state all   # search open AND closed FIRST
 gh issue reopen 4069 --comment "Recurred 2026-08-06: …"   # prefer this over a new issue
