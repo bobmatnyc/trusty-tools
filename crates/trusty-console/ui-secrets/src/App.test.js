@@ -109,7 +109,7 @@ describe('the Secrets page', () => {
     for (const input of document.querySelectorAll('input, textarea, select')) {
       expect(input.value).not.toContain(SECRET);
     }
-    expect(q('masked').textContent).toContain('sk-live-… [40 chars]');
+    expect(q('masked').textContent).toContain('sk-l…Qx7Lm [40 chars]');
   });
 
   test('the value is cleared even when the set is refused', async () => {

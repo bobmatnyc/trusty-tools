@@ -3,8 +3,9 @@
 //! Why: owner ruling 24 — trusty-secrets serves its own socket and tm is a
 //! client, so this module holds no store. The 2026-09-17 rulings fix the
 //! `set` grammar: one upsert verb, the value from the clipboard, never from
-//! argv. The 2026-10-01 ruling fixes the confirmation: first 8 characters and
-//! the length, or the length alone for 8 characters or fewer.
+//! argv. #10394: the 2026-10-28 ruling fixes the confirmation — first 4 and
+//! last 5 characters and the length at 16+, last 5 and the length at 10-15,
+//! the length alone under 10 (`mask_secret`).
 //! What: [`run`] builds a [`Ctx`] — the socket client
 //! (`OnDemandSecrets`, which starts the server on first call), the working
 //! directory as the project, the system clipboard and stdin — and

@@ -412,12 +412,13 @@ fn api_bridge_assertion_wire_shape_and_consistency() {
 }
 
 /// Why: #9066 — `mask_secret` is reachable from `api`, the only feature the
-/// console bridge links, and masks a specimen there as `store` does.
+/// console bridge links, and masks a specimen there as `store` does
+/// (#10394: first 4, last 5, length).
 /// Test: itself.
 #[test]
 fn api_mask_secret_masks_a_specimen_value() {
     const SPECIMEN: &str = "SPECIMEN-9066-value-Qx7Lm2";
     let masked = mask_secret(SPECIMEN);
     assert!(!masked.contains(SPECIMEN), "{masked}");
-    assert_eq!(masked, "SPECIMEN… [26 chars]");
+    assert_eq!(masked, "SPEC…x7Lm2 [26 chars]");
 }

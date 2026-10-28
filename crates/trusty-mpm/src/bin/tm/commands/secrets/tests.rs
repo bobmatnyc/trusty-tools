@@ -25,13 +25,16 @@ use trusty_secrets::{BackendId, SecretKey, SecretsError, VaultName};
 use super::*;
 use crate::cli::{Cli, Command};
 
-/// A value longer than 8 characters: only [`HEAD`] may ever be printed.
+/// A value of 16 characters or more: only [`HEAD`] and [`END`] may ever be
+/// printed (#10394).
 const VALUE: &str = "sk-live-TAIL-7521-c0ffee";
-/// The first 8 characters of [`VALUE`].
-const HEAD: &str = "sk-live-";
-/// Everything after [`HEAD`]; no output may carry it.
-const TAIL: &str = "TAIL-7521-c0ffee";
-/// A value of exactly 8 characters: no character of it may be printed.
+/// The first 4 characters of [`VALUE`].
+const HEAD: &str = "sk-l";
+/// The last 5 characters of [`VALUE`].
+const END: &str = "0ffee";
+/// Everything between [`HEAD`] and [`END`]; no output may carry it.
+const MIDDLE: &str = "ive-TAIL-7521-c";
+/// A value of under 10 characters: no character of it may be printed.
 const SHORT: &str = "Q7xZ-9wK";
 /// The project vault of the fixture's `git@github.com:Acme/Web.git`.
 const PROJECT_VAULT: &str = "trusty/acme/web";
@@ -218,11 +221,11 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// No text carries [`TAIL`] or any of [`SHORT`].
+    /// No text carries [`MIDDLE`] or any of [`SHORT`].
     fn assert_no_value(&self) {
         let err = self.err.as_deref().unwrap_or("");
         for (what, text) in [("stdout", &*self.out), ("error", err), ("logs", &self.logs)] {
-            assert!(!text.contains(TAIL), "{what} carries the value: {text}");
+            assert!(!text.contains(MIDDLE), "{what} carries the value: {text}");
             assert!(
                 !text.contains(&SHORT[..4]),
                 "{what} carries the short value: {text}"
@@ -372,18 +375,22 @@ fn parsed_set_arguments_never_show_in_debug() {
     let cli = Cli::try_parse_from(argv).expect("parse");
     let debug = format!("{cli:?}");
     assert!(debug.contains("Secrets"), "{debug}");
-    assert!(!debug.contains(TAIL), "Debug shows the value: {debug}");
+    assert!(!debug.contains(MIDDLE), "Debug shows the value: {debug}");
 }
 
+/// Why: #10394 — the confirmation printed the first 8 characters; the
+/// owner ruling of 2026-10-28 shows the first 4, the last 5 and the length.
+/// Test: itself.
 #[tokio::test]
-async fn set_reads_the_clipboard_and_confirms_head_and_length_only() {
+async fn set_reads_the_clipboard_and_confirms_the_ruled_mask_only() {
     let h = harness().await;
     let first = run(&h, " sk-live-TAIL-7521-c0ffee\n", &["set", "API_KEY"]).await;
     assert_eq!(first.err, None);
     assert_eq!(
         first.out,
-        format!("(new) secret set API_KEY: {HEAD}… [24 chars]\n")
+        format!("(new) secret set API_KEY: {HEAD}…{END} [24 chars]\n")
     );
+    first.assert_no_value();
     assert_eq!(
         stored(&h.keychain, PROJECT_VAULT, "API_KEY").as_deref(),
         Some(VALUE)
@@ -392,7 +399,7 @@ async fn set_reads_the_clipboard_and_confirms_head_and_length_only() {
     let second = run(&h, "sk-live-TAIL-7521-c0ffee-v2", &["set", "API_KEY"]).await;
     assert_eq!(
         second.out,
-        format!("(updated) secret set API_KEY: {HEAD}… [27 chars]\n")
+        format!("(updated) secret set API_KEY: {HEAD}…ee-v2 [27 chars]\n")
     );
 }
 
@@ -410,7 +417,7 @@ async fn set_slower_than_the_old_client_wait_reports_the_real_outcome() {
     assert!(started.elapsed() >= Duration::from_secs(31));
     assert_eq!(
         outcome.out,
-        format!("(new) secret set API_KEY: {HEAD}… [24 chars]\n")
+        format!("(new) secret set API_KEY: {HEAD}…{END} [24 chars]\n")
     );
     assert_eq!(
         stored(&h.keychain, PROJECT_VAULT, "API_KEY").as_deref(),
@@ -474,7 +481,7 @@ async fn set_with_a_group_namespaces_the_key() {
     .await;
     assert_eq!(
         outcome.out,
-        format!("(new) secret set stripe.API_KEY: {HEAD}… [24 chars]\n")
+        format!("(new) secret set stripe.API_KEY: {HEAD}…{END} [24 chars]\n")
     );
     let again = run(&h, VALUE, &["set", "API_KEY", "stripe"]).await;
     assert!(

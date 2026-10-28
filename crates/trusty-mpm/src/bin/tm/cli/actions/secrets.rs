@@ -57,8 +57,9 @@ pub(crate) enum SecretsAction {
     ///
     /// An empty clipboard is an error and stores nothing. `--value -` reads
     /// stdin instead; a value is never an argument. The confirmation shows
-    /// the first 8 characters and the length, or only the length for a
-    /// value of 8 characters or fewer.
+    /// the first 4 and last 5 characters and the length for a value of 16
+    /// characters or more, the last 5 and the length for 10 to 15, and only
+    /// the length under 10.
     Set {
         /// The key name.
         key: ArgText,
