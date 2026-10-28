@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
-use trusty_secrets::server::{BackendFactory, OnDemandSecrets, ServerSettings, serve};
+use trusty_secrets::server::{
+    BackendFactory, OnDemandSecrets, ServerSettings, serve_without_agent_callers,
+};
 use trusty_secrets::store::{MemoryBackend, SecretBackend};
 use trusty_secrets::{BackendId, SecretKey, SecretsError, VaultName};
 
@@ -166,9 +168,15 @@ async fn harness_slowed(set_delay: Duration) -> Harness {
     });
     let (tx, rx) = oneshot::channel::<()>();
     let socket = settings.socket.clone();
-    tokio::spawn(serve(settings, backends, async move {
-        let _ = rx.await;
-    }));
+    // #10386: `set` refuses a caller under Claude Code; judge callers as people
+    // so this suite runs the same in CI and in an agent session.
+    tokio::spawn(serve_without_agent_callers(
+        settings,
+        backends,
+        async move {
+            let _ = rx.await;
+        },
+    ));
     let started = Instant::now();
     while !trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(200)).await {
         assert!(

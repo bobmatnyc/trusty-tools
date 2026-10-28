@@ -5,8 +5,8 @@
 //! the built `tm` binary, the real server, the OS process table.
 //! What: [`Live`] serves trusty-secrets under a scratch `$HOME`. This test
 //! process grants its own pid, so the `tm` it spawns resolves as a
-//! descendant. Every key is seeded with "agents may use" on, so the run
-//! passes the server's agent check with or without Claude Code above it. The
+//! descendant. No key is denied to agents (#10386), so the run passes the
+//! server's agent check with or without Claude Code above it. The
 //! token reaches `tm` the way the exec stub hands it down: a read-only fd on
 //! an unlinked file, its number in `TRUSTY_SECRETS_TOKEN_FD`.
 //! Test: this file IS the test module.
@@ -32,7 +32,8 @@ const FORGED: &str = "9072aaaabbbbccccddddeeeeffff000011112222333344445555666677
 /// The fd number the token lands on in `tm`.
 const TOKEN_FD: i32 = 7;
 
-/// A server holding `API_KEY` and `OTHER_KEY`, both [`VALUE`], both flagged.
+/// A server holding `API_KEY` and `OTHER_KEY`, both [`VALUE`], neither
+/// denied to agents (#10386).
 async fn live(repo: &str) -> Live {
     let backend = Arc::new(MemoryBackend::new());
     let live = Live::new(Arc::clone(&backend) as Arc<dyn SecretBackend>, repo).await;
@@ -43,7 +44,6 @@ async fn live(repo: &str) -> Live {
         store
             .set(&vault, &key, &SecretValue::new(VALUE))
             .expect("seed");
-        store.set_agents_may_use(&vault, &key, true).expect("flag");
     }
     live
 }
