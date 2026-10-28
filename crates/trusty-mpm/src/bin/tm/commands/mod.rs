@@ -52,6 +52,7 @@ pub(crate) mod egress_guard;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
+pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
 // #8454 VC: the egress guard's daemon verdict client.

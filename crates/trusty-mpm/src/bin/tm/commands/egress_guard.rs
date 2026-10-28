@@ -14,7 +14,9 @@
 //! `ChannelPolicy::check_egress`: an `Allow` from a channel policy must not
 //! read as permission to run a family tool.
 //! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
-//! trust-anchor floor ([`verdict`]), [`decide`]s, applies the channel-taint
+//! trust-anchor floor ([`verdict`]), [`decide`]s, lifts the deny of a Slack
+//! read the host `channels.slack_read_allowlist` grants this project
+//! (`egress_guard_slack_read`, #10387), applies the channel-taint
 //! arm with its policy readiness gate ([`with_taint_async`], #8433, #9741;
 //! the daemon's verdict first, #8454 VC), and on
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
@@ -32,6 +34,7 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
+use crate::commands::egress_guard_slack_read::{lift, load_allowlist};
 use crate::commands::egress_guard_taint::{
     POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
 };
@@ -155,8 +158,9 @@ pub(crate) fn decide(
             format!(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and no \
                  tm-launched session, PM or subagent, may use an outbound message channel \
-                 directly (#8454). Read and list tools are denied too. Ask the operator \
-                 instead."
+                 directly (#8454). Read and list tools are denied too, except a Slack \
+                 channel or thread read the host config grants this project (#10387). Ask \
+                 the operator instead."
             ),
         ),
         Classification::Malformed(detail) => deny(
@@ -346,7 +350,9 @@ where
 
 /// Read, decide and audit one call; `Some(deny)` to print, `None` to allow.
 ///
-/// What: the stdin read under `PM_GUARD_STDIN_TIMEOUT`, then [`verdict`]. A
+/// What: the stdin read under `PM_GUARD_STDIN_TIMEOUT`, then [`verdict`], the
+/// #10387 Slack read [`lift`] and the taint arm. An allowed Slack read prints
+/// its audit line on stderr. A
 /// deny is recorded and POSTed through `pm_guard_deny_log` first; neither can
 /// change the verdict — a failed record is reported on stderr, a failed POST
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
@@ -356,8 +362,12 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     // #8454 D1: the floor reads the ambient home and user config, as pm-guard's.
     let env = HookEnv::ambient();
     let anchor = |payload: &serde_json::Value| evaluate(payload, &env, MpmConfig::load_default);
-    let first = verdict(&read, &FamilyTable::builtin(), anchor);
+    let table = FamilyTable::builtin();
+    let first = verdict(&read, &table, anchor);
     let home = env.home.as_deref();
+    // #10387: after the floor, before the taint arm.
+    let project_dir = env.project_dir.as_deref();
+    let (first, slack_read) = lift(first, &read, &table, project_dir, || load_allowlist(home));
     // #9923 (Architect Q10): the launch directory, which a `cd` does not move.
     let launch = session_profile::hook_project_dir(env.project_dir.clone());
     // #9741: the policy loads under the same home the taint is read from.
@@ -365,6 +375,10 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let ready = || cached_policy_ready(url, home, || policy_ready(home));
     let verdict = with_taint_async(first, &read, home, launch.as_deref(), ready).await;
     let Verdict::Deny { check, reason } = verdict else {
+        // #10387: one audit line per allowed read, no call content.
+        if let Some(allowed) = slack_read {
+            eprintln!("{}", allowed.audit_line());
+        }
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.
