@@ -1,4 +1,0 @@
-crate   trusty-common
-version 0.66.0
-reason  Architect GO 2026-10-26, under Bob's 2026-09-26 versioning ruling (a public-API break never forces a major version): the no-op `memory-core` feature, kept one minor after the #9271 engine move (published in 0.64.0), is removed. No workspace crate enables it; on crates.io only trusty-memory 0.35.0 names it, with trusty-common ^0.61, which never resolves to 0.66. Refs #9272.
-accept  feature_missing  memory-core

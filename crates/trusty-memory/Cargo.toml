@@ -159,7 +159,7 @@ trusty-mcp = { workspace = true, optional = true }
 # serving surface needs is switched on by `server` below (`config-cli` is what
 # pulls in clap). #9271: the engine moved here from trusty-common's
 # `memory-core`, so this names the trusty-common features it used to imply.
-trusty-common = { path = "../trusty-common", version = "0.66", default-features = false, features = [
+trusty-common = { path = "../trusty-common", version = "0.67", default-features = false, features = [
     "embedder",
     "embedder-bundled-ort",
     "credentials",
@@ -275,7 +275,7 @@ git2 = { workspace = true }
 # of this migration are proven to agree.
 # #9271: `test-support` exposes the trusty-common test helpers the engine's
 # tests share (`capture_logs`, `ReadOnlyDir`, `EnvVarGuard`).
-trusty-common = { path = "../trusty-common", version = "0.66", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
+trusty-common = { path = "../trusty-common", version = "0.67", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
 # #9271: this crate's own test-support features, for `tests/*`. A path-only
 # self dev-dependency: Cargo turns the features on for test builds only, and
 # `cargo publish` strips the entry. `default-features = false` keeps it from
