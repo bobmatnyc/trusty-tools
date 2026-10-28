@@ -127,10 +127,11 @@ impl StdioMcpClient {
     /// transparently recovering the connection. Without this, every query
     /// after a server crash stalls until timeout.
     /// What: Spawns the same `binary` + `args` used at construction, swaps
-    /// in the new stdio handles, resets the request id counter, and runs
-    /// `initialize`. Returns Err if respawn or handshake fails.
+    /// in the new stdio handles, keeps the request id counter running (#10360),
+    /// and runs `initialize`. Returns Err if respawn or handshake fails.
     /// Test: `call_tool_errors_when_respawn_unavailable` exercises the
-    /// failure path (binary no longer present).
+    /// failure path (binary no longer present);
+    /// `stale_frame_after_respawn_is_not_returned_as_result` the id counter.
     async fn respawn(&mut self) -> Result<()> {
         let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
         let mut new_child = Command::new(&self.binary)
@@ -158,7 +159,9 @@ impl StdioMcpClient {
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
         // client_name is retained from the original spawn — no update needed.
-        self.next_id.store(1, Ordering::Relaxed);
+        // #10360: `next_id` is NOT reset. Ids stay unique across process
+        // generations, so a frame carrying an id from an earlier lifetime can
+        // never match a request of this one.
 
         self.initialize()
             .await
@@ -181,11 +184,13 @@ impl StdioMcpClient {
         Ok(())
     }
 
-    /// Allocate the next JSON-RPC request id. Monotonic, starts at 1.
+    /// Allocate the next JSON-RPC request id. Monotonic, starts at 1, and
+    /// never restarts on respawn (#10360).
     ///
     /// Why: JSON-RPC 2.0 requires each request to carry a unique id so
     /// responses can be correlated. The atomic counter provides this without
-    /// locks.
+    /// locks; one counter per client makes an id unique across every process
+    /// generation, so the id alone names the in-flight request it answers.
     /// What: Atomically increments and returns the previous value using
     /// `Relaxed` ordering (ordering across threads is not required for id
     /// uniqueness within a single connection).
@@ -396,17 +401,20 @@ impl StdioMcpClient {
         }
     }
 
-    /// Send `req` and read responses until one matches the expected id.
-    /// Server-initiated notifications (no `id`) are ignored.
+    /// Send `req` and read frames until the response to it arrives.
     ///
-    /// Why: JSON-RPC allows servers to send notifications (no id) at any time.
-    /// A simple read-one-frame approach would misinterpret a notification as
-    /// a response. This loop discards notifications and out-of-order ids
-    /// (rare) until the matching response arrives.
+    /// Why: JSON-RPC allows servers to send notifications and requests of
+    /// their own (`roots/list`, which carries an id) at any time, and a late
+    /// reply to an abandoned call can still be in the pipe. Returning the
+    /// first frame with a matching id misread such frames as this call's
+    /// result (#10360).
     /// What: Wraps the round-trip in `bound` (`CALL_TIMEOUT` for every method
-    /// but `call_tool_with_timeout`, #9979). Returns Err if the timeout fires
-    /// or if the frame cannot be parsed.
-    /// Test: Covered by every method that calls `request`.
+    /// but `call_tool_with_timeout`, #9979) and skips every frame
+    /// [`is_response_to`] rejects. Ids never repeat across respawns, so a
+    /// matching id names this generation's in-flight request. Returns Err if
+    /// the timeout fires or a frame cannot be parsed.
+    /// Test: `server_request_with_matching_id_is_not_returned_as_result`,
+    /// `stale_frame_after_respawn_is_not_returned_as_result`.
     async fn request(&mut self, req: &Value, bound: Duration) -> Result<Value> {
         let expected_id = req
             .get("id")
@@ -417,17 +425,27 @@ impl StdioMcpClient {
             self.write_line(req).await?;
             loop {
                 let frame = self.read_line().await?;
-                // Skip server-initiated notifications.
-                if frame.get("id").is_none() {
-                    continue;
-                }
-                if frame.get("id") == Some(&expected_id) {
+                if is_response_to(&frame, &expected_id) {
                     return Ok::<Value, anyhow::Error>(frame);
                 }
-                // Out-of-order id (rare). Continue reading.
+                // Notification, server request, or a reply to another id.
+                debug!(expected = %expected_id, "StdioMcpClient: skipping non-matching frame");
             }
         })
         .await
         .map_err(|_| anyhow!("MCP request timed out after {bound:?}"))?
     }
+}
+
+/// Whether `frame` is the JSON-RPC response to the request carrying `id`.
+///
+/// Why: #10360 — an id match alone also accepts a server-initiated request
+/// (it has `method`) and a malformed frame with neither `result` nor `error`.
+/// What: True only when the ids are equal, `method` is absent, and `result`
+/// or `error` is present.
+/// Test: `is_response_to_accepts_only_responses_with_the_id`.
+pub(super) fn is_response_to(frame: &Value, id: &Value) -> bool {
+    frame.get("id") == Some(id)
+        && frame.get("method").is_none()
+        && (frame.get("result").is_some() || frame.get("error").is_some())
 }
