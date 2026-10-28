@@ -15,6 +15,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 TOOL = REPO / "content/skills/data-design/scripts/check_palette.py"
 
+# The checker lives in content/, which the bundle loads byte-for-byte: a
+# __pycache__ beside it would break content loading, so never write one.
+sys.dont_write_bytecode = True
 _spec = importlib.util.spec_from_file_location("check_palette", TOOL)
 cp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cp)

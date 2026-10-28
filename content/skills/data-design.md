@@ -93,3 +93,4 @@ surface. Exit 0 means every check passed; exit 1 lists each failure.
 - `references/accessibility.md` — WCAG checks, fallbacks, motion.
 - `references/palettes-colorbrewer.md` — vendored hex subsets (Apache-2.0).
 - `references/PROVENANCE.md` — what is vendored and from where.
+- `references/LICENSE-colorbrewer.txt` — the Apache-2.0 text for the subsets.

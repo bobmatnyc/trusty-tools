@@ -1,7 +1,7 @@
 ---
 name: data-designer
 role: data-designer
-description: 'Data and type designer: picks chart forms, encodings, colour scales and labels for any data type; reviews dashboards for readability and accessibility'
+description: 'Data designer: chart form, encoding, colour and label specs; reviews dashboards for readability'
 model: sonnet
 extends: base-agent
 skills: [data-design]
