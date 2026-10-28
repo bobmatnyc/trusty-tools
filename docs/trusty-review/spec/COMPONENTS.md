@@ -45,7 +45,7 @@ both concurrently and returns a `GateOutcome`:
 |---------------|---------|------------------------|
 | `Proceed` | both reachable | normal authoritative review (`status = Completed`) |
 | `Skip(reason)` | a REQUIRED dep is unavailable | `ReviewResult { status: Skipped, verdict: Unknown, error: Some(reason), dry_run: true }`, returned **before** the LLM call and **without** finalize/post. The CLI/`run` path turns this into a non-zero exit (`anyhow::Err`); `serve`/`POST /review`/webhook return it as a structured skip result and never post. |
-| `Degraded(reason)` | a dep is unavailable but opted-out (`require_*=false`) | review proceeds but `status = Degraded`, a `⚠️ DEGRADED REVIEW — NOT AUTHORITATIVE` banner is prepended to `review_body`, and `error` records the reason |
+| `Degraded(reason)` | a dep is unavailable but opted-out (`require_*=false`) | review proceeds but `status = Degraded`, a `⚠️ DEGRADED REVIEW — NOT AUTHORITATIVE` banner is prepended to `review_body`, `error` records the reason, and a model APPROVE is capped at `APPROVE_WITH_RESERVATIONS` (grade kept, #10226) |
 
 The gate lives in the shared pipeline, so it applies uniformly to PR review,
 local-diff review, and the forward-compatible commit-review (#589). Config knobs:
@@ -209,7 +209,8 @@ Opus is intentionally excluded (not access-granted in the target account).
 **`ReviewStatus`** (`src/models/status.rs`, #590) — review-run outcome class:
 - `Completed` (default) — ran with full required context; verdict is **authoritative**
 - `Skipped` — a REQUIRED context dep (trusty-search/trusty-analyze) was unavailable; **no real verdict** was produced (CLI exits non-zero; service never posts)
-- `Degraded` — opted-in context-free run; the verdict is present but explicitly **non-authoritative** (loudly labelled in `review_body`)
+- `Degraded` — opted-in context-free run; the verdict is present but explicitly **non-authoritative** (loudly labelled in `review_body`); an APPROVE is capped at `APPROVE_WITH_RESERVATIONS`, the grade is kept (#10226)
+  - The kept letter may sit above the C+ ceiling `verdict_to_grade` applies to `APPROVE_WITH_RESERVATIONS` (e.g. A beside APPROVE*). This pairing is intentional: owner ruling D06 keeps the model's grade on a Degraded run (#10226)
 - helpers: `is_authoritative()` (only `Completed`), `is_skipped()`
 
 **`ReviewResult`** — complete output of a PR review pass:
