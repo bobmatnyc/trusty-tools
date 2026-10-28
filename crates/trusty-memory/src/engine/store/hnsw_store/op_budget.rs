@@ -27,7 +27,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::{MutexGuard, RwLockReadGuard};
@@ -192,7 +192,9 @@ struct OpSlot {
     breaker: Arc<OpBreaker>,
     palace: Arc<str>,
     op: &'static str,
-    started: Instant,
+    // #10335: tokio's clock, the one the watcher's timer runs on. It is the
+    // system clock unless a test pauses it, so the progress tests can step time.
+    started: tokio::time::Instant,
     progress_ms: AtomicU64,
 }
 
@@ -276,7 +278,6 @@ async fn watch_op(
             let _ = task_end.await;
             return;
         };
-        let deadline = tokio::time::Instant::from_std(deadline);
         if tokio::time::timeout_at(deadline, &mut task_end)
             .await
             .is_ok()
@@ -497,7 +498,7 @@ impl HnswStore {
             breaker: Arc::clone(&self.breaker),
             palace: Arc::clone(&self.palace),
             op,
-            started: Instant::now(),
+            started: tokio::time::Instant::now(),
             progress_ms: AtomicU64::new(0),
         });
         let progress = OpProgress(Some(Arc::clone(&slot)));
