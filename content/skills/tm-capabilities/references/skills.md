@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-59 bundled skills.
+60 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -14,6 +14,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `code-review-standards` | agent-reference | no | Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference. |
 | `condition-based-waiting` | agent-reference | no | Replace arbitrary timeouts with condition polling for reliable async tests |
 | `contract-driven-testing` | agent-reference | no | Derive a three-level test pyramid directly from a function's Code Contracts (preconditions, postconditions, invariants) — contract-targeted unit tests, property-based tests, precondition-violation tests, plus the no-contracts fallback and the contract review checklist. Loaded by the code-critic agent. |
+| `data-design` | agent-reference | no | Maps data type and question to chart form, encoding, colour scale, labels and interaction, with accessibility and dark-mode rules. Use when designing or reviewing any chart, dashboard, treemap, legend or table. |
 | `database-migration` | agent-reference | no | Safe patterns for evolving database schemas in production with decision trees and troubleshooting guidance. |
 | `documentation-style` | agent-reference | no | SLD-grounded per-artifact-type documentation style guide: the four-axis Why/What/Test + Spec-References inline model, plus focused conventions for specs, READMEs, files, classes, methods/functions, and block comments. Use when writing or reviewing any documentation artifact. |
 | `env-manager` | agent-reference | no | Environment variable validation, security scanning, and management for Next.js, Vite, React, and Node.js applications |
