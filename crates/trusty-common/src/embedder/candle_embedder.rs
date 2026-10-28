@@ -8,7 +8,7 @@
 //! jetsam SIGKILL. Candle talks to Metal directly through the
 //! `candle_core::Device::Metal` backend, bypassing CoreML entirely while
 //! preserving the 384-dim L2-normalised f32 embedding contract that the rest
-//! of the workspace (HNSW search, memory-core, etc.) is built on.
+//! of the workspace (HNSW search, the trusty-memory engine, etc.) is built on.
 //!
 //! What: loads `all-MiniLM-L6-v2` from HuggingFace Hub via `hf-hub`,
 //! tokenises with the upstream `tokenizers` crate, runs `BertModel::forward`
@@ -325,7 +325,7 @@ impl CandleEmbedder {
 /// Shared-trait impl so `CandleEmbedder` slots into any
 /// `Arc<dyn trusty_common::embedder::Embedder>` consumer.
 ///
-/// Why: the embed pool, memory-core ingest path, and search query path all
+/// Why: the embed pool, trusty-memory ingest path, and search query path all
 /// take `Arc<dyn Embedder>`; implementing the trait here is what makes this
 /// embedder a drop-in replacement for `FastEmbedder` rather than a separate
 /// surface every caller has to special-case.

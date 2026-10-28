@@ -779,7 +779,7 @@ jobs:
   # invocation, so a shard that builds a subset resolves a SUBSET of features:
   # measured on this workspace, a shard containing trusty-common + its six
   # nearest neighbours saw 24 of the 37 trusty-common features that `--workspace`
-  # resolves, losing embedder, memory-core, bm25, migrations and friends — and
+  # resolves, losing embedder, bm25, migrations and friends — and
   # every test behind those `#[cfg(feature = …)]` gates with them. A bare
   # `cargo test -p trusty-common --lib` lists 310 tests where `--workspace`
   # lists 2062. Four green shards, ~1750 trusty-common tests not run, nothing

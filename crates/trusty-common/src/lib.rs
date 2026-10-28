@@ -579,8 +579,8 @@ pub mod migrations;
 #[cfg(feature = "symgraph")]
 pub mod symgraph;
 
-// #9271: the Memory Palace engine moved to `trusty_memory::engine`; the
-// `memory-core` feature is a no-op kept for compatibility.
+// #9271: the Memory Palace engine moved to `trusty_memory::engine`.
+// #9272: its no-op `memory-core` feature is removed.
 
 /// Unified ticketing MCP server (formerly the `trusty-tickets` crate).
 ///
@@ -887,9 +887,9 @@ pub mod inference;
 /// Why: five crates each carried a byte-identical copy of the four-arm `match`
 /// that decides whether an unopenable redb file may be quarantined, so a safety
 /// change to that decision had to land five times. The classifier previously
-/// lived under `memory-core`, which pulls in usearch, git2 and a bundled ORT
-/// embedder — a cost no consumer would pay for a predicate, which is why the
-/// copies existed. This module is gated behind the light `redb-open` feature
+/// lived in the Memory Palace engine, which pulled in usearch, git2 and a
+/// bundled ORT embedder — a cost no consumer would pay for a predicate, which
+/// is why the copies existed. This module is gated behind the light `redb-open` feature
 /// (`dep:redb` only) so every store can route through it.
 /// What: [`redb_open::is_incompatible_format`] plus the quarantine-path helpers
 /// two of those crates also duplicated. Each store's recovery POLICY stays in
@@ -904,8 +904,8 @@ pub mod redb_open;
 /// grows into it. Three redb files per palace times 64 resident palaces is a
 /// 192 GiB ceiling nothing was bounding, which is how a 233 MB daemon reached
 /// 11–23 GB of heap. Gated behind the same light `redb-open` feature as the
-/// classifier so every store can route through it without paying for
-/// `memory-core`.
+/// classifier so every store can route through it without paying for the
+/// Memory Palace engine.
 /// What: [`redb_cache::create_palace_db`] and [`redb_cache::palace_db_builder`],
 /// plus the `TRUSTY_MEMORY_REDB_CACHE_MB` override and its fail-open warning.
 /// Test: `cargo test -p trusty-common --features redb-open -- redb_cache::`.
@@ -1109,7 +1109,7 @@ pub use palace_resolve::{
 /// [`palace_alias::LiveAliasError`] (#9544), plus
 /// [`palace_alias::default_palace_registry_dir`] and
 /// [`palace_alias::palace_registry_dir_from`] for locating the registry dir. This
-/// module is always compiled (no `memory-core` gate) so trusty-mpm's always-on
+/// module is always compiled (no feature gate) so trusty-mpm's always-on
 /// session-launch path can register aliases without pulling the storage engine.
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// palace_alias::tests`.
