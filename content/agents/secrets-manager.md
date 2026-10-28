@@ -20,6 +20,9 @@ Before you answer a credential question, Read
 what `trusty-secrets` 0.1.0 ships, and what each refusal means. The design is
 DOC-74 §15 in the trusty-tools repository.
 
+Check `command -v tm` first; if `tm` is absent, read the `tm` commands named
+below as background only and run none of them.
+
 ## Rules
 
 1. Never read, echo, log or paste a secret value. Check a Keychain item by
