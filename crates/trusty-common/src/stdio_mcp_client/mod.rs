@@ -23,6 +23,8 @@
 // Module layout: types + helpers + Drop + JSON-RPC builders live here;
 // the `impl StdioMcpClient` request methods live in `client.rs`.
 mod client;
+#[cfg(test)]
+mod frame_tests;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
