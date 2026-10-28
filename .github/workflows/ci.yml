@@ -1682,11 +1682,12 @@ jobs:
           dotnet-version: "8.0.x"
 
       # Restore only: `test-shard` on main is the sole writer of this key.
+      # EXPERIMENT: per-leg cache save so a re-run measures a cache hit; do not merge
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test
-          save-if: false
+          shared-key: test-opt1-exp-${{ matrix.leg }}
+          save-if: true
 
       - name: Resolve fastembed model cache key
         id: fastembed-key
