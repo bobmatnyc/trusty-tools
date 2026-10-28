@@ -70,7 +70,8 @@ pub enum ErrorKind {
     HomeUnavailable = 14,
     /// `copy` named the same backend twice.
     SameBackend = 15,
-    /// An agent-parent process asked for a key not flagged "agents may use".
+    /// An agent-parent process asked for a key denied to agents, or called
+    /// an operator-only method (#10386).
     // #7525: its own kind so a refusal never reads as a miss or a failure.
     AgentUseRefused = 16,
     /// An env-map entry broke a rule before any resolution started.
@@ -252,8 +253,9 @@ impl ErrorKind {
             Self::ConfigInvalid => "a `secrets:` config section is invalid",
             Self::HomeUnavailable => "the home directory is unavailable",
             Self::SameBackend => "the source and destination backends are the same",
+            // #10386 Q6: one code for a denied key and an operator-only call.
             Self::AgentUseRefused => {
-                "the key is not flagged \"agents may use\"; refused under a Claude Code parent"
+                "this key is denied to agents, or the operation is operator-only"
             }
             Self::InvalidEnvEntry => "an env-map entry is invalid",
             Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",

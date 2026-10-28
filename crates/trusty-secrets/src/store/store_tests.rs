@@ -758,41 +758,58 @@ fn store_set_reports_an_orphan_when_compensation_fails() {
     assert!(backend.0.get(&project(), &key("SECOND")).unwrap().is_some());
 }
 
-/// Why: #9070 — the flag must survive a value update, go with the key on
-/// delete, and start OFF for a new key even when a stale flag item exists.
-/// What: every flag read goes through the backend; the index is not
+/// Whether the backend holds `name`'s deny item.
+fn denied(backend: &MemoryBackend, name: &str) -> bool {
+    backend
+        .control_item(ControlItem::AgentDeny, &project(), Some(&key(name)))
+        .unwrap()
+}
+
+/// Why: #10386 — a deny must survive a value update and go with the key on
+/// delete, and a new key starts with no deny even when a stale deny item
+/// exists (the `.env.local` model).
+/// What: every deny read goes through the backend; the index is not
 /// consulted for it.
 /// Test: itself.
 #[test]
-fn store_agents_flag_survives_an_update_and_clears_on_delete() {
+fn store_agent_deny_survives_an_update_and_clears_on_delete() {
     let (_tmp, backend, store) = fixture();
     let value = SecretValue::new(FAKE_VALUE);
     store.set(&project(), &key("API_KEY"), &value).unwrap();
-    store
-        .set_agents_may_use(&project(), &key("API_KEY"), true)
-        .unwrap();
-    assert!(backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
-    store.set(&project(), &key("API_KEY"), &value).unwrap();
     assert!(
         store.list(&project()).unwrap()[0].agents_may_use,
-        "an update keeps the flag"
+        "a new key is open"
+    );
+    store
+        .set_agents_may_use(&project(), &key("API_KEY"), false)
+        .unwrap();
+    assert!(denied(&backend, "API_KEY"));
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    assert!(
+        !store.list(&project()).unwrap()[0].agents_may_use,
+        "an update keeps the deny"
     );
 
     store.delete(&project(), &key("API_KEY")).unwrap();
-    assert!(!backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
+    assert!(!denied(&backend, "API_KEY"));
 
-    // A stale flag item never turns a new key ON.
+    // A stale deny item never closes a new key.
     backend
-        .set_agents_may_use(&project(), &key("API_KEY"), true)
+        .set_control_item(
+            ControlItem::AgentDeny,
+            &project(),
+            Some(&key("API_KEY")),
+            true,
+        )
         .unwrap();
     store.set(&project(), &key("API_KEY"), &value).unwrap();
-    assert!(!store.list(&project()).unwrap()[0].agents_may_use);
+    assert!(store.list(&project()).unwrap()[0].agents_may_use);
 
     let err = store
-        .set_agents_may_use(&project(), &key("MISSING"), true)
+        .set_agents_may_use(&project(), &key("MISSING"), false)
         .unwrap_err();
     assert!(matches!(err, SecretsError::NotFound { .. }), "{err:?}");
-    assert!(!backend.agents_may_use(&project(), &key("MISSING")).unwrap());
+    assert!(!denied(&backend, "MISSING"));
 }
 
 /// Why: #9621 — the server's write-ahead audit record runs in `before`, so
@@ -813,23 +830,23 @@ fn store_flag_before_hook_runs_under_the_row_check() {
         NamesIndex::at(tmp.path().join("index")).with_lock_timeout(std::time::Duration::ZERO),
     );
     let mut raced = None;
-    let applied = store.set_agents_may_use_after(&project(), &key("API_KEY"), true, || {
+    let applied = store.set_agents_may_use_after(&project(), &key("API_KEY"), false, || {
         raced = Some(racer.set(&project(), &key("RACER"), &value).is_ok());
         Ok::<(), &str>(())
     });
     assert_eq!(applied.unwrap(), Ok(()));
     assert_eq!(raced, Some(false), "the racer wrote under the lock");
-    assert!(backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
+    assert!(denied(&backend, "API_KEY"));
 
-    let refused = store.set_agents_may_use_after(&project(), &key("API_KEY"), false, || Err("no"));
+    let refused = store.set_agents_may_use_after(&project(), &key("API_KEY"), true, || Err("no"));
     assert_eq!(refused.unwrap(), Err("no"));
     assert!(
-        backend.agents_may_use(&project(), &key("API_KEY")).unwrap(),
+        denied(&backend, "API_KEY"),
         "a refused hook changes nothing"
     );
 
     let mut called = false;
-    let missing = store.set_agents_may_use_after(&project(), &key("MISSING"), true, || {
+    let missing = store.set_agents_may_use_after(&project(), &key("MISSING"), false, || {
         called = true;
         Ok::<(), &str>(())
     });
@@ -837,35 +854,44 @@ fn store_flag_before_hook_runs_under_the_row_check() {
     assert!(!called, "no hook for a key with no row");
 }
 
-/// Why: #9070 — a backend with no flag item (file, 1Password, Keeper) must
-/// read every key OFF and refuse to turn one ON, never accept it silently.
+/// Why: #10386 — a backend with no control item (1Password, Keeper) must
+/// refuse a deny rather than accept and drop it, and under the open-all
+/// default its keys read usable.
 /// Test: itself.
 #[test]
-fn store_default_agent_flag_reads_off_and_refuses_on() {
+fn store_default_backend_holds_no_agent_controls() {
     let (vault, name) = (project(), key("API_KEY"));
-    assert!(!FailingBackend.agents_may_use(&vault, &name).unwrap());
-    FailingBackend
-        .set_agents_may_use(&vault, &name, false)
-        .unwrap();
+    assert!(!FailingBackend.holds_agent_controls());
+    for item in [ControlItem::AgentDeny, ControlItem::DenyMigrated] {
+        assert!(matches!(
+            FailingBackend.control_item(item, &vault, Some(&name)),
+            Err(SecretsError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            FailingBackend.set_control_item(item, &vault, Some(&name), false),
+            Err(SecretsError::Unsupported { .. })
+        ));
+    }
 
     let (_tmp, store) = fixture_with(Arc::new(FailingBackend));
     store.index().upsert(&vault, &name, 4, 1).unwrap();
-    let err = store.set_agents_may_use(&vault, &name, true).unwrap_err();
+    let err = store.set_agents_may_use(&vault, &name, false).unwrap_err();
     assert!(
         matches!(
             err,
             SecretsError::Unsupported {
-                operation: "agents_may_use",
+                operation: "agent_deny",
                 ..
             }
         ),
         "{err:?}"
     );
-    assert!(!store.list(&vault).unwrap()[0].agents_may_use);
+    store.set_agents_may_use(&vault, &name, true).unwrap();
+    assert!(store.list(&vault).unwrap()[0].agents_may_use);
 }
 
-/// A [`MemoryBackend`] whose flag removal fails, standing in for a Keychain
-/// that cannot delete a flag item (#9070).
+/// A [`MemoryBackend`] whose deny removal fails, standing in for a Keychain
+/// that cannot delete a deny item (#9070, #10386).
 #[derive(Debug, Default)]
 struct FlagClearFaultBackend(MemoryBackend);
 
@@ -885,26 +911,35 @@ impl SecretBackend for FlagClearFaultBackend {
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         self.0.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.0.agents_may_use(vault, key)
+    fn holds_agent_controls(&self) -> bool {
+        true
     }
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.0.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
     ) -> Result<(), SecretsError> {
-        if allowed {
-            self.0.set_agents_may_use(vault, key, true)
-        } else {
-            Err(FailingBackend::failure(vault, key))
+        match (item, key, present) {
+            (ControlItem::AgentDeny, Some(key), false) => Err(FailingBackend::failure(vault, key)),
+            _ => self.0.set_control_item(item, vault, key, present),
         }
     }
 }
 
-/// Why: #9070 Fail-Open Check — a new key whose stale flag item cannot be
-/// removed might start ON, so `set` must fail before the value is stored
-/// and leave no index row. Ignoring the removal's result fails this test.
+/// Why: #10386 — a new key whose stale deny item cannot be removed would
+/// start in a state `set` did not choose, so `set` must fail before the
+/// value is stored and leave no index row. Ignoring the removal's result
+/// fails this test.
 /// Test: itself.
 #[test]
 fn store_set_stores_no_value_when_the_flag_removal_fails() {
@@ -921,10 +956,10 @@ fn store_set_stores_no_value_when_the_flag_removal_fails() {
     );
 }
 
-/// Why: #9070 Fail-Open Check — a delete that cannot remove the flag item
-/// would leave the flag ON for a key set again later, so it must fail and
-/// keep the index row, as a failed value delete does. Ignoring the
-/// removal's result fails this test.
+/// Why: #9070, #10386 — a delete that cannot remove the deny item must fail
+/// and keep the index row, as a failed value delete does, so `list` still
+/// shows a key the backend holds state for. Ignoring the removal's result
+/// fails this test.
 /// Test: itself.
 #[test]
 fn store_delete_keeps_the_row_when_the_flag_removal_fails() {
@@ -935,7 +970,10 @@ fn store_delete_keeps_the_row_when_the_flag_removal_fails() {
         .0
         .set(&vault, &name, &SecretValue::new(FAKE_VALUE))
         .unwrap();
-    backend.0.set_agents_may_use(&vault, &name, true).unwrap();
+    backend
+        .0
+        .set_control_item(ControlItem::AgentDeny, &vault, Some(&name), true)
+        .unwrap();
     store.index().upsert(&vault, &name, 4, 1).unwrap();
 
     let err = store.delete(&vault, &name).unwrap_err();
@@ -944,5 +982,10 @@ fn store_delete_keeps_the_row_when_the_flag_removal_fails() {
         store.index().get(&vault, &name).unwrap().is_some(),
         "the row stays"
     );
-    assert!(backend.0.agents_may_use(&vault, &name).unwrap());
+    assert!(
+        backend
+            .0
+            .control_item(ControlItem::AgentDeny, &vault, Some(&name))
+            .unwrap()
+    );
 }

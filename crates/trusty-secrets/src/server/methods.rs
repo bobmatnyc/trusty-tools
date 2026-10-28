@@ -24,6 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+use super::agents_flag::refuse_agent_caller;
 use super::audit::AuditMethod;
 use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
@@ -150,14 +151,15 @@ pub(crate) fn scopes(state: &State, caller: Caller, params: Value) -> Result<Val
     }
 }
 
-/// `secrets.list`: names, lengths, `updated_at`, and the agents flag.
+/// `secrets.list`: names, lengths, `updated_at`, and `agents_may_use`.
 ///
-/// What: names, lengths and times from the names-only index. #9070: each
-/// key's agents flag comes from the project's backend through
-/// [`SecretStore::list`], never from the index file. When that backend does
-/// not open — not in this build, not enabled, its CLI missing, `$HOME`
-/// unknown — the index listing is returned with every flag OFF. A failed
-/// flag lookup on an opened backend is an error. Never reads a value. A
+/// What: names, lengths and times from the names-only index. #9070,
+/// #10386: each key's `agents_may_use` is the absence of its agent deny in
+/// the project's backend, through [`SecretStore::list`], never the index
+/// file. When that backend does not open — not in this build, not enabled,
+/// its CLI missing, `$HOME` unknown — the index listing is returned with
+/// every `agents_may_use` false. A failed deny lookup on an opened backend
+/// is an error. Never reads a value. A
 /// denied call leaves one audit record; an allowed one leaves none (#4567).
 /// #9066: a console bridge call is audited like `set` instead — admitted
 /// fail-closed before the listing, one record per call.
@@ -204,8 +206,12 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// logged or formatted here. #4567: one audit record per call; the audit log
 /// is opened before the backend is touched (see `gate`). #7524 H1: the
 /// backend opens through [`ProjectContext::open_for_write`]. #7520: after
-/// the write, the key is evicted from the session cache.
+/// the write, the key is evicted from the session cache. #10386 Q2: after
+/// the scope check and before any backend opens, a caller under Claude Code
+/// is refused ([`refuse_agent_caller`]); no peer pid is
+/// [`ErrorKind::GrantRefused`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `set_by_agent_ancestor_is_refused_before_the_backend`,
 /// `set_delete_copy_evict_cached_value`,
 /// `server_malformed_set_never_echoes_its_value`,
 /// `audit_set_and_delete_write_one_record_per_call`,
@@ -219,6 +225,9 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
+        // #10386 Q2: a value write is operator-only, judged before any backend.
+        let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+        refuse_agent_caller(state, caller, peer, gate)?;
         // #7524: the `file` posture check every value write passes.
         let backend = project.open_for_write(state, &project.resolved_config().backend)?;
         let store = SecretStore::new(backend, state.index.clone());
@@ -239,7 +248,10 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
 /// (#7519). The key is then deleted from the configured backend and from
 /// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
 /// #4567 — audited like [`set`]. #7520: evicts the key like [`set`].
+/// #10386 Q2: refuses a caller under Claude Code like [`set`], before the
+/// account config is read.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `delete_by_agent_ancestor_is_refused_before_the_backend`,
 /// `set_delete_copy_evict_cached_value`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
@@ -259,6 +271,9 @@ pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Val
             let project = ProjectContext::resolve(state, &dir)?;
             gate.project(&project);
             project.require_in_scope(&request.vault)?;
+            // #10386 Q2: an irreversible loss is operator-only.
+            let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+            refuse_agent_caller(state, caller, peer, gate)?;
             // #7519: a missing account file skips 1Password; an unreadable one
             // refuses, since a 1Password copy from when it was readable may remain.
             let account = sweep_machine(state)?;

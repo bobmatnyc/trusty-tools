@@ -109,6 +109,8 @@ pub(crate) struct Gate<'a> {
     // #9070 slice 3: the requested flag value and the ancestry verdict.
     agents_allowed: Option<bool>,
     agent_parent: Option<bool>,
+    // #10386: an agent allowed by the absence of a deny.
+    default_policy: bool,
     admitted: Option<Admitted>,
 }
 
@@ -145,6 +147,7 @@ pub(crate) fn audited(
         project_root: None,
         agents_allowed: None,
         agent_parent: None,
+        default_policy: false,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -210,6 +213,15 @@ impl Gate<'_> {
     /// Whether the caller has a Claude Code ancestor, once judged (#9070).
     pub(crate) fn agent_parent(&mut self, agent_parent: bool) {
         self.agent_parent = Some(agent_parent);
+    }
+
+    /// Mark this call's allow records `default_policy: true` (#10386).
+    ///
+    /// What: set by `grant` and `resolve` for a caller under Claude Code,
+    /// whose only path to a key is the absence of its deny. Deny records
+    /// never carry it.
+    pub(crate) fn default_policy(&mut self) {
+        self.default_policy = true;
     }
 
     /// Open the audit log and append this call's allow record, before the
@@ -288,6 +300,9 @@ impl Gate<'_> {
         record.project_root = self.project_root.clone();
         record.agents_allowed = self.agents_allowed;
         record.agent_parent = self.agent_parent;
+        if denied.is_none() && self.default_policy {
+            record.default_policy = Some(true);
+        }
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

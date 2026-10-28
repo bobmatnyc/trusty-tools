@@ -96,17 +96,14 @@ pub enum SecretsError {
         cleanup: Box<SecretsError>,
     },
 
-    /// A process whose parent chain includes Claude Code asked for a key that
-    /// is not flagged "agents may use" (DOC-74 §15.8). Raised before any
-    /// backend read.
-    #[error(
-        "secret {key} in {vault} is not flagged \"agents may use\"; \
-         refusing to resolve it under a Claude Code parent"
-    )]
+    /// A process whose parent chain includes Claude Code asked for a key the
+    /// operator denied to agents (DOC-74 §15.8, #10386). Raised before any
+    /// value read.
+    #[error("secret {key} in {vault} is denied to agents; refusing it under a Claude Code parent")]
     AgentUseRefused {
         /// The key refused.
         key: String,
-        /// The vault whose index row carries the flag.
+        /// The vault holding the key.
         vault: String,
     },
 

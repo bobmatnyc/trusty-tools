@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::config::MachineSecretsConfig;
-use super::{KeychainBackend, RemoteIdentity};
+use super::{ControlItem, KeychainBackend, RemoteIdentity};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// What a backend can do.
@@ -121,42 +121,58 @@ pub trait SecretBackend: Send + Sync + fmt::Debug {
         })
     }
 
-    /// Whether `key` in `vault` is flagged "agents may use" (DOC-74 §15.8).
+    /// Whether this backend stores agent-control items (#10386).
     ///
-    /// Why: #9070 — the flag sat in the 0600 index JSON, which any same-uid
-    /// process can edit. The backend holds it now, as its own item per key.
-    /// What: `Ok(true)` only when the backend holds the flag item for this
-    /// key. A missing item is `Ok(false)`; a failed lookup is an `Err`, never
-    /// `Ok(true)`. The default holds no flag, so every key reads OFF.
-    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`,
-    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        let _ = (vault, key);
-        Ok(false)
+    /// Why: a deny that cannot be stored must not read as stored; the
+    /// caller then applies the migration mode's default instead.
+    /// What: `false` by default. A backend returning `true` implements
+    /// [`Self::control_item`] and [`Self::set_control_item`] for every
+    /// [`ControlItem`].
+    /// Test: `agent_denied_without_controls_follows_the_mode`.
+    fn holds_agent_controls(&self) -> bool {
+        false
     }
 
-    /// Create (`allowed`) or remove (`!allowed`) `key`'s flag item.
+    /// Whether the control `item` is present for `key` in `vault`; `key` is
+    /// `None` for a per-vault item.
     ///
-    /// What: removing a flag that is not there succeeds. The default holds
-    /// no flag: `false` succeeds with nothing to remove, and `true` is
-    /// [`SecretsError::Unsupported`] for operation `agents_may_use`.
-    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`.
-    fn set_agents_may_use(
+    /// Why: #9070 — the agent rule lives in the backend, never in the 0600
+    /// index JSON any same-uid process can edit. #10386: present means deny.
+    /// What: `Ok(true)` only when the backend holds the item. A missing item
+    /// is `Ok(false)`; a failed lookup is an `Err`, never a guess. The
+    /// default is [`SecretsError::Unsupported`].
+    /// Test: `store_default_backend_holds_no_agent_controls`,
+    /// `agent_denied_fails_closed_when_the_lookup_fails`.
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
-    ) -> Result<(), SecretsError> {
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
         let _ = (vault, key);
-        if allowed {
-            // #9070: a backend with no flag item can never hold the flag ON.
-            Err(SecretsError::Unsupported {
-                backend: self.id().to_string(),
-                operation: "agents_may_use",
-            })
-        } else {
-            Ok(())
-        }
+        Err(SecretsError::Unsupported {
+            backend: self.id().to_string(),
+            operation: item.operation(),
+        })
+    }
+
+    /// Create (`present`) or remove (`!present`) the control `item`.
+    ///
+    /// What: removing an item that is not there succeeds. The default is
+    /// [`SecretsError::Unsupported`].
+    /// Test: `store_default_backend_holds_no_agent_controls`.
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
+    ) -> Result<(), SecretsError> {
+        let _ = (vault, key, present);
+        Err(SecretsError::Unsupported {
+            backend: self.id().to_string(),
+            operation: item.operation(),
+        })
     }
 }
 

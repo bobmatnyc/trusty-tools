@@ -37,8 +37,17 @@ use tokio::task::JoinHandle;
 use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{send_framed_request, socket_is_serving};
 use trusty_secrets::server::{BackendFactory, ServeError, ServeExit, ServerSettings, serve};
-use trusty_secrets::store::{Capabilities, NamesIndex, SecretBackend, SecretStore};
+use trusty_secrets::store::{Capabilities, ControlItem, NamesIndex, SecretBackend, SecretStore};
 use trusty_secrets::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
+
+#[path = "support/detached_call.rs"]
+mod detached_call;
+
+/// The re-run that makes a detached call (#10386); a no-op otherwise.
+#[test]
+fn detached_call_role() {
+    detached_call::run_role_if_asked();
+}
 
 /// The file-size limit for this process, and the pre-filled log's size.
 // #4567: far above any gate log this binary's output is redirected into.
@@ -119,8 +128,12 @@ impl Mem {
         self.values.lock().unwrap().get(key).cloned()
     }
 
-    fn flagged(&self, key: &str) -> bool {
-        self.flags.lock().unwrap().contains(key)
+    /// Whether `key` carries an agent deny (#10386).
+    fn denied(&self, key: &str) -> bool {
+        self.flags
+            .lock()
+            .unwrap()
+            .contains(&control(ControlItem::AgentDeny, Some(key)))
     }
 }
 
@@ -146,24 +159,41 @@ impl SecretBackend for Mem {
         Ok(self.values.lock().unwrap().remove(key.as_str()).is_some())
     }
 
-    fn agents_may_use(&self, _: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        Ok(self.flagged(key.as_str()))
+    fn holds_agent_controls(&self) -> bool {
+        true
     }
 
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         _: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        let name = control(item, key.map(SecretKey::as_str));
+        Ok(self.flags.lock().unwrap().contains(&name))
+    }
+
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        _: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
     ) -> Result<(), SecretsError> {
+        let name = control(item, key.map(SecretKey::as_str));
         let mut flags = self.flags.lock().unwrap();
-        if allowed {
-            flags.insert(key.as_str().to_string());
+        if present {
+            flags.insert(name);
         } else {
-            flags.remove(key.as_str());
+            flags.remove(&name);
         }
         Ok(())
     }
+}
+
+/// The set entry for one control item.
+fn control(item: ControlItem, key: Option<&str>) -> String {
+    format!("{item:?}/{}", key.unwrap_or_default())
 }
 
 /// A checkout, a machine config, a full audit log, and two backends:
@@ -292,17 +322,19 @@ fn kind(response: &RpcResponse) -> String {
 /// Why: C-7.7a — an allowed set whose record cannot be appended after the
 /// backend call answers `audit_unavailable`; the value stands, and the log
 /// gains no torn record. Red when `Gate::finish` passes the success through.
+/// #10386: `set` is refused to a caller under Claude Code and `serve` judges
+/// the host's process table, so the call comes from a detached process.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_success_append_failure_is_audit_unavailable_and_the_change_stands() {
     let fx = fixture();
     let (task, stop) = fx.start().await;
-    let set = fx
-        .call(
-            "secrets.set",
-            json!({"vault": VAULT, "key": "K", "value": "v-1234567890"}),
-        )
-        .await;
+    let params = json!({"project": fx.repo.display().to_string(), "vault": VAULT,
+        "key": "K", "value": "v-1234567890"});
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "secrets.set", "params": params});
+    let dir = fx.settings.index_root.with_file_name("detached");
+    detached_call::spawn(&dir, &fx.settings.socket, &request);
+    let set = detached_call::response(&dir).await;
     assert_eq!(kind(&set), "audit_unavailable");
     assert_eq!(fx.keychain.value("K").as_deref(), Some("v-1234567890"));
     assert_eq!(fx.log_len(), LIMIT, "no torn record appended");
@@ -362,12 +394,12 @@ async fn copy_stops_before_the_next_key_after_a_failed_deny_append() {
     task.await.unwrap().unwrap();
 }
 
-/// Why: #9070 slice 3, Architect ruling 2026-10-10 — the flag-set allow
+/// Why: #9070 slice 3, Architect ruling 2026-10-10 — the deny-change allow
 /// record is written before the backend call. When the log opens but that
-/// append fails, the flag is never changed: distinct from an unopenable log,
-/// this catches a gate that only checks the open. The call turns the flag
-/// OFF, which reads no ancestry: the public `serve` judges callers on the
-/// host's real process table, so an ON call would depend on the host.
+/// append fails, the deny is never written: distinct from an unopenable log,
+/// this catches a gate that only checks the open. The call sets a deny
+/// (#10386), which reads no ancestry: the public `serve` judges callers on
+/// the host's real process table, so a deny removal would depend on the host.
 /// Red when the record is appended after the backend call.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -381,13 +413,6 @@ async fn set_flag_append_failure_after_open_changes_nothing() {
             &SecretValue::new("v-1234567890"),
         )
         .unwrap();
-    fx.keychain
-        .set_agents_may_use(
-            &VaultName::new(VAULT).unwrap(),
-            &SecretKey::new("K").unwrap(),
-            true,
-        )
-        .unwrap();
     let (task, stop) = fx.start().await;
     let set = fx
         .call(
@@ -396,7 +421,7 @@ async fn set_flag_append_failure_after_open_changes_nothing() {
         )
         .await;
     assert_eq!(kind(&set), "audit_unavailable");
-    assert!(fx.keychain.flagged("K"), "the flag was never changed");
+    assert!(!fx.keychain.denied("K"), "the deny was never written");
     assert_eq!(fx.log_len(), LIMIT, "no torn record appended");
     let _ = stop.send(());
     task.await.unwrap().unwrap();

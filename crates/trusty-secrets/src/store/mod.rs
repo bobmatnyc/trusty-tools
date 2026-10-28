@@ -9,6 +9,7 @@
 //! touchpoint sits in the private `platform` module.
 //! Test: the `*_tests.rs` files beside this module.
 
+pub mod agent_deny;
 mod backend;
 // #7520: the server's per-session cache of CLI-backed values; only the
 // server builds one, so without `server` it is never constructed.
@@ -33,6 +34,8 @@ pub mod github_actions;
 // audit sink reuses its mode, owner and symlink checks, so it is crate-visible.
 #[cfg(unix)]
 pub(crate) mod file;
+#[cfg(unix)]
+mod file_controls;
 mod index;
 // #7519 P3: the Keeper Commander backend; spawns `keeper` through `cli`.
 #[cfg(all(unix, feature = "cli-backends"))]
@@ -54,6 +57,7 @@ mod secret_store;
 // #7524 P2-L7: the time limit on every Keychain call.
 mod time_limit;
 
+pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION};
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;

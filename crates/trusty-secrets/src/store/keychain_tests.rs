@@ -81,30 +81,48 @@ fn keychain_delete_maps_no_entry_to_false_and_failures_to_errors() {
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 }
 
-/// Why: #9070 — a flag lookup that failed must never read as ON, and a
-/// missing flag item is OFF. Mapping the failure arm to `Ok(true)` or
-/// `Ok(false)` fails this test.
+/// Why: #9070, #10386 — a control lookup that failed must never read as
+/// "no deny" nor as present, and a missing item is absent. Mapping the
+/// failure arm to `Ok(true)` or `Ok(false)` fails this test.
 /// Test: itself.
 #[test]
 #[cfg(target_os = "macos")]
 fn keychain_flag_maps_no_entry_to_off_and_failures_to_errors() {
     let (vault, key) = names();
-    assert!(map_flag(&vault, &key, Ok("1".to_string())).unwrap());
-    assert!(!map_flag(&vault, &key, Err(keyring::Error::NoEntry)).unwrap());
+    let key = Some(&key);
+    assert!(map_flag(&vault, key, Ok("1".to_string())).unwrap());
+    assert!(!map_flag(&vault, key, Err(keyring::Error::NoEntry)).unwrap());
     let locked = keyring::Error::NoStorageAccess("keychain is locked".into());
-    let err = map_flag(&vault, &key, Err(locked)).unwrap_err();
+    let err = map_flag(&vault, key, Err(locked)).unwrap_err();
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 }
 
-/// Why: #9070 — the flag item lives in its own service, one account per
-/// (vault, key), so it can never collide with a value item.
+/// Why: #9070, #10386 — each control item lives in its own service, one
+/// account per (vault, key) or per vault, so none can collide with a value
+/// item or with another control item. The legacy service keeps its name, so
+/// the migration finds the pre-#10386 flags.
 /// Test: itself.
 #[test]
 fn keychain_agents_account_is_vault_then_key() {
     let (vault, key) = names();
-    assert_eq!(AGENTS_SERVICE, "trusty-secrets.agents");
-    assert_eq!(agents_account(&vault, &key), "trusty/acme/web/API_KEY");
-    assert_ne!(AGENTS_SERVICE, vault.as_str());
+    assert_eq!(
+        control_service(ControlItem::LegacyAgentsFlag),
+        "trusty-secrets.agents"
+    );
+    assert_eq!(
+        control_service(ControlItem::AgentDeny),
+        "trusty-secrets.agents-deny"
+    );
+    assert_eq!(
+        control_service(ControlItem::DenyMigrated),
+        "trusty-secrets.agents-deny-migrated"
+    );
+    assert_eq!(
+        agents_account(&vault, Some(&key)),
+        "trusty/acme/web/API_KEY"
+    );
+    assert_eq!(agents_account(&vault, None), "trusty/acme/web");
+    assert_ne!(AGENTS_DENY_SERVICE, vault.as_str());
 }
 
 /// Why: `BadEncoding` carries the stored bytes — the secret. The mapped
@@ -175,9 +193,11 @@ fn keychain_backend_runs_every_call_under_the_time_limit() {
         ("get", |b, v, k| b.get(v, k).map(drop)),
         ("set", |b, v, k| b.set(v, k, &SecretValue::new(FAKE_VALUE))),
         ("delete", |b, v, k| b.delete(v, k).map(drop)),
-        ("agents_may_use", |b, v, k| b.agents_may_use(v, k).map(drop)),
-        ("set_agents_may_use", |b, v, k| {
-            b.set_agents_may_use(v, k, true)
+        ("control_item", |b, v, k| {
+            b.control_item(ControlItem::AgentDeny, v, Some(k)).map(drop)
+        }),
+        ("set_control_item", |b, v, k| {
+            b.set_control_item(ControlItem::AgentDeny, v, Some(k), true)
         }),
     ];
     let (vault, key) = names();
