@@ -165,7 +165,8 @@ name = "trusty-common"
 # 0.65.0 (Refs #9167): minor — breaking: `MessageEvent` gains a public `direction` field (`MessageDirection`), so a struct-literal construction no longer compiles; 0.64.0 is live on crates.io.
 # 0.65.1 (Refs #6637): patch — doc-only edit in daemon_token.rs; no API change; 0.65.0 is live on crates.io.
 # 0.66.0 (Refs #10207): minor — breaking: RecycleTrigger::HardFootprint, RecycleSnapshot.hard_footprint_kills; subsumes the unpublished 0.65.1 (0.65.0 is live on crates.io).
-version = "0.66.0"
+# 0.67.0 (Refs #9272): minor — breaking: the no-op `memory-core` feature is removed, so a manifest that names it no longer resolves.
+version = "0.67.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -206,7 +207,7 @@ lanes = [
         # tests already compile them under `cfg(test)`, this lane compiles the
         # feature form.
         "test-support",
-        # #9271: both reached this lane through `memory-core`, now a no-op.
+        # #9271: both reached this lane through `memory-core`, removed in #9272.
         "embedder-bundled-ort",
         "redb-open",
         "embedder-client",
@@ -284,7 +285,6 @@ exempt = [
     { feature = "embedder-cuda", reason = "Links ORT against a CUDA host runtime. Mutually exclusive with `embedder-bundled-ort`, which the `core` lane runs, and unbuildable on this workspace's macOS and ubuntu runners." },
     { feature = "embedder-load-dynamic", reason = "Selects ORT's load-dynamic linking for AL2023; gates no `cfg` site anywhere in `src/`, so it changes how `embedder` links and not what it does. `core` runs the embedder tests." },
     { feature = "embedder-coreml", reason = "Documented no-op alias for `embedder`, kept for backward compatibility; gates no `cfg` site anywhere in `src/`." },
-    { feature = "memory-core", reason = "No-op since #9271: the engine moved to `trusty_memory::engine`. Kept so a manifest that still names it resolves; it enables nothing and gates no `cfg` site." },
     { feature = "embedder-candle", reason = "Every test it gates is `#[ignore]`d — they download ~90 MB from HuggingFace. Run them deliberately: `cargo test -p trusty-common --features embedder-candle -- --ignored`." },
 ]
 
@@ -796,11 +796,10 @@ symgraph-parser = [
     "dep:genco",
 ]
 chat-attachments = ["dep:base64", "dep:image", "dep:thiserror"]
-# #9271: a no-op kept for compatibility. The Memory Palace engine it enabled
-# moved to trusty-memory (`trusty_memory::engine`); depend on trusty-memory
-# instead. It implies nothing, so a consumer that relied on it for `embedder`,
-# `credentials`, `redb-open` or `chat-attachments` must name those itself.
-memory-core = []
+# #9272: the `memory-core` feature, a no-op since #9271 moved the Memory Palace
+# engine to trusty-memory (`trusty_memory::engine`), is removed. Depend on
+# trusty-memory for the engine; name `embedder`, `credentials`, `redb-open` or
+# `chat-attachments` directly for what it used to imply.
 # Why (#5695): the `memory-core-kuzu` feature and its `memory_core::store::kuzu`
 # module were REMOVED. Nothing enabled the feature and no bindings were ever
 # wired in, so it only made `--all-features` — the path cargo-semver-checks

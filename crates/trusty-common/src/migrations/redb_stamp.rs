@@ -1,7 +1,7 @@
 //! Documentation-only stub for storing schema-version stamps inside redb.
 //!
-//! Why: redb is not a direct dependency of `trusty-common` — it lives behind
-//! the heavyweight `memory-core` feature flag — so this crate cannot offer
+//! Why: redb is not an unconditional dependency of `trusty-common` — it lives
+//! behind the optional `redb-open` feature — so this crate cannot offer
 //! a generic redb-stamp helper without dragging redb into every consumer's
 //! build graph. Crates that already depend on redb (`trusty-search`,
 //! `trusty-memory`) can implement the equivalent five-line helper locally

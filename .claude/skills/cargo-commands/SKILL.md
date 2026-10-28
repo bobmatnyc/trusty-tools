@@ -41,8 +41,8 @@ Name what you changed — `--features <feature>`, e.g. `--features embedder` —
 `--all-features` is unavailable: the `embedder-*` ORT variants are mutually
 exclusive. `cargo build` and `cargo check -p trusty-common` are unaffected.
 The whole crate, every test once: `./scripts/test_trusty_common_lanes.sh`.
-The memory engine left trusty-common in #9271 (its `memory-core` feature is a
-no-op): test it with `cargo test -p trusty-memory --no-fail-fast`.
+The memory engine left trusty-common in #9271 (its `memory-core` feature was
+removed in 0.66.0, #9272): test it with `cargo test -p trusty-memory --no-fail-fast`.
 
 ## Workspace-wide
 

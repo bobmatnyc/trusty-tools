@@ -4,8 +4,8 @@
 //! heavy crates must leave this manifest with it, or every trusty-common
 //! consumer keeps paying for them through a feature that now enables nothing.
 //! What: reads this crate's `Cargo.toml` and checks that no dependency table
-//! names a crate only the engine used, that `memory-core` enables nothing, and
-//! that `src/memory_core` is gone.
+//! names a crate only the engine used, that the `memory-core` feature is no
+//! longer declared (#9272), and that `src/memory_core` is gone.
 //! Test: this file.
 
 use toml::Value;
@@ -76,22 +76,23 @@ fn no_dependency_table_names_an_engine_only_crate() {
     );
 }
 
-/// Why (#9271, D2): `memory-core` stays so old manifests resolve, but it must
-/// turn nothing on, and the module it gated must be gone.
-/// What: checks `features.memory-core == []` and that `src/memory_core` does
-/// not exist.
+/// Why (#9272): the `memory-core` no-op kept for one minor after #9271 is
+/// removed, and the module it gated must stay gone.
+/// What: fails when `[features]` still declares `memory-core` or when
+/// `src/memory_core` exists. The `[features]` table must be found, so an empty
+/// read cannot pass.
 /// Test: itself.
 #[test]
-fn memory_core_is_a_no_op_and_the_module_is_gone() {
+fn memory_core_feature_is_absent_and_the_module_is_gone() {
     let manifest = manifest();
-    let feature = manifest
+    let features = manifest
         .get("features")
-        .and_then(|f| f.get("memory-core"))
-        .and_then(Value::as_array)
-        .expect("`memory-core` is still declared, as a list");
+        .and_then(Value::as_table)
+        .expect("no [features] table found");
     assert!(
-        feature.is_empty(),
-        "`memory-core` must enable nothing: {feature:?}"
+        !features.contains_key("memory-core"),
+        "`memory-core` is still declared: {:?}",
+        features.get("memory-core")
     );
     let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory_core");
     assert!(!module.exists(), "{} still exists", module.display());

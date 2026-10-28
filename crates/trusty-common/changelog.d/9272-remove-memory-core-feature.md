@@ -1,0 +1,2 @@
+Breaking
+- The `memory-core` feature, a no-op since the Memory Palace engine moved to trusty-memory in 0.64.0, is removed. A manifest that still names `trusty-common/memory-core` no longer resolves: drop it, depend on `trusty-memory` for the engine, and name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly for what it used to imply ([#9272](https://github.com/bobmatnyc/trusty-tools/issues/9272))

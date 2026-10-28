@@ -448,8 +448,8 @@ pub(crate) fn path_bytes(p: &Path) -> Vec<u8> {
 /// feature flag is worse than no identity at all — so this stays dependency-free
 /// and unconditional. Not a security boundary: nothing here defends against a
 /// chosen-preimage attacker, only against accidental collision.
-/// (`memory_core::analytics::fnv1a_hash` is the same algorithm but lives behind
-/// the `memory-core` feature and takes `&str`, so it is unusable here.)
+/// (`trusty_memory::engine::analytics::fnv1a_hash` is the same algorithm but
+/// lives in trusty-memory and takes `&str`, so it is unusable here.)
 /// What: standard FNV-1a over `bytes`, then a splitmix64 finalizer so that
 /// paths differing in a single character still differ in most output bits.
 /// Test: `digest_is_stable_for_identical_inputs`.

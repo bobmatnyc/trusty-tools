@@ -121,7 +121,7 @@ To follow an old citation, replace the old prefix with the new one.
 |---|---|---|---|
 | `crates/trusty-common/src/memory_core/` (module `trusty_common::memory_core`, feature `memory-core`) | `crates/trusty-memory/src/engine/` (module `trusty_memory::engine`) | #9271 | 2026-10-12 |
 
-The `memory-core` feature of trusty-common still exists as a no-op. Some old
+The `memory-core` feature was removed in trusty-common 0.66.0 (#9272). Some old
 citations were already stale before the move because a file became a
 directory: `memory_core/dream.rs` is now `engine/dream/mod.rs`, and
 `memory_core/retrieval.rs` is now `engine/retrieval/mod.rs`.
