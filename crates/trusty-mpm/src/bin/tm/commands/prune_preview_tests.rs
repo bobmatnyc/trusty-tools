@@ -471,6 +471,7 @@ async fn prune_worktrees_outside_a_repository_posts_nothing() {
         true,
         false,
         None,
+        false,
     )
     .await;
     let bodies = server.await.expect("stub");

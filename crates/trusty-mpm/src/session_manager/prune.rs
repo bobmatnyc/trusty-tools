@@ -758,12 +758,20 @@ impl SessionManager {
         // #7619: unstarted candidates of a cancelled pass, never touched.
         let mut cancelled_unstarted = Vec::new();
         let mut queue = candidates.into_iter();
-        for candidate in queue.by_ref() {
+        for (n, candidate) in queue.by_ref().enumerate() {
             // #7619: a cancelled pass stops reading too, between candidates.
             if cancel.stop_requested() {
                 cancelled_unstarted.push(candidate);
                 break;
             }
+            // #7619: one progress line per candidate for the streaming method.
+            cancel.progress(|| {
+                let path = candidate.display();
+                format!(
+                    "orphan sweep: inspecting {}/{total_candidates} {path}",
+                    n + 1
+                )
+            });
             match super::worktree_ownership::read_sentinel_owner(&candidate) {
                 SentinelOwner::Unknown => {
                     // #4323: `debug!`, not `info!`. This arm fires once per
@@ -876,14 +884,19 @@ impl SessionManager {
         let mut partially_removed = Vec::new();
         // #8782: a real run reports what the pre-removal re-check discarded.
         discarded_dirty.clear();
+        let to_remove = reclaimable.len();
         let mut queue = reclaimable.into_iter();
-        for candidate in queue.by_ref() {
+        for (n, candidate) in queue.by_ref().enumerate() {
             // #7619: asked BEFORE each candidate and never inside
             // `remove_candidate`, so a removal in flight finishes.
             if cancel.stop_requested() {
                 cancelled_unstarted.push(candidate);
                 break;
             }
+            cancel.progress(|| {
+                let path = candidate.display();
+                format!("orphan sweep: removing {}/{to_remove} {path}", n + 1)
+            });
             match remove_candidate(&candidate, &fresh_in_use, policy, scope, ceiling).await {
                 CandidateRemoval::Removed(discard) => {
                     removed.push(candidate);

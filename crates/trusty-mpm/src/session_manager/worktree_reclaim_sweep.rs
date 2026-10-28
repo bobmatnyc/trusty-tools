@@ -243,7 +243,8 @@ fn survey_scanned(
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
-    for scanned in scanned {
+    let total = scanned.len();
+    for (n, scanned) in scanned.into_iter().enumerate() {
         let past_deadline = budget.classify.is_some_and(|d| Instant::now() >= d);
         if past_deadline || cancel.stop_requested() {
             // #2919: fail closed. A candidate we ran out of time to inspect is
@@ -263,6 +264,9 @@ fn survey_scanned(
             });
             continue;
         }
+        // #7619: one progress line per candidate for the streaming method.
+        let shown = scanned.path.display();
+        cancel.progress(|| format!("merged-PR pass: classifying {}/{total} {shown}", n + 1));
         // #8301: every child this inspection starts ends at the deadline, and an
         // inspection the deadline interrupted is kept, whatever it answered.
         let (pr, verdict) = inspect_within(&scanned.path, budget.classify, || {
@@ -323,6 +327,7 @@ fn survey_scanned(
     // The measurement deadline starts HERE, when the phase does — not when the
     // survey did. See `SurveyBudget::measure`.
     let measure_deadline = budget.measure.map(|d| Instant::now() + d);
+    cancel.progress(|| format!("merged-PR pass: measuring {} worktree(s)", candidates.len()));
     measure_reclaimable_first(&mut candidates, measure_deadline, cancel);
     ReclaimSurvey::from_candidates(candidates)
 }
@@ -795,13 +800,16 @@ pub(crate) fn reclaim_scoped_with_cancel(
     // Rebuilt fresh for the delete phase — the survey's index is as old as the
     // survey, which is minutes.
     let mut fresh_indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
+    let to_remove = approved.len();
     let mut queue = approved.into_iter();
-    for candidate in queue.by_ref() {
+    for (n, candidate) in queue.by_ref().enumerate() {
         // #7619: asked BEFORE each candidate, never inside the removal below.
         if cancel.stop_requested() {
             out.cancelled_unstarted.push(candidate.path);
             break;
         }
+        let shown = candidate.path.display();
+        cancel.progress(|| format!("merged-PR pass: removing {}/{to_remove} {shown}", n + 1));
         let path = candidate.path;
         // #7504: ahead of the pull-request lookups, because it is the only gate
         // here that costs nothing — two in-process path compares — and a

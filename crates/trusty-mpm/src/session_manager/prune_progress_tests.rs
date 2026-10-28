@@ -344,3 +344,40 @@ fn worktree_7619_a_partial_removal_is_never_also_cancelled_unstarted() {
                 .any(|r| r.starts_with(&format!("{}: ", t.display())))
     }));
 }
+
+/// #7619 PR 2: a progress sink hears each inspected and removed candidate,
+/// and listening never stops the pass.
+#[tokio::test]
+async fn worktree_7619_progress_lines_reach_the_sink_and_never_cancel() {
+    let (mgr, _store) = manager().await;
+    let fx = GitWorktreeFixture::new();
+    let trees = orphans(&fx, "progress-7619", 2);
+    let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let heard = Arc::clone(&lines);
+    let cancel = PruneCancel::never().with_progress(move |line| {
+        heard.lock().expect("lines").push(line);
+    });
+    assert!(!cancel.stop_requested(), "a sink must not read as stop");
+
+    let out = sweep(&mgr, &fx, &cancel).await;
+
+    assert_eq!(
+        sorted(out.removed.clone()),
+        sorted(trees.clone()),
+        "{out:?}"
+    );
+    let lines = lines.lock().expect("lines").clone();
+    for wt in &trees {
+        let shown = wt.display().to_string();
+        for verb in ["inspecting", "removing"] {
+            assert!(
+                lines.iter().any(|l| l.contains(verb) && l.contains(&shown)),
+                "no `{verb}` line for {shown}: {lines:?}"
+            );
+        }
+    }
+    assert!(
+        lines.iter().any(|l| l.contains("removing 2/2")),
+        "{lines:?}"
+    );
+}

@@ -155,6 +155,8 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #8782: the per-project prune-worktrees preview and its scope checks.
 pub(crate) mod prune_preview;
+// #7619: the streamed prune-worktrees reader.
+pub(crate) mod prune_stream_client;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
