@@ -118,6 +118,33 @@ Output goes to the gitignored `.trusty-mpm/perf/memory/weekly/<UTC stamp>/` (or 
 
 `scripts/perf_weekly_memory_selftest.sh` drives the runner with stubbed suite, load and host commands (the `PERF_RUN_CMD`, `PERF_LOAD_CMD` and `PERF_HOST_CMD` hooks) and the logs in `scripts/test-data/perf-weekly/`. It needs no EVO and no cargo. CI runs it and `perf_compare_selftest.sh` in the `changes` job of `ci.yml`.
 
+## Daily sampler (read-only, under load)
+
+`scripts/perf_sampler.sh --tool memory|search` samples a running daemon for 30 minutes (`--duration-s 1800`) every 10 s plus 0 to 5 s of jitter (`--interval-s`, minimum 10; `--jitter-s`). It serves trusty-memory and trusty-search with one envelope shape. It is the daily Mac sampler of [#10210](https://github.com/bobmatnyc/trusty-tools/issues/10210); scheduling it is phase 5.
+
+```
+scripts/perf_sampler.sh --tool memory|search [--socket PATH] [--pid PID]
+  [--duration-s S] [--interval-s S] [--jitter-s S] [--max-samples N]
+  [--load-stop L] [--out-dir DIR] [--label mac|evo]
+```
+
+Each sample records the 1- and 15-minute load and sets `under_load` when the 1-minute load is 2 or more. The sample is labelled, not dropped. memory sends `memory.status` and `tools/call console_metrics`. search sends `search.health` and `search.indexes.list` and reads the daemon RSS with `ps`. The script refuses any other method, so no recall, search query or write is ever sent.
+
+Public output. Only listed numbers are kept. Palaces and indexes appear as rank labels (`p01`, `i01`, ...), largest disk bytes first, fixed when first seen. The id-to-label map stays in a temp dir that is removed on exit. No data root, palace or index name, socket, host path or daemon error text reaches the output. A JSON-RPC error keeps its numeric code only.
+
+Output goes to the gitignored `.trusty-mpm/perf/<tool>/sampler/<UTC stamp>/` (or `--out-dir`, which must be ignored if it is inside the repository): `samples.ndjson`, one row per sample, and `envelope.json`. Both tools write the same top-level keys: `schema`, `kind` (`perf_sampler`), `tool`, `version`, `commit`, `label`, `host`, `date`, `utc_start`, `utc_end`, `corpus`, `load`, `outcome`, `reason`, `sampling`, `residency` and `results`. `results` uses the row shape above, with nearest-rank `p50`, `p95` and `max` over the good samples, and `rank_label` on per-palace and per-index rows.
+
+It fails closed. The outcome is one of:
+
+- `ok`, exit 0: every sample was good and the run reached `--duration-s` or `--max-samples`.
+- `stopped`, exit 31: the 1-minute load went above 8 (`--load-stop`) after at least one good sample. `reason` names the load. `results` covers the good samples only.
+- `skipped`, exit 30: the load was above 8 at the first sample. No call is made and `results` is empty.
+- `failed`, exit 20: an unreadable load, no daemon socket, no reply, a reply that is not JSON, a JSON-RPC error, or a required figure that is missing, not a number, or zero where zero is impossible (RAM, disk, RSS). The first failed sample ends the run and `results` is empty, even after good samples.
+
+The sampler writes no status file and no committed file.
+
+`scripts/perf_sampler_selftest.sh` runs the stub cases through the `PERF_SAMPLER_LOAD_CMD`, `PERF_SAMPLER_RPC_CMD`, `PERF_SAMPLER_RSS_CMD` and `PERF_SAMPLER_SLEEP_CMD` hooks. It needs no daemon and no cargo, and CI runs it beside the other perf selftests. `--live` starts one sandbox daemon per tool with `scripts/sandbox_memory_daemon.sh` and `scripts/sandbox_search_daemon.sh`. The search sandbox runs with `TRUSTY_EMBEDDER=stdio`, so no python venv is downloaded. It creates a palace and an index with private names, runs the real sampler for two samples each, greps both outputs for the names and the sandbox paths, compares the envelope keys, and stops both daemons.
+
 ## Live collector (read-only)
 
 `scripts/memory_perf_collect.sh` takes the storage, indexing and dream-score rows from a running or stopped trusty-memory data root and prints one envelope (schema 1) on stdout. It adds two fields to the envelope: `idle_gate` (`passed`, `failed` or `skipped`) and `sampled_palaces`. Palace rows carry `palace` (a size-rank label `p01`, `p02`, ...) and, for file rows, `file` (a basename).
