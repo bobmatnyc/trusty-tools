@@ -610,16 +610,47 @@ fn store_debug_never_contains_a_value() {
     assert!(!shown.contains(FAKE_VALUE), "{shown}");
 }
 
-/// Why: owner ruling 2026-10-01 — ≤ 8 characters shows only the length;
-/// longer shows the first 8 plus the length. Characters, not bytes.
+/// Why: #10394, owner ruling 2026-10-28 — under 10 characters shows only
+/// the length; 10 to 15 the last 5 and the length; 16 or more the first 4,
+/// the last 5 and the length. Characters, not bytes, so a multi-byte value
+/// never panics on a char boundary. Red against the head-8 mask.
 /// Test: itself.
 #[test]
 fn mask_secret_table() {
-    assert_eq!(mask_secret(""), "[0 chars]");
-    assert_eq!(mask_secret("12345678"), "[8 chars]");
-    assert_eq!(mask_secret("123456789"), "12345678… [9 chars]");
-    assert_eq!(mask_secret("ééééééééé"), "éééééééé… [9 chars]");
-    assert!(!mask_secret("12345678").contains('1'));
+    for (value, masked) in [
+        ("", "[0 chars]"),
+        ("123456789", "[9 chars]"),
+        ("abcdefghij", "…fghij [10 chars]"),
+        ("abcdefghijklmno", "…klmno [15 chars]"),
+        ("abcdefghijklmnop", "abcd…lmnop [16 chars]"),
+        ("ééééééééé", "[9 chars]"),
+        ("日本語のテキストです", "…キストです [10 chars]"),
+        ("αβγδεζηθικλμνξοπ", "αβγδ…μνξοπ [16 chars]"),
+        ("🔑🔒ab🔓cdefghijk🗝", "🔑🔒ab…hijk🗝 [16 chars]"),
+    ] {
+        assert_eq!(mask_secret(value), masked, "{value:?}");
+    }
+}
+
+/// Why: #10394 — no length may show more than the ruling allows: the first
+/// 4 only at 16 or more, the last 5 only at 10 or more, nothing in between.
+/// Test: itself.
+#[test]
+fn mask_secret_hides_every_character_the_ruling_masks() {
+    // Distinct characters, none of which `[N chars]` or `…` contains.
+    let alphabet: Vec<char> = ('A'..='Z').chain('Α'..='Ω').collect();
+    for length in 0..=40 {
+        let value: String = alphabet[..length].iter().collect();
+        let masked = mask_secret(&value);
+        for (index, c) in value.chars().enumerate() {
+            let shown = (length >= 16 && index < 4) || (length >= 10 && index >= length - 5);
+            assert_eq!(
+                masked.contains(c),
+                shown,
+                "len {length} index {index}: {masked}"
+            );
+        }
+    }
 }
 
 /// A store over a fresh memory backend whose index waits `lock_ms` at most.

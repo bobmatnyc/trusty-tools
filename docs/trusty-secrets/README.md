@@ -25,8 +25,9 @@ The crate README is the entry point for usage:
 - Serves the `secrets.*` methods on an on-demand Unix socket. The
   `trusty-secrets` binary starts on the first call and exits after 60 seconds
   idle.
-- Shows a value once after a write, masked: the first 8 characters and the
-  length. Values of 8 characters or fewer show only the length.
+- Shows a value once after a write, masked: the first 4 and last 5
+  characters and the length for 16 characters or more, the last 5 and the
+  length for 10 to 15, and only the length under 10.
 
 ## Install
 

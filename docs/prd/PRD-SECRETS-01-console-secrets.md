@@ -85,8 +85,8 @@ the value.
 ## User Stories / Jobs-to-be-Done
 
 1. **As a developer**, I open `/tools/secrets/`, pick `bobmatnyc/trusty-tools`,
-   and save `OPENAI_API_KEY`. The page confirms with the first 8 characters and
-   the length, once. No agent sees any of it.
+   and save `OPENAI_API_KEY`. The page confirms once with the masked value and
+   its length (first 4 and last 5 characters for a long value). No agent sees any of it.
 2. **As a developer**, I save `NPM_TOKEN` at owner scope `bobmatnyc`. Every
    repo under that owner resolves it, unless a repo sets its own.
 3. **As an agent**, I run `tm secrets exec --env GH_TOKEN=GH_TOKEN -- gh pr list`.
@@ -114,8 +114,9 @@ the value.
 
 trusty-console serves a secrets page at `/tools/secrets/`. It lists scopes and
 key names, and sets, deletes and copies keys. The list shows each key's length
-and last-updated time. The first 8 characters appear once, in the set
-confirmation. A value of 8 characters or fewer shows only its length. The
+and last-updated time. The set confirmation shows, once, the first 4 and
+last 5 characters of a value of 16 or more, the last 5 of a value of 10 to
+15, and only the length of a shorter one. The
 console never reads a store and never receives a value back.
 
 **Why:** Value entry outside any session is what removes the transcript path.
@@ -270,7 +271,7 @@ the console.
 
 **PRD-SECRETS-02 (Console service page)**
 - [ ] `/tools/secrets/` lists scopes and key names with length and last-updated.
-- [ ] Set confirmation shows the first 8 characters and length once; a value of ≤8 characters shows only its length.
+- [ ] Set confirmation shows once: first 4 + last 5 characters and length at 16+; last 5 and length at 10–15; length only under 10 (#10394).
 - [ ] No console response body contains a stored value.
 
 **PRD-SECRETS-03 (Scopes)**
@@ -355,6 +356,7 @@ All rulings are the owner's, dated, and recorded on
 | 2026-10-01 | List shows length and updated_at only; first 8 characters once on set. Owner scope = GitHub owner from the git remote; no machine scope; project > owner. Remote: "Local or Tailscale." Order: Keychain through the console page first, then one PR per integration. Default taken: Vercel development target opt-in per key. |
 | 2026-10-01 | Per-key "agents may use" flag, default OFF. All three language tiers are in scope. |
 | 2026-10-28 | Bob D69/Af9, D6a: "Security model is exactly like .env.local. If it's in the scope (user/owner/project), then it's usable by the agent." Supersedes the 2026-10-01 default: agents may use in-scope keys; the per-key deny is an operator opt-out; existing vaults migrate open-all ([#10386](https://github.com/bobmatnyc/trusty-tools/issues/10386)). |
+| 2026-10-28 | Set confirmation mask (#10394): first 4 + last 5 characters at 16+; last 5 at 10–15; length only under 10. Supersedes the first-8 confirmation of 2026-09-17 and 2026-10-01. |
 | 2026-10-06 | f5 "Keychain default": trusty-secrets 0.1.0 stores credentials in the macOS Keychain by default; the 0600 file is only a fallback where no Keychain exists. [#4570](https://github.com/bobmatnyc/trusty-tools/issues/4570) is in 0.1.0; this supersedes the 2026-09-21 "500 file" reading. |
 | 2026-10-06 | f6 "Both out": Doppler/AWS timing and the Go client are out of 0.1.0. |
 

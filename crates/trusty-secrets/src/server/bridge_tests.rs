@@ -25,6 +25,8 @@ const BRIDGE_LIST: &str = "secrets.bridge.list";
 const BRIDGE_DELETE: &str = "secrets.bridge.delete";
 /// An executable path whose file name is the console's.
 const CONSOLE_EXE: &str = "/opt/trusty/bin/trusty-console";
+/// #10394: `SENTINEL_VALUE` under the ruled mask — first 4, last 5, length.
+const BRIDGE_MASK: &str = "SENT…w2Pn6 [32 chars]";
 
 /// `procs_with_me`, with this process running the console's executable.
 fn console_procs() -> Arc<FakeProcs> {
@@ -767,7 +769,8 @@ async fn bridge_errors_and_masked_set_never_carry_the_specimen_value() {
     server.stop().await;
 
     assert!(!wire(&stored).contains(SENTINEL_VALUE));
-    assert_eq!(ok(stored)["masked"], mask_secret(SENTINEL_VALUE));
+    // #10394: the bridge returns the ruled mask, pinned as a literal.
+    assert_eq!(ok(stored)["masked"], BRIDGE_MASK);
     for refused in [&malformed, &out_of_scope] {
         assert!(refused.result.is_none());
         assert!(kind(refused).is_some(), "{:?}", refused.error);
@@ -778,21 +781,19 @@ async fn bridge_errors_and_masked_set_never_carry_the_specimen_value() {
     assert!(!captured().contains(SENTINEL_VALUE));
 }
 
-/// Why: DOC-74 §15.6 — `mask_secret` on a specimen shows its first 8
-/// characters and its length, never the whole value; a short one shows its
-/// length only.
+/// Why: DOC-74 §15.6, #10394 — `mask_secret` on a specimen shows its first
+/// 4 and last 5 characters and its length, never the middle; a value under
+/// 10 characters shows its length only.
 /// Test: itself.
 #[test]
 fn mask_secret_never_shows_a_specimen_value_whole() {
     // #9066: the `api` path the console bridge links.
     use crate::api::mask_secret;
     let masked = mask_secret(SENTINEL_VALUE);
-    assert!(!masked.contains(SENTINEL_VALUE), "{masked}");
-    assert_eq!(
-        masked,
-        format!("SENTINEL… [{} chars]", SENTINEL_VALUE.len())
-    );
+    assert!(!masked.contains("INEL-VALUE-9070-zq4Rk8L"), "{masked}");
+    assert_eq!(masked, BRIDGE_MASK);
     assert_eq!(mask_secret("hunter2!"), "[8 chars]");
+    assert_eq!(mask_secret("hunter22!"), "[9 chars]");
 }
 
 /// Why: the Fail-Open Check — a bridge call whose peer pid the kernel did

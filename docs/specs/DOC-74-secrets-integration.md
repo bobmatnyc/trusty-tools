@@ -173,7 +173,7 @@ behave.
 | `Debug`/`Display` of any in-memory type holding a value | Every type in this module implements `Debug` the way `Secret<T>` and `KeyringStore` do: either a constant redacted string or (for `KeyringStore`, stateless) nothing to leak | `secret.rs:105-126`, `keyring_store.rs:48` (`derive(Debug)` is safe only because the struct is stateless) |
 | A `tm` log line | Never logs a resolved value; logs only the reference and the backend name | Same posture as `resolve_key`'s existing "never logs the (absent) value" contract (`mod.rs:163`) |
 | argv of a spawned process | `tm secrets exec` never places a resolved value in argv — only in the child's environment (`--env NAME=KEY`) or its stdin (`--stdin KEY`) | New; see §10.5 and the negative test in §12 |
-| A console response (amended 2026-10-01) | `secrets.list` returns names, length and `updated_at` only; `secrets.set` returns the first 8 characters and the length once, through `mask_secret` (§15.6) | New; ruling 2026-10-01 |
+| A console response (amended 2026-10-01) | `secrets.list` returns names, length and `updated_at` only; `secrets.set` returns, once, through `mask_secret` (§15.6): the first 4 and last 5 characters and the length for 16 characters or more, the last 5 and the length for 10 to 15, the length alone under 10 | New; ruling 2026-10-01, mask amended 2026-10-28 (#10394) |
 | A UDS decode error on a `secrets.*` method (amended 2026-10-01) | Fixed error text; the generic router's `params do not decode: {e}` text is not used for `secrets.*` (§15.6) | The generic echo at [`router.rs:144`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/uds/server/router.rs#L144) |
 | A file on disk | The session cache is in-memory only (§9.3); nothing this document adds writes a decrypted value to disk. `FileKeyStore`'s existing `0600` file remains a distinct, pre-existing tier (DOC-45 §11), untouched by this document except as a migration source (§11) |
 
@@ -717,8 +717,8 @@ tm secrets set KEY [group] [--value -]         # upsert one key; value from the 
                                                # an empty clipboard is an error: non-zero exit, nothing stored
                                                # the paste tool runs from fixed system directories, never PATH; past 5 s
                                                # it and its process group are killed, and text over 1 MiB is refused (#7524)
-                                               # confirms "(new)" or "(updated)", KEY, the first 8 characters and the length;
-                                               # a value of 8 characters or fewer shows only its length (mask_secret, §15.6)
+                                               # confirms "(new)" or "(updated)", KEY and mask_secret (§15.6, #10394): first 4 + last 5
+                                               # characters and the length at 16+; last 5 and the length at 10-15; length only under 10
 tm secrets list                                # key NAMES, length and updated_at per scope — never values (mirrors KeyStore::list, mod.rs:171)
 tm secrets remove KEY [group]                  # delete one project-scope key; a key the scope does not hold is named and exits non-zero
 tm secrets copy --from <backend> --to <backend> [KEY...]
@@ -1045,7 +1045,7 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
 | `copy` never observes the destination write partially applied | Interrupt (simulated backend error) mid-copy of N keys; assert already-written keys are reported and no value appears in the error text. Exception: a destination entry whose index publish and compensating delete both fail aborts the copy with `orphaned_backend_entry` and no copied list; keys copied before it stay visible through `secrets.list`. See [#9065](https://github.com/bobmatnyc/trusty-tools/issues/9065) | New — DOC-45-style honesty about partial-failure states |
 | No value reaches the console (2026-10-01) | Drive every `secrets.*` method through the `secrets_uds` bridge with a specimen value; assert no response body, error body or log line contains it | New — PRD-SECRETS-10 |
 | Fixed error text (2026-10-01) | Send a malformed `secrets.set` whose bad field holds a specimen value; assert the error text is the fixed string and omits the specimen | New — the echo at `router.rs:144` |
-| `mask_secret` (2026-10-01) | Table test: a value of ≤8 characters yields its length only; a longer value yields the first 8 characters and the length; `redact_secret`'s 4-character output is unchanged | New; `redact_secret_short_inputs_table` stays green |
+| `mask_secret` (2026-10-28, #10394) | Table test at lengths 0, 9, 10, 15, 16 and a multi-byte value: under 10 characters yields the length only; 10 to 15 yields the last 5 and the length; 16 or more yields the first 4, the last 5 and the length; `redact_secret`'s 4-character output is unchanged | New; `redact_secret_short_inputs_table` stays green |
 | Browser hardening (2026-10-01) | Requests with a foreign Origin, no Origin, a foreign Host, or a missing/stale anti-CSRF header get 403 on every secrets route | New — S3a |
 | Tailnet gate (2026-10-01) | A `tailscale whois` stub returns another login, a tagged node, and the same login; only the same login passes. A loopback request carrying a `Tailscale-*` header gets 403 | New — S3b, [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) |
 | Exec grant (2026-10-01) | `secrets.resolve` refuses an unknown token, an expired token, a key outside the grant, and a caller pid outside the granted tree; accepts the child and a grandchild | New — S8 |
@@ -1455,9 +1455,10 @@ console makes the ancestry judgment and the server checks who made it.
 `api` feature. The bridge links `api` and `ancestry` only (#9066):
 
 - `secrets.list` shows length and `updated_at` only.
-- `secrets.set` shows the first 8 characters and the length, once.
-- A value of 8 characters or fewer shows only its length (owner ruling
-  2026-10-01).
+- `secrets.set` shows, once, the first 4 and last 5 characters and the
+  length for a value of 16 characters or more, the last 5 and the length
+  for 10 to 15, and only the length under 10 (owner ruling 2026-10-28,
+  #10394; replaces the 2026-10-01 first-8 format).
 
 `mask_secret` is a new function, not a change to `redact_secret`.
 [`redact_secret`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/credentials/redact.rs#L92)
