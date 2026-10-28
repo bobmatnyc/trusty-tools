@@ -574,7 +574,9 @@ debug = false
 # executable on its first exec, and the scan time grows with the file size.
 [profile.test]
 debug = "line-tables-only"
-# EXPERIMENT (CI-duration measurement, do not merge): opt-level 1 for test builds
+
+# EXPERIMENT (CI-duration measurement, do not merge): opt-level 1 for dependencies only in test builds
+[profile.test.package."*"]
 opt-level = 1
 
 [profile.release]
