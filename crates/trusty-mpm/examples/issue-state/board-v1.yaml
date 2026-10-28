@@ -49,7 +49,7 @@ fields:
         state: "status:in-progress"
       - name: In PR
         color: ORANGE
-        description: "PR open, `Refs #N`"
+        description: "PR open, Refs #N"
         state: "status:coded"
       - name: On Preview
         color: YELLOW
@@ -123,8 +123,8 @@ views:
       - Assignees
       - Status
       - Linked pull requests
-      - Milestone
       - Sub-issues progress
+      - Milestone
       - Created
       - Start date
       - Target date
