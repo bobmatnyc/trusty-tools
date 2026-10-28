@@ -2668,6 +2668,9 @@ jobs:
       - name: Preflight CHECK 8 decision self-test
         run: bash scripts/preflight-check8-selftest.sh
 
+      - name: Preflight CHECK 10 crate-size self-test (an over-limit .crate must FAIL)
+        run: bash scripts/check-crate-size-selftest.sh
+
   # The website CONTENT gate (owner ruling 2026-09-18): every website suite
   # that reads real repository content runs here and nowhere else, and it is
   # the only suite a docs, content or changelog change can turn red. Moved
