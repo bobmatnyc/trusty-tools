@@ -117,7 +117,8 @@ pub trait ProcessTable: Send + Sync {
 /// Whether `pid`, or any process above it, is a Claude Code process.
 ///
 /// Why: DOC-74 §15.8 — a grant registered from inside Claude Code's process
-/// tree may name only keys flagged "agents may use". The decision reads
+/// tree may not name a key denied to agents (#10386), and operator-only
+/// methods refuse such a caller. The decision reads
 /// process ancestry; an env marker is never authorization (L1186-1190).
 /// What: walks from `pid` itself up the parent chain, asking
 /// [`ProcessTable::is_agent`] of each process. Answers `true` at the first

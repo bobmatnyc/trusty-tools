@@ -19,7 +19,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use super::{Capabilities, SecretBackend};
+use super::{Capabilities, ControlItem, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// A backend whose every call returns within a time limit.
@@ -37,12 +37,12 @@ pub(crate) struct TimeLimited {
     abandoned: Arc<Abandoned>,
 }
 
-/// Which item of a key a call touches: its value, its "agents may use" flag
-/// item (#9070), or the whole vault.
+/// Which item of a key a call touches: its value, one of its agent-control
+/// items (#9070, #10386), or the whole vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Part {
     Value,
-    Flag,
+    Control(ControlItem),
     Vault,
 }
 
@@ -257,26 +257,36 @@ impl SecretBackend for TimeLimited {
         })
     }
 
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        let (v, k) = (vault.clone(), key.clone());
-        self.run("agents_may_use", Part::Flag, vault, Some(key), move |b| {
-            b.agents_may_use(&v, &k)
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
+    }
+
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        let (v, k) = (vault.clone(), key.cloned());
+        self.run("control_item", Part::Control(item), vault, key, move |b| {
+            b.control_item(item, &v, k.as_ref())
         })
     }
 
-    fn set_agents_may_use(
+    fn set_control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
+        key: Option<&SecretKey>,
+        present: bool,
     ) -> Result<(), SecretsError> {
-        let (v, k) = (vault.clone(), key.clone());
+        let (v, k) = (vault.clone(), key.cloned());
         self.run(
-            "set_agents_may_use",
-            Part::Flag,
+            "set_control_item",
+            Part::Control(item),
             vault,
-            Some(key),
-            move |b| b.set_agents_may_use(&v, &k, allowed),
+            key,
+            move |b| b.set_control_item(item, &v, k.as_ref(), present),
         )
     }
 }

@@ -3,9 +3,9 @@
 //! Why: the OS keychain cannot enumerate a service's accounts portably, and
 //! `list` must never read values to learn names. The index is the listable
 //! record. It also carries per-key metadata no backend stores: value length
-//! and `updated_at` (DOC-74 §15.3). #9070: the "agents may use" flag (§15.8)
-//! is not index metadata; the backend holds it, because any same-uid process
-//! can edit this file.
+//! and `updated_at` (DOC-74 §15.3). #9070, #10386: the agent rule (§15.8)
+//! is not index metadata; the backend holds each key's deny, because any
+//! same-uid process can edit this file.
 //! What: one JSON file per vault under
 //! `~/.trusty-tools/trusty-secrets/index/` (root injectable), named by
 //! [`VaultName::file_stem`]. Files are 0600 in a 0700 directory, published by
@@ -262,7 +262,7 @@ impl NamesIndex {
     /// What: takes the lock and re-reads the file (a corrupt file or a lock
     /// timeout fails here), returns [`SecretsError::NotFound`] when the row
     /// is missing, else `act`'s result. Publishes nothing.
-    /// Test: `store_agents_flag_survives_an_update_and_clears_on_delete`.
+    /// Test: `store_agent_deny_survives_an_update_and_clears_on_delete`.
     pub(crate) fn with_row<R>(
         &self,
         vault: &VaultName,
@@ -280,6 +280,33 @@ impl NamesIndex {
                     searched: vault.to_string(),
                 })
             }
+        })
+    }
+
+    /// Run `act` under the index lock with every key name `vault` indexes.
+    ///
+    /// Why: #10386 — the deny migration must see the same names a
+    /// concurrent `set` or `delete` would change, so it runs under their lock.
+    /// What: takes the lock and re-reads the file (a corrupt file or a lock
+    /// timeout fails here), then `act(names)`. Publishes nothing.
+    /// Test: `migration_keep_closed_denies_unflagged_and_opens_flagged`.
+    pub(crate) fn with_names<R>(
+        &self,
+        vault: &VaultName,
+        act: impl FnOnce(Vec<SecretKey>) -> Result<R, SecretsError>,
+    ) -> Result<R, SecretsError> {
+        platform::create_private_dir(&self.root)?;
+        let path = self.path_for(vault);
+        platform::with_exclusive_lock(&path, self.lock_timeout, || {
+            let file = read_file(&path, vault)?;
+            let names = file
+                .keys
+                .keys()
+                .map(|name| {
+                    SecretKey::new(name).map_err(|_| corrupt(&path, "holds an invalid key name"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            act(names)
         })
     }
 
