@@ -636,7 +636,7 @@ impl SessionRecord {
     /// Whether an AUTOMATIC resume may relaunch this session (#6194).
     ///
     /// Why: the two unattended relaunch paths — the supervisor's per-tick sweep
-    /// ([`crate::supervisor::poller::run_tick`]) and the auto-resume tail of
+    /// ([`crate::supervisor::poller::resume_sweep`]) and the auto-resume tail of
     /// [`super::SessionManager::reconcile_on_boot`] — both used to act on state
     /// alone, so every `Stopped` record was a relaunch candidate. That respawned
     /// sessions an operator had just killed: `tmux kill-session` on a leaked

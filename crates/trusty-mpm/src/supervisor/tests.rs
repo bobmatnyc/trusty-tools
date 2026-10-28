@@ -30,7 +30,7 @@ use super::config::{
     SupervisorConfig,
 };
 use super::metrics::FleetMetrics;
-use super::poller::run_tick;
+use super::poller::{resume_sweep, run_tick};
 use super::publish::{self, SupervisorMetricsStatus};
 
 // ── Test doubles ─────────────────────────────────────────────────────────────
@@ -162,25 +162,26 @@ impl LlmClassifier for StubClassifier {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build a session manager backed by a fake tmux driver under a temp dir.
+///
+/// #10356: `resume_auto` fails closed with no relauncher installed, so the
+/// manager carries one that always reports a runtime — the daemon's topology.
+/// A test that scripts its own relauncher uses [`make_bare_manager`].
 async fn make_manager(dir: &TempDir, tmux: Arc<FakeTmux>) -> Arc<SessionManager> {
+    let mgr = make_bare_manager(dir, tmux).await;
+    assert!(mgr.install_relauncher(Arc::new(ScriptedRelauncher {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        verdict: Ok(()),
+    })));
+    mgr
+}
+
+/// A manager with no relauncher installed.
+async fn make_bare_manager(dir: &TempDir, tmux: Arc<FakeTmux>) -> Arc<SessionManager> {
     Arc::new(
         SessionManager::new(dir.path(), tmux)
             .await
             .expect("session manager"),
     )
-}
-
-/// A desired-state path inside a temp dir where no override file exists.
-///
-/// Why: #5208 made `Supervisor::tick` read `~/.trusty-mpm/auto_resume` every
-/// sweep. Left unpinned, every supervisor test would depend on whatever the
-/// developer's own console toggle last wrote. Pointing at a nonexistent file in
-/// the test's temp dir keeps `resolve_auto_resume` on the "no override → boot
-/// flag stands" arm, which is what these tests mean to exercise.
-/// What: `<dir>/auto_resume`, deliberately never created.
-/// Test: used by every `Supervisor::new` call site in this file.
-fn no_override(dir: &TempDir) -> PathBuf {
-    dir.path().join("auto_resume")
 }
 
 /// Build a `SupervisorConfig` with auto-resume on and classification off.
@@ -570,7 +571,7 @@ async fn tick_auto_resumes_stopped() {
     let mgr = make_manager(&dir, tmux.clone()).await;
     seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
 
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
     assert_eq!(report.resumed.len(), 1);
     assert_eq!(report.resume_failures, 0);
 
@@ -599,7 +600,7 @@ async fn tick_never_resumes_a_deliberately_stopped_session() {
     let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
     set_stop_cause(&mgr, &ids[0], Some(StopCause::Deliberate)).await;
 
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
 
     assert!(
         report.resumed.is_empty(),
@@ -638,7 +639,7 @@ async fn tick_never_resumes_a_supervisor_record() {
             store.upsert(record).await.expect("stamp kind");
         }
 
-        let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+        let report = resume_sweep(&mgr, &resume_cfg()).await;
 
         assert!(report.resumed.is_empty(), "{kind:?}: {:?}", report.resumed);
         assert_eq!(*tmux.create_calls.lock().unwrap(), 0, "{kind:?}");
@@ -661,7 +662,7 @@ async fn tick_still_resumes_a_session_whose_runtime_exited() {
     let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
     set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
 
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
 
     assert_eq!(report.resumed.len(), 1);
     assert_eq!(*tmux.create_calls.lock().unwrap(), 1);
@@ -686,7 +687,7 @@ async fn tick_skips_resume_when_disabled() {
         classify_idle: false,
         ..SupervisorConfig::default()
     };
-    let report = run_tick::<StubClassifier>(&mgr, &cfg, None).await;
+    let report = resume_sweep(&mgr, &cfg).await;
     assert!(report.resumed.is_empty());
     // Still stopped — observer mode did not resume.
     assert!(
@@ -708,7 +709,7 @@ async fn tick_fleet_of_n_resumed() {
     let mgr = make_manager(&dir, tmux.clone()).await;
     seed_sessions(&mgr, N, ManagedSessionState::Stopped, &ws).await;
 
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
     assert_eq!(report.observed, N);
     assert_eq!(report.resumed.len(), N);
     assert_eq!(report.resume_failures, 0);
@@ -993,23 +994,55 @@ async fn a_fresh_verdict_clears_or_replaces_the_raised_prompt() {
 
 // ── Supervisor struct tests ──────────────────────────────────────────────────
 
+/// #10356 (owner ruling D74): `tm supervisor` no longer auto-resumes.
+///
+/// Why: the supervisor builds its own manager and installs no runtime
+/// relauncher. After the 2026-10-27 reboot its resumes marked 15 records
+/// `Active` over panes with nothing in them. The daemon owns auto-resume now.
+/// What: a supervisor whose config has auto-resume ON, over a manager that HAS
+/// a relauncher, sweeps four stopped sessions. None is resumed, none is marked
+/// `Errored`, no pane is created, and the run stats count no resume.
+/// Test: this function IS the test.
 #[tokio::test]
-async fn supervisor_tick_updates_stats() {
+async fn the_supervisor_tick_no_longer_resumes() {
     let dir = TempDir::new().unwrap();
     let ws = TempDir::new().unwrap();
     let tmux = FakeTmux::new();
     let mgr = make_manager(&dir, tmux.clone()).await;
     seed_sessions(&mgr, 4, ManagedSessionState::Stopped, &ws).await;
 
-    let mut sup: Supervisor<StubClassifier> =
-        Supervisor::new(mgr, resume_cfg(), None).with_auto_resume_path(no_override(&dir));
+    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr.clone(), resume_cfg(), None);
+    let report = sup.tick().await;
+
+    assert!(report.resumed.is_empty(), "{report:?}");
+    assert_eq!(report.resume_failures, 0);
+    assert_eq!(*tmux.create_calls.lock().unwrap(), 0);
+    assert!(
+        mgr.list()
+            .await
+            .iter()
+            .all(|r| r.state == ManagedSessionState::Stopped),
+        "the supervisor must leave stopped sessions to the daemon, untouched"
+    );
+    assert_eq!(sup.stats().sweeps, 1);
+    assert_eq!(sup.stats().auto_resumed, 0);
+}
+
+#[tokio::test]
+async fn supervisor_tick_updates_stats() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 2, ManagedSessionState::Active, &ws).await;
+
+    let monitor = ActivityMonitor::new(StubClassifier::new(), "test-model");
+    let mut sup = Supervisor::new(mgr, classify_cfg(), Some(monitor));
     sup.tick().await;
     assert_eq!(sup.stats().sweeps, 1);
-    assert_eq!(sup.stats().auto_resumed, 4);
-    // A second sweep finds them all Active now → no more resumes.
+    assert_eq!(sup.stats().classified, 2);
     sup.tick().await;
     assert_eq!(sup.stats().sweeps, 2);
-    assert_eq!(sup.stats().auto_resumed, 4);
 }
 
 #[tokio::test]
@@ -1020,17 +1053,16 @@ async fn supervisor_snapshot_reflects_fleet() {
     let mgr = make_manager(&dir, tmux.clone()).await;
     seed_sessions(&mgr, 3, ManagedSessionState::Stopped, &ws).await;
 
-    let mut sup: Supervisor<StubClassifier> =
-        Supervisor::new(mgr, resume_cfg(), None).with_auto_resume_path(no_override(&dir));
+    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, resume_cfg(), None);
     let before = sup.snapshot().await;
     assert_eq!(before.stopped, 3);
     assert_eq!(before.active, 0);
 
     sup.tick().await;
     let after = sup.snapshot().await;
-    assert_eq!(after.stopped, 0);
-    assert_eq!(after.active, 3);
-    assert_eq!(after.run_stats.auto_resumed, 3);
+    assert_eq!(after.stopped, 3, "#10356: the supervisor resumes nothing");
+    assert_eq!(after.run_stats.sweeps, 1);
+    assert_eq!(after.run_stats.auto_resumed, 0);
 }
 
 #[tokio::test]
@@ -1048,234 +1080,10 @@ async fn supervisor_classifier_invoked_on_active() {
         classify_idle: true,
         ..SupervisorConfig::default()
     };
-    let mut sup = Supervisor::new(mgr, cfg, Some(monitor)).with_auto_resume_path(no_override(&dir));
+    let mut sup = Supervisor::new(mgr, cfg, Some(monitor));
     let report = sup.tick().await;
     assert_eq!(report.classified, 2);
     assert_eq!(sup.stats().classified, 2);
-}
-
-// ── #5208: persisted console desired-state drives the supervisor ─────────────
-
-/// Why: #5208 — `auto_resume_set` wrote `~/.trusty-mpm/auto_resume`, reported
-/// success, and no code path read it, so an operator toggling auto-resume in the
-/// console changed nothing in the running supervisor. This is the acceptance
-/// test: the console's write, and ONLY that write, must make a live supervisor
-/// resume a stopped session, with no process restart and no env var set.
-/// What: boots a supervisor whose config has `auto_resume = false` (as
-/// `TRUSTY_MPM_AUTO_RESUME` unset would give it), sweeps once and asserts the
-/// session is untouched; then writes the desired-state file exactly as
-/// `auto_resume_set` does and sweeps the SAME supervisor instance again — the
-/// session must now be `Active`, with a real tmux create behind it.
-/// Test: this test.
-#[tokio::test]
-async fn supervisor_honours_console_desired_state_without_restart() {
-    let dir = TempDir::new().unwrap();
-    let ws = TempDir::new().unwrap();
-    let state_dir = TempDir::new().unwrap();
-    let desired = state_dir.path().join("auto_resume");
-    let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
-
-    let cfg = SupervisorConfig {
-        auto_resume: false,
-        classify_idle: false,
-        ..SupervisorConfig::default()
-    };
-    let mut sup: Supervisor<StubClassifier> =
-        Supervisor::new(mgr.clone(), cfg, None).with_auto_resume_path(&desired);
-
-    // No override file yet: the boot flag (off) stands.
-    let before = sup.tick().await;
-    assert!(
-        before.resumed.is_empty(),
-        "no desired-state file must leave the boot flag (off) in force"
-    );
-    assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
-    assert_eq!(*tmux.create_calls.lock().unwrap(), 0);
-
-    // The operator flips the console toggle. This is exactly what
-    // `daemon::mcp_console::auto_resume_set` does — no restart, no env change.
-    crate::core::auto_resume::write_desired_at(&desired, true).expect("console write");
-
-    let after = sup.tick().await;
-    assert_eq!(
-        after.resumed.len(),
-        1,
-        "the persisted console setting must make the SAME running supervisor resume"
-    );
-    assert_eq!(
-        mgr.list().await[0].state,
-        ManagedSessionState::Active,
-        "the session must actually be resumed, not merely counted"
-    );
-    assert_eq!(
-        *tmux.create_calls.lock().unwrap(),
-        1,
-        "resume must have re-spawned a tmux session"
-    );
-    assert_eq!(sup.stats().auto_resumed, 1);
-}
-
-/// Why: the toggle has to work in both directions. An operator disabling
-/// auto-resume in the console must stop a supervisor that booted with
-/// `TRUSTY_MPM_AUTO_RESUME=1` — otherwise "off" is the write-only half of the
-/// same defect.
-/// What: boots with `auto_resume = true`, writes `false` to the desired-state
-/// file, and asserts the sweep leaves the stopped session alone.
-/// Test: this test.
-#[tokio::test]
-async fn supervisor_console_disable_overrides_env_enabled() {
-    let dir = TempDir::new().unwrap();
-    let ws = TempDir::new().unwrap();
-    let state_dir = TempDir::new().unwrap();
-    let desired = state_dir.path().join("auto_resume");
-    let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 2, ManagedSessionState::Stopped, &ws).await;
-
-    crate::core::auto_resume::write_desired_at(&desired, false).expect("console write");
-
-    let mut sup: Supervisor<StubClassifier> =
-        Supervisor::new(mgr.clone(), resume_cfg(), None).with_auto_resume_path(&desired);
-    let report = sup.tick().await;
-
-    assert!(
-        report.resumed.is_empty(),
-        "an explicit console `false` must outrank the boot env flag"
-    );
-    assert!(
-        mgr.list()
-            .await
-            .iter()
-            .all(|r| r.state == ManagedSessionState::Stopped)
-    );
-    assert_eq!(*tmux.create_calls.lock().unwrap(), 0);
-}
-
-/// Why: an absent file means "the operator never touched the toggle", which must
-/// leave an env-enabled supervisor enabled. Reading the file with the display
-/// helper (`read_desired_at`, which flattens absent → `false`) would disable it
-/// instead — the original fail-open, relocated into the fix.
-/// What: boots with `auto_resume = true` and no desired-state file; the sweep
-/// must still resume.
-/// Test: this test.
-#[tokio::test]
-async fn supervisor_absent_desired_file_keeps_boot_flag() {
-    let dir = TempDir::new().unwrap();
-    let ws = TempDir::new().unwrap();
-    let state_dir = TempDir::new().unwrap();
-    let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
-
-    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr.clone(), resume_cfg(), None)
-        .with_auto_resume_path(state_dir.path().join("auto_resume"));
-    let report = sup.tick().await;
-
-    assert_eq!(
-        report.resumed.len(),
-        1,
-        "no override file must leave the boot flag (on) in force"
-    );
-    assert_eq!(mgr.list().await[0].state, ManagedSessionState::Active);
-}
-
-/// Why: the read the fix introduces is itself a new failure arm. If an
-/// unreadable desired-state file collapsed to `false`, a permissions accident or
-/// a stray directory at that path would silently turn an operator-enabled
-/// supervisor into an observer — the same "reports fine, does nothing" shape
-/// #5208 closes, one layer out.
-/// What: puts a DIRECTORY where the file belongs (reads fail with EISDIR, not
-/// NotFound) and asserts an `auto_resume = true` supervisor still resumes.
-/// Test: this test.
-#[tokio::test]
-async fn supervisor_unreadable_desired_file_does_not_disable_resume() {
-    let dir = TempDir::new().unwrap();
-    let ws = TempDir::new().unwrap();
-    let state_dir = TempDir::new().unwrap();
-    let desired = state_dir.path().join("auto_resume");
-    std::fs::create_dir(&desired).expect("mkdir over the desired-state path");
-    let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
-
-    let mut sup: Supervisor<StubClassifier> =
-        Supervisor::new(mgr.clone(), resume_cfg(), None).with_auto_resume_path(&desired);
-    let report = sup.tick().await;
-
-    assert_eq!(
-        report.resumed.len(),
-        1,
-        "an unreadable desired-state file must not fail open to auto-resume off"
-    );
-    assert_eq!(mgr.list().await[0].state, ManagedSessionState::Active);
-}
-
-/// Why: #5208's layer above — once the persisted setting makes the supervisor
-/// resume, a resume that FAILS must not degrade to a log line while the session
-/// stays dead and `Stopped`. A `Stopped` record is retried by every subsequent
-/// sweep forever, invisibly; the failure has to land somewhere an operator
-/// looks. `FleetMetrics.errored` is that place — it is what drives the console's
-/// Degraded health.
-/// What: seeds a stopped session whose workspace directory has been deleted (so
-/// `resume` fails in `resolve_existing_workdir`), enables auto-resume via the
-/// console file, and asserts the sweep counts the failure, marks the record
-/// `Errored`, surfaces it in the snapshot, and does NOT retry it next sweep.
-/// Test: this test.
-#[tokio::test]
-async fn supervisor_failed_resume_surfaces_as_errored() {
-    let dir = TempDir::new().unwrap();
-    let ws = TempDir::new().unwrap();
-    let state_dir = TempDir::new().unwrap();
-    let desired = state_dir.path().join("auto_resume");
-    let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
-    // Delete the workspace so every resume path (last_cwd → workspace_path →
-    // cwd) is missing on disk and `resume` returns WorkspaceMissing.
-    ws.close()
-        .expect("drop the workspace the session resumes into");
-
-    crate::core::auto_resume::write_desired_at(&desired, true).expect("console write");
-    let mut sup: Supervisor<StubClassifier> = Supervisor::new(
-        mgr.clone(),
-        SupervisorConfig {
-            auto_resume: false,
-            classify_idle: false,
-            ..SupervisorConfig::default()
-        },
-        None,
-    )
-    .with_auto_resume_path(&desired);
-
-    let report = sup.tick().await;
-    assert!(report.resumed.is_empty(), "the resume must have failed");
-    assert_eq!(report.resume_failures, 1);
-
-    let after = mgr.list().await;
-    assert_eq!(
-        after[0].state,
-        ManagedSessionState::Errored,
-        "a failed auto-resume must leave the session visibly errored, not silently stopped"
-    );
-    assert!(
-        after[0].task.contains("auto-resume failed"),
-        "the failure reason must be readable from the record: {}",
-        after[0].task
-    );
-
-    // It surfaces where the console looks: FleetMetrics.errored drives Degraded.
-    let snapshot = sup.snapshot().await;
-    assert_eq!(snapshot.errored, 1);
-    assert_eq!(snapshot.stopped, 0);
-
-    // And the doomed session is not retried forever on every subsequent sweep.
-    let second = sup.tick().await;
-    assert_eq!(
-        second.resume_failures, 0,
-        "an errored session must not be re-attempted every interval"
-    );
 }
 
 // ── #6288: snapshot publication (the file the daemon reads) ──────────────────
@@ -1543,9 +1351,8 @@ async fn supervisor_publishes_run_stats_after_sweeps() {
         ..SupervisorConfig::default()
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
-    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
-        .with_auto_resume_path(no_override(&dir))
-        .with_metrics_path(&metrics_file);
+    let mut sup: Supervisor<StubClassifier> =
+        Supervisor::new(mgr, cfg, None).with_metrics_path(&metrics_file);
 
     // Nothing published yet: a reader must say so rather than report zero.
     assert!(
@@ -1565,11 +1372,8 @@ async fn supervisor_publishes_run_stats_after_sweeps() {
         SupervisorMetricsStatus::Current { snapshot, .. } => {
             let stats = &snapshot.fleet.run_stats;
             assert_eq!(stats.sweeps, 2, "two real sweeps must be published");
-            assert_eq!(
-                stats.auto_resumed, 2,
-                "both seeded stopped sessions were auto-resumed; the published \
-                 counters must say so rather than defaulting to zero"
-            );
+            // #10356: the supervisor resumes nothing; the daemon does.
+            assert_eq!(stats.auto_resumed, 0);
         }
         other => panic!("a just-published snapshot must be Current, got {other:?}"),
     }
@@ -1603,9 +1407,8 @@ async fn supervisor_run_until_stops_cleanly() {
         ..SupervisorConfig::default()
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
-    let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
-        .with_auto_resume_path(no_override(&dir))
-        .with_metrics_path(&metrics_file);
+    let sup: Supervisor<StubClassifier> =
+        Supervisor::new(mgr, cfg, None).with_metrics_path(&metrics_file);
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     // Fire shutdown almost immediately; the loop should observe it and return.
@@ -1687,9 +1490,7 @@ async fn a_wedged_sweep_times_out_and_the_loop_continues() {
     };
     let monitor = ActivityMonitor::new(classifier, "test-model");
     let metrics_file = dir.path().join("supervisor-metrics.json");
-    let sup = Supervisor::new(mgr, cfg, Some(monitor))
-        .with_auto_resume_path(no_override(&dir))
-        .with_metrics_path(&metrics_file);
+    let sup = Supervisor::new(mgr, cfg, Some(monitor)).with_metrics_path(&metrics_file);
 
     let watched = metrics_file.clone();
     let later_sweep_completed = async move {
@@ -1871,7 +1672,6 @@ async fn a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues() {
         ..SupervisorConfig::default()
     };
     let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
-        .with_auto_resume_path(no_override(&dir))
         .with_metrics_path(dir.path().join("supervisor-metrics.json"))
         .with_cleanup(cleanup);
 
@@ -1963,9 +1763,7 @@ async fn abandoned_fleet_sweeps_are_counted_and_read_as_stale() {
     };
     let monitor = ActivityMonitor::new(StubClassifier::new(), "test-model");
     let metrics_file = dir.path().join("supervisor-metrics.json");
-    let mut sup = Supervisor::new(mgr, cfg, Some(monitor))
-        .with_auto_resume_path(no_override(&dir))
-        .with_metrics_path(&metrics_file);
+    let mut sup = Supervisor::new(mgr, cfg, Some(monitor)).with_metrics_path(&metrics_file);
 
     for _ in 0..2 {
         let started = std::time::Instant::now();
@@ -2094,17 +1892,14 @@ async fn supervisor_metrics_merge_reports_real_run_stats() {
     let ws = TempDir::new().unwrap();
     let tmux = FakeTmux::new();
     let mgr = make_manager(&dir, tmux.clone()).await;
-    seed_sessions(&mgr, 3, ManagedSessionState::Stopped, &ws).await;
+    // #10356: the supervisor resumes nothing, so the counter it really moves is
+    // `classified`.
+    seed_sessions(&mgr, 3, ManagedSessionState::Active, &ws).await;
 
-    let cfg = SupervisorConfig {
-        auto_resume: true,
-        classify_idle: false,
-        ..SupervisorConfig::default()
-    };
     let metrics_file = dir.path().join("supervisor-metrics.json");
-    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
-        .with_auto_resume_path(no_override(&dir))
-        .with_metrics_path(&metrics_file);
+    let monitor = ActivityMonitor::new(StubClassifier::new(), "test-model");
+    let mut sup =
+        Supervisor::new(mgr, classify_cfg(), Some(monitor)).with_metrics_path(&metrics_file);
     sup.tick().await;
     sup.publish_snapshot().await;
 
@@ -2124,8 +1919,8 @@ async fn supervisor_metrics_merge_reports_real_run_stats() {
         "the daemon must report the supervisor's real sweep count, not zero"
     );
     assert_eq!(
-        fleet.run_stats.auto_resumed, 3,
-        "the daemon must report the supervisor's real auto-resume count: {block}"
+        fleet.run_stats.classified, 3,
+        "the daemon must report the supervisor's real classified count: {block}"
     );
 }
 
@@ -2158,7 +1953,7 @@ async fn one_failed_auto_resume_appends_exactly_one_error_note() {
     let dir = TempDir::new().unwrap();
     let ws = TempDir::new().unwrap();
     let tmux = FakeTmux::new();
-    let mgr = make_manager(&dir, tmux.clone()).await;
+    let mgr = make_bare_manager(&dir, tmux.clone()).await;
     let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
     set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
     let relauncher = Arc::new(ScriptedRelauncher {
@@ -2167,7 +1962,7 @@ async fn one_failed_auto_resume_appends_exactly_one_error_note() {
     });
     assert!(mgr.install_relauncher(relauncher.clone()));
 
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
 
     assert_eq!(
         report.resume_failures, 1,
@@ -2210,7 +2005,7 @@ async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
     let claim = mgr
         .begin_resume(&ids[0])
         .expect("the first claim is granted");
-    let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let report = resume_sweep(&mgr, &resume_cfg()).await;
 
     assert!(report.resumed.is_empty(), "no launch: {:?}", report.resumed);
     assert_eq!(report.resume_failures, 0, "and nothing failed either");
@@ -2230,7 +2025,7 @@ async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
     // Released, the session is admitted again — a claim that outlived its
     // resume would make it permanently unresumable.
     drop(claim);
-    let after = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+    let after = resume_sweep(&mgr, &resume_cfg()).await;
     assert_eq!(
         after.resumed.len(),
         1,

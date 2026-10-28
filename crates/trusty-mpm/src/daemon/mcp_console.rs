@@ -54,15 +54,13 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Auto-resume control fields:
 /// - `desired`: the operator's persisted choice (console-mutable), or `null` when
 ///   the file could not be read.
-/// - `env`: the flag the DAEMON's environment carries. The supervisor is a
-///   separate process (`bin/tm/commands/supervisor.rs`) and `--auto-resume` sets
-///   its config without touching the env, so this is an inference about another
-///   process, not an observation of it. It is only consulted when no override
-///   file exists — i.e. before the operator has ever used the toggle. Closing
-///   that gap means adding the supervisor's resolved flag to the snapshot it
-///   already publishes (#6288); tracked separately.
-/// - `effective`: what the supervisor's next sweep will do — the persisted file
-///   when it exists, otherwise `env`, or `null` when the file could not be read.
+/// - `env`: the flag the DAEMON's environment carries. #10356 (owner ruling
+///   D74): the daemon is the process that auto-resumes, so this is an
+///   observation of the resuming process. It is only consulted when no
+///   override file exists.
+/// - `effective`: what the daemon's next auto-resume sweep will do — the
+///   persisted file when it exists, otherwise `env`, or `null` when the file
+///   could not be read.
 /// - `read_error`: `null` normally; the I/O error string when the desired-state
 ///   file exists but could not be read. #5208: this used to be swallowed into a
 ///   fabricated `desired: false`, which reported a confident "off" while the
@@ -245,16 +243,16 @@ pub async fn supervisor_status(state: &Arc<DaemonState>) -> Result<Value, String
 /// Back the `auto_resume_set` tool: persist the operator's desired flag.
 ///
 /// Why: the console toggle must durably record whether auto-resume should be on
-/// (RFC §6 Q6 — controls live in the console, not CLI-only). The supervisor runs
-/// as a separate process, so this writes the desired state the supervisor reads
-/// on its next sweep rather than mutating a live env var.
+/// (RFC §6 Q6 — controls live in the console, not CLI-only). This writes the
+/// desired state the daemon's auto-resume loop reads on its next sweep (#10356)
+/// rather than mutating a live env var.
 /// What: writes `~/.trusty-mpm/auto_resume`, then echoes the same
 /// `{ desired, env, effective, pending_restart }` block [`fleet_snapshot`]
-/// returns. Since #5208 the write is load-bearing: the supervisor re-reads the
-/// file every sweep, so `effective` is `enabled` and no restart is pending.
+/// returns. Since #5208 the write is load-bearing: the resuming process re-reads
+/// the file every sweep, so `effective` is `enabled` and no restart is pending.
 /// Test: `write_then_read_round_trips` (the persistence),
-/// `supervisor_honours_console_desired_state_without_restart` (the supervisor
-/// acting on it). This function itself writes the real `~/.trusty-mpm` root, so
+/// `the_console_toggle_enables_a_running_daemon_sweep` (the daemon acting on
+/// it). This function itself writes the real `~/.trusty-mpm` root, so
 /// it is deliberately not unit-tested against a live `$HOME`.
 pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     auto_resume::write_desired(enabled)

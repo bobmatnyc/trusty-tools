@@ -75,7 +75,7 @@ const BLOCKED_GRACE: Duration = Duration::from_millis(500);
 /// Test: `a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues`,
 /// `abandoned_fleet_sweeps_are_counted_and_read_as_stale`,
 /// `a_wedged_sweep_times_out_and_the_loop_continues`.
-pub(super) struct DetachedSweep<T> {
+pub(crate) struct DetachedSweep<T> {
     /// The log name, e.g. `"fleet sweep"`.
     what: &'static str,
     /// A sweep abandoned at its bound whose thread has not finished yet.
@@ -84,7 +84,7 @@ pub(super) struct DetachedSweep<T> {
 
 impl<T: Send + 'static> DetachedSweep<T> {
     /// A sweep kind with no orphan.
-    pub(super) fn new(what: &'static str) -> Self {
+    pub(crate) fn new(what: &'static str) -> Self {
         Self { what, orphan: None }
     }
 
@@ -93,7 +93,7 @@ impl<T: Send + 'static> DetachedSweep<T> {
     /// What: see the type docs. `make` builds the sweep future on the blocking
     /// thread, so the future itself need not be `Send`.
     /// Test: as the type.
-    pub(super) async fn run<F, Fut>(&mut self, limit: Duration, make: F) -> Option<T>
+    pub(crate) async fn run<F, Fut>(&mut self, limit: Duration, make: F) -> Option<T>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,

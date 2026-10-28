@@ -70,6 +70,8 @@ mod doctor_events;
 mod doctor_content;
 // #8390: assets whose advisory `requires:` this binary does not satisfy.
 mod doctor_content_requires;
+// #10356 (owner ruling D74): the daemon owns auto-resume.
+pub mod auto_resume_loop;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
@@ -262,8 +264,11 @@ pub async fn serve_with_shutdown(
     // this is installed `resume_auto` prepares a pane and marks the record
     // `Active` with nothing in it — the fleet state a daemon restart produced.
     // The boot reconcile inside `session_manager()` defers its own auto-resume
-    // to the supervisor for exactly that reason; see `session_manager::reconcile`.
+    // for exactly that reason; see `session_manager::reconcile`.
     managed_routes::auto_relaunch::install_auto_relauncher(&state).await;
+    // #10356 (owner ruling D74): the daemon owns auto-resume, and its first
+    // sweep runs now, with the relauncher above already installed.
+    auto_resume_loop::spawn(&state, cancel.child_token()).await;
     // #8433 (Dfc): a stop or decommission retires the session's channel taint
     // from the same tree the SessionStart re-apply writes.
     if let Some(home) = state.user_home() {

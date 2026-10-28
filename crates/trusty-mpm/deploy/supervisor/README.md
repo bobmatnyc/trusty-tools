@@ -1,11 +1,11 @@
 # trusty-mpm unattended supervisor (#1206)
 
 The **supervisor** is a lightweight, always-on process that keeps a managed-session
-fleet running 24/7 with **no live caller attached**. It is a passive **observer +
-auto-resumer**, *not* a decision-maker:
+fleet running 24/7 with **no live caller attached**. It is a passive
+**observer**, *not* a decision-maker. Since #10356 it does **not** auto-resume
+sessions: the trusty-mpm daemon does, because only the daemon installs the
+runtime relauncher that puts a runtime back in a recreated pane.
 
-- It **auto-resumes** enduring (`stopped`) sessions so a rebooted host or an exited
-  runtime does not leave work parked. (Gated by `TRUSTY_MPM_AUTO_RESUME`.)
 - It **observes** session health and classifies idle `active` sessions via the
   activity monitor (optional; needs `OPENROUTER_API_KEY`, otherwise `unknown`).
 - It **surfaces** `pending_decision`s for a human or a higher-level fleet manager
@@ -19,14 +19,7 @@ auto-resumer**, *not* a decision-maker:
 ## Run it by hand
 
 ```bash
-# Observe-only (no resume):
-tm supervisor
-
-# Auto-resume stopped sessions, poll every 30s:
-TRUSTY_MPM_AUTO_RESUME=1 tm supervisor --interval 30
-
-# Or pass --auto-resume instead of the env var:
-tm supervisor --auto-resume
+tm supervisor --interval 30
 ```
 
 Then query fleet state:
@@ -52,27 +45,31 @@ instead of showing a confident zero.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TRUSTY_MPM_AUTO_RESUME` | `0` (off) | `1`/`true` enables auto-resume of `stopped` sessions. **This is the master switch for resume.** |
+| `TRUSTY_MPM_AUTO_RESUME` | — | Ignored here since #10356; set it on the **daemon** (see below). |
 | `TRUSTY_MPM_SUPERVISOR_INTERVAL` | `30` | Poll interval, seconds. |
 | `TRUSTY_MPM_SUPERVISOR_CLASSIFY` | `1` (on) | `0`/`false` disables idle classification (no LLM spend). |
 | `TRUSTY_LLM_MODEL` | `openai/gpt-4o-mini` | OpenRouter model used for idle-session activity classification. |
 | `OPENROUTER_API_KEY` | — | Required for real activity classification; absent ⇒ `unknown`. |
 
-CLI flags (`--interval`, `--auto-resume`, `--no-classify`) override the env vars.
+CLI flags (`--interval`, `--no-classify`) override the env vars. `--auto-resume`
+is still accepted, and ignored with a warning.
 `TRUSTY_MPM_SUPERVISOR_ADDR` and `--addr` were removed by #6288 along with the
 listener they configured; a leftover value in an environment is ignored.
 
 ## Enabling auto-resume
 
-Auto-resume is **opt-in** for safety — by default the supervisor runs observe-only
-and only surfaces fleet state. The launchd plist and systemd unit below ship with
-`TRUSTY_MPM_AUTO_RESUME` **commented out**, so an out-of-the-box install never
-resumes sessions until you opt in. To enable it, do **one** of:
+Auto-resume is **opt-in** and runs in the **daemon** (#10356). Its sweep runs at
+daemon start and then every `TRUSTY_MPM_SUPERVISOR_INTERVAL` seconds. To enable
+it, do **one** of:
 
-- **uncomment / set `TRUSTY_MPM_AUTO_RESUME=1`** in the supervisor's environment
-  (uncomment the `TRUSTY_MPM_AUTO_RESUME` block in the plist, or the
-  `Environment=TRUSTY_MPM_AUTO_RESUME=1` line in the systemd unit), **or**
-- pass `tm supervisor --auto-resume`.
+- turn on the console's auto-resume toggle (it writes `~/.trusty-mpm/auto_resume`;
+  this file wins over the env var), **or**
+- set `TRUSTY_MPM_AUTO_RESUME=1` in the **daemon's** environment.
+
+For `TRUSTY_MPM_RESUME_BOOT_GRACE_SECS` after the daemon starts (default 600), a
+runtime exit does not count toward the flap breaker. When the window ends, the
+daemon logs one `warn` line (target `trusty_mpm::resume_park`) naming every
+session still parked.
 
 ## Persistence — macOS (launchd)
 

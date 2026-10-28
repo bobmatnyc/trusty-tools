@@ -539,13 +539,17 @@ impl SessionManager {
         // install the runtime relauncher — so resuming here would mark records
         // `Active` behind panes with nothing in them, which is the fleet state
         // the owner observed after a restart. Leaving them `Stopped` is both
-        // truthful and resumable: the supervisor's next sweep has a relauncher
-        // and resumes them through the real adapter path.
+        // truthful and resumable.
+        // #10356: owner ruling D74 reverses #8233's ownership. The resume is
+        // deferred to the DAEMON's auto-resume loop
+        // (`daemon::auto_resume_loop`), whose first sweep runs right after the
+        // relauncher is installed. `tm supervisor` no longer resumes; it never
+        // had a relauncher.
         if auto_resume && !to_resume.is_empty() && self.relauncher().is_none() {
             info!(
                 pending = to_resume.len(),
-                "reconcile: auto_resume deferred to the supervisor — no runtime relauncher is \
-                 installed yet, and a resume without one would mark a bare pane active (#8233)"
+                "reconcile: auto_resume deferred to the daemon's auto-resume loop — no runtime \
+                 relauncher is installed yet, and a resume without one cannot launch (#10356)"
             );
         } else if auto_resume && !to_resume.is_empty() {
             info!(

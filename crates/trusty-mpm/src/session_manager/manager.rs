@@ -781,8 +781,8 @@ impl SessionManager {
     /// tears the preserved pane down. True bare-`tm`-in-pane relaunch reusing
     /// the surviving shell is the scope of #2023 component C, not this method.
     ///
-    /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
-    /// (`supervisor::poller::run_tick`) auto-resumes a `Stopped` record whose
+    /// NOTE — auto-resume: the daemon's sweep (`supervisor::poller::resume_sweep`,
+    /// #10356; `tm supervisor` before) auto-resumes a `Stopped` record whose
     /// stop nobody asked for, and `resume()` kills the preserved pane as
     /// described above. This method records
     /// [`StopCause::Unexpected`](crate::session_manager::record::StopCause::Unexpected), so its

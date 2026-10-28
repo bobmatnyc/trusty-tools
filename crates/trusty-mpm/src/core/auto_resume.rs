@@ -12,9 +12,10 @@
 //!
 //! #5208: until this issue, the supervisor read nothing — the console wrote the
 //! file, `supervisor_status` displayed it, and no code path acted on it. The
-//! supervisor now consults it in [`crate::supervisor::Supervisor::tick`] with
-//! this precedence: the file when present (the operator's live console choice) >
-//! the boot-time `TRUSTY_MPM_AUTO_RESUME` env / `--auto-resume` flag > off.
+//! resuming process consults it through [`AutoResumeGate`] with this
+//! precedence: the file when present (the operator's live console choice) >
+//! the boot-time `TRUSTY_MPM_AUTO_RESUME` env > off. #10356 (owner ruling
+//! D74): that process is now the daemon, not `tm supervisor`.
 //! Decide on that with [`read_override_at`] (tri-state), never with
 //! [`read_desired_at`] — the latter collapses "file absent" into `false`, so
 //! using it would let a never-touched toggle silently disable an env-enabled
@@ -161,6 +162,85 @@ pub fn effective_from_env() -> bool {
 /// Test: `parse_truthy_accepts_known_tokens`.
 pub(crate) fn parse_truthy(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// The auto-resume flag in force for one sweep, re-read from disk each time.
+///
+/// Why: #5208. An operator toggling auto-resume in the console writes
+/// [`AUTO_RESUME_FILE`], and the process that resumes must act on it without a
+/// restart. #10356 (owner ruling D74) moved auto-resume from `tm supervisor`
+/// into the daemon, so the precedence rule moved here, where the daemon's sweep
+/// can use it.
+/// What: [`Self::resolve`] applies file when present > boot flag > off, logs
+/// each transition once, and on a read error holds the last value it saw
+/// (falling back to the boot flag). It never fails open to `false`.
+/// Test: `the_console_toggle_enables_a_running_daemon_sweep`,
+/// `a_console_disable_overrides_an_env_enabled_daemon`,
+/// `an_absent_desired_file_keeps_the_boot_flag`,
+/// `an_unreadable_desired_file_does_not_disable_resume` in
+/// `daemon::auto_resume_loop` tests.
+#[derive(Debug, Clone)]
+pub struct AutoResumeGate {
+    /// The boot-time `TRUSTY_MPM_AUTO_RESUME` value.
+    boot_flag: bool,
+    /// The console-written desired-state file.
+    path: PathBuf,
+    /// The last override read successfully.
+    last_override: Option<bool>,
+}
+
+impl AutoResumeGate {
+    /// A gate over `path` with `boot_flag` as the fallback.
+    pub fn new(boot_flag: bool, path: impl Into<PathBuf>) -> Self {
+        Self {
+            boot_flag,
+            path: path.into(),
+            last_override: None,
+        }
+    }
+
+    /// The desired-state file this gate reads.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Resolve the flag for the sweep about to run. See the type's doc.
+    pub fn resolve(&mut self) -> bool {
+        match read_override_at(&self.path) {
+            Ok(Some(desired)) => {
+                if self.last_override != Some(desired) {
+                    tracing::info!(
+                        desired,
+                        path = %self.path.display(),
+                        "auto-resume: desired state applied from console"
+                    );
+                    self.last_override = Some(desired);
+                }
+                desired
+            }
+            Ok(None) => {
+                if self.last_override.is_some() {
+                    tracing::info!(
+                        boot_flag = self.boot_flag,
+                        path = %self.path.display(),
+                        "auto-resume: override removed; reverting to boot flag"
+                    );
+                    self.last_override = None;
+                }
+                self.boot_flag
+            }
+            Err(e) => {
+                let held = self.last_override.unwrap_or(self.boot_flag);
+                tracing::error!(
+                    path = %self.path.display(),
+                    auto_resume = held,
+                    "auto-resume: cannot read desired state: {e}; holding the last known \
+                     value (NOT failing open to off)"
+                );
+                held
+            }
+        }
+    }
 }
 
 #[cfg(test)]

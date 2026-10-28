@@ -254,7 +254,7 @@ async fn a_daemon_restart_leaves_a_live_architect_alone() {
 /// positive control) but never the Architect.
 #[tokio::test]
 async fn a_daemon_restart_never_relaunches_an_architect_whose_pane_died() {
-    use crate::session_manager::stop_cause_tests::{CountingRelauncher, NeverClassifies};
+    use crate::session_manager::stop_cause_tests::CountingRelauncher;
     let dir = crate::test_support::hermetic_temp_dir();
     let (arch, work, _) = shut_down_with_an_architect(&dir).await;
 
@@ -275,7 +275,7 @@ async fn a_daemon_restart_never_relaunches_an_architect_whose_pane_died() {
         classify_idle: false,
         ..Default::default()
     };
-    let tick = crate::supervisor::run_tick::<NeverClassifies>(&mgr, &cfg, None).await;
+    let tick = crate::supervisor::resume_sweep(&mgr, &cfg).await;
 
     assert_eq!(tick.resumed, vec![work.to_string()], "{tick:?}");
     assert_eq!(tick.resume_failures, 0, "{tick:?}");
