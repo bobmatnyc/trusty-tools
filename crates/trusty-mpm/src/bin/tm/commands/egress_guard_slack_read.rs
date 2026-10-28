@@ -12,8 +12,10 @@
 //! must list `<tool>` by exact, case-sensitive name. All of that lifts the
 //! deny to [`Verdict::Allow`] and returns the [`Allowed`] audit fact; any
 //! fault keeps the deny and names the fault, never a config value. A
-//! trust-anchor deny is never an `egress-family` deny, so the floor stands,
-//! and the taint arm runs after the lift.
+//! trust-anchor deny is never an `egress-family` deny, so the floor stands.
+//! The taint arm runs after the lift but judges path tools only, so an
+//! allowlisted Slack read stays allowed in a channel-tainted session, by
+//! design (Bob D6c, Architect df-D38). See #10387.
 //! Test: `egress_guard_slack_read_tests.rs`; end to end in
 //! `tests/tm_hook_egress_slack_read_10387.rs`.
 
@@ -104,7 +106,8 @@ fn host_fault(error: &HostError) -> String {
 /// Test: `slack_read_allowlisted_project_reads_both_tools_on_both_prefixes`,
 /// `slack_read_posting_tools_stay_refused`, `slack_read_faults_keep_the_deny`,
 /// `slack_read_lookalike_names_are_not_judged`,
-/// `slack_read_trust_anchor_deny_is_never_lifted`.
+/// `slack_read_trust_anchor_deny_is_never_lifted`,
+/// `slack_read_allow_survives_channel_taint_by_design`.
 pub(crate) fn lift(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,

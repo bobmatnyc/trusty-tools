@@ -261,3 +261,76 @@ fn slack_read_trust_anchor_deny_is_never_lifted() {
     );
     assert_eq!((v, allowed), (Verdict::Allow, None));
 }
+
+/// The full first-verdict, lift and taint pipeline for `tool`, as session
+/// `s-tainted` launched at `project`, with `home` holding the taint state.
+fn tainted_pipeline(fx: &Fx, tool: &str, project: &Path) -> (Verdict, Option<Allowed>) {
+    use crate::commands::egress_guard::with_taint;
+    let read = Ok(json!({
+        "session_id": "s-tainted",
+        "tool_name": tool,
+        "tool_input": { "file_path": fx.root.join("notes.md").display().to_string() },
+    }));
+    let table = FamilyTable::builtin();
+    let first = verdict(&read, &table, |_| None);
+    let os = project.as_os_str();
+    let (lifted, allowed) = lift(first, &read, &table, Some(os), || fx.list());
+    let home = Some(fx.root.as_path());
+    let v = with_taint(lifted, &read, home, Some(project), || Ok(()));
+    (v, allowed)
+}
+
+/// 🔴 #10387 (Bob D6c, Architect df-D38): a channel-tainted tm-apex session
+/// keeps its listed Slack reads; the taint arm judges path tools only, and
+/// still denies those. Unlisted tools and another project stay refused.
+#[test]
+fn slack_read_allow_survives_channel_taint_by_design() {
+    use crate::commands::egress_guard_taint::TAINT_CHECK;
+    use trusty_mpm::core::channels_taint::{
+        TaintMark, read_state, taint_dir, taint_managed_session,
+    };
+    let fx = Fx::new();
+    let mark = TaintMark {
+        channel: "slack".into(),
+        route: "owner-dm".into(),
+        question_id: "Q-1".into(),
+        tainted_at: chrono::Utc::now(),
+        workspace: fx.root.clone(),
+    };
+    let dir = taint_dir(&fx.root);
+    taint_managed_session(&dir, "m-1", "s-tainted", &mark).expect("taint");
+    assert!(
+        read_state(&dir, "s-tainted").is_tainted(),
+        "fixture is tainted"
+    );
+    let apex = fx.apex();
+    for server in SLACK_READ_SERVERS {
+        for tool in ["slack_read_channel", "slack_read_thread"] {
+            let name = format!("mcp__{server}__{tool}");
+            let (v, allowed) = tainted_pipeline(&fx, &name, &apex);
+            assert_eq!(v, Verdict::Allow, "{name}");
+            assert!(allowed.is_some(), "{name}: audit fact");
+        }
+        for tool in ["slack_send_message", "slack_read_canvas"] {
+            let name = format!("mcp__{server}__{tool}");
+            let reason = denied(&tainted_pipeline(&fx, &name, &apex), &name);
+            assert!(
+                reason.contains("does not list this tool"),
+                "{name}: {reason}"
+            );
+        }
+        let name = format!("mcp__{server}__slack_read_channel");
+        let other = fx.root.join("other");
+        let reason = denied(&tainted_pipeline(&fx, &name, &other), &name);
+        assert!(
+            reason.contains("no slack_read_allowlist entry"),
+            "{name}: {reason}"
+        );
+    }
+    let (v, allowed) = tainted_pipeline(&fx, "Read", &apex);
+    assert!(allowed.is_none());
+    assert!(
+        matches!(&v, Verdict::Deny { check, .. } if *check == TAINT_CHECK),
+        "a path tool still gets the taint deny: {v:?}"
+    );
+}

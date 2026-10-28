@@ -79,6 +79,8 @@ channels:
   `slack_read_file` and every posting tool stay refused.
 - The load refuses any other tool name and any `*` or `?`, and an unknown
   key anywhere in `channels:` refuses the whole section.
+- A bad allowlist entry fails the whole `channels:` host ceiling closed:
+  every channel route is denied until it is fixed.
 - A missing, unreadable or malformed file, or a missing or non-canonical
   `CLAUDE_PROJECT_DIR`, keeps the deny; the reason names the fault.
 - Each allowed read prints one stderr line:
