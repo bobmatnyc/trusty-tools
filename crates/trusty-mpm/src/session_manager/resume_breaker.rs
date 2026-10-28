@@ -38,6 +38,8 @@
 //! fleet. See [`DEFAULT_BOOT_GRACE_SECS`] for the default.
 //!
 //! Test: `resume_breaker_tests.rs`.
+//!
+//! [`DEFAULT_BOOT_GRACE_SECS`]: crate::session_manager::resume_breaker::DEFAULT_BOOT_GRACE_SECS
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

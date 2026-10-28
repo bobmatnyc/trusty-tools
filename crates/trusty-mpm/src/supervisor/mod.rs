@@ -20,6 +20,7 @@
 //!
 //! [`Supervisor`]: crate::supervisor::Supervisor
 //! [`poller::run_tick`]: crate::supervisor::poller::run_tick
+//! [`poller::resume_sweep`]: crate::supervisor::poller::resume_sweep
 //! [`SupervisorRunStats`]: crate::supervisor::SupervisorRunStats
 //! [`FleetMetrics`]: crate::supervisor::FleetMetrics
 
