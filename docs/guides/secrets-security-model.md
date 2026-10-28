@@ -22,21 +22,27 @@ that process.
 The service's own index stores no plaintext. Values live in the store you
 choose: the macOS Keychain by default.
 
-## The "agents may use" flag
+## Agents and the per-key deny
 
-Each key has an "agents may use" flag, off by default. A key with the flag off
-is never set in a process whose parent chain includes Claude Code. You tick
-the flag in the console.
+The model is the same as `.env.local`: a key in your scope (the project or
+owner vault) is usable by an agent, unless you deny that key to agents. A
+denied key is never set in a process whose parent chain includes Claude Code.
+You tick "Denied to agents" in the console. An agent may deny a key; only a
+person can remove a deny (#10386).
+
+Some operations stay with a person whatever the key: storing a value (`set`),
+deleting a key, and copying keys to a sync target such as GitHub Actions. The
+service refuses each of them to a caller under Claude Code.
 
 ## What it does not protect
 
 An agent with shell access and an exec grant can read any value it was
 granted. For example, it can run `tm secrets exec -- printenv STRIPE_KEY` and
-copy the output into its transcript. The flag decides which keys an agent can
+copy the output into its transcript. The deny decides which keys an agent can
 reach. It does not stop the agent from printing one of those keys.
 
-Treat a key with the flag on as a key the agent can read. Grant agents only the
-keys they need. Prefer keys with narrow permissions for agent work.
+Treat every key without a deny as a key the agent can read. Deny the keys an
+agent does not need. Prefer keys with narrow permissions for agent work.
 
 A process started by `tm secrets exec` holds plain values in its environment.
 Any code in that process, and any child it starts, can read them.

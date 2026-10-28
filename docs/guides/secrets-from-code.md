@@ -93,8 +93,9 @@ page shows no client code.
 
 ## Agents and your code
 
-A key whose "agents may use" flag is off is never set in a process whose
-parent chain includes Claude Code. If an agent runs your tests and a key is
-missing, check that key's flag in the console. Tick it only if the agent needs
-the key. See [Secrets security model](secrets-security-model.md) for what the
-flag does and does not protect.
+An agent may use every key in your scope unless you denied the key to
+agents. A denied key is never set in a process whose parent chain includes
+Claude Code. If an agent runs your tests and a key is missing, check whether
+that key is denied in the console. See
+[Secrets security model](secrets-security-model.md) for what the deny does and
+does not protect.
