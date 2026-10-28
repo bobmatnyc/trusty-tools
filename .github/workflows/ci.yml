@@ -347,10 +347,13 @@ jobs:
       # #10210: the perf compare, status writer and weekly memory runner are
       # pure shell over fixtures and stubbed suites; no EVO, no cargo. Same job,
       # same reason as the steps above: no new required context, no toolchain.
-      - name: Perf compare + weekly runner selftests (#10210)
+      # The daily sampler selftest runs in stub mode here; its `--live`
+      # sandbox-daemon smoke needs installed binaries and stays local.
+      - name: Perf compare + weekly runner + sampler selftests (#10210)
         run: |
           bash scripts/perf_compare_selftest.sh
           bash scripts/perf_weekly_memory_selftest.sh
+          bash scripts/perf_sampler_selftest.sh
 
       # #8378: the relevance detector and the `CI gate` verdict decide which
       # required contexts do work and which skips are legitimate, so their
