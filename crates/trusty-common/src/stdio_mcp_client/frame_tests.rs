@@ -1,0 +1,117 @@
+//! #10360: response matching in `StdioMcpClient::request` — only a response
+//! (`result` or `error`, no `method`) to the in-flight id is a call's result,
+//! and ids never repeat across a respawn.
+
+use serde_json::json;
+
+use super::StdioMcpClient;
+
+/// Extracts the numeric `id` of the request line just read into `$l`.
+#[cfg(unix)]
+const READ_ID: &str = r#"id=$(printf '%s' "$l" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')"#;
+
+/// Why: #10360 — a server request such as `roots/list` carries an id of its
+/// own; when it equals the in-flight id it must not become the call's result.
+/// What: the mock answers `initialize`, then on `tools/call` (id 2) first
+/// sends a `roots/list` request with id 2, then the real response.
+/// Test: This test.
+#[tokio::test]
+#[cfg(unix)]
+async fn server_request_with_matching_id_is_not_returned_as_result() {
+    let script = r#"read -r l
+printf '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"mock","version":"1"}}}\n'
+read -r l
+read -r l
+printf '{"jsonrpc":"2.0","id":2,"method":"roots/list"}\n'
+printf '{"jsonrpc":"2.0","id":2,"result":{"answer":"tool"}}\n'
+sleep 5"#;
+    let mut client = StdioMcpClient::spawn("sh", &["-c", script], "test-client")
+        .await
+        .expect("spawn mock");
+    client.initialize().await.expect("initialize");
+    let result = client
+        .call_tool("t", json!({}))
+        .await
+        .expect("the response, not the server request, is the result");
+    assert_eq!(result, json!({ "answer": "tool" }));
+}
+
+/// Why: #10360 — `respawn` restarted ids at 1, so a frame carrying an id
+/// from the earlier process lifetime matched a request of the new one.
+/// What: generation 1 answers `initialize` (id 1) and `tools/call` (id 2),
+/// then exits. Generation 2 answers `initialize`, then emits a stale id-2
+/// response before answering each later request with `fresh`. The call after
+/// the respawn must return `fresh`, which requires an id other than 2.
+/// Test: This test.
+#[tokio::test]
+#[cfg(unix)]
+async fn stale_frame_after_respawn_is_not_returned_as_result() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("generation-1-ran");
+    let marker = marker.to_str().expect("utf-8 temp path");
+    let script = format!(
+        r#"if [ -e "$1" ]; then
+  read -r l; {READ_ID}
+  printf '{{"jsonrpc":"2.0","id":%s,"result":{{"serverInfo":{{"name":"mock","version":"2"}}}}}}\n' "$id"
+  read -r l
+  printf '{{"jsonrpc":"2.0","id":2,"result":{{"stale":true}}}}\n'
+  while read -r l; do {READ_ID}
+    printf '{{"jsonrpc":"2.0","id":%s,"result":{{"fresh":true}}}}\n' "$id"
+  done
+else
+  : > "$1"
+  read -r l
+  printf '{{"jsonrpc":"2.0","id":1,"result":{{"serverInfo":{{"name":"mock","version":"1"}}}}}}\n'
+  read -r l
+  read -r l
+  printf '{{"jsonrpc":"2.0","id":2,"result":{{"first":true}}}}\n'
+fi"#
+    );
+    let mut client = StdioMcpClient::spawn("sh", &["-c", &script, "sh", marker], "test-client")
+        .await
+        .expect("spawn mock");
+    client.initialize().await.expect("initialize");
+    let first = client.call_tool("t", json!({})).await.expect("first call");
+    assert_eq!(first, json!({ "first": true }));
+    for _ in 0..100 {
+        if !client.is_alive() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!client.is_alive(), "generation 1 should have exited");
+
+    let second = client
+        .call_tool("t", json!({}))
+        .await
+        .expect("call after respawn");
+    assert_eq!(second, json!({ "fresh": true }), "stale frame was misread");
+}
+
+/// Why: #10360 — the response test behind `request`'s skip loop.
+/// What: a table of frames against expected id 2; only a `result` or `error`
+/// frame with id 2 and no `method` is accepted.
+/// Test: This test.
+#[test]
+fn is_response_to_accepts_only_responses_with_the_id() {
+    use super::client::is_response_to;
+    let id = json!(2);
+    let cases = [
+        (json!({"jsonrpc":"2.0","id":2,"result":{}}), true),
+        (json!({"jsonrpc":"2.0","id":2,"error":{"code":-1}}), true),
+        (json!({"jsonrpc":"2.0","id":2,"method":"roots/list"}), false),
+        (
+            json!({"jsonrpc":"2.0","id":2,"method":"x","result":{}}),
+            false,
+        ),
+        (json!({"jsonrpc":"2.0","id":2}), false),
+        (json!({"jsonrpc":"2.0","id":3,"result":{}}), false),
+        (
+            json!({"jsonrpc":"2.0","method":"notifications/progress"}),
+            false,
+        ),
+    ];
+    for (frame, want) in cases {
+        assert_eq!(is_response_to(&frame, &id), want, "{frame}");
+    }
+}
