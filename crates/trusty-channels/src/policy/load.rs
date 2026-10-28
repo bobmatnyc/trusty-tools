@@ -61,6 +61,21 @@ impl LoadRequest {
     }
 }
 
+/// Read and parse the host ceiling alone: no project file, no git.
+///
+/// Why (#10387): the egress guard reads `channels.slack_read_allowlist` once
+/// per Slack read call, under the same symlink, canonical-path, size and
+/// strict-parse rules as the full load, and never through the lenient
+/// `TrustyToolsConfig` loader.
+/// What: [`read_host`] of `~/.trusty-tools/trusty-mpm/config.yaml` under
+/// `home`, then [`parse_host`]. Every fault is the [`HostError`] the full
+/// load would report.
+/// Test: `read_host_ceiling_reads_the_allowlist_and_refuses_faults`.
+pub fn read_host_ceiling(home: &Path) -> Result<HostCeiling, HostError> {
+    let path = trusty_common::crate_config::crate_config_path_at(home, "trusty-mpm");
+    read_host(&path, home).and_then(|text| parse_host(&text, Some(home)))
+}
+
 /// Load the effective policy for `req`.
 ///
 /// Why: the one entry point consumers call; a deny is always an empty
