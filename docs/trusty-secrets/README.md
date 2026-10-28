@@ -95,8 +95,8 @@ remaining keys fail without running.
 - Keep values out of agent transcripts. An agent session records what is typed
   into it and sends it to the model provider. Use a key name or reference.
 - An agent may use every key in its scope unless the operator denied the key
-  to agents (#10386). `set`, `delete`, removing a deny and a copy to a sync
-  target are refused to a caller under Claude Code.
+  to agents (#10386). `set`, `delete`, `copy` and removing a deny are
+  refused to a caller under Claude Code.
 
 ## Where it is going
 

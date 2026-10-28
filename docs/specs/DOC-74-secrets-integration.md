@@ -1562,9 +1562,15 @@ whose own parent chain includes Claude Code may write a deny but not remove
 one (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
 record with its kind, so no deny change exists without a record.
-`secrets.set`, `secrets.delete` and a copy to a sync target are
-operator-only: the server refuses a caller with a Claude Code ancestor
-(Architect Q2, Q3). An agent's `grant` and `resolve` allow records carry
+`secrets.set`, `secrets.delete` and `secrets.copy` (to a backend or a sync
+target) are operator-only: the server refuses a caller with a Claude Code
+ancestor (Architect Q2, Q3). A copy carries the key's deny into the
+destination before the value; a denied key is refused (`unsupported`) for a
+destination that cannot hold a deny. `delete` removes a deny only after
+every value delete succeeded, and `set` never clears one. Every deny written
+or removed, including the migration's, has a write-ahead
+`secrets.set_agents_may_use` record; without it the deny is unchanged
+(`audit_unavailable`). An agent's `grant` and `resolve` allow records carry
 `default_policy: true`. Printing a value (`exec -- printenv`) stays
 rule-guarded only; see "What it does not protect" in the security guide. The
 console process has no agent ancestor even when it serves an agent's

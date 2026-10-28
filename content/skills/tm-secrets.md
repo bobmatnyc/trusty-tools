@@ -113,8 +113,10 @@ the caller's scope (project or owner vault) is usable by an agent through
 denied that key to agents. The deny is an item the backend holds beside the
 value (a Keychain item, or a 0600 file on the file backend), never an index
 field. An agent may write a deny; only a person may remove one. `set`,
-`delete` and a copy to a sync target (GitHub Actions) are operator-only: the
-server refuses a caller with a Claude Code ancestor.
+`delete` and `copy` (to a backend or a sync target such as GitHub Actions)
+are operator-only: the server refuses a caller with a Claude Code ancestor.
+A copy carries a key's deny; a denied key cannot be copied into 1Password or
+Keeper, which cannot hold a deny.
 
 **Socket.** `trusty-secrets serve` answers on
 `~/.trusty-tools/trusty-secrets/secrets.sock`, started by a client on first
@@ -128,7 +130,7 @@ server derives the vaults from that checkout's remote.
 | `secrets.set` | `new` or `updated`, and the first 8 characters plus length once. Its request carries the value. Operator-only. |
 | `secrets.delete` | Whether a key was removed. Operator-only. |
 | `secrets.set_agents_may_use` | `allowed: false` writes the key's agent deny (an agent may); `allowed: true` removes it (a person only) |
-| `secrets.copy` | Names copied and failed. Keychain is the only backend, so no copy has a destination. |
+| `secrets.copy` | Names copied and failed. Operator-only; a key's deny travels with it. |
 | `secrets.doctor` | Backend availability and paths |
 
 Only `secrets.set` echoes any part of a value: its one-time confirmation
@@ -146,7 +148,7 @@ kind and the key or reference to the PM. Do not retry under another name.
 | `vault_out_of_scope` | The reference or vault is not the project's or its owner's. Cross-project access does not ship. Do not widen a config file. |
 | `remote_host_unsupported` | `origin` is not a github.com URL in an accepted form. Do not change the remote. |
 | `project_unresolved`, `project_invalid` | No usable checkout or remote. Report the directory. |
-| `agent_use_refused` | The key is denied to agents, or the method is operator-only (`set`, `delete`, removing a deny, a copy to a sync target). Report the key and method to the PM; only a person removes a deny. |
+| `agent_use_refused` | The key is denied to agents, or the method is operator-only (`set`, `delete`, `copy`, removing a deny). Report the key and method to the PM; only a person removes a deny. |
 | `not_found` | Neither vault indexes the key. Tell the PM the vault and key; the operator enters the value outside every session. |
 | `unknown_backend`, `same_backend` | No such backend on this build or OS, or a copy onto itself. |
 | `backend_failed`, `index_busy`, `index_corrupt`, `storage_unavailable`, `orphaned_backend_entry` | Store fault. Report it; do not touch the Keychain or the index by hand. |
