@@ -765,14 +765,14 @@ pub(crate) enum Command {
         #[arg(long)]
         sandbox: bool,
     },
-    /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
+    /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
     /// Why: for overnight / unattended operation the fleet needs an always-on
-    /// process that auto-resumes `stopped` sessions, observes session health
-    /// without a live caller, surfaces pending decisions, and exposes fleet
-    /// metrics — all while making NO autonomy decisions itself.
+    /// process that observes session health without a live caller, surfaces
+    /// pending decisions, and exposes fleet metrics — all while making NO
+    /// autonomy decisions itself.
     /// What: runs the supervisor loop, polling the managed-session store on an
-    /// interval. Auto-resume is gated by `TRUSTY_MPM_AUTO_RESUME=1`; the poll
+    /// interval. #10356: it no longer auto-resumes; the daemon does. The poll
     /// cadence and classification toggle are read from env
     /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. #6288:
     /// it binds no listener — each sweep's snapshot is published to
@@ -782,9 +782,9 @@ pub(crate) enum Command {
         /// Poll interval in seconds (overrides `TRUSTY_MPM_SUPERVISOR_INTERVAL`).
         #[arg(long)]
         interval: Option<u64>,
-        /// Force auto-resume of `stopped` sessions on (overrides
-        /// `TRUSTY_MPM_AUTO_RESUME`). Without this flag (and without the env
-        /// var) the supervisor runs observe-only.
+        /// Ignored since #10356: the daemon owns auto-resume. Set
+        /// `TRUSTY_MPM_AUTO_RESUME` on the daemon or use the console toggle.
+        /// Still accepted so an existing launchd plist keeps starting.
         #[arg(long)]
         auto_resume: bool,
         /// Disable idle-session activity classification (no LLM calls).

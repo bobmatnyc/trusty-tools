@@ -29,10 +29,9 @@
         <string>supervisor</string>
     </array>
 
-    <!-- Seed config. Auto-resume ships DISABLED for safety (the README's
-         "opt-in" stance): the supervisor runs observe-only until you explicitly
-         turn it on. To ENABLE auto-resume of stopped sessions, UNCOMMENT the
-         TRUSTY_MPM_AUTO_RESUME block below (or pass `tm supervisor --auto-resume`). -->
+    <!-- Seed config. #10356: the supervisor no longer auto-resumes; the
+         daemon does. TRUSTY_MPM_AUTO_RESUME below has no effect here; set it
+         in the daemon's environment or use the console toggle. -->
     <key>EnvironmentVariables</key>
     <dict>
         <!-- Full PATH so the supervisor (and the sessions it spawns) can find

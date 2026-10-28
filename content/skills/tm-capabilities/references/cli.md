@@ -268,7 +268,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `status` — Show daemon and session status
 - `statusline` — Read Claude Code statusLine JSON from stdin and print one compact line
 - `stop` — Stop every running trusty-mpm daemon process
-- `supervisor` — Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206)
+- `supervisor` — Run the unattended fleet supervisor (24/7 observer, #1206)
 - `telegram` — Manage the Telegram remote-management bot (pair, status, start, stop)
   - `pair` — Request a one-time pairing code for the Telegram bot
   - `start` — Start the Telegram bot process
