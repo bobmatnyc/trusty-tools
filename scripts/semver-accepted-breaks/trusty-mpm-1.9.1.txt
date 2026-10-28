@@ -1,0 +1,122 @@
+crate   trusty-mpm
+version 1.9.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  auto_trait_impl_removed type TmuxBackend is no longer RefUnwindSafe
+accept  auto_trait_impl_removed type TmuxBackend is no longer UnwindSafe
+accept  constructible_struct_adds_field field ActivityResponse.pending_decision_id
+accept  constructible_struct_adds_field field AnswerParams.answered_by
+accept  constructible_struct_adds_field field AnswerParams.decision_id
+accept  constructible_struct_adds_field field AnswerRequest.answered_by
+accept  constructible_struct_adds_field field AnswerRequest.decision_id
+accept  constructible_struct_adds_field field AnswerResponse.decision_id
+accept  constructible_struct_adds_field field CliLaunch.settings
+accept  constructible_struct_adds_field field ControlPlaneConfig.hook_exe
+accept  constructible_struct_adds_field field FactSlot.verify
+accept  constructible_struct_adds_field field FleetMetrics.context_usage
+accept  constructible_struct_adds_field field FleetMetrics.plan_usage
+accept  constructible_struct_adds_field field HealthResponse.unbound_delegations
+accept  constructible_struct_adds_field field HealthResponse.unbound_delegations_error
+accept  constructible_struct_adds_field field HealthSnapshot.unbound_delegations
+accept  constructible_struct_adds_field field HealthSnapshot.unbound_delegations_error
+accept  constructible_struct_adds_field field LiveWorktree.pr
+accept  constructible_struct_adds_field field MpmConfig.architect
+accept  constructible_struct_adds_field field MpmConfig.legacy_supervisor
+accept  constructible_struct_adds_field field OrphanSweepOutcome.cancelled_unstarted
+accept  constructible_struct_adds_field field SessionRecord.blocked_prompt
+accept  constructible_struct_adds_field field SessionRecord.context_usage
+accept  constructible_struct_adds_field field SessionRecord.last_answer
+accept  constructible_struct_adds_field field SessionRecord.pending_decision_id
+accept  constructible_struct_adds_field field SessionRefRequest.git_env
+accept  constructible_struct_adds_field field SessionSummary.pending_decision_id
+accept  derive_trait_impl_removed type FleetMetrics no longer derives Eq
+accept  derive_trait_impl_removed type PublishedMetrics no longer derives Eq
+accept  derive_trait_impl_removed type SupervisorMetricsStatus no longer derives Eq
+accept  enum_missing enum trusty_mpm::client::http_client::supervisor::RegisterCallError
+accept  enum_missing enum trusty_mpm::session_manager::supervisor::ProtectedVerb
+accept  enum_missing enum trusty_mpm::session_manager::supervisor_floor::KillVerdict
+accept  enum_missing enum trusty_mpm::session_manager::supervisor_register::RegisterError
+accept  enum_no_repr_variant_discriminant_changed variant EventKind::Removed 3 -> 4
+accept  enum_struct_variant_field_added field session of variant EventKind::Observed
+accept  enum_variant_added variant EventKind:PrLinked
+accept  enum_variant_added variant Origin:GitCommand
+accept  enum_variant_added variant SessionKind:Architect
+accept  enum_variant_added variant SessionKind:ArchitectAux
+accept  enum_variant_added variant SessionProfile:Architect
+accept  enum_variant_added variant TwinRefusal:NotArchitectProfile
+accept  enum_variant_missing variant DaemonUrlError::Unreachable
+accept  enum_variant_missing variant SessionKind::Supervisor
+accept  enum_variant_missing variant SessionKind::SupervisorAux
+accept  enum_variant_missing variant SessionProfile::Supervisor
+accept  enum_variant_missing variant TwinRefusal::NotSupervisor
+accept  function_missing function trusty_mpm::core::default_daemon_addr
+accept  function_missing function trusty_mpm::core::deploy_validate::validate_and_repair_reusing_memory
+accept  function_missing function trusty_mpm::core::discovery::default_daemon_addr
+accept  function_missing function trusty_mpm::core::discovery::resolve_daemon_url_for_cli
+accept  function_missing function trusty_mpm::core::discovery::resolve_daemon_url_probing
+accept  function_missing function trusty_mpm::core::discovery::resolve_daemon_url_via_gateway
+accept  function_missing function trusty_mpm::core::memory_reachable::probe_memory_reachable_blocking
+accept  function_missing function trusty_mpm::core::memory_reachable::resolve_memory_reachable
+accept  function_missing function trusty_mpm::core::memory_reachable::resolve_spawn_memory_reachable
+accept  function_missing function trusty_mpm::core::resolve_daemon_url_for_cli
+accept  function_missing function trusty_mpm::core::resolve_daemon_url_probing
+accept  function_missing function trusty_mpm::core::resolve_daemon_url_via_gateway
+accept  function_missing function trusty_mpm::core::session_launch::prepare_session_for_repair
+accept  function_missing function trusty_mpm::core::session_launch::prepare_session_with_memory_reachable
+accept  function_missing function trusty_mpm::core::session_profile::supervisor_prompt
+accept  function_missing function trusty_mpm::daemon::managed_routes::supervisor::register_supervisor_route
+accept  function_missing function trusty_mpm::daemon::managed_routes::supervisor::supervisor_routes
+accept  function_missing function trusty_mpm::daemon::run_http
+accept  function_missing function trusty_mpm::daemon::serve_http
+accept  function_missing function trusty_mpm::session_manager::supervisor_register::collector_session_name
+accept  function_parameter_count_changed trusty_mpm::core::daemon_identity::write_lock now takes 1 parameters instead of 2
+accept  function_parameter_count_changed trusty_mpm::core::daemon_identity::write_lock_at now takes 2 parameters instead of 3
+accept  function_parameter_count_changed trusty_mpm::core::memory_import::refresh::verify_findable now takes 4 parameters instead of 3
+accept  function_parameter_count_changed trusty_mpm::core::session_launch::prepare_session_for_repair_under now takes 5 parameters instead of 6
+accept  function_parameter_count_changed trusty_mpm::core::session_ref_publish::push_session_ref now takes 4 parameters instead of 3
+accept  function_parameter_count_changed trusty_mpm::core::session_ref_publish::remote_tip now takes 3 parameters instead of 2
+accept  function_parameter_count_changed trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory now takes 2 parameters instead of 3
+accept  function_parameter_count_changed trusty_mpm::daemon::lock::write_lock now takes 1 parameters instead of 2
+accept  function_parameter_count_changed trusty_mpm::daemon::serve_with_shutdown now takes 3 parameters instead of 4
+accept  function_parameter_count_changed trusty_mpm::runtime::build_adapter now takes 3 parameters instead of 4
+accept  inherent_method_missing DaemonClient::register_supervisor
+accept  inherent_method_missing ManagedSessionId::for_supervisor
+accept  inherent_method_missing SessionManager::clear_pending_decision
+accept  inherent_method_missing SessionManager::register_supervisor
+accept  inherent_method_missing SessionProfile::is_supervisor
+accept  inherent_method_missing TmuxDriver::supervisor_floor
+accept  method_parameter_count_changed trusty_mpm::daemon::manager::ManagerState::provision takes 1 parameters, but now takes 2 parameters
+accept  method_parameter_count_changed trusty_mpm::daemon::manager::PortfolioPalace::provision takes 1 parameters, but now takes 2 parameters
+accept  method_parameter_count_changed trusty_mpm::daemon::manager::memory::PortfolioPalace::provision takes 1 parameters, but now takes 2 parameters
+accept  method_parameter_count_changed trusty_mpm::daemon::manager::state::ManagerState::provision takes 1 parameters, but now takes 2 parameters
+accept  method_parameter_count_changed trusty_mpm::runtime::ClaudeCodeAdapter::new takes 3 parameters, but now takes 2 parameters
+accept  method_parameter_count_changed trusty_mpm::session_manager::SessionManager::answer_decision takes 2 parameters, but now takes 3 parameters
+accept  method_parameter_count_changed trusty_mpm::session_manager::manager::SessionManager::answer_decision takes 2 parameters, but now takes 3 parameters
+accept  module_missing mod trusty_mpm::client::http_client::supervisor
+accept  module_missing mod trusty_mpm::daemon::managed_routes::supervisor
+accept  module_missing mod trusty_mpm::session_manager::supervisor
+accept  module_missing mod trusty_mpm::session_manager::supervisor_floor
+accept  module_missing mod trusty_mpm::session_manager::supervisor_register
+accept  pub_module_level_const_missing COLLECTOR_ROLE
+accept  pub_module_level_const_missing DEFAULT_DAEMON_ADDR
+accept  pub_module_level_const_missing GATEWAY_PATH
+accept  pub_module_level_const_missing GATEWAY_PROBE_TIMEOUT
+accept  pub_module_level_const_missing SUPERVISOR_MODEL
+accept  pub_module_level_const_missing SUPERVISOR_OUTPUT_STYLE_ID
+accept  pub_module_level_const_missing SUPERVISOR_PROFILE_ID
+accept  pub_module_level_const_missing SUPERVISOR_ROLE
+accept  pub_module_level_const_missing SUPERVISOR_SECTIONS
+accept  struct_missing struct trusty_mpm::core::session_profile::SupervisorConfig
+accept  struct_missing struct trusty_mpm::daemon::managed_routes::supervisor::LaunchRecordBinding
+accept  struct_missing struct trusty_mpm::session_manager::SupervisorFloor
+accept  struct_missing struct trusty_mpm::session_manager::SupervisorRegistration
+accept  struct_missing struct trusty_mpm::session_manager::supervisor_floor::SidecarRole
+accept  struct_missing struct trusty_mpm::session_manager::supervisor_floor::SupervisorFloor
+accept  struct_missing struct trusty_mpm::session_manager::supervisor_register::RegisteredSession
+accept  struct_missing struct trusty_mpm::session_manager::supervisor_register::RegistrationReport
+accept  struct_missing struct trusty_mpm::session_manager::supervisor_register::SupervisorRegistration
+accept  struct_pub_field_missing field memory_reachable of struct PrepReport
+accept  struct_pub_field_missing field supervisor of struct MpmConfig
+accept  trait_method_added trait method trusty_mpm::mcp::OrchestratorBackend::ask_owner
+accept  trait_method_added trait method trusty_mpm::mcp::OrchestratorBackend::sessions_chat
+accept  trait_method_missing method supervisor_floor of trait ManagedTmuxDriver
+accept  trait_missing trait trusty_mpm::session_manager::supervisor_register::BindingVerifier
