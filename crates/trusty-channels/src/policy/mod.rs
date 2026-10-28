@@ -15,7 +15,8 @@
 //! `routes.toml` v1 or v2, and [`merge`] combines them into a
 //! [`LoadReport`]. S2b adds the I/O: [`load_effective`] reads the host
 //! file and each listed project's file under the default-branch gate ([`check_default_branch`]),
-//! and [`PolicyLoader`] reloads on a content or branch change.
+//! and [`PolicyLoader`] reloads on a content or branch change. #10387 adds
+//! [`SlackReadAllowlist`], read alone through [`read_host_ceiling`].
 //! Test: `src/policy/tests/`.
 
 mod bucket;
@@ -30,6 +31,7 @@ mod project_file;
 mod redact;
 mod reload;
 mod report;
+mod slack_read;
 mod table;
 mod types;
 
@@ -44,11 +46,12 @@ pub use error::PolicyError;
 pub use fs::MAX_FILE_BYTES;
 pub use gate::{check_default_branch, commit_author, BranchState, CommitAuthor, GateError};
 pub use host::{parse_host, HostCeiling, HostChannel, HostError, RefFault, HOST_SCHEMA_VERSION};
-pub use load::{load_effective, load_effective_until, LoadRequest};
+pub use load::{load_effective, load_effective_until, read_host_ceiling, LoadRequest};
 pub use merge::{merge, merge_for, ProjectInput};
 pub use project_file::{parse_project_file, ProjectFile, ProjectFileError, ProjectRoute};
 pub use reload::PolicyLoader;
 pub use report::{FileState, FileStatus, Finding, FindingScope, LoadReport, Origin};
+pub use slack_read::{SlackReadAllowlist, SlackReadEntry, SLACK_READ_TOOLS};
 pub use table::{ChannelPolicy, PolicySpec};
 pub use types::{
     Channel, MessageKind, RateLimit, RateLimitSpec, Route, RouteSpec, MAX_LIMIT, MAX_WINDOW_SECS,

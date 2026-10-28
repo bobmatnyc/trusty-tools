@@ -8,7 +8,7 @@ servers do not yet use the policy.
 
 | Part | State |
 |------|-------|
-| `policy` module | Deny by default. A send needs a route that names the recipient; an inbound message may only answer an open question; a rate limiter bounds floods. Reads the host ceiling (the `channels:` section of `~/.trusty-tools/trusty-mpm/config.yaml`) and each project's `.trusty-channels/routes.toml`, and accepts a route file only when its bytes match the committed default branch. |
+| `policy` module | Deny by default. A send needs a route that names the recipient; an inbound message may only answer an open question; a rate limiter bounds floods. Reads the host ceiling (the `channels:` section of `~/.trusty-tools/trusty-mpm/config.yaml`) and each project's `.trusty-channels/routes.toml`, and accepts a route file only when its bytes match the committed default branch. The host's `slack_read_allowlist` (#10387) names the projects whose sessions `tm hook --egress-guard` lets call `slack_read_channel` and `slack_read_thread`; see [docs/slack-mcp.md](docs/slack-mcp.md#read-only-allowlist-under-the-egress-guard). |
 | `gchat-mcp` binary | Google Chat MCP server over Pub/Sub. Sends only along the project's committed routes. Installed by default. |
 | `slack::api`, `telegram::api` | HTTP clients. They make no recipient decision: the caller owns the route check. |
 | `slack-mcp` binary | Slack MCP server with 22 tools. It has **no route check**, so it is not built by default (see below). |

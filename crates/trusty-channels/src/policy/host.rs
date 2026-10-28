@@ -21,6 +21,8 @@
 //!     kinds: [question, review_notice]
 //!     projects: [/Users/me/proj]
 //!   slack: { enabled: true, connection: { bot_ref: slack, app_ref: slack-app }, projects: [/abs] }
+//!   slack_read_allowlist:   # #10387, see `slack_read`
+//!     - { project: /abs, name: proj, tools: [slack_read_channel] }
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +34,7 @@ use trusty_common::credentials::CredentialRef;
 
 use crate::gchat::routes::{expand_home, validate_connection, Connection, RawConnection};
 use crate::policy::redact::withhold;
+use crate::policy::slack_read::{parse_allowlist, RawSlackReadEntry, SlackReadAllowlist};
 use crate::policy::types::{Channel, MessageKind, RateLimit, RateLimitSpec};
 
 /// The only `channels.version` this parser reads.
@@ -172,6 +175,15 @@ pub enum HostError {
         /// Why the reference was refused.
         fault: RefFault,
     },
+    /// A `slack_read_allowlist` entry is refused (#10387). Named by position;
+    /// the reason is fixed text and never echoes a value.
+    #[error("channels.slack_read_allowlist[{index}]: {reason}")]
+    SlackReadAllowlist {
+        /// The entry's zero-based position in the list.
+        index: usize,
+        /// What is wrong.
+        reason: &'static str,
+    },
 }
 
 /// Why a `bot_ref` or `app_ref` was refused (#8454 S2c).
@@ -222,9 +234,16 @@ pub enum RefFault {
 pub struct HostCeiling {
     rate_limit: RateLimit,
     channels: BTreeMap<Channel, HostChannel>,
+    slack_read_allowlist: SlackReadAllowlist,
 }
 
 impl HostCeiling {
+    /// The projects granted read-only Slack tools (#10387); empty when the
+    /// file names none. Test: `slack_read_allowlist_parses_both_tools`.
+    pub fn slack_read_allowlist(&self) -> &SlackReadAllowlist {
+        &self.slack_read_allowlist
+    }
+
     /// The default rate limit; a route may lower it, never raise it.
     pub fn rate_limit(&self) -> RateLimit {
         self.rate_limit
@@ -367,7 +386,8 @@ fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<&'static
 /// What: YAML to a value, take only `channels`, deserialize it with unknown
 /// keys denied at every level, then check `version`, the rate limit, each
 /// channel's kinds, projects (absolute after `~/` expansion against `home`,
-/// no `..`), gchat connection and credential refs. Other top-level keys are
+/// no `..`), gchat connection and credential refs, and the #10387
+/// `slack_read_allowlist`. Other top-level keys are
 /// ignored. Pure: `home` is a parameter.
 /// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`,
 /// `no_channels_section_denies_all`, `host_ceiling_parses_every_field`.
@@ -451,9 +471,11 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
             },
         );
     }
+    let slack_read_allowlist = parse_allowlist(raw.slack_read_allowlist, home)?;
     Ok(HostCeiling {
         rate_limit,
         channels,
+        slack_read_allowlist,
     })
 }
 
@@ -543,6 +565,8 @@ struct RawHost {
     slack: Option<RawBotChannel>,
     #[serde(default)]
     telegram: Option<RawBotChannel>,
+    #[serde(default)]
+    slack_read_allowlist: Vec<RawSlackReadEntry>,
 }
 
 /// The keys every channel shares, moved out of its raw struct.

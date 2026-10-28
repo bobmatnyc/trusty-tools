@@ -19,6 +19,7 @@ mod merge;
 mod project_file;
 mod reload;
 mod repo;
+mod slack_read;
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};

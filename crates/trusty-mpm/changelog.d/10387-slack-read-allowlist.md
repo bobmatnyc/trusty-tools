@@ -1,0 +1,2 @@
+Added
+- `tm hook --egress-guard` lets a project named in the host `channels.slack_read_allowlist` call `slack_read_channel` and `slack_read_thread` on the `slack-mcp` or `claude_ai_Slack` server (#10387). The server and tool must match exactly; every other Slack tool, every other project, a missing or non-canonical `CLAUDE_PROJECT_DIR`, and any fault in `config.yaml` keep today's deny, with the reason naming the fault. Each allowed read prints one stderr line, `egress-slack-read-allowed project=<name> tool=<tool> prefix=<server>`.
