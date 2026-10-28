@@ -10,7 +10,7 @@
 #   archive, so only packaging the crate can see it.
 #
 # What: runs `cargo package -p <package> --no-verify`, finds
-#   `<target-dir>/package/<package>-<version>.crate`, and compares its byte size
+#   `<cargo's target dir>/package/<package>-<version>.crate`, and compares its byte size
 #   with the limit (10485760 B, the figure crates.io reports).
 #     [FAIL] size >= limit, OR the .crate could not be packaged / found /
 #            measured. Fail-closed: an unmeasurable crate never passes.
@@ -18,9 +18,11 @@
 #            1 MiB, which is under one release of growth for the crates that
 #            ship a UI bundle, so the WARN lands a release before the FAIL.
 #     [PASS] below the margin.
-#   The target dir is `${CARGO_TARGET_DIR:-<repo>/target}`, the same resolution
-#   cargo uses for its own output (#10372: a hard-coded <repo>/target/ misses
-#   the .envrc-exported CARGO_TARGET_DIR). A stale .crate from an earlier run is
+#   The target dir comes from cargo itself (`cargo metadata` target_directory,
+#   scripts/lib/cargo_target_dir.sh), run through the same cargo and environment
+#   as the package step, so a tm build-lease slot, `--target-dir` or
+#   `build.target-dir` is followed (#10372: a hard-coded <repo>/target/ or
+#   CARGO_TARGET_DIR guess misses them). A stale .crate in that directory is
 #   deleted before packaging so it cannot stand in for this run's archive.
 #
 # Usage:
@@ -66,9 +68,14 @@ REPO_ROOT="${CRATE_SIZE_REPO_ROOT:-$(git -C "$SCRIPT_DIR" rev-parse --show-tople
 fail() { echo "[FAIL] crate-size: $*" >&2; exit 1; }
 
 if [ -z "$CRATE_FILE" ]; then
-  TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
-  CRATE_FILE="${TARGET_DIR}/package/${PKG}-${VERSION}.crate"
-  rm -f "$CRATE_FILE"
+  # shellcheck source=lib/cargo_target_dir.sh
+  . "${SCRIPT_DIR}/lib/cargo_target_dir.sh"
+  # Ask cargo where it writes, before and after packaging: a stale archive in
+  # the pre-package directory is removed, and the post-package answer is the
+  # one measured, so a lease that moves cargo between the two calls is caught.
+  if pre_dir="$(cargo_target_dir "$REPO_ROOT" 2>/dev/null)"; then
+    rm -f "${pre_dir}/package/${PKG}-${VERSION}.crate"
+  fi
   pkg_log="$(mktemp "${TMPDIR:-/tmp}/check-crate-size.XXXXXX")"
   trap 'rm -f "$pkg_log"' EXIT
   rc=0
@@ -77,9 +84,12 @@ if [ -z "$CRATE_FILE" ]; then
     tail -n 15 "$pkg_log" | sed 's/^/       /' >&2
     fail "'cargo package -p ${PKG} --no-verify' exited ${rc}; the archive size is unknown."
   fi
+  TARGET_DIR="$(cargo_target_dir "$REPO_ROOT")" \
+    || fail "could not learn cargo's target directory for ${PKG}; the archive size is unknown."
+  CRATE_FILE="${TARGET_DIR}/package/${PKG}-${VERSION}.crate"
 fi
 
-[ -f "$CRATE_FILE" ] || fail "no .crate at ${CRATE_FILE} after packaging ${PKG} ${VERSION}; the archive size is unknown (CARGO_TARGET_DIR='${CARGO_TARGET_DIR:-<unset>}')."
+[ -f "$CRATE_FILE" ] || fail "no .crate at ${CRATE_FILE} after packaging ${PKG} ${VERSION}; the archive size is unknown."
 
 SIZE=""
 SIZE="$(wc -c < "$CRATE_FILE" | tr -d '[:space:]')" || SIZE=""

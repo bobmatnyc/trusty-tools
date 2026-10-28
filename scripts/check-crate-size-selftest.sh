@@ -27,12 +27,21 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "${WORK}/bin" "${WORK}/repo"
 
 # Stub cargo: STUB_CRATE_BYTES=<n> writes an n-byte archive; STUB_CARGO_RC=<n>
-# fails; STUB_CRATE_BYTES unset exits 0 and writes nothing.
+# fails `package`; STUB_CRATE_BYTES unset writes nothing. STUB_LEASE_DIR plays
+# the build lease: both `package` and `metadata` use it instead of
+# CARGO_TARGET_DIR, as a leased cargo reports and writes the slot directory.
+# STUB_META_FAIL=1 makes `metadata` fail.
 cat > "${WORK}/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
+tdir="${STUB_LEASE_DIR:-${CARGO_TARGET_DIR:-$PWD/target}}"
+if [ "$1" = metadata ]; then
+  [ -z "${STUB_META_FAIL:-}" ] || exit 1
+  printf '{"packages":[],"target_directory":"%s","version":1}\n' "$tdir"
+  exit 0
+fi
 [ "${STUB_CARGO_RC:-0}" -eq 0 ] || { echo "stub cargo: forced failure" >&2; exit "$STUB_CARGO_RC"; }
 if [ -n "${STUB_CRATE_BYTES:-}" ]; then
-  d="${CARGO_TARGET_DIR:-$PWD/target}/package"
+  d="${tdir}/package"
   mkdir -p "$d"
   head -c "$STUB_CRATE_BYTES" /dev/zero > "$d/demo-1.0.0.crate"
 fi
@@ -71,6 +80,12 @@ run_case "cargo package failure is a FAIL"   1 "exited 3" STUB_CARGO_RC=3 STUB_C
 mkdir -p "${WORK}/tgt/package"
 head -c 100 /dev/zero > "${WORK}/tgt/package/demo-1.0.0.crate"
 run_case "stale small .crate is not reused"  1 "[FAIL] crate-size: no .crate" STUB_CRATE_BYTES=
+
+# A leased cargo writes and reports a dir that is NOT CARGO_TARGET_DIR.
+run_case "leased dir is measured (small)"    0 "${WORK}/lease/package/demo-1.0.0.crate" STUB_LEASE_DIR="${WORK}/lease" STUB_CRATE_BYTES=1000
+run_case "leased dir over limit fails"       1 "[FAIL] crate-size: demo 1.0.0: $((LIMIT + 1)) B" STUB_LEASE_DIR="${WORK}/lease" STUB_CRATE_BYTES="$((LIMIT + 1))"
+run_case "leased dir with no .crate fails"   1 "[FAIL] crate-size: no .crate at ${WORK}/lease2/package" STUB_LEASE_DIR="${WORK}/lease2" STUB_CRATE_BYTES=
+run_case "unresolvable target dir fails"     1 "could not learn cargo's target directory" STUB_META_FAIL=1 STUB_CRATE_BYTES=1000
 
 # --crate-file measures an existing archive without calling cargo.
 head -c "$((LIMIT + 5))" /dev/zero > "${WORK}/big.crate"
