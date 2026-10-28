@@ -301,6 +301,21 @@ impl Fixture {
         panic!("socket never served");
     }
 
+    /// [`Self::call`] from a detached process, judged as no agent on any host
+    /// (#10386: `set` and `copy` refuse a caller under Claude Code).
+    async fn call_detached(&self, method: &str, mut params: Value) -> RpcResponse {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        params["project"] = json!(self.repo.display().to_string());
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = self
+            .settings
+            .index_root
+            .with_file_name(format!("detached-{n}"));
+        detached_call::spawn(&dir, &self.settings.socket, &request);
+        detached_call::response(&dir).await
+    }
+
     async fn call(&self, method: &str, mut params: Value) -> RpcResponse {
         params["project"] = json!(self.repo.display().to_string());
         let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
@@ -329,12 +344,12 @@ fn kind(response: &RpcResponse) -> String {
 async fn post_success_append_failure_is_audit_unavailable_and_the_change_stands() {
     let fx = fixture();
     let (task, stop) = fx.start().await;
-    let params = json!({"project": fx.repo.display().to_string(), "vault": VAULT,
-        "key": "K", "value": "v-1234567890"});
-    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "secrets.set", "params": params});
-    let dir = fx.settings.index_root.with_file_name("detached");
-    detached_call::spawn(&dir, &fx.settings.socket, &request);
-    let set = detached_call::response(&dir).await;
+    let set = fx
+        .call_detached(
+            "secrets.set",
+            json!({"vault": VAULT, "key": "K", "value": "v-1234567890"}),
+        )
+        .await;
     assert_eq!(kind(&set), "audit_unavailable");
     assert_eq!(fx.keychain.value("K").as_deref(), Some("v-1234567890"));
     assert_eq!(fx.log_len(), LIMIT, "no torn record appended");
@@ -354,7 +369,7 @@ async fn copy_stops_after_a_key_whose_record_cannot_be_appended() {
     }
     let (task, stop) = fx.start().await;
     let copy = |keys: Value| {
-        fx.call(
+        fx.call_detached(
             "secrets.copy",
             json!({"from_backend": "src", "to_backend": "keychain", "keys": keys}),
         )
@@ -382,7 +397,7 @@ async fn copy_stops_before_the_next_key_after_a_failed_deny_append() {
     fx.src.put("A", "copied-value");
     let (task, stop) = fx.start().await;
     let copy = fx
-        .call(
+        .call_detached(
             "secrets.copy",
             json!({"from_backend": "src", "to_backend": "keychain", "keys": ["MISSING", "A"]}),
         )

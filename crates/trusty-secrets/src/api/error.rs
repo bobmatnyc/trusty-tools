@@ -384,4 +384,10 @@ pub enum SecretsError {
         /// The limit that ran out.
         waited: Duration,
     },
+
+    /// The write-ahead audit record an agent deny change needs could not be
+    /// written, so the deny was neither written nor removed (#10386).
+    // #10386: last, so no published discriminant moves.
+    #[error("the audit record for an agent deny change could not be written; nothing was changed")]
+    AuditUnavailable,
 }

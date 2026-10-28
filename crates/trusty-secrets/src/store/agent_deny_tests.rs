@@ -70,6 +70,7 @@ fn migration_open_all_writes_no_deny_and_clears_legacy() {
         &index,
         &vault(),
         AgentDenyMigration::OpenAll,
+        None,
     )
     .unwrap();
     for name in ["OFF_KEY", "ON_KEY"] {
@@ -94,6 +95,7 @@ fn migration_keep_closed_denies_unflagged_and_opens_flagged() {
         &index,
         &vault(),
         AgentDenyMigration::KeepClosed,
+        None,
     )
     .unwrap();
     assert!(item(&backend, ControlItem::AgentDeny, Some("OFF_KEY")));
@@ -122,6 +124,7 @@ fn migration_rerun_is_a_no_op() {
         &index,
         &vault(),
         AgentDenyMigration::KeepClosed,
+        None,
     )
     .unwrap();
     // The operator opens OFF_KEY after the migration.
@@ -138,6 +141,7 @@ fn migration_rerun_is_a_no_op() {
         &index,
         &vault(),
         AgentDenyMigration::KeepClosed,
+        None,
     )
     .unwrap();
     assert!(!item(&backend, ControlItem::AgentDeny, Some("OFF_KEY")));
@@ -156,6 +160,7 @@ fn migration_unreadable_marker_refuses() {
         &index,
         &vault(),
         AgentDenyMigration::OpenAll,
+        None,
     );
     assert!(matches!(err, Err(SecretsError::Backend { .. })), "{err:?}");
     let denied = agent_denied(
@@ -164,6 +169,7 @@ fn migration_unreadable_marker_refuses() {
         &vault(),
         &key("ON_KEY"),
         AgentDenyMigration::OpenAll,
+        None,
     );
     assert!(
         denied.is_err(),
@@ -199,7 +205,7 @@ fn agent_denied_without_controls_follows_the_mode() {
         (AgentDenyMigration::KeepClosed, true),
     ] {
         assert_eq!(
-            agent_denied(&backend, &index, &vault(), &key("K"), mode).unwrap(),
+            agent_denied(&backend, &index, &vault(), &key("K"), mode, None).unwrap(),
             denied,
             "{mode:?}"
         );
@@ -210,4 +216,40 @@ fn agent_denied_without_controls_follows_the_mode() {
         matches!(deny, Err(SecretsError::Unsupported { .. })),
         "{deny:?}"
     );
+}
+
+/// Why: Architect acceptance criterion, code-critic finding 3 — the
+/// keep-closed migration's denies each get a write-ahead record, and a record
+/// that cannot be written stops the migration before that deny is written.
+/// Red when the migration writes a deny without the hook.
+/// Test: itself.
+#[test]
+fn migration_keep_closed_records_each_deny_before_writing_it() {
+    for refuse in [false, true] {
+        let (_tmp, backend, index) = legacy_vault();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let hook: DenyAudit = Arc::new(move |_v: &VaultName, key: &SecretKey, denied: bool| {
+            log.lock().unwrap().push((key.to_string(), denied));
+            if refuse {
+                Err(SecretsError::AuditUnavailable)
+            } else {
+                Ok(())
+            }
+        });
+        let result = migrate_vault(
+            backend.as_ref(),
+            &index,
+            &vault(),
+            AgentDenyMigration::KeepClosed,
+            Some(&hook),
+        );
+        assert_eq!(*seen.lock().unwrap(), [("OFF_KEY".to_string(), true)]);
+        assert_eq!(
+            item(&backend, ControlItem::AgentDeny, Some("OFF_KEY")),
+            !refuse
+        );
+        assert_eq!(item(&backend, ControlItem::DenyMigrated, None), !refuse);
+        assert_eq!(result.is_err(), refuse, "refuse={refuse}");
+    }
 }

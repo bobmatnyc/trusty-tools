@@ -13,8 +13,40 @@
 //! an unreadable marker are errors, never "allowed" (Fail-Open Check).
 //! Test: `agent_deny_tests.rs` beside this file.
 
+use std::sync::Arc;
+
 use super::{NamesIndex, SecretBackend};
 use crate::api::{SecretKey, SecretsError, VaultName};
+
+/// Called before a deny is written (`true`) or removed (`false`) outside
+/// `secrets.set_agents_may_use`, which records its own change (#10386).
+///
+/// Why: Architect acceptance criterion (2026-10-28) — every deny change has
+/// a write-ahead audit record. The store has no audit log; the server gives
+/// it this hook.
+/// What: an `Err` stops the change before the backend is touched; the
+/// server's hook answers [`SecretsError::AuditUnavailable`]. It is given the
+/// vault, the key and the deny state after the change, never a value.
+pub type DenyAudit =
+    Arc<dyn Fn(&VaultName, &SecretKey, bool) -> Result<(), SecretsError> + Send + Sync>;
+
+/// Write (`denied`) or remove a key's deny, after `audit` records it.
+///
+/// What: `audit` first, then the backend write; an audit error leaves the
+/// backend untouched. `None` writes with no record (a store with no log).
+/// Test: `migration_keep_closed_records_each_deny_before_writing_it`.
+pub fn change_deny(
+    backend: &dyn SecretBackend,
+    vault: &VaultName,
+    key: &SecretKey,
+    denied: bool,
+    audit: Option<&DenyAudit>,
+) -> Result<(), SecretsError> {
+    if let Some(record) = audit {
+        record(vault, key, denied)?;
+    }
+    backend.set_control_item(ControlItem::AgentDeny, vault, Some(key), denied)
+}
 
 /// One agent-control item a backend may hold beside a key's value.
 ///
@@ -78,8 +110,10 @@ pub const DEFAULT_AGENT_DENY_MIGRATION: AgentDenyMigration = AgentDenyMigration:
 /// flag is removed; then the marker is written. A crash part-way leaves no
 /// marker, so the rerun repeats it; a key whose legacy flag was already
 /// removed then reads as unflagged and is denied under `KeepClosed`, which
-/// fails closed. Every backend error is returned as-is.
+/// fails closed. Every backend error is returned as-is. Each deny goes
+/// through [`change_deny`], so `audit` records it first.
 /// Test: `migration_open_all_writes_no_deny_and_clears_legacy`,
+/// `migration_keep_closed_records_each_deny_before_writing_it`,
 /// `migration_keep_closed_denies_unflagged_and_opens_flagged`,
 /// `migration_rerun_is_a_no_op`, `migration_unreadable_marker_refuses`.
 pub fn migrate_vault(
@@ -87,6 +121,7 @@ pub fn migrate_vault(
     index: &NamesIndex,
     vault: &VaultName,
     mode: AgentDenyMigration,
+    audit: Option<&DenyAudit>,
 ) -> Result<(), SecretsError> {
     if !backend.holds_agent_controls() {
         return Ok(());
@@ -102,7 +137,7 @@ pub fn migrate_vault(
         if mode == AgentDenyMigration::KeepClosed {
             for (key, on) in names.iter().zip(&flagged) {
                 if !on {
-                    backend.set_control_item(ControlItem::AgentDeny, vault, Some(key), true)?;
+                    change_deny(backend, vault, key, true, audit)?;
                 }
             }
         }
@@ -130,11 +165,12 @@ pub fn agent_denied(
     vault: &VaultName,
     key: &SecretKey,
     mode: AgentDenyMigration,
+    audit: Option<&DenyAudit>,
 ) -> Result<bool, SecretsError> {
     if !backend.holds_agent_controls() {
         return Ok(mode == AgentDenyMigration::KeepClosed);
     }
-    migrate_vault(backend, index, vault, mode)?;
+    migrate_vault(backend, index, vault, mode, audit)?;
     backend.control_item(ControlItem::AgentDeny, vault, Some(key))
 }
 

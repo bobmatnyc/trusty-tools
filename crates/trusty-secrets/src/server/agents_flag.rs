@@ -77,7 +77,8 @@ pub(crate) fn set_agents_may_use(
             if request.allowed {
                 refuse_agent_caller(state, caller, peer, gate)?;
             }
-            let store = SecretStore::new(project.backend(state)?, state.index.clone());
+            let store = SecretStore::new(project.backend(state)?, state.index.clone())
+                .with_deny_audit(gate.deny_audit());
             // #9070: no record, no change (write-ahead, Architect Q1).
             // #9621: written under the key's index lock, so records and
             // changes for one key land in the same order.

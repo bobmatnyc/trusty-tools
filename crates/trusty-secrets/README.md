@@ -470,11 +470,15 @@ one went in. A value of 8 characters or fewer shows only its length, as
   pre-#10386 "agents may use" flag (service `trusty-secrets.agents`) was off.
   Either way the old flag items are removed. A marker or lookup that cannot
   be read refuses.
-- `secrets.set`, `secrets.delete`, removing a deny and a copy to a sync
-  target refuse a caller with a Claude Code ancestor (`agent_use_refused`);
+- `secrets.set`, `secrets.delete`, `secrets.copy` and removing a deny
+  refuse a caller with a Claude Code ancestor (`agent_use_refused`);
   an unreadable ancestry refuses (`grant_refused`). Writing a deny is allowed
   to an agent. An agent's grant and resolve allow records carry
-  `default_policy: true`.
+  `default_policy: true`. A copy carries a key's deny before its value, and
+  refuses a denied key into a backend that cannot hold one. `delete` removes
+  a deny only after every value delete succeeded. `set` never clears a
+  deny. Each deny the store writes or removes on its own has a write-ahead
+  `secrets.set_agents_may_use` record; without it nothing changes.
 
 ## Licence
 

@@ -109,7 +109,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
             // #9070 slice 3: every grant record says what was judged.
             gate.agent_parent(agent_parent);
             if agent_parent {
-                let store = SecretStore::new(project.backend(state)?, state.index.clone());
+                let store = SecretStore::new(project.backend(state)?, state.index.clone())
+                    .with_deny_audit(gate.deny_audit());
                 for key in &request.keys {
                     let reference = SecretRef::Unscoped { key: key.clone() };
                     if let Err(e) = require_agent_use(&store, project.scopes(), &reference) {
@@ -236,6 +237,7 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             let opened_under =
                 before.filter(|before| OpenedUnder::read(account, &id).as_ref() == Some(before));
             let store = SecretStore::new(backend, state.index.clone())
+                .with_deny_audit(gate.deny_audit())
                 .with_cache(Arc::clone(&state.cache), opened_under);
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),

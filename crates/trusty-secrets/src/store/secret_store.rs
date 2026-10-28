@@ -19,7 +19,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::agent_deny::{self, AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION};
+use super::agent_deny::{
+    self, AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit, change_deny,
+};
 use super::{
     Capabilities, NamesIndex, OpenedUnder, ScopeSet, SecretBackend, SecretCache, mask_secret,
     platform,
@@ -45,6 +47,8 @@ pub struct SecretStore {
     opened_under: Option<OpenedUnder>,
     // #10386: how a vault written before the deny model is migrated.
     migration: AgentDenyMigration,
+    // #10386: records each deny change the store makes on its own.
+    deny_audit: Option<DenyAudit>,
 }
 
 impl fmt::Debug for SecretStore {
@@ -66,7 +70,19 @@ impl SecretStore {
             cache: None,
             opened_under: None,
             migration: DEFAULT_AGENT_DENY_MIGRATION,
+            deny_audit: None,
         }
+    }
+
+    /// This store, recording every deny it writes or removes through `audit`
+    /// first (#10386): the migration's denies, a deny `delete` removes, and
+    /// a deny a copy carries.
+    ///
+    /// Test: `migration_keep_closed_records_each_deny_before_writing_it`,
+    /// `store_delete_records_the_deny_it_removes`.
+    pub fn with_deny_audit(mut self, audit: DenyAudit) -> Self {
+        self.deny_audit = Some(audit);
+        self
     }
 
     /// This store, migrating pre-#10386 vaults with `mode` instead of
@@ -80,7 +96,13 @@ impl SecretStore {
 
     /// Migrate `vault` to the deny model if it was not yet ([`agent_deny::migrate_vault`]).
     fn migrate(&self, vault: &VaultName) -> Result<(), SecretsError> {
-        agent_deny::migrate_vault(self.backend.as_ref(), &self.index, vault, self.migration)
+        agent_deny::migrate_vault(
+            self.backend.as_ref(),
+            &self.index,
+            vault,
+            self.migration,
+            self.deny_audit.as_ref(),
+        )
     }
 
     /// Whether agents may use `key` in `vault`: no deny item (#10386).
@@ -95,6 +117,7 @@ impl SecretStore {
             vault,
             key,
             self.migration,
+            self.deny_audit.as_ref(),
         )
         .map(|denied| !denied)
     }
@@ -159,10 +182,9 @@ impl SecretStore {
     ///
     /// What: refuses an empty value and a backend without `WRITE`; then,
     /// under the index lock, writes the backend and the index row (length,
-    /// `updated_at`). #10386: the vault is migrated to the deny model first;
-    /// a key's deny is kept on update; for a new key a stale deny is removed
-    /// before the value is written, so a new key starts usable by agents and
-    /// a failed removal stores nothing. A
+    /// `updated_at`). #10386: the vault is migrated to the deny model first.
+    /// `set` never touches a deny: an update keeps it, and a deny left from
+    /// an earlier key of the same name stays (fail closed). A
     /// corrupt index or a lock timeout fails before the backend is touched; a
     /// backend failure leaves the index untouched. If the index publish fails
     /// after a new key reached the backend, the entry is deleted again while
@@ -174,7 +196,7 @@ impl SecretStore {
     /// `store_set_fails_closed_on_the_index_before_the_backend_write`,
     /// `store_set_compensates_a_new_key_when_the_index_publish_fails`,
     /// `store_set_reports_an_orphan_when_compensation_fails`,
-    /// `store_set_stores_no_value_when_the_flag_removal_fails`.
+    /// `store_set_keeps_a_stale_deny_on_a_new_key`.
     pub fn set(
         &self,
         vault: &VaultName,
@@ -193,18 +215,8 @@ impl SecretStore {
             key,
             value.char_len(),
             platform::now_unix(),
-            |outcome| {
-                // #10386: a new key starts with no deny (`.env.local` model).
-                if outcome == SetOutcome::New && self.backend.holds_agent_controls() {
-                    self.backend.set_control_item(
-                        ControlItem::AgentDeny,
-                        vault,
-                        Some(key),
-                        false,
-                    )?;
-                }
-                self.backend.set(vault, key, value)
-            },
+            // #10386: no deny is cleared here; a stale one keeps the key shut.
+            |_| self.backend.set(vault, key, value),
             |outcome, publish| self.compensate(vault, key, outcome, publish),
         )?;
         Ok(SetResponse {
@@ -291,9 +303,10 @@ impl SecretStore {
     /// index lock (a corrupt or locked index fails before any backend is
     /// touched), deletes from the configured backend, then from each of
     /// `others`, and keeps going after a failure so every backend that can
-    /// be cleared is. #10386: each backend that holds control items has the
-    /// key's deny and legacy flag removed too, before its value. If any backend
-    /// failed, the first error is returned and
+    /// be cleared is. #10386: only when every value delete succeeded are the
+    /// key's control items removed from each backend that holds them (a deny
+    /// through the audit hook first), so a failed delete leaves the deny in
+    /// place. If any backend failed, the first error is returned and
     /// the index row is kept, so `list` still shows a key a backend may hold.
     /// Otherwise the row is dropped in the same locked update, so no `set`
     /// can land between the sweep and the removal. `removed` is true when
@@ -301,7 +314,9 @@ impl SecretStore {
     /// Test: `store_delete_across_removes_the_key_from_every_backend`,
     /// `store_delete_across_keeps_the_row_when_any_backend_fails`,
     /// `store_delete_across_holds_the_index_lock_through_the_sweep`,
-    /// `store_delete_keeps_the_row_when_the_flag_removal_fails`.
+    /// `store_delete_keeps_the_row_when_the_flag_removal_fails`,
+    /// `store_delete_keeps_the_deny_when_a_value_delete_fails`,
+    /// `store_delete_records_the_deny_it_removes`.
     pub fn delete_across(
         &self,
         vault: &VaultName,
@@ -313,31 +328,76 @@ impl SecretStore {
         let (existed, had_row) = self.index.remove_with(vault, key, || {
             let mut existed = false;
             let mut failure: Option<SecretsError> = None;
-            for backend in std::iter::once(&self.backend).chain(others) {
-                // #10386: the key's control items go with it.
-                let controls = if backend.holds_agent_controls() {
-                    [ControlItem::AgentDeny, ControlItem::LegacyAgentsFlag]
-                        .into_iter()
-                        .try_for_each(|item| {
-                            backend.set_control_item(item, vault, Some(key), false)
-                        })
-                } else {
-                    Ok(())
-                };
-                for result in [controls.map(|()| false), backend.delete(vault, key)] {
-                    match result {
-                        Ok(held) => existed |= held,
-                        // #7519: a failed delete may leave a value; never a miss.
-                        Err(e) if failure.is_none() => failure = Some(e),
-                        Err(_) => {}
-                    }
+            let backends = || std::iter::once(&self.backend).chain(others);
+            for backend in backends() {
+                match backend.delete(vault, key) {
+                    Ok(held) => existed |= held,
+                    // #7519: a failed delete may leave a value; never a miss.
+                    Err(e) if failure.is_none() => failure = Some(e),
+                    Err(_) => {}
                 }
             }
-            failure.map_or(Ok(existed), Err)
+            if let Some(e) = failure {
+                return Err(e);
+            }
+            // #10386: the deny goes only once every value is gone.
+            for backend in backends().filter(|b| b.holds_agent_controls()) {
+                self.clear_controls(backend.as_ref(), vault, key)?;
+            }
+            Ok(existed)
         })?;
         Ok(DeleteResponse {
             removed: existed || had_row,
         })
+    }
+
+    /// Remove `key`'s deny (recorded first, when present) and legacy flag
+    /// from `backend` (#10386).
+    fn clear_controls(
+        &self,
+        backend: &dyn SecretBackend,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<(), SecretsError> {
+        if backend.control_item(ControlItem::AgentDeny, vault, Some(key))? {
+            change_deny(backend, vault, key, false, self.deny_audit.as_ref())?;
+        }
+        backend.set_control_item(ControlItem::LegacyAgentsFlag, vault, Some(key), false)
+    }
+
+    /// Before a copy writes `key` here from `source`, carry its deny (#10386).
+    ///
+    /// Why: code-critic BLOCK on 90558c5cbc — a denied key copied into a
+    /// backend with no deny read as open, an escape from the operator's deny.
+    /// What: a key `source` does not deny needs nothing. A denied key is
+    /// [`SecretsError::Unsupported`] when this backend cannot hold a deny;
+    /// otherwise this vault is migrated and the deny written here (recorded
+    /// first), before the caller writes the value.
+    /// Test: `server_copy_of_a_denied_key_into_a_no_controls_backend_is_refused`,
+    /// `server_copy_of_a_denied_key_carries_the_deny`.
+    pub(crate) fn carry_deny_from(
+        &self,
+        source: &SecretStore,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<(), SecretsError> {
+        if source.agents_may_use(vault, key)? {
+            return Ok(());
+        }
+        if !self.backend.holds_agent_controls() {
+            return Err(SecretsError::Unsupported {
+                backend: self.backend.id().to_string(),
+                operation: ControlItem::AgentDeny.operation(),
+            });
+        }
+        self.migrate(vault)?;
+        change_deny(
+            self.backend.as_ref(),
+            vault,
+            key,
+            true,
+            self.deny_audit.as_ref(),
+        )
     }
 
     /// Allow (`true`) or deny (`false`) agents an indexed key (DOC-74 §15.8).

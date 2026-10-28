@@ -229,3 +229,147 @@ async fn serve_without_agent_callers_stores_a_key_for_any_caller() {
             .is_some()
     );
 }
+
+fn copy_params(fx: &Fixture, to: &str) -> Value {
+    json!({"project": fx.project(), "from_backend": "keychain", "to_backend": to, "keys": ["API_KEY"]})
+}
+
+/// The deny-change records: (key, `agents_allowed`).
+fn deny_changes(fx: &Fixture) -> Vec<(Option<String>, Option<bool>)> {
+    records(fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::SetAgentsMayUse)
+        .map(|r| (r.key.map(|k| k.to_string()), r.agents_allowed))
+        .collect()
+}
+
+/// Why: code-critic finding 1 (CRITICAL) on 90558c5cbc — `secrets.copy` never
+/// judged its caller, so an agent could move a denied key into a backend
+/// that cannot hold the deny. A copy is operator-only, like `set`. Red when
+/// `copy` has no ancestry check.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_by_agent_ancestor_is_refused_and_writes_nothing() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, true);
+    let (state, _grants) = state_with(&fx, agent_procs());
+    let server = fx.start_state(state).await;
+    let refused = call(&fx.settings.socket, method::COPY, copy_params(&fx, "spare")).await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&refused, method::COPY),
+        ErrorKind::AgentUseRefused
+    );
+    assert!(fx.spare.is_empty(), "nothing was copied");
+    let all = records(&fx);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].decision, AuditDecision::Deny);
+    assert_eq!(all[0].agent_parent, Some(true));
+}
+
+/// Why: code-critic finding 1 — a denied key copied into a backend that
+/// cannot hold a deny (1Password, Keeper) read as open under `OpenAll`.
+/// Any caller's copy of a denied key there is refused, and nothing lands.
+/// Red when the copy writes the value without carrying the deny.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_of_a_denied_key_into_a_no_controls_backend_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let nocontrols = Arc::new(MemoryBackend::without_agent_controls());
+    let base = fx.backends();
+    let target = Arc::clone(&nocontrols);
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "nocontrols" => Ok(Arc::clone(&target) as Arc<dyn SecretBackend>),
+        _ => base(id),
+    });
+    let mut state = fx.state(factory);
+    state.grants = Arc::new(GrantRegistry::new(
+        procs_with_me(),
+        Arc::new(FakeClock::at(T0)),
+        DEFAULT_MAX_TTL,
+    ));
+    let server = fx.start_state(state).await;
+    let answer = ok(call(
+        &fx.settings.socket,
+        method::COPY,
+        copy_params(&fx, "nocontrols"),
+    )
+    .await);
+    server.stop().await;
+
+    assert_eq!(answer, json!({"copied": [], "failed": ["API_KEY"]}));
+    assert!(nocontrols.is_empty(), "nothing was written");
+    let failed: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Copy)
+        .map(|r| r.reason.map(|reason| reason.as_str().to_owned()))
+        .collect();
+    assert_eq!(failed, [Some("unsupported".to_string())]);
+}
+
+/// Why: code-critic findings 1 and 3 — a copy into a backend that can hold a
+/// deny carries the source's deny, written (with its write-ahead record)
+/// before the value. Red when the destination key reads as open.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_of_a_denied_key_carries_the_deny() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    let answer = ok(call(&fx.settings.socket, method::COPY, copy_params(&fx, "spare")).await);
+    server.stop().await;
+
+    assert_eq!(answer, json!({"copied": ["API_KEY"], "failed": []}));
+    assert!(
+        fx.spare
+            .control_item(
+                ControlItem::AgentDeny,
+                &vault(PROJECT_VAULT),
+                Some(&key("API_KEY"))
+            )
+            .unwrap(),
+        "the deny travelled with the key"
+    );
+    assert_eq!(
+        deny_changes(&fx),
+        [(Some("API_KEY".to_string()), Some(false))]
+    );
+}
+
+/// Why: Architect acceptance criterion, code-critic finding 3 — a `delete`
+/// that removes a deny leaves a write-ahead record of it, ahead of the
+/// delete's own record. Red when the removal is unrecorded.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_records_the_deny_it_removes() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    ok(call(
+        &fx.settings.socket,
+        method::DELETE,
+        delete_params(&fx, "API_KEY"),
+    )
+    .await);
+    server.stop().await;
+
+    let methods: Vec<_> = records(&fx).iter().map(|r| r.method).collect();
+    assert_eq!(methods, [AuditMethod::SetAgentsMayUse, AuditMethod::Delete]);
+    assert_eq!(
+        deny_changes(&fx),
+        [(Some("API_KEY".to_string()), Some(true))]
+    );
+    assert!(
+        !fx.keychain
+            .control_item(
+                ControlItem::AgentDeny,
+                &vault(PROJECT_VAULT),
+                Some(&key("API_KEY"))
+            )
+            .unwrap()
+    );
+}

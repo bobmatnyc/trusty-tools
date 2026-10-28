@@ -189,7 +189,9 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
         // vouches for no flag, so the index listing stands with every flag
         // OFF; a list that worked before the flag moved keeps working.
         let keys = match project.backend(state) {
-            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
+            Ok(backend) => SecretStore::new(backend, state.index.clone())
+                .with_deny_audit(gate.deny_audit())
+                .list(&request.vault)?,
             Err(_) => state.index.list(&request.vault)?,
         };
         to_json(&ListResponse {
@@ -230,7 +232,8 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         refuse_agent_caller(state, caller, peer, gate)?;
         // #7524: the `file` posture check every value write passes.
         let backend = project.open_for_write(state, &project.resolved_config().backend)?;
-        let store = SecretStore::new(backend, state.index.clone());
+        let store =
+            SecretStore::new(backend, state.index.clone()).with_deny_audit(gate.deny_audit());
         gate.admit()?;
         let response = store.set(&request.vault, &request.key, &request.value);
         // #7520: after the write, success or not, so no read that raced it
@@ -277,7 +280,8 @@ pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Val
             // #7519: a missing account file skips 1Password; an unreadable one
             // refuses, since a 1Password copy from when it was readable may remain.
             let account = sweep_machine(state)?;
-            let store = SecretStore::new(project.backend(state)?, state.index.clone());
+            let store = SecretStore::new(project.backend(state)?, state.index.clone())
+                .with_deny_audit(gate.deny_audit());
             // #7519: a backend switch or a copy leaves values in other backends.
             // Ruling 74: the CLI backends swept are the ones the factory opens,
             // so enablement comes from the account's file, not the spawner's.
@@ -400,7 +404,14 @@ impl CopySelection {
 /// `audit_copy_writes_one_record_per_key`,
 /// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
-/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+/// `server_copy_by_agent_ancestor_is_refused_and_writes_nothing`,
+/// `server_copy_of_a_denied_key_into_a_no_controls_backend_is_refused`,
+/// `server_copy_of_a_denied_key_carries_the_deny`.
+/// #10386: after the project resolves, a caller under Claude Code is
+/// refused ([`refuse_agent_caller`]). Each key's deny in the source is
+/// carried before its value: into a backend that cannot hold a deny the key
+/// fails with [`ErrorKind::Unsupported`] and nothing is written.
 /// #9069: a sync-target destination goes to `sync_target::push` after the
 /// project resolves; a sync-target source is [`ErrorKind::Unsupported`]
 /// (`server_copy_from_a_sync_target_is_unsupported`).
@@ -419,6 +430,9 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             }
             let project = ProjectContext::resolve(state, &dir)?;
             gate.project(&project);
+            // #10386: a copy moves keys between stores; operator-only, as `set`.
+            let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
+            refuse_agent_caller(state, caller, peer, gate)?;
             let vault = project.scopes().project().clone();
             gate.name(&vault, None);
             // #9069: a sync target is never read back, so never a source.
@@ -448,7 +462,11 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                     .collect(),
             };
             // #9065: write through `set`'s index lock and compensation, never around it.
-            let store = SecretStore::new(destination, state.index.clone());
+            let store = SecretStore::new(destination, state.index.clone())
+                .with_deny_audit(gate.deny_audit());
+            // #10386: the source's deny travels with each key it denies.
+            let source_store = SecretStore::new(Arc::clone(&source), state.index.clone())
+                .with_deny_audit(gate.deny_audit());
             let mut response = CopyResponse {
                 copied: Vec::new(),
                 failed: Vec::new(),
@@ -461,7 +479,9 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                 let outcome = if crate::store::deadline::passed() {
                     Err(ErrorKind::DeadlineExceeded)
                 } else {
-                    let written = match source.get(&vault, &key) {
+                    // #10386: the deny lands before the value, or nothing does.
+                    let carried = store.carry_deny_from(&source_store, &vault, &key);
+                    let written = match carried.and_then(|()| source.get(&vault, &key)) {
                         Ok(Some(value)) => store
                             .set(&vault, &key, &value)
                             .map(drop)

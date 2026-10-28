@@ -57,7 +57,7 @@ mod secret_store;
 // #7524 P2-L7: the time limit on every Keychain call.
 mod time_limit;
 
-pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION};
+pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit};
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;

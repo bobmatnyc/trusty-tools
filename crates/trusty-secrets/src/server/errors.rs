@@ -447,6 +447,8 @@ impl From<SecretsError> for ErrorKind {
             // not apply, so a new `SecretsError` variant fails the build here
             // until it is given a kind.
             SecretsError::HomeUnavailable => Self::HomeUnavailable,
+            // #10386: a deny change whose write-ahead record failed.
+            SecretsError::AuditUnavailable => Self::AuditUnavailable,
         }
     }
 }

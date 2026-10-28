@@ -766,8 +766,7 @@ fn denied(backend: &MemoryBackend, name: &str) -> bool {
 }
 
 /// Why: #10386 — a deny must survive a value update and go with the key on
-/// delete, and a new key starts with no deny even when a stale deny item
-/// exists (the `.env.local` model).
+/// delete.
 /// What: every deny read goes through the backend; the index is not
 /// consulted for it.
 /// Test: itself.
@@ -792,18 +791,6 @@ fn store_agent_deny_survives_an_update_and_clears_on_delete() {
 
     store.delete(&project(), &key("API_KEY")).unwrap();
     assert!(!denied(&backend, "API_KEY"));
-
-    // A stale deny item never closes a new key.
-    backend
-        .set_control_item(
-            ControlItem::AgentDeny,
-            &project(),
-            Some(&key("API_KEY")),
-            true,
-        )
-        .unwrap();
-    store.set(&project(), &key("API_KEY"), &value).unwrap();
-    assert!(store.list(&project()).unwrap()[0].agents_may_use);
 
     let err = store
         .set_agents_may_use(&project(), &key("MISSING"), false)
@@ -936,26 +923,6 @@ impl SecretBackend for FlagClearFaultBackend {
     }
 }
 
-/// Why: #10386 — a new key whose stale deny item cannot be removed would
-/// start in a state `set` did not choose, so `set` must fail before the
-/// value is stored and leave no index row. Ignoring the removal's result
-/// fails this test.
-/// Test: itself.
-#[test]
-fn store_set_stores_no_value_when_the_flag_removal_fails() {
-    let backend = Arc::new(FlagClearFaultBackend::default());
-    let (_tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
-    let err = store
-        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
-        .unwrap_err();
-    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
-    assert!(backend.0.is_empty(), "no value is stored");
-    assert!(
-        store.list(&project()).unwrap().is_empty(),
-        "no row is written"
-    );
-}
-
 /// Why: #9070, #10386 — a delete that cannot remove the deny item must fail
 /// and keep the index row, as a failed value delete does, so `list` still
 /// shows a key the backend holds state for. Ignoring the removal's result
@@ -988,4 +955,133 @@ fn store_delete_keeps_the_row_when_the_flag_removal_fails() {
             .control_item(ControlItem::AgentDeny, &vault, Some(&name))
             .unwrap()
     );
+}
+
+/// Why: code-critic finding 4 on 90558c5cbc — clearing a stale deny on a new
+/// key's `set` failed open: a deny left behind by an earlier key of the same
+/// name opened the new key to agents. Red when `set` removes the deny.
+/// Test: itself.
+#[test]
+fn store_set_keeps_a_stale_deny_on_a_new_key() {
+    let (_tmp, backend, store) = fixture();
+    backend
+        .set_control_item(
+            ControlItem::AgentDeny,
+            &project(),
+            Some(&key("API_KEY")),
+            true,
+        )
+        .unwrap();
+    let value = SecretValue::new(FAKE_VALUE);
+    let set = store.set(&project(), &key("API_KEY"), &value).unwrap();
+    assert_eq!(set.outcome, SetOutcome::New);
+    assert!(denied(&backend, "API_KEY"), "the stale deny stays");
+    assert!(!store.list(&project()).unwrap()[0].agents_may_use);
+}
+
+/// A [`MemoryBackend`] whose value deletes fail; its control items work.
+#[derive(Debug, Default)]
+struct ValueDeleteFaultBackend(MemoryBackend);
+
+impl SecretBackend for ValueDeleteFaultBackend {
+    fn id(&self) -> BackendId {
+        self.0.id()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.0.get(vault, key)
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, v: &SecretValue) -> Result<(), SecretsError> {
+        self.0.set(vault, key, v)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Err(FailingBackend::failure(vault, key))
+    }
+    fn holds_agent_controls(&self) -> bool {
+        true
+    }
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.0.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
+    ) -> Result<(), SecretsError> {
+        self.0.set_control_item(item, vault, key, present)
+    }
+}
+
+/// Why: code-critic finding 2 on 90558c5cbc — `delete_across` removed the
+/// deny before the value, so a value delete that failed left the value in
+/// place with its deny gone: open to agents. Red when controls are removed
+/// before (or despite) a failed value delete.
+/// Test: itself.
+#[test]
+fn store_delete_keeps_the_deny_when_a_value_delete_fails() {
+    let backend = Arc::new(ValueDeleteFaultBackend::default());
+    let (_tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
+    let (vault, name) = (project(), key("API_KEY"));
+    store
+        .set(&vault, &name, &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    store.set_agents_may_use(&vault, &name, false).unwrap();
+
+    let err = store.delete(&vault, &name).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(denied(&backend.0, "API_KEY"), "the deny stays");
+    assert!(
+        store.index().get(&vault, &name).unwrap().is_some(),
+        "the row stays"
+    );
+}
+
+/// The deny changes a [`DenyAudit`] hook saw, and the hook; it refuses when
+/// `refuse` is set.
+/// The (key, denied) pairs a recording hook saw.
+type Seen = Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+fn recording_hook(refuse: bool) -> (Seen, DenyAudit) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let hook: DenyAudit = Arc::new(move |_vault: &VaultName, key: &SecretKey, denied: bool| {
+        log.lock().unwrap().push((key.to_string(), denied));
+        if refuse {
+            Err(SecretsError::AuditUnavailable)
+        } else {
+            Ok(())
+        }
+    });
+    (seen, hook)
+}
+
+/// Why: Architect acceptance criterion, code-critic finding 3 — a `delete`
+/// that removes a deny writes its audit record first, and a record that
+/// cannot be written keeps the deny. Red when the removal skips the hook.
+/// Test: itself.
+#[test]
+fn store_delete_records_the_deny_it_removes() {
+    for refuse in [false, true] {
+        let (_tmp, backend, store) = fixture();
+        let (vault, name) = (project(), key("API_KEY"));
+        store
+            .set(&vault, &name, &SecretValue::new(FAKE_VALUE))
+            .unwrap();
+        store.set_agents_may_use(&vault, &name, false).unwrap();
+        let (seen, hook) = recording_hook(refuse);
+        let result = store.with_deny_audit(hook).delete(&vault, &name);
+
+        assert_eq!(*seen.lock().unwrap(), [("API_KEY".to_string(), false)]);
+        assert_eq!(denied(&backend, "API_KEY"), refuse, "refuse={refuse}");
+        assert_eq!(result.is_err(), refuse, "refuse={refuse}: {result:?}");
+    }
 }
