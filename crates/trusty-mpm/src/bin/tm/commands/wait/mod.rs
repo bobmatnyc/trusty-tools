@@ -353,7 +353,7 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
 /// everything a decision needs — whether to re-run, how much budget is left,
 /// and what to re-run — without the agent parsing prose.
 /// What: `tm-wait status=… for=… elapsed=… remaining=… polls=… detail="…"`,
-/// plus `rerun="…"` when the status is `pending`. Inner double quotes in the
+/// plus `note="…"` and `rerun="…"` when the status is `pending`. Inner double quotes in the
 /// detail become single quotes so the line always parses as five bare
 /// `key=value` pairs followed by quoted fields.
 /// Test: `status_line_carries_remaining_budget`, `status_line_quotes_detail`.
@@ -363,6 +363,7 @@ pub(crate) fn status_line(
     budget: &Budget,
     now: u64,
     rerun: &str,
+    slice_s: u64,
 ) -> String {
     let detail = outcome.detail.replace('"', "'").replace('\n', " ");
     let mut line = format!(
@@ -375,9 +376,26 @@ pub(crate) fn status_line(
         detail
     );
     if outcome.status == Status::Pending {
-        line.push_str(&format!(" rerun=\"{rerun}\""));
+        // #10339: say plainly that the SLICE ended, not the timeout, so a
+        // caller does not read exit 75 as a failure.
+        line.push_str(&format!(
+            " note=\"{}\" rerun=\"{rerun}\"",
+            pending_note(slice_s, budget.remaining(now), budget.timeout_s)
+        ));
     }
     line
+}
+
+/// The plain-language explanation carried by a `pending` line.
+///
+/// Why: #10339 — exit 75 after one slice was read as a timeout or a failure.
+/// What: names the slice that elapsed, the budget left, and the two ways to
+/// continue: re-run the `rerun=` command, or raise `--slice` up to `SLICE_MAX`.
+/// Test: `status_line_pending_note_says_the_slice_ended`.
+fn pending_note(slice_s: u64, remaining_s: u64, timeout_s: u64) -> String {
+    format!(
+        "the {slice_s}s slice ended before the {timeout_s}s --timeout; this is not a timeout or a failure, {remaining_s}s of the budget remain. Re-run the command in rerun= (or pass --slice <n>, up to {SLICE_MAX})"
+    )
 }
 
 /// Rebuild the exact command an agent should re-issue.
@@ -466,7 +484,10 @@ pub(crate) fn run(args: WaitArgs) -> ! {
                 polls: 0,
                 timeout_s: 0,
             };
-            println!("{}", status_line(&outcome, args.condition, &spent, 0, ""));
+            println!(
+                "{}",
+                status_line(&outcome, args.condition, &spent, 0, "", 0)
+            );
             eprintln!("tm wait: {e:#}");
             EXIT_ERROR
         }
@@ -510,7 +531,8 @@ fn run_inner(args: &WaitArgs) -> anyhow::Result<i32> {
             args.condition,
             &budget,
             end,
-            &rerun_command(args, &plan)
+            &rerun_command(args, &plan),
+            plan.slice_s
         )
     );
     Ok(outcome.status.exit_code())
