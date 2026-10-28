@@ -3,7 +3,7 @@
 **Status:** Draft (design cleared 2026-10-27; no code yet)
 **Subsystem:** `trusty-channels` — route policy, host ceiling, audit; `trusty-common` — credential registry; `trusty-agents` — channel adapters
 **Owner:** owner
-**Last-updated:** 2026-10-27
+**Last-updated:** 2026-10-28
 **Spec ID:** `SPEC-CHMODE-01~draft` … `SPEC-CHMODE-07~draft` (DOC-85)
 **DOC-N claim:** `DOC-85`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft); `DOC-84` was the highest on `origin/main` (2026-10-27).
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) (principal, scope, audit); [DOC-74](./DOC-74-secrets-integration.md) (storage, owner scope); [DOC-60](./DOC-60-bus-based-agent-messaging.md) §8 (channels ride the bus).
@@ -41,6 +41,8 @@ A channel call runs in exactly one mode.
 | Audit line | Every action. | Every action; the only mark of the proxy (Dda, section 6). |
 
 A mode never grants more than the route and the host ceiling already allow. The table is the most a mode may do.
+
+Separately from modes, the `tm hook --egress-guard` backstop (#8454) refuses every Slack MCP tool in a tm-launched session. Its one exception is the host `channels.slack_read_allowlist` (#10387): a listed project may call `slack_read_channel` and `slack_read_thread` on the `slack-mcp` or `claude_ai_Slack` server, and nothing else. Schema and rules: `crates/trusty-channels/src/policy/slack_read.rs`.
 
 ### 2.1 Service-account scope {#SPEC-CHMODE-02A~draft}
 

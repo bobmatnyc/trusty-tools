@@ -356,7 +356,8 @@ where
 /// deny is recorded and POSTed through `pm_guard_deny_log` first; neither can
 /// change the verdict — a failed record is reported on stderr, a failed POST
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
-/// Test: `egress_deny_is_audited_without_changing_verdict_when_log_unwritable`.
+/// Test: `egress_deny_is_audited_without_changing_verdict_when_log_unwritable`,
+/// `slack_read_allowlist_allows_tm_apex_reads_with_one_audit_line`.
 async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let read = read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await;
     // #8454 D1: the floor reads the ambient home and user config, as pm-guard's.

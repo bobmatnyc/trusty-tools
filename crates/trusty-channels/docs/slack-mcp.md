@@ -59,3 +59,28 @@ download), which returns Slack's HTML export of the canvas — **not** the
 original markdown source. There is currently no API to recover the editable
 markdown.
 
+## Read-only allowlist under the egress guard
+
+`tm hook --egress-guard` (#8454) refuses every Slack MCP tool in a
+tm-launched session, reads included. The host `config.yaml` may grant one
+project two read tools (#10387):
+
+```yaml
+channels:
+  version: 1
+  slack_read_allowlist:
+    - project: /abs/canonical/path/to/project   # compared to CLAUDE_PROJECT_DIR
+      name: project-name                        # printed in the audit line
+      tools: [slack_read_channel, slack_read_thread]
+```
+
+- Only `mcp__slack-mcp__<tool>` and `mcp__claude_ai_Slack__<tool>` are
+  judged; the tool must equal a listed name exactly. `slack_read_canvas`,
+  `slack_read_file` and every posting tool stay refused.
+- The load refuses any other tool name and any `*` or `?`, and an unknown
+  key anywhere in `channels:` refuses the whole section.
+- A missing, unreadable or malformed file, or a missing or non-canonical
+  `CLAUDE_PROJECT_DIR`, keeps the deny; the reason names the fault.
+- Each allowed read prints one stderr line:
+  `egress-slack-read-allowed project=<name> tool=<tool> prefix=<server>`.
+- `config.yaml` is a trust anchor: no session writes it.

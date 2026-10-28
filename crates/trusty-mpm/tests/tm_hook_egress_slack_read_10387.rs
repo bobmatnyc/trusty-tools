@@ -174,7 +174,8 @@ fn slack_read_allowlist_fault_arms_refuse() {
         "CLAUDE_PROJECT_DIR is not set",
     );
     let out = fx.run("mcp__slack-evil__slack_read_channel", Some(&fx.apex()), &[]);
-    assert_refused(&out, "lookalike server", "Slack tool");
+    assert_refused(&out, "lookalike server", "it is a slack tool");
+    assert!(!reason(&out).contains("does not apply"), "never judged");
     let wildcard = fx.yaml().replace("slack_read_thread]", "\"*\"]");
     let unknown = fx
         .yaml()
