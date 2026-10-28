@@ -17,12 +17,15 @@
 
 use std::sync::Arc;
 
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
 
 use crate::core::auto_resume::{self, AutoResumeGate};
 use crate::core::paths::FrameworkPaths;
 use crate::daemon::DaemonState;
+use crate::daemon::action_events::ActionPublisher;
 use crate::session_manager::{SessionManager, SessionRecord};
 use crate::supervisor::watchdog::DetachedSweep;
 use crate::supervisor::{SupervisorConfig, TickReport, resume_sweep};
@@ -50,6 +53,8 @@ pub struct AutoResumeLoop {
     gate: AutoResumeGate,
     sweep: DetachedSweep<TickReport>,
     notice_done: bool,
+    /// The bus producer the notice is also published on (#10362).
+    publisher: Option<Arc<ActionPublisher>>,
 }
 
 impl AutoResumeLoop {
@@ -67,7 +72,14 @@ impl AutoResumeLoop {
             gate,
             sweep: DetachedSweep::new("auto-resume sweep"),
             notice_done: false,
+            publisher: None,
         }
+    }
+
+    /// Also publish the parked notice on the control bus through `publisher`.
+    pub fn with_publisher(mut self, publisher: Option<Arc<ActionPublisher>>) -> Self {
+        self.publisher = publisher;
+        self
     }
 
     /// Run one iteration: resume eligible sessions, then the notice check.
@@ -124,6 +136,14 @@ impl AutoResumeLoop {
         let records = self.mgr.list().await;
         let notice = park_notice(&records)?;
         warn!(target: "trusty_mpm::resume_park", "{notice}");
+        // #10362: the same once-per-boot decision also goes on the bus.
+        match (&self.publisher, resume_parked_event(&records, &notice)) {
+            (Some(publisher), Some(event)) => publisher.publish_event(event),
+            _ => warn!(
+                target: "trusty_mpm::resume_park",
+                "auto-resume: no control-bus publisher; resume_parked event not emitted (#10362)"
+            ),
+        }
         Some(notice)
     }
 
@@ -177,6 +197,41 @@ pub fn park_notice(records: &[SessionRecord]) -> Option<String> {
     ))
 }
 
+/// The `Hook{kind:"resume_parked"}` bus event for `notice`, or `None` when
+/// no record is parked.
+///
+/// Why: #10362 — subscribers learn of parked sessions from the bus, not the
+/// daemon log. A `Hook` payload carries it with no `HarnessPayload` change.
+/// What: `data` is `{sessions: [{id, tmux_name, reason}], count, notice}`
+/// over the records whose `auto_resume_park_reason` is set.
+/// Test: `the_park_event_reaches_the_bus_once_across_ticks_10362`,
+/// `no_park_event_for_an_unparked_fleet_10362`.
+pub fn resume_parked_event(records: &[SessionRecord], notice: &str) -> Option<HarnessEvent> {
+    let sessions: Vec<_> = records
+        .iter()
+        .filter_map(|r| {
+            r.auto_resume_park_reason().map(|reason| {
+                json!({"id": r.id.to_string(), "tmux_name": r.tmux_name, "reason": reason})
+            })
+        })
+        .collect();
+    if sessions.is_empty() {
+        return None;
+    }
+    Some(HarnessEvent {
+        source: HarnessSource::Mpm,
+        session: None,
+        seq: 0,
+        at: chrono::Utc::now(),
+        payload: HarnessPayload::Hook {
+            kind: "resume_parked".to_string(),
+            data: json!({"sessions": sessions, "count": sessions.len(), "notice": notice}),
+        },
+        id: EventId::new(),
+        parent_id: None,
+    })
+}
+
 /// Start the daemon's auto-resume loop.
 ///
 /// Why: #10356 (owner ruling D74). Call it after `install_auto_relauncher`,
@@ -188,7 +243,10 @@ pub fn park_notice(records: &[SessionRecord]) -> Option<String> {
 pub async fn spawn(state: &Arc<DaemonState>, cancel: CancellationToken) {
     let mgr = state.session_manager().await;
     let desired = auto_resume::desired_path(&FrameworkPaths::default());
-    let driver = AutoResumeLoop::new(mgr, SupervisorConfig::from_env(), desired);
+    // #10362: the notice also goes to the bus producer attached at start.
+    let publisher = state.action_events().publisher().cloned();
+    let driver =
+        AutoResumeLoop::new(mgr, SupervisorConfig::from_env(), desired).with_publisher(publisher);
     tokio::spawn(driver.run_until(cancel));
 }
 

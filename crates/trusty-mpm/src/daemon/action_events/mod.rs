@@ -227,6 +227,17 @@ impl ActionPublisher {
         self.received.lock().note(record);
     }
 
+    /// Buffer one already-built `event`; never does I/O (#10362).
+    ///
+    /// What: stamps `seq` under the projection lock, as `publish` does, so
+    /// `seq` follows buffer order, then hands it to the push client.
+    /// Test: `the_park_event_reaches_the_bus_once_across_ticks_10362`.
+    pub fn publish_event(&self, mut event: trusty_common::control_bus::HarnessEvent) {
+        let _order = self.threader.lock();
+        event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.client.send(event);
+    }
+
     /// Buffer a `received` event per cross-session message that reached a
     /// due transcript; returns how many (#9167 PR2).
     ///

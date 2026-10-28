@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use super::{AutoResumeLoop, park_notice};
+use trusty_common::control_bus::HarnessPayload;
+
+use super::{AutoResumeLoop, park_notice, resume_parked_event};
+use crate::daemon::action_events::ActionPublisher;
 use crate::session_manager::record::ManagedSessionId;
 use crate::session_manager::relaunch::RuntimeRelauncher;
 use crate::session_manager::resume_breaker::ResumeBreakerConfig;
@@ -306,4 +309,90 @@ async fn an_unreadable_desired_file_does_not_disable_resume() {
     let (mgr, _ids) = fleet(&dir, 1, Duration::from_secs(600), scripted(Ok(()))).await;
     let mut driver = AutoResumeLoop::new(mgr, cfg(true), &desired);
     assert_eq!(driver.tick().await.report.resumed.len(), 1);
+}
+
+// ── #10362: the parked notice as one `resume_parked` bus event ─────────────
+
+/// Flush `publisher` into a listener on `sock` and return the frames.
+async fn flushed(
+    publisher: &ActionPublisher,
+    sock: &std::path::Path,
+) -> Vec<trusty_common::control_bus::HarnessEvent> {
+    use tokio::io::AsyncReadExt;
+    let listener = trusty_common::uds::bind_hardened(sock).expect("bind");
+    let read = tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.expect("accept");
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).await.expect("read");
+        buf
+    });
+    let outcome = publisher.flush().await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let bytes = tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("nothing reached the bus within 10 s")
+        .expect("join");
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("frame"))
+        .collect()
+}
+
+/// Two ticks after the grace window put exactly one `resume_parked` hook
+/// event on the bus, carrying the parked sessions, the count and the notice.
+#[tokio::test]
+async fn the_park_event_reaches_the_bus_once_across_ticks_10362() {
+    let dir = TempDir::new().expect("tempdir");
+    let sock = dir.path().join("bus.sock");
+    let (mgr, ids) = fleet(&dir, 2, Duration::ZERO, scripted(Ok(()))).await;
+    set_cause(&mgr, &ids[0], StopCause::ResumeFlapping).await;
+    let publisher = Arc::new(ActionPublisher::new(&sock));
+    let mut driver = AutoResumeLoop::new(mgr.clone(), cfg(false), dir.path().join("absent"))
+        .with_publisher(Some(Arc::clone(&publisher)));
+
+    let notice = driver.tick().await.park_notice.expect("notice");
+    assert_eq!(driver.tick().await.park_notice, None);
+
+    let frames = flushed(&publisher, &sock).await;
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    let HarnessPayload::Hook { kind, data } = &frames[0].payload else {
+        panic!("{:?}", frames[0].payload);
+    };
+    assert_eq!(kind, "resume_parked");
+    assert_eq!(data["count"], 1);
+    assert_eq!(data["notice"], notice.as_str());
+    let record = mgr.get(&ids[0]).await.expect("record");
+    let session = &data["sessions"][0];
+    assert_eq!(session["id"], ids[0].to_string());
+    assert_eq!(session["tmux_name"], record.tmux_name.as_str());
+    assert_eq!(
+        session["reason"],
+        record.auto_resume_park_reason().expect("parked")
+    );
+}
+
+/// An unparked fleet puts nothing on the bus, and the pure builder agrees.
+#[tokio::test]
+async fn no_park_event_for_an_unparked_fleet_10362() {
+    let dir = TempDir::new().expect("tempdir");
+    let (mgr, _ids) = fleet(&dir, 1, Duration::ZERO, scripted(Ok(()))).await;
+    let publisher = Arc::new(ActionPublisher::new(dir.path().join("bus.sock")));
+    let mut driver = AutoResumeLoop::new(mgr.clone(), cfg(false), dir.path().join("absent"))
+        .with_publisher(Some(Arc::clone(&publisher)));
+    driver.tick().await;
+    driver.tick().await;
+    assert_eq!(publisher.buffered_len(), 0);
+    assert!(resume_parked_event(&mgr.list().await, "n").is_none());
+}
+
+/// Fail-open check: with no publisher the notice still fires once and the
+/// loop keeps ticking; the missed emit is logged at warn.
+#[tokio::test]
+async fn a_missing_publisher_does_not_break_the_loop_10362() {
+    let dir = TempDir::new().expect("tempdir");
+    let (mgr, ids) = fleet(&dir, 1, Duration::ZERO, scripted(Ok(()))).await;
+    set_cause(&mgr, &ids[0], StopCause::ResumeFlapping).await;
+    let mut driver = AutoResumeLoop::new(mgr, cfg(false), dir.path().join("absent"));
+    assert!(driver.tick().await.park_notice.is_some());
+    assert_eq!(driver.tick().await.park_notice, None);
 }
