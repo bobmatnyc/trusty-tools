@@ -19,7 +19,7 @@ use crate::integrations::github::{
 };
 use crate::{
     config::{ReviewConfig, constants::LOCAL_OWNER},
-    models::{InlineCommentOut, ReviewResult, Verdict},
+    models::{InlineCommentOut, ReviewResult, ReviewStatus, Verdict},
     pipeline::{
         diff::DiffSource,
         grade::derive_verdict_with_grade,
@@ -470,17 +470,42 @@ pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) 
         .collect();
 }
 
+/// Cap a Degraded run's APPROVE at APPROVE_WITH_RESERVATIONS.
+///
+/// Why: a Degraded review is non-authoritative, so it must never emit a clean
+/// APPROVE (#10226 cond2, owner ruling D06). The status, grade and banner stay,
+/// because the code-intelligence consumer reads `degraded` and the grade.
+/// What: on `status == Degraded` and `verdict == Approve`, sets the verdict to
+/// `ApproveWithReservations` and mirrors it into any JSON in `review_body`.
+/// Every other verdict, and every non-Degraded run, is left unchanged.
+/// Test: `cap_degraded_approve_only_moves_a_degraded_approve`,
+/// `run_review_degraded_approve_is_capped_at_approve_with_reservations`,
+/// `run_review_mapreduce_degraded_approve_is_capped_at_approve_with_reservations`.
+pub(super) fn cap_degraded_approve(result: &mut ReviewResult) {
+    if result.status != ReviewStatus::Degraded || result.verdict != Verdict::Approve {
+        return;
+    }
+    result.verdict = Verdict::ApproveWithReservations;
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_verdict(
+        &result.review_body,
+        &result.verdict,
+    );
+}
+
 /// Apply post-or-log finalisation (Phase 1, #582) for a completed review.
 ///
 /// Why: single exit path so live/dry policy is applied exactly once.
-/// What: builds `PostContext` from result fields, delegates to `finalize_review`.
+/// What: caps a Degraded APPROVE, builds `PostContext` from result fields,
+/// and delegates to `finalize_review`.
 /// Test: `post::tests` cover branch selection; runner tests assert dry-run.
 pub(super) async fn finalize_run(
-    result: ReviewResult,
+    mut result: ReviewResult,
     config: &ReviewConfig,
     input: &ReviewInput,
     dedup: Option<&Arc<DedupStore>>,
 ) -> ReviewResult {
+    // #10226: cond2 owner ruling D06 — both review paths reach this one call.
+    cap_degraded_approve(&mut result);
     // Clone the dedup-key fields up front so `result` can be moved into
     // `finalize_review` while `PostContext` borrows the owned copies.
     let owner = result.owner.clone();

@@ -820,3 +820,75 @@ async fn missing_search_socket_skips_or_degrades_naming_the_path() {
         other => panic!("opted-out search must degrade: {other:?}"),
     }
 }
+
+/// #10226 regression: `--source-root` diff-only keeps an explicit
+/// `require_search = true` on both the daemon-unreachable and the no-index
+/// branches, so the CLI run ends `Skip` instead of a context-free verdict.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_diff_only_keeps_explicit_require_search_and_skips() {
+    use crate::config::SourceRootOutcome;
+    use crate::integrations::{NullAnalyzeClient, NullSearchClient};
+
+    /// `list_indexes` fails, driving the daemon-unreachable branch.
+    struct UnreachableSearch;
+
+    #[async_trait]
+    impl SearchClient for UnreachableSearch {
+        async fn index_status(
+            &self,
+            index_id: &str,
+        ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError>
+        {
+            Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+        }
+        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+            Err(SearchClientError::Unavailable("down".to_string()))
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Err(SearchClientError::Unavailable("daemon down".to_string()))
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    let unreachable: Arc<dyn SearchClient> = Arc::new(UnreachableSearch);
+    // A reachable daemon with no registered index drives the no-index branch.
+    let no_index: Arc<dyn SearchClient> = Arc::new(StubSearch { health: Some(true) });
+    for (branch, client) in [("unreachable", unreachable), ("no-index", no_index)] {
+        let mut cfg = config();
+        cfg.context.require_search = Some(true);
+
+        let outcome = cfg
+            .resolve_source_root(client.as_ref(), std::path::Path::new("/tmp/whatever-10226"))
+            .await;
+        let notice = match outcome {
+            SourceRootOutcome::DiffOnly(notice) => notice,
+            other => panic!("{branch}: expected DiffOnly, got {other:?}"),
+        };
+        assert_eq!(
+            cfg.context.require_search,
+            Some(true),
+            "{branch}: an explicit require_search=true must survive --source-root diff-only"
+        );
+
+        // The CLI swaps in null clients on DiffOnly (`apply_source_root_fallback`).
+        let d = ReviewDeps {
+            llm: Arc::new(StubLlm),
+            verifier: None,
+            search: Arc::new(NullSearchClient::new(notice.clone())),
+            analyze: Some(Arc::new(NullAnalyzeClient::new(notice))),
+            dedup: None,
+        };
+        match preflight_context(&cfg, &d, InvocationSurface::Interactive).await {
+            GateOutcome::Skip(_) => {}
+            other => panic!("{branch}: required search must skip, got {other:?}"),
+        }
+    }
+}

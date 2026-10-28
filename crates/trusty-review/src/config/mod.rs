@@ -619,6 +619,22 @@ impl ReviewConfig {
         }
     }
 
+    /// Relax the required-context flags for a `--source-root` diff-only run.
+    ///
+    /// Why: diff-only should degrade rather than skip, but never against an
+    /// operator's explicit `require_search = true` (env or TOML).
+    /// What: marks the index explicit, clears `require_analyze`, and sets
+    /// `require_search = Some(false)` unless it is already `Some(true)`.
+    /// Test: `source_root_diff_only_keeps_explicit_require_search_and_skips`.
+    fn relax_required_context_for_diff_only(&mut self) {
+        self.search_index_explicit = true;
+        self.context.require_analyze = false;
+        // #10226: an explicit require_search=true survives, so the gate skips.
+        if self.context.require_search != Some(true) {
+            self.context.require_search = Some(false);
+        }
+    }
+
     /// Resolve the trusty-search index for an explicit `--source-root <dir>`
     /// (issue #2994).
     ///
@@ -640,10 +656,11 @@ impl ReviewConfig {
     /// to the matched id and `search_index_explicit = true` (so `resolve_index`
     /// becomes a no-op and this choice is never clobbered by CWD auto-derive),
     /// returning `SourceRootOutcome::Matched`. On no match, or when the daemon
-    /// is unreachable: sets `search_index_explicit = true` AND clears BOTH
-    /// `context.require_search = Some(false)` and `context.require_analyze = false`
+    /// is unreachable: sets `search_index_explicit = true` AND clears
+    /// `context.require_analyze` and an unset/false `context.require_search`
     /// so the required-context gate (`pipeline::context_gate::preflight_context`)
-    /// degrades instead of skipping either dependency, and returns
+    /// degrades instead of skipping; an explicit `require_search = Some(true)`
+    /// is kept, so that run ends `Skip` (#10226). Returns
     /// `SourceRootOutcome::DiffOnly` with a notice the caller must surface
     /// (stderr/log) and use to swap BOTH `deps.search` for a `NullSearchClient`
     /// AND `deps.analyze` for a `NullAnalyzeClient` — relaxing the `require_*`
@@ -653,7 +670,8 @@ impl ReviewConfig {
     /// `source_root_no_match_forces_diff_only`,
     /// `source_root_daemon_unreachable_forces_diff_only`,
     /// `source_root_no_match_also_disables_require_analyze`,
-    /// `source_root_daemon_unreachable_also_disables_require_analyze`.
+    /// `source_root_daemon_unreachable_also_disables_require_analyze`,
+    /// `source_root_diff_only_keeps_explicit_require_search_and_skips`.
     pub async fn resolve_source_root(
         &mut self,
         client: &dyn crate::integrations::search_client::SearchClient,
@@ -663,9 +681,7 @@ impl ReviewConfig {
         let indexes = match client.list_indexes().await {
             Ok(indexes) => indexes,
             Err(e) => {
-                self.search_index_explicit = true;
-                self.context.require_search = Some(false);
-                self.context.require_analyze = false;
+                self.relax_required_context_for_diff_only();
                 let notice = format!(
                     "--source-root {}: trusty-search unreachable while resolving an index \
                      ({e}) — proceeding in diff-only mode (no code-context retrieval)",
@@ -688,9 +704,7 @@ impl ReviewConfig {
                 SourceRootOutcome::Matched(id)
             }
             SourceRootResolution::NoIndex => {
-                self.search_index_explicit = true;
-                self.context.require_search = Some(false);
-                self.context.require_analyze = false;
+                self.relax_required_context_for_diff_only();
                 let notice = format!(
                     "--source-root {} has no registered trusty-search index — proceeding in \
                      diff-only mode (no code-context retrieval). Run `trusty-search index {}` \
