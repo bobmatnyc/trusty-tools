@@ -1,7 +1,8 @@
 <script>
   /*
    * Why: #9067, DOC-74 §15.6 "Page (S4)" — scope picker, key list, set,
-   * delete and copy, each key with an "agents may use" toggle, default OFF.
+   * delete and copy, each key with a "denied to agents" toggle, default OFF:
+   * agents may use every in-scope key the operator has not denied (#10386).
    * What: one page over `lib/api.js`. The project comes only from the tm
    * registry picker; scopes are the project and owner scopes only; the key
    * list shows name, length and time, never a value. A set clears its value
@@ -173,6 +174,7 @@
     }
   }
 
+  // #10386: the toggle shows the deny; `allowed` is its inverse on the wire.
   async function toggle(row, allowed) {
     clearResults();
     const before = row.agents_may_use === true;
@@ -283,7 +285,7 @@
       {:else}
         <table data-testid="keys">
           <thead>
-            <tr><th>Name</th><th>Length</th><th>Updated</th><th>Agents may use</th><th></th></tr>
+            <tr><th>Name</th><th>Length</th><th>Updated</th><th>Denied to agents</th><th></th></tr>
           </thead>
           <tbody>
             {#each keys as row (row.name)}
@@ -294,10 +296,10 @@
                 <td>
                   <input
                     type="checkbox"
-                    aria-label={`Agents may use ${row.name}`}
+                    aria-label={`Deny agents ${row.name}`}
                     data-testid="agents-toggle"
-                    checked={row.agents_may_use === true}
-                    onchange={(e) => toggle(row, e.currentTarget.checked)}
+                    checked={row.agents_may_use !== true}
+                    onchange={(e) => toggle(row, !e.currentTarget.checked)}
                   />
                 </td>
                 <td>

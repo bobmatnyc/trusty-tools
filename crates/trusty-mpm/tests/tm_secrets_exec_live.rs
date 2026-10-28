@@ -9,7 +9,8 @@
 //! (`TRUSTY_SECRETS_EXTERNAL=1`, so tm spawns no server of its own). Each
 //! test first asserts that its own parent chain holds no Claude Code process
 //! ([`assert_detached`]): an agent ancestor would make the server refuse
-//! unflagged keys, and the run would prove nothing. Run them detached, e.g.
+//! `secrets.set`, `secrets.delete` and a deny removal (#10386), and the run
+//! would prove nothing. Run them detached, e.g.
 //! `setsid -f` or `systemd-run --user --scope` on Linux, or
 //! `launchctl asuser` on macOS.
 //! Test: this file IS the test module.
@@ -80,8 +81,8 @@ fn report(out: &std::process::Output) -> String {
 
 /// A real trusty-secrets server over `backend`, under a scratch `$HOME`.
 ///
-/// #9072: shared with `tm_secrets_resolve`, which seeds flagged keys under
-/// `index` and so needs no detached run.
+/// #9072: shared with `tm_secrets_resolve`, which seeds keys under `index`
+/// directly and so needs no detached run.
 pub(crate) struct Live {
     pub(crate) home: tempfile::TempDir,
     pub(crate) repo: PathBuf,
@@ -199,7 +200,7 @@ impl Live {
 }
 
 /// Why: #9621 end to end on a real server — the grant is registered for the
-/// stub, the command resolves an unflagged key with no agent above it, and
+/// stub, the command resolves a key with no agent above it, and
 /// after exit the grant is gone: a resolve with its token is refused.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: real process ancestry; run detached from any Claude Code tree"]
@@ -254,23 +255,22 @@ async fn live_exec_spawn_and_revoke() {
     }
 }
 
-/// Why: DOC-74 §15.8 on the real Keychain — a detached caller may turn the
-/// "agents may use" flag ON (the file backend refuses ON, so only the
-/// Keychain proves the write); under a `claude` parent the flagged key is
-/// injected and an unflagged key is refused. The flag is set back OFF and
-/// both keys removed before any assertion.
+/// Why: DOC-74 §15.8, #10386 on the real Keychain — a detached caller may
+/// write an agent deny item and remove it; under a `claude` parent the key
+/// with no deny is injected and the denied key is refused. The deny is
+/// removed and both keys deleted before any assertion.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: writes the login Keychain; run detached from any Claude Code tree"]
-async fn live_keychain_flag_on_write_proof() {
+async fn live_keychain_deny_write_proof() {
     assert_detached();
     let backend = trusty_secrets::store::open_backend(&BackendId::keychain()).expect("keychain");
     let repo_name = format!("exec-9621-{}", std::process::id());
     let live = Live::new(backend, &repo_name).await;
-    live.set("FLAGGED").await;
+    live.set("DENIED").await;
     live.set("PLAIN").await;
-    let flag = |allowed: bool| json!({"vault": live.vault, "key": "FLAGGED", "allowed": allowed});
-    let flag_on = live.call("secrets.set_agents_may_use", flag(true)).await;
+    let flag = |allowed: bool| json!({"vault": live.vault, "key": "DENIED", "allowed": allowed});
+    let deny_on = live.call("secrets.set_agents_may_use", flag(false)).await;
 
     // A copy of bash named `claude`: the server reads its path and name.
     let bin = live.home.path().join("bin");
@@ -286,10 +286,10 @@ async fn live_keychain_flag_on_write_proof() {
         .expect("codesign");
     assert!(signed.status.success(), "codesign: {}", report(&signed));
     let script = r#"printf %s "$A" | wc -c"#;
-    let flagged = live
+    let denied = live
         .exec(
             Some(&claude),
-            &["--env", "A=FLAGGED", "--", "sh", "-c", script],
+            &["--env", "A=DENIED", "--", "sh", "-c", script],
         )
         .await;
     let plain = live
@@ -299,26 +299,26 @@ async fn live_keychain_flag_on_write_proof() {
         )
         .await;
 
-    let flag_off = live.call("secrets.set_agents_may_use", flag(false)).await;
-    for key in ["FLAGGED", "PLAIN"] {
+    let deny_off = live.call("secrets.set_agents_may_use", flag(true)).await;
+    for key in ["DENIED", "PLAIN"] {
         let _ = live
             .call("secrets.delete", json!({"vault": live.vault, "key": key}))
             .await;
     }
 
     assert!(
-        flag_on.is_ok(),
-        "a detached caller could not turn the flag on"
+        deny_on.is_ok(),
+        "a detached caller could not write the deny"
     );
-    assert!(flag_off.is_ok(), "the flag was not set back OFF");
+    assert!(deny_off.is_ok(), "the deny was not removed");
     // #9621: a run that dies on a signal prints nothing; name its status.
-    assert!(flagged.status.success(), "flagged: {}", report(&flagged));
+    assert!(plain.status.success(), "plain: {}", report(&plain));
     assert_eq!(
-        String::from_utf8_lossy(&flagged.stdout).trim(),
+        String::from_utf8_lossy(&plain.stdout).trim(),
         VALUE.len().to_string()
     );
-    let refused = String::from_utf8_lossy(&plain.stderr);
-    assert_eq!(plain.status.code(), Some(1), "plain: {}", report(&plain));
+    let refused = String::from_utf8_lossy(&denied.stderr);
+    assert_eq!(denied.status.code(), Some(1), "denied: {}", report(&denied));
     assert!(refused.contains("nothing ran"), "{refused}");
     let records = live.audit();
     assert!(

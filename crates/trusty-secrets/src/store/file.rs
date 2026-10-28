@@ -17,7 +17,9 @@
 //! between check and read is caught. A refusal is an error, never a warning
 //! followed by a read; it names the path and never the value. A write
 //! fsyncs the directory after its rename, and set, delete and list remove
-//! temp files whose writer process is gone (#9326). Unix only.
+//! temp files whose writer process is gone (#9326). #10386: the per-key
+//! agent deny and the migration marker live beside the vaults, under
+//! `<root>/.agent-controls/` (`file_controls`). Unix only.
 //! Test: `file_tests.rs` beside this file.
 
 use std::fs::{self, File, OpenOptions};
@@ -28,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Capabilities, SecretBackend, platform};
+use super::{Capabilities, ControlItem, SecretBackend, platform};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// Value directory under `$HOME`.
@@ -192,6 +194,30 @@ impl SecretBackend for FileBackend {
         }
         names.sort();
         Ok(names)
+    }
+
+    // #10386 Q5: the deny and the migration marker are 0600 files.
+    fn holds_agent_controls(&self) -> bool {
+        true
+    }
+
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        super::file_controls::read(&self.root, item, vault, key)
+    }
+
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
+    ) -> Result<(), SecretsError> {
+        super::file_controls::write(&self.root, item, vault, key, present)
     }
 }
 

@@ -180,7 +180,8 @@ impl From<BridgeSource> for AuditSource {
 /// Code process, on `grant`, `resolve` and flag-set records once judged.
 /// #9066: on a console bridge call, every record also carries `source`, and
 /// `agent_parent` is the console's assertion; a direct call's record omits
-/// `source`, so its line is unchanged. Unknown fields are ignored and missing optional fields default, so old
+/// `source`, so its line is unchanged. #10386: `default_policy` marks an
+/// agent's grant or resolve allowed by the absence of a deny. Unknown fields are ignored and missing optional fields default, so old
 /// and new readers and writers interoperate.
 /// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`,
 /// `audit_flag_record_round_trips_and_an_older_record_decodes`.
@@ -213,7 +214,7 @@ pub struct AuditRecord {
     /// The calling process: the socket peer's pid (#9070).
     #[serde(default)]
     pub caller_pid: Option<u32>,
-    /// The "agents may use" value a flag-set call asked for (#9070).
+    /// The `allowed` value a deny-change call asked for (#9070, #10386).
     #[serde(default)]
     pub agents_allowed: Option<bool>,
     /// Whether the caller had a Claude Code ancestor, once judged (#9070).
@@ -223,6 +224,11 @@ pub struct AuditRecord {
     /// call, and then not written (#9066).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<AuditSource>,
+    /// `true` on a `grant` or `resolve` allow record for a caller under
+    /// Claude Code: the key was allowed because no deny names it (#10386).
+    /// `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_policy: Option<bool>,
 }
 
 impl AuditRecord {
@@ -246,6 +252,7 @@ impl AuditRecord {
             agents_allowed: None,
             agent_parent: None,
             source: None,
+            default_policy: None,
         }
     }
 

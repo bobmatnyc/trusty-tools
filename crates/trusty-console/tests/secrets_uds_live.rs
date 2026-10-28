@@ -4,7 +4,8 @@
 //! Why: the stub-socket tests prove what the console sends; only a real
 //! server proves what it then decides and records. The server believes a
 //! bridge assertion only from a peer whose executable is `trusty-console`
-//! with no Claude Code above it, and judges `set_agents_may_use` on the
+//! with no Claude Code above it, and judges `set`, `delete` and a deny
+//! removal (`set_agents_may_use` with `allowed: true`, #10386) on the
 //! console's verdict.
 //! What: [`live_bridge_is_judged_by_the_real_server`] re-runs this test
 //! binary in roles chosen by [`ROLE`]:
@@ -350,14 +351,20 @@ fn live_bridge_is_judged_by_the_real_server() {
         let agent = live.client("claude", addr);
         eprintln!("audit {tag}: notclaude {human} claude {agent}");
         assert_eq!(human["set"], 200, "{tag}: {human}");
-        // The file backend holds no ON flag (`unsupported`, 422), so the
-        // non-agent's call fails after the agent check an agent's fails (403).
-        assert_eq!(human["flag_on"], 422, "{tag}: not refused as an agent");
+        // #10386 Q5: the file backend holds the deny, so a person may both
+        // remove and write it.
+        assert_eq!(human["flag_on"], 200, "{tag}: not refused as an agent");
+        assert_eq!(human["flag_off"], 200, "{tag}: {human}");
+        // #10386 Q2: `set` and `delete` are operator-only.
+        assert_eq!(agent["set"], 403, "{tag}: an agent may not set");
+        assert_eq!(agent["delete"], 403, "{tag}: an agent may not delete");
         assert_eq!(
             agent["flag_on"], 403,
-            "{tag}: an agent may not allow agents"
+            "{tag}: an agent may not remove a deny"
         );
-        assert_eq!(agent["flag_off"], 200, "{tag}: an agent may withdraw it");
+        // Writing a deny passes the agent check; the person's client deleted
+        // the key first, so it then fails on the missing row (404).
+        assert_eq!(agent["flag_off"], 404, "{tag}: an agent may write a deny");
         let records = records(&audit_log);
         if audit {
             let methods: std::collections::HashSet<&str> = records

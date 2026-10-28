@@ -162,6 +162,29 @@ Vetted against `docs/adr/INDEX.md` on 2026-10-24:
 - **DOC-74 §10.2 reference-only MCP rule:** Consistent. The new tools return
   verdicts, never values.
 
+## Amendment 1 — 2026-10-28: the agent gate is a per-key deny (#10386)
+
+**Amended, not superseded.** D1–D5 and D7–D9 are unchanged. D6 and the
+Related Decisions verdict on DOC-74 §15.8 were written when keys were closed
+to agents unless flagged "agents may use". Owner ruling (Bob D69/Af9, D6a,
+2026-10-28): *"Security model is exactly like .env.local. If it's in the
+scope (user/owner/project), then it's usable by the agent."*
+
+- **D6 now reads:** an agent caller may probe any key in its scope unless the
+  operator denied that key to agents; a human caller is not gated. MCP tool
+  calls still declare `agent_caller: true`, which applies the deny.
+- The per-key deny is an operator opt-out held by the backend (Keychain item,
+  or a 0600 file on the file backend). An agent may write a deny; only a
+  person may remove one. 1Password and Keeper cannot hold a deny, so a deny
+  there is refused (`unsupported`).
+- Existing vaults migrate once; the default (`DEFAULT_AGENT_DENY_MIGRATION`)
+  is open-all.
+- The `secrets.test` method this ADR specifies was not on `main` when the
+  deny shipped; when it lands, it gates on the deny through the same check
+  `secrets.grant` uses.
+
+Spec: DOC-74 §15.8 and §15.11.5 as amended 2026-10-28.
+
 ## References
 
 - DOC-74 §15.11 (`docs/specs/DOC-74-secrets-integration.md`)

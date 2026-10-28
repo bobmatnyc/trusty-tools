@@ -27,7 +27,7 @@ export const KIND_TEXT = {
   config_invalid: 'The secrets configuration is not valid.',
   home_unavailable: 'The secrets server cannot find its home directory.',
   same_backend: 'Copy needs two different backends.',
-  agent_use_refused: 'The secrets server refused to let agents use this key for this caller.',
+  agent_use_refused: 'This key is denied to agents, or the operation is operator-only.',
   invalid_env_entry: 'An environment entry is not valid.',
   env_resolution_failed: 'An environment entry could not be resolved.',
   dotenv_syntax: 'A .env file has a syntax error.',

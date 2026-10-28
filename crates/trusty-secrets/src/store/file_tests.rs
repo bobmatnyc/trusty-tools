@@ -422,3 +422,73 @@ fn file_delete_removes_an_orphaned_temp_file() {
     assert_refused(b.delete(&vault(), &key("B")).unwrap_err(), &wide);
     assert!(wide.exists(), "a refused orphan is not unlinked");
 }
+
+/// Why: #10386 Q5 (subsumes #10090) — on a host with no Keychain the file
+/// backend holds the per-key agent deny, so an operator can deny a key and
+/// the deny outlives the process. The deny is a 0600 file in 0700
+/// directories outside every vault directory, and `list_names` never shows
+/// it. Red when the backend drops the deny or refuses it.
+/// Test: itself.
+#[test]
+fn file_backend_persists_the_agent_deny() {
+    let fx = fx();
+    let index = NamesIndex::at(fx.tmp.path().join("index"));
+    let store = SecretStore::new(Arc::new(fx.backend.clone()), index.clone());
+    store
+        .set(&vault(), &key("API_KEY"), &SecretValue::new(VALUE))
+        .unwrap();
+    assert!(store.agents_may_use(&vault(), &key("API_KEY")).unwrap());
+
+    store
+        .set_agents_may_use(&vault(), &key("API_KEY"), false)
+        .unwrap();
+    let reopened = SecretStore::new(Arc::new(FileBackend::at(fx.root())), index);
+    assert!(!reopened.agents_may_use(&vault(), &key("API_KEY")).unwrap());
+    let dir = fx.root().join(".agent-controls").join(vault().file_stem());
+    let deny = dir.join("deny").join(file_name(&key("API_KEY")).unwrap());
+    assert_eq!(mode(&deny), 0o600);
+    assert_eq!(mode(&dir.join("deny")), 0o700);
+    assert_eq!(mode(&dir.join("migrated")), 0o600);
+    assert_eq!(fx.backend.list_names(&vault()).unwrap(), [key("API_KEY")]);
+
+    reopened
+        .set_agents_may_use(&vault(), &key("API_KEY"), true)
+        .unwrap();
+    assert!(reopened.agents_may_use(&vault(), &key("API_KEY")).unwrap());
+    assert!(!deny.exists());
+    // The file backend never held the pre-#10386 opt-in flag (#10090).
+    assert!(matches!(
+        fx.backend.set_control_item(
+            ControlItem::LegacyAgentsFlag,
+            &vault(),
+            Some(&key("API_KEY")),
+            true
+        ),
+        Err(SecretsError::Unsupported { .. })
+    ));
+}
+
+/// Why: Fail-Open Check — a deny path that is a symlink is refused like a
+/// value file, never read as present or absent.
+/// Test: itself.
+#[test]
+fn file_backend_control_refuses_a_symlinked_deny() {
+    let fx = fx();
+    fx.backend
+        .set_control_item(ControlItem::AgentDeny, &vault(), Some(&key("OTHER")), true)
+        .unwrap();
+    let dir = fx
+        .root()
+        .join(".agent-controls")
+        .join(vault().file_stem())
+        .join("deny");
+    let target = fx.tmp.path().join("elsewhere");
+    std::fs::write(&target, "").unwrap();
+    let link = dir.join(file_name(&key("API_KEY")).unwrap());
+    symlink(&target, &link).unwrap();
+    let err = fx
+        .backend
+        .control_item(ControlItem::AgentDeny, &vault(), Some(&key("API_KEY")))
+        .unwrap_err();
+    assert_refused(err, &link);
+}

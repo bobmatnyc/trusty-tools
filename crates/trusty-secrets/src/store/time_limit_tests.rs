@@ -66,14 +66,24 @@ impl SecretBackend for Hangs {
         self.hang()
     }
 
-    fn agents_may_use(&self, _: &VaultName, _: &SecretKey) -> Result<bool, SecretsError> {
+    fn holds_agent_controls(&self) -> bool {
+        true
+    }
+
+    fn control_item(
+        &self,
+        _: ControlItem,
+        _: &VaultName,
+        _: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
         self.hang()
     }
 
-    fn set_agents_may_use(
+    fn set_control_item(
         &self,
+        _: ControlItem,
         _: &VaultName,
-        _: &SecretKey,
+        _: Option<&SecretKey>,
         _: bool,
     ) -> Result<(), SecretsError> {
         self.hang()
@@ -104,12 +114,14 @@ const OPS: [(&str, Op); 7] = [
     }),
     ("delete", |b, v, k| b.delete(v, k).map(drop)),
     ("list_names", |b, v, _| b.list_names(v).map(drop)),
-    ("agents_may_use", |b, v, k| b.agents_may_use(v, k).map(drop)),
-    ("set_agents_may_use", |b, v, k| {
-        b.set_agents_may_use(v, k, true)
+    ("control_item", |b, v, k| {
+        b.control_item(ControlItem::AgentDeny, v, Some(k)).map(drop)
     }),
-    ("set_agents_may_use", |b, v, k| {
-        b.set_agents_may_use(v, k, false)
+    ("set_control_item", |b, v, k| {
+        b.set_control_item(ControlItem::AgentDeny, v, Some(k), true)
+    }),
+    ("set_control_item", |b, v, k| {
+        b.set_control_item(ControlItem::AgentDeny, v, Some(k), false)
     }),
 ];
 
@@ -156,8 +168,8 @@ fn time_limited_call_that_never_returns_times_out_on_every_operation() {
     assert_eq!(hangs.calls.load(Ordering::SeqCst), OPS.len());
 }
 
-/// Why: #7524 P2-L7 — `list` reads each key's flag item (#9070) and `set`
-/// writes one, so both reach the hang through the store.
+/// Why: #7524 P2-L7 — `list` and `set` read the vault's deny-migration
+/// marker first (#10386), so both reach the hang through the store.
 /// What: a store over the never-returning backend fails `list` and `set`
 /// with `Timeout`, and the timed-out `set` leaves no index row.
 /// Test: itself.
@@ -183,18 +195,18 @@ fn time_limited_store_list_and_set_time_out_and_set_leaves_no_row() {
         matches!(
             listed,
             Err(SecretsError::Timeout {
-                operation: "agents_may_use",
+                operation: "control_item",
                 ..
             })
         ),
         "{listed:?}"
     );
-    // A new key's stale flag item is cleared first, so that call times out.
+    // The marker read comes first, so that call times out (or fails fast).
     assert!(
         matches!(
             set,
             Err(SecretsError::Timeout {
-                operation: "set_agents_may_use",
+                operation: "control_item",
                 ..
             })
         ),
@@ -222,8 +234,15 @@ fn time_limited_call_passes_results_and_errors_through() {
         limited.get(&vault, &key).unwrap().unwrap().expose(),
         "sk-fake-7524"
     );
-    limited.set_agents_may_use(&vault, &key, true).unwrap();
-    assert!(limited.agents_may_use(&vault, &key).unwrap());
+    assert!(limited.holds_agent_controls());
+    limited
+        .set_control_item(ControlItem::AgentDeny, &vault, Some(&key), true)
+        .unwrap();
+    assert!(
+        limited
+            .control_item(ControlItem::AgentDeny, &vault, Some(&key))
+            .unwrap()
+    );
     assert!(limited.delete(&vault, &key).unwrap());
     assert!(!limited.delete(&vault, &key).unwrap());
     let err = limited.list_names(&vault).unwrap_err();
@@ -321,19 +340,29 @@ impl SecretBackend for FirstCallBlocks {
         self.store.delete(v, k)
     }
 
-    fn agents_may_use(&self, v: &VaultName, k: &SecretKey) -> Result<bool, SecretsError> {
-        self.enter();
-        self.store.agents_may_use(v, k)
+    fn holds_agent_controls(&self) -> bool {
+        true
     }
 
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         v: &VaultName,
-        k: &SecretKey,
+        k: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.enter();
+        self.store.control_item(item, v, k)
+    }
+
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        v: &VaultName,
+        k: Option<&SecretKey>,
         on: bool,
     ) -> Result<(), SecretsError> {
         self.enter();
-        self.store.set_agents_may_use(v, k, on)
+        self.store.set_control_item(item, v, k, on)
     }
 }
 
@@ -386,7 +415,11 @@ fn time_limited_item_with_an_abandoned_call_fails_fast_until_that_call_ends() {
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "it was started");
 
         limited.set(&vault, &other, &value).unwrap();
-        assert!(!limited.agents_may_use(&vault, &key).unwrap());
+        assert!(
+            !limited
+                .control_item(ControlItem::AgentDeny, &vault, Some(&key))
+                .unwrap()
+        );
 
         backend.release();
         let until = Instant::now() + MARGIN;

@@ -282,7 +282,7 @@ and the #9030 backend routes (owner ruling). Those are now merged.
 | S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client | not started |
 | S3a | Console bridge and hardening | not started |
 | S3b | Tailnet identity gate; also fixes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) | not started |
-| S4 | Console `/tools/secrets` UI with the per-key "agents may use" flag | not started |
+| S4 | Console `/tools/secrets` UI with the per-key agent toggle ("Denied to agents", an opt-out since #10386) | not started |
 | S5 | Agent and skill text | not started |
 | S6+ | Integrations, one per PR: 1Password, Keeper, Vercel push, GitHub Actions push, Doppler, AWS Secrets Manager | not started |
 | S7 | `tm secrets exec --dotenv` | not started |

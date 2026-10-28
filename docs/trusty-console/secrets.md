@@ -82,13 +82,15 @@ The console never shows a stored value.
 
 The service's own index stores no plaintext.
 
-### The "agents may use" flag
+### Denied to agents
 
-Each key has an "agents may use" flag. It is off by default.
+An agent may use every key in your scope, as with `.env.local` (#10386). Each
+key has a "Denied to agents" toggle. It is off by default.
 
-With the flag off, the service never puts the key into a process whose parent
+With the toggle on, the service never puts the key into a process whose parent
 chain includes Claude Code. Your own terminal can still use the key. An agent
-session cannot. Tick the flag in the console only for keys an agent needs.
+session cannot. Turn it on for keys an agent must not reach. Only you can turn
+it off again: the service refuses that change to an agent.
 
 ## Adding a secret
 

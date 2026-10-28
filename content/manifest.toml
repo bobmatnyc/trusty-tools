@@ -148,7 +148,7 @@ version = "0.1.1"
 
 [[member]]
 path = "agents/secrets-manager.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "agents/security.md"
@@ -620,7 +620,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-secrets.md"
-version = "1.4.0"
+version = "1.5.0"
 
 [[member]]
 path = "skills/tm-session-management.md"

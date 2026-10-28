@@ -19,10 +19,14 @@ fn flag_params(fx: &Fixture, name: &str, allowed: bool) -> Value {
     json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": name, "allowed": allowed})
 }
 
-/// The flag as the fixture's project backend holds it.
-fn flagged(fx: &Fixture, name: &str) -> bool {
+/// Whether the fixture's project backend holds `name`'s deny (#10386).
+fn denied(fx: &Fixture, name: &str) -> bool {
     fx.keychain
-        .agents_may_use(&vault(PROJECT_VAULT), &key(name))
+        .control_item(
+            ControlItem::AgentDeny,
+            &vault(PROJECT_VAULT),
+            Some(&key(name)),
+        )
         .unwrap()
 }
 
@@ -89,15 +93,28 @@ impl SecretBackend for ProbeBackend {
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         self.inner.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.inner.agents_may_use(vault, key)
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
     }
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.inner.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
         allowed: bool,
     ) -> Result<(), SecretsError> {
+        // #10386: the vault's migration marker is not the deny under test.
+        if item != ControlItem::AgentDeny {
+            return self.inner.set_control_item(item, vault, key, allowed);
+        }
         let text = std::fs::read_to_string(&self.audit_log).unwrap_or_default();
         let count = text
             .lines()
@@ -110,12 +127,12 @@ impl SecretBackend for ProbeBackend {
                 operation: "agents_may_use",
             });
         }
-        self.inner.set_agents_may_use(vault, key, allowed)
+        self.inner.set_control_item(item, vault, key, allowed)
     }
 }
 
-/// Why: DOC-74 §15.8 — a caller under Claude Code cannot flag a key for
-/// itself. The refusal comes before the backend call, so the flag stays OFF,
+/// Why: DOC-74 §15.8, #10386 — a caller under Claude Code cannot lift an
+/// operator's deny. The refusal comes before the backend call, so the deny stays,
 /// and it leaves one deny record naming the key, the peer and the verdict.
 /// Red when the ancestry check is missing or runs after the backend call.
 /// Test: itself.
@@ -138,7 +155,7 @@ async fn set_flag_on_by_agent_ancestor_is_refused_and_audited() {
         ErrorKind::AgentUseRefused
     );
     assert!(refused.result.is_none());
-    assert!(!flagged(&fx, "API_KEY"), "the flag stayed OFF");
+    assert!(denied(&fx, "API_KEY"), "the deny stayed");
     let all = records(&fx);
     assert_eq!(all.len(), 1, "{all:?}");
     assert_eq!(
@@ -157,8 +174,8 @@ async fn set_flag_on_by_agent_ancestor_is_refused_and_audited() {
     );
 }
 
-/// Why: turning the flag OFF narrows access, so an agent caller may do it;
-/// one allow record. Red on a blanket refusal of agent callers.
+/// Why: #10386 — setting a deny narrows access, so an agent caller may do
+/// it; one allow record. Red on a blanket refusal of agent callers.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_flag_off_by_agent_ancestor_is_allowed() {
@@ -175,7 +192,7 @@ async fn set_flag_off_by_agent_ancestor_is_allowed() {
     server.stop().await;
 
     assert_eq!(answer["allowed"], false);
-    assert!(!flagged(&fx, "OPEN_KEY"), "the flag went OFF");
+    assert!(denied(&fx, "OPEN_KEY"), "the deny was written");
     let flags = flag_records(&fx);
     let shapes: Vec<_> = flags.iter().map(shape).collect();
     assert_eq!(
@@ -215,7 +232,7 @@ async fn set_flag_allow_record_is_written_before_the_backend_call() {
     server.stop().await;
 
     assert_eq!(answer["allowed"], true);
-    assert!(flagged(&fx, "API_KEY"), "the flag went ON");
+    assert!(!denied(&fx, "API_KEY"), "the deny was removed");
     assert_eq!(
         *probe.seen.lock().unwrap(),
         Some(1),
@@ -255,7 +272,7 @@ async fn set_flag_with_unwritable_audit_changes_nothing() {
         fixed_error(&response, method::SET_AGENTS_MAY_USE),
         ErrorKind::AuditUnavailable
     );
-    assert!(!flagged(&fx, "API_KEY"), "the flag stayed OFF");
+    assert!(denied(&fx, "API_KEY"), "the deny stayed");
 }
 
 /// Why: Architect Q1 — a backend call that fails after the allow record
@@ -397,7 +414,8 @@ fn gate_finish_asserts_an_allowed_write_ahead_call_wrote_ahead() {
 }
 
 /// Why: fail-closed — an ancestry that cannot be read never counts as "no
-/// agent". ON is refused with no change; OFF needs no ancestry and passes.
+/// agent". Removing a deny is refused with no change; setting one needs no
+/// ancestry and passes.
 /// Red when a read error is treated as `false`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -427,7 +445,7 @@ async fn set_flag_unreadable_ancestry_refuses_on() {
         fixed_error(&on, method::SET_AGENTS_MAY_USE),
         ErrorKind::GrantRefused
     );
-    assert!(!flagged(&fx, "API_KEY"), "the flag stayed OFF");
+    assert!(denied(&fx, "API_KEY"), "the deny stayed");
     assert_eq!(ok(off)["allowed"], false);
     // #9621: the refused ON leaves its single deny, then OFF its allow.
     let shapes: Vec<_> = flag_records(&fx)
@@ -464,7 +482,7 @@ fn set_flag_with_no_peer_pid_is_refused() {
         );
         assert_eq!(refused, Err(ErrorKind::GrantRefused));
     }
-    assert!(!flagged(&fx, "API_KEY"));
+    assert!(denied(&fx, "API_KEY"));
     let all = flag_records(&fx);
     assert_eq!(all.len(), 2, "{all:?}");
     assert!(all.iter().all(|r| r.decision == AuditDecision::Deny));
@@ -493,11 +511,11 @@ async fn set_flag_out_of_scope_vault_is_refused() {
     assert_eq!(all[0].decision, AuditDecision::Deny);
 }
 
-/// Why: end to end with slice 2 — a key a non-agent flagged on the socket
-/// can then be granted by a registrar under Claude Code.
+/// Why: end to end with slice 2 — a key whose deny a non-agent removed on
+/// the socket can then be granted by a registrar under Claude Code.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn set_flag_on_then_grant_by_agent_ancestor_succeeds() {
+async fn remove_deny_then_grant_by_agent_ancestor_succeeds() {
     let fx = fixture();
     seed(&fx, "API_KEY", OPEN_VALUE, false);
     let procs = procs_with_me();

@@ -323,8 +323,9 @@ fn parent_pid() -> u32 {
 }
 
 /// Why: DOC-74 §15.8, the `agent_parent=true` refusal on a real process
-/// tree — a registrar whose parent is named `claude` is refused an unflagged
-/// key with `agent_use_refused` (-32065); one named `notclaude` is granted.
+/// tree — a registrar whose parent is named `claude` is refused a key the
+/// operator denied to agents (#10386) with `agent_use_refused` (-32065); one
+/// named `notclaude` is granted it.
 /// Test: itself.
 #[test]
 #[ignore = "live: spawns the real binary and copies of this test binary; run on EVO"]
@@ -351,6 +352,16 @@ fn live_claude_named_ancestor_is_refused_a_grant() {
         _ => {}
     }
     let live = live();
+    // #10386: agents use keys by default, so the refusal needs a denied key.
+    let backend: Arc<dyn SecretBackend> =
+        Arc::new(FileBackend::at(live.path("home").join(VALUES_SUBDIR)));
+    SecretStore::new(backend, NamesIndex::at(live.path("index")))
+        .set_agents_may_use(
+            &VaultName::new(VAULT).unwrap(),
+            &SecretKey::new(KEY).unwrap(),
+            false,
+        )
+        .unwrap();
     let exe = std::env::current_exe().unwrap();
     let out = live.path("out");
     std::fs::create_dir(&out).unwrap();

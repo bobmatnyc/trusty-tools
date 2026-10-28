@@ -237,7 +237,8 @@ pub struct State {
     /// Backend id → implementation.
     pub backends: BackendFactory,
     /// The credential access audit log.
-    pub(crate) audit: AuditSink,
+    // #10386: shared, so a store's deny-change hook can append to it.
+    pub(crate) audit: Arc<AuditSink>,
     /// Whether this build links a Keychain, for the `file` posture checks.
     // #7524: a field, not the constant, so tests can act as either build.
     pub(crate) keychain_compiled: bool,
@@ -329,7 +330,10 @@ impl State {
         account_home: Option<&Path>,
     ) -> Self {
         let index = NamesIndex::at(&settings.index_root);
-        let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
+        let audit = Arc::new(AuditSink::new(
+            settings.audit_log.clone(),
+            settings.audit_max_bytes,
+        ));
         // #7520 S2: entries answer for at most the configured max age.
         let cache = Arc::new(SecretCache::new(settings.cache_max_age));
         Self {

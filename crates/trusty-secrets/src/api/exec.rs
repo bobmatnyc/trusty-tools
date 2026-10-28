@@ -163,8 +163,9 @@ pub struct RevokeResponse {
 
 /// `secrets.set_agents_may_use` request, beside `project` (#9070 slice 3).
 ///
-/// Why: DOC-74 §15.8 — the "agents may use" flag is set through the socket,
+/// Why: DOC-74 §15.8 — a key's agent deny is changed through the socket,
 /// so the server can judge the caller's ancestry and audit the change.
+/// #10386: `allowed: false` writes the deny, `allowed: true` removes it.
 /// What: the same shape as `secrets.set`, with `allowed` in place of the
 /// value. It carries no secret.
 /// Test: `api_set_agents_may_use_request_matches_the_wire_shape`.
@@ -174,14 +175,14 @@ pub struct RevokeResponse {
 pub struct SetAgentsMayUseRequest {
     /// The vault that holds the key.
     pub vault: VaultName,
-    /// The key whose flag changes.
+    /// The key whose deny changes.
     pub key: SecretKey,
-    /// `true` turns the flag on, `false` off.
+    /// `true` removes the key's agent deny, `false` writes it (#10386).
     pub allowed: bool,
 }
 
 impl SetAgentsMayUseRequest {
-    /// A request to set `key`'s flag in `vault` to `allowed`.
+    /// A request to allow (`true`) or deny (`false`) agents `key` in `vault`.
     pub fn new(vault: VaultName, key: SecretKey, allowed: bool) -> Self {
         Self {
             vault,
@@ -191,7 +192,7 @@ impl SetAgentsMayUseRequest {
     }
 }
 
-/// `secrets.set_agents_may_use` response: the flag as set.
+/// `secrets.set_agents_may_use` response: `allowed` as set (#10386).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SetAgentsMayUseResponse {

@@ -48,8 +48,9 @@ macOS it fails with `SecretsError::UnknownBackend`.
 
 Apart from value files, the crate writes only the names-only index at
 `~/.trusty-tools/trusty-secrets/index/`. Each file is mode 0600 in a 0700
-directory. It lists key names, value lengths, update times and the "agents may
-use" flag. It never holds a value.
+directory. It lists key names, value lengths and update times. It never holds
+a value or an agent rule. The file backend also keeps each key's agent deny as
+a 0600 file under `<values root>/.agent-controls/` (#10386).
 
 ## Scopes
 
@@ -328,7 +329,7 @@ secrets:
 - `gh` uses its own stored login. Every inherited `GH_*`, `GITHUB_TOKEN` and
   `GITHUB_ENTERPRISE_TOKEN` variable is removed from its environment.
 - The key list is required. A caller with a Claude Code ancestor is refused
-  (`agent_use_refused`), whatever the key's "agents may use" flag says.
+  (`agent_use_refused`), whether or not the key is denied to agents.
 - The value reaches `gh secret set` only on stdin. A key counts as copied
   only when the secret's `updated_at` advanced after the push; a signed-out
   `gh` is `backend_locked` and nothing is pushed.
@@ -451,14 +452,33 @@ one went in. A value of 8 characters or fewer shows only its length, as
 - Keep values out of agent transcripts. An agent session records everything
   typed into it, and the record goes to the model provider. Refer to a secret
   by key name or `secret://` reference, never by value.
-- Each indexed key carries an "agents may use" flag, off by default. The
-  backend holds it as its own item per key: on the Keychain, service
-  `trusty-secrets.agents`, account `<vault>/<key>`, present when the flag is
-  on. The names-only index never holds it, so editing the index file cannot
-  turn it on. A backend with no flag item (file, 1Password, Keeper) reads every
-  key off and refuses to turn one on. `store::resolve_reference` with
-  `agent_parent` set refuses a key whose flag is off, or whose flag cannot be
-  read, before it reads the value.
+- Agents use keys by default (#10386, the `.env.local` model): an indexed
+  key is usable under a Claude Code parent unless the operator denied it. The
+  backend holds the deny as its own item per key: on the Keychain, service
+  `trusty-secrets.agents-deny`, account `<vault>/<key>`; on the file backend,
+  a 0600 file under `.agent-controls/`. The names-only index never holds it,
+  so editing the index file can neither allow nor deny a key. A backend with
+  no control item (1Password, Keeper) cannot store a deny: under the default
+  migration its keys are usable and a deny is refused (`unsupported`).
+  `store::resolve_reference` with `agent_parent` set refuses a denied key, or
+  one whose deny cannot be read, before it reads the value.
+- A vault written before #10386 is migrated once, recorded per vault (on the
+  Keychain, service `trusty-secrets.agents-deny-migrated`, account
+  `<vault>`). `store::DEFAULT_AGENT_DENY_MIGRATION` picks the mode:
+  `OpenAll` (the default, owner ruling D6a) writes no deny, so every existing
+  key becomes usable by agents; `KeepClosed` writes a deny for each key whose
+  pre-#10386 "agents may use" flag (service `trusty-secrets.agents`) was off.
+  Either way the old flag items are removed. A marker or lookup that cannot
+  be read refuses.
+- `secrets.set`, `secrets.delete`, `secrets.copy` and removing a deny
+  refuse a caller with a Claude Code ancestor (`agent_use_refused`);
+  an unreadable ancestry refuses (`grant_refused`). Writing a deny is allowed
+  to an agent. An agent's grant and resolve allow records carry
+  `default_policy: true`. A copy carries a key's deny before its value, and
+  refuses a denied key into a backend that cannot hold one. `delete` removes
+  a deny only after every value delete succeeded. `set` never clears a
+  deny. Each deny the store writes or removes on its own has a write-ahead
+  `secrets.set_agents_may_use` record; without it nothing changes.
 
 ## Licence
 

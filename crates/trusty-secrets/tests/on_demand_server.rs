@@ -21,6 +21,15 @@ use trusty_secrets::server::OnDemandSecrets;
 
 const BIN: &str = env!("CARGO_BIN_EXE_trusty-secrets");
 
+#[path = "support/detached_call.rs"]
+mod detached_call;
+
+/// The re-run that makes a detached call (#10386); a no-op otherwise.
+#[test]
+fn detached_call_role() {
+    detached_call::run_role_if_asked();
+}
+
 struct Paths {
     tmp: TempDir,
     socket: PathBuf,
@@ -344,8 +353,6 @@ mod sigterm_9572 {
     use std::time::{Duration, Instant};
 
     use serde_json::json;
-    use trusty_common::uds::send_framed_request;
-    use trusty_common::uds::server::RpcResponse;
     use trusty_secrets::BackendId;
     use trusty_secrets::server::{
         BackendFactory, ServeExit, ServerSettings, StartEnv, default_backends, run_to_exit,
@@ -491,10 +498,9 @@ mod sigterm_9572 {
         let request = json!({"jsonrpc": "2.0", "id": 1, "method": "secrets.set",
             "params": {"project": project.display().to_string(), "vault": "trusty/acme/web",
                        "key": "A", "value": "sk-fake-9572-0123456789abcdef"}});
-        let socket = p.socket.clone();
-        let _call = tokio::spawn(async move {
-            send_framed_request::<_, RpcResponse>(&socket, &request, HANG_SPAN).await
-        });
+        // #10386: `set` refuses a caller under Claude Code, judged on the
+        // host's table, so the call comes from a detached process.
+        super::detached_call::spawn(&dir.join("detached"), &p.socket, &request);
         let started = Instant::now();
         let leader = loop {
             if let Some(pid) = read_pid(&pidfile) {

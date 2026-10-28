@@ -89,6 +89,8 @@ fn sandbox_state(
 ) -> State {
     let mut state = State::new_in(settings, backends, env, Some(&layout.account));
     state.keychain_compiled = true;
+    // #10386: `set` and `delete` judge the caller on a fake table.
+    state.grants = super::person_grants();
     state
 }
 
