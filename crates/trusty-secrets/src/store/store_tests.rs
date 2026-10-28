@@ -86,7 +86,8 @@ fn store_set_reports_outcome_and_mask_once() {
         .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
         .unwrap();
     assert_eq!(first.outcome, SetOutcome::New);
-    assert_eq!(first.masked, "sk-fake-… [24 chars]");
+    // #10394: first 4, last 5, length.
+    assert_eq!(first.masked, "sk-f…67890 [24 chars]");
     let second = store
         .set(&project(), &key("API_KEY"), &SecretValue::new("short"))
         .unwrap();
@@ -626,7 +627,7 @@ fn mask_secret_table() {
         ("ééééééééé", "[9 chars]"),
         ("日本語のテキストです", "…キストです [10 chars]"),
         ("αβγδεζηθικλμνξοπ", "αβγδ…μνξοπ [16 chars]"),
-        ("🔑🔒ab🔓cdefghijk🗝", "🔑🔒ab…hijk🗝 [16 chars]"),
+        ("🔑🔒ab🔓cdefghijkl🗝", "🔑🔒ab…ijkl🗝 [16 chars]"),
     ] {
         assert_eq!(mask_secret(value), masked, "{value:?}");
     }

@@ -41,7 +41,7 @@ export function defaultHandlers() {
         keys: [{ name: 'API_KEY', length: 32, updated_at: '2026-10-11T12:00:00Z', agents_may_use: true }],
       },
     ],
-    set: () => [200, { outcome: 'new', masked: 'sk-live-… [40 chars]' }],
+    set: () => [200, { outcome: 'new', masked: 'sk-l…Qx7Lm [40 chars]' }],
     delete: () => [200, { removed: true }],
     copy: () => [200, { copied: ['API_KEY'], failed: [] }],
     agents_may_use: (body) => [200, { vault: body.vault, key: body.key, allowed: body.allowed }],
