@@ -172,10 +172,17 @@ fn keychain_backend_fails_closed_off_macos() {
     unavailable(backend.set(&vault, &key, &value));
     unavailable(backend.get(&vault, &key).map(|_| ()));
     unavailable(backend.delete(&vault, &key).map(|_| ()));
-    // #9070: the flag item fails closed too; it never reads as ON.
-    unavailable(backend.agents_may_use(&vault, &key).map(|_| ()));
-    unavailable(backend.set_agents_may_use(&vault, &key, true));
-    unavailable(backend.set_agents_may_use(&vault, &key, false));
+    // #9070, #10386: every control item fails closed too; a deny lookup
+    // never reads as "not denied".
+    for item in [
+        ControlItem::AgentDeny,
+        ControlItem::LegacyAgentsFlag,
+        ControlItem::DenyMigrated,
+    ] {
+        unavailable(backend.control_item(item, &vault, Some(&key)).map(|_| ()));
+        unavailable(backend.set_control_item(item, &vault, Some(&key), true));
+        unavailable(backend.set_control_item(item, &vault, Some(&key), false));
+    }
 }
 
 /// Why: #7524 P2-L7 — a `KeychainBackend` method that called `keyring`
