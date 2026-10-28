@@ -110,6 +110,7 @@ pub(crate) async fn dispatch(cmd: crate::cli::McpCmd) -> Result<()> {
             root,
             project,
             share_with_projects,
+            replace,
         } => add_cmd(
             root.as_deref(),
             &name,
@@ -120,6 +121,7 @@ pub(crate) async fn dispatch(cmd: crate::cli::McpCmd) -> Result<()> {
             AddPlacement {
                 project,
                 share_with_projects,
+                replace,
             },
         ),
         // #7892: retired to a notice, not removed — scripts and docs still
@@ -133,13 +135,14 @@ pub(crate) async fn dispatch(cmd: crate::cli::McpCmd) -> Result<()> {
     }
 }
 
-/// Where `tm mcp add` puts the server, and who may load it.
+/// Where `tm mcp add` puts the server, who may load it, and whether it may
+/// replace a stored credential.
 ///
-/// Why: clap hands these two independent booleans down together, and an
-/// argument list of eight trips `clippy::too_many_arguments`. Grouping them
-/// also keeps the two flags that decide WHO can load the server in one place.
+/// Why: clap hands these independent booleans down together, and an
+/// argument list of eight trips `clippy::too_many_arguments`.
 /// What: `project` writes the project's own `.mcp.json` instead of the user
-/// scope; `share_with_projects` is retired and only prints a notice (#7892).
+/// scope; `share_with_projects` is retired and only prints a notice (#7892);
+/// `replace` lets an `-e` credential overwrite a different stored one (#10041).
 /// Test: `cli_parses_mcp_share`, `cli_parses_mcp_unshare`.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AddPlacement {
@@ -148,6 +151,9 @@ pub(crate) struct AddPlacement {
     /// `--share-with-projects`, retired by #7892: a user-scope server already
     /// loads in every project, so there is nothing left to share.
     pub share_with_projects: bool,
+    /// `--replace`: overwrite a credential-store slot that already holds a
+    /// different value (#10041). Without it such an add fails.
+    pub replace: bool,
 }
 
 pub(crate) fn add_cmd(
@@ -162,6 +168,7 @@ pub(crate) fn add_cmd(
     let AddPlacement {
         project,
         share_with_projects,
+        replace: placement_replace,
     } = placement;
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
@@ -187,7 +194,27 @@ pub(crate) fn add_cmd(
                 );
                 eprintln!("warning: '{command}' not found on PATH — adding '{name}' anyway");
             }
-            let env = parse_env(env)?;
+            let mut env = parse_env(env)?;
+            // #10041: a credential goes to the store, never into the env block.
+            // A store failure aborts the add before any config is written.
+            let store = trusty_common::credentials::default_store();
+            // #10041: only a store-reading trusty server has its credential
+            // moved; any other server's credential is refused.
+            let moved = trusty_mpm::core::mcp_credential_env::store_credential_env(
+                &mut env,
+                store.as_ref(),
+                trusty_mpm::core::mcp_credential_env::CredentialTarget {
+                    server: name,
+                    command,
+                    replace: placement_replace,
+                },
+            )?;
+            for key in &moved {
+                println!(
+                    "{key} is in the credential store; '{name}' reads it from there at launch, \
+                     so it is not written to the MCP config"
+                );
+            }
             build_stdio_entry(command, args, &env)
         }
         McpTransportArg::Http | McpTransportArg::Sse => {

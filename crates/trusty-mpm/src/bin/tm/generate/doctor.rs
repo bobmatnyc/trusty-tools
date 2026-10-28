@@ -261,6 +261,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Fails when a `com.trusty.*` LaunchAgent plist holds a plaintext credential, naming the file, the KEY and the file's mode and never the value. UNKNOWN rather than OK when a plist cannot be read, parsed, is a BINARY `bplist00` file, or is a symlink — a scan that did not run has not shown the host clean. `tm doctor --fix --yes` migrates each registered credential into the credential store, confirms a byte-equal read-back and only then strips the key; the credential still has to be rotated (issue #8236).",
     ),
     (
+        "claude_json_secrets",
+        "Fails when an `mcpServers.<server>.env` block in the managed `.claude.json` holds a credential value, naming the server and KEY and never the value, or when that file or any `.claude.json*` copy beside it is readable beyond its owner (wider than 0600). UNKNOWN when the file cannot be read or parsed. `tm doctor --fix --yes` moves each registered credential into the credential store, confirms a byte-equal read-back, removes it from the env block in one atomic rewrite, and tightens the files to 0600; the credential still has to be rotated (issue #10041).",
+    ),
+    (
         "credential_reach",
         "Reports, for each credential the daemon consumes, whether it resolves: present, absent, the store's error kind, or timed out — never the value. A timeout means a macOS Keychain approval dialog may be on screen, which is the expected state after a `cargo install` rebuild; approve it once. Runs on the blocking pool and is bounded, so it can hang neither `tm doctor` nor the runtime (issue #8236).",
     ),

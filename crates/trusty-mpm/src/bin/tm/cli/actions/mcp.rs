@@ -70,6 +70,13 @@ pub(crate) enum McpCmd {
         /// nothing left to share.
         #[arg(long = "share-with-projects")]
         share_with_projects: bool,
+        /// Overwrite a credential-store slot that already holds a different
+        /// value for an `-e` credential.
+        ///
+        /// Without it, `tm mcp add` fails rather than replace a stored
+        /// credential (#10041).
+        #[arg(long)]
+        replace: bool,
     },
     /// Retired by #7892; prints why and does nothing.
     ///
