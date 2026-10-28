@@ -58,6 +58,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 GATE="${SCRIPT_DIR}/check-tag-publish-parity.sh"
 
+# #10372: the dev .envrc exports CARGO_TARGET_DIR; cases must not inherit it.
+unset CARGO_TARGET_DIR
 PASSED=0
 FAILED=0
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tag-parity-selftest.XXXXXX")"
@@ -274,6 +276,48 @@ mkdir -p "${repo}/target/package/trusty-example-1.2.3"
 echo '{"path_in_vcs": "crates/trusty-example"}' \
   > "${repo}/target/package/trusty-example-1.2.3/.cargo_vcs_info.json"
 run_case "vcs-info without git.sha1 fails closed" 1 "VCS-INFO-UNREADABLE" "$repo" trusty-example --vcs-info auto
+
+# ===========================================================================
+# 9b. #10372: `--vcs-info auto` must look where cargo wrote the artifact.
+#     CARGO_TARGET_DIR wins; unset falls to `cargo metadata`'s target_directory
+#     (stubbed on PATH so no real cargo runs); a missing file still fails closed
+#     and names the directory it searched.
+# ===========================================================================
+write_vcs_info() { # <dir> <sha>
+  mkdir -p "$1/package/trusty-example-1.2.3"
+  printf '{"git": {"sha1": "%s"}, "path_in_vcs": "crates/trusty-example"}\n' "$2" \
+    > "$1/package/trusty-example-1.2.3/.cargo_vcs_info.json"
+}
+STUBBIN="${WORK}/stubbin"
+mkdir -p "$STUBBIN"
+
+repo="$(mkrepo vcs-envdir trusty-example trusty-example 1.2.3)"
+git -C "$repo" tag trusty-example-v1.2.3
+head_sha="$(git -C "$repo" rev-parse HEAD)"
+write_vcs_info "${WORK}/ctd-set" "$head_sha"
+CARGO_TARGET_DIR="${WORK}/ctd-set" \
+  run_case "auto reads \$CARGO_TARGET_DIR/package when set" 0 "-" "$repo" trusty-example --vcs-info auto
+
+# CARGO_TARGET_DIR is authoritative: a stale file under <repo>/target must not
+# rescue a run whose real target dir is empty.
+write_vcs_info "${repo}/target" "$head_sha"
+CARGO_TARGET_DIR="${WORK}/ctd-empty" \
+  run_case "auto does not fall back to <repo>/target when CARGO_TARGET_DIR is set" \
+  1 "${WORK}/ctd-empty/package/trusty-example-1.2.3/.cargo_vcs_info.json" "$repo" trusty-example --vcs-info auto
+
+# Unset: the target_directory reported by `cargo metadata`.
+printf '#!/bin/sh\necho '"'"'{"packages":[],"target_directory":"%s"}'"'"'\n' "${WORK}/ctd-meta" > "${STUBBIN}/cargo"
+chmod +x "${STUBBIN}/cargo"
+repo="$(mkrepo vcs-metadir trusty-example trusty-example 1.2.3)"
+git -C "$repo" tag trusty-example-v1.2.3
+head_sha="$(git -C "$repo" rev-parse HEAD)"
+write_vcs_info "${WORK}/ctd-meta" "$head_sha"
+PATH="${STUBBIN}:${PATH}" \
+  run_case "auto reads cargo metadata target_directory when CARGO_TARGET_DIR is unset" 0 "-" "$repo" trusty-example --vcs-info auto
+rm -rf "${WORK}/ctd-meta/package"
+PATH="${STUBBIN}:${PATH}" \
+  run_case "auto with the file missing under cargo metadata target fails closed" \
+  1 "${WORK}/ctd-meta/package/trusty-example-1.2.3/.cargo_vcs_info.json" "$repo" trusty-example --vcs-info auto
 
 # ===========================================================================
 # 10. An ANNOTATED tag at HEAD. `git ls-remote` and `refs/tags/<t>` resolve to
