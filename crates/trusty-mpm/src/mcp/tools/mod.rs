@@ -38,6 +38,8 @@ pub mod proxy;
 // #7522: `secrets_get_ref`, a client of the trusty-secrets socket.
 pub mod secrets;
 pub mod session;
+// #10300: the two PM pause/resume context tools, split out of `session`.
+pub mod session_context;
 
 /// Canonical names of every tool the server exposes, in catalog order.
 ///
@@ -114,7 +116,9 @@ pub const TOOL_CATALOG: [&str; 39] = [
 /// keeps the schemas and the dispatch argument-parsing in lockstep across all
 /// tool groups.
 /// What: concatenates `core::core_tools` (nine descriptors),
-/// `session::session_tools` (twelve descriptors), `console::console_tools`
+/// `session::session_tools` (ten descriptors),
+/// `session_context::session_context_tools` (two descriptors, #10300),
+/// `console::console_tools`
 /// (five descriptors), `project::project_tools` (four descriptors, WI-5 adds
 /// `project_resolve`), `proxy::proxy_tools` (four descriptors, #2550) and
 /// `disk::disk_tools` (one descriptor, #6927), `secrets::secrets_tools` (one
@@ -126,6 +130,7 @@ pub const TOOL_CATALOG: [&str; 39] = [
 pub fn tool_catalog() -> Vec<Value> {
     let mut tools = core::core_tools();
     tools.extend(session::session_tools());
+    tools.extend(session_context::session_context_tools());
     tools.extend(console::console_tools());
     tools.extend(project::project_tools());
     tools.extend(proxy::proxy_tools());

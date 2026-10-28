@@ -8,16 +8,14 @@
 //! existing [`crate::session_manager::SessionManager`] lifecycle ops that the
 //! HTTP `…/managed/*` routes already use, so the behaviour is identical across
 //! transports.
-//! What: [`session_tools`] returns the twelve `{ name, description, inputSchema }`
+//! What: [`session_tools`] returns the ten `{ name, description, inputSchema }`
 //! descriptors — `session_new`, `session_stop`, `session_resume`,
 //! `session_decommission`, `session_delete` (#2012),
 //! `session_delete_records` (#6431), `session_activity`,
-//! `session_send`, the #1508 fleet-wide `session_decommission_ephemeral` +
-//! `session_prune`, and the PM pause/resume context tools
-//! `session_context_catchup` + `session_context_pause` (replace the bash
-//! `tm session catchup` / git / snapshot-file plumbing the `/tm-session-pause`
-//! and `/tm-session-resume` skills used to shell out to). The shared [`tool`]
-//! builder is re-exported from the parent module.
+//! `session_send`, and the #1508 fleet-wide `session_decommission_ephemeral` +
+//! `session_prune`. The PM pause/resume context tools live in the sibling
+//! [`super::session_context`] (#10300). The shared [`tool`] builder is
+//! re-exported from the parent module.
 //! Test: `cargo test -p trusty-mpm` (in [`super`]) asserts the full catalog is
 //! well-formed and that each of these names is present.
 
@@ -25,7 +23,7 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the twelve session-lifecycle tool descriptors.
+/// Build the ten session-lifecycle tool descriptors.
 ///
 /// Why: spawning, stopping, resuming, decommissioning, hard-deleting,
 /// observing, and driving a managed session are the operations the driver
@@ -36,23 +34,15 @@ use super::tool;
 /// from `session_decommission` (which stops the runtime and may remove the
 /// workspace but always leaves a tombstone); #6431 adds
 /// `session_delete_records`, the record-only bulk delete the console's Sessions
-/// tab drives. The PM pause/resume context tools
-/// (`session_context_catchup`, `session_context_pause`) are a DIFFERENT
-/// concept — PM session snapshot/digest, not managed-sub-session lifecycle —
-/// kept here anyway to avoid a third tool-group file for two tools. Keeping
-/// them in their own builder keeps `tools/core.rs` and this file each well
-/// under the 500-SLOC cap.
-/// What: returns the twelve descriptors in catalog order. `session_new` takes the
+/// tab drives. The PM pause/resume context tools are a different concept and
+/// live in [`super::session_context`] (#10300: split to hold the SLOC cap).
+/// What: returns the ten descriptors in catalog order. `session_new` takes the
 /// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
 /// take a `session_id` (`session_delete` also takes optional `force`);
 /// `session_delete_records` takes a non-empty `session_ids` array;
 /// `session_decommission_ephemeral` takes no args; `session_prune` takes a
-/// `state` filter plus `dry_run`/`include_active`; `session_context_catchup`
-/// takes a required `project_dir` plus optional `session_id`/`all_projects`/
-/// `full`; `session_context_pause` takes required `project_dir`/`summary` plus
-/// an optional `session_id` (#6888 — derived from the caller when omitted),
-/// optional bullet-list sections, `tmux_window`, and
-/// `prune_worktrees`. Every schema sets `additionalProperties: false` so the
+/// `state` filter plus `dry_run`/`include_active`. Every schema sets
+/// `additionalProperties: false` so the
 /// driver gets a clear error on a typo.
 /// Test: `super::tests::session_tools_present`,
 /// `super::tests::catalog_names_match_constant`.
@@ -313,223 +303,6 @@ pub(super) fn session_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["state"],
-                "additionalProperties": false
-            }),
-        ),
-        tool(
-            "session_context_catchup",
-            "Return STRUCTURED (JSON, not prose) resume context for `project_dir`. \
-             By DEFAULT the answer is LEAN (#9883): `digest: \"lean\"`, the \
-             snapshot resolved for you (`resolved_snapshot`, `resolved_via`, and \
-             `resolved_session` — its `summary`, `in_progress`, `next_steps` and \
-             pause-time `git_context`, or null), a LIVE `git_status` (`available`, \
-             at most 40 `git status --porcelain` `entries`, `entries_total`, \
-             `truncated`; `available: false` with an `error` starting \
-             `unavailable:` when git failed or timed out), and the resolution \
-             fields below — no `sessions`, `recent_commits` or `recent_memory`. \
-             `full: true` returns the FULL digest instead: paused sessions \
-             (native trusty-mpm + legacy claude-mpm), recent git commits and \
-             recent memory-palace activity over the whole history, no watermark. \
-             Neither ever advances the catch-up watermark, so repeated calls are \
-             safe and `watermark_advanced` is always `false`. \
-             `resolved_snapshot` names a snapshot belonging to the `session_id` \
-             you pass; several sessions share one store, so there is no \"latest \
-             overall\" fallback. When that id owns nothing — a relaunch mints a \
-             new session id inside the same window — passing `tmux_window` \
-             resolves the newest snapshot THIS WINDOW paused in this project \
-             instead; failing that, the newest one THIS NAMED TMUX SESSION \
-             paused since it was created, because a relaunch recreates the \
-             window (#8408) — pass `tmux_session_created`, without which that \
-             route resolves nothing. \
-             `resolved_via` says which answered (`session_id`, `tmux_window`, \
-             `tmux_session`, or null), so do not read a window match as an exact \
-             one. `resolved_snapshot_superseded` is true when this checkout's \
-             HEAD has moved past the commit the snapshot recorded: its \
-             `in_progress` and `next_steps` may already be done, so read \
-             `commits_since_snapshot` (newest first, at most 20 of \
-             `commits_since_snapshot_total`) before re-planning any of them. It \
-             is false whenever the answer cannot be established, so false means \
-             \"not shown to be stale\", never \"proven current\". \
-             `resume_verify` (#9390) re-reads what the resume relies on. It is \
-             null when no snapshot resolved; otherwise it reads the \
-             `ws:<session>/resume` slot of the session that wrote the snapshot \
-             and runs its `verify` commands, ONLY `gh pr view <n> --json \
-             headRefOid,state` and `git rev-parse <branch>`, argv-only, in \
-             `project_dir`, each command and the whole pass time-bounded. Each \
-             `checks` entry carries `command`, `claimed`, `returned` and \
-             `verdict`: `verified`, `stale` (the PR is MERGED or CLOSED, or the \
-             branch tip moved off the snapshot's recorded commit), or \
-             `unverified:<reason>`. Act on `returned`, the live head, never on a \
-             head in the snapshot, and read `unverified` as unknown, never as \
-             confirmed. `status` is `ran`, or `unverified:<reason>` when no \
-             command could be read (memory daemon unreachable, no live slot, no \
-             verify command). The pass only reports: it edits no slot, and a \
-             failure never fails the catch-up. \
-             Before any of that is read, the local session cache is \
-             rebuilt from THIS caller's own append-only git ref \
-             `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
-             resume from a fresh clone still resolves. `session_refs` reports \
-             that pass: `hydrated` (it ran), `refs_seen` (how many session refs \
-             exist on the remote, this caller's or not), `own_ref_found` \
-             (whether this caller's own ref was among them), `restored` (how \
-             many snapshot files were written back), and `error`. Note that \
-             `session_refs.own_ref_found` is about THIS CALLER'S REF and is \
-             unrelated to the per-session `sessions[].owned` below. \
-             `refs_seen > 0` with `own_ref_found: false` is a real and \
-             PERMANENT state, not a transient: after a hostname change or a \
-             `gh` account switch this caller reaches none of its old refs and \
-             never will, so report it rather than reading five refs as five \
-             restorable sessions. A hydration failure never fails the catch-up. \
-             Each entry in `sessions` carries `owned`: true when the \
-             session is attributable to you (your `session_id` paused it, you \
-             are in the window that did, or it is the one snapshot resolved for \
-             you by tmux session name). A session you do not own is \
-             listed with `format`, `paused_at` and `summary` only — its \
-             `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
-             `git_context` are withheld, so the digest cannot hand you the \
-             means to adopt another session's state (#5386). \
-             `sessions` is a bounded PAGE — the whole response is fitted to a \
-             size a caller can read in one tool result — ordered with the \
-             sessions you own first, then newest-first, so page 0 carries what \
-             a resume reads. `sessions_total` says how many matched, \
-             `sessions_offset` where this page starts, and \
-             `sessions_next_offset` the value to pass back as \
-             `sessions_offset` for the remainder (null on the last page). \
-             Whenever anything was withheld — sessions, commits or drawers — \
-             `truncated` is true and `truncation_notice` says what and how to \
-             retrieve it, so a short page never reads as a complete one. \
-             `over_budget` is the separate case where nothing was withheld but \
-             one record is larger than a whole page: it ships intact and \
-             `page_bytes` says how big the page got (#5557).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Absolute path to the project directory to scan. Required — the stdio bridge forwards no cwd, so the daemon cannot infer it."
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and the daemon derives the same id `session_context_pause` derived for you, so a pause written with no `session_id` resolves back here exactly (#6888); with neither an id nor a `tmux_window` an unidentified caller still owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
-                    },
-                    "tmux_window": {
-                        "type": "string",
-                        "description": "The CALLER's own `session_name:window_index:window_id` from `tmux display-message`, e.g. `tm-dogfood:0:@230`. Used only when `session_id` resolved nothing: matches the `window_id` (`@230`) component against snapshots this project paused, newest first. When no window matches — a relaunch recreates the window with a new id — the session name (`tm-dogfood`) is matched instead (#8408), only together with `tmux_session_created`; a digits-only session name never matches. Window indexes are never matched."
-                    },
-                    "tmux_session_created": {
-                        "type": "integer",
-                        "description": "The CALLER's tmux session creation time, `tmux display-message -p '#{session_created}'` (Unix seconds). trusty-mpm names every tmux session `tm-<folder>`, so a later session reuses the name; the session-name route matches only snapshots paused after this time, and resolves nothing without it (#8408)."
-                    },
-                    "all_projects": {
-                        "type": "boolean",
-                        "description": "Also scan every project in the legacy claude-mpm registry, merging their sessions/commits/memory into the same arrays. Full digest only: requires `full: true`, else the call errors. Defaults to false (project_dir only)."
-                    },
-                    "full": {
-                        "type": "boolean",
-                        "description": "Return the full digest — paused sessions, recent commits and recent memory over the whole history, with no watermark — instead of the lean default (the resolved snapshot plus live `git_status`). Defaults to false. The full digest is paged, not dropped — walk `sessions_next_offset` to read all of it."
-                    },
-                    "sessions_offset": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Full digest only (a non-zero value without `full: true` errors). Index into the ordered session list this page starts at. Defaults to 0, the page a resume wants — it holds the sessions you own. Pass the previous response's `sessions_next_offset` to continue; when that field is null you have the whole history. The offset is POSITIONAL into a list rebuilt from disk on every call, so a snapshot paused between two calls shifts the indexes and a later page can repeat a record you already have — de-duplicate by `source_file` or `paused_at` if that matters to you (#5557)."
-                    }
-                },
-                "required": ["project_dir"],
-                "additionalProperties": false
-            }),
-        ),
-        tool(
-            "session_context_pause",
-            "Write a session-pause snapshot for `project_dir`: a \
-             `<session-id>/session-YYYYMMDD-HHMMSS.md` file in the SAME section \
-             format the \
-             catch-up reader already parses (`## Summary` / `## Completed` / \
-             `## In Progress` / `## Next Steps` / `## Git Context` / \
-             `## Tmux Window`), plus an appended `pause` line in the \
-             append-only `sessions-log.jsonl` naming it. Only that session can \
-             resume from it (#5272). Leave `session_id` out — the daemon derives \
-             it from your own identity, which is what the next \
-             `session_context_catchup` matches on, and an invented one silently \
-             files the snapshot where nothing will look for it (#6888). Where \
-             the project TRACKS `.trusty-mpm/sessions/`, the snapshot is then \
-             published: those two files and nothing else are committed onto a \
-             fresh `chore/sessions-<session>-<ts>` branch cut from the \
-             project's default branch — the one `config.yaml`'s `projects:` \
-             entry declares, else `origin/HEAD`, else `main` — pushed, and \
-             opened as an auto-merging docs-only PR \
-             through `tm pr open` — your branch, your HEAD and every other file \
-             stay untouched, and `snapshot_publish` in the result carries the \
-             branch, commit and PR URL for you to report (#7282). Publishing \
-             from anything but that branch, or a failure at any step, is an \
-             ERROR naming the step and the branch the commit was left on; the \
-             snapshot file is written either way. Every no-PR outcome reports \
-             `snapshot_publish.status: \"skipped\"` with a `reason` — \
-             `not_tracked` (the project git-ignores `.trusty-mpm/sessions/`), \
-             `not_a_git_repo`, or `unchanged`. SEPARATELY, and on every project \
-             tracked or not, the snapshot is appended to this session's own \
-             append-only git ref `refs/tm/sessions/<user-id>/<session-key>` and \
-             lease-pushed to `origin` (ADR-0062, #7830): `ref_name` names the \
-             ref, `ref_published` says whether the push landed, and \
-             `ref_error` carries the reason when it did not. A ref failure NEVER \
-             fails the pause — the local snapshot is the primary write — so a \
-             non-null `ref_error` is yours to REPORT to the operator, not to \
-             retry. With `[session_refs] enabled = false` in \
-             `~/.trusty-mpm/config.toml` no ref is written at all and both \
-             `ref_name` and `ref_error` are null. `resume_slot` (#9390) reports \
-             the `ws:<session>/resume` Tier C slot the pause writes over the \
-             memory socket for the next `session_context_catchup` to re-verify: \
-             a 24-hour expiry, the branch, PR numbers and snapshot path plus \
-             their re-read commands, never a head SHA. It is `stored`, \
-             `stored_without_verify:<reason>`, `stored_unslotted:slot_refused` \
-             or `skipped:<reason>`; the write is fail-open and never fails the \
-             pause. Also \
-             prunes orphaned managed-session \
-             git worktrees in-process (same engine as `tm session prune-worktrees`) \
-             unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
-             worktree holding uncommitted or unpushed work (#4091) — any such \
-             worktree is returned in `skipped_dirty_worktrees` with a reason and \
-             file/commit counts for you to relay to the user. Does NOT touch tmux.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Absolute path to the project directory to snapshot."
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "OPTIONAL — omit it and the daemon derives the id from your own identity, which is what the next `session_context_catchup` looks the snapshot back up by (#6888). Do NOT invent a stable-looking string: the resume lookup is exact string equality, so a second guess never matches the first. Pass it only to attribute the pause to a specific KNOWN id. The id actually used comes back in the response's `session_id`."
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "The `## Summary` section body — required, human-readable current-state prose."
-                    },
-                    "completed": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Bullet items for the `## Completed` section. Omitted entirely from the file when empty."
-                    },
-                    "in_progress": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Bullet items for the `## In Progress` section. Omitted entirely from the file when empty."
-                    },
-                    "next_steps": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Bullet items for the `## Next Steps` section. Omitted entirely from the file when empty."
-                    },
-                    "tmux_window": {
-                        "type": "string",
-                        "description": "`session_name:window_index:window_id` captured via `tmux display-message`, when inside tmux. Omitted entirely from the file when absent."
-                    },
-                    "prune_worktrees": {
-                        "type": "boolean",
-                        "description": "Also prune orphaned managed-session git worktree directories as part of pause wrap-up. Defaults to true."
-                    }
-                },
-                // #6888: `session_id` is derived when omitted, so it is not required.
-                "required": ["project_dir", "summary"],
                 "additionalProperties": false
             }),
         ),
