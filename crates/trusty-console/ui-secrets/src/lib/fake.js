@@ -38,7 +38,7 @@ export function defaultHandlers() {
       200,
       {
         vault: VAULT,
-        keys: [{ name: 'API_KEY', length: 32, updated_at: '2026-10-11T12:00:00Z', agents_may_use: false }],
+        keys: [{ name: 'API_KEY', length: 32, updated_at: '2026-10-11T12:00:00Z', agents_may_use: true }],
       },
     ],
     set: () => [200, { outcome: 'new', masked: 'sk-live-… [40 chars]' }],
