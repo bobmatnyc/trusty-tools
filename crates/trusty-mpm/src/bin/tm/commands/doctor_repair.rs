@@ -334,6 +334,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         );
     }
 
+    // #10041: move plaintext credentials out of the managed `.claude.json`
+    // env blocks into the credential store, and tighten it and its copies to 0600.
+    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
+        steps.extend(
+            trusty_mpm::daemon::doctor_claude_json_secrets_repair::repair_claude_json_secrets(
+                &dir, mode,
+            ),
+        );
+    }
+
     // #8392: bring tm's opt-in `Notification` entry in the managed settings in
     // line with `[notification_hook] enabled`; silent when it already matches.
     if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {

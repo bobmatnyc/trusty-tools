@@ -247,6 +247,8 @@ pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
+// #10041: credential values in a `tm mcp add -e` pair go to the store, not the file.
+pub mod mcp_credential_env;
 pub mod mcp_provenance;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).

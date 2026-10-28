@@ -482,7 +482,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_nine_checks`,
+/// Test: `run_doctor_produces_eighty_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -685,6 +685,13 @@ pub(crate) async fn run_doctor_with_claims(
     // Read-only and key-only — it never prints a credential value.
     // `tm doctor --fix` removes the entries.
     checks.push(crate::daemon::doctor_launchd_secrets::check_launchd_plist_secrets(&home));
+    // #10041: and the managed `.claude.json` — a credential in an MCP env
+    // block, or a file (or backup) readable beyond its owner.
+    checks.push(
+        crate::daemon::doctor_claude_json_secrets::check_claude_json_secrets(
+            crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+        ),
+    );
     // #8236 item 8: and now the other half — once the value is OUT of the
     // plist, can the daemon's own resolver still get it? Bounded, so this row
     // cannot hang on a Keychain approval dialog either.
@@ -911,7 +918,7 @@ pub async fn run_doctor_for_manager(
 /// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_nine_checks`.
+/// this wiring is covered by `run_doctor_produces_eighty_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

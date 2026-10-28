@@ -378,7 +378,7 @@ fn plan_all(
 /// `repair_leaves_the_plist_untouched_when_the_import_fails`,
 /// `repair_keeps_an_unmapped_key_and_says_so`,
 /// `a_different_store_value_is_never_overwritten`.
-fn import_all(
+pub(crate) fn import_all(
     entries: &[PlistCredentialEntry],
     store: &dyn KeyStore,
 ) -> (Vec<String>, Vec<String>) {

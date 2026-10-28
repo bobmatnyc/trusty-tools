@@ -66,6 +66,18 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "`tm doctor --fix-launchd-secrets` CLI only; same write path as above",
     ),
     (
+        "daemon/doctor_claude_json_secrets_repair.rs",
+        "default_store",
+        "`tm doctor --fix` CLI only; moves a `.claude.json` env credential INTO the store, \
+         where an empty sandbox store would drop it (#10041)",
+    ),
+    (
+        "bin/tm/commands/mcp.rs",
+        "default_store",
+        "`tm mcp add` CLI only; stores an `-e` credential instead of writing it to \
+         `.claude.json`, where an empty sandbox store would drop it (#10041)",
+    ),
+    (
         "bin/tm/commands/env_file.rs",
         "\"/usr/bin/security\"",
         "`tm env set` CLI only; reads its value from the login Keychain by design (#8939)",

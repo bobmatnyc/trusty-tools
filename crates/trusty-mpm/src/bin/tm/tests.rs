@@ -178,6 +178,7 @@ fn cli_parses_mcp_add() {
                 root,
                 project: _,
                 share_with_projects: _,
+                replace,
             },
     }) = cli.command
     else {
@@ -187,6 +188,7 @@ fn cli_parses_mcp_add() {
     assert_eq!(transport, McpTransportArg::Stdio);
     assert!(env.is_empty() && header.is_empty() && root.is_none());
     assert_eq!(command_and_args, vec!["echo", "hi"]);
+    assert!(!replace, "--replace defaults off (#10041)");
 }
 
 #[test]
