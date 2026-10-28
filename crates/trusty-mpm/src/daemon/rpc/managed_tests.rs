@@ -194,6 +194,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.prune",
         "mpm.managed.decommission_ephemeral",
         "mpm.managed.prune_worktrees",
+        "mpm.managed.prune_worktrees_stream", // #7619
         "mpm.managed.reconcile_worktrees",
         "mpm.managed.fleet",
         "mpm.managed.register_supervisor",
