@@ -651,6 +651,41 @@ class StopHookCase(Base):
         self.assertIn("IL DIGEST", ctx)
         self.assertIn("next: do x", ctx)
 
+    def test_clear_and_compact_carry_the_digest(self):
+        # #10109: a /clear or compaction resumes from the ledger with no typed prompt.
+        datg.write_ops(self.p, [{"op": "session", "task": "resume me", "next": "do x"}])
+        for src in ("clear", "compact"):
+            r = self.hook({"hook_event_name": "SessionStart", "source": src})
+            self.assertEqual((r.returncode, r.stderr), (0, ""), src)
+            ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("IL DIGEST", ctx)
+            self.assertIn("next: do x", ctx)
+            self.assertNotIn("FULL DIGEST:", ctx)  # nothing was cut
+
+    def test_large_digest_stays_under_the_hook_limit(self):
+        # #10109: Claude Code caps additionalContext at 10,000 chars; a cut digest points at the full one.
+        datg.write_ops(self.p, [{"op": "session", "task": "big", "next": "keep going"}])
+        for kind, n in (("D", 40), ("T", 30)):  # near the 16 KB state bar
+            datg.write_ops(self.p, [{"op": "add", "kind": kind, "title": f"{kind} {i:02d} " + "w" * 105,
+                                     "goal": "th-G01"} for i in range(n)])
+        self.assertGreater(len(datg.RULES) + len(datg.build_digest(self.p)), 10000)  # uncut, over the limit
+        r = self.hook({"hook_event_name": "SessionStart", "source": "clear"})
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertLess(len(ctx), 10000)
+        self.assertIn("next: keep going", ctx)
+        self.assertTrue(ctx.endswith(os.path.join(SCRIPTS, "datg.py") + " digest"), ctx[-200:])
+
+    def test_no_ledger_is_silent_and_an_unreadable_one_is_reported(self):
+        # #10109: no ledger -> no output, no error; an unreadable ledger fails open but says so on stderr.
+        os.unlink(self.sp)
+        r = self.hook({"hook_event_name": "SessionStart", "source": "clear"})
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        with open(self.sp, "w") as f:
+            f.write("garbage")
+        r = self.hook({"hook_event_name": "SessionStart", "source": "clear"})
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertIn("datg hook: failed open", r.stderr)
+
     def test_per_pm_directory_and_legacy_coexist(self):
         # legacy layout untouched; a --session init creates datg/<session>/ and hooks select it via DATG_SESSION
         r = run_cli(self.p, ["init", "--code", "pm"], session="tm-pm-a")

@@ -82,19 +82,41 @@ from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and
 )
 
 
+# #10109: Claude Code caps a hook's additionalContext at 10,000 characters; keep margin under it.
+HOOK_CONTEXT_MAX = 9500
+
+
+def session_start_context(st, project):
+    """SessionStart context for every source (startup, resume, clear, compact), within HOOK_CONTEXT_MAX.
+
+    Why: #10109, a session cleared or compacted must resume from its ledger with no typed prompt.
+    What: rules + summary + the digest, bounded to the hook limit; a cut digest ends with the
+    command that prints it in full. A digest failure is reported on stderr; rules still go out.
+    Test: test_clear_and_compact_carry_the_digest, test_large_digest_stays_under_the_hook_limit.
+    """
+    py = os.path.abspath(__file__)
+    pm = per_pm_session(project)
+    cli = py + (f" --session {pm}" if pm else "")
+    s = summary(st)
+    head = RULES.format(py=cli, code=st["code"]) + (" " + s if s else "")
+    ptr = f"FULL DIGEST: python3 {cli} digest"
+    room = HOOK_CONTEXT_MAX - len(head) - len(ptr) - 2
+    try:
+        dig = "\n" + build_digest(project, max(50, room // 4))
+    except Exception as e:  # #10109: fail open, but visibly
+        print(f"datg hook: SessionStart digest failed ({e})", file=sys.stderr)
+        dig = ""
+    ctx = head + dig
+    if "\nTRUNCATED:" in dig or len(ctx) > HOOK_CONTEXT_MAX:
+        ctx = ctx[:HOOK_CONTEXT_MAX - len(ptr) - 1] + "\n" + ptr
+    return ctx
+
+
 def hook_output(event, st, payload, project, now=None):
     """Return the hook JSON dict for the event, or None for no output."""
     if event == "SessionStart":
-        py = os.path.abspath(__file__)
-        pm = per_pm_session(project)
-        text = RULES.format(py=py + (f" --session {pm}" if pm else ""), code=st["code"])
-        s = summary(st)
-        try:
-            dig = "\n" + build_digest(project)
-        except Exception:
-            dig = ""  # fail open: rules and summary still go out
         return {"hookSpecificOutput": {"hookEventName": "SessionStart",
-                                       "additionalContext": text + (" " + s if s else "") + dig}}
+                                       "additionalContext": session_start_context(st, project)}}
     if event == "Stop":
         stamp_turn(project, payload)
         return None
@@ -113,16 +135,19 @@ def hook_output(event, st, payload, project, now=None):
 
 
 def run_hook(stdin_text):
-    """Fail open: any problem returns "" (no output)."""
+    """Fail open: any problem returns "" (no output). No ledger is silent; any other failure is one stderr line."""
     try:
         payload = json.loads(stdin_text or "{}")
         if not isinstance(payload, dict) or payload.get("agent_id"):
             return ""
         project = os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
+        if not os.path.exists(paths(project)[1]):
+            return ""  # #10109: a session without a ledger gets nothing and no error
         st = load_state(project)
         out = hook_output(payload.get("hook_event_name"), st, payload, project)
         return json.dumps(out, separators=(",", ":")) if out else ""
-    except Exception:
+    except Exception as e:  # #10109: never block the session, but report the failure
+        print(f"datg hook: failed open ({e})", file=sys.stderr)
         return ""
 
 

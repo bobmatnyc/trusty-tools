@@ -19,5 +19,6 @@ if [ -n "$WANT" ]; then
   export DATG_SESSION="$WANT"  # datg.py logs warn-mode warnings under this session name
 fi
 R=$(cd "$(dirname "$0")/.." && pwd)
-python3 "$R/scripts/datg.py" hook 2>/dev/null
+# #10109: stderr passes through, so a fail-open (unreadable ledger) is visible in the hook log.
+python3 "$R/scripts/datg.py" hook
 exit 0
