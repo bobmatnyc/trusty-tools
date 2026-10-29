@@ -246,3 +246,59 @@ async fn a_refused_start_leaves_the_holders_daemon_env_untouched() {
     assert_eq!(end.and_then(|s| s.code()), Some(1), "exit: {end:?}");
     assert_eq!(after, original, "a refused start rewrote daemon.env");
 }
+
+/// Why (#10358 follow-up): a supervised start must not stand by forever behind a
+/// holder that predates the installed binary - the install would never take
+/// effect. Exiting 1 once the bounded wait ends keeps the respawn rate to one
+/// run per wait, not one per 30 s.
+/// What: a healthy holder whose lock mtime is set far in the past (so the test
+/// binary's mtime postdates its start) is stood by for the 1.5 s stale grace,
+/// then the supervised start exits 1 and the log says the holder predates the
+/// binary. The holder keeps serving.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn supervised_start_stops_waiting_behind_an_older_image_holder() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    let mut holder = spawn_start(dir, "holder.log", false);
+    wait_up(dir).await;
+    let lock = File::options()
+        .write(true)
+        .open(dir.join("daemon.lock"))
+        .expect("open lock");
+    lock.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(86_400))
+        .expect("backdate the lock: the holder now looks older than the binary");
+    drop(lock);
+
+    let home = dir.join("home");
+    let log = File::create(dir.join("stale.log")).expect("log");
+    let mut cmd = test_daemon::command();
+    cmd.args(["start", "--foreground", "--no-auto-discover"])
+        .env("TRUSTY_DATA_DIR", dir)
+        .env("TRUSTY_DATA_DIR_OVERRIDE", dir)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("TRUSTY_EMBEDDER", "stdio")
+        .env("TRUSTY_SKIP_RAM_CHECK", "1")
+        .env("TRUSTY_SEARCH_STANDBY_RETRY_MS", "200")
+        .env("TRUSTY_SEARCH_STANDBY_STALE_GRACE_MS", "1500")
+        .env("TRUSTY_SEARCH_TEST_ASSUME_LAUNCHD_SUPERVISED", "1")
+        .env("RUST_LOG", "info")
+        .env_remove("TRUSTY_SEARCH_SOCKET")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    let mut second = cmd.spawn().expect("spawn the supervised start");
+    let end = wait_exit(&mut second, Duration::from_secs(20));
+    let holder_up = client(dir).is_up().await;
+    let stale_log = log_of(dir, "stale.log");
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(
+        end.and_then(|s| s.code()),
+        Some(1),
+        "still standing by behind an older image: {stale_log}"
+    );
+    assert!(stale_log.contains("predates"), "{stale_log}");
+    assert!(holder_up, "the holder must keep serving");
+}
