@@ -528,15 +528,16 @@ async fn call_refuses_an_incompatible_daemon_without_sending_the_frame() {
     assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
     assert!(err.message().contains("protocol 99"), "{err:?}");
 
-    let stream = open_stream(
+    let Err(stream) = open_stream(
         &socket,
         METHOD_ACTIVITY_STREAM,
         json!({}),
         STREAM_OPEN_TIMEOUT,
     )
     .await
-    .err()
-    .expect("an unsupported protocol cannot open a stream");
+    else {
+        panic!("an unsupported protocol cannot open a stream");
+    };
     assert!(
         matches!(stream, MemoryRpcError::ProtocolMismatch(_)),
         "{stream:?}"

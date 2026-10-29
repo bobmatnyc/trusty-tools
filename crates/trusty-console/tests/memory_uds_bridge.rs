@@ -521,7 +521,7 @@ fn silent_stub_daemon(dir: &Path, quiet: std::time::Duration) -> PathBuf {
             let Ok((mut conn, _)) = listener.accept().await else {
                 return;
             };
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            use tokio::io::AsyncReadExt as _;
             let mut raw = vec![0u8; 4096];
             let n = conn.read(&mut raw).await.unwrap_or(0);
             if answer_handshake(&mut conn, &raw[..n]).await {
