@@ -33,7 +33,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use trusty_common::memory_rpc::{call_memory_tool_at, resolve_memory_socket};
+use crate::core::memory_checked;
+use trusty_common::memory_rpc::resolve_memory_socket;
 use trusty_common::palace_resolve::resolve_palace;
 
 /// The trusty-memory method `tm memory recall` calls.
@@ -525,7 +526,7 @@ pub(crate) async fn call_method(
     method: &'static str,
     params: Value,
 ) -> Result<Value, MemoryVerbError> {
-    call_memory_tool_at(socket, method, params)
+    memory_checked::call(socket, method, params)
         .await
         .map_err(|e| MemoryVerbError::Call {
             method,
