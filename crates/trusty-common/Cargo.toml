@@ -166,7 +166,7 @@ name = "trusty-common"
 # 0.65.1 (Refs #6637): patch — doc-only edit in daemon_token.rs; no API change; 0.65.0 is live on crates.io.
 # 0.66.0 (Refs #10207): minor — breaking: RecycleTrigger::HardFootprint, RecycleSnapshot.hard_footprint_kills; subsumes the unpublished 0.65.1 (0.65.0 is live on crates.io).
 # 0.67.0 (Refs #9272): minor — breaking: the no-op `memory-core` feature is removed, so a manifest that names it no longer resolves.
-version = "0.67.1"
+version = "0.67.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

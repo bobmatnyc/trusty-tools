@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use super::super::tests::NO_TMUX;
 use super::super::{init, resolve_dir, user_config_path};
-use super::{DirRefusal, FLEET_SCAN_BUDGET, check};
+use super::{DirRefusal, FLEET_SCAN_BUDGET, check, check_with};
 
 /// `<outer>/home`, so a test can name a real ancestor of the home directory.
 struct Scratch {
@@ -606,4 +606,127 @@ fn a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time() {
         &format!("stopped after checking {FLEET_SCAN_BUDGET} directories"),
     );
     assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+/// #10457: FAILS BEFORE THE FIX — the shallow scan read only the immediate
+/// children of a skip-listed directory, so each of these passed. Covers the
+/// target and its private `local/` repository.
+#[test]
+fn a_repository_deep_in_a_skip_listed_dir_is_refused() {
+    for rel in ["node_modules/a/b", "build/x/proj"] {
+        let s = Scratch::new();
+        let dir = s.outer().join("arch");
+        s.repo(&dir.join(rel), false);
+        assert_workspace_parent(s.refused(&dir), &dir, "contains the repository");
+
+        let s = Scratch::new();
+        let dir = s.outer().join("arch");
+        s.repo(&dir.join("local"), false);
+        s.repo(&dir.join("local").join(rel), false);
+        assert_workspace_parent(s.refused(&dir), &dir, "nested in its private repository");
+    }
+}
+
+/// #10457: FAILS BEFORE THE FIX — a symlinked directory was probed once and
+/// never descended, so a repository below its target passed. Covers the
+/// target and its private `local/` repository.
+#[test]
+fn a_repository_behind_a_symlinked_dir_is_refused() {
+    for parent in ["", "local"] {
+        let s = Scratch::new();
+        let dir = s.outer().join("arch");
+        std::fs::create_dir_all(&dir).unwrap();
+        if !parent.is_empty() {
+            s.repo(&dir.join(parent), false);
+        }
+        let outside = s.outer().join("outside");
+        s.repo(&outside.join("sub"), false);
+        std::os::unix::fs::symlink(&outside, dir.join(parent).join("elsewhere")).unwrap();
+        assert_unresolvable(
+            s.refused(&dir),
+            &format!("points to {}, outside", outside.display()),
+        );
+    }
+}
+
+/// #10457: FAILS BEFORE THE FIX — an escaping directory symlink with nothing
+/// behind it passed. The scan never follows it, so it refuses instead.
+#[test]
+fn a_symlink_escaping_the_dir_refuses_without_a_repository() {
+    let s = Scratch::new();
+    let dir = s.outer().join("arch");
+    std::fs::create_dir_all(dir.join("deep")).unwrap();
+    let outside = s.outer().join("empty");
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = dir.join("deep/elsewhere");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    assert_unresolvable(
+        s.refused(&dir),
+        &format!(
+            "the symlink {} points to {}",
+            link.display(),
+            outside.display()
+        ),
+    );
+}
+
+/// #10457: FAILS BEFORE THE FIX — `node_modules` was not charged and its 129
+/// children fit the 1024-probe shallow cap, so the tree passed. Now it counts
+/// against the fleet budget, refuses naming it, and stops promptly.
+#[test]
+fn a_large_node_modules_refuses_in_bounded_time() {
+    let s = Scratch::new();
+    let dir = s.outer().join("arch");
+    let per_dir = 128;
+    for i in 0..=(FLEET_SCAN_BUDGET / per_dir) {
+        wide(&dir.join(format!("node_modules/g{i:04}")), per_dir);
+    }
+    let started = std::time::Instant::now();
+    let refusal = s.refused(&dir);
+    let elapsed = started.elapsed();
+    assert_unresolvable(
+        refusal,
+        &format!("stopped after checking {FLEET_SCAN_BUDGET} directories, before"),
+    );
+    eprintln!("#10457: a {FLEET_SCAN_BUDGET}-directory node_modules refused in {elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+/// #10457: links that stay inside the directory, as a pnpm `node_modules`
+/// makes them, and a symlink cycle, still pass (no-regression guard).
+#[test]
+fn a_pnpm_style_node_modules_inside_the_dir_passes() {
+    let s = Scratch::new();
+    let dir = s.repo(&s.outer().join("arch"), false);
+    let store = dir.join("node_modules/.pnpm/pkg@1/node_modules/pkg");
+    std::fs::create_dir_all(&store).unwrap();
+    std::os::unix::fs::symlink(&store, dir.join("node_modules/pkg")).unwrap();
+    // A cycle: `.pnpm/back` resolves to `node_modules`. A link to the root
+    // itself would be `Found`, since the root is a repository.
+    std::os::unix::fs::symlink(Path::new(".."), dir.join("node_modules/.pnpm/back")).unwrap();
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+}
+
+/// A fake `st_dev` reader: `<dir>/local` sits on another filesystem.
+fn local_is_a_mount(path: &Path) -> std::io::Result<u64> {
+    if path.file_name().is_some_and(|n| n == "local") {
+        return Ok(2);
+    }
+    Ok(1)
+}
+
+/// #10457 critic MEDIUM: FAILS BEFORE THE FIX — `local/` was left out of the
+/// outer scan before its device was read, and its own scan took its device as
+/// the root's, so a mount there passed. A test cannot mount, so the reader is
+/// faked; the same directory passes with the real reader.
+#[test]
+fn a_mount_point_at_local_is_refused() {
+    let s = Scratch::new();
+    let dir = s.outer().join("arch");
+    s.repo(&dir.join("local"), false);
+    assert_unresolvable(
+        check_with(&dir, &s.home(), local_is_a_mount).expect_err("a mount at local/ must refuse"),
+        &format!("{} is a mount point", dir.join("local").display()),
+    );
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
 }

@@ -233,7 +233,7 @@ async fn grant_by_agent_ancestor_cannot_name_denied_key() {
 
     assert_eq!(
         fixed_error(&refused, method::GRANT),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert!(refused.result.is_none());
     assert_eq!(grants.has_unexpired(), Ok(false), "nothing was minted");
@@ -244,7 +244,7 @@ async fn grant_by_agent_ancestor_cannot_name_denied_key() {
         (
             AuditMethod::Grant,
             AuditDecision::Deny,
-            Some("agent_use_refused"),
+            Some("agent_key_denied"),
             Some("API_KEY")
         )
     );
@@ -479,7 +479,7 @@ async fn resolve_by_agent_descendant_of_denied_key_is_refused() {
 
     assert_eq!(
         fixed_error(&response, method::RESOLVE),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert_no_value(&response);
     let resolves: Vec<_> = records(&fx)
@@ -500,7 +500,7 @@ async fn resolve_by_agent_descendant_of_denied_key_is_refused() {
             (
                 AuditMethod::Resolve,
                 AuditDecision::Deny,
-                Some("agent_use_refused"),
+                Some("agent_key_denied"),
                 Some("API_KEY")
             ),
         ]
