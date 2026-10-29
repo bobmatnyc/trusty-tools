@@ -76,6 +76,7 @@ async fn reachability_probe_reports_the_protocol_mismatch() {
     );
 }
 
+#[cfg(feature = "tui")]
 #[tokio::test]
 async fn banner_probe_reports_the_protocol_mismatch_as_unreachable_with_a_note() {
     let (daemon, seen) = future_daemon().await;
