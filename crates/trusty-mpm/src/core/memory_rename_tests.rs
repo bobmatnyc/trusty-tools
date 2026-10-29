@@ -29,7 +29,9 @@ enum Daemon {
     Current,
     /// Supports the handshake and refuses `palace_rename` with -32006.
     Refusing,
-    /// Answers -32601 to every method, as a daemon before both did.
+    /// Supports the handshake but answers -32601 to `palace_rename`, as a
+    /// daemon before that method did. (A daemon with no handshake is refused
+    /// by the shared check, #9537.)
     Old,
 }
 
@@ -45,8 +47,8 @@ impl RpcFallback for Stub {
             calls.push((method.to_string(), params.clone()));
         }
         match (self.daemon, method) {
-            (Daemon::Old, _) => Err(RpcError::new(CODE_METHOD_NOT_FOUND, "Method not found")),
             (_, m) if m == METHOD_PROTOCOL => Ok(json!({"protocol_version": 1})),
+            (Daemon::Old, _) => Err(RpcError::new(CODE_METHOD_NOT_FOUND, "Method not found")),
             (Daemon::Refusing, _) => Err(RpcError::new(
                 CODE_REFUSED,
                 "palace \"dst\" already exists and is not empty: it holds drawers",
