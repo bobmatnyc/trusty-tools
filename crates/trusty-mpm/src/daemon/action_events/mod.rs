@@ -45,6 +45,9 @@ pub mod message;
 pub mod projection;
 // #9167 PR2: the receiving side of a cross-session message.
 pub mod received;
+// #10412: the once-only settle at stop.
+mod settle;
+pub use settle::Settled;
 // #10412: what the bus did not take at stop, replayed on the next start.
 pub mod spool;
 pub mod tmux_send;
@@ -189,17 +192,8 @@ pub struct ActionPublisher {
     scanning: parking_lot::Mutex<()>,
     /// #10412: where the final flush puts what the bus did not take.
     spool: Option<PathBuf>,
-}
-
-/// Where the final flush left the buffered events (#10412).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Settled {
-    /// Written to the bus.
-    pub sent: usize,
-    /// Written to the spool, for replay on the next start.
-    pub spooled: usize,
-    /// Neither; each loss is also logged with this count.
-    pub lost: usize,
+    /// #10412: the once-only settle and the closed buffer ([`settle`]).
+    settle: settle::SettleState,
 }
 
 impl ActionPublisher {
@@ -213,6 +207,7 @@ impl ActionPublisher {
             received: parking_lot::Mutex::default(),
             scanning: parking_lot::Mutex::new(()),
             spool: None,
+            settle: settle::SettleState::default(),
         }
     }
 
@@ -226,7 +221,7 @@ impl ActionPublisher {
     ///
     /// Why: events spooled at shutdown reach the bus only if a later start
     /// sends them (#10412).
-    /// What: [`spool::take_all`] claims and deletes each file, so a file is
+    /// What: [`spool::take_all`] takes each file under a lock and deletes it, so a file is
     /// replayed once; its events join the buffer ahead of any new hook.
     /// Overflow is counted in [`Self::dropped`], and logged here too.
     /// Test: `spooled_events_replay_on_the_next_start_exactly_once_10412`.
@@ -246,10 +241,16 @@ impl ActionPublisher {
                 "action events: part of the spool was unreadable"
             );
         }
+        if replay.held > 0 {
+            tracing::info!(
+                held = replay.held,
+                "action events: spool files held by a live process; left to it"
+            );
+        }
         let dropped_before = self.client.dropped();
         let count = replay.events.len();
         for event in replay.events {
-            self.client.send(event);
+            self.buffer(event);
         }
         let overflowed = self.client.dropped().saturating_sub(dropped_before);
         if count > 0 {
@@ -295,7 +296,7 @@ impl ActionPublisher {
         let mut threader = self.threader.lock();
         for mut event in threader.project(record) {
             event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            self.client.send(event);
+            self.buffer(event);
         }
         drop(threader);
         // #9167: no I/O here; the flush task reads the transcript.
@@ -310,7 +311,7 @@ impl ActionPublisher {
     pub fn publish_event(&self, mut event: trusty_common::control_bus::HarnessEvent) {
         let _order = self.threader.lock();
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.client.send(event);
+        self.buffer(event);
     }
 
     /// Buffer a `received` event per cross-session message that reached a
@@ -375,7 +376,7 @@ impl ActionPublisher {
             }
             for mut event in events {
                 event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                self.client.send(event);
+                self.buffer(event);
                 found += 1;
             }
         }
@@ -434,89 +435,6 @@ impl ActionPublisher {
                 health.report(&outcome, me.client.dropped(), Instant::now());
             }
         })
-    }
-
-    /// The exit-path flush, bounded by [`FINAL_FLUSH_BUDGET`].
-    ///
-    /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
-    /// `shutdown_runs_the_final_flush_once_6849`.
-    pub async fn final_flush(&self) -> Settled {
-        self.final_flush_within(FINAL_FLUSH_BUDGET).await
-    }
-
-    /// The exit-path flush, bounded by `budget`: deliver, then spool the rest.
-    ///
-    /// Why: a bus that is down or stalled at stop lost the whole buffer
-    /// (#10412); a slow bus or disk must still not hold the stop.
-    /// What: the bus gets half of `budget` (a cut-off write re-queues its
-    /// frame). What is left is taken from the buffer and written to the spool
-    /// on the blocking pool, cut off at `budget`. Every event not sent or
-    /// spooled is counted in [`Settled::lost`] and logged with that count.
-    /// Test: `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`,
-    /// `a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_10412`.
-    pub async fn final_flush_within(&self, budget: Duration) -> Settled {
-        let deadline = tokio::time::Instant::now() + budget;
-        let mut settled = Settled::default();
-        let buffered = self.client.buffered_len();
-        match tokio::time::timeout(budget / 2, self.client.flush()).await {
-            Ok(PushFlushOutcome { error: None, sent }) => settled.sent = sent,
-            Ok(PushFlushOutcome {
-                error: Some(e),
-                sent,
-            }) => {
-                tracing::info!(sent, error = %e, "action events: final flush stopped; spooling the rest");
-                settled.sent = sent;
-            }
-            Err(_) => {
-                // The cut-off flush reports nothing; the buffer shows what it wrote.
-                settled.sent = buffered.saturating_sub(self.client.buffered_len());
-                tracing::info!(
-                    sent = settled.sent,
-                    "action events: final flush outlived its budget; spooling the rest"
-                );
-            }
-        }
-        let left = self.client.drain_buffered();
-        if left.is_empty() {
-            tracing::debug!(sent = settled.sent, "action events: final flush delivered");
-            return settled;
-        }
-        let count = left.len();
-        let Some(dir) = self.spool.clone() else {
-            tracing::warn!(
-                lost = count,
-                "action events: undelivered at stop and no spool; lost"
-            );
-            settled.lost = count;
-            return settled;
-        };
-        let write = tokio::task::spawn_blocking(move || spool::persist(&dir, &left));
-        match tokio::time::timeout_at(deadline, write).await {
-            Ok(Ok(Ok(written))) => {
-                tracing::info!(
-                    spooled = written,
-                    "action events: undelivered at stop; spooled for the next start"
-                );
-                settled.spooled = written;
-            }
-            Ok(Ok(Err(e))) => {
-                tracing::warn!(lost = count, error = %e, "action events: spool write failed; lost");
-                settled.lost = count;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(lost = count, error = %e, "action events: spool write did not finish; lost");
-                settled.lost = count;
-            }
-            Err(_) => {
-                // The write may still land; it is not counted as spooled.
-                tracing::warn!(
-                    lost = count,
-                    "action events: spool write outlived the stop budget; counted lost"
-                );
-                settled.lost = count;
-            }
-        }
-        settled
     }
 }
 
@@ -681,7 +599,9 @@ pub fn start_with_spool(
                     .with_spool(spool),
             );
             let events = state.action_events();
-            // #10412: a second publisher must not claim the spool it never uses.
+            // #10412: held across check, replay and attach, so a second
+            // start never claims a spool its publisher then fails to attach.
+            let mut flush_task = events.flush_task.lock();
             if events.publisher().is_some() {
                 return false;
             }
@@ -689,7 +609,7 @@ pub fn start_with_spool(
             if !events.attach(Arc::clone(&publisher)) {
                 return false;
             }
-            *events.flush_task.lock() = Some(publisher.spawn_flush_task());
+            *flush_task = Some(publisher.spawn_flush_task());
             true
         }
         Err(e) => {

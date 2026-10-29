@@ -160,9 +160,11 @@ async fn spooled_events_replay_on_the_next_start_exactly_once_10412() {
         buf
     });
     let second = started(&sock, &spool);
-    assert!(spooled(&spool).is_empty(), "the replay claimed the spool");
+    assert!(spooled(&spool).is_empty(), "the replay took the spool");
+    // A hook in the new run goes out after the replayed events.
+    second.push_hook_event(hook(SessionId::new(), "t2"));
     let settled = second.action_events().shutdown().await;
-    assert_eq!((settled.sent, settled.lost), (2, 0), "{settled:?}");
+    assert_eq!((settled.sent, settled.lost), (4, 0), "{settled:?}");
     let bytes = tokio::time::timeout(Duration::from_secs(10), read)
         .await
         .expect("bus read")
@@ -171,7 +173,8 @@ async fn spooled_events_replay_on_the_next_start_exactly_once_10412() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("frame"))
         .collect();
-    assert_eq!(ids(&got), expected);
+    assert_eq!(got.len(), 4, "two replayed, then root and started");
+    assert_eq!(ids(&got[..2]), expected, "the replay goes first");
 
     let third = started(&sock, &spool);
     let publisher = third.action_events().publisher().expect("attached");
@@ -208,4 +211,152 @@ fn a_torn_spool_line_is_skipped_and_the_rest_replay_10412() {
             .events
             .is_empty()
     );
+}
+
+/// SIGTERM runs the signal handler's settle and the serve drain's at once:
+/// both get the one result, and the spool holds each event once.
+#[tokio::test]
+async fn concurrent_settles_account_for_every_event_once_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool = dir.path().join("spool");
+    let state = started(&dir.path().join("absent.sock"), &spool);
+    let s = SessionId::new();
+    for i in 0..50 {
+        state.push_hook_event(hook(s, &format!("t{i}")));
+    }
+    let events = state.action_events();
+    let begun = Instant::now();
+    let (drain, signal) = tokio::join!(
+        events.shutdown(),
+        events.shutdown_within(SIGNAL_FLUSH_BUDGET)
+    );
+    assert!(begun.elapsed() < FINAL_FLUSH_BUDGET + Duration::from_millis(150));
+    assert_eq!(drain, signal, "two settles split the buffer");
+    assert_eq!(
+        drain,
+        Settled {
+            sent: 0,
+            spooled: 51,
+            lost: 0
+        }
+    );
+    assert_eq!(spooled(&spool).len(), 51, "each event spooled once");
+}
+
+/// A caller whose budget ends while another settle is still at the bus
+/// returns on time and counts every event still at risk as lost.
+#[tokio::test]
+async fn a_settle_waiter_out_of_budget_counts_what_is_at_risk_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("bus.sock");
+    let state = started(&sock, &dir.path().join("spool"));
+    let s = SessionId::new();
+    for i in 0..3_000 {
+        state.push_hook_event(hook(s, &format!("t{i}")));
+    }
+    let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+    let hold = tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(conn);
+    });
+    let publisher = Arc::clone(state.action_events().publisher().expect("attached"));
+    let first = Arc::clone(&publisher);
+    let settling = tokio::spawn(async move { first.final_flush_within(FINAL_FLUSH_BUDGET).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let begun = Instant::now();
+    let waiter = publisher.final_flush_within(SIGNAL_FLUSH_BUDGET).await;
+    let took = begun.elapsed();
+    assert!(
+        took < SIGNAL_FLUSH_BUDGET + Duration::from_millis(150),
+        "{took:?}"
+    );
+    assert_eq!(
+        waiter.spooled, 0,
+        "the waiter settled on its own: {waiter:?}"
+    );
+    assert!(waiter.lost > 0, "nothing counted at risk: {waiter:?}");
+
+    let settled = settling.await.expect("join");
+    hold.abort();
+    assert_eq!(
+        settled.sent + settled.spooled + settled.lost,
+        3_001,
+        "{settled:?}"
+    );
+}
+
+/// A hook after the stop drained the buffer is counted, not stranded.
+#[tokio::test]
+async fn an_event_after_the_settle_is_counted_lost_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = started(&dir.path().join("absent.sock"), &dir.path().join("spool"));
+    state.action_events().shutdown().await;
+    let publisher = state.action_events().publisher().expect("attached");
+    state.push_hook_event(hook(SessionId::new(), "late"));
+    assert_eq!(publisher.buffered_len(), 0, "stranded in a settled buffer");
+    assert_eq!(publisher.late_lost(), 2, "root and started");
+}
+
+/// A spool file another live process holds is left to it; once that holder
+/// is gone without deleting it (a taker that died), it replays once.
+#[test]
+fn a_spool_file_held_by_a_live_taker_is_left_alone_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool_dir = dir.path().join("spool");
+    let publisher = ActionPublisher::new(dir.path().join("absent.sock"));
+    publisher.publish(&hook(SessionId::new(), "t1"));
+    let events = publisher.client.drain_buffered();
+    spool::persist(&spool_dir, &events).expect("persist");
+    let file = std::fs::read_dir(&spool_dir)
+        .expect("dir")
+        .next()
+        .expect("one file")
+        .expect("entry")
+        .path();
+
+    let holder = std::fs::File::open(&file).expect("open");
+    holder.lock().expect("lock");
+    let replay = spool::take_all(&spool_dir).expect("take");
+    assert!(replay.events.is_empty(), "took a held file");
+    assert_eq!(replay.held, 1);
+    assert!(file.exists());
+
+    drop(holder);
+    let replay = spool::take_all(&spool_dir).expect("take");
+    assert_eq!(ids(&replay.events), ids(&events));
+    assert!(
+        spool::take_all(&spool_dir)
+            .expect("again")
+            .events
+            .is_empty()
+    );
+}
+
+/// A temp file a stopped write left is swept once past the grace period; a
+/// fresh one, or one a live writer holds, is kept.
+#[test]
+fn a_stale_unlocked_temp_file_is_swept_and_a_live_one_kept_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool_dir = dir.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).expect("dir");
+    let abandoned = spool_dir.join(".a.ndjson.tmp");
+    let writing = spool_dir.join(".b.ndjson.tmp");
+    std::fs::write(&abandoned, b"{").expect("abandoned");
+    std::fs::write(&writing, b"{").expect("writing");
+    let writer = std::fs::File::open(&writing).expect("open");
+    writer.lock().expect("lock");
+
+    let now = std::time::SystemTime::now();
+    let fresh = spool::take_all_at(&spool_dir, now).expect("take");
+    assert_eq!(fresh.swept_tmp, 0, "swept inside the grace period");
+    assert!(abandoned.exists());
+
+    let later = now + spool::TMP_GRACE * 2;
+    let stale = spool::take_all_at(&spool_dir, later).expect("take");
+    assert_eq!(stale.swept_tmp, 1);
+    assert!(!abandoned.exists(), "the abandoned temp file stayed");
+    assert!(writing.exists(), "removed a file a live writer holds");
+    drop(writer);
 }
