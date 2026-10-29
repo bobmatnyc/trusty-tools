@@ -538,4 +538,41 @@ mod tests {
         );
         assert_eq!(creator_label(&[]), NO_CREATOR_LABEL);
     }
+
+    /// Why (#9538): `is_healthy` must report a reachable daemon on a mismatched
+    /// protocol as up, while `fetch_all` refuses it.
+    /// Test: this test.
+    #[tokio::test]
+    async fn is_healthy_reports_a_reachable_daemon_on_a_mismatched_protocol() {
+        use crate::memory_rpc::METHOD_PROTOCOL;
+        use crate::uds::server::{RpcRouter, RpcServeOptions, serve_until};
+        use serde_json::{Value, json};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("fake-memory.sock");
+        let listener = crate::uds::bind_hardened(&socket).expect("bind");
+        let router = RpcRouter::new()
+            .typed::<Value, Value, _, _>(METHOD_PROTOCOL, |_| async {
+                Ok(json!({ "protocol_version": 99, "daemon_version": "9.9.9" }))
+            })
+            .typed::<Value, Value, _, _>("memory.health", |_| async { Ok(json!({})) });
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            serve_until(
+                &listener,
+                Arc::new(router),
+                RpcServeOptions::default(),
+                async {
+                    let _ = shutdown.await;
+                },
+            )
+            .await;
+        });
+
+        let client = MemoryClient::new(&socket);
+        assert!(client.is_healthy().await);
+        assert!(client.fetch_all().await.is_err());
+        let _ = stop.send(());
+    }
 }

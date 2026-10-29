@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::memory_rpc::call_memory_tool_at_with_timeout;
+use crate::memory_rpc::{call_memory_tool_at_raw_with_timeout, call_memory_tool_at_with_timeout};
 use crate::monitor::dashboard::{MemoryData, PalaceRow};
 
 use super::parsers::{
@@ -118,10 +118,19 @@ impl MemoryClient {
     /// Why: the memory panel shows an offline badge when the daemon is down;
     /// the cheap `memory.health` call decides reachability before the heavier
     /// status calls run.
-    /// What: one `memory.health` call; any error is `false`.
-    /// Test: covered by the trusty-memory daemon suite.
+    /// What: one unchecked `memory.health` call (no protocol check), so a
+    /// reachable daemon on a mismatched protocol is not shown as offline —
+    /// `fetch_all` still refuses it. Any error is `false`.
+    /// Test: `is_healthy_reports_a_reachable_daemon_on_a_mismatched_protocol`.
     pub async fn is_healthy(&self) -> bool {
-        self.call("memory.health", json!({})).await.is_ok()
+        call_memory_tool_at_raw_with_timeout(
+            &self.socket,
+            "memory.health",
+            json!({}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .is_ok()
     }
 
     /// Fetch the palace roster, without paying to open every palace on disk.
