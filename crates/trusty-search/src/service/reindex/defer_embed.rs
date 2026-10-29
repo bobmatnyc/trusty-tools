@@ -13,9 +13,10 @@
 //! component re-enable path in `service::server::components`.
 //! 1. Acquires the background reindex semaphore (serialises against concurrent
 //!    reindexes on the same handle) — `spawn_deferred_embed_pass` only.
-//! 2. Snapshots the owed chunks under the indexer's READ lock, embeds with NO
-//!    indexer lock held, then commits under a fresh READ lock (#8600).
-//! 3. On success: forces an HNSW snapshot and marks semantic `Ready`.
+//! 2. Per wave, loads the owed chunks under the indexer's READ lock, embeds
+//!    with NO indexer lock held, then commits under a fresh READ lock (#8600),
+//!    checkpointing the vectors on a cadence (#10294).
+//! 3. On success: the final checkpoint is written; marks semantic `Ready`.
 //! 4. On failure: marks semantic `Failed` with the error reason (issue #928).
 //!
 //! Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
@@ -69,9 +70,10 @@ pub(crate) fn spawn_deferred_embed_pass(
 /// concurrency guard — this function does NOT acquire the background
 /// semaphore itself, so a caller that already holds a permit (the runtime
 /// toggle path) can call this directly without a nested-acquire deadlock.
-/// What: plans under the indexer READ lock, embeds with no indexer lock held,
-/// commits under a fresh READ lock (#8600), forces an HNSW snapshot, then
-/// marks semantic `Ready` (or `Failed` when embedding errors, issue #928).
+/// What: per wave, loads under the indexer READ lock, embeds with no indexer
+/// lock held, commits under a fresh READ lock (#8600) and checkpoints on a
+/// cadence (#10294), then marks semantic `Ready` (or `Failed` when embedding
+/// or a checkpoint errors, issue #928).
 /// Idempotent: re-running after a partial failure re-embeds all not-yet-embedded
 /// chunks (HNSW upsert is idempotent).
 /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
@@ -135,27 +137,21 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
         }
     });
 
-    // #8600: the indexer read guard is held to snapshot and to commit, never
-    // across embedding — a writer queued behind a long-held guard blocked
-    // every later reader, `GET /indexes/{id}/status` included. The per-index
-    // permit and the teardown read-guard still exclude a reindex and a DELETE.
-    let plan = handle.indexer.read().await.plan_deferred_embed().await;
-    // #6524: the pass stops at the next wave boundary while embedding is
-    // paused. It does not park here — this task holds the one background
-    // permit, this index's permit and its teardown read-guard, so a park
-    // would stall every other index's catch-up and any DELETE on this one.
-    let result = match plan
-        .embed(Some(&progress_tx), Some(&handle.embedding_pause))
-        .await
-    {
-        // #8600: a stalled run still commits its completed waves here; the
-        // stall then comes back as the `Err` that settles `Failed` below.
-        Ok(run) => {
-            let indexer = handle.indexer.read().await;
-            indexer.commit_deferred_embed(plan, run).await
-        }
-        Err(e) => Err(e),
-    };
+    // #8600: the indexer read guard is held to plan, load and commit each
+    // wave, never across embedding — a writer queued behind a long-held guard
+    // blocked every later reader, `GET /indexes/{id}/status` included. The
+    // per-index permit and the teardown read-guard still exclude a reindex and
+    // a DELETE. #6524: the pass stops at the next wave boundary while
+    // embedding is paused; it does not park here, since this task holds the
+    // one background permit. #10294: each wave is committed before the next
+    // starts and the vectors are checkpointed on a cadence and on every exit;
+    // a stall still comes back as the `Err` that settles `Failed` below.
+    let result = crate::core::indexer::run_deferred_embed(
+        || handle.indexer.read(),
+        Some(&progress_tx),
+        Some(&handle.embedding_pause),
+    )
+    .await;
     // Drop the sender so the updater task's recv loop terminates.
     drop(progress_tx);
     // Wait for the updater to finish processing any buffered notifications.
@@ -172,11 +168,8 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
         // queue's own pause gate, which is where it parks (holding no permits)
         // until the operator resumes.
         Ok(outcome) if outcome.paused => {
+            // #10294: the pass checkpointed its waves before it returned.
             let embedded = outcome.embedded;
-            {
-                let indexer = handle.indexer.read().await;
-                indexer.force_incremental_persist();
-            }
             {
                 let mut stages = handle.stages.write().await;
                 stages.semantic.embedded = Some(embedded);
@@ -204,13 +197,9 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             spawn_deferred_embed_pass(handle, progress, pending);
         }
         Ok(outcome) => {
+            // #10294: the pass wrote the HNSW snapshot before it returned, so
+            // the vectors survive a restart even if no later reindex runs.
             let (embedded, total) = (outcome.embedded, outcome.total);
-            // Force an HNSW snapshot so the vectors survive a daemon
-            // restart even if no subsequent reindex runs.
-            {
-                let indexer = handle.indexer.read().await;
-                indexer.force_incremental_persist();
-            }
             tracing::info!(
                 "deferred_embed[{}]: embedded {}/{} chunks — marking semantic Ready",
                 index_id.0,
@@ -661,3 +650,8 @@ mod tests {
 #[cfg(test)]
 #[path = "defer_embed_8600_tests.rs"]
 mod tests_8600;
+
+// #10294: per-wave commit and checkpoint, and a failed checkpoint fails the pass.
+#[cfg(test)]
+#[path = "defer_embed_10294_tests.rs"]
+mod tests_10294;
