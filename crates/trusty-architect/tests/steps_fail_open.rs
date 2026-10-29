@@ -339,8 +339,17 @@ fn a_probe_past_its_deadline_is_killed_with_its_group_and_reaped() -> TestResult
     p.probe_script = script(
         dir.path(),
         "usage-probe.sh",
-        &format!("sleep 30 &\necho \"$$ $!\" > '{}'\nwait", pids.display()),
+        &format!(
+            "[ $# -eq 0 ] && exit 0\nsleep 30 &\necho \"$$ $!\" > '{}'\nwait",
+            pids.display()
+        ),
     )?;
+    // #10428: the first exec of a freshly written script can take over a
+    // second on macOS, longer than the 300 ms deadline, so the probe was
+    // killed before it wrote its pids. Run it once with no arguments (it
+    // exits at once) so the deadline below only times the probe's own work.
+    let warmed = std::process::Command::new(&p.probe_script).status()?;
+    assert!(warmed.success(), "warm-up exec: {warmed}");
     let probe = ScriptProbe::new(&p).with_deadline(Duration::from_millis(300));
     probe.launch("tm-x", "%1", GM)?;
     let line = wait_for_line(&pids);
