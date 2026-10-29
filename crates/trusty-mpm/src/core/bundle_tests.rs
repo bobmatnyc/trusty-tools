@@ -15,6 +15,10 @@ use crate::core::framework_content::tests::skill_with_references;
 mod rule_markers;
 use rule_markers::{has_rule, plain, rule_section, rule_sentence};
 
+// #10401: data-design skill and data-designer agent registration and import safety.
+#[path = "bundle_data_design_tests.rs"]
+mod data_design;
+
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
 fn skill_text(path: &str) -> &'static str {

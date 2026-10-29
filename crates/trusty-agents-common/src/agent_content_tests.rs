@@ -206,7 +206,7 @@ fn require_names_the_missing_file() {
     assert!(err.to_string().contains("agents/no-such-agent.md"), "{err}");
 }
 
-/// The repository roster carries all 43 agent files, `BASE-*` first, each
+/// The repository roster carries all 44 agent files, `BASE-*` first, each
 /// byte-identical to the file it names, and exactly the `content/agents/*.md`
 /// listing — a file nothing loads, or a loaded name with no file, fails here.
 #[test]
@@ -220,7 +220,7 @@ fn the_repository_roster_carries_every_agent() {
         .collect();
     on_disk.sort();
     let mut loaded: Vec<String> = roster().iter().map(|(n, _)| n.to_string()).collect();
-    assert_eq!(loaded.len(), 43, "the roster must carry all 43 agent files");
+    assert_eq!(loaded.len(), 44, "the roster must carry all 44 agent files");
     let bases = loaded.iter().take_while(|n| n.starts_with("BASE-")).count();
     assert_eq!(bases, 5, "the five BASE-* templates must come first");
     loaded.sort();
