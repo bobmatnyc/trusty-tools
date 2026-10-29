@@ -6,7 +6,7 @@ Generated from content/agents (the agent roster) + `agent_metadata::agent_metada
 
 Every agent below transitively `extends: base-agent` (directly, or via `base-engineer`/`base-qa`/`base-ops`/`base-research`) — see `agents/BASE-AGENT.md` and its four role-specific bases for the shared foundation, not repeated per row here.
 
-38 concrete agents.
+39 concrete agents.
 
 | Agent | Category | Deploys When | Role | Extends | Description | Declared Skills |
 |---|---|---|---|---|---|---|
@@ -14,6 +14,7 @@ Every agent below transitively `extends: base-agent` (directly, or via `base-eng
 | `code-analyzer` | universal | always | code-analyzer | base-research | Code analysis specialist: static review of correctness, quality, security, architecture | code-review-standards |
 | `code-critic` | universal | always | qa | base-qa | Adversarial code reviewer: rubric-based APPROVE/WARN/BLOCK verdict with line-level citations | code-review-standards, contract-driven-testing |
 | `dart-engineer` | language | `pubspec.yaml` | engineer | base-engineer | Dart/Flutter specialist: cross-platform mobile, web and desktop apps, null safety, state | systematic-debugging, test-driven-development |
+| `data-designer` | universal | always | data-designer | base-agent | Data designer: chart form, encoding, colour and label specs; reviews dashboards for readability | data-design |
 | `data-engineer` | universal | always | data-engineer | base-engineer | Data specialist: ETL pipelines, database migrations, large-dataset processing | systematic-debugging, test-driven-development |
 | `documentation` | universal | always | documentation | base-agent | Documentation specialist: writes, reorganises and maintains consistent technical docs | documentation-style |
 | `dotnet-engineer` | language | `*.sln` or `*.csproj` or `*.vbproj` or `global.json` or `Directory.Build.props` | engineer | base-engineer | C#/.NET 8+ specialist: ASP.NET Core, EF Core, xUnit, minimal APIs, async; legacy VB.NET aware |  |

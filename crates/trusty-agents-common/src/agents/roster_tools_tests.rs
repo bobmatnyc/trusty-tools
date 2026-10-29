@@ -65,6 +65,11 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
         "dart-engineer",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search",
     ),
+    // #10401: designs specs; no web tools by construction.
+    (
+        "data-designer",
+        "Read, Write, Edit, Bash, Grep, Glob, mcp__trusty-search",
+    ),
     (
         "data-engineer",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search",

@@ -51,6 +51,10 @@ path = "agents/dart-engineer.md"
 version = "0.1.0"
 
 [[member]]
+path = "agents/data-designer.md"
+version = "0.1.0"
+
+[[member]]
 path = "agents/data-engineer.md"
 version = "0.1.0"
 
@@ -477,6 +481,10 @@ version = "1.0.1"
 [[member]]
 path = "skills/contract-driven-testing.md"
 version = "1.0.0"
+
+[[member]]
+path = "skills/data-design.md"
+version = "0.1.0"
 
 [[member]]
 path = "skills/database-migration.md"

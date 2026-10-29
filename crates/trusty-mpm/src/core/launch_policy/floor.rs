@@ -119,6 +119,8 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
     "git-workflow",
     "code-review-standards",
     "contract-driven-testing",
+    // #10401: the data-designer agent preloads it.
+    "data-design",
     "documentation-style",
     "rust-build-performance",
     "rust-delivery-workflow",
