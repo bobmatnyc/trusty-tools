@@ -19,6 +19,7 @@
 //! `dashboard_concurrent_blind_sets_of_a_new_id_let_exactly_one_win`,
 //! `batch_rolls_back_on_midway_failure`, `failed_restore_names_the_torn_files`,
 //! `body_with_version_refused`,
+//! `batch_op_with_unknown_key_is_refused_and_writes_nothing`,
 //! `dashboard_writer_matches_prototype_bytes`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -74,12 +75,20 @@ impl Op {
     /// An op from the prototype's JSON shape `{op, collection, id, data, if_version}`.
     ///
     /// # Errors
-    /// [`DashError::Invalid`] for an unknown op, a missing name or a
-    /// non-integer `if_version`, in the prototype's words.
+    /// [`DashError::Invalid`] for an unknown op, a missing name, a
+    /// non-integer `if_version`, or a key outside [`OP_KEYS`].
     pub fn from_json(v: &Value) -> Result<Self, DashError> {
         let obj = v
             .as_object()
             .ok_or_else(|| DashError::Invalid("each batch op must be an object".into()))?;
+        // #10063: a misspelled `if_version` must fail the batch, not drop the guard.
+        if let Some(key) = obj.keys().find(|k| !OP_KEYS.contains(&k.as_str())) {
+            return Err(DashError::Invalid(format!(
+                "unknown op key {}: use {}",
+                py_repr(key),
+                OP_KEYS.join(", ")
+            )));
+        }
         let name = |key: &str| obj.get(key).and_then(Value::as_str).map(str::to_owned);
         let if_version = match obj.get("if_version") {
             None | Some(Value::Null) => None,
@@ -161,6 +170,12 @@ impl Op {
         }
     }
 }
+
+/// Why: an ignored key would let a typo such as `if_verison` drop the
+/// stale-write guard and land a stale write (#10063).
+/// What: the only keys [`Op::from_json`] accepts on a batch op.
+/// Test: `batch_op_with_unknown_key_is_refused_and_writes_nothing`.
+pub const OP_KEYS: [&str; 5] = ["op", "collection", "id", "data", "if_version"];
 
 fn unknown_op(op: Option<&Value>) -> String {
     let shown = match op {
