@@ -143,6 +143,39 @@ fn data_designer_composes_against_the_real_base() {
     assert!(!composed.contains("\nextends:"), "builder strips extends");
 }
 
+/// Every `__pycache__` directory or `.pyc` file under `dir`, recursively.
+fn python_bytecode_under(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "__pycache__" || name.ends_with(".pyc") {
+            found.push(path.clone());
+        }
+        if path.is_dir() {
+            python_bytecode_under(&path, found);
+        }
+    }
+}
+
+/// Why: the content loader reads every file under `skills/**` as UTF-8, so a
+/// stray `.pyc` (written when a test imports `check_palette.py`) panics every
+/// content-reading test with an opaque `FromUtf8Error` (#10401 critic).
+/// What: walks `content/skills` on disk, without the loader, and names each
+/// `__pycache__` or `.pyc` it finds.
+#[test]
+fn no_python_bytecode_under_content_skills() {
+    let root = crate::core::content_source::test_support::repo_root().join("content/skills");
+    let mut found = Vec::new();
+    python_bytecode_under(&root, &mut found);
+    assert!(
+        found.is_empty(),
+        "Python bytecode under content/skills breaks the UTF-8 content loader; delete it \
+         (and set PYTHONDONTWRITEBYTECODE=1 when running the checker tests): {found:?}"
+    );
+}
+
 /// Why: the brief's import-safety checklist (#10401): no fetch instruction,
 /// no executable surface beyond our own checker, and a URL only where it is a
 /// citation.
