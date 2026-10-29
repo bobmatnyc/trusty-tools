@@ -110,8 +110,8 @@ pub(super) fn already_running_message(
     format!(
         "Daemon already running (pid {pid}).\n\
          \n\
-         If you just replaced the binary, this is the OLD image: a truncated \
-         shutdown leaves launchd respawning it, and it keeps the lock.\n\
+         This daemon predates the installed binary (it is the OLD image): a \
+         truncated shutdown leaves launchd respawning it, and it keeps the lock.\n\
          \n\
          Remedy:  kill -TERM {pid}\n\
          Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
@@ -149,7 +149,7 @@ pub(super) fn classify_lock_holder(
 /// What: a failed `stat` yields `None`, which classifies as a healthy peer.
 /// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`
 /// covers the decision; the stat itself is exercised by a live `start`.
-fn probe_lock_holder() -> LockHolder {
+pub(super) fn probe_lock_holder() -> LockHolder {
     let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let started = crate::service::daemon_lock_path()
         .ok()
