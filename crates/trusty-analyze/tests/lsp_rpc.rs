@@ -886,6 +886,50 @@ mod events {
         assert_eq!(tool(&frames[0]).3, tool(&frames[1]).3);
     }
 
+    /// #10087: the barrier's terminal event says whether the server was ready.
+    /// A timeout is an answer (DOC-72 §3) but must not read as `ok`/ready.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analysed_at_timeout_finishes_as_timed_out_not_ok() {
+        let mut rig = Rig::new("never_ready");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        let v = rig
+            .ok(
+                "analyze.lsp_analysed_at",
+                json!({"path": rig.file(), "version": 1, "timeout_ms": 300}),
+            )
+            .await;
+        assert_eq!(v["state"], "timed_out", "the RPC answer is unchanged: {v}");
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        let (end, phase, _, _) = tool(&frames[1]);
+        assert_eq!(phase, CallPhase::Finished, "a deadline is an answer");
+        assert_ne!(end.attrs["outcome"], "ok", "{:?}", end.attrs);
+        assert_eq!(end.attrs["outcome"], "timed_out");
+        assert_eq!(end.attrs["state"], "timed_out");
+        assert_eq!(end.attrs["version_seen"], Value::Null);
+    }
+
+    /// The ready case keeps `outcome: ok` and adds `state: ready`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analysed_at_ready_finishes_ok_with_state_ready() {
+        let mut rig = Rig::new("unversioned");
+        let bus = StubBus::bind();
+        let publisher = attach(&mut rig, bus.path());
+        rig.ok(
+            "analyze.lsp_analysed_at",
+            json!({"path": rig.file(), "version": 1, "timeout_ms": 5000}),
+        )
+        .await;
+
+        let frames = pushed(&publisher, &bus, 2).await;
+        let (end, phase, _, _) = tool(&frames[1]);
+        assert_eq!(phase, CallPhase::Finished);
+        assert_eq!(end.attrs["outcome"], "ok");
+        assert_eq!(end.attrs["state"], "ready");
+        assert!(!end.attrs.contains_key("version_seen"), "{:?}", end.attrs);
+    }
+
     /// D8 on the failure path: an Errored event names the error's code, never
     /// its text, which for `InitializeFailed` quotes the server's stderr.
     #[tokio::test(flavor = "multi_thread")]
