@@ -151,6 +151,9 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
             .ok(),
     };
     let retry = retry_interval(std::env::var(RETRY_MS_ENV).ok().as_deref());
+    // #10358: tokio keeps the handlers this installs, so a stop that lands after
+    // takeover must be latched for `run_daemon` rather than swallowed.
+    crate::service::early_stop::arm();
     let mut stop = std::pin::pin!(trusty_common::shutdown_signal());
     let mut announced = false;
     let mut silent_since: Option<std::time::Instant> = None;
