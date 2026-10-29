@@ -42,6 +42,14 @@ fn stub_daemon<F>(dir: &Path, respond: F) -> PathBuf
 where
     F: Fn(&Value) -> Vec<String> + Send + Sync + 'static,
 {
+    stub_daemon_on_protocol(dir, json!({ "protocol_version": 1 }), respond)
+}
+
+/// [`stub_daemon`] for a daemon whose `memory.protocol` answer is `protocol` (#9538).
+fn stub_daemon_on_protocol<F>(dir: &Path, protocol: Value, respond: F) -> PathBuf
+where
+    F: Fn(&Value) -> Vec<String> + Send + Sync + 'static,
+{
     let socket = dir.join("sockets").join("memory.sock");
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
     let respond = std::sync::Arc::new(respond);
@@ -51,6 +59,7 @@ where
                 return;
             };
             let respond = std::sync::Arc::clone(&respond);
+            let protocol = protocol.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                 let mut raw = Vec::new();
@@ -58,7 +67,7 @@ where
                 let request: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
                 // #9538: the console opens every call with the protocol handshake.
                 let lines = if is_handshake(&request) {
-                    vec![handshake_frame()]
+                    vec![result_frame(protocol)]
                 } else {
                     respond(&request)
                 };
@@ -612,13 +621,14 @@ async fn an_incompatible_daemon_is_a_bad_gateway_naming_the_protocol() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let log = std::sync::Arc::clone(&seen);
-    let socket = stub_daemon(tmp.path(), move |request| {
-        if is_handshake(request) {
-            return vec![result_frame(json!({ "protocol_version": 99 }))];
-        }
-        log.lock().expect("log").push(request["method"].to_string());
-        vec![result_frame(json!({ "status": "ok" }))]
-    });
+    let socket = stub_daemon_on_protocol(
+        tmp.path(),
+        json!({ "protocol_version": 99 }),
+        move |request| {
+            log.lock().expect("log").push(request["method"].to_string());
+            vec![result_frame(json!({ "status": "ok" }))]
+        },
+    );
     let (status, _, body) = through_router(socket, "GET", "/api/memory/health").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(body.contains("protocol 99"), "{body}");

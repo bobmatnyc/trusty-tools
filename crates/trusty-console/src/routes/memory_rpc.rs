@@ -47,7 +47,7 @@ pub(crate) async fn call_tool(
     id: &str,
 ) -> Result<Value, ActionVerdict> {
     // #9538: refuse a daemon on an unsupported protocol before any frame is sent.
-    if let Err(e) = crate::memory_uds::ensure_protocol(socket, ACTION_TIMEOUT).await {
+    if let Err(e) = crate::memory_uds::ensure_protocol(socket, tool, ACTION_TIMEOUT).await {
         return Err(match e {
             MemoryRpcError::ProtocolMismatch(reason) => ActionVerdict::Refused {
                 id: id.to_string(),

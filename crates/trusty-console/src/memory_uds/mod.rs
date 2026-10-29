@@ -306,7 +306,8 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
 /// socket for a few seconds; a pre-handshake daemon stays callable). An
 /// unsupported or unreadable handshake is [`MemoryRpcError::ProtocolMismatch`]
 /// and is logged; a handshake that could not run is
-/// [`MemoryRpcError::Unreachable`], as any other transport failure.
+/// [`MemoryRpcError::Unreachable`], as any other transport failure, naming
+/// `method` (the call the caller was about to make).
 ///
 /// # Errors
 ///
@@ -316,13 +317,14 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
 /// `call_refuses_a_daemon_with_no_protocol_version`.
 pub(crate) async fn ensure_protocol(
     socket: &Path,
+    method: &str,
     timeout: Duration,
 ) -> Result<(), MemoryRpcError> {
     use trusty_common::memory_rpc::{MemoryProtocolError, ensure_memory_protocol_at};
     match ensure_memory_protocol_at(socket, timeout).await {
         Ok(_) => Ok(()),
         Err(e @ MemoryProtocolError::HandshakeFailed { .. }) => Err(MemoryRpcError::Unreachable(
-            format!("{MEMORY_SERVICE} did not answer the protocol check: {e}"),
+            format!("{MEMORY_SERVICE} did not answer {method}: {e}"),
         )),
         Err(e) => {
             tracing::warn!("{MEMORY_SERVICE} refused by the protocol check (#9538): {e}");
@@ -357,7 +359,7 @@ pub(crate) async fn call(
     params: Value,
     timeout: Duration,
 ) -> Result<Value, MemoryRpcError> {
-    ensure_protocol(socket, timeout).await?;
+    ensure_protocol(socket, method, timeout).await?;
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -415,7 +417,7 @@ pub(crate) async fn open_stream(
     params: Value,
     open_timeout: Duration,
 ) -> Result<FramedStream<Value>, MemoryRpcError> {
-    ensure_protocol(socket, open_timeout).await?;
+    ensure_protocol(socket, method, open_timeout).await?;
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
