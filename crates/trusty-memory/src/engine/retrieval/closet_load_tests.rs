@@ -78,7 +78,7 @@ async fn closet_boost_survives_reopen_without_a_write() {
 /// Why (#10377): the load-time rebuild must not break an open that has
 /// nothing, or cannot read anything, to index.
 /// What: an empty palace opens with an empty closet index; a palace whose
-/// `kg.db` is garbage returns an error instead of panicking.
+/// `kg.db` is garbage opens as a degraded, empty handle instead of panicking.
 /// Test: this test.
 #[test]
 fn opening_an_empty_or_unreadable_palace_does_not_panic() {
@@ -95,5 +95,8 @@ fn opening_an_empty_or_unreadable_palace_does_not_panic() {
     };
     std::fs::create_dir_all(&bad.data_dir).unwrap();
     std::fs::write(bad.data_dir.join("kg.db"), b"not a redb file").unwrap();
-    let _ = PalaceHandle::open(&bad); // Ok(degraded) or Err; never a panic.
+    // A corrupt kg.db degrades to a handle with no drawers; it is not an Err.
+    let degraded = PalaceHandle::open(&bad).expect("corrupt kg.db opens degraded");
+    assert!(degraded.drawers.read().is_empty());
+    assert!(degraded.closets.read().is_empty());
 }

@@ -583,7 +583,7 @@ impl PalaceHandle {
         // a loaded palace keeps the L2 closet boost without waiting for a write.
         // No lock is held and no other thread can see the handle yet.
         let closet_started = std::time::Instant::now();
-        let closet_index = super::closets::closet_index(&all_drawers);
+        let closet_index = crate::engine::dream::build_closet_index(&all_drawers);
         tracing::debug!(
             palace = %palace.id,
             drawers = all_drawers.len(),
