@@ -255,7 +255,12 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
 
     // #6590: refuse in the PARENT, before the fork below detaches the child's
     // stdio to /dev/null and discards everything it would have said.
-    refuse_if_already_running(crate::service::running_daemon_pid())?;
+    // #10358: only the forking parent. A `--foreground` start (launchd, systemd)
+    // has no stdio to lose and reaches the standby gate below instead; running
+    // this check for it would refuse before the gate could stand by.
+    if !foreground {
+        refuse_if_already_running(crate::service::running_daemon_pid())?;
+    }
     // #9258: refuse a bad `[search]` config in the parent too, for the same
     // reason as above: the detached child's error would never be seen.
     crate::service::load_user_config()?;

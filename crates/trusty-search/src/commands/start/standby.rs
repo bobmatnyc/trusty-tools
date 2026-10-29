@@ -24,6 +24,14 @@ use crate::service::daemon_client::DaemonClient;
 /// Gap between lock retries while standing by.
 pub(super) const DEFAULT_RETRY: Duration = Duration::from_secs(5);
 
+/// How long a holder that stopped answering is waited out once we stand by.
+///
+/// Why: a holder asked to stop (launchd restart, SIGTERM) closes its socket
+/// first and exits after its snapshot flush, so it stops answering while still
+/// holding the lock. Refusing then would restart the respawn loop at the moment
+/// of takeover. A holder silent past this bound is treated as wedged.
+pub(super) const UNHEALTHY_GRACE: Duration = Duration::from_secs(60);
+
 /// Test seam: retry gap in milliseconds, so a test need not wait out 5 s ticks.
 pub(super) const RETRY_MS_ENV: &str = "TRUSTY_SEARCH_STANDBY_RETRY_MS";
 
@@ -145,12 +153,25 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
     let retry = retry_interval(std::env::var(RETRY_MS_ENV).ok().as_deref());
     let mut stop = std::pin::pin!(trusty_common::shutdown_signal());
     let mut announced = false;
+    let mut silent_since: Option<std::time::Instant> = None;
     loop {
         let healthy = match (&client, supervised) {
             (Some(c), true) => c.is_up().await,
             _ => false,
         };
-        if holder_action(supervised, healthy) == HolderAction::Refuse {
+        // Before standing by, an unhealthy holder refuses at once. After, it is
+        // waited out for `UNHEALTHY_GRACE` (it is likely shutting down).
+        let waiting_out = announced
+            && supervised
+            && !healthy
+            && silent_since
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                < UNHEALTHY_GRACE;
+        if healthy {
+            silent_since = None;
+        }
+        if !waiting_out && holder_action(supervised, healthy) == HolderAction::Refuse {
             if supervised {
                 tracing::info!(
                     "daemon lock holder (pid {pid}) does not answer search.health; refusing"
