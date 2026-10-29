@@ -17,6 +17,8 @@
 //! already filters with. [`serialize_recall`] applies both.
 //! Test: `tools::tests::recall_projection_tests`.
 
+use crate::engine::decay::DecayConfig;
+use crate::engine::palace::Drawer;
 use crate::engine::retrieval::RecallResult;
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -35,6 +37,31 @@ use super::recall_rulings::RulingsDegraded;
 /// What: `2`, the first query-scored layer.
 /// Test: `score_floor_keeps_identity_and_essential_layers`.
 pub(crate) const FIRST_FILTERABLE_LAYER: u8 = 2;
+
+/// The access facts a drawer row shows its caller (#9881).
+///
+/// Why: recall records an access on each served hit, but no response showed
+/// the count or the rank boost it earns, so a used drawer looked like an
+/// unused one.
+/// What: `access_count`, `accumulated_boost` (under the default decay config,
+/// the one every palace handle uses) and `last_accessed_at` (RFC 3339 or
+/// `null`). A recall row shows the count as of before its own access.
+/// Test: `recall_and_list_responses_expose_access_count_and_boost`.
+pub(crate) fn access_fields(drawer: &Drawer) -> Value {
+    json!({
+        "access_count": drawer.access_count,
+        "accumulated_boost": drawer.accumulated_boost(&DecayConfig::default()),
+        "last_accessed_at": drawer.last_accessed_at.map(|t| t.to_rfc3339()),
+    })
+}
+
+/// Merge [`access_fields`] into the JSON object `row`.
+pub(crate) fn with_access(mut row: Value, drawer: &Drawer) -> Value {
+    if let (Some(obj), Value::Object(extra)) = (row.as_object_mut(), access_fields(drawer)) {
+        obj.extend(extra);
+    }
+    row
+}
 
 /// The projection facts a recall response carries beyond its hits.
 ///
@@ -223,15 +250,18 @@ pub(crate) fn serialize_recall(
     let payload: Vec<Value> = results
         .iter()
         .map(|r| {
-            json!({
-                "drawer_id": r.drawer.id.to_string(),
-                "content":   r.drawer.content(),
-                "score":     r.score,
-                "layer":     r.layer,
-                "tags":      project_tags(&r.drawer.tags, projection.include_creator_tags),
-                "importance": r.drawer.importance,
-                "drawer_type": r.drawer.drawer_type.as_str(),
-            })
+            with_access(
+                json!({
+                    "drawer_id": r.drawer.id.to_string(),
+                    "content":   r.drawer.content(),
+                    "score":     r.score,
+                    "layer":     r.layer,
+                    "tags":      project_tags(&r.drawer.tags, projection.include_creator_tags),
+                    "importance": r.drawer.importance,
+                    "drawer_type": r.drawer.drawer_type.as_str(),
+                }),
+                &r.drawer,
+            )
         })
         .collect();
     let mut envelope = json!({
