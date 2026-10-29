@@ -386,8 +386,8 @@ pub async fn serve_with_shutdown(
     // Signal all background loops to stop before we walk the session list.
     cancel.cancel();
     // #6849: the bounded final flush runs on both exit arms below.
-    state.action_events().shutdown().await;
-    if let Err(e) = served {
+    // #10464: the error arm logs the late total there too.
+    if let Err(e) = action_events::settle_serve_exit(&state, served).await {
         // #6288 S3a: a dead accept loop is a crash, not a stop; the managed
         // sessions are left running as a SIGKILLed daemon leaves them.
         tracing::error!("trusty-mpm socket stopped serving: {e:#}");
