@@ -530,29 +530,15 @@ use super::rtk::{compress_via_rtk_binary, rtk_filter_for, rtk_pipe_argv, stderr_
 /// Why: The argv the `rtk` process actually receives is only observable from
 /// inside that process; a shim that echoes its own arguments makes it
 /// observable without needing the real `rtk` on `PATH`.
-/// What: A short-lived `/bin/sh` child writes `body` to `<dir>/.fake-rtk.tmp`
-/// and chmods it 0755; once it is reaped the file is renamed to
-/// `<dir>/fake-rtk`. This process never holds a write fd on the shim, so a
-/// sibling test's fork cannot inherit one and fail the exec with ETXTBSY
-/// (#6231, same fix as `stub_binary` in trusty-code's daemon_autospawn_tests).
+/// What: writes `body` to `<dir>/fake-rtk` through
+/// [`trusty_common::exec_stub::write_executable`], so this process never holds
+/// a write fd on the shim and a sibling test's fork cannot fail the exec with
+/// ETXTBSY (#6231, #10248).
 #[cfg(unix)]
 fn write_rtk_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    let staging = dir.join(".fake-rtk.tmp");
-    let status = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#)
-        .arg("sh")
-        .arg(&staging)
-        .arg(body)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("run the shim writer");
-    assert!(
-        status.success(),
-        "shim writer failed for {staging:?}: {status}"
-    );
     let path = dir.join("fake-rtk");
-    std::fs::rename(&staging, &path).expect("move the shim into place");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, body).expect("write the rtk shim");
     path
 }
 

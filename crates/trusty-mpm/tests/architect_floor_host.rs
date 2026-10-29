@@ -85,7 +85,6 @@ fn the_host_floor_reads_the_sidecars_under_home() {
 #[cfg(feature = "daemon")]
 #[tokio::test]
 async fn the_legacy_delete_kill_never_reaches_a_sidecar_named_session() {
-    use std::os::unix::fs::PermissionsExt as _;
     use trusty_mpm::daemon::services::TmuxService;
 
     let home = home_with_sidecar();
@@ -96,8 +95,8 @@ async fn the_legacy_delete_kill_never_reaches_a_sidecar_named_session() {
     let log = home.path().join("calls.log");
     let bin = home.path().join("fake-tmux");
     let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", log.display());
-    std::fs::write(&bin, script).expect("write fake tmux");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("write fake tmux");
     let calls = || std::fs::read_to_string(&log).unwrap_or_default();
 
     trusty_mpm::core::tmux::with_tmux_binary(bin.clone(), async {

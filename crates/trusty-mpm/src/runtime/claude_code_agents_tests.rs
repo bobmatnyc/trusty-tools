@@ -395,13 +395,12 @@ fn recorded_probe_pid(pidfile: &Path) -> Option<libc::pid_t> {
 #[test]
 #[cfg(unix)]
 fn query_registry_kills_and_reaps_a_wedged_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let pidfile = dir.path().join("pid");
     let script = dir.path().join("wedged-claude");
     // `exec` so the recorded pid IS the long sleep, not a shell wrapper.
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!(
             "#!/bin/sh\necho $$ > {}\nexec sleep 300\n",
@@ -409,7 +408,6 @@ fn query_registry_kills_and_reaps_a_wedged_probe() {
         ),
     )
     .expect("write stand-in claude");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let started = std::time::Instant::now();
     let err = super::query_registry(script.to_str().expect("utf-8 tempdir path"), None)
