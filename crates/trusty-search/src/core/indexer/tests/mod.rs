@@ -121,4 +121,6 @@ mod persistence_and_search;
 mod ranking_and_modes;
 mod snapshot_guard_7920;
 mod sops_8922;
+// #10195: rehydrate stage timings and the search's rehydrate flag.
+mod stage_timings_10195;
 mod zero_chunk_8976;

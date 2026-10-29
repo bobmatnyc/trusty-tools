@@ -72,6 +72,8 @@ mod router;
 mod routing;
 mod search;
 mod search_global;
+// #10195: per-stage timings, the fan-out line and the cancelled-search log.
+mod search_log;
 // #9970: the per-index search `meta` block, `embedder` included.
 mod search_meta;
 mod state;
@@ -262,6 +264,9 @@ mod tests_8348;
 // #10194: a cold embedder waits at most the query-embed deadline.
 #[cfg(test)]
 mod tests_10194;
+// #10195: stage timings, logged deadline cancellations, the search_all line.
+#[cfg(test)]
+mod tests_10195;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;
