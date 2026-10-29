@@ -366,7 +366,7 @@ pub(crate) async fn ensure_protocol(
 /// `call_reports_a_jsonrpc_error_with_the_http_status_it_came_from`,
 /// `call_reports_an_empty_answer_as_malformed`, `call_returns_the_daemon_result`,
 /// `call_keeps_the_handshake_and_the_frame_inside_one_timeout`,
-/// `call_stays_callable_on_a_daemon_that_predates_the_handshake`.
+/// `call_refuses_a_daemon_that_predates_the_handshake`.
 pub(crate) async fn call(
     socket: &Path,
     method: &str,
