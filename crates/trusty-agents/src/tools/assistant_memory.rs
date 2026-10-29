@@ -352,7 +352,7 @@ async fn call(
     method: &str,
     args: Value,
 ) -> anyhow::Result<Value> {
-    use trusty_common::memory_rpc::call_memory_tool_at_with_timeout as rpc;
+    use crate::memory::checked_rpc::call_with_timeout as rpc;
     let timeout = std::time::Duration::from_secs(30);
     if method == "memory_remember" {
         ensure_palace(socket, policy).await?;
@@ -378,7 +378,7 @@ pub(crate) async fn ensure_palace(
     socket: &std::path::Path,
     policy: &MemoryPolicy,
 ) -> anyhow::Result<()> {
-    use trusty_common::memory_rpc::call_memory_tool_at_with_timeout as rpc;
+    use crate::memory::checked_rpc::call_with_timeout as rpc;
     let timeout = std::time::Duration::from_secs(30);
     // Serialize first-write provision within this assistant, without resetting existing metadata.
     let list = rpc(socket, "palace_list", json!({}), timeout).await?;

@@ -1,6 +1,7 @@
 //! Code index storage and trusty-memory RPC contracts (#7360).
 //! Explicit fact memory is daemon-owned; legacy local memory files are preserved on disk.
 //! Test: `redb_usearch::tests` covers code index persistence; `trusty_client::tests` covers RPC.
+pub mod checked_rpc;
 pub mod code_store;
 pub mod embed;
 pub mod redb_recovery;

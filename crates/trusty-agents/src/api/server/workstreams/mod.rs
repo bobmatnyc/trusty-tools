@@ -310,8 +310,7 @@ async fn call(
     params: serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value> {
-    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(socket, method, params, timeout)
-        .await
+    crate::memory::checked_rpc::call_with_timeout(socket, method, params, timeout).await
 }
 
 /// Resolve the current project's trusty-memory palace id from `cwd`.

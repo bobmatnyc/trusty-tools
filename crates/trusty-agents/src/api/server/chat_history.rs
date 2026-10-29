@@ -339,7 +339,7 @@ const SESSION_ABSENT_MARKER: &str = "session not found";
 /// `chat_history_reports_a_malformed_session`,
 /// `chat_history_absent_palace_is_not_reported_as_absent_session`.
 async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<Session, String> {
-    let answer = trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    let answer = crate::memory::checked_rpc::call_with_timeout(
         socket,
         "tools/call",
         json!({
@@ -405,6 +405,9 @@ fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
     match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
         Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
         Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None if e.is::<trusty_common::memory_rpc::MemoryProtocolError>() => {
+            format!("trusty-memory refused the connection: {e:#}")
+        }
         None => format!("trusty-memory unreachable: {e:#}"),
     }
 }

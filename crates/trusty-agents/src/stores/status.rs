@@ -520,7 +520,7 @@ async fn probe_palace(
             Some("trusty-memory daemon not discoverable (is it running?)".to_string()),
         );
     };
-    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    match crate::memory::checked_rpc::call_with_timeout(
         socket,
         "memory.drawers_list",
         serde_json::json!({ "palace_id": palace, "limit": 1 }),
@@ -542,6 +542,9 @@ fn describe_palace_failure(e: &anyhow::Error, palace: &str) -> String {
     match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
         Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
         Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None if e.is::<trusty_common::memory_rpc::MemoryProtocolError>() => {
+            format!("trusty-memory refused the connection: {e:#}")
+        }
         None => format!("trusty-memory unreachable: {e:#}"),
     }
 }
