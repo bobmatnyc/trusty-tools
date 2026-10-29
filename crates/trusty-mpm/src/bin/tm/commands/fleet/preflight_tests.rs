@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use super::super::tests::NO_TMUX;
 use super::super::{init, resolve_dir, user_config_path};
-use super::{DirRefusal, FLEET_SCAN_BUDGET, check};
+use super::{DirRefusal, FLEET_SCAN_BUDGET, check, check_with};
 
 /// `<outer>/home`, so a test can name a real ancestor of the home directory.
 struct Scratch {
@@ -704,5 +704,29 @@ fn a_pnpm_style_node_modules_inside_the_dir_passes() {
     // A cycle: `.pnpm/back` resolves to `node_modules`. A link to the root
     // itself would be `Found`, since the root is a repository.
     std::os::unix::fs::symlink(Path::new(".."), dir.join("node_modules/.pnpm/back")).unwrap();
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+}
+
+/// A fake `st_dev` reader: `<dir>/local` sits on another filesystem.
+fn local_is_a_mount(path: &Path) -> std::io::Result<u64> {
+    if path.file_name().is_some_and(|n| n == "local") {
+        return Ok(2);
+    }
+    Ok(1)
+}
+
+/// #10457 critic MEDIUM: FAILS BEFORE THE FIX — `local/` was left out of the
+/// outer scan before its device was read, and its own scan took its device as
+/// the root's, so a mount there passed. A test cannot mount, so the reader is
+/// faked; the same directory passes with the real reader.
+#[test]
+fn a_mount_point_at_local_is_refused() {
+    let s = Scratch::new();
+    let dir = s.outer().join("arch");
+    s.repo(&dir.join("local"), false);
+    assert_unresolvable(
+        check_with(&dir, &s.home(), local_is_a_mount).expect_err("a mount at local/ must refuse"),
+        &format!("{} is a mount point", dir.join("local").display()),
+    );
     assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
 }

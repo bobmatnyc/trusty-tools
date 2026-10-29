@@ -18,7 +18,9 @@ use std::process::Command;
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo_exhaustive};
+use trusty_mpm::core::child_repo_scan::{
+    ChildRepoScan, DeviceOf, device_of, scan_for_child_repo_exhaustive_with,
+};
 use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
 
 use super::user_config_path;
@@ -148,6 +150,15 @@ impl std::error::Error for DirRefusal {}
 /// `a_private_local_repository_without_a_remote_passes`, and the rest of
 /// `preflight_tests.rs`.
 pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
+    check_with(dir, home, device_of)
+}
+
+/// [`check`] with the `st_dev` reader the repository scan uses.
+///
+/// Why: #10457 — a test cannot mount a filesystem, so it fakes the device of
+/// `<dir>/local` to prove a mount there refuses.
+/// Test: `a_mount_point_at_local_is_refused`.
+pub(crate) fn check_with(dir: &Path, home: &Path, device: DeviceOf) -> Result<PathBuf, DirRefusal> {
     let target = resolve(dir)?;
     if is_filesystem_root(&target)? {
         return Err(DirRefusal::FilesystemRoot(target));
@@ -163,7 +174,7 @@ pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
         });
     }
     refuse_config_dir(&target, &home)?;
-    refuse_workspace_parent(&target, &home)?;
+    refuse_workspace_parent(&target, &home, device)?;
     refuse_enclosing_work_tree(&target)?;
     refuse_remote(&target)?;
     Ok(target)
@@ -279,8 +290,8 @@ fn projects_roots(target: &Path, home: &Path) -> Result<Vec<PathBuf>, DirRefusal
 /// `a_repository_behind_a_symlinked_dir_is_refused`,
 /// `a_symlink_escaping_the_dir_refuses_without_a_repository`,
 /// `a_large_node_modules_refuses_in_bounded_time`,
-/// `a_pnpm_style_node_modules_inside_the_dir_passes`.
-fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal> {
+/// `a_pnpm_style_node_modules_inside_the_dir_passes`, `a_mount_point_at_local_is_refused`.
+fn refuse_workspace_parent(target: &Path, home: &Path, device: DeviceOf) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
         reason,
@@ -298,23 +309,27 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
     // scan still looks at everything beside it.
     // #10355: fleet budget, not the shared 256; exhaustion still refuses below.
     // #10457: exhaustive rule; the shallow one missed deep and symlinked repos.
-    let scan = match private_repo(target)? {
-        None => scan_for_child_repo_exhaustive(target, None, FLEET_SCAN_BUDGET),
-        Some(local) => {
-            check_private_repo(target, &local)?;
-            scan_for_child_repo_exhaustive(target, Some(&local), FLEET_SCAN_BUDGET)
+    let local = private_repo(target)?;
+    match scan_for_child_repo_exhaustive_with(target, local.as_deref(), FLEET_SCAN_BUDGET, device) {
+        ChildRepoScan::Clear => {}
+        ChildRepoScan::Found(repo) => {
+            return Err(parent(format!(
+                "it contains the repository {}",
+                repo.display()
+            )));
         }
-    };
-    match scan {
-        ChildRepoScan::Clear => Ok(()),
-        ChildRepoScan::Found(repo) => Err(parent(format!(
-            "it contains the repository {}",
-            repo.display()
-        ))),
-        ChildRepoScan::Incomplete(why) => Err(DirRefusal::Unresolvable {
-            path: target.to_path_buf(),
-            reason: format!("the scan for repositories inside it did not finish: {why}"),
-        }),
+        ChildRepoScan::Incomplete(why) => {
+            return Err(DirRefusal::Unresolvable {
+                path: target.to_path_buf(),
+                reason: format!("the scan for repositories inside it did not finish: {why}"),
+            });
+        }
+    }
+    // #10457: after the outer scan, which compares `local`'s device with the
+    // target's, so no `git` command runs inside a foreign mount.
+    match local {
+        Some(local) => check_private_repo(target, &local, device),
+        None => Ok(()),
     }
 }
 
@@ -354,12 +369,12 @@ fn private_repo(target: &Path) -> Result<Option<PathBuf>, DirRefusal> {
 /// Test: `a_private_local_repository_with_a_remote_is_refused`,
 /// `a_repository_nested_in_the_private_local_repository_is_refused`,
 /// `a_failing_remote_listing_on_the_private_repository_refuses`.
-fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
+fn check_private_repo(target: &Path, local: &Path, device: DeviceOf) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
         reason,
     };
-    match scan_for_child_repo_exhaustive(local, None, FLEET_SCAN_BUDGET) {
+    match scan_for_child_repo_exhaustive_with(local, None, FLEET_SCAN_BUDGET, device) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(repo) => {
             return Err(parent(format!(

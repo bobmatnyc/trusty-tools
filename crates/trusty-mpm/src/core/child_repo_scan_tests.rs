@@ -380,7 +380,7 @@ fn exhaustive_finds_a_repository_deep_in_a_skip_listed_dir() {
 }
 
 /// #10457: a directory symlink out of the root refuses, with or without a
-/// repository behind it; a link to a file outside does not.
+/// repository behind it.
 #[cfg(unix)]
 #[test]
 fn exhaustive_reports_an_escaping_symlink() {
@@ -389,8 +389,6 @@ fn exhaustive_reports_an_escaping_symlink() {
     let ws = workspace(&tmp);
     let outside = ws.parent().unwrap().join("outside");
     std::fs::create_dir_all(outside.join("sub")).unwrap();
-    std::fs::write(outside.join("notes.md"), "x").unwrap();
-    symlink(outside.join("notes.md"), ws.join("AGENTS.md")).unwrap();
     assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
 
     let link = ws.join("deep/elsewhere");
@@ -538,4 +536,127 @@ fn the_shallow_rule_is_unchanged_for_the_seed_guard_and_auto_init() {
         ChildRepoScan::Clear
     );
     assert!(matches!(exhaustive(&ws), ChildRepoScan::Found(_)));
+}
+
+/// #10457 critic MEDIUM: the excepted entry is scanned by the caller from its
+/// own root, so only this walk can compare its device with the root's.
+#[test]
+fn exhaustive_refuses_an_excepted_entry_on_another_device() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let mnt = ws.join("mnt");
+    let local = ws.join("local");
+    std::fs::create_dir_all(&mnt).unwrap();
+    std::fs::create_dir_all(&local).unwrap();
+    assert_eq!(
+        scan(&ws, Some(&mnt), 64, Some(fake_device)),
+        ChildRepoScan::Incomplete(ScanIncomplete::MountPoint { path: mnt.clone() })
+    );
+    std::fs::remove_dir(&mnt).unwrap();
+    assert_eq!(
+        scan(&ws, Some(&local), 64, Some(fake_device)),
+        ChildRepoScan::Clear
+    );
+}
+
+/// Deletes a root named `vanish` while reading its device, as a concurrent
+/// `rm -rf` between the fence and the first `read_dir` would.
+fn vanishing_device(path: &Path) -> io::Result<u64> {
+    if path.file_name().is_some_and(|n| n == "vanish") {
+        std::fs::remove_dir(path)?;
+    }
+    Ok(1)
+}
+
+/// #10457 critic LOW: a root that existed when the fence was built and is
+/// gone at the first `read_dir` is unreadable, not empty.
+#[test]
+fn exhaustive_refuses_a_root_that_vanishes_mid_scan() {
+    let tmp = TempDir::new().unwrap();
+    let root = workspace(&tmp).join("vanish");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(matches!(
+        scan(&root, None, 64, Some(vanishing_device)),
+        ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) if path == root
+    ));
+    assert_eq!(
+        exhaustive(&root),
+        ChildRepoScan::Clear,
+        "never created: nothing to walk"
+    );
+}
+
+/// #10457 ruling (b): a dangling link whose lexical target leaves the root
+/// refuses, relative or absolute.
+#[cfg(unix)]
+#[test]
+fn exhaustive_refuses_a_dangling_link_outside_the_root() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("deep")).unwrap();
+    let link = ws.join("deep/gone");
+    symlink(Path::new("../../nowhere"), &link).unwrap();
+    assert_eq!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+            link: link.clone(),
+            target: ws.parent().unwrap().join("nowhere"),
+        })
+    );
+    std::fs::remove_file(&link).unwrap();
+    symlink(Path::new("/nonexistent-10457/x"), &link).unwrap();
+    assert!(matches!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes { link: l, .. }) if l == link
+    ));
+}
+
+/// #10457 ruling (b): a link to a file outside the root refuses.
+#[cfg(unix)]
+#[test]
+fn exhaustive_refuses_a_file_link_outside_the_root() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let notes = ws.parent().unwrap().join("notes.md");
+    std::fs::write(&notes, "x").unwrap();
+    let link = ws.join("AGENTS.md");
+    symlink(&notes, &link).unwrap();
+    assert_eq!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+            link,
+            target: notes
+        })
+    );
+}
+
+/// #10457 ruling (b): a dangling link that stays inside the root passes; the
+/// walk covers the path it names.
+#[cfg(unix)]
+#[test]
+fn exhaustive_passes_a_dangling_link_inside_the_root() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("a/b")).unwrap();
+    symlink(Path::new("../missing"), ws.join("a/b/gone")).unwrap();
+    symlink(ws.join("not-yet"), ws.join("later")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
+}
+
+/// #10457 ruling (b): a link to a file inside the root passes
+/// (`AGENTS.md -> CLAUDE.md` is common).
+#[cfg(unix)]
+#[test]
+fn exhaustive_passes_a_file_link_inside_the_root() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::write(ws.join("CLAUDE.md"), "x").unwrap();
+    std::fs::create_dir_all(ws.join("docs")).unwrap();
+    symlink(Path::new("CLAUDE.md"), ws.join("AGENTS.md")).unwrap();
+    symlink(Path::new("./../CLAUDE.md"), ws.join("docs/rules.md")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
 }

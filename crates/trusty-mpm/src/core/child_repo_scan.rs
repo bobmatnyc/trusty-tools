@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::fs::FileType;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Bound on the downward scan: directories visited, not depth.
 ///
@@ -86,7 +86,7 @@ pub enum ChildRepoScan {
     /// children; none is a repository. Symlinks are checked but never
     /// descended. Exhaustive rule ([`scan_for_child_repo_exhaustive`]): every
     /// physical directory beneath the root, outside `.git`, was checked, no
-    /// directory symlink leaves the walked tree, and no mount point was met.
+    /// symlink leaves the walked tree, and no mount point was met.
     Clear,
     /// The scan stopped before checking everything.
     Incomplete(ScanIncomplete),
@@ -126,8 +126,9 @@ pub enum ScanIncomplete {
         /// The first directory left unchecked.
         next: PathBuf,
     },
-    /// Exhaustive rule: a directory symlink resolves outside the walked tree
-    /// (outside the root, or into a `.git` directory, which is not walked).
+    /// Exhaustive rule: a symlink (to a directory, a file or nothing) resolves
+    /// outside the walked tree (outside the root, or into a `.git` directory,
+    /// which is not walked).
     SymlinkEscapes {
         /// The symlink.
         link: PathBuf,
@@ -231,9 +232,12 @@ pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
 /// shares `st_dev` and is not detected). A directory symlink is probed for
 /// `.git` as before, then canonicalized: a target inside the canonical root
 /// and outside every `.git` is already walked, so it is skipped and cannot
-/// cycle; any other target is [`ScanIncomplete::SymlinkEscapes`]. Exhaustion
+/// cycle; any other target is [`ScanIncomplete::SymlinkEscapes`]. A file or
+/// dangling symlink is fenced the same way on its lexically resolved target
+/// (#10457 ruling (b)), so one inside the root passes. Exhaustion
 /// is [`ScanIncomplete::BudgetExhaustedAt`]. `except` is left out as in
-/// [`scan_for_child_repo_except`]; the caller checks it. Every I/O error,
+/// [`scan_for_child_repo_except`]; the caller checks it, but its `st_dev` is
+/// compared here, because only this walk knows the root's. Every I/O error,
 /// including a canonicalize or `st_dev` read failure, is
 /// [`ScanIncomplete::Unreadable`]. Scaffold limit: a future tm scaffold that
 /// symlinks `.claude/*` to a path outside `dir` makes every relaunch refuse.
@@ -243,6 +247,12 @@ pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
 /// `exhaustive_charges_skip_listed_dirs_to_the_budget`,
 /// `exhaustive_still_finds_a_symlink_to_a_repository`,
 /// `exhaustive_refuses_a_mount_point_and_an_unreadable_device`,
+/// `exhaustive_refuses_an_excepted_entry_on_another_device`,
+/// `exhaustive_refuses_a_root_that_vanishes_mid_scan`,
+/// `exhaustive_refuses_a_dangling_link_outside_the_root`,
+/// `exhaustive_refuses_a_file_link_outside_the_root`,
+/// `exhaustive_passes_a_dangling_link_inside_the_root`,
+/// `exhaustive_passes_a_file_link_inside_the_root`,
 /// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
 pub fn scan_for_child_repo_exhaustive(
     dir: &Path,
@@ -252,17 +262,31 @@ pub fn scan_for_child_repo_exhaustive(
     scan(dir, except, budget, Some(device_of))
 }
 
-/// Reads a directory's `st_dev`; a parameter so a test can fake a mount.
-type DeviceOf = fn(&Path) -> io::Result<u64>;
+/// [`scan_for_child_repo_exhaustive`] with the `st_dev` reader named by the
+/// caller, so a caller's test can fake a mount point (#10457).
+/// Test: `a_mount_point_at_local_is_refused`.
+pub fn scan_for_child_repo_exhaustive_with(
+    dir: &Path,
+    except: Option<&Path>,
+    budget: usize,
+    device_of: DeviceOf,
+) -> ChildRepoScan {
+    scan(dir, except, budget, Some(device_of))
+}
 
-/// The `st_dev` of `path`, following a symlink.
-fn device_of(path: &Path) -> io::Result<u64> {
+/// Reads a directory's `st_dev`; a parameter so a test can fake a mount.
+pub type DeviceOf = fn(&Path) -> io::Result<u64>;
+
+/// The `st_dev` of `path`, following a symlink; the production [`DeviceOf`].
+pub fn device_of(path: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).map(|meta| meta.dev())
 }
 
 /// What the exhaustive rule compares each entry against.
 struct Fence {
+    /// The root as the walk spells it: every entry path starts with it.
+    root: PathBuf,
     /// The canonical root: a symlink target under it is already walked.
     real_root: PathBuf,
     /// The root's `st_dev`.
@@ -280,6 +304,7 @@ impl Fence {
         };
         let device = device_of(&real_root).map_err(|e| unreadable(root, e))?;
         Ok(Some(Self {
+            root: root.to_path_buf(),
             real_root,
             device,
             device_of,
@@ -297,9 +322,43 @@ impl Fence {
         }
     }
 
-    /// Refuse a directory symlink whose target the walk does not reach.
+    /// Refuse a directory symlink whose canonical target the walk does not reach.
     fn check_link(&self, link: &Path) -> Result<(), ScanIncomplete> {
         let target = std::fs::canonicalize(link).map_err(|e| unreadable(link, e))?;
+        self.fence(link, target)
+    }
+
+    /// Refuse a file or dangling symlink whose target, resolved lexically
+    /// against the link's parent, the walk does not reach.
+    ///
+    /// Why: #10457 ruling (b) — a dangling link cannot be canonicalized, and
+    /// one pointing outside `dir` still lets a write through it leave the tree.
+    /// What: `read_link`, joined to the link's parent re-rooted on the
+    /// canonical root, with `.` and `..` folded without touching the disk. A
+    /// link whose own path is not under the root cannot be placed and is
+    /// [`ScanIncomplete::Unreadable`]. An intermediate symlink in the target
+    /// is itself an entry the walk fences, so lexical folding stays sound.
+    fn check_lexical(&self, link: &Path) -> Result<(), ScanIncomplete> {
+        let raw = std::fs::read_link(link).map_err(|e| unreadable(link, e))?;
+        let parent = link
+            .parent()
+            .and_then(|p| p.strip_prefix(&self.root).ok())
+            .ok_or_else(|| unreadable(link, io::Error::other("not under the scanned root")))?;
+        let mut target = PathBuf::new();
+        for part in self.real_root.join(parent).join(raw).components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    target.pop();
+                }
+                other => target.push(other),
+            }
+        }
+        self.fence(link, target)
+    }
+
+    /// `target` is walked when it is under the canonical root and outside `.git`.
+    fn fence(&self, link: &Path, target: PathBuf) -> Result<(), ScanIncomplete> {
         let walked = target
             .strip_prefix(&self.real_root)
             .is_ok_and(|rel| !rel.components().any(|c| c.as_os_str() == ".git"));
@@ -400,7 +459,13 @@ impl Walk<'_> {
             // #7673: a root that does not exist yet (a first-touch seed site the
             // pipeline creates) queues nothing. A CHILD that vanished mid-walk is
             // still incomplete.
-            Err(e) if e.kind() == io::ErrorKind::NotFound && current == self.root => {
+            // #10457: under the exhaustive rule the root existed when the fence
+            // was built, so a root gone now is unreadable, not empty.
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    && current == self.root
+                    && self.fence.is_none() =>
+            {
                 return Ok(None);
             }
             Err(e) => return Err(unreadable(current, e)),
@@ -410,6 +475,13 @@ impl Walk<'_> {
             let path = entry.path();
             // #8878 R1: the caller checks the excepted entry itself.
             if self.except == Some(path.as_path()) {
+                // #10457: its device is compared here; its own scan cannot.
+                if let Some(fence) = self.fence {
+                    let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
+                    if kind.is_dir() {
+                        fence.check_mount(&path)?;
+                    }
+                }
                 continue;
             }
             // `DirEntry::file_type` does not follow symlinks.
@@ -424,6 +496,12 @@ impl Walk<'_> {
             }
             match probe(&path, kind)? {
                 Probe::Repository => return Ok(Some(path)),
+                // #10457 ruling (b): a file or dangling link is fenced too.
+                Probe::NotDirectory if kind.is_symlink() => {
+                    if let Some(fence) = self.fence {
+                        fence.check_lexical(&path)?;
+                    }
+                }
                 Probe::NotDirectory => {}
                 // #7673: never descend a symlink; `probe` already checked its `.git`.
                 // #10457: the exhaustive rule refuses one the walk does not cover.
