@@ -14,6 +14,9 @@
 //! `CARGO_TARGET_DIR` (cargo's `./target`, a repo's `build.target-dir`) and any
 //! other pinned directory are left alone; a shared one is replaced by the held
 //! slot's directory, and when no pool is available the build is refused.
+//! [`plan_with_worktree`] adds one case (#10215): an unset `CARGO_TARGET_DIR`
+//! in a LINKED worktree gets the held slot's directory too, so a session with
+//! no `.envrc` never cold-builds into a worktree-local `target/`.
 //! Test: the `#[cfg(test)]` suite below.
 
 use std::path::{Path, PathBuf};
@@ -84,6 +87,16 @@ pub enum TargetPlan {
     },
     /// The build would run in a shared directory and no slot can replace it.
     Refuse(String),
+    /// Unset in a linked worktree: use the held slot's directory instead of
+    /// cargo's worktree-local `./target` (#10215). Unlike [`TargetPlan::Slot`]
+    /// nothing shared is at stake, so a slot that cannot be used falls back to
+    /// cargo's own directory rather than refusing the build.
+    UnsetSlot {
+        /// The repo's slot pool.
+        pool: SlotPool,
+        /// The repo's warm shared directory, if any.
+        clone_from: Option<PathBuf>,
+    },
 }
 
 /// Decide the target directory before a slot is taken.
@@ -102,8 +115,33 @@ pub fn plan(
     shared: &SharedDirs,
     pool: Result<(SlotPool, Option<PathBuf>), String>,
 ) -> TargetPlan {
+    plan_with_worktree(ambient, shared, pool, false)
+}
+
+/// [`plan`], knowing whether the build runs in a linked worktree (#10215).
+///
+/// Why: with `CARGO_TARGET_DIR` unset, [`plan`] leaves cargo's `./target`,
+/// which in a fresh worktree is a cold 3.6-6.7 GB build per session. The
+/// slot substitution keyed on an ambient shared directory that only an
+/// operator-local `.envrc` ever exported.
+/// What: as [`plan`], except an unset value in a linked worktree with a
+/// resolvable pool is [`TargetPlan::UnsetSlot`]. A main checkout, or a
+/// worktree with no pool (no `origin`), stays [`TargetPlan::Unset`].
+/// Test: `an_unset_target_dir_in_a_linked_worktree_takes_a_slot`,
+/// `an_unset_target_dir_in_a_main_checkout_is_left_to_cargo`.
+#[must_use]
+pub fn plan_with_worktree(
+    ambient: Option<&str>,
+    shared: &SharedDirs,
+    pool: Result<(SlotPool, Option<PathBuf>), String>,
+    linked_worktree: bool,
+) -> TargetPlan {
     let Some(dir) = ambient.filter(|d| !d.trim().is_empty()) else {
-        return TargetPlan::Unset;
+        // #10215: a linked worktree never builds into its own `./target`.
+        return match pool {
+            Ok((pool, clone_from)) if linked_worktree => TargetPlan::UnsetSlot { pool, clone_from },
+            _ => TargetPlan::Unset,
+        };
     };
     if !shared.contains(Path::new(dir)) {
         return TargetPlan::Keep(dir.to_string());
@@ -295,6 +333,25 @@ mod tests {
             plan(Some(" "), &shared(), pool()),
             TargetPlan::Unset
         ));
+    }
+
+    /// #10215: unset in a linked worktree takes the slot; unset in one with
+    /// no pool stays cargo's.
+    #[test]
+    fn an_unset_target_dir_in_a_linked_worktree_takes_a_slot() {
+        for ambient in [None, Some(" ")] {
+            let got = plan_with_worktree(ambient, &shared(), pool(), true);
+            assert!(matches!(got, TargetPlan::UnsetSlot { .. }), "{got:?}");
+        }
+        let got = plan_with_worktree(None, &shared(), Err("no origin".into()), true);
+        assert!(matches!(got, TargetPlan::Unset), "{got:?}");
+    }
+
+    /// #10215: a main checkout keeps cargo's (or its repo's) target directory.
+    #[test]
+    fn an_unset_target_dir_in_a_main_checkout_is_left_to_cargo() {
+        let got = plan_with_worktree(None, &shared(), pool(), false);
+        assert!(matches!(got, TargetPlan::Unset), "{got:?}");
     }
 
     /// #8261 round 3: no repo identity, shared directory ambient — refused.

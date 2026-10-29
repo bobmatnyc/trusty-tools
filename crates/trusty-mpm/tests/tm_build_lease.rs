@@ -808,6 +808,63 @@ fn an_ambient_pool_slot_held_by_another_lease_is_not_used() {
     assert!(target.ends_with("slot-1"), "{target}");
 }
 
+/// #10215: with `CARGO_TARGET_DIR` unset, a build in a LINKED worktree runs in
+/// a pool slot, never the worktree's own `./target`; the main checkout keeps
+/// cargo's own directory.
+#[test]
+fn an_unset_target_dir_in_a_linked_worktree_builds_in_a_slot_10215() {
+    let home = home_with_ceiling(2, "");
+    let (repo, pool, _) = widget_repo(home.path());
+    let worktree = home.path().join("wt");
+    for args in [
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        vec!["worktree", "add", "-q", "-b", "task"],
+    ] {
+        let mut git = Command::new("git");
+        git.arg("-C").arg(&repo).args(&args);
+        if args[0] == "worktree" {
+            git.arg(&worktree);
+        }
+        assert!(git.status().expect("git").success(), "git {args:?}");
+    }
+    let got = home.path().join("target-dir");
+    let run = |dir: &Path| {
+        let _ = std::fs::remove_file(&got);
+        let out = build_lease(home.path())
+            .current_dir(dir)
+            .args(["--wait-secs", "3", "--"])
+            .args(record_target_dir(&got))
+            .output()
+            .expect("run");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        (
+            std::fs::read_to_string(&got).expect("the build recorded its target"),
+            stderr(&out),
+        )
+    };
+    let (target, err) = run(&worktree);
+    assert!(
+        Path::new(&target).starts_with(&pool) && target.ends_with("slot-0"),
+        "a linked worktree builds in a slot, not ./target: {target:?} {err}"
+    );
+    assert!(
+        err.contains("CARGO_TARGET_DIR="),
+        "the slot is named: {err}"
+    );
+    let (target, err) = run(&repo);
+    assert_eq!(target, "", "the main checkout keeps cargo's own: {err}");
+}
+
 /// Like [`home_with_ceiling`], but the heavy-build table also matches a real
 /// `cargo test` invocation (#8261 round 7, supervisor acceptance criterion 2:
 /// the driven test needs the run path's own classifier to admit `cargo`, not
