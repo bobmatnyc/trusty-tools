@@ -47,7 +47,7 @@ use super::recall_supersede::{Supersessions, supersessions_across, supersessions
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
     RecallProjection, apply_score_floor, include_creator_tags_arg, min_score_arg, project_tags,
-    serialize_recall,
+    serialize_recall, with_access,
 };
 use super::wing_ops::resolve_wing_arg;
 
@@ -521,16 +521,19 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     let payload: Vec<Value> = results
         .iter()
         .map(|r| {
-            json!({
-                "palace_id":  r.palace_id,
-                "drawer_id":  r.result.drawer.id.to_string(),
-                "content":    r.result.drawer.content(),
-                "importance": r.result.drawer.importance,
-                "tags":       project_tags(&r.result.drawer.tags, include_creator_tags),
-                "score":      r.result.score,
-                "layer":      r.result.layer,
-                "drawer_type": r.result.drawer.drawer_type.as_str(),
-            })
+            with_access(
+                json!({
+                    "palace_id":  r.palace_id,
+                    "drawer_id":  r.result.drawer.id.to_string(),
+                    "content":    r.result.drawer.content(),
+                    "importance": r.result.drawer.importance,
+                    "tags":       project_tags(&r.result.drawer.tags, include_creator_tags),
+                    "score":      r.result.score,
+                    "layer":      r.result.layer,
+                    "drawer_type": r.result.drawer.drawer_type.as_str(),
+                }),
+                &r.result.drawer,
+            )
         })
         .collect();
     let mut out = serde_json::Map::new();

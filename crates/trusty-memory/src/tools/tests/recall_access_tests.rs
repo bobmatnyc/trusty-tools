@@ -261,3 +261,62 @@ async fn a_released_palace_is_recorded_off_the_response_path() {
     let (count, _) = wait_for_persisted_access(tmp.path(), "acc-own", &id).await;
     assert_eq!(count, 1, "the detached reopen lands the count");
 }
+
+/// Why (#9881): recall records accesses, but no response showed the count or
+/// the boost it earns, so a caller could not tell a used drawer from an unused
+/// one.
+/// What: serves one drawer through `memory_recall` three times, then reads it
+/// back through `memory_recall`, `memory_recall_all` and `memory_list`. Each
+/// view must carry `access_count > 0`, `accumulated_boost > 0` and a
+/// `last_accessed_at`. The in-memory count is bumped synchronously, so no
+/// flush is needed.
+/// Test: this function.
+#[tokio::test]
+async fn recall_and_list_responses_expose_access_count_and_boost() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "acc-show"}))
+        .await
+        .expect("palace_create");
+    let text = "Recall responses show how often this drawer has been served";
+    let id = remember(&state, "acc-show", text).await;
+    let args = json!({"palace": "acc-show", "query": text, "top_k": 3});
+    for _ in 0..3 {
+        dispatch_tool(&state, "memory_recall", args.clone())
+            .await
+            .expect("recall");
+    }
+
+    let recall = dispatch_tool(&state, "memory_recall", args)
+        .await
+        .expect("recall");
+    let all = dispatch_tool(&state, "memory_recall_all", json!({"q": text, "top_k": 5}))
+        .await
+        .expect("recall_all");
+    let list = dispatch_tool(&state, "memory_list", json!({"palace": "acc-show"}))
+        .await
+        .expect("memory_list");
+    for (name, out, key) in [
+        ("memory_recall", &recall, "results"),
+        ("memory_recall_all", &all, "results"),
+        ("memory_list", &list, "drawers"),
+    ] {
+        let row = out[key]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["drawer_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{name} omits the drawer: {out:#}"));
+        assert!(
+            row["access_count"].as_u64().unwrap_or(0) > 0,
+            "{name} access_count: {row:#}"
+        );
+        assert!(
+            row["accumulated_boost"].as_f64().unwrap_or(0.0) > 0.0,
+            "{name} accumulated_boost: {row:#}"
+        );
+        assert!(
+            row["last_accessed_at"].as_str().is_some(),
+            "{name} last_accessed_at: {row:#}"
+        );
+    }
+}
