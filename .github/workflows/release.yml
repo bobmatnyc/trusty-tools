@@ -943,9 +943,10 @@ jobs:
 
           # D96 (#10388): main OR release/<crate>-<semver>. The rule lives in
           # ONE script, shared with check-publish-ready.sh and
-          # preflight-publish.sh; it fetches the refs and fails closed.
+          # preflight-publish.sh; it fetches the refs and fails closed. On a
+          # release branch the tag must match Cargo.toml and the branch tip.
           echo "Tag: ${TAG}"
-          if ! bash scripts/check-tag-ancestry.sh 'HEAD'; then
+          if ! bash scripts/check-tag-ancestry.sh --tag "${TAG}" 'HEAD'; then
             echo "::error::Tag '${TAG}' is not on origin/main or a release/<crate>-<semver> branch (D96, #10388). Refusing to run the release pipeline for this tag."
             exit 1
           fi

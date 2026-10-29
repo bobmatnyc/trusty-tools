@@ -479,7 +479,7 @@ check1_merged_main() {
   # release/<crate>-<semver> branch. The rule lives in check-tag-ancestry.sh.
   local head_sha
   head_sha="$(git rev-parse HEAD)"
-  if bash "${SCRIPT_DIR}/check-tag-ancestry.sh" --at-tip HEAD; then
+  if bash "${SCRIPT_DIR}/check-tag-ancestry.sh" --at-tip --crate "$CRATE_DIR" --version "$VERSION" HEAD; then
     echo "[PASS] merged-main: HEAD (${head_sha}) is the tip of a releasable ref" >&2
     return 0
   fi

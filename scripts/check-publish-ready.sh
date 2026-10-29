@@ -179,7 +179,7 @@ main() {
   local head_sha ancestry
   ancestry="$(dirname "${BASH_SOURCE[0]}")/check-tag-ancestry.sh"
   head_sha="$(git rev-parse HEAD)"
-  if bash "${ancestry}" HEAD; then
+  if bash "${ancestry}" --crate "${crate_dir}" --version "${version}" HEAD; then
     echo "PASS: GUARD 1 (merged-main) — HEAD (${head_sha}) is on a releasable ref" >&2
   else
     if [[ "${override_active}" -eq 1 ]]; then
@@ -224,7 +224,7 @@ main() {
   else
     git fetch origin "${tag_sha}" --quiet 2>/dev/null || true
     if git cat-file -e "${tag_sha}^{commit}" 2>/dev/null \
-      && bash "${ancestry}" --no-fetch "${tag_sha}"; then
+      && bash "${ancestry}" --no-fetch --crate "${crate_dir}" --version "${version}" "${tag_sha}"; then
       echo "PASS: GUARD 2 (version tag) — '${matched_tag}' (${tag_sha}) is on a releasable ref" >&2
     else
       if [[ "${override_active}" -eq 1 ]]; then

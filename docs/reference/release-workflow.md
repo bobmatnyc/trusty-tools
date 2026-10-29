@@ -174,7 +174,10 @@ release-branch family; the #2227 intent (2026-07) is unchanged. One script,
 below and preflight CHECK 1. It fetches `main` and `release/*` and fails closed;
 a branch qualifies only when it matches
 `^release/[a-z0-9]+(-[a-z0-9]+)*-MAJOR.MINOR.PATCH(-pre)?$`, so `release/d66`
-and `release/2026-07-07-workspace` do not. `scripts/check-publish-ready.sh <crate-name-or-dir>` (also
+and `release/2026-07-07-workspace` do not. A commit on `main` passes by
+reachability. A release `<crate>-vX.Y.Z` from a release branch passes only when
+the commit is that branch's TIP and `crates/<crate>/Cargo.toml` at that commit
+says `version = "X.Y.Z"`; the callers pass the tag or crate and version. `scripts/check-publish-ready.sh <crate-name-or-dir>` (also
 exposed as `make publish-check CRATE=<crate-name-or-dir>`) is a mandatory
 preflight gate that must pass before running `cargo publish -p <crate-name>`.
 
