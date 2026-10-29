@@ -477,7 +477,11 @@ fn rule_inputs_fingerprint() -> u64 {
         format!("{MAX_FILE_EXTENSION_LEN} {MAX_GITHUB_USER_ID_LEN} {MAX_GITHUB_LOGIN_LEN}"),
         format!("{GITHUB_NOREPLY_DOMAIN:?} {MAX_SHORT_STEM_RUN}"),
         format!("{PEM_BEGIN:?} {PEM_END:?} {PEM_PRIVATE_KEY:?}"),
-        format!("{SECRET_QUERY_KEYS:?} {MIN_QUERY_SECRET_LEN}"),
+        format!(
+            "{PASSWORD_NAME_SUFFIXES:?} {TOKEN_NAME_SUFFIXES:?} {BOUNDARY_NAME_SUFFIXES:?} \
+             {COMPOUND_KEY_NAMES:?}"
+        ),
+        format!("{MIN_QUERY_SECRET_LEN} {MIN_WEAK_NAME_SECRET_LEN} {MAX_STRUCTURAL_EQUALS}"),
         format!("{MAX_LINE_SUFFIX_GROUPS} {MAX_LINE_SUFFIX_DIGITS}"),
         format!("{labels:?}"),
     ];

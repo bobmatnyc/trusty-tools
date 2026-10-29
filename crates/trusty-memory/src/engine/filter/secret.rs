@@ -1355,6 +1355,12 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
     // through to the entropy heuristics and is flagged.
     // Exception: RHS that is pure `=` padding is non-structural (base64).
     if token.contains('=') {
+        // #9748: each `=` below recurses on the text after it, so a long
+        // `a=b&a=b&...` query overflowed the stack. Past the cap the token is
+        // not structural and falls to the entropy heuristics.
+        if token.bytes().filter(|&b| b == b'=').count() > MAX_STRUCTURAL_EQUALS {
+            return false;
+        }
         let parts: Vec<&str> = token.splitn(2, '=').collect();
         if parts.len() == 2 {
             let lhs = parts[0];
