@@ -278,6 +278,7 @@ universal = [
   "internal-comms",
   "json-data-handling",
   "model-context-builder",
+  "neon-postgres",
   "requesting-code-review",
   "root-cause-tracing",
   "rust-build-performance",
