@@ -67,7 +67,7 @@ impl ResumeSlotHost {
 /// trusty-memory kept the drawer but not its command, `no_identifiers` when
 /// there was nothing to re-read); `stored_unslotted:slot_refused` when the
 /// daemon stored an ordinary drawer instead of a slot; or `skipped:<reason>`
-/// (`invalid_session_id`, `no_palace`, `memory_unreachable`, `memory_error`,
+/// (`invalid_session_id`, `no_palace`, `memory_unreachable`, `memory_protocol`, `memory_error`,
 /// `not_stored`). Every skip is logged with its detail.
 /// Test: see the module doc.
 pub(crate) async fn record_resume_slot(

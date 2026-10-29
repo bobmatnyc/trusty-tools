@@ -88,7 +88,7 @@ impl ResumeVerifyHost {
 /// `fact_key` (the slot read, or `null` when none could be named), `status`
 /// (`ran`, or `unverified:<reason>` when no command could be read: one of
 /// `no_session_owner`, `invalid_session_id`, `no_palace`,
-/// `memory_unreachable`, `memory_error`, `slot_unresolved`,
+/// `memory_unreachable`, `memory_protocol`, `memory_error`, `slot_unresolved`,
 /// `no_verify_command`, `pass_timeout`), `detail` on an unverified status, and
 /// `checks`: one entry per `verify` line with `command`, `claimed`, `returned`
 /// and `verdict`, for at most [`MAX_LINES`] lines, then one `over_line_cap`
