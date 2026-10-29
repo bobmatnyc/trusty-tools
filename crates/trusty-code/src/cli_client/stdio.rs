@@ -335,4 +335,31 @@ mod tests {
         let malformed_params = json!({"method": "session.event", "params": {"not": "an envelope"}});
         assert!(classify_notification(&malformed_params).is_none());
     }
+
+    /// Why: #10360 — `call` accepted any frame whose id matched, so a server
+    /// request carrying the awaited id became the call's result.
+    /// What: a stand-in daemon script answers request 1 with a `roots/list`
+    /// request (id 1), an `error` frame that also has `method`, then the real
+    /// response; `call` must return the real result.
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn call_skips_server_request_with_matching_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("fake-tcode");
+        let script = "#!/bin/sh\nread -r l\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"roots/list\"}\\n'\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"error\":{\"code\":-1,\"message\":\"m\"}}\\n'\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"answer\":\"real\"}}\\n'\n\
+sleep 5\n";
+        std::fs::write(&exe, script).expect("write script");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut client = StdioRpcClient::spawn(&exe, dir.path()).expect("spawn");
+        let result = client
+            .call("session.list", json!({}))
+            .await
+            .expect("the real response");
+        assert_eq!(result, json!({ "answer": "real" }));
+    }
 }
