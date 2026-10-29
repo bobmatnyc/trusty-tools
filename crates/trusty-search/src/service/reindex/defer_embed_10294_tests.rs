@@ -166,6 +166,32 @@ async fn handle_with(
     ))
 }
 
+/// The handle a restarted daemon builds: the same redb corpus and pending
+/// marker, a fresh indexer over `store` warmed from redb, and no re-staging of chunks (a
+/// re-stage with no embeddings would evict the vectors the store holds).
+async fn reopened_handle(
+    id: &str,
+    root: &Path,
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn VectorStore>,
+) -> Arc<IndexHandle> {
+    let mut entry = crate::service::persistence::PersistedIndex::new(id, root);
+    entry.deferred_embed_pending = true;
+    crate::service::persistence::upsert_index_registry_entry(entry).expect("persist entry");
+    let mut indexer = CodeIndexer::new(id, root).with_components(embedder, store);
+    let redb = CorpusStore::open(&root.join("index.redb")).expect("reopen corpus");
+    indexer.set_corpus_store(Arc::new(redb));
+    indexer
+        .load_chunks_from_redb()
+        .await
+        .expect("warm the chunk map");
+    Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.to_path_buf(),
+    ))
+}
+
 /// Run the calling test in a child with its own data dir and a checkpoint
 /// after every wave. Returns `true` in the child.
 fn isolate(test_name: &str) -> bool {
@@ -269,6 +295,88 @@ async fn a_finished_wave_is_searchable_and_on_disk_before_the_next_wave_starts()
         .await
         .expect("the pass must finish once released")
         .expect("the pass task must not panic");
+    assert_eq!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Ready
+    );
+}
+
+/// A pass killed while wave 2 is in flight keeps wave 1's vectors, and the
+/// restarted pass embeds only the chunks wave 1 did not cover.
+///
+/// The kill is a task abort at the wave-2 boundary. The restart builds a fresh
+/// indexer over the same redb corpus and a store loaded from the on-disk
+/// snapshot, as warm boot does. Pre-fix nothing reached disk before the end of
+/// the pass, so the restart found an empty snapshot and embedded all `n` chunks.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_pass_killed_mid_embedding_keeps_its_waves_and_a_restart_does_not_re_embed_them() {
+    if !isolate(
+        "service::reindex::defer_embed::tests_10294::\
+         a_pass_killed_mid_embedding_keeps_its_waves_and_a_restart_does_not_re_embed_them",
+    ) {
+        return;
+    }
+    let id = "kill-restart-10294";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inflight = crate::core::indexer::resolve_embed_inflight();
+    let n = inflight * 512 + 1;
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (_release_tx, release_rx) = oneshot::channel::<()>();
+    let first_answered = Arc::new(Mutex::new(Vec::new()));
+    let embedder = Arc::new(ParkingEmbedder {
+        park_at: inflight,
+        park: Mutex::new(Some((reached_tx, release_rx))),
+        calls: AtomicUsize::new(0),
+        answered: Arc::clone(&first_answered),
+    });
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let handle = handle_with(id, tmp.path(), embedder, store, n).await;
+    let pass = tokio::spawn(run_embed_catch_up(
+        Arc::clone(&handle),
+        Arc::new(ReindexProgress::new()),
+    ));
+    tokio::time::timeout(Duration::from_secs(20), reached_rx)
+        .await
+        .expect("wave 2 must start")
+        .expect("the parked call signals");
+    let wave_one = ids_of(&first_answered.lock().expect("answered lock"), n);
+    assert!(!wave_one.is_empty() && wave_one.len() < n, "wave 1 only");
+
+    // Kill: drop the pass, the handle, and with them the in-memory store.
+    pass.abort();
+    let _ = pass.await;
+    drop(handle);
+
+    // Restart: the snapshot on disk is all that survives.
+    let path = StorageLayout::default()
+        .file(id, tmp.path(), HNSW_FILE)
+        .expect("hnsw path");
+    let reloaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load snapshot")
+        .expect("the killed pass left a snapshot");
+    let second_answered = Arc::new(Mutex::new(Vec::new()));
+    let second = Arc::new(ParkingEmbedder {
+        park_at: usize::MAX,
+        park: Mutex::new(None),
+        calls: AtomicUsize::new(0),
+        answered: Arc::clone(&second_answered),
+    });
+    let handle = reopened_handle(id, tmp.path(), second, Arc::new(reloaded)).await;
+    run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())).await;
+
+    let re_embedded = ids_of(&second_answered.lock().expect("answered lock"), n);
+    assert!(
+        re_embedded.iter().all(|c| !wave_one.contains(c)),
+        "the restart must not re-embed a chunk the killed pass committed"
+    );
+    assert_eq!(
+        re_embedded.len() + wave_one.len(),
+        n,
+        "the restart embeds exactly the chunks the killed pass had not committed"
+    );
     assert_eq!(
         handle.stages.read().await.semantic.status,
         StageStatus::Ready
