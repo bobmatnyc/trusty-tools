@@ -148,3 +148,132 @@ fn secrets_inside_paths_and_urls_are_refused_after_9748() {
         );
     }
 }
+
+/// True when the gate raises no secret verdict on `content`.
+fn accepted(content: &str) -> bool {
+    check_secret(content).is_ok()
+        && !matches!(
+            FilterConfig::default().apply(content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        )
+        && find_secret_spans(content).is_empty()
+}
+
+/// Why: a credential parameter is named many ways (`x-api-key`, `apitoken`,
+/// `slack_token`, `secret_key`, `pwd`); an exact-name list missed all of
+/// them, and a lowercase value gives the value-shape rules nothing to read.
+/// A short password has no shape at all, so the name alone must refuse it.
+/// What: each row carries the credential only under its parameter name, in
+/// the query or the fragment, bare and in prose.
+/// Test: itself; red on the exact-name, floor-of-8 matcher.
+#[test]
+fn credential_parameter_names_are_refused_by_suffix_after_9748() {
+    let rows = [
+        "https://a.example.com/v1?key=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
+        "https://a.example.com/v1?api-key=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+        "https://a.example.com/v1?slack_token=abcdefghijklmnopqrstuvwxabcdefghijklmnop", // pragma: allowlist secret
+        "https://a.example.com/v1?x-api-key=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
+        "https://a.example.com/v1?apitoken=abcdefghijklmnop",          // pragma: allowlist secret
+        "https://a.example.com/v1?github_token=abcdefghijklmnop",      // pragma: allowlist secret
+        "https://a.example.com/v1?secret_key=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
+        "https://a.example.com/v1?auth=abcdefghijklmnopqrstuvwx",      // pragma: allowlist secret
+        "https://a.example.com/v1?access-token=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
+        "https://a.example.com/v1?Client-Secret=hunter2",              // pragma: allowlist secret
+        "https://a.example.com/v1?sig=abcdef0123",                     // pragma: allowlist secret
+        "https://a.example.com/v1?password=hunter2",                   // pragma: allowlist secret
+        "https://a.example.com/v1?db_passwd=x1",                       // pragma: allowlist secret
+        "https://a.example.com/v1?pwd=hunter2",                        // pragma: allowlist secret
+        "https://a.example.com/cb#refresh-token=abcdefghijklmnop",     // pragma: allowlist secret
+        "https://a.example.com/v1?token=Zq7%2FRt%2BY2uWx9Kp4",         // pragma: allowlist secret
+        "https://a.example.com/v1?password=hunter%212",                // pragma: allowlist secret
+    ];
+    for shape in rows {
+        assert!(refused(shape), "admitted {shape}");
+        assert!(
+            refused(&format!("Callback set to {shape} for the job.")),
+            "admitted in prose: {shape}"
+        );
+    }
+}
+
+/// Why: a password may hold `#` or `?`, which end the authority in a strict
+/// URL parse; cutting the authority there let the password through.
+/// What: the userinfo is the text before the last `@` that precedes the first
+/// `/` after the scheme.
+/// Test: itself; red when the authority is cut at the first `?` or `#`.
+#[test]
+fn userinfo_with_raw_delimiters_is_refused_after_9748() {
+    for shape in [
+        "mysql://root:hunter#2@db.internal/app", // pragma: allowlist secret
+        "postgres://admin:p?ss@db.internal/app", // pragma: allowlist secret
+        "https://user:pw@example.com?x=1",       // pragma: allowlist secret
+        "https://üser:pä@host.example.com/x",    // pragma: allowlist secret
+    ] {
+        assert!(refused(shape), "admitted {shape}");
+        assert!(
+            refused(&format!("Connect with {shape} now.")),
+            "admitted in prose: {shape}"
+        );
+    }
+}
+
+/// Why: matching by name suffix must not turn ordinary parameters into
+/// secrets. `keyword`, `monkey` and `sort_key` end in or hold `key`; an `@`
+/// in a query or fragment is not userinfo.
+/// What: each row is admitted bare and in prose.
+/// Test: itself; guards the suffix matcher and the userinfo parser.
+#[test]
+fn benign_query_names_and_at_signs_stay_accepted_after_9748() {
+    for shape in [
+        "https://example.com/search?keyword=rust",
+        "https://example.com/list?sort_key=asc",
+        "https://example.com/list?sort_key=created_at_descending",
+        "https://example.com/list?primary_key=id&page=2",
+        "https://example.com/zoo?monkey=banana",
+        "https://example.com/list?page=2",
+        "https://example.com/oauth?token_type=bearer&state=open",
+        "https://example.com/profile?email=a@b.com",
+        "https://example.com/u?next=/a:b@c&page=2",
+        "https://example.com/p#section@x",
+        "https://example.com?note=a:b@c",
+        "http://localhost:3000?email=a@b.com",
+    ] {
+        assert!(accepted(shape), "refused {shape}");
+        assert!(
+            accepted(&format!("Open {shape} in the browser.")),
+            "refused in prose: {shape}"
+        );
+    }
+}
+
+/// Why: the gate slices tokens by byte offset; a multibyte character must not
+/// panic it. A 100 KB body of query pairs or `:N` groups must not stall it.
+/// What: runs every gate path over the inputs; only the multibyte rows
+/// assert a verdict, the long rows assert the run time.
+/// Test: itself.
+#[test]
+fn multibyte_and_long_inputs_are_safe_after_9748() {
+    for shape in [
+        "https://example.com/größe/日本語?q=ünï&lang=日本語#é",
+        "docs/日本語.md:12",
+        "docs/日本語.md:١٢:3",
+        "docs/é.md:1:é",
+    ] {
+        let _ = (check_secret(shape), find_secret_spans(shape));
+        let _ = FilterConfig::default().apply(shape, false);
+    }
+    let pairs = format!("https://example.com/p?{}", "&a=b".repeat(25_000));
+    let lines = format!("docs/a.md{}", ":1".repeat(50_000));
+    for content in [pairs, lines] {
+        let start = std::time::Instant::now();
+        let _ = check_secret(&content);
+        let _ = find_secret_spans(&content);
+        let _ = FilterConfig::default().apply(&content, false);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "stalled for {:?} on {} bytes",
+            start.elapsed(),
+            content.len()
+        );
+    }
+}
