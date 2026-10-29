@@ -15,7 +15,6 @@
 //! Test: this module.
 
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -23,7 +22,8 @@ use std::time::Duration;
 fn write_mock() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("mock-embedderd-recycle.sh");
-    std::fs::write(
+    // See #10248
+    crate::exec_stub::write_executable(
         &path,
         r#"#!/bin/sh
 here=$(dirname "$0")
@@ -38,9 +38,6 @@ done
 "#,
     )
     .expect("write mock script");
-    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod +x");
     (dir, path)
 }
 

@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 /// Write an executable shell script standing in for git.
 #[cfg(unix)]
 fn fake_git(dir: &Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-git.sh");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake git");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+        .expect("write fake git");
     path
 }
 

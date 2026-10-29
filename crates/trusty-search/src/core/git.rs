@@ -623,13 +623,12 @@ mod tests {
     /// the first two calls and fails the third reaches the arm.
     fn git_shim_failing_untracked(dir: &Path) -> String {
         let shim = dir.join("git-shim.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = \"--others\" ] && exit 1\ndone\nexec git \"$@\"\n",
         )
         .expect("write shim");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         shim.to_string_lossy().into_owned()
     }
 

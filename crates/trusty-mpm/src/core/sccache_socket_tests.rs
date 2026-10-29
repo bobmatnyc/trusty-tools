@@ -1,6 +1,5 @@
 //! Tests for the #8928 step 3 sccache unix-socket server.
 
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixDatagram, UnixListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -16,8 +15,9 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 
 /// Write an executable `sh` script at `path`.
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, format!("#!/bin/sh\n{body}\n"))
+        .expect("write script");
 }
 
 /// A socket file nothing can stream-connect to. A dropped `UnixListener`

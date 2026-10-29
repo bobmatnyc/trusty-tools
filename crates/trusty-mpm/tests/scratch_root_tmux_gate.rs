@@ -59,22 +59,13 @@ impl Drop for EnvOverride {
 /// Write an executable `tmux` into `dir` that appends its argv to `log` and
 /// prints one Claude-hosting pane row.
 fn write_fake_tmux(dir: &Path, log: &Path) -> PathBuf {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
     let path = dir.join("tmux");
     let body = format!(
         "#!/bin/sh\necho \"$@\" >> '{log}'\necho 'scratch-root-fake-pane claude'\nexit 0\n",
         log = log.display()
     );
-    let mut f = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o755)
-        .open(&path)
-        .expect("create fake tmux");
-    f.write_all(body.as_bytes()).expect("write fake tmux");
-    drop(f);
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, body).expect("write fake tmux");
     path
 }
 

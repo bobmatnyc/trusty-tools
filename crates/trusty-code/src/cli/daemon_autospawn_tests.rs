@@ -195,21 +195,11 @@ fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
     script
 }
 
-/// Write `#!/bin/sh\n<body>` to `staging` from a reaped `sh` child (#6231).
+/// Write `#!/bin/sh\n<body>\n` to `staging` from a reaped child (#6231).
 fn write_stub(staging: &Path, body: &str) {
-    let status = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(r#"printf '%s\n' "$2" > "$1" && chmod 755 "$1""#)
-        .arg("sh")
-        .arg(staging)
-        .arg(format!("#!/bin/sh\n{body}"))
-        .stdin(std::process::Stdio::null())
-        .status()
-        .expect("run the stub writer");
-    assert!(
-        status.success(),
-        "stub writer failed for {staging:?}: {status}"
-    );
+    // See #10248
+    trusty_common::exec_stub::write_executable(staging, format!("#!/bin/sh\n{body}\n"))
+        .unwrap_or_else(|e| panic!("stub writer failed for {staging:?}: {e}"));
 }
 
 /// The per-user root that [`stable_stub`] keys its stubs under.

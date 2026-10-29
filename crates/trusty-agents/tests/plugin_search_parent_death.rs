@@ -13,8 +13,6 @@
 
 mod support;
 
-use std::os::unix::fs::PermissionsExt;
-
 use support::project::Project;
 
 /// Stub body: record the stamp it inherited, then exit.
@@ -24,8 +22,8 @@ const STUB: &str = "#!/bin/sh\nprintf '%s' \"${TRUSTY_EXIT_WITH_PARENT:-UNSET}\"
 async fn plugins_status_stamps_the_trusty_search_child_for_parent_death() {
     let stub_dir = tempfile::tempdir().expect("stub dir");
     let stub = stub_dir.path().join("trusty-search");
-    std::fs::write(&stub, STUB).expect("write stub");
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&stub, STUB).expect("write stub");
 
     let proj = Project::new();
     let out = proj

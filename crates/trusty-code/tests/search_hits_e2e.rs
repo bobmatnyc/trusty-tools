@@ -54,8 +54,6 @@ const FAKE_HITS: &[(&str, f64)] = &[("src/auth.rs", 0.87), ("src/session/session
 /// Test: exercised by this module's own e2e test.
 #[cfg(unix)]
 fn write_fake_trusty_search(dir: &std::path::Path, project_root: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     let canonical_root = std::fs::canonicalize(project_root)
         .expect("canonicalize project root")
         .to_str()
@@ -98,12 +96,9 @@ fn write_fake_trusty_search(dir: &std::path::Path, project_root: &std::path::Pat
     );
 
     let path = dir.join("trusty-search");
-    std::fs::write(&path, script).expect("write fake trusty-search script");
-    let mut perms = std::fs::metadata(&path)
-        .expect("stat fake trusty-search script")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod fake trusty-search script");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, script)
+        .expect("write fake trusty-search script");
 }
 
 /// Drive `task.run` -> `session.attach` -> read-until-`session_done` using

@@ -706,16 +706,14 @@ impl PrivateTmuxServer {
     /// test that takes a tmux binary path and adds no `-L` itself (#8443). It
     /// never reaches the default server.
     pub(crate) fn shim_bin(&self) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let path = self.shim_dir.path().join("tmux-private");
         if !path.exists() {
             let script = format!(
                 "#!/bin/sh\nexec '{}' -f /dev/null -L '{}' \"$@\"\n",
                 self.tmux_bin, self.socket
             );
-            std::fs::write(&path, script).expect("write tmux shim");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod tmux shim");
+            // See #10248
+            trusty_common::exec_stub::write_executable(&path, script).expect("write tmux shim");
         }
         path.to_string_lossy().into_owned()
     }

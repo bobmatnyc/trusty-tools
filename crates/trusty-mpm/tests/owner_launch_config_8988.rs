@@ -130,12 +130,9 @@ impl Fixture {
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).expect("mkdir bin");
         let exe = bin.join("claude");
-        std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
+        // See #10248
+        trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
+            .expect("write fake claude");
         let repos_root = home.join("projects");
         let project = repos_root.join("acme").join("widget");
         std::fs::create_dir_all(&project).expect("mkdir project");

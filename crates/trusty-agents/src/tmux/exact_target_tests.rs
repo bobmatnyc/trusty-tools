@@ -31,13 +31,12 @@ impl PrivateServer {
         let dir = tempfile::tempdir().expect("shim dir");
         let socket = format!("tagent-8443-{tag}-{}", std::process::id());
         let shim = dir.path().join("tmux-private");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             format!("#!/bin/sh\nexec tmux -L '{socket}' \"$@\"\n"),
         )
         .expect("write shim");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         Some(Self {
             socket,
             shim,
@@ -57,7 +56,8 @@ impl PrivateServer {
         let dir = self.shim.parent().expect("shim dir");
         let log = dir.join("argv.log");
         let shim = dir.join("tmux-recording");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in has-session) exit 0;; esac\nexec tmux -L '{}' \"$@\"\n",
@@ -66,8 +66,6 @@ impl PrivateServer {
             ),
         )
         .expect("write recording shim");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         (shim.to_string_lossy().into_owned(), log)
     }
 

@@ -421,14 +421,9 @@ fn driver_reports_availability() {
 /// Why: mirrors `core::tmux`'s own `write_fake_tmux` test helper — a
 /// deterministic scripted `tmux` binary, no live tmux server required.
 fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).expect("write fake tmux script");
-    let mut perms = std::fs::metadata(&path)
-        .expect("stat fake tmux script")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod fake tmux script");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, body).expect("write fake tmux script");
     path.to_string_lossy().into_owned()
 }
 

@@ -359,7 +359,6 @@ fn should_give_up_at_boundary_does_not_trip() {
 #[cfg(unix)]
 mod shutdown_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -385,7 +384,8 @@ mod shutdown_tests {
     fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd.sh");
-        std::fs::write(
+        // See #10248
+        crate::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -396,9 +396,6 @@ done
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 
@@ -418,7 +415,8 @@ done
     fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd-crash-once.sh");
-        std::fs::write(
+        // See #10248
+        crate::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 IFS= read -r line
@@ -429,9 +427,6 @@ exit 1
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 
@@ -458,7 +453,8 @@ exit 1
     fn write_mock_embedderd_wedges_after_probe() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd-wedges.sh");
-        std::fs::write(
+        // See #10248
+        crate::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 IFS= read -r line
@@ -471,9 +467,6 @@ while :; do sleep 1; done
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 
@@ -499,7 +492,8 @@ while :; do sleep 1; done
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd-crash-once-then-healthy.sh");
         let marker = dir.path().join("crashed-once.marker");
-        std::fs::write(
+        // See #10248
+        crate::exec_stub::write_executable(
             &path,
             format!(
                 r#"#!/bin/sh
@@ -524,9 +518,6 @@ exit 1
             ),
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 

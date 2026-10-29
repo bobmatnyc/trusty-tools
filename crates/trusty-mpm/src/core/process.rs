@@ -701,7 +701,8 @@ mod tests {
         // private server's socket dir is pinned into the shim it runs.
         let tmpdir = std::env::var("TMUX_TMPDIR").unwrap_or_default();
         let shim = dir.join("tmux-pinned");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &shim,
             format!(
                 "#!/bin/sh\nTMUX_TMPDIR='{tmpdir}' exec '{}' \"$@\"\n",
@@ -709,8 +710,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
         // inner.sh runs as the fake claude; the probe is its child. The
         // trailing sleep keeps `claude` alive for the name check below.
         let inner = dir.join("inner.sh");

@@ -583,16 +583,15 @@ async fn subprocess_probe_status_over_socket_is_false_only_on_32004() {
 /// Test: this test.
 #[test]
 fn analyze_child_env_carries_the_resolved_transport() {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("tempdir");
     let script = dir.path().join("fake-analyze");
     let dump = dir.path().join("env.txt");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!("#!/bin/sh\nenv > '{}'\nexit 1\n", dump.display()),
     )
     .expect("write the fake binary");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let bin = script.to_string_lossy().to_string();
 
     let socket = SearchTransport::Socket(dir.path().join("search.sock"));

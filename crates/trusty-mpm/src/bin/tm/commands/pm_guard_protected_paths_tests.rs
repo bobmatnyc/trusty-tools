@@ -424,10 +424,9 @@ fn a_bare_hook_program_is_resolved_on_path() {
 
 /// An executable file at `path`, its directory created.
 fn executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
-    std::fs::write(path, "#!/bin/sh\n").expect("write program");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, "#!/bin/sh\n").expect("write program");
 }
 
 /// `fx` with `command` as its project's one hook and `path` as `PATH`.

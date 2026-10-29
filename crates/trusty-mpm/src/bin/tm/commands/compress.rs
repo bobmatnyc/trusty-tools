@@ -1051,31 +1051,22 @@ mod tests {
     /// What: an `/bin/sh` script that drains stdin (otherwise the writer in
     /// `compress_via_rtk_binary` takes `EPIPE`, the rtk arm reports failure,
     /// and the native chain would answer instead), deletes itself, and exits
-    /// zero having written nothing — exactly the #7377 shape. A `/bin/sh` child
-    /// writes and chmods the stub, so this test process never holds a writable
-    /// fd on it.
+    /// zero having written nothing — exactly the #7377 shape. The shared
+    /// writer has a child write the stub, so this test process never holds a
+    /// writable fd on it (#10232, #10248).
     /// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`.
     #[cfg(unix)]
     fn empty_rtk(_name: &str) -> Option<PathBuf> {
-        use std::io::Write as _;
-        // #10232: a sibling test that forks while this process holds the
-        // stub's write fd inherits that fd until its own exec, and the stub's
-        // execve then fails with ETXTBSY — `compress_via_rtk_binary` drops the
-        // spawn error and the native chain answers. A child's fds are never
-        // inherited by our other forks, so the writer must be a child.
+        // #10232: an in-process write fd, inherited by a sibling test's fork,
+        // fails the stub's execve with ETXTBSY and the native chain answers.
+        // See #10248
         let path = empty_rtk_stub_path();
-        let mut writer = std::process::Command::new("/bin/sh")
-            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
-            .arg(&path)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .ok()?;
-        writer
-            .stdin
-            .take()?
-            .write_all(b"#!/bin/sh\ncat >/dev/null\nrm -f -- \"$0\"\nexit 0\n")
-            .ok()?;
-        writer.wait().ok()?.success().then_some(path)
+        trusty_common::exec_stub::write_executable(
+            &path,
+            b"#!/bin/sh\ncat >/dev/null\nrm -f -- \"$0\"\nexit 0\n",
+        )
+        .ok()?;
+        Some(path)
     }
 
     /// Run `body` with a thread-local capturing subscriber, returning its

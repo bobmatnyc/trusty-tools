@@ -16,7 +16,6 @@
 //! Test: this file IS the test.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -153,8 +152,8 @@ while IFS= read -r line; do
 done
 "#;
     let bin = dir.join("trusty-mpm");
-    fs::write(&bin, script).expect("write stub");
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("write stub");
 
     let path = std::env::var("PATH").unwrap_or_default();
     // SAFETY: this integration binary holds exactly one test, so no other

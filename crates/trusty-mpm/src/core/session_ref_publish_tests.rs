@@ -111,12 +111,12 @@ impl Fixture {
         let hooks = self.remote.join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-receive");
-        std::fs::write(&hook, "#!/bin/sh\necho 'refused by policy' >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        // See #10248
+        trusty_common::exec_stub::write_executable(
+            &hook,
+            "#!/bin/sh\necho 'refused by policy' >&2\nexit 1\n",
+        )
+        .unwrap();
     }
 }
 

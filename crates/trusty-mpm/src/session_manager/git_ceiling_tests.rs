@@ -135,7 +135,8 @@ struct StatusWedge {
 
 impl Drop for StatusWedge {
     fn drop(&mut self) {
-        let _ = std::fs::write(&self.hook, "#!/bin/sh\nexit 1\n");
+        // See #10248
+        let _ = trusty_common::exec_stub::write_executable(&self.hook, "#!/bin/sh\nexit 1\n");
         release(&self.gate);
     }
 }
@@ -146,7 +147,8 @@ fn wedge_status_in(repo: &Path, wt: &Path) -> StatusWedge {
     let gate = dir.path().join("gate");
     mkfifo(&gate);
     let hook = dir.path().join("fsmonitor-hook");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &hook,
         format!("#!/bin/sh\nexec cat \"{}\" >/dev/null\n", gate.display()),
     )
@@ -161,8 +163,6 @@ fn wedge_status_in(repo: &Path, wt: &Path) -> StatusWedge {
             &hook.to_string_lossy(),
         ],
     );
-    let status = Command::new("chmod").arg("+x").arg(&hook).status();
-    assert!(status.is_ok_and(|s| s.success()), "chmod the hook");
     StatusWedge {
         hook,
         gate,

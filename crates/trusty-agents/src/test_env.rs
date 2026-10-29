@@ -23,7 +23,6 @@
 #![cfg(test)]
 
 use std::cell::Cell;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -293,38 +292,22 @@ pub fn clear_all_credential_env_vars() {
     }
 }
 
-/// Write a shell script to `dir/name`, flush and close the file handle, THEN
-/// set the execute bit — eliminating the ETXTBSY race (#1528).
+/// Write a shell script to `dir/name` as a mode-0755 executable and return
+/// its path.
 ///
-/// Why: The Linux kernel rejects `execve` with ETXTBSY (os error 26) when
-/// ANY process holds an open writable fd to the target inode — including the
-/// writing process itself. Closing/dropping the `File` before `set_permissions`
-/// and before `spawn` removes that fd, satisfying the kernel's constraint.
-/// The safe pattern is: open → write → flush → **drop the `File`** → chmod
-/// → spawn. Without the explicit drop, the writable fd can still be open when
-/// `execve` is called, triggering ETXTBSY even under light load.
-/// What: Creates the file at `dir.join(name)`, writes `contents`, syncs,
-/// drops the file handle, sets mode 0o755, and returns the absolute path.
+/// Why: closing the `File` before exec is not enough — a sibling test thread
+/// that forks while the write fd is open hands its child a copy, and the exec
+/// fails with ETXTBSY (#1528, #10248).
+/// What: delegates to [`trusty_common::exec_stub::write_executable`], which has
+/// a child process write the file, and panics with the path on any error.
 /// Test: All tests in `subprocess::tests` and `agents::claude_code_runner::tests`
-/// that spawn a mock shell script call this helper; ETXTBSY flakiness should
-/// not recur after the refactor.
+/// that spawn a mock shell script call this helper.
 #[cfg(unix)]
 pub fn write_executable_script(dir: &Path, name: &str, contents: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let path = dir.join(name);
-    {
-        // Scope the File so it is closed before set_permissions.
-        let mut f = std::fs::File::create(&path)
-            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
-        f.write_all(contents.as_bytes())
-            .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        f.flush()
-            .unwrap_or_else(|e| panic!("flush {}: {e}", path.display()));
-        // `f` drops here — fd is closed before chmod.
-    }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+    // See #10248
+    trusty_common::exec_stub::write_executable(&path, contents)
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     path
 }
 

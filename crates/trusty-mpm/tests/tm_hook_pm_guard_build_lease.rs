@@ -430,23 +430,21 @@ fn leasing_home_and_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
 /// The same slot path is printed to the agent on stderr.
 #[test]
 fn a_subagents_leased_build_runs_in_its_slot_directory() {
-    use std::os::unix::fs::PermissionsExt;
     let (home, worktree) = leasing_home_and_worktree();
     let shared = home.path().join(".trusty-tools/cargo-target/acme/widget");
     let record = home.path().join("cargo-saw");
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).expect("bin dir");
     // `cargo metadata` (the stale-build guard) fails; `cargo test` records.
-    std::fs::write(
-        bin.join("cargo"),
+    // See #10248
+    trusty_common::exec_stub::write_executable(
+        &bin.join("cargo"),
         format!(
             "#!/bin/sh\n[ \"$1\" = test ] || exit 1\nprintf %s \"$CARGO_TARGET_DIR\" > '{}'\n",
             record.display()
         ),
     )
     .expect("stand-in cargo");
-    std::fs::set_permissions(bin.join("cargo"), std::fs::Permissions::from_mode(0o755))
-        .expect("chmod");
 
     let payload = bash_payload(&worktree, "cargo test -p widget", true);
     let (command, _) = updated_command(&run_hook(home.path(), &["--pm-guard"], &payload));

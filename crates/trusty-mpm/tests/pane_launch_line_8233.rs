@@ -167,11 +167,11 @@ impl Drop for EnvGuard {
 /// with no Claude Code install (a silently skipped test would be worse than none).
 #[cfg(unix)]
 fn plant_fake_claude(bin: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(bin).expect("mkdir bin");
     let exe = bin.join("claude");
-    std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
+        .expect("write fake claude");
 }
 
 /// A realistic worst case: the agent-worktree layout tm itself provisions, under

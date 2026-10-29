@@ -130,7 +130,6 @@ struct Fixture {
 
 impl Fixture {
     async fn new(fake: FakeTmux) -> Self {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = crate::test_support::hermetic_temp_dir();
         let log = dir.path().join("calls.log");
         let bin = dir.path().join("fake-tmux");
@@ -183,8 +182,8 @@ impl Fixture {
             log = log.display(),
             signalled = signalled.display(),
         );
-        std::fs::write(&bin, script).expect("write fake tmux");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // See #10248
+        trusty_common::exec_stub::write_executable(&bin, script).expect("write fake tmux");
         Self::with_bin(dir, bin).await
     }
 

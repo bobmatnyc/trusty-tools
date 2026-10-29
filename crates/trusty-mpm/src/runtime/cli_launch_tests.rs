@@ -21,15 +21,14 @@ fn env_words(spec: &LaunchSpec) -> Vec<String> {
 
 /// A fake `tmux` that appends its argv to `<dir>/argv.log` and exits `exit`.
 fn fake_tmux(dir: &Path, exit: u8) -> (String, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("argv.log");
     let bin = dir.join("fake-tmux");
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{}'\necho 'fake failure' >&2\nexit {exit}\n",
         log.display()
     );
-    std::fs::write(&bin, script).expect("fake tmux");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
     (bin.display().to_string(), log)
 }
 

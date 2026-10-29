@@ -375,6 +375,19 @@ pub mod supervision;
 /// Test: `cargo test -p trusty-common --features unconditional-only spawn_retry`.
 pub mod spawn_retry;
 
+/// Write an executable this process will exec, with no `ETXTBSY` window (#10248).
+///
+/// Why: a test that writes a stub with `std::fs::write` and then execs it races
+/// every sibling test thread that forks while the write fd is open; four such
+/// tests turned CI red on unrelated PRs (#9718, #10176, #10232, #10248).
+/// What: [`exec_stub::write_executable`] has a `/bin/cp` child write the file,
+/// so no fork of this process can inherit a write fd to it. Ungated and std-only,
+/// so every crate that already depends on `trusty-common` can call it from its
+/// tests without a new dependency edge. Unix only.
+/// Test: `cargo test -p trusty-common --features unconditional-only exec_stub`.
+#[cfg(unix)]
+pub mod exec_stub;
+
 /// Parent-death linkage for spawned processes (#7085, #3734).
 ///
 /// Why: a `Child` handle reaps only in `Drop`, which a SIGKILL of the parent

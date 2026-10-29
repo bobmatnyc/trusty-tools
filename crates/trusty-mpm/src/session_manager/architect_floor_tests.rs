@@ -65,7 +65,6 @@ impl Scratch {
     /// A fake tmux that logs every argv line to `calls.log` and lists
     /// `live` as its only session.
     fn fake_tmux(&self, live: &str) -> (String, PathBuf) {
-        use std::os::unix::fs::PermissionsExt as _;
         let log = self.dir.path().join("calls.log");
         let bin = self.dir.path().join("fake-tmux");
         let script = format!(
@@ -73,8 +72,8 @@ impl Scratch {
              if [ \"$1\" = list-sessions ]; then echo '{live}:1700000000:1'; fi\nexit 0\n",
             log = log.display()
         );
-        std::fs::write(&bin, script).expect("write fake tmux");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // See #10248
+        trusty_common::exec_stub::write_executable(&bin, script).expect("write fake tmux");
         (bin.to_string_lossy().into_owned(), log)
     }
 }

@@ -1032,13 +1032,9 @@ impl Drop for PathGuard {
 /// and `resume_managed_errors_when_the_launch_is_typed_but_no_runtime_appears`.
 fn write_fake_binary(dir: &std::path::Path, name: &str) -> PathBuf {
     let bin = dir.join(name);
-    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake binary");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake binary executable");
-    }
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, "#!/bin/sh\nexit 0\n")
+        .expect("write fake binary");
     bin
 }
 

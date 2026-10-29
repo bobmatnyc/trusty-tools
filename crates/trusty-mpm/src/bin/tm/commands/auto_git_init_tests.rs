@@ -515,31 +515,19 @@ const INIT_MARKER: &str = "fake-git-init-ran";
 ///
 /// Why: real git's no-repository wording depends on the host's mounts, so a
 /// test that pins one wording needs a fake, and a fake `init` keeps a real
-/// `git init` out of the fixture. #9034: exec'ing a file this process just
-/// wrote can race a sibling test's fork (ETXTBSY), so the shim is probed until
-/// it runs before the code under test sees it.
+/// `git init` out of the fixture. #9034, #10248: the shared writer keeps the
+/// shim's write fd out of this process, so a sibling test's fork cannot make
+/// the exec fail with ETXTBSY.
 #[cfg(unix)]
 fn fake_git(dir: &Path, stderr: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    // ETXTBSY is 26 on both Linux and macOS.
-    const ETXTBSY: i32 = 26;
     let shim = dir.join("fake-git");
     let script = format!(
         "#!/bin/sh\ncase \"$3\" in\n  rev-parse) printf '%s\\n' '{stderr}' >&2; exit 128 ;;\n  \
          init) : > \"$2/{INIT_MARKER}\"; exit 0 ;;\nesac\nexit 0\n"
     );
-    std::fs::write(&shim, script).unwrap();
-    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for _ in 0..100 {
-        match Command::new(&shim).arg("probe").output() {
-            Ok(_) => return shim.to_string_lossy().into_owned(),
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => panic!("fake git at {} did not run: {e}", shim.display()),
-        }
-    }
-    panic!("fake git at {} stayed busy (ETXTBSY)", shim.display());
+    // See #10248
+    trusty_common::exec_stub::write_executable(&shim, script).unwrap();
+    shim.to_string_lossy().into_owned()
 }
 
 /// Fail-Open Check (#9495): git's classic "no repository" wording under a real

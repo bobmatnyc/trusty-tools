@@ -126,7 +126,6 @@ struct Layout {
 #[cfg(unix)]
 impl Layout {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let shim_root = tmp.path().join("gh-shim");
         let shim = shim_root.join("a@github.com-1");
@@ -137,8 +136,8 @@ impl Layout {
             let body = format!(
                 "#!/bin/sh\nprintf '{name} GH_TOKEN=%s GH_CONFIG_DIR=%s\\n' \"$GH_TOKEN\" \"$GH_CONFIG_DIR\"\n"
             );
-            std::fs::write(&gh, body).expect("script");
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            // See #10248
+            trusty_common::exec_stub::write_executable(&gh, body).expect("script");
         }
         Self {
             _tmp: tmp,

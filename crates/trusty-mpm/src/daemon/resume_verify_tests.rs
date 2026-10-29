@@ -583,14 +583,14 @@ async fn one_gh_slot(project: &Path, session: &str) -> (crate::uds_mock::MockUds
 #[cfg(unix)]
 #[tokio::test]
 async fn the_system_runner_kills_a_child_that_outlives_its_bound() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let (daemon, snapshot) = one_gh_slot(&project, "s-kill").await;
     let marks = tmp.path().join("marks");
     let script = tmp.path().join("fake-gh");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!(
             "#!/bin/sh\npwd -P > '{m}.cwd'\necho \"$@\" > '{m}.args'\necho $$ > '{m}.pid'\n\
@@ -599,7 +599,6 @@ async fn the_system_runner_kills_a_child_that_outlives_its_bound() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runner = SystemRunner {
         programs: vec![("gh".to_string(), script)],
     };
