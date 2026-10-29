@@ -16,16 +16,18 @@
 //! onto the fork path, so a spawn costs slightly more.
 //! Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 use std::io;
 
 /// A raw descriptor number (`std::os::fd::RawFd` exists on unix only).
 type RawFd = i32;
 
 /// The first descriptor the hook touches; 0-2 are the child's stdio.
+#[cfg(all(unix, any(target_os = "macos", test)))]
 const FIRST_FD: RawFd = 3;
 
 /// Upper bound on descriptors the hook visits, whatever the fd limit says.
+#[cfg(all(unix, any(target_os = "macos", test)))]
 const MAX_SCAN: RawFd = 1 << 16;
 
 /// Set `FD_CLOEXEC` on every inherited descriptor of the child `cmd` spawns.
@@ -68,7 +70,7 @@ pub fn seal_inherited_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::pr
 ///
 /// Why: the public helpers are macOS-only, but the hook body is plain POSIX;
 /// tests on Linux CI call this directly so the code is exercised there too.
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 pub(crate) fn install(cmd: &mut std::process::Command, keep: &[RawFd]) {
     use std::os::unix::process::CommandExt as _;
     // SAFETY: the hook runs between fork and exec and calls only `fcntl`
@@ -80,7 +82,7 @@ pub(crate) fn install(cmd: &mut std::process::Command, keep: &[RawFd]) {
 }
 
 /// [`install`] for a tokio command.
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 pub(crate) fn install_tokio(cmd: &mut tokio::process::Command, keep: &[RawFd]) {
     // SAFETY: as in [`install`].
     unsafe {
@@ -89,7 +91,7 @@ pub(crate) fn install_tokio(cmd: &mut tokio::process::Command, keep: &[RawFd]) {
 }
 
 /// The `pre_exec` body: everything allocated here, before the fork.
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn sealing_hook(keep: &[RawFd]) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
     let keep = keep.to_vec();
     // SAFETY: `getdtablesize` takes no arguments and reads a process limit.
@@ -103,7 +105,7 @@ fn sealing_hook(keep: &[RawFd]) -> impl FnMut() -> io::Result<()> + Send + Sync 
 /// Set `FD_CLOEXEC` on every open fd in `FIRST_FD..limit` not in `keep`.
 ///
 /// What: `fcntl` only. A closed fd (`EBADF`) and a flag already set are skipped.
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn seal_range(limit: RawFd, keep: &[RawFd]) {
     for fd in FIRST_FD..limit {
         if keep.contains(&fd) {
