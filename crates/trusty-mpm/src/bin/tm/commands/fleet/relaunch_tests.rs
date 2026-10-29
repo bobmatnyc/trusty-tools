@@ -11,7 +11,7 @@ use trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
 use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::twin_identity::ArmingRecord;
 
-use super::super::launch::{Launched, PaneState, Pending};
+use super::super::launch::{Launched, PaneState, Pending, Unbound};
 use super::super::session_name::SessionNames;
 use super::super::{Probe, Step};
 use super::*;
@@ -83,7 +83,10 @@ fn prepare_unbound(_: &Path, _: &Path, _: &str) -> anyhow::Result<Pending> {
     Ok(Box::new(|| {
         call("send");
         let launched: Launched = (
-            Err("no `claude` process appeared".to_owned()),
+            Err(Unbound::NotRecorded(
+                "cannot write the Architect launch record /h/x.architect: denied (os error 13)"
+                    .to_owned(),
+            )),
             ConversationStart::Resume("c-1".to_owned()),
         );
         Ok(launched)
@@ -370,17 +373,51 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
     assert_eq!(calls(), ["prepare".to_owned()], "no send");
 }
 
+/// #10448 Fail-Open Check: a new `claude` whose record did not land is
+/// stopped, and the run is an error naming the record and the stop; it was a
+/// FAILED step that left the unbound `claude` running.
 #[test]
-fn relaunch_reports_an_unrecorded_claude_as_failed() {
+fn relaunch_stops_an_unrecorded_claude_and_fails() {
     let fx = Fixture::new(live(), &[PaneClaude::Absent]);
     let mut ops = STUB;
     ops.prepare = prepare_unbound;
-    let report = fx.relaunch(ops).expect("the run completes");
-    assert!(report.failed());
-    assert!(report.registration.is_none());
-    let text = report.render();
-    assert!(text.contains("FAILED"), "{text}");
-    assert!(text.contains("but it is NOT bound"), "{text}");
+    ops.probe.claude = |_| Some(NEW_PID);
+    let err = fx
+        .relaunch(ops)
+        .expect_err("an unrecorded claude fails the run");
+    let text = format!("{err:#}");
+    assert!(text.contains("is NOT bound"), "{text}");
+    assert!(
+        text.contains("/h/x.architect: denied (os error 13)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "stopped claude pid {NEW_PID}, so no Architect runs unbound"
+        )),
+        "{text}"
+    );
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            "send".to_owned(),
+            format!("stop {NEW_PID}")
+        ]
+    );
+
+    // A stop that fails says the `claude` may still run, and how to stop it.
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    ops.stop = |_| Err("permission denied".to_owned());
+    let text = format!("{:#}", fx.relaunch(ops).expect_err("still an error"));
+    assert!(
+        text.contains(&format!("could NOT stop claude pid {NEW_PID}")),
+        "{text}"
+    );
+    assert!(
+        text.contains("tmux kill-session -t =tm-architect"),
+        "{text}"
+    );
 }
 
 /// Write the `<pid>.architect` record (when `project` is set) and the

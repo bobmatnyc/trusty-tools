@@ -218,9 +218,9 @@ impl Step {
 pub(crate) struct InitReport {
     /// One entry per step.
     pub(crate) steps: Vec<Step>,
-    /// This run started the Architect but could not bind it to its `claude`
-    /// (#8878 ruling A), or found its session running unbound (#8878 R1); a
-    /// warning, never a failure.
+    /// This run started the Architect but found no `claude` to bind (#8878
+    /// ruling A), or found its session running unbound (#8878 R1); a warning,
+    /// never a failure. #10448: a record that does not land fails instead.
     pub(crate) unbound: bool,
     /// The daemon registration to send, set only when the Architect's
     /// session runs bound (#8942); [`run`] sends it.
@@ -521,8 +521,10 @@ fn write_edit(path: &Path, edit: Edit, label: &str) -> anyhow::Result<Step> {
 /// name may hold a `claude` tm never launched, and `init` must not call that
 /// set up.
 /// What: a running session is checked with [`status::bound`]; not bound is a
-/// warning and the unbound flag. Otherwise starts and records the Architect.
-/// Test: `a_running_unbound_session_is_reported_by_init`.
+/// warning and the unbound flag. Otherwise starts and records the Architect;
+/// #10448: a launch record that does not land is `Err` ([`launch::start`]).
+/// Test: `a_running_unbound_session_is_reported_by_init`,
+/// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`.
 fn launch_step(
     dir: &Path,
     home: &Path,
@@ -570,6 +572,8 @@ fn launch_step(
     }
     let (bound, unbound) = match binding {
         Ok(record) => (format!("bound to claude pid {}", record.pid), false),
+        // #10448: only `Unbound::NoClaude` gets here; a record that did not
+        // land already failed `launch::start`.
         Err(err) => {
             eprintln!("warning: the Architect process was NOT recorded: {err}");
             let text = format!(

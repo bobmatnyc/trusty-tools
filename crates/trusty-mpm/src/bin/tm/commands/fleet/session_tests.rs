@@ -293,6 +293,44 @@ fn status_binding_needs_the_record_and_the_same_session() {
     unbound(binding(None, LIVE_ME), "could not be read");
 }
 
+/// #10448: a running, stamped session whose `claude` has no launch record is
+/// UNBOUND, and the setup is not `complete`; the record makes it complete.
+#[test]
+fn status_is_complete_only_when_the_architect_is_bound() {
+    use trusty_mpm::core::session_profile::ARCHITECT_WRITTEN_PROFILE_ID;
+    const STAMPED_HERE: Probe = Probe {
+        stamp: |_| Some(ARCHITECT_WRITTEN_PROFILE_ID.to_owned()),
+        ..LIVE_HERE
+    };
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("init");
+    let canonical = std::fs::canonicalize(h.dir()).expect("canonical dir");
+    HERE.with(|here| *here.borrow_mut() = canonical);
+
+    let report = h.status(None, STAMPED_HERE);
+    let text = report.render();
+    assert!(report.checks.iter().all(|c| c.ok), "{text}");
+    assert!(!report.binding.ok, "{text}");
+    assert!(
+        !report.complete,
+        "an unbound Architect is not complete: {text}"
+    );
+    assert!(text.contains("UNBOUND  binding"), "{text}");
+    assert!(
+        text.contains("incomplete: the Architect is not bound"),
+        "{text}"
+    );
+
+    let root = h.home().join(".trusty-mpm");
+    record_launch(&root, std::process::id(), &h.dir(), "tm-architect").expect("record");
+    let report = h.status(None, STAMPED_HERE);
+    let text = report.render();
+    assert!(report.binding.ok, "{text}");
+    assert!(report.complete, "{text}");
+    assert!(text.contains("ok       binding"), "{text}");
+    assert!(text.ends_with("\ncomplete\n"), "{text}");
+}
+
 thread_local! {
     /// The directory a [`LIVE_HERE`] session runs in.
     static HERE: RefCell<PathBuf> = const { RefCell::new(PathBuf::new()) };

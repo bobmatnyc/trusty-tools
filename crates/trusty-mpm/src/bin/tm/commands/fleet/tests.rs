@@ -1197,7 +1197,9 @@ fn a_resume_fails_only_on_a_proven_absent_claude() {
         project_dir: PathBuf::from("/arch"),
         armed_at: String::new(),
     });
-    let unbound = Err("no `claude` process appeared".to_owned());
+    let unbound = Err(launch::Unbound::NoClaude(
+        "no `claude` process appeared".to_owned(),
+    ));
     let exited = || {
         let secs = RESUME_SETTLE.as_secs();
         ResumeCheck::Failed(format!("`claude` exited within {secs} s of starting"))

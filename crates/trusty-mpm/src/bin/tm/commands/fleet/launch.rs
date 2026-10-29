@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use trusty_mpm::core::architect_conversation::{self, ConversationStart};
+use trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
 use trusty_mpm::core::architect_session;
 use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
@@ -166,8 +167,11 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// cannot be sent. `home` is the user home every write goes under; `session`
 /// is the validated session name. Returns the [`record_process`] outcome and
 /// how the conversation started (#8981). A failed resume ([`resume_check`])
-/// kills the session, clears the conversation record and is `Err`.
+/// kills the session, clears the conversation record and is `Err`. #10448: a
+/// launch record that does not land ([`Unbound::NotRecorded`]) kills the
+/// session and is `Err`.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
+/// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`,
 /// `fleet_init_with_a_session_override_names_every_session`,
 /// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 /// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
@@ -197,7 +201,26 @@ pub(crate) fn prepare_restart(dir: &Path, home: &Path, session: &str) -> anyhow:
 
 /// What [`start`] and a [`Pending`] return: the [`record_process`] outcome
 /// and how the conversation started (#8981).
-pub(crate) type Launched = (Result<ArmingRecord, String>, ConversationStart);
+pub(crate) type Launched = (Result<ArmingRecord, Unbound>, ConversationStart);
+
+/// Why [`record_process`] left the Architect unbound (#10448).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unbound {
+    /// No `claude` was found under the pane shell, as for an npm/node
+    /// `claude` (#8436 P4 item 8); `init` warns.
+    NoClaude(String),
+    /// A `claude` was found but its launch record did not land or read back;
+    /// fatal for `init` and `relaunch`.
+    NotRecorded(String),
+}
+
+impl std::fmt::Display for Unbound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoClaude(why) | Self::NotRecorded(why) => f.write_str(why),
+        }
+    }
+}
 
 /// A prepared relaunch: starts the `claude` in the existing session (#9092).
 pub(crate) type Pending = Box<dyn FnOnce() -> anyhow::Result<Launched>>;
@@ -364,6 +387,23 @@ impl Prepared {
             );
             settle_resume(check, &root, id, session, pane)?;
         }
+        // #10448: an unrecorded Architect is denied every anchor write, so
+        // init never leaves one running; a relaunch stops its own (`relaunch`).
+        if pane == Pane::Create
+            && let Err(Unbound::NotRecorded(why)) = &binding
+        {
+            let killed = match kill_session(session) {
+                Ok(()) => format!("killed tmux session {session}, so no Architect runs unbound"),
+                Err(err) => format!(
+                    "could NOT kill tmux session {session}, so its `claude` may run unbound; run \
+                     `tmux kill-session -t ={session}` ({err})"
+                ),
+            };
+            bail!(
+                "the Architect was started but NOT bound ({why}); {killed}. Fix the cause and run \
+                 `tm fleet init` again"
+            );
+        }
         Ok((binding, conversation))
     }
 }
@@ -392,7 +432,7 @@ pub(crate) enum ResumeCheck {
 /// `Unknown` answers are [`ResumeCheck::Unknown`].
 /// Test: `a_resume_fails_only_on_a_proven_absent_claude`.
 pub(crate) fn resume_check(
-    binding: &Result<ArmingRecord, String>,
+    binding: &Result<ArmingRecord, Unbound>,
     mut probe: impl FnMut() -> PaneClaude,
     mut sleep: impl FnMut(Duration),
 ) -> ResumeCheck {
@@ -405,7 +445,7 @@ pub(crate) fn resume_check(
     };
     if let Err(why) = binding {
         match read(&mut sleep) {
-            PaneClaude::Absent => return ResumeCheck::Failed(why.clone()),
+            PaneClaude::Absent => return ResumeCheck::Failed(why.to_string()),
             PaneClaude::Unknown => return ResumeCheck::Unknown,
             PaneClaude::Present => {}
         }
@@ -524,18 +564,35 @@ pub(crate) fn architect_args(conversation: &ConversationStart, session: &str) ->
 /// Then records its PID, start time and `session` under `home`'s
 /// `~/.trusty-mpm` ([`architect_session::record_launch`]) and reads the name
 /// back. A failure, or a name that reads back as another session (#8878 R1),
-/// is reported as unbound, never fatal.
+/// is `Err`: [`Unbound::NoClaude`] when no `claude` is found, else
+/// [`Unbound::NotRecorded`], naming the record path and the OS error (#10448).
+/// [`Prepared::send`] makes `NotRecorded` fatal for `init`.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
-/// `fleet_init_with_a_session_override_names_every_session`.
-fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord, String> {
+/// `fleet_init_with_a_session_override_names_every_session`,
+/// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`.
+fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord, Unbound> {
     let pid = trusty_mpm::core::process::find_claude_pid_in_tmux(
         session,
         20,
         std::time::Duration::from_millis(500),
     )
-    .ok_or_else(|| format!("no `claude` process appeared in {session} within 10 s"))?;
+    .ok_or_else(|| {
+        Unbound::NoClaude(format!(
+            "no `claude` process appeared in {session} within 10 s"
+        ))
+    })?;
+    record_found(dir, home, session, pid).map_err(Unbound::NotRecorded)
+}
+
+/// Record the `claude` at `pid` found in `session` and read its name back.
+fn record_found(dir: &Path, home: &Path, session: &str, pid: u32) -> Result<ArmingRecord, String> {
     let root = home.join(".trusty-mpm");
-    let record = architect_session::record_launch(&root, pid, dir, session)?;
+    let record = architect_session::record_launch(&root, pid, dir, session).map_err(|why| {
+        format!(
+            "cannot write the Architect launch record {} for claude pid {pid}: {why}",
+            ARCHITECT_RECORDS.path(&root, pid).display()
+        )
+    })?;
     match architect_session::architect_session_name(&root, pid) {
         Ok(name) if name == session => Ok(record),
         Ok(name) => Err(format!(
