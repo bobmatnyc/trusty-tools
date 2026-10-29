@@ -32,6 +32,7 @@ use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // `memory_list` takes the same `room`/`wing` scope the recall tools do
 // (ADR-0027 D4.1), so it borrows the resolver rather than re-spelling it.
 use super::recall_ops::recall_scope;
+use super::recall_projection::with_access;
 use super::wing_ops::resolve_wing_arg;
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -373,20 +374,23 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
     let payload: Vec<Value> = drawers
         .iter()
         .map(|d| {
-            json!({
-                "drawer_id": d.id.to_string(),
-                "content": d.content(),
-                "importance": d.importance,
-                "tags": d.tags,
-                "created_at": d.created_at.to_rfc3339(),
-                "drawer_type": d.drawer_type.as_str(),
-                "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
-                // #9340: read-only slot report; `null` when the drawer holds no slot.
-                "fact_key": d.fact_key,
-                // #9390: only a slot holder reports a command, so a displaced
-                // drawer shows `null` even when closing its triple failed.
-                "verify": verify.get(&d.id).filter(|_| d.fact_key.is_some()),
-            })
+            with_access(
+                json!({
+                    "drawer_id": d.id.to_string(),
+                    "content": d.content(),
+                    "importance": d.importance,
+                    "tags": d.tags,
+                    "created_at": d.created_at.to_rfc3339(),
+                    "drawer_type": d.drawer_type.as_str(),
+                    "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
+                    // #9340: read-only slot report; `null` when the drawer holds no slot.
+                    "fact_key": d.fact_key,
+                    // #9390: only a slot holder reports a command, so a displaced
+                    // drawer shows `null` even when closing its triple failed.
+                    "verify": verify.get(&d.id).filter(|_| d.fact_key.is_some()),
+                }),
+                d,
+            )
         })
         .collect();
     Ok(json!({ "palace": palace, "drawers": payload }))
