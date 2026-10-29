@@ -7,7 +7,7 @@ pub(crate) const INITIAL: &str = r#"
 orgs:
   duetto:
     kind: slack
-    workspace: T0298MNPV
+    workspace: T0TEST001
     credentials:
       bot_token: secret://trusty/duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
   bta:
@@ -21,9 +21,9 @@ users:
   bob-duetto:
     org: duetto
     address: U0OWNER01
-  masa@travelbta.com:
+  owner@example.com:
     org: bta
-    address: masa@travelbta.com
+    address: owner@example.com
 owner:
   slack_org: duetto
   slack_user: U0OWNER01
@@ -34,7 +34,7 @@ fn initial_config_parses() {
     let cfg = OrgsConfig::parse(INITIAL).expect("parses");
     let duetto = cfg.org("duetto").expect("duetto");
     assert_eq!(duetto.kind, ChannelKind::Slack);
-    assert_eq!(duetto.workspace.as_deref(), Some("T0298MNPV"));
+    assert_eq!(duetto.workspace.as_deref(), Some("T0TEST001"));
     let bta = cfg.org("bta").expect("bta");
     assert_eq!(bta.kind, ChannelKind::Gchat);
     assert_eq!(bta.space.as_deref(), Some("AAQAee6_DV8"));
@@ -44,10 +44,10 @@ fn initial_config_parses() {
 fn cross_org_send_is_refused() {
     let cfg = OrgsConfig::parse(INITIAL).expect("parses");
     let err = cfg
-        .route("masa@travelbta.com", Some("duetto"))
+        .route("owner@example.com", Some("duetto"))
         .expect_err("refused");
     assert_eq!(err.code(), "cross_org");
-    let ok = cfg.route("masa@travelbta.com", None).expect("own org");
+    let ok = cfg.route("owner@example.com", None).expect("own org");
     assert_eq!((ok.org.as_str(), ok.kind), ("bta", ChannelKind::Gchat));
 }
 
@@ -65,12 +65,12 @@ orgs:
   duetto: { kind: gchat, space: S1 }
   bta: { kind: slack, workspace: T1 }
 users:
-  a@duetto.com: { org: duetto, address: a@duetto.com }
+  other@example.com: { org: duetto, address: other@example.com }
   b: { org: bta, address: U0B }
 "#;
     let cfg = OrgsConfig::parse(swapped).expect("parses");
     assert_eq!(
-        cfg.route("a@duetto.com", None).expect("route").kind,
+        cfg.route("other@example.com", None).expect("route").kind,
         ChannelKind::Gchat
     );
     assert_eq!(

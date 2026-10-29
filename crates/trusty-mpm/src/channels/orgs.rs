@@ -3,7 +3,7 @@
 //! Why: owner ruling (Bob 03:1xZ): "I should be able to connect either to
 //! either." An org binds to a channel kind in config, never in code, and a
 //! message to a user goes only through that user's own org channel ("Duetto
-//! never needs to talk to masa@travelbta.com").
+//! never needs to talk to owner@example.com").
 //! What: [`OrgsConfig`] parses the `orgs:` / `users:` / `owner:` YAML
 //! document; [`OrgsConfig::route`] resolves a user to the one [`OrgRoute`]
 //! that may carry a message to them, and refuses a send through any other
