@@ -93,7 +93,7 @@ pub trait ChannelSender {
 }
 
 /// One staged send.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StagedSend {
     /// The route resolved at stage time.
     pub route: OrgRoute,
@@ -103,6 +103,24 @@ pub struct StagedSend {
     staged_at: Instant,
     /// The current state.
     pub state: SendState,
+}
+
+/// Why: a `{:?}` log must never print the staged message text (#10417).
+/// What: shows the route, the text length, a 12-hex digest prefix and the
+/// state; the text appears as `<redacted>`.
+/// Test: `debug_output_redacts_the_staged_text`.
+impl std::fmt::Debug for StagedSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // #10417: never print `text`; the digest prefix identifies it.
+        f.debug_struct("StagedSend")
+            .field("route", &self.route)
+            .field("text", &"<redacted>")
+            .field("text_len", &self.text.len())
+            .field("digest", &self.digest.get(..12).unwrap_or(&self.digest))
+            .field("staged_at", &self.staged_at)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 /// Why a stage or a decision was refused.
