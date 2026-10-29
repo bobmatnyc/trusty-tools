@@ -17,16 +17,23 @@
 //! `jsonl` line or the `dir` file) and is null for a delete, and `keys` are
 //! the top-level keys whose value changed; only its durable append can fail.
 //! [`read_all`] reads every log (rotated first) for `fsck`, accepting the
-//! prototype's `coll` key too. [`append_durable`] is the fsynced append the
-//! prune log shares.
-//! Test: `changes_seq_strictly_increases_across_rotation`,
+//! prototype's `coll` key too. #10063 PR 3: when no log exists yet,
+//! [`prepare`] creates it before the commit, with one `baseline` line per
+//! document already on disk (a legacy store's records), so a first batch
+//! whose append fails is still found by `fsck` and a legacy document is not
+//! reported as unlogged. Every log open and append goes through
+//! [`beneath`]: a symlinked log is refused, never followed.
+//! Test: `fsck_accepts_a_legacy_baseline_after_the_first_write`,
+//! `fsck_reports_a_first_batch_committed_with_no_change_log`,
+//! `write_refuses_a_change_log_that_is_a_symlink`,
+//! `changes_seq_strictly_increases_across_rotation`,
 //! `change_line_hashes_the_written_bytes`, `rotation_never_overwrites_a_rotated_file`,
 //! `change_log_preconditions_refuse_the_batch`,
 //! `change_log_failure_is_unlogged_after_commit`, `fsck_reports_torn_change_line`.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -34,8 +41,7 @@ use serde_json::{Map, Value, json};
 use super::super::canonical::compact;
 use super::super::error::DashError;
 use super::stage::{Slot, Staged};
-use super::{Format, Store, dir, jsonl};
-use crate::ledger::store::sync_dir;
+use super::{Format, Store, beneath, dir, jsonl};
 use crate::sha256::sha256_hex;
 
 /// The current log's file name under the store root.
@@ -50,13 +56,45 @@ const TAIL: u64 = 64 * 1024;
 ///
 /// # Errors
 /// [`DashError::Corrupt`] for a torn or `seq`-less last line, a bad
-/// first-line `ts` or an existing rotation target; [`DashError::Io`] when a
-/// log cannot be read or renamed. The batch is refused on any of these.
-pub(super) fn prepare(root: &Path, now: &str) -> Result<u64, DashError> {
+/// first-line `ts` or an existing rotation target; [`DashError::Invalid`]
+/// for a symlinked log; [`DashError::Io`] when a log cannot be read,
+/// renamed or created. The batch is refused on any of these.
+pub(super) fn prepare(store: &Store, now: &str) -> Result<u64, DashError> {
+    let root = store.root.as_path();
     // #10063 df-G01: these failures are deterministic, so they refuse the
     // batch; after the commit they made every later write `Unlogged`.
     let seq = last_seq(root)?;
-    rotate(root, &root.join(CHANGES), now)?;
+    rotate(root, now)?;
+    if !logs(root)?.is_empty() {
+        return Ok(seq);
+    }
+    // #10063 PR 3: the log exists before the first commit, and records the
+    // documents written before it (a legacy baseline).
+    baseline(store, now, seq)
+}
+
+/// Creates the log with one `baseline` line per document on disk, numbered
+/// after `seq`; returns the last `seq` written.
+fn baseline(store: &Store, now: &str, mut seq: u64) -> Result<u64, DashError> {
+    let (disk, _) = store.on_disk()?;
+    let mut text = String::new();
+    for ((coll, id), (version, sha)) in disk {
+        seq += 1;
+        let line = json!({
+            "by": store.actor,
+            "collection": coll,
+            "id": id,
+            "keys": [],
+            "op": "baseline",
+            "seq": seq,
+            "sha256": sha,
+            "ts": now,
+            "version": version,
+        });
+        text.push_str(&compact(&line));
+        text.push('\n');
+    }
+    append_durable(&store.root, Path::new(CHANGES), &text)?;
     Ok(seq)
 }
 
@@ -73,14 +111,13 @@ pub(super) fn append(
         return Ok(());
     }
     dirty.sort_by(|a, b| (&a.coll, &a.id).cmp(&(&b.coll, &b.id)));
-    let path = store.root.join(CHANGES);
     let mut text = String::new();
     for slot in dirty {
         seq += 1;
         text.push_str(&compact(&line(store, slot, seq, now)));
         text.push('\n');
     }
-    append_durable(&path, &text)
+    append_durable(&store.root, Path::new(CHANGES), &text)
 }
 
 /// One change line.
@@ -168,10 +205,8 @@ fn last_seq(root: &Path) -> Result<u64, DashError> {
 /// The last line of `path` without its LF; `None` for an empty or absent
 /// file. A file not ending in LF is torn and refused.
 fn last_line(path: &Path) -> Result<Option<String>, DashError> {
-    let mut f = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(DashError::io(path)(e)),
+    let Some(mut f) = open_log(path)? else {
+        return Ok(None);
     };
     let len = f.metadata().map_err(DashError::io(path))?.len();
     let mut from = len.saturating_sub(TAIL);
@@ -203,20 +238,28 @@ fn last_line(path: &Path) -> Result<Option<String>, DashError> {
     }
 }
 
-/// Renames `path` to `changes-<month>.jsonl` when its first line is from a
-/// month before `now`'s. An existing rotated file is never overwritten.
-fn rotate(root: &Path, path: &Path, now: &str) -> Result<(), DashError> {
-    let first = match File::open(path) {
-        Ok(f) => {
-            let mut line = String::new();
-            BufReader::new(f)
-                .read_line(&mut line)
-                .map_err(DashError::io(path))?;
-            line
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(DashError::io(path)(e)),
+/// A log under its store root, opened without following a symlink.
+fn open_log(path: &Path) -> Result<Option<fs::File>, DashError> {
+    let (Some(root), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(DashError::Invalid(format!(
+            "{} is not a log path",
+            path.display()
+        )));
     };
+    beneath::open_read(root, Path::new(name))
+}
+
+/// Renames the current log to `changes-<month>.jsonl` when its first line is
+/// from a month before `now`'s. An existing rotated file is never overwritten.
+fn rotate(root: &Path, now: &str) -> Result<(), DashError> {
+    let path = &root.join(CHANGES);
+    let Some(f) = open_log(path)? else {
+        return Ok(());
+    };
+    let mut first = String::new();
+    BufReader::new(f)
+        .read_line(&mut first)
+        .map_err(DashError::io(path))?;
     if first.trim().is_empty() {
         return Ok(());
     }
@@ -235,49 +278,20 @@ fn rotate(root: &Path, path: &Path, now: &str) -> Result<(), DashError> {
         return Err(DashError::corrupt(path, format!("first line ts {ts:?}")));
     }
     let target = root.join(format!("{stem}.jsonl"));
-    if target.exists() {
+    if fs::symlink_metadata(&target).is_ok() {
         return Err(DashError::corrupt(
             &target,
             "rotated log already exists; it is never overwritten",
         ));
     }
-    fs::rename(path, &target).map_err(DashError::io(path))?;
-    sync_dir(&target).map_err(DashError::from)
+    beneath::rename(root, CHANGES, &format!("{stem}.jsonl"))
 }
 
-/// Appends `text` to `path` (created with its directory), then fsyncs it.
-pub(super) fn append_durable(path: &Path, text: &str) -> Result<(), DashError> {
-    append_with(path, text, OpenOptions::new())
-}
-
-/// [`append_durable`], refusing a symlink at `path`'s last component
-/// (`O_NOFOLLOW`): the open fails with [`DashError::Io`] and nothing is
-/// written.
-pub(super) fn append_durable_nofollow(path: &Path, text: &str) -> Result<(), DashError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut opts = OpenOptions::new();
-    // #10063 df-G01: a link planted after the path was checked is not followed.
-    opts.custom_flags(libc::O_NOFOLLOW);
-    append_with(path, text, opts)
-}
-
-fn append_with(path: &Path, text: &str, mut opts: OpenOptions) -> Result<(), DashError> {
-    let existed = path.exists();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(DashError::io(parent))?;
-    }
-    let mut f = opts
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(DashError::io(path))?;
-    f.write_all(text.as_bytes())
-        .and_then(|()| f.sync_all())
-        .map_err(DashError::io(path))?;
-    if !existed {
-        sync_dir(path)?;
-    }
-    Ok(())
+/// Appends `text` to `anchor/rel` (created with its directories), then
+/// fsyncs it; no part below `anchor` is followed through a symlink (#10063
+/// PR 3: a link planted after the path was checked is refused).
+pub(super) fn append_durable(anchor: &Path, rel: &Path, text: &str) -> Result<(), DashError> {
+    beneath::append(anchor, rel, text)
 }
 
 /// A change line as `fsck` reads it.

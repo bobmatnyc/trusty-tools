@@ -560,7 +560,7 @@ fn prune_log_inside_root_refused() -> R {
         root.join("pruned.jsonl"),
         root.join(".archive/pruned.jsonl"),
         root.clone(),
-        tmp.path().join("x/../store/p.jsonl"),
+        tmp.path().join("x/../store/pruned.jsonl"),
         // #10063 df-G01: `..` is taken after the symlink, as the OS opens it.
         tmp.path().join("outside/lnk/../pruned.jsonl"),
     ] {
@@ -574,13 +574,15 @@ fn prune_log_inside_root_refused() -> R {
     let sibling = PruneLog::default_for(&root)?;
     assert!(sibling.path().ends_with("owner-queue-archive/pruned.jsonl"));
     assert!(!sibling.path().starts_with(fs::canonicalize(&root)?));
-    let unresolvable = PruneLog::outside(&root, looped.join("p.jsonl"));
+    // #10063: every path here is named `pruned.jsonl`, so only the root and
+    // resolution checks decide.
+    let unresolvable = PruneLog::outside(&root, looped.join("pruned.jsonl"));
     assert!(
         matches!(unresolvable, Err(DashError::Io { .. })),
         "{unresolvable:?}"
     );
-    let outside = PruneLog::outside(&root, tmp.path().join("store-archive/./p.jsonl"))?;
-    let resolved = fs::canonicalize(tmp.path())?.join("store-archive/p.jsonl");
+    let outside = PruneLog::outside(&root, tmp.path().join("store-archive/./pruned.jsonl"))?;
+    let resolved = fs::canonicalize(tmp.path())?.join("store-archive/pruned.jsonl");
     assert_eq!(
         outside.path(),
         resolved,
@@ -600,7 +602,7 @@ fn prune_log_dangling_link_refused() -> R {
     std::os::unix::fs::symlink(root.join("leak.jsonl"), &link)?;
     let dir_link = tmp.path().join("outside/dlink");
     std::os::unix::fs::symlink(root.join("newdir"), &dir_link)?;
-    for path in [link, dir_link.join("p.jsonl")] {
+    for path in [link, dir_link.join("pruned.jsonl")] {
         let got = PruneLog::outside(&root, &path);
         assert!(
             matches!(got, Err(DashError::Invalid(_))),

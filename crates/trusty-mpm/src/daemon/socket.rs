@@ -83,6 +83,8 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::client_cutover::register(router, state);
     // #9758: the PM ledger writer.
     let router = rpc::dbatg::register(router);
+    // #10063: the Architect dashboard store.
+    let router = rpc::architect_dashboard::register(router);
     rpc::coordinator::register(router, state)
 }
 

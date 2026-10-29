@@ -149,6 +149,8 @@ pub mod context_usage;
 pub mod daemon_identity;
 // #9758: the `mpm.dbatg.*` bodies the daemon, the MCP tool and `tm dbatg` share.
 pub mod dbatg;
+// #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
+pub mod architect_dashboard;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;

@@ -14,8 +14,12 @@
 //! reported too: it was written while the log was not (#10063 df-G01, the
 //! `Unlogged` error says "run fsck"). Messages the prototype also prints
 //! keep its words. `dir` files are not checked for canonical bytes: the
-//! page's mirror writes them too.
-//! Test: `fsck_reports_gap`, `fsck_reports_version_mismatch`,
+//! page's mirror writes them too. #10063 PR 3: a `baseline` line (a legacy
+//! document the first logged batch recorded) is checked like a `set` line,
+//! and a live record naming an id no document holds is reported
+//! (LDG-2.2.5, [`super::refs`]).
+//! Test: `fsck_reports_dangling_links_depends_on_and_goal`,
+//! `fsck_accepts_a_legacy_baseline_after_the_first_write`, `fsck_reports_gap`, `fsck_reports_version_mismatch`,
 //! `fsck_clean_after_writes`, `fsck_reports_torn_change_line`,
 //! `fsck_reports_documents_with_no_change_line`, `fsck_missing_root_is_an_error`.
 
@@ -24,11 +28,11 @@ use std::fs;
 use std::path::Path;
 
 use super::super::error::DashError;
-use super::{Format, Store, changes, dir, jsonl};
+use super::{Format, Store, changes, dir, jsonl, refs};
 use crate::sha256::sha256_hex;
 
 /// `(version, sha256 of the bytes on disk)` per `(collection, id)`.
-type OnDisk = BTreeMap<(String, String), (u64, String)>;
+pub(super) type OnDisk = BTreeMap<(String, String), (u64, String)>;
 
 impl Store {
     /// Problems in the store, as lines; empty when it is consistent.
@@ -38,6 +42,22 @@ impl Store {
     /// is never clean), [`DashError::WrongFormat`], [`DashError::Io`].
     pub fn fsck(&self) -> Result<Vec<String>, DashError> {
         require_root(&self.root)?;
+        let (disk, mut problems) = self.on_disk()?;
+        let (last, log_problems) = changes::read_all(&self.root)?;
+        problems.extend(log_problems);
+        let logged = !changes::logs(&self.root)?.is_empty();
+        let keys: BTreeSet<&(String, String)> = disk.keys().chain(last.keys()).collect();
+        for key in keys {
+            problems.extend(doc_problem(key, disk.get(key), last.get(key), logged));
+        }
+        // #10063 PR 3: LDG-2.2.5, after the file and log problems.
+        problems.extend(refs::dangling(self));
+        Ok(problems)
+    }
+
+    /// Every readable document's `(version, sha256)`, and the problems of
+    /// the files that are not readable or not canonical.
+    pub(super) fn on_disk(&self) -> Result<(OnDisk, Vec<String>), DashError> {
         let mut problems = Vec::new();
         let mut disk = OnDisk::new();
         for coll in self.collections()? {
@@ -46,14 +66,7 @@ impl Store {
                 Format::Dir => self.fsck_dir(&coll, &mut disk, &mut problems)?,
             }
         }
-        let (last, log_problems) = changes::read_all(&self.root)?;
-        problems.extend(log_problems);
-        let logged = !changes::logs(&self.root)?.is_empty();
-        let keys: BTreeSet<&(String, String)> = disk.keys().chain(last.keys()).collect();
-        for key in keys {
-            problems.extend(doc_problem(key, disk.get(key), last.get(key), logged));
-        }
-        Ok(problems)
+        Ok((disk, problems))
     }
 
     fn fsck_jsonl(

@@ -4,12 +4,15 @@
 //! scripts; each verb here takes the same arguments as the script it
 //! replaces, so a caller swaps one for the other.
 //! What: [`ArchitectAction`] — `poll`, `classify`, `input-state`, `quiet`,
-//! `self-ctx`. The work is `trusty_architect::verbs`.
-//! Test: `cli_parses_architect_verbs`.
+//! `self-ctx`. The work is `trusty_architect::verbs`. #10063 adds
+//! `dashboard`, the dashboard store's verbs ([`DashboardArgs`]).
+//! Test: `cli_parses_architect_verbs`, `cli_parses_architect_dashboard_verbs`.
 
 use std::path::PathBuf;
 
 use clap::Subcommand;
+
+use super::DashboardArgs;
 
 /// Actions for the `architect` subcommand.
 #[derive(Debug, Subcommand)]
@@ -71,4 +74,10 @@ pub(crate) enum ArchitectAction {
         /// Architect project's Claude Code transcript folder).
         dir: Option<PathBuf>,
     },
+    /// Read and write the Architect's dashboard store (`dashboard-db.py`).
+    ///
+    /// Exit codes: 0 ok, 1 a stale `--if-version` (or `fsck`/`validate`
+    /// found a problem), 2 a refused request, 3 an unreadable or locked store.
+    // #10063: owner ruling D34 fixes the conflict exit at 1.
+    Dashboard(DashboardArgs),
 }

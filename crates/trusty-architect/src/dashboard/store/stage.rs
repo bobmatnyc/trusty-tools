@@ -6,7 +6,9 @@
 //! two; restoring earlier files when a later write fails gives the rest.
 //! What: [`Op`] (`set`, `update`, `delete`, with `if_version`, 0 meaning
 //! "must not exist") and [`OpResult`]. [`Store::stage`] reads each target
-//! once under the lock, checks names, format, `if_version` and the body
+//! once under the lock, checks names, format, `if_version` (and, when the
+//! store refuses blind sets, a `set` with none on a document that existed
+//! before the batch) and the body
 //! (an object without `version`; minute timestamps under time keys gain
 //! `:00`), and chains later ops on one document. [`Store::commit`] writes
 //! every dirty target (`dir`: one file each; `jsonl`: each touched
@@ -14,8 +16,10 @@
 //! fails, restores the bytes of every earlier one; a restore that fails too
 //! is [`DashError::RollbackIncomplete`]. Rollback covers failures, not crashes.
 //! Test: `stale_if_version_conflicts_and_leaves_bytes`,
+//! `dashboard_concurrent_blind_sets_of_a_new_id_let_exactly_one_win`,
 //! `batch_rolls_back_on_midway_failure`, `failed_restore_names_the_torn_files`,
 //! `body_with_version_refused`,
+//! `batch_op_with_unknown_key_is_refused_and_writes_nothing`,
 //! `dashboard_writer_matches_prototype_bytes`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -28,8 +32,7 @@ use serde_json::{Map, Value};
 use super::super::error::DashError;
 use super::super::ids::check_name;
 use super::jsonl::{self, Docs};
-use super::{Format, Store, Versioned, dir};
-use crate::ledger::store::{sync_dir, write_atomic};
+use super::{Format, Store, Versioned, beneath, dir};
 use crate::pystr::py_repr;
 
 /// One write in a batch.
@@ -72,12 +75,20 @@ impl Op {
     /// An op from the prototype's JSON shape `{op, collection, id, data, if_version}`.
     ///
     /// # Errors
-    /// [`DashError::Invalid`] for an unknown op, a missing name or a
-    /// non-integer `if_version`, in the prototype's words.
+    /// [`DashError::Invalid`] for an unknown op, a missing name, a
+    /// non-integer `if_version`, or a key outside [`OP_KEYS`].
     pub fn from_json(v: &Value) -> Result<Self, DashError> {
         let obj = v
             .as_object()
             .ok_or_else(|| DashError::Invalid("each batch op must be an object".into()))?;
+        // #10063: a misspelled `if_version` must fail the batch, not drop the guard.
+        if let Some(key) = obj.keys().find(|k| !OP_KEYS.contains(&k.as_str())) {
+            return Err(DashError::Invalid(format!(
+                "unknown op key {}: use {}",
+                py_repr(key),
+                OP_KEYS.join(", ")
+            )));
+        }
         let name = |key: &str| obj.get(key).and_then(Value::as_str).map(str::to_owned);
         let if_version = match obj.get("if_version") {
             None | Some(Value::Null) => None,
@@ -159,6 +170,12 @@ impl Op {
         }
     }
 }
+
+/// Why: an ignored key would let a typo such as `if_verison` drop the
+/// stale-write guard and land a stale write (#10063).
+/// What: the only keys [`Op::from_json`] accepts on a batch op.
+/// Test: `batch_op_with_unknown_key_is_refused_and_writes_nothing`.
+pub const OP_KEYS: [&str; 5] = ["op", "collection", "id", "data", "if_version"];
 
 fn unknown_op(op: Option<&Value>) -> String {
     let shown = match op {
@@ -301,6 +318,19 @@ impl Store {
             }
         };
         let cur = &mut staged.slots[slot_at];
+        // #10063: read under the lock, so a racing blind `set` sees the winner.
+        let blind = matches!(
+            op,
+            Op::Set {
+                if_version: None,
+                ..
+            }
+        );
+        if self.refuse_blind_set && blind && cur.old.is_some() {
+            return Err(DashError::Conflict(format!(
+                "{coll}/{id} already exists; pass --if-version <v> to replace it, or `ids` for a new id"
+            )));
+        }
         let have = if cur.exists { cur.version } else { 0 };
         if let Some(want) = expected.filter(|w| *w != have) {
             return Err(DashError::Conflict(format!(
@@ -417,50 +447,49 @@ impl Store {
                     .collect()
             }
         };
-        apply(&plan)
+        apply(&self.root, &plan)
     }
 }
 
-/// Writes `(path, bytes | None = remove)` in order; on any failure restores
-/// every earlier path's previous bytes (or absence) and returns the failure.
-fn apply(plan: &[(PathBuf, Option<String>)]) -> Result<(), DashError> {
+/// Writes `(path, bytes | None = remove)` in order, each under `root`
+/// without following a symlinked parent (#10063 PR 3); on any failure
+/// restores every earlier path's previous bytes (or absence) and returns the
+/// failure.
+fn apply(root: &Path, plan: &[(PathBuf, Option<String>)]) -> Result<(), DashError> {
     let mut backups: Vec<(&PathBuf, Option<Vec<u8>>)> = Vec::new();
     for (path, payload) in plan {
         let old = match fs::read(path) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(rollback(&backups, DashError::io(path)(e))),
+            Err(e) => return Err(rollback(root, &backups, DashError::io(path)(e))),
         };
         let existed = old.is_some();
         backups.push((path, old));
         let step = match payload {
-            None if existed => fs::remove_file(path)
-                .map_err(DashError::io(path))
-                .and_then(|()| sync_dir(path).map_err(DashError::from)),
+            None if existed => beneath::remove(root, rel(root, path)?),
             None => Ok(()),
-            Some(text) => write(path, text),
+            Some(text) => beneath::write_atomic(root, rel(root, path)?, text.as_bytes()),
         };
         if let Err(e) = step {
-            return Err(rollback(&backups, e));
+            return Err(rollback(root, &backups, e));
         }
     }
     Ok(())
 }
 
-fn write(path: &Path, text: &str) -> Result<(), DashError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(DashError::io(parent))?;
-    }
-    write_atomic(path, text).map_err(DashError::from)
+/// `path` relative to the store `root` it was built from.
+fn rel<'a>(root: &Path, path: &'a Path) -> Result<&'a Path, DashError> {
+    path.strip_prefix(root)
+        .map_err(|_| DashError::Invalid(format!("{} is outside the store", path.display())))
 }
 
 /// Restores `backups` newest first. Returns `error` when every file is back,
 /// else [`DashError::RollbackIncomplete`] naming the files that are not
 /// (#10063 df-G01: a torn store is never reported as a plain write failure).
-fn rollback(backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashError {
+fn rollback(root: &Path, backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashError {
     let mut unrestored = Vec::new();
     for (path, old) in backups.iter().rev() {
-        if let Err(e) = restore(path, old.as_deref()) {
+        if let Err(e) = restore(root, path, old.as_deref()) {
             tracing::error!(path = %path.display(), error = %e, "dashboard store: rollback could not restore a file");
             unrestored.push((*path).clone());
         }
@@ -477,7 +506,7 @@ fn rollback(backups: &[(&PathBuf, Option<Vec<u8>>)], error: DashError) -> DashEr
 
 /// Puts `old` (bytes, or absence) back at `path`; a file that already holds
 /// them, such as the one whose write failed before its rename, is left alone.
-fn restore(path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
+fn restore(root: &Path, path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
     let unchanged = match (fs::read(path), old) {
         (Ok(now), Some(old)) => now == old,
         (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
@@ -485,9 +514,7 @@ fn restore(path: &Path, old: Option<&[u8]>) -> Result<(), DashError> {
     };
     match old {
         _ if unchanged => Ok(()),
-        None => fs::remove_file(path)
-            .map_err(DashError::io(path))
-            .and_then(|()| sync_dir(path).map_err(DashError::from)),
-        Some(bytes) => write_atomic(path, bytes).map_err(DashError::from),
+        None => beneath::remove(root, rel(root, path)?),
+        Some(bytes) => beneath::write_atomic(root, rel(root, path)?, bytes),
     }
 }

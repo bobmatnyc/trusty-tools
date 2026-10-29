@@ -18,6 +18,8 @@
 mod agent;
 // #9822: `tm architect` — the Rust stand-ins for the Architect's scripts.
 mod architect;
+// #10063: `tm architect dashboard` — the dashboard store's verbs.
+mod architect_dashboard;
 mod auth;
 mod catalog;
 // #8378 PR-C: `tm content install|update|status` (ADR-0064).
@@ -59,6 +61,7 @@ mod watch;
 
 pub(crate) use agent::AgentAction;
 pub(crate) use architect::ArchitectAction;
+pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
 pub(crate) use content::ContentAction;

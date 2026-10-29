@@ -9,6 +9,19 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
+  - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
+    - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
+    - `delete` — Delete a document; its record goes to the prune log first
+    - `footer` — Print the one-line reply footer, built from `tally`
+    - `fsck` — Check the files against the change log and references; exit 1 on a problem
+    - `get` — Print one document as `{id, version, data}`
+    - `ids` — Print the next free id of a prefix, the free count and retire candidates
+    - `list` — Print a collection's documents, in id order
+    - `pruned` — Print prune-log lines, newest last
+    - `set` — Replace or create a document; an existing one needs `--if-version`
+    - `tally` — Print the open-item counts line, the only source for counts
+    - `update` — Merge keys into an existing document
+    - `validate` — Check every document against the schemas; exit 1 on an error
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line

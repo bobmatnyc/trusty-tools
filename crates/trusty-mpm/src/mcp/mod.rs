@@ -7,8 +7,8 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-nine
-//! tools; #9758 adds `dbatg`) — nine orchestration/bug-reporting (six core + three bug-reporting:
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], forty
+//! tools; #9758 adds `dbatg`, #10063 `architect_dashboard`) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
 //! `session_resume`, `session_decommission`, `session_activity`, `session_send`,
@@ -35,6 +35,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_mcp::{Request, Response, error_codes};
 
+// #10063: the `architect_dashboard` tool.
+pub mod architect_dashboard_dispatch;
 pub mod dbatg_dispatch;
 pub mod project_dispatch;
 pub mod proxy_dispatch;
@@ -838,7 +840,13 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                     // #9758: the PM ledger tool; no backend, the ledger is files.
                     None => match dbatg_dispatch::try_dispatch(other, &args).await {
                         Some(result) => result,
-                        None => Err(format!("unknown tool: {other}")),
+                        // #10063: the Architect dashboard tool; the store is files.
+                        None => {
+                            match architect_dashboard_dispatch::try_dispatch(other, &args).await {
+                                Some(result) => result,
+                                None => Err(format!("unknown tool: {other}")),
+                            }
+                        }
                     },
                 },
             },

@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-39 tools.
+40 tools.
 
 ## `session_list`
 
@@ -370,6 +370,28 @@ Write or read this PM session's Intent Ledger (goals G, decisions D, asks A, tas
 | `request_id` | `string` | no |
 | `session` | `string` | no |
 | `store` | `object` | no |
+
+## `architect_dashboard`
+
+Read or write the Architect's dashboard store (collections items, goals, sessions, questions, meta, ...). Every call names `store` {root, format dir|jsonl}. `op` picks the method: `get` {collection, id}, `list` {collection, status, order_by, desc, limit}, `set` / `update` {collection, id, data, if_version} (`if_version` 0: must not exist; a `set` with no `if_version` on an existing document is a conflict), `delete` {collection, id, if_version} (the record is appended to the prune log first), `batch` {ops: [{op set|update|delete, collection, id, data, if_version}]} (all or none), `pruned` {id, collection}, `validate` {schemas: schema directory}, `fsck`, `tally`, `footer` {tailnet, local}, `ids` {prefix: one capital letter}. Errors end with the CLI exit code: 1 conflict (stale `if_version`), 2 refused input (bad name, `version` in a body, secret-shaped value, case variant), 3 store unreadable or locked. Never put a secret value in a field.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `collection` | `string` | no |
+| `data` | `object` | no |
+| `desc` | `boolean` | no |
+| `id` | `string` | no |
+| `if_version` | `integer` | no |
+| `limit` | `integer` | no |
+| `local` | `string` | no |
+| `op` | `string` | yes |
+| `ops` | `array` | no |
+| `order_by` | `string` | no |
+| `prefix` | `string` | no |
+| `schemas` | `string` | no |
+| `status` | `string` | no |
+| `store` | `object` | yes |
+| `tailnet` | `string` | no |
 
 ## Sibling Daemon MCP Surfaces
 

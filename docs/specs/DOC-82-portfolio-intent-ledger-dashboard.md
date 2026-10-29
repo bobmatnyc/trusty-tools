@@ -112,9 +112,11 @@ Source of truth: the dashboard JSON Schema set (JSON Schema 2020-12, 14 files), 
 
 | Surface | PM verbs (#9758, #9995) | Architect verbs |
 |---|---|---|
-| daemon method | `dbatg.init/add/update/close/batch/show/prune/rotate/session_set/digest/fresh/stamp/archive_show` | `architect.dashboard.get/list/set/update/delete/batch/pruned/validate/fsck/tally/footer/ids` |
+| daemon method | `dbatg.init/add/update/close/batch/show/prune/rotate/session_set/digest/fresh/stamp/archive_show` | `mpm.architect.dashboard.get/list/set/update/delete/batch/pruned/validate/fsck/tally/footer/ids` |
 | MCP tool | `dbatg` (op field) | `architect_dashboard` (op field) |
 | CLI | `tm dbatg <verb>` | `tm architect dashboard <verb>` (extends the `tm architect` group of [#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822)) |
+
+The Architect methods carry the daemon router's `mpm.` prefix (owner ruling D34, [#10063](https://github.com/bobmatnyc/trusty-tools/issues/10063)). A stale `if_version` exits 1 on every surface (LDG-2.8.1); a refused request exits 2, and an unreadable or locked store exits 3.
 
 - **LDG-3.4** The HTTP surface MUST be the console only (ADR-0032, as cited in DOC-73): a console route (proposed `/architect`, serving the dashboard page and `/api/<coll>[/<id>]`, `/api/batch`, `/doc/<project>/<rel>`) replaces the prototype's standalone server. The route name is DECIDED ([§8](#SPEC-LEDGER-08~draft) decision 6). The route MUST keep the prototype's guards: bind 127.0.0.1, Host allowlist (localhost, MagicDNS name), Origin check on writes, 409 on `if_version` mismatch, a read-only Markdown reader (no dotfiles, no `..`, no secrets-named files, `.md` only). Check: the prototype's document-reader, tailnet and store tests, ported.
 - **LDG-3.5** The page MUST keep working unchanged against the new route (same `/api` shape, same 2 s snapshot poll or an SSE feed once the console provides it, [#6851](https://github.com/bobmatnyc/trusty-tools/issues/6851)), and MUST reload on page-revision change (`X-Page-Rev`). Check: a browser live check by a web QA pass.
