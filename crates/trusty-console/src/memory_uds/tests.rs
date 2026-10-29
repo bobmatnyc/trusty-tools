@@ -14,26 +14,17 @@ use axum::http::Method;
 
 // ─── the RPC client ──────────────────────────────────────────────────────────
 
-/// Bind a socket that answers exactly one framed request with `reply`.
+/// Bind a socket that answers every request with `reply` and the protocol handshake with a supported version.
 ///
 /// The same stub shape `routes::memory_rpc`'s tests use, so the console's two
 /// trusty-memory clients are exercised against the same kind of daemon.
 fn stub_daemon(dir: &Path, reply: impl Into<String>) -> PathBuf {
-    let socket = dir.join("sockets").join("memory.sock");
-    let reply = reply.into();
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-    tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let Ok((mut conn, _)) = listener.accept().await else {
-            return;
-        };
-        let mut sink = Vec::new();
-        let _ = conn.read_to_end(&mut sink).await;
-        let _ = conn.write_all(reply.as_bytes()).await;
-        let _ = conn.write_all(b"\n").await;
-        let _ = conn.flush().await;
-    });
-    socket
+    crate::memory_uds::protocol_stub::spawn(
+        dir,
+        crate::memory_uds::protocol_stub::supported(),
+        reply,
+    )
+    .0
 }
 
 /// Why: the SPA branches on HTTP status, so every code trusty-memory's
@@ -509,4 +500,73 @@ fn query_json_is_an_empty_object_for_no_query() {
     };
     assert_eq!(params, json!({}));
     assert!(params.is_object(), "never null");
+}
+
+// ─── the protocol check (#9538) ──────────────────────────────────────────────
+
+/// Why: a daemon from another release must be refused by name, and nothing may
+/// be sent to it — the fail-open branch is a call that goes ahead anyway.
+/// What: a fake daemon reporting protocol 99 and answering anything else with
+/// success. `call` and `open_stream` must both fail with `ProtocolMismatch`
+/// (502), and the daemon must have seen only the handshake.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_refuses_an_incompatible_daemon_without_sending_the_frame() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn(
+        tmp.path(),
+        json!({ "protocol_version": 99, "daemon_version": "9.9.9" }),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+    );
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect_err("an unsupported protocol is not callable");
+    assert!(
+        matches!(err, MemoryRpcError::ProtocolMismatch(_)),
+        "{err:?}"
+    );
+    assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+    assert!(err.message().contains("protocol 99"), "{err:?}");
+
+    let stream = open_stream(
+        &socket,
+        METHOD_ACTIVITY_STREAM,
+        json!({}),
+        STREAM_OPEN_TIMEOUT,
+    )
+    .await
+    .err()
+    .expect("an unsupported protocol cannot open a stream");
+    assert!(
+        matches!(stream, MemoryRpcError::ProtocolMismatch(_)),
+        "{stream:?}"
+    );
+
+    let seen = seen.lock().expect("recorded");
+    assert!(
+        seen.iter().all(|m| m == "memory.protocol"),
+        "no memory method may reach a refused daemon: {seen:?}"
+    );
+}
+
+/// Why: a handshake answer without a `protocol_version` is unreadable, and an
+/// unreadable answer must never read as compatible.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_refuses_a_daemon_with_no_protocol_version() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn(
+        tmp.path(),
+        json!({}),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+    );
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect_err("a handshake with no version is not callable");
+    assert!(
+        matches!(err, MemoryRpcError::ProtocolMismatch(_)),
+        "{err:?}"
+    );
+    let seen = seen.lock().expect("recorded");
+    assert_eq!(seen.as_slice(), ["memory.protocol"], "{seen:?}");
 }

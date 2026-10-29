@@ -26,6 +26,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::memory_uds::MemoryRpcError;
 use crate::routes::verdict::ActionVerdict;
 use crate::routes::{ACTION_TIMEOUT, MEMORY_SERVICE};
 
@@ -33,7 +34,9 @@ use crate::routes::{ACTION_TIMEOUT, MEMORY_SERVICE};
 ///
 /// Why: see the module docs. `id` is carried only so a failure verdict names
 /// the resource the caller was acting on.
-/// What: one framed JSON-RPC `tools/call` on `socket`. `Ok` carries the tool's
+/// What: the protocol check (#9538; a refused daemon is
+/// [`ActionVerdict::Refused`] and no frame is sent), then one framed JSON-RPC
+/// `tools/call` on `socket`. `Ok` carries the tool's
 /// payload — `Value::Null` when the answer had no readable payload, which every
 /// caller must then treat as an unconfirmed answer rather than as a success.
 /// Test: the `call_tool_*` tests below.
@@ -43,6 +46,24 @@ pub(crate) async fn call_tool(
     arguments: Value,
     id: &str,
 ) -> Result<Value, ActionVerdict> {
+    // #9538: refuse a daemon on an unsupported protocol before any frame is sent.
+    if let Err(e) = crate::memory_uds::ensure_protocol(socket, ACTION_TIMEOUT).await {
+        return Err(match e {
+            MemoryRpcError::ProtocolMismatch(reason) => ActionVerdict::Refused {
+                id: id.to_string(),
+                reason: format!("{MEMORY_SERVICE} refused {tool}: {reason}"),
+                detail: json!({ "protocol_mismatch": true }),
+            },
+            other => ActionVerdict::Unreachable {
+                id: id.to_string(),
+                reason: format!(
+                    "{MEMORY_SERVICE} did not answer {tool}: {}",
+                    other.message()
+                ),
+            },
+        });
+    }
+
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -107,23 +128,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Bind a socket that answers exactly one framed request with `reply`.
+    /// Bind a socket that answers every request with `reply` and the protocol handshake with a supported version.
     fn stub_memory_daemon(dir: &Path, reply: impl Into<String>) -> PathBuf {
-        let socket = dir.join("sockets").join("memory.sock");
-        let reply = reply.into();
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let _ = conn.write_all(reply.as_bytes()).await;
-            let _ = conn.write_all(b"\n").await;
-            let _ = conn.flush().await;
-        });
-        socket
+        crate::memory_uds::protocol_stub::spawn(
+            dir,
+            crate::memory_uds::protocol_stub::supported(),
+            reply,
+        )
+        .0
     }
 
     /// Why: the caller decides what counts as confirmation, so it must be handed
@@ -200,5 +212,29 @@ mod tests {
             .await
             .expect("a payload-less answer is still an answer");
         assert_eq!(payload, Value::Null);
+    }
+
+    /// Why: a daemon on an unsupported protocol must be refused with a typed
+    /// verdict, and the tool frame must never reach it (#9538).
+    /// Test: this is the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_tool_refuses_an_incompatible_daemon_without_sending_the_frame() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (socket, seen) = crate::memory_uds::protocol_stub::spawn(
+            tmp.path(),
+            json!({ "protocol_version": 99 }),
+            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+        );
+
+        let verdict = call_tool(&socket, "palace_compact", json!({}), "scratch")
+            .await
+            .expect_err("an unsupported protocol is not callable");
+        assert!(
+            matches!(&verdict, ActionVerdict::Refused { reason, detail, .. }
+                if reason.contains("protocol 99") && detail["protocol_mismatch"] == json!(true)),
+            "the refusal must name the protocol: {verdict:?}"
+        );
+        let seen = seen.lock().expect("recorded");
+        assert_eq!(seen.as_slice(), ["memory.protocol"], "{seen:?}");
     }
 }
