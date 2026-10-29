@@ -18,7 +18,7 @@ use super::{file_name_stem, looks_like_secret};
 ///
 /// Why (#9748): a password such as `hunter2` has no shape to read, so the name
 /// alone must refuse it.
-/// What: matched against the normalised name (lowercase, `-` as `_`) as a raw
+/// What: matched against the normalised name (lowercase, `_` for `-`, `.` and camelCase joins) as a raw
 /// suffix, so `db_passwd`, `client_secret` and `x_pwd` all match.
 /// Test: `credential_parameter_names_are_refused_by_suffix_after_9748`.
 pub(crate) const PASSWORD_NAME_SUFFIXES: &[&str] = &["password", "passwd", "pwd", "secret"];
@@ -31,6 +31,8 @@ pub(crate) const PASSWORD_NAME_SUFFIXES: &[&str] = &["password", "passwd", "pwd"
 /// What: matched as a raw suffix of the normalised name (`apitoken`,
 /// `slack_token`, `x_amz_signature`, `x_amz_credential`). The floor keeps
 /// `token=none` and similar short words out.
+/// Test: `credential_parameter_names_are_refused_by_suffix_after_9748`,
+/// `benign_query_names_and_at_signs_stay_accepted_after_9748`.
 pub(crate) const TOKEN_NAME_SUFFIXES: &[&str] = &["token", "signature", "credential"];
 
 /// Short names that count only when they are the whole name or follow a `_`:
@@ -40,15 +42,21 @@ pub(crate) const TOKEN_NAME_SUFFIXES: &[&str] = &["token", "signature", "credent
 /// `keyword`-like names; these three are ordinary words and word endings.
 /// What: `sort_key` and `x_api_key` match, `monkey` does not. See
 /// [`COMPOUND_KEY_NAMES`] for the run-together spellings.
+/// Test: `camel_case_and_dotted_names_are_refused_after_9748`,
+/// `benign_query_names_and_at_signs_stay_accepted_after_9748`.
 pub(crate) const BOUNDARY_NAME_SUFFIXES: &[&str] = &["sig", "key", "auth"];
 
 /// Run-together spellings that end a [`BOUNDARY_NAME_SUFFIXES`] word but name
 /// a credential: `apikey`, `accesskey`, `secretkey`, `privatekey`, `oauth`.
+/// camelCase spellings (`apiKey`) reach [`BOUNDARY_NAME_SUFFIXES`] through
+/// `normalise_param_name` and need no entry here.
+/// Test: `credential_parameter_names_are_refused_by_suffix_after_9748`.
 pub(crate) const COMPOUND_KEY_NAMES: &[&str] =
     &["apikey", "accesskey", "secretkey", "privatekey", "oauth"];
 
 /// Shortest value under a [`TOKEN_NAME_SUFFIXES`] or `sig` name that is
 /// refused.
+/// Test: `credential_parameter_names_are_refused_by_suffix_after_9748`.
 pub(crate) const MIN_QUERY_SECRET_LEN: usize = 8;
 
 /// Shortest value under a `key` or `auth` name that is refused.
@@ -57,12 +65,16 @@ pub(crate) const MIN_QUERY_SECRET_LEN: usize = 8;
 /// `auth=basic`). The guard is a floor of this many bytes and a value made of
 /// ASCII letters, digits and `%` only, so a wordy value (`created_at_desc`,
 /// `no-cache`) is admitted and a bare 24-letter key is not.
+/// Test: `benign_query_names_and_at_signs_stay_accepted_after_9748`,
+/// `camel_case_and_dotted_names_are_refused_after_9748`.
 pub(crate) const MIN_WEAK_NAME_SECRET_LEN: usize = 16;
 
 /// Most `=` a token may hold before [`super::is_structural_token`] stops
 /// recursing on the text after each one.
 ///
 /// Why (#9748): the recursion overflowed the stack on a 100 KB query string.
+/// Test: `long_query_string_finishes_quickly_after_9748`,
+/// `token_past_the_equals_cap_still_refuses_an_embedded_secret_after_9748`.
 pub(crate) const MAX_STRUCTURAL_EQUALS: usize = 64;
 
 /// Most `:N` groups a file reference carries: `:line` or `:line:column`.
@@ -169,7 +181,7 @@ fn userinfo_password(rest: &str) -> Option<&str> {
 /// credential; see [`url_carries_secret`].
 ///
 /// Why (#9748): the name decides when the value has no shape of its own.
-/// What: normalises the name (lowercase, `-` as `_`). A
+/// What: normalises the name ([`normalise_param_name`]). A
 /// [`PASSWORD_NAME_SUFFIXES`] name refuses any non-empty value; a
 /// [`TOKEN_NAME_SUFFIXES`] or `sig` name from [`MIN_QUERY_SECRET_LEN`] bytes; a
 /// `key` or `auth` name from [`MIN_WEAK_NAME_SECRET_LEN`] bytes of letters,
@@ -182,7 +194,7 @@ fn param_carries_secret(param: &str) -> bool {
     if value.is_empty() {
         return false;
     }
-    let name = name.to_ascii_lowercase().replace('-', "_");
+    let name = normalise_param_name(name);
     let by_name = if PASSWORD_NAME_SUFFIXES.iter().any(|s| name.ends_with(s)) {
         true
     } else if TOKEN_NAME_SUFFIXES.iter().any(|s| name.ends_with(s))
@@ -201,6 +213,30 @@ fn param_carries_secret(param: &str) -> bool {
         false
     };
     by_name || looks_like_secret(value)
+}
+
+/// `name` lowercased, with `_` at each lower-to-upper camelCase transition and
+/// in place of `-` and `.`.
+///
+/// Why (#9748): lowercasing first removed the `key` boundary from `clientKey`,
+/// `appKey` and `subscriptionKey`, and `api.key` had no boundary either.
+/// What: `clientKey` is `client_key`, `api.key` is `api_key`, `x-api-key` is
+/// `x_api_key`. A run of capitals (`APIKEY`) gets no `_`.
+/// Test: `camel_case_and_dotted_names_are_refused_after_9748`.
+fn normalise_param_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() && prev_lower {
+            out.push('_');
+        }
+        prev_lower = c.is_ascii_lowercase();
+        out.push(match c {
+            '-' | '.' => '_',
+            c => c.to_ascii_lowercase(),
+        });
+    }
+    out
 }
 
 /// True when `name` is `word` or ends in `_word`.
