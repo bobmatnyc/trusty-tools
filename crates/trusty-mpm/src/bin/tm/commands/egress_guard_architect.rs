@@ -9,12 +9,15 @@
 //! of a family) and an `egress-bash` deny whose command names a channel host
 //! or program; the over-cap and walk-budget Bash denies are never judged,
 //! since the floor did not read those commands. A judged deny is lifted only
-//! when [`architect_main_thread_relaunch_safe`] holds: no payload
-//! `agent_id`, `CLAUDE_MPM_SUB_AGENT` unset, the `supervisor` launch stamp,
-//! and a `CLAUDE_PROJECT_DIR` that requests the supervisor profile and is in
-//! the user-level `[supervisor] projects` allowlist after canonicalization.
-//! It reads no `tm fleet init` launch record, so the allow survives a
-//! relaunch or self-clear (Architect 11:54Z). [`audited`] then lets the allow stand only once one audit line is
+//! when [`architect_main_thread`] holds — the one identity predicate the
+//! #8878 floor uses: no payload `agent_id`, `CLAUDE_MPM_SUB_AGENT` unset, the
+//! `supervisor` launch stamp, a `CLAUDE_PROJECT_DIR` that requests the
+//! supervisor profile and is in the user-level `[supervisor] projects`
+//! allowlist after canonicalization, and the hook's nearest `claude`
+//! matching a `tm fleet init` / `tm fleet relaunch` launch record on PID and
+//! start time. The record keeps a nested `TRUSTY_MPM_SESSION_PROFILE=supervisor
+//! claude` in the Architect directory out (Architect ruling 13:03Z).
+//! [`audited`] then lets the allow stand only once one audit line is
 //! appended: family, tool, time and session, never a message body or a
 //! command argument.
 //! FAIL-CLOSED: a trust-anchor deny is never judged. An unreadable or
@@ -36,7 +39,7 @@ use crate::commands::egress_guard_bash::{
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::HookStdinError;
-use crate::commands::pm_guard_architect_reason::architect_main_thread_relaunch_safe;
+use crate::commands::pm_guard_architect_reason::architect_main_thread;
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 
 /// The check slug of an MCP family deny.
@@ -134,7 +137,8 @@ fn liftable_family(check: &str, payload: &Value, table: &FamilyTable) -> Option<
 /// Why / What: see the module doc. `config` is called only for a judged
 /// deny, so every other call reads no file and walks no process table.
 /// Test: `architect_main_thread_may_send_slack_and_name_the_slack_host`,
-/// `architect_main_thread_after_a_relaunch_has_no_launch_record`,
+/// `architect_relaunch_is_allowed_only_once_recorded`,
+/// `nested_supervisor_claude_in_the_architect_dir_is_denied`,
 /// `architect_subagent_stays_denied`, `pm_project_with_supervisor_env_stays_denied`,
 /// `unreadable_config_or_profile_stays_denied`,
 /// `trust_anchor_deny_holds_for_the_architect_main_thread`.
@@ -152,7 +156,7 @@ pub(crate) fn lift(
         return (first, None);
     };
     // #10447: the floor's identity predicate; any failed check keeps the deny.
-    if architect_main_thread_relaunch_safe(payload, env, config).is_err() {
+    if architect_main_thread(payload, env, config).is_err() {
         return (first, None);
     }
     let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");

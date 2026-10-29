@@ -11,10 +11,13 @@ use serde_json::json;
 use super::*;
 use crate::commands::egress_guard::{verdict, with_taint};
 use crate::commands::egress_guard_bash::MAX_COMMAND_BYTES;
+use crate::commands::egress_guard_taint::TAINT_CHECK;
 use crate::commands::pm_guard_trust_anchor::tests::{
-    ARCHITECT, Fixture, allowlist, architect_env, fixture, launch_record, payload, spoof_env,
+    ARCHITECT, Fixture, allowlist, architect_env, architect_table, fixture, launch_record, payload,
+    spoof_env, table,
 };
 use crate::commands::pm_guard_trust_anchor::{TRUST_ANCHOR_RULE, evaluate};
+use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
 
 /// The fixed audit time every case writes.
 const TIME: &str = "2026-10-29T12:00:00Z";
@@ -99,40 +102,92 @@ fn architect_main_thread_may_send_slack_and_name_the_slack_host() {
     }
 }
 
-/// 🔴 #10447 (Architect 11:54Z): after a relaunch or self-clear the
-/// Architect's `claude` has no `tm fleet init` launch record and no process
-/// table is supplied; its main thread is still allowed, and a subagent in the
-/// same session is still denied.
+/// 🔴 #10447 (Architect 13:03Z, option b): a relaunched Architect `claude`
+/// with no launch record is denied; once its launcher writes the record the
+/// next call is allowed, and a subagent in that session stays denied.
 #[test]
-fn architect_main_thread_after_a_relaunch_has_no_launch_record() {
+fn architect_relaunch_is_allowed_only_once_recorded() {
     let fx = fixture();
     let log = log_of(&fx);
     let config = || allowlist(&fx);
-    let relaunched = spoof_env(&fx);
+    let relaunched = HookEnv {
+        claude: table(architect_table()),
+        ..spoof_env(&fx)
+    };
+    for call in [slack_send(&fx), slack_bash(&fx)] {
+        denied(
+            run(&call, &relaunched, config, &log),
+            "an unrecorded relaunch",
+        );
+    }
+    assert!(!log.exists());
+    // The record `tm fleet init` / `tm fleet relaunch` writes for its `claude`.
+    launch_record(&fx, ARCHITECT, &fx.project);
     assert_eq!(
         run(&slack_send(&fx), &relaunched, config, &log),
         Verdict::Allow
     );
-    assert_eq!(
-        run(&slack_bash(&fx), &relaunched, config, &log),
-        Verdict::Allow
-    );
     let mut dispatched = slack_send(&fx);
     dispatched["agent_id"] = json!("agent-7");
-    denied(
-        run(&dispatched, &relaunched, config, &log),
-        "a relaunched subagent",
-    );
+    denied(run(&dispatched, &relaunched, config, &log), "a subagent");
+    let lines = std::fs::read_to_string(&log).expect("log").lines().count();
+    assert_eq!(lines, 1, "only the recorded main-thread call audits");
+}
+
+/// 🔴 #10447 (code-critic HIGH): a PM or subagent running
+/// `cd <architect> && TRUSTY_MPM_SESSION_PROFILE=supervisor claude -p …`
+/// carries every environment claim, but its nearest `claude` ancestor is the
+/// nested one, which has no launch record, so it stays denied — even with the
+/// real Architect `claude` recorded further up the tree.
+#[test]
+fn nested_supervisor_claude_in_the_architect_dir_is_denied() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    launch_record(&fx, ARCHITECT, &fx.project);
+    // hook 100 -> nested claude 70 -> shell 65 -> recorded Architect claude 60.
     let nested = HookEnv {
-        sub_agent: true,
+        claude: table(vec![
+            (100, Some(70), false),
+            (70, Some(65), true),
+            (65, Some(60), false),
+            (60, Some(1), true),
+        ]),
         ..spoof_env(&fx)
     };
-    denied(
-        run(&slack_bash(&fx), &nested, config, &log),
-        "a nested process",
+    for call in [slack_send(&fx), slack_bash(&fx)] {
+        denied(
+            run(&call, &nested, || allowlist(&fx), &log),
+            "a nested claude -p",
+        );
+    }
+    assert!(!log.exists());
+}
+
+/// 🔴 #10447 (bonus): the lift does not reach the #8433 taint arm; a
+/// channel-tainted Architect session's Bash call to Slack is a taint deny.
+#[test]
+fn a_tainted_architect_bash_call_still_hits_the_taint_deny() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let mark = TaintMark {
+        channel: "slack".into(),
+        route: "owner-dm".into(),
+        question_id: "Q-1".into(),
+        tainted_at: chrono::Utc::now(),
+        workspace: fx.project.clone(),
+    };
+    taint_managed_session(&taint_dir(&fx.home), "m-1", "s-1", &mark).expect("taint");
+    let check = denied(
+        run(
+            &slack_bash(&fx),
+            &architect_env(&fx),
+            || allowlist(&fx),
+            &log,
+        ),
+        "a tainted session",
     );
-    let lines = std::fs::read_to_string(&log).expect("log").lines().count();
-    assert_eq!(lines, 2, "only the two main-thread calls audit");
+    assert_eq!(check, TAINT_CHECK);
+    assert!(!log.exists());
 }
 
 /// 🔴 #10447: a subagent of the Architect — an `agent_id` payload, or a

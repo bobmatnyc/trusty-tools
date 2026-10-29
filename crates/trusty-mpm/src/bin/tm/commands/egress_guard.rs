@@ -161,9 +161,9 @@ pub(crate) fn decide(
             format!(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and no \
                  tm-launched session, PM or subagent, may use an outbound message channel \
-                 directly (#8454); only the Architect's main thread is exempt (#10447). Read and list tools are denied too, except a Slack \
-                 channel or thread read the host config grants this project (#10387). Ask \
-                 the operator instead."
+                 directly (#8454); only the Architect's main thread is exempt (#10447). \
+                 Read and list tools are denied too, except a Slack channel or thread read \
+                 the host config grants this project (#10387). Ask the operator instead."
             ),
         ),
         Classification::Malformed(detail) => deny(
