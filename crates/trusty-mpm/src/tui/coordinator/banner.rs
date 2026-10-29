@@ -273,7 +273,7 @@ pub async fn probe_memory(socket: Option<&Path>) -> ProbeOutcome {
     if let Err(e) = health_ok_at(socket).await {
         // #9538: a protocol mismatch is reported with its reason, not as "down".
         return ProbeOutcome::unreachable(Some(
-            match crate::core::memory_checked::protocol_error(&e) {
+            match crate::core::memory_checked::protocol_mismatch(&e) {
                 Some(_) => format!("memory protocol mismatch: {e:#}"),
                 None => "memory daemon down".to_string(),
             },

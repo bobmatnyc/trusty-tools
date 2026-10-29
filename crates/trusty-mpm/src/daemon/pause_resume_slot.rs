@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::core::memory_checked::{self, protocol_error};
+use crate::core::memory_checked::{self, protocol_mismatch};
 use serde_json::{Value, json};
 use trusty_common::catchup::git::capture_git_status;
 use trusty_common::catchup::pause::{PauseSnapshotInput, PauseSnapshotOutcome};
@@ -252,7 +252,7 @@ fn error_outcome(e: &anyhow::Error) -> String {
         }
         Some(_) => skipped("memory_error", &detail),
         // #9538: a daemon outside the supported protocol is named, not "unreachable".
-        None if protocol_error(e).is_some() => skipped("memory_protocol", &detail),
+        None if protocol_mismatch(e).is_some() => skipped("memory_protocol", &detail),
         None => skipped("memory_unreachable", &detail),
     }
 }

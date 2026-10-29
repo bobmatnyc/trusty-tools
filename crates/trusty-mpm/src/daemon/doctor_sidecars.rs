@@ -120,7 +120,7 @@ async fn probe_health_once(socket: &Path) -> ProbeOutcome {
     {
         Ok(body) => ProbeOutcome::Success(Some(body)),
         Err(e) => {
-            if crate::core::memory_checked::protocol_error(&e).is_some() {
+            if crate::core::memory_checked::protocol_mismatch(&e).is_some() {
                 return ProbeOutcome::ProtocolMismatch(format!("{e:#}"));
             }
             if let Some(rpc) = e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {

@@ -8,7 +8,7 @@
 //! `trusty_common::memory_rpc::ensure_memory_protocol_at` (cached per socket for
 //! a few seconds; a pre-handshake daemon stays callable) and then
 //! `call_memory_tool_at_with_timeout`. A refusal is an `anyhow::Error` wrapping
-//! `MemoryProtocolError`: `{e:#}` shows the named cause, [`protocol_error`]
+//! `MemoryProtocolError`: `{e:#}` shows the named cause, [`protocol_mismatch`]
 //! recovers it.
 //! Test: `core::memory_protocol_gate_tests`.
 
@@ -47,10 +47,20 @@ pub async fn call_with_timeout(
     call_memory_tool_at_with_timeout(socket, method, params, timeout).await
 }
 
-/// The protocol refusal inside `e`, when that is what failed.
+/// The protocol MISMATCH inside `e`, when that is what failed.
 ///
-/// Why: a probe reports a mismatch as degraded with its reason, which it can
-/// only do after telling it from "nothing answered".
-pub fn protocol_error(e: &anyhow::Error) -> Option<&MemoryProtocolError> {
-    e.downcast_ref::<MemoryProtocolError>()
+/// Why: a probe reports a daemon from another release as degraded with its
+/// reason, which it can only do after telling it from "nothing answered". A
+/// `HandshakeFailed` check is a dead or broken transport, not a mismatch, so it
+/// is not returned and the caller's existing unreachable handling applies.
+/// What: `Some` for `Unsupported` and `MalformedHandshake` only.
+/// Test: `core::memory_protocol_gate_tests`, `unreachable_socket_answers_false`.
+pub fn protocol_mismatch(e: &anyhow::Error) -> Option<&MemoryProtocolError> {
+    e.downcast_ref::<MemoryProtocolError>().filter(|p| {
+        matches!(
+            p,
+            MemoryProtocolError::Unsupported { .. }
+                | MemoryProtocolError::MalformedHandshake { .. }
+        )
+    })
 }

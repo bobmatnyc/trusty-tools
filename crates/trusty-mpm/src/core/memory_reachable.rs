@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use crate::core::memory_checked::protocol_error;
+use crate::core::memory_checked::protocol_mismatch;
 use trusty_common::memory_rpc::MemoryHealthStatus;
 
 /// How long one reachability probe may take.
@@ -139,7 +139,7 @@ pub async fn probe_socket_reachability(socket: &std::path::Path) -> MemoryReacha
             MemoryHealthStatus::Ok => MemoryReachability::Reachable,
             other => MemoryReachability::Unhealthy(other),
         },
-        Err(e) if protocol_error(&e).is_some() => {
+        Err(e) if protocol_mismatch(&e).is_some() => {
             MemoryReachability::ProtocolMismatch(format!("{e:#}"))
         }
         Err(e) => match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {

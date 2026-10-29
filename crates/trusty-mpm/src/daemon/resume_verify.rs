@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::core::memory_checked::{self, protocol_error};
+use crate::core::memory_checked::{self, protocol_mismatch};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use trusty_common::catchup::session_log;
@@ -217,7 +217,7 @@ async fn read_slot_verify(
         .map_err(|e| match e.downcast_ref::<MemoryRpcError>() {
             Some(_) => ("memory_error", format!("{e:#}")),
             // #9538: a daemon outside the supported protocol is named, not "unreachable".
-            None if protocol_error(&e).is_some() => ("memory_protocol", format!("{e:#}")),
+            None if protocol_mismatch(&e).is_some() => ("memory_protocol", format!("{e:#}")),
             None => ("memory_unreachable", format!("{e:#}")),
         })?;
     let now = chrono::Utc::now();

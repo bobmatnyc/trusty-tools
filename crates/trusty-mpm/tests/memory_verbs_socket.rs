@@ -37,6 +37,11 @@ struct Canned {
 #[async_trait]
 impl RpcFallback for Canned {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        // #9538: the client asks for the protocol before its first call.
+        if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
+            let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
+            return Ok(json!({ "protocol_version": max }));
+        }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));
         }
@@ -458,6 +463,11 @@ struct ByMethod {
 #[async_trait]
 impl RpcFallback for ByMethod {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        // #9538: the client asks for the protocol before its first call.
+        if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
+            let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
+            return Ok(json!({ "protocol_version": max }));
+        }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));
         }
