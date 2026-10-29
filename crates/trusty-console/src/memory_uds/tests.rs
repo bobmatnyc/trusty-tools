@@ -623,9 +623,11 @@ async fn call_stays_callable_on_a_daemon_that_predates_the_handshake() {
         .expect("a pre-handshake daemon is still callable");
     assert_eq!(out["status"], "ok");
     let seen = seen.lock().expect("recorded");
+    // The shared check probes a pre-handshake daemon with a health call first.
+    assert_eq!(seen.first().map(String::as_str), Some("memory.protocol"));
     assert_eq!(
-        seen.as_slice(),
-        ["memory.protocol", METHOD_HEALTH],
+        seen.last().map(String::as_str),
+        Some(METHOD_HEALTH),
         "{seen:?}"
     );
 }
