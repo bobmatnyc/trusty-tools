@@ -144,7 +144,8 @@ pub struct PalaceHandle {
     /// drawer appears under every closet keyword its content contains, whereas
     /// a level requires exactly one parent.
     /// What: `Arc<RwLock<HashMap<String, Vec<Uuid>>>>` so reads can run
-    /// concurrently with the (rare) dream-time rebuild.
+    /// concurrently with the (rare) dream-time rebuild. Built at open from the
+    /// loaded drawer table (#10377), then rebuilt on every write.
     /// Test: `dream::tests::closet_refresh_builds_index`.
     pub(crate) closets: Arc<RwLock<HashMap<String, Vec<Uuid>>>>,
     /// Set to `true` for the duration of an in-flight `Dreamer::dream_cycle`.
@@ -578,6 +579,18 @@ impl PalaceHandle {
         );
         // #9719: L1 is selected from the merged table, not the raw snapshot.
         let l1_drawers = Arc::new(RwLock::new(super::l1::select_l1(&all_drawers)));
+        // #10377: build the closet index while the table is still owned here, so
+        // a loaded palace keeps the L2 closet boost without waiting for a write.
+        // No lock is held and no other thread can see the handle yet.
+        let closet_started = std::time::Instant::now();
+        let closet_index = super::closets::closet_index(&all_drawers);
+        tracing::debug!(
+            palace = %palace.id,
+            drawers = all_drawers.len(),
+            keywords = closet_index.len(),
+            elapsed_ms = closet_started.elapsed().as_millis() as u64,
+            "closet index built on load"
+        );
         let drawers = Arc::new(RwLock::new(all_drawers));
 
         // Attach a per-palace RecallLog at <data_dir>/recall.db so every disk-
@@ -615,7 +628,7 @@ impl PalaceHandle {
             data_dir: Some(data_dir.clone()),
             decay_config: DecayConfig::default(),
             recall_log,
-            closets: Arc::new(RwLock::new(HashMap::new())),
+            closets: Arc::new(RwLock::new(closet_index)),
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
