@@ -267,8 +267,9 @@ pub async fn call_memory_tool_at(socket: &Path, method: &str, params: Value) -> 
 /// reaches, covers them all instead of leaving each to remember a wrapper.
 /// What: runs [`ensure_memory_protocol_at`] on `socket` with the same
 /// `timeout`, then the call. The verdict is cached per socket, so the cost is
-/// at most one extra round trip per socket per ten seconds. The handshake method
-/// itself, and [`call_memory_tool_at_raw_with_timeout`], skip the check.
+/// at most one extra round trip per socket per ten seconds. On a cache miss the
+/// handshake and the call each get the full `timeout`, so the worst case is
+/// twice the budget. The handshake method itself, and [`call_memory_tool_at_raw_with_timeout`], skip the check.
 ///
 /// # Errors
 ///
