@@ -434,6 +434,22 @@ impl PushClient {
         self.lock_buffer().len()
     }
 
+    /// Remove and return every buffered frame, oldest first, without I/O.
+    ///
+    /// Why: a producer that stops while the bus is down must hand what it
+    /// still holds to a fallback store, or lose it (#10412).
+    /// What: empties the buffer; `dropped` is unchanged, since a taken frame
+    /// is the caller's to deliver, not an overflow.
+    /// Test: `tests::drain_buffered_takes_every_frame_in_order_10412`.
+    pub fn drain_buffered(&self) -> Vec<HarnessEvent> {
+        let mut buffer = self.lock_buffer();
+        let mut events = Vec::with_capacity(buffer.len());
+        while let Some(frame) = buffer.pop_front() {
+            events.push(frame.event);
+        }
+        events
+    }
+
     fn lock_buffer(&self) -> std::sync::MutexGuard<'_, PushBuffer> {
         self.buffer
             .lock()
@@ -652,6 +668,27 @@ mod tests {
 
         assert_eq!(client.buffered_len(), 2, "never grows past capacity");
         assert_eq!(client.dropped(), 3, "the three oldest overflow frames");
+    }
+
+    /// #10412: the shutdown fallback takes the whole buffer, oldest first,
+    /// and a later flush has nothing left to dial for.
+    #[tokio::test]
+    async fn drain_buffered_takes_every_frame_in_order_10412() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let client = PushClient::new(tmp.path().join("absent.sock"));
+        let sent: Vec<HarnessEvent> = (0..3).map(|_| sample_event()).collect();
+        for event in &sent {
+            client.send(event.clone());
+        }
+        let taken = client.drain_buffered();
+        assert_eq!(
+            taken.iter().map(|e| e.id).collect::<Vec<_>>(),
+            sent.iter().map(|e| e.id).collect::<Vec<_>>()
+        );
+        assert_eq!(client.buffered_len(), 0);
+        assert_eq!(client.dropped(), 0, "a taken frame is not an overflow");
+        let outcome = client.flush().await;
+        assert_eq!((outcome.sent, outcome.error.is_none()), (0, true));
     }
 
     /// A byte budget evicts oldest-first even when the frame COUNT cap alone
