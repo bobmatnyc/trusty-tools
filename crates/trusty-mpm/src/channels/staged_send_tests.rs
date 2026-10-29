@@ -139,7 +139,7 @@ fn cross_org_stage_is_refused_and_audited_without_text() {
     let err = t
         .stage(
             &cfg,
-            "masa@travelbta.com",
+            "owner@example.com",
             Some("duetto"),
             TEXT,
             Instant::now(),
@@ -207,7 +207,7 @@ fn slack_dm_posts_to_the_member_id() {
         *poster.0.lock().expect("lock"),
         vec!["U0OWNER01".to_owned()]
     );
-    let gchat = cfg.route("masa@travelbta.com", None).expect("route");
+    let gchat = cfg.route("owner@example.com", None).expect("route");
     assert!(matches!(
         sender.send(&gchat, TEXT),
         Err(SendFailure::Rejected(_))
