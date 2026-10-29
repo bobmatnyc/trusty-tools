@@ -194,7 +194,9 @@ fn param_carries_secret(param: &str) -> bool {
         || COMPOUND_KEY_NAMES.iter().any(|s| name.ends_with(s))
     {
         value.len() >= MIN_WEAK_NAME_SECRET_LEN
-            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'%')
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'%')
     } else {
         false
     };
