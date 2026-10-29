@@ -5,7 +5,7 @@
 //! for creation, and a markdown table retyped by an LLM on every phase
 //! transition. The retyping IS the drift the pattern's second rule forbids, so
 //! this module makes the deterministic half code. The hand-run procedure it
-//! replaces is `crates/trusty-mpm/src/assets/skills/tm-epic/references/manual-procedure.md`,
+//! replaces is `content/skills/tm-epic/references/manual-procedure.md`,
 //! including the guard it grew after an `awk` fail-open wiped a tracker body:
 //! never write an empty body. Here that guard lives once, in
 //! [`backend::EpicBackend::set_body`]; the marker half is structural, since

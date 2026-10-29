@@ -6,7 +6,7 @@
 //! production cap; this file is itself capped at 1500 SLOC as a test file).
 //!
 //! Why: mirrors `tests_behavior_2890_skills_tests.rs`'s rationale exactly —
-//! a skill asset file existing under `src/assets/skills/` is NOT sufficient
+//! a skill asset file existing under `content/skills/` is NOT sufficient
 //! for it to ship; only `ALL` (`bundle_all.rs`) registration makes
 //! `deploy_all_skill_tiers` see it, and issue #2902's constraint #2 (multi-
 //! file skill directories) adds a SECOND failure mode this batch introduced:

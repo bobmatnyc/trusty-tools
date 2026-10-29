@@ -51,7 +51,7 @@ pub struct DaemonLock {
     pub pid: u32,
     /// Base URL a pre-#6288-S3a daemon bound, e.g. `http://127.0.0.1:7880`.
     ///
-    /// #6288 S3a (owner ruling Q6): the daemon binds no TCP port and writes
+    /// #6288 S3a: the daemon binds no TCP port and writes
     /// this empty. The key is still written so an older `tm`, whose struct
     /// requires it, parses a new lock; `#[serde(default)]` lets a later
     /// release drop it. Removal is due in 2.0.0.
@@ -185,7 +185,7 @@ pub fn read_lock() -> Option<DaemonLock> {
 /// What: creates parent directories, then writes the TOML record. Best-effort:
 /// a failure is logged, never fatal — the daemon still serves. `socket` is the
 /// Unix socket path this daemon serves (#6288). #6288 S3a: `addr` is written
-/// empty, since the daemon binds no TCP port (owner ruling Q6).
+/// empty, since the daemon binds no TCP port.
 /// Test: `read_lock_returns_written_record`,
 /// `a_socket_only_lock_keeps_an_empty_addr_key`.
 pub fn write_lock_at(path: &std::path::Path, socket: &str) {
@@ -332,7 +332,7 @@ mod tests {
         );
     }
 
-    /// #6288 S3a, the forward half (owner ruling Q6): the record a socket-only
+    /// #6288 S3a, the forward half: the record a socket-only
     /// daemon writes stays readable by a `tm` built before S3a.
     ///
     /// Why: an older `tm`'s `DaemonLock` has no `#[serde(default)]` on `addr`,
