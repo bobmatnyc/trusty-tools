@@ -495,7 +495,7 @@ const PINNED_FINGERPRINTS: &[(u32, u64)] = &[
     // #9748: GitHub Projects v2 node-id shapes.
     (2, 0x5cef_e4b6_e8ed_c676),
     // #9748: `:line` file references; URL userinfo, query and fragment.
-    (3, 0xa210_a8e4_06eb_306a),
+    (3, 0x6f2a_8387_062a_3b04),
 ];
 
 /// Why (#8623): a ledger keyed on `SECRET_FILTER_VERSION` is only as good as
