@@ -727,7 +727,7 @@ async fn call_memory_tool(
     tool: &str,
     arguments: serde_json::Value,
 ) -> Result<(), String> {
-    trusty_common::memory_rpc::call_memory_tool_at(
+    crate::memory::checked_rpc::call(
         socket,
         "tools/call",
         json!({ "name": tool, "arguments": arguments }),

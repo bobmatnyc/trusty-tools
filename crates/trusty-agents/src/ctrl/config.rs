@@ -340,7 +340,7 @@ pub(crate) async fn recall_project_memories(
             tokio::task::spawn_blocking(move || crate::assistants::memory_policy::resolve(&name))
                 .await??;
         let socket = trusty_common::memory_rpc::resolve_memory_socket()?;
-        let value = trusty_common::memory_rpc::call_memory_tool_at(
+        let value = crate::memory::checked_rpc::call(
             &socket,
             "memory_recall",
             serde_json::json!({"palace":policy.namespace,"query":query,"top_k":top_k}),

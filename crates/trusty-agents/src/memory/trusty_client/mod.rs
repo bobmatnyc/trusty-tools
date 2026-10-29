@@ -52,11 +52,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::memory::checked_rpc::call_with_timeout;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
+use trusty_common::memory_rpc::MemoryRpcError;
 use uuid::Uuid;
 
 use crate::memory::redb_usearch::RedbUsearchStore;
@@ -145,7 +146,7 @@ impl TrustyMemoryClient {
 
     /// One RPC call on this client's socket.
     async fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
-        call_memory_tool_at_with_timeout(&self.socket, method, params, timeout).await
+        call_with_timeout(&self.socket, method, params, timeout).await
     }
 
     /// Probe `memory.health`. Returns true when the daemon answers.

@@ -372,3 +372,32 @@ async fn get_and_delete_are_clean_when_absent() {
     assert_eq!(client.get(Segment::Brief, "missing").await.unwrap(), None);
     client.delete(Segment::Brief, "missing").await.unwrap();
 }
+
+/// Why (#9538): the memory client must refuse a daemon from another protocol
+/// release by name, not proceed and misparse its replies.
+/// What: a daemon reporting a protocol past the supported range; `get` fails
+/// with the protocol refusal and sends no application call.
+/// Test: this test.
+#[tokio::test]
+async fn client_refuses_a_daemon_with_an_unsupported_protocol() {
+    let beyond = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    let daemon = uds_mock::spawn_with_protocol(beyond, move |_m: &str, _p: Value| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(json!({})) })
+    })
+    .await;
+    let client = TrustyMemoryClient::new(daemon.socket());
+
+    let err = client
+        .get(Segment::Context, "k")
+        .await
+        .expect_err("an incompatible daemon must be refused");
+
+    assert!(
+        format!("{err:#}").contains("unsupported trusty-memory protocol"),
+        "got: {err:#}"
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

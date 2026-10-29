@@ -520,7 +520,7 @@ async fn probe_palace(
             Some("trusty-memory daemon not discoverable (is it running?)".to_string()),
         );
     };
-    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    match crate::memory::checked_rpc::call_with_timeout(
         socket,
         "memory.drawers_list",
         serde_json::json!({ "palace_id": palace, "limit": 1 }),
