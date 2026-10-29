@@ -185,9 +185,9 @@ fn param_carries_secret(param: &str) -> bool {
     let name = name.to_ascii_lowercase().replace('-', "_");
     let by_name = if PASSWORD_NAME_SUFFIXES.iter().any(|s| name.ends_with(s)) {
         true
-    } else if TOKEN_NAME_SUFFIXES.iter().any(|s| name.ends_with(s)) {
-        value.len() >= MIN_QUERY_SECRET_LEN
-    } else if is_boundary_name(&name, "sig") {
+    } else if TOKEN_NAME_SUFFIXES.iter().any(|s| name.ends_with(s))
+        || is_boundary_name(&name, "sig")
+    {
         value.len() >= MIN_QUERY_SECRET_LEN
     } else if is_boundary_name(&name, "key")
         || is_boundary_name(&name, "auth")
