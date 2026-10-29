@@ -36,10 +36,11 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 - Anything else (release builds, feature-gated tests, `--include-ignored`, a
   single test by name) — `Skill(skill="cargo-commands")` rather than guessing.
-- 🟡 **EVO is the default host for rung 3 and 4 gates (Df4, draft).** Run
-  `check`, `clippy` and `test` from a committed, clean linked worktree through
-  `scripts/evo` in MPM-Utils, logged by `evo-gate-log`. CI stays the gate of
-  record.
+- 🟡 **EVO is the default host for rung 3 and 4 gates (Df4, draft).**
+  `check` and `clippy` default to EVO now; `test` defaults to EVO only once the
+  failing-test-name and ci_result conditions are deployed. Run from a
+  committed, clean linked worktree through `scripts/evo` in MPM-Utils, logged by
+  `evo-gate-log`. CI stays the gate of record.
 - 🔴 **`CARGO_TARGET_DIR` is exported by the repo-local `.envrc`.** Never
   override it EXCEPT with the builder slot the hook grants, and never point a
   gate at a worktree-local `target/` — that is a cold build of the whole
