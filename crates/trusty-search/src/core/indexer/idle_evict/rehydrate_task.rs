@@ -164,6 +164,16 @@ struct RestoredCorpus {
     entities: Vec<(String, Vec<RawEntity>)>,
     bm25: CodeBm25Index,
     bm25_dropped: usize,
+    /// #10195: milliseconds per blocking stage — scan, sort, entities, BM25.
+    stage_ms: [u64; 4],
+}
+
+/// Milliseconds since `lap`, then restart `lap` (#10195).
+fn lap_ms(lap: &mut Instant) -> u64 {
+    let now = Instant::now();
+    let ms = u64::try_from(now.saturating_duration_since(*lap).as_millis()).unwrap_or(u64::MAX);
+    *lap = now;
+    ms
 }
 
 /// Test-only artificial delay injected into the detached rehydrate task's
@@ -521,12 +531,16 @@ impl CodeIndexer {
                         std::thread::sleep(Duration::from_millis(delay_ms));
                     }
                 }
+                let mut lap = Instant::now();
                 let mut chunks = corpus.load_all_chunks()?;
+                let scan_ms = lap_ms(&mut lap);
                 // Issue #3684: sort by the stable chunk id BEFORE the
                 // cap-truncated BM25 build, so the surviving subset of an
                 // over-cap corpus is the same every rehydrate.
                 chunks.sort_by(|a, b| a.id.cmp(&b.id));
+                let sort_ms = lap_ms(&mut lap);
                 let entities = corpus.load_all_entities()?;
+                let entities_ms = lap_ms(&mut lap);
                 #[cfg(test)]
                 pause_if_scan_paused(commit_panic_key);
                 // #10193: build BM25 here, off the live index's write guard
@@ -534,11 +548,13 @@ impl CodeIndexer {
                 #[cfg(test)]
                 sleep_if_bm25_build_delayed(commit_panic_key);
                 let (bm25, bm25_dropped) = build_bm25(&chunks);
+                let bm25_ms = lap_ms(&mut lap);
                 Ok(RestoredCorpus {
                     chunks,
                     entities,
                     bm25,
                     bm25_dropped,
+                    stage_ms: [scan_ms, sort_ms, entities_ms, bm25_ms],
                 })
             })
             .await;
@@ -555,7 +571,10 @@ impl CodeIndexer {
                         entities,
                         bm25: built,
                         bm25_dropped,
+                        stage_ms: [scan_ms, sort_ms, entities_ms, bm25_ms],
                     } = restored;
+                    // #10195: the publish-and-commit phase, timed from here.
+                    let mut commit_lap = Instant::now();
                     let n_chunks = chunks.len();
                     let n_files = entities.len();
 
@@ -657,8 +676,17 @@ impl CodeIndexer {
                         .as_millis()
                         .min(u128::from(u64::MAX)) as u64;
                     last_rehydrate_cost_ms.store(rehydrate_ms, Ordering::Relaxed);
+                    // #10195: the per-stage split beside the whole-rehydrate time.
+                    let commit_ms = lap_ms(&mut commit_lap);
                     tracing::info!(
+                        index_id = %index_id,
                         rehydrate_ms,
+                        scan_ms,
+                        sort_ms,
+                        entities_ms,
+                        bm25_build_ms = bm25_ms,
+                        commit_ms,
+                        chunks = n_chunks,
                         "index '{index_id}': rehydrate cost {rehydrate_ms} ms recorded \
                          for idle-evict scaling"
                     );

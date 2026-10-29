@@ -358,6 +358,8 @@ pub struct UsearchStore {
     /// Test: `tests::test_demote_to_view_full_cycle`,
     /// `tests::test_demote_to_view_skips_when_dirty`.
     pub(super) dirty: Arc<AtomicBool>,
+    /// #10195: completed view → mutable promotions, read by the search timings.
+    pub(super) promotions: AtomicU64,
     /// When this store's graph was last mutated, and how many mutations have
     /// been recorded (issue #6826). See [`super::usearch_demote::WriteClock`]
     /// for why both readings are needed and
@@ -481,6 +483,7 @@ impl UsearchStore {
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
             removed_since_save: Arc::new(AtomicU64::new(0)),
             compact: super::usearch_compact::CompactState::fresh(),
+            promotions: AtomicU64::new(0),
         })
     }
 
@@ -1090,7 +1093,8 @@ impl UsearchStore {
             // this and every future write forever.
             self.rebuild_mutable_from_view(&index, &path, &e.to_string())?;
             self.is_view.store(false, Ordering::Release);
-            // Nothing on disk matches the rebuilt graph until the next save.
+            self.promotions.fetch_add(1, Ordering::Relaxed); // #10195
+                                                             // Nothing on disk matches the rebuilt graph until the next save.
             self.mark_dirty();
             return Ok(());
         }
@@ -1101,8 +1105,9 @@ impl UsearchStore {
                 .map_err(|e| anyhow!("usearch reserve after promote failed: {e}"))?;
         }
         self.is_view.store(false, Ordering::Release);
-        // A fresh `Index::load` is byte-for-byte the on-disk snapshot, so
-        // there is nothing unpersisted yet (issue #2164 dirty tracking).
+        self.promotions.fetch_add(1, Ordering::Relaxed); // #10195
+                                                         // A fresh `Index::load` is byte-for-byte the on-disk snapshot, so
+                                                         // there is nothing unpersisted yet (issue #2164 dirty tracking).
         self.dirty.store(false, Ordering::Release);
         tracing::info!(
             "usearch: promoted view → mutable for {} ({} vectors)",

@@ -165,6 +165,9 @@ pub use search::exact::ExactMatchReport;
 pub use search::lexical_lane::{
     check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT, ORIGIN_CONFIG,
 };
+// #10195: per-stage search timings and the query phase.
+pub(crate) use search::timings as query_timings;
+pub use search::timings::{QueryPhase, SearchTimings};
 pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;

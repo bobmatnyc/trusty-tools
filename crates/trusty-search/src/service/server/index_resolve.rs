@@ -98,6 +98,8 @@ pub(super) async fn resolve_or_load_index(
         &state.cold_store,
         cold_reload_timeout(),
         move |entry| async move {
+            #[cfg(test)]
+            test_cold_load_delay(&entry.id).await;
             let e = Arc::clone(&embedder);
             // #4087 review follow-up: `is_complete()` preserves the exact prior
             // contract — anything short of a finished restore is a lazy-load
@@ -133,5 +135,24 @@ pub(super) async fn resolve_or_load_index(
                 "retry_after_secs": retry_after_secs,
             })),
         )),
+    }
+}
+
+/// #10195 test hook: an extra cold-load cost for one index id, so a test can
+/// prove `latency_ms` spans the load without a slow fixture.
+#[cfg(test)]
+pub(super) static TEST_COLD_LOAD_DELAY: std::sync::Mutex<Option<(String, std::time::Duration)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn test_cold_load_delay(id: &str) {
+    let delay = TEST_COLD_LOAD_DELAY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(armed, _)| armed == id)
+        .map(|(_, d)| *d);
+    if let Some(d) = delay {
+        tokio::time::sleep(d).await;
     }
 }
