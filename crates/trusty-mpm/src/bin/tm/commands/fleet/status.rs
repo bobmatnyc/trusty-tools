@@ -10,7 +10,8 @@
 //! [`this_session_check`] adds whether the calling session is bound as the
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
 //! [`skills_check`] adds whether the Architect's shipped skills are current
-//! in its project tier (#9540); like `binding` it is never part of `complete`.
+//! in its project tier (#9540); it is never part of `complete`. #10448: an
+//! unbound `binding` makes the setup incomplete.
 //! It also warns on the pre-#9997 records directory and moves nothing.
 //! Test: `status_reports_incomplete_setup`,
 //! `status_warns_about_a_stale_records_dir_and_moves_nothing`,
@@ -54,10 +55,10 @@ pub(crate) struct StatusReport {
     pub(crate) session: String,
     /// `allowlist`, `profile`, `session`, `launch_stamp`, in that order.
     pub(crate) checks: Vec<Check>,
-    /// Whether every check passed.
+    /// Whether every check passed and `binding` is ok (#10448).
     pub(crate) complete: bool,
     /// Whether the session's `claude` is the Architect tm launched, under
-    /// this session name (#8878 R1); informational, never part of `complete`.
+    /// this session name (#8878 R1); #10448: part of `complete`.
     pub(crate) binding: Check,
     /// Whether the Architect's shipped skills are current in its project
     /// tier (#9540); informational, never part of `complete`.
@@ -87,6 +88,13 @@ impl StatusReport {
         }
         if self.complete {
             out.push_str("complete\n");
+        } else if self.checks.iter().all(|c| c.ok) {
+            // #10448: set up but unbound; `init` refuses a running session.
+            out.push_str(&format!(
+                "incomplete: the Architect is not bound; run `tm fleet relaunch --dir {}` to \
+                 rebind it\n",
+                self.dir.display()
+            ));
         } else {
             // #8995: a bare `tm fleet init` could set up a second Architect.
             out.push_str(&format!(
@@ -108,10 +116,12 @@ impl StatusReport {
 /// the stamp `supervisor`. The session is `session`, else the name recorded
 /// in `home`'s config ([`session_name::recorded_names`]); a recorded name
 /// that cannot be read fails `session` and `launch_stamp` and is never
-/// replaced by `tm-architect`. `binding` comes from [`binding_check`].
+/// replaced by `tm-architect`. `binding` comes from [`binding_check`];
+/// `complete` needs all four checks and `binding` (#10448).
 /// `probe` reads tmux (see [`Probe`]).
 /// Test: `status_reports_incomplete_setup`,
 /// `fleet_init_launches_the_architect_and_status_is_complete`,
+/// `status_is_complete_only_when_the_architect_is_bound`,
 /// `status_without_the_flag_reads_the_recorded_name`,
 /// `a_malformed_recorded_name_refuses_init_and_fails_status`.
 pub(crate) fn status(
@@ -129,9 +139,11 @@ pub(crate) fn status(
         session_check(&dir, probe, &names),
         stamp_check(probe, &names),
     ];
-    let complete = checks.iter().all(|c| c.ok);
+    let binding = binding_check(&dir, home, probe, &names);
+    // #10448: an unbound Architect is denied every anchor write; not complete.
+    let complete = checks.iter().all(|c| c.ok) && binding.ok;
     StatusReport {
-        binding: binding_check(&dir, home, probe, &names),
+        binding,
         skills: skills_check(&dir),
         session: names
             .as_ref()
