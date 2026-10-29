@@ -9,8 +9,9 @@
 //! What: [`app_ref`] reads the enabled Slack channel's `app_ref`;
 //! [`check_app_ref`] accepts only [`SLACK_APP_REF`]; [`resolve_app_token`]
 //! maps it to its registry variable and reads it through the daemon's one
-//! credential door, `secret_source::resolve_bounded_gated` (nothing in a
-//! sandbox, #9121).
+//! credential door, `secret_source::resolve_store_first_gated` (nothing in a
+//! sandbox, #9121; the store before env and `.env.local`, the same door as
+//! `bot_ref`, #9936).
 //! Test: `daemon_holds_app_token_via_app_ref_only`,
 //! `no_user_token_loaded_anywhere_in_channels_path`.
 
@@ -52,10 +53,12 @@ pub fn check_app_ref(app_ref: &str) -> Result<(), String> {
 
 /// Resolve `app_ref`'s token through the credential door.
 ///
-/// What: [`resolve_app_token_with`] over `resolve_bounded_gated`. Blocking.
-/// Test: `daemon_holds_app_token_via_app_ref_only`.
+/// What: [`resolve_app_token_with`] over `resolve_store_first_gated`. Blocking.
+/// Test: `daemon_holds_app_token_via_app_ref_only`,
+/// `slack_refs_resolve_the_store_before_the_environment_9936`.
 pub fn resolve_app_token(app_ref: &str) -> Result<Secret<String>, String> {
-    resolve_app_token_with(app_ref, crate::secret_source::resolve_bounded_gated)
+    // #9936: store first, the same door as `bot_ref`.
+    resolve_app_token_with(app_ref, crate::secret_source::resolve_store_first_gated)
 }
 
 /// [`resolve_app_token`] with the credential door a parameter.
