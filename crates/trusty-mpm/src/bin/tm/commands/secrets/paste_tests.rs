@@ -5,7 +5,6 @@
 //! through `/bin/sh` rather than being executed itself, so a sibling test's
 //! fork cannot hold it open for writing (`ETXTBSY`).
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -129,26 +128,23 @@ fn a_hung_paste_tool_times_out_and_its_whole_process_group_is_killed() {
 /// would fail every production read while the suite stayed green.
 /// What: installs an executable script under the platform's first paste
 /// tool name in a temp dir and reads through `in_dirs`. The read must be
-/// `Ok` with the script's output for that tool's arguments. A child `cp`
-/// writes the executable, so no thread of this process ever holds it open
-/// for writing (`ETXTBSY`). Not a `/bin/echo` symlink: a multicall
+/// `Ok` with the script's output for that tool's arguments. The shared
+/// writer has a child write the executable, so no thread of this process ever
+/// holds it open for writing (`ETXTBSY`, #10248). Not a `/bin/echo` symlink: a multicall
 /// coreutils dispatches on the link's name.
 /// Test: itself.
 #[test]
 fn in_dirs_runs_the_tool_it_finds_in_a_search_directory() {
     let dir = hermetic_temp_dir();
     let (name, args) = PASTE_TOOLS[0];
-    let staged = dir.path().join("tool.src");
-    std::fs::write(&staged, "#!/bin/sh\nprintf 'found %s' \"$*\"\n").expect("stage the tool");
     let search = dir.path().join("search");
     std::fs::create_dir(&search).expect("search dir");
-    let installed = Command::new("/bin/sh")
-        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
-        .arg(&staged)
-        .arg(search.join(name))
-        .status()
-        .expect("install the tool");
-    assert!(installed.success(), "install the tool: {installed}");
+    // See #10248
+    trusty_common::exec_stub::write_executable(
+        &search.join(name),
+        "#!/bin/sh\nprintf 'found %s' \"$*\"\n",
+    )
+    .expect("install the tool");
 
     let clipboard = SystemClipboard::in_dirs(std::slice::from_ref(&search), CLIPBOARD_READ_TIMEOUT);
     let text = read_within(clipboard).expect("the tool found in the search directory answers");
@@ -196,8 +192,8 @@ fn a_paste_tool_planted_on_path_never_runs() {
     for name in ["pbpaste", "wl-paste", "xclip", "xsel"] {
         let path = fakes.join(name);
         let body = format!("#!/bin/sh\n: > '{}'\nprintf planted\n", ran.display());
-        std::fs::write(&path, body).expect("write a fake");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // See #10248
+        trusty_common::exec_stub::write_executable(&path, body).expect("write a fake");
     }
     let module = module_path!();
     let module = module.split_once("::").map_or(module, |(_, rest)| rest);

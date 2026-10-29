@@ -109,7 +109,7 @@ describe('the Secrets page', () => {
     for (const input of document.querySelectorAll('input, textarea, select')) {
       expect(input.value).not.toContain(SECRET);
     }
-    expect(q('masked').textContent).toContain('sk-live-… [40 chars]');
+    expect(q('masked').textContent).toContain('sk-l…Qx7Lm [40 chars]');
   });
 
   test('the value is cleared even when the set is refused', async () => {
@@ -133,10 +133,10 @@ describe('the Secrets page', () => {
     expect(document.body.innerHTML).not.toContain('abcde');
   });
 
-  test('the agents toggle defaults OFF and reverts on agent_use_refused', async () => {
+  test('the deny toggle is OFF for an open key and sends allowed=false', async () => {
     const fake = await open({
-      list: () => [200, { vault: 'trusty/acme/web', keys: [{ name: 'API_KEY', length: 32, updated_at: 't' }] }],
-      agents_may_use: () => [403, { error: 'the secrets server refused the request', kind: 'agent_use_refused' }],
+      list: () => [200, { vault: 'trusty/acme/web', keys: [{ name: 'API_KEY', length: 32, updated_at: 't', agents_may_use: true }] }],
+      agents_may_use: (body) => [200, { vault: body.vault, key: body.key, allowed: body.allowed }],
     });
     const toggle = q('agents-toggle');
     expect(toggle.checked).toBe(false);
@@ -144,8 +144,24 @@ describe('the Secrets page', () => {
     toggle.dispatchEvent(new Event('change', { bubbles: true }));
     await settle();
 
+    // #10386: checking "denied to agents" writes the deny.
+    expect(fake.calls.find((c) => c.verb === 'agents_may_use').body.allowed).toBe(false);
+    expect(q('agents-toggle').checked).toBe(true);
+  });
+
+  test('removing a deny reverts on agent_use_refused', async () => {
+    const fake = await open({
+      list: () => [200, { vault: 'trusty/acme/web', keys: [{ name: 'API_KEY', length: 32, updated_at: 't', agents_may_use: false }] }],
+      agents_may_use: () => [403, { error: 'the secrets server refused the request', kind: 'agent_use_refused' }],
+    });
+    const toggle = q('agents-toggle');
+    expect(toggle.checked).toBe(true);
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
     expect(fake.calls.find((c) => c.verb === 'agents_may_use').body.allowed).toBe(true);
-    expect(q('agents-toggle').checked).toBe(false);
+    expect(q('agents-toggle').checked).toBe(true);
     const lines = [...q('notice').querySelectorAll('p')].map((p) => p.textContent);
     // #9067 P4: the fixed text plus one hint line, no pid, no path.
     expect(lines).toEqual([KIND_TEXT.agent_use_refused, AGENT_HINT]);

@@ -61,7 +61,7 @@ fn outcome_word(outcome: SetOutcome) -> &'static str {
 /// What: refuses argv values before reading anything; reads the source,
 /// trims surrounding whitespace, refuses an empty result before any socket
 /// call, then prints `(new|updated) secret set KEY: <mask_secret>`.
-/// Test: `set_reads_the_clipboard_and_confirms_head_and_length_only`,
+/// Test: `set_reads_the_clipboard_and_confirms_the_ruled_mask_only`,
 /// `set_with_a_short_value_shows_only_its_length`,
 /// `set_with_an_empty_clipboard_is_an_error_and_stores_nothing`,
 /// `set_refuses_a_value_on_the_command_line_without_echoing_it`.

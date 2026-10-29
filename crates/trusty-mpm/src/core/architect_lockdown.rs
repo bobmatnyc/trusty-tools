@@ -40,6 +40,8 @@ pub const DISABLE_CLAUDE_AI_CONNECTORS: &str = "disableClaudeAiConnectors";
 /// What: one `permissions.deny` rule per entry, each with no `(` (Claude Code
 /// skips such an `mcp__` rule); [`Lockdown::deny_rules`] adds the
 /// [`capitalised`] variant. The gworkspace braces are four plain globs.
+/// The #10387 Slack read allowlist is a hook allow, which cannot lift a
+/// `permissions.deny` rule, so it never reaches an Architect session.
 /// Test: `the_production_deny_list_is_the_plans_full_list`,
 /// `the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools`,
 /// `the_architect_deny_covers_every_egress_family`.

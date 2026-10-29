@@ -472,12 +472,11 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
 /// Test: `daemon::managed_routes::resume_claim_tests::the_claim_is_still_held_when_the_route_types_into_the_pane`.
 #[cfg(unix)]
 pub(crate) fn fake_claude_on_path() -> FakeClaudeOnPath {
-    use std::os::unix::fs::PermissionsExt;
     let dir = hermetic_temp_dir();
     let exe = dir.path().join("claude");
-    std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write the fake claude");
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod the fake claude");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
+        .expect("write the fake claude");
     let prev = std::env::var_os("PATH");
     let mut entries = vec![dir.path().to_path_buf()];
     if let Some(ref p) = prev {

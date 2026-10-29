@@ -194,6 +194,11 @@ pub struct PruneWorktreesRequest {
     /// kept, even under `discard_dirty`.
     #[serde(default)]
     pub only_discard_paths: Option<Vec<String>>,
+    /// Keep running after the client leaves (#7619, `--detach`). Read by the
+    /// streaming method only: without it a departed client cancels the pass
+    /// at its next candidate. The unary method ignores it.
+    #[serde(default)]
+    pub detach: bool,
 }
 
 fn default_dry_run() -> bool {
@@ -261,42 +266,9 @@ pub(crate) async fn prune_worktrees_core_in(
     req: PruneWorktreesRequest,
     lane: &'static tokio::sync::Semaphore,
 ) -> RouteOutcome {
-    // #6806: reject a present-but-unparseable caller id before any work, for
-    // the reason #6118 gives — dropping it would run the sweep with the
-    // self-attribution the caller asked for silently switched off, and report
-    // every one of the caller's own worktrees as blocked by a stranger.
-    if let Some(raw) = req.invoking_session.as_deref()
-        && raw.parse::<uuid::Uuid>().is_err()
-    {
-        let msg = "invalid invoking_session: not a UUID — refusing the prune rather than \
-                   running it without the requested caller attribution (#6806)"
-            .to_string();
-        warn!("prune-worktrees route: {msg}");
-        return RouteOutcome::text(400, msg);
-    }
-    // #8782: resolved before any work, and a project root that does not
-    // resolve is a 400 rather than a daemon-global sweep.
-    let scope = match PruneScope::from_request(
-        req.project_root.as_deref(),
-        req.only_orphan_paths.as_deref(),
-        req.only_merged_paths.as_deref(),
-        req.only_discard_paths.as_deref(),
-    ) {
-        Ok(scope) => scope,
-        Err(msg) => {
-            warn!("prune-worktrees route: {msg}");
-            return RouteOutcome::text(400, msg);
-        }
-    };
-    // #8994: one maintenance permit for manual and timer reclaim, taken before
-    // any work. Every refusal returns here.
-    let permit = if req.merged_prs {
-        match crate::daemon::services::merged_pr_reclaim::try_manual_permit(lane) {
-            Ok(permit) => Some(permit),
-            Err(refusal) => return merged_prs_refusal(refusal),
-        }
-    } else {
-        None
+    let (scope, permit) = match admit_prune(&req, lane) {
+        Ok(admitted) => admitted,
+        Err(refusal) => return refusal,
     };
     // See #8994: the pass runs in its own task that OWNS the permit. The
     // reclaim and orphan loops run in `spawn_blocking`, which a dropped
@@ -326,11 +298,62 @@ pub(crate) async fn prune_worktrees_core_in(
     }
 }
 
+/// Every refusal a prune-worktrees request can meet before any work (#6806,
+/// #8782, #8994), shared by the unary and streaming methods (#7619).
+///
+/// What: the caller id must parse, the scope must resolve, and a
+/// `merged_prs` pass must take the maintenance permit. `Err` is the reply.
+/// Test: `prune_route_rejects_an_unparseable_invoking_session`,
+/// `a_merged_prs_prune_is_refused_while_the_timer_sweep_holds_the_lane`.
+pub(crate) fn admit_prune(
+    req: &PruneWorktreesRequest,
+    lane: &'static tokio::sync::Semaphore,
+) -> Result<(PruneScope, Option<tokio::sync::SemaphorePermit<'static>>), RouteOutcome> {
+    // #6806: reject a present-but-unparseable caller id before any work, for
+    // the reason #6118 gives — dropping it would run the sweep with the
+    // self-attribution the caller asked for silently switched off, and report
+    // every one of the caller's own worktrees as blocked by a stranger.
+    if let Some(raw) = req.invoking_session.as_deref()
+        && raw.parse::<uuid::Uuid>().is_err()
+    {
+        let msg = "invalid invoking_session: not a UUID — refusing the prune rather than \
+                   running it without the requested caller attribution (#6806)"
+            .to_string();
+        warn!("prune-worktrees route: {msg}");
+        return Err(RouteOutcome::text(400, msg));
+    }
+    // #8782: resolved before any work, and a project root that does not
+    // resolve is a 400 rather than a daemon-global sweep.
+    let scope = match PruneScope::from_request(
+        req.project_root.as_deref(),
+        req.only_orphan_paths.as_deref(),
+        req.only_merged_paths.as_deref(),
+        req.only_discard_paths.as_deref(),
+    ) {
+        Ok(scope) => scope,
+        Err(msg) => {
+            warn!("prune-worktrees route: {msg}");
+            return Err(RouteOutcome::text(400, msg));
+        }
+    };
+    // #8994: one maintenance permit for manual and timer reclaim, taken before
+    // any work. Every refusal returns here.
+    let permit = if req.merged_prs {
+        match crate::daemon::services::merged_pr_reclaim::try_manual_permit(lane) {
+            Ok(permit) => Some(permit),
+            Err(refusal) => return Err(merged_prs_refusal(refusal)),
+        }
+    } else {
+        None
+    };
+    Ok((scope, permit))
+}
+
 /// The prune pass itself, run by [`prune_worktrees_core_in`] in a task that holds the permit (#8994).
 ///
 /// Test: `prune_spares_a_stopped_records_workspace`,
 /// `a_dropped_prune_request_keeps_the_lane_until_the_pass_ends`.
-async fn prune_worktrees_pass(
+pub(crate) async fn prune_worktrees_pass(
     state: &Arc<DaemonState>,
     req: PruneWorktreesRequest,
     scope: PruneScope,
@@ -728,6 +751,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -750,6 +774,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -783,6 +808,7 @@ mod tests {
                 only_orphan_paths: None,
                 only_merged_paths: None,
                 only_discard_paths: None,
+                detach: false,
             }),
         )
         .await
@@ -801,6 +827,7 @@ mod tests {
             only_orphan_paths: None,
             only_merged_paths: None,
             only_discard_paths: None,
+            detach: false,
         }
     }
 
@@ -1190,6 +1217,7 @@ mod tests {
                     only_orphan_paths: None,
                     only_merged_paths: None,
                     only_discard_paths: None,
+                    detach: false,
                 }),
             )
             .await

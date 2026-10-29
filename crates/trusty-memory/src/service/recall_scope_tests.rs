@@ -369,15 +369,17 @@ const GOLDEN_FIXTURE: &[(&str, &[&str])] = &[
 /// The fixed query behind the golden test.
 const GOLDEN_QUERY: &str = "rust build cache";
 
-/// `scope: "all"` top 5 for [`GOLDEN_QUERY`] over [`GOLDEN_FIXTURE`]. The
-/// golden test passes unchanged on `origin/main` bd0148dc70, where every
-/// recall_all searched every palace, so this is the pre-change answer.
+/// `scope: "all"` top 5 for [`GOLDEN_QUERY`] over [`GOLDEN_FIXTURE`].
+/// #10377: re-pinned. The two palaces dropped from the registry are reopened
+/// from disk; they used to open with an empty closet index and lose the 0.15
+/// closet boost, so their "cache" drawers ranked low. They now rank as if
+/// resident, which lifts the two `gold-d` cache drawers into the top 5.
 const GOLDEN_TOP5: [&str; 5] = [
     "rust build cache lives in the shared target directory",
     "rust analyzer indexes the workspace",
+    "docker layer cache speeds image builds",
+    "cache invalidation is hard",
     "a cold build compiles every dependency",
-    "sccache wraps rustc for cache hits",
-    "the cafeteria opens at noon",
 ];
 
 /// Seed [`GOLDEN_FIXTURE`] through MCP, then leave only `gold-a` and `gold-b`

@@ -875,7 +875,7 @@ mod tests {
     /// as a hole it cannot see.
     ///
     /// Why the check is "first live sequence == last snapshotted sequence + 1":
-    /// the writer emits `0..TOTAL` in order and the broadcast buffer is sized
+    /// the writer emits `0, 1, 2, …` in order and the broadcast buffer is sized
     /// above the run, so no subscriber can lag. A subscription is then correct
     /// exactly when its receiver resumes one past where its snapshot stopped —
     /// resuming later means a sample fell in the gap, resuming at the same
@@ -893,31 +893,68 @@ mod tests {
     /// 3000 samples, 6 in 10 with an 8-slot ring at 10 000, and 10 in 10 at
     /// 20 000 — which is the shape kept here, at about 5 s. Eviction is harmless
     /// because the check reads the last sequence, not the count.
-    /// What: one task records `TOTAL` sequence-tagged samples as fast as it can
-    /// while the main task subscribes in a tight loop for the whole run, then
-    /// checks that resume point for every subscription that landed mid-run.
+    ///
+    /// Why the writer ends on the subscriber's progress (#10029): a lone writer
+    /// records 20 000 samples in about 9 ms, so a fixed-length run ended on the
+    /// writer's clock while the floor counts the subscriber's work, on another
+    /// OS thread. A runner that took the subscriber thread off-CPU for a few
+    /// milliseconds let the writer finish alone — CI saw 293 mid-run
+    /// subscriptions. Past `MIN_SAMPLES` the writer now records one sample per
+    /// new subscription until `MIN_MID_RUN` have landed, so the floor holds
+    /// however the threads are scheduled and the buffer stays bounded.
+    /// What: one task records at least `MIN_SAMPLES` sequence-tagged samples as
+    /// fast as it can while the main task subscribes in a tight loop for the
+    /// whole run, then checks that resume point for every subscription that
+    /// landed mid-run.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn every_sample_reaches_a_mid_run_subscriber_exactly_once() {
+        use std::sync::atomic::AtomicUsize;
         use tokio::sync::broadcast::error::TryRecvError;
 
-        const TOTAL: u64 = 20_000;
+        const MIN_SAMPLES: u64 = 20_000;
+        const MIN_MID_RUN: usize = 500;
         const MAX_SUBSCRIPTIONS: usize = 200_000;
+        // #10029: past `MIN_SAMPLES` the writer adds at most one sample per
+        // subscription, and stops once `MIN_MID_RUN` have been counted.
+        const MAX_SAMPLES: u64 = MIN_SAMPLES + MIN_MID_RUN as u64 + 1;
 
         let history = MachineHistory::with_limits(
             8,
             8,
             // Above the whole run, so a receiver read at the end cannot lag and
             // every gap it reports is the ordering bug.
-            TOTAL as usize * 2,
+            MAX_SAMPLES as usize + 1,
             Duration::from_secs(60),
         );
 
+        let subscribed = Arc::new(AtomicUsize::new(0));
+        let progressed = Arc::new(tokio::sync::Notify::new());
         let writer = {
             let history = history.clone();
+            let subscribed = Arc::clone(&subscribed);
+            let progressed = Arc::clone(&progressed);
             tokio::spawn(async move {
-                for seq in 0..TOTAL {
+                let mut seq = 0u64;
+                loop {
+                    // #10029: read the count BEFORE recording. Every subscription
+                    // it counts released its read lock before this load, so the
+                    // sample recorded next is outside that snapshot — the
+                    // counted subscriptions are all mid-run.
+                    let seen = subscribed.load(Ordering::Acquire);
+                    let done = seq + 1 >= MIN_SAMPLES && seen >= MIN_MID_RUN;
                     history.record_sample(tagged_sample(seq)).await;
+                    if done {
+                        return seq;
+                    }
+                    seq += 1;
+                    // #10029: past the minimum run, wait for the subscriber
+                    // instead of running ahead of it.
+                    if seq >= MIN_SAMPLES {
+                        while subscribed.load(Ordering::Acquire) == seen {
+                            progressed.notified().await;
+                        }
+                    }
                 }
             })
         };
@@ -935,13 +972,17 @@ mod tests {
                 .last()
                 .map(|m| m.sampled_at_unix.expect("tagged sample"));
             taken.push((last, rx));
+            // #10029: the writer paces on this and ends the run on it.
+            subscribed.store(taken.len(), Ordering::Release);
+            progressed.notify_one();
         }
-        writer.await.expect("writer task");
+        let last_seq = writer.await.expect("writer task");
+        let total = last_seq + 1;
 
         let mut mid_run = 0usize;
         for (nth, (last_snapshotted, mut rx)) in taken.into_iter().enumerate() {
             // Subscribed after the last sample — nothing live to resume at.
-            if last_snapshotted == Some(TOTAL - 1) {
+            if last_snapshotted == Some(last_seq) {
                 continue;
             }
             let expected = last_snapshotted.map_or(0, |s| s + 1);
@@ -951,7 +992,7 @@ mod tests {
                     Ok(HistoryEvent::Sample(m)) => break m.sampled_at_unix.expect("tagged sample"),
                     Ok(HistoryEvent::Transition(_) | HistoryEvent::Services(_)) => {}
                     Err(TryRecvError::Empty | TryRecvError::Closed) => panic!(
-                        "subscription {nth} snapshotted through {last_snapshotted:?} of {TOTAL} \
+                        "subscription {nth} snapshotted through {last_snapshotted:?} of {total} \
                          samples and then received nothing live"
                     ),
                     Err(TryRecvError::Lagged(n)) => panic!(
@@ -967,9 +1008,9 @@ mod tests {
             );
         }
         assert!(
-            mid_run >= 500,
+            mid_run >= MIN_MID_RUN,
             "only {mid_run} subscription(s) landed mid-run — the race this test exists to catch \
-             was never given a chance"
+             was never given a chance in {total} samples"
         );
     }
 }

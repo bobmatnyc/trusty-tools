@@ -852,7 +852,6 @@ impl Drop for EnvGuard {
 #[cfg(unix)]
 mod shutdown_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Write a minimal stdio JSON-RPC mock of `trusty-embedderd --stdio` to a
     /// temp file; returns the path plus the guarding `TempDir`.
@@ -862,7 +861,8 @@ mod shutdown_tests {
     fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -873,9 +873,6 @@ done
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 
@@ -889,7 +886,8 @@ done
     fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mock-embedderd-crash-once.sh");
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &path,
             r#"#!/bin/sh
 IFS= read -r line
@@ -900,9 +898,6 @@ exit 1
 "#,
         )
         .expect("write mock script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod +x");
         (dir, path)
     }
 

@@ -140,15 +140,50 @@ async fn an_auto_resume_whose_relaunch_finds_no_runtime_is_not_left_active() {
     );
 }
 
+/// FAIL-OPEN CHECK (#10356): an auto-resume in a process with no relauncher.
+///
+/// Why: the standalone `tm supervisor` builds its own manager and installs no
+/// relauncher. Its auto-resume used to mark the record `Active`, stamp the
+/// breaker and return `Ok` over a pane with no runtime; the reaper then
+/// stopped it again and the #6568 breaker parked the whole fleet.
+/// What: with nothing installed, the call fails, the record ends `Errored`
+/// with the reason on its task, and the breaker holds no stamp for it.
+/// Test: this function IS the test. RED on the pre-fix commit: the resume
+/// returned `Ok` and the record was `Active`.
 #[tokio::test]
-async fn an_auto_resume_without_a_relauncher_behaves_as_before() {
-    // Every hermetic test and any embedder that drives its own resumes lives
-    // here; installing nothing must change nothing.
+async fn an_auto_resume_without_a_relauncher_fails_closed() {
     let (_d, mgr, id) = manager_with_stopped_session().await;
     assert!(mgr.relauncher().is_none());
-    mgr.resume_auto(&id).await.expect("the resume must succeed");
+
+    let err = mgr
+        .resume_auto(&id)
+        .await
+        .expect_err("an auto-resume with no relauncher must fail, not report Ok");
+    assert!(
+        matches!(
+            err,
+            crate::session_manager::ManagedError::AutoResumeRecorded(_)
+        ),
+        "the failure is already on the record, so the poller must not add a second note: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("no runtime relauncher is installed"),
+        "{err}"
+    );
+
+    let record = mgr.get(&id).await.expect("the record survives");
+    assert_eq!(record.state, ManagedSessionState::Errored);
+    assert!(
+        record.task.contains("no runtime relauncher is installed"),
+        "the reason must be recorded on the record: {}",
+        record.task
+    );
+
+    let flap = mgr.resume_breaker.write().await.state_of(&id).await;
     assert_eq!(
-        mgr.get(&id).await.expect("record").state,
-        ManagedSessionState::Active
+        flap,
+        crate::session_manager::resume_breaker::FlapState::default(),
+        "an attempt that launched nothing must not stamp or count toward the breaker"
     );
 }

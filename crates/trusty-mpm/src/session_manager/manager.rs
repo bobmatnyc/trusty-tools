@@ -371,6 +371,9 @@ pub struct SessionManager {
     /// Installed by the daemon only; see `decommission_ledger.rs`.
     pub(crate) removal_recorder:
         std::sync::OnceLock<crate::core::worktree_ledger::removal_evidence::RemovalRecorder>,
+    /// #9167 AC5: where each delivered inject is recorded. Installed by a
+    /// process with a bus producer only; see `inject_record.rs`.
+    pub(crate) inject_recorder: std::sync::OnceLock<Arc<dyn super::inject_record::InjectRecorder>>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -419,6 +422,7 @@ impl SessionManager {
             claude_registry: std::sync::OnceLock::new(),
             taint_dir: std::sync::OnceLock::new(),
             removal_recorder: std::sync::OnceLock::new(),
+            inject_recorder: std::sync::OnceLock::new(),
         })
     }
 
@@ -641,6 +645,9 @@ impl SessionManager {
     /// to that pane: [`Submit::Enter`] → `send_line_to_pane` (literal +
     /// Enter), [`Submit::NoSubmit`] → `send_keys_literal_to_pane` (literal
     /// only), [`Submit::Interrupt`] → `send_interrupt_to_pane` (Ctrl-C).
+    /// Once tmux accepts an `Enter`/`NoSubmit` text, it is reported to the
+    /// installed recorder (#9167 AC5, `inject_record.rs`); an `Interrupt` and
+    /// any refused or failed send report nothing.
     /// Bumps `last_activity_at` ONLY for
     /// `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is a STOP signal, not
     /// forward progress, so treating it as activity would mislead the
@@ -654,7 +661,10 @@ impl SessionManager {
     /// `inject_refuses_a_legacy_record_without_pane_id`
     /// in `pane_scoped_tests.rs`;
     /// `a_stale_record_after_a_server_restart_never_sends_keys`;
-    /// `inbound_send_into_an_exited_harness_pane_types_nothing`.
+    /// `inbound_send_into_an_exited_harness_pane_types_nothing`;
+    /// `an_inject_is_exactly_one_message_event_9167`,
+    /// `an_interrupt_records_no_message_9167`,
+    /// `a_refused_inject_records_no_message_9167`.
     pub async fn inject(
         &self,
         id: &ManagedSessionId,
@@ -695,6 +705,10 @@ impl SessionManager {
             Submit::Interrupt => self.tmux.send_interrupt_to_pane(name, &pane),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // #9167 AC5: typed text is one `message` event; Ctrl-C carries none.
+        if !matches!(submit, Submit::Interrupt) {
+            self.record_delivery(&record, text);
+        }
         // Interrupt is a STOP signal, not activity — do not bump last_activity_at.
         if matches!(submit, Submit::Enter | Submit::NoSubmit) {
             record.last_activity_at = Some(Utc::now());
@@ -767,8 +781,8 @@ impl SessionManager {
     /// tears the preserved pane down. True bare-`tm`-in-pane relaunch reusing
     /// the surviving shell is the scope of #2023 component C, not this method.
     ///
-    /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
-    /// (`supervisor::poller::run_tick`) auto-resumes a `Stopped` record whose
+    /// NOTE — auto-resume: the daemon's sweep (`supervisor::poller::resume_sweep`,
+    /// #10356; `tm supervisor` before) auto-resumes a `Stopped` record whose
     /// stop nobody asked for, and `resume()` kills the preserved pane as
     /// described above. This method records
     /// [`StopCause::Unexpected`](crate::session_manager::record::StopCause::Unexpected), so its

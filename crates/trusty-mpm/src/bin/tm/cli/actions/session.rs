@@ -631,6 +631,11 @@ pub(crate) enum SessionAction {
         /// the run is scoped to the checkout it is invoked from.
         #[arg(long)]
         all_projects: bool,
+        /// With `--force`, let the daemon finish the removal after this
+        /// command exits (#7619). Without it, Ctrl-C stops new removals and a
+        /// removal in flight finishes.
+        #[arg(long, requires = "force")]
+        detach: bool,
     },
     /// Report every git-registered worktree against `sessions.json` (#4288).
     ///

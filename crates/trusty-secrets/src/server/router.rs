@@ -158,7 +158,7 @@ pub(crate) fn open_local(
 ///
 /// Why: A10 — the binary takes the 1Password service-account token out of
 /// its environment before any thread starts and hands it to the factory;
-/// doctor may report only that it was there (owner ruling Q1).
+/// doctor may report only that it was there (#7519).
 /// What: the token's presence, never its value, and the `PATH` doctor's
 /// tool detection searches (DOC-74 §7), so `Debug` carries no secret.
 /// Test: `doctor_reports_token_presence_and_never_the_token`,
@@ -237,7 +237,8 @@ pub struct State {
     /// Backend id → implementation.
     pub backends: BackendFactory,
     /// The credential access audit log.
-    pub(crate) audit: AuditSink,
+    // #10386: shared, so a store's deny-change hook can append to it.
+    pub(crate) audit: Arc<AuditSink>,
     /// Whether this build links a Keychain, for the `file` posture checks.
     // #7524: a field, not the constant, so tests can act as either build.
     pub(crate) keychain_compiled: bool,
@@ -329,7 +330,10 @@ impl State {
         account_home: Option<&Path>,
     ) -> Self {
         let index = NamesIndex::at(&settings.index_root);
-        let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
+        let audit = Arc::new(AuditSink::new(
+            settings.audit_log.clone(),
+            settings.audit_max_bytes,
+        ));
         // #7520 S2: entries answer for at most the configured max age.
         let cache = Arc::new(SecretCache::new(settings.cache_max_age));
         Self {

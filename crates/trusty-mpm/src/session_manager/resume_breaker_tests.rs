@@ -16,8 +16,8 @@ use chrono::{TimeDelta, Utc};
 
 use super::record::{ManagedSessionId, ManagedSessionState, StopCause};
 use super::resume_breaker::{
-    BreakerVerdict, DEFAULT_MAX_CONSECUTIVE, ENV_FLAP_WINDOW_SECS, ENV_MAX_CONSECUTIVE, FlapState,
-    ResumeBreakerConfig, ResumeBreakerStore, evaluate,
+    BreakerVerdict, DEFAULT_MAX_CONSECUTIVE, ENV_BOOT_GRACE_SECS, ENV_FLAP_WINDOW_SECS,
+    ENV_MAX_CONSECUTIVE, FlapState, ResumeBreakerConfig, ResumeBreakerStore, evaluate,
 };
 use super::{FakeNoopTmuxDriver, SessionManager};
 
@@ -30,6 +30,7 @@ fn config_defaults() {
     let cfg = ResumeBreakerConfig::default();
     assert_eq!(cfg.flap_window, Duration::from_secs(120));
     assert_eq!(cfg.max_consecutive, DEFAULT_MAX_CONSECUTIVE);
+    assert_eq!(cfg.boot_grace, Duration::from_secs(600));
 }
 
 #[test]
@@ -37,10 +38,12 @@ fn config_env_parsing() {
     let cfg = ResumeBreakerConfig::from_env_with(|k| match k {
         ENV_FLAP_WINDOW_SECS => Some(" 45 ".to_string()),
         ENV_MAX_CONSECUTIVE => Some("3".to_string()),
+        ENV_BOOT_GRACE_SECS => Some("0".to_string()),
         _ => None,
     });
     assert_eq!(cfg.flap_window, Duration::from_secs(45));
     assert_eq!(cfg.max_consecutive, 3);
+    assert_eq!(cfg.boot_grace, Duration::ZERO, "zero disables the grace");
 
     // Garbage falls back rather than silently disabling the breaker.
     let cfg = ResumeBreakerConfig::from_env_with(|_| Some("nope".to_string()));
@@ -60,6 +63,7 @@ fn cfg(window_secs: u64, k: u32) -> ResumeBreakerConfig {
     ResumeBreakerConfig {
         flap_window: Duration::from_secs(window_secs),
         max_consecutive: k,
+        boot_grace: Duration::ZERO,
     }
 }
 
@@ -322,6 +326,20 @@ async fn a_fast_death_after_an_auto_resume_counts() {
 // End to end, through the real SessionManager
 // -------------------------------------------------------------------------
 
+/// A relauncher that always reports a verified runtime.
+///
+/// #10356: `resume_auto` fails closed with no relauncher installed, so the
+/// breaker cycle needs one that succeeds. The pane is unchanged, so the
+/// session still dies again on the next reap.
+struct AlwaysRuns;
+
+#[async_trait::async_trait]
+impl super::relaunch::RuntimeRelauncher for AlwaysRuns {
+    async fn relaunch(&self, _record: &super::SessionRecord) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// A session workspace inside the test's own temp dir.
 ///
 /// #8838: every stop writes `<workspace>/.trusty-mpm/scrollback.txt`, so a
@@ -335,6 +353,15 @@ fn fixture_workspace(dir: &tempfile::TempDir) -> std::path::PathBuf {
 /// Build an isolated manager whose breaker parks after `k` fast deaths, and
 /// seed one `Active` session on a fake tmux driver.
 async fn seeded(dir: &tempfile::TempDir, k: u32) -> (Arc<SessionManager>, ManagedSessionId) {
+    seeded_with_grace(dir, k, Duration::ZERO).await
+}
+
+/// [`seeded`] with a boot grace window (#10356).
+async fn seeded_with_grace(
+    dir: &tempfile::TempDir,
+    k: u32,
+    boot_grace: Duration,
+) -> (Arc<SessionManager>, ManagedSessionId) {
     let mut mgr = SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
         .await
         .expect("session manager");
@@ -343,8 +370,10 @@ async fn seeded(dir: &tempfile::TempDir, k: u32) -> (Arc<SessionManager>, Manage
     mgr.set_resume_breaker_config(ResumeBreakerConfig {
         flap_window: Duration::from_secs(3600),
         max_consecutive: k,
+        boot_grace,
     });
     let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
     let ws = fixture_workspace(dir);
     let record = mgr
         .create("flap-test".into(), Some(ws.clone()), None, None, None, None)
@@ -383,8 +412,11 @@ async fn attach(dir: &tempfile::TempDir, k: u32) -> Arc<SessionManager> {
     mgr.set_resume_breaker_config(ResumeBreakerConfig {
         flap_window: Duration::from_secs(3600),
         max_consecutive: k,
+        boot_grace: Duration::ZERO,
     });
-    Arc::new(mgr)
+    let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
+    mgr
 }
 
 /// The production topology: the reaper and the poller are DIFFERENT processes.
@@ -580,8 +612,10 @@ async fn a_session_that_dies_slowly_is_never_parked() {
     mgr.set_resume_breaker_config(ResumeBreakerConfig {
         flap_window: Duration::from_secs(0),
         max_consecutive: 2,
+        boot_grace: Duration::ZERO,
     });
     let mgr = Arc::new(mgr);
+    assert!(mgr.install_relauncher(Arc::new(AlwaysRuns)));
     let ws = fixture_workspace(&tmp);
     let record = mgr
         .create("slow".into(), Some(ws.clone()), None, None, None, None)
@@ -601,6 +635,59 @@ async fn a_session_that_dies_slowly_is_never_parked() {
         );
         assert!(r.is_auto_resumable(), "cycle {cycle}");
     }
+}
+
+/// #10356 (owner ruling D73): the cold-start storm must not spend the flap
+/// budget.
+///
+/// Why: on 2026-10-27 every session flapped through boot and the breaker
+/// parked them all after five cycles.
+/// What: a manager inside a one-hour grace window runs six fast cycles with a
+/// threshold of three. No cycle parks, and the counter is never written.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn deaths_inside_the_boot_grace_are_not_counted() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (mgr, id) = seeded_with_grace(&tmp, 3, Duration::from_secs(3600)).await;
+    assert!(mgr.in_resume_boot_grace().await);
+
+    for cycle in 1..=6 {
+        let r = one_cycle(&mgr, &id).await;
+        assert_eq!(
+            r.stop_cause,
+            Some(StopCause::Unexpected),
+            "cycle {cycle}: a death inside the boot grace must not park"
+        );
+    }
+    let flap = mgr.resume_breaker.write().await.state_of(&id).await;
+    assert_eq!(flap.consecutive, 0, "no grace death may count: {flap:?}");
+}
+
+/// #10356 failure path: the grace window must not hide a real flapper.
+///
+/// What: two cycles inside the grace window count nothing; once the window
+/// ends, the next three fast deaths park the session at threshold three.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_flapper_is_still_parked_after_the_grace_window() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (mgr, id) = seeded_with_grace(&tmp, 3, Duration::from_secs(3600)).await;
+    for _ in 0..2 {
+        one_cycle(&mgr, &id).await;
+    }
+    mgr.end_resume_boot_grace().await;
+    assert!(!mgr.in_resume_boot_grace().await);
+
+    for cycle in 1..=2 {
+        let r = one_cycle(&mgr, &id).await;
+        assert_eq!(r.stop_cause, Some(StopCause::Unexpected), "cycle {cycle}");
+    }
+    let parked = one_cycle(&mgr, &id).await;
+    assert_eq!(
+        parked.stop_cause,
+        Some(StopCause::ResumeFlapping),
+        "the third counted fast death after the grace window must park"
+    );
 }
 
 /// Build a `Stopped` record carrying `cause`, through the real create path.

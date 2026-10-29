@@ -344,6 +344,17 @@ jobs:
       - name: Content-bundle packager selftest (#8389)
         run: bash scripts/package_content_selftest.sh
 
+      # #10210: the perf compare, status writer and weekly memory runner are
+      # pure shell over fixtures and stubbed suites; no EVO, no cargo. Same job,
+      # same reason as the steps above: no new required context, no toolchain.
+      # The daily sampler selftest runs in stub mode here; its `--live`
+      # sandbox-daemon smoke needs installed binaries and stays local.
+      - name: Perf compare + weekly runner + sampler selftests (#10210)
+        run: |
+          bash scripts/perf_compare_selftest.sh
+          bash scripts/perf_weekly_memory_selftest.sh
+          bash scripts/perf_sampler_selftest.sh
+
       # #8378: the relevance detector and the `CI gate` verdict decide which
       # required contexts do work and which skips are legitimate, so their
       # fixtures — and the table-equals-needs wiring check — run first.
@@ -768,7 +779,7 @@ jobs:
   # invocation, so a shard that builds a subset resolves a SUBSET of features:
   # measured on this workspace, a shard containing trusty-common + its six
   # nearest neighbours saw 24 of the 37 trusty-common features that `--workspace`
-  # resolves, losing embedder, memory-core, bm25, migrations and friends — and
+  # resolves, losing embedder, bm25, migrations and friends — and
   # every test behind those `#[cfg(feature = …)]` gates with them. A bare
   # `cargo test -p trusty-common --lib` lists 310 tests where `--workspace`
   # lists 2062. Four green shards, ~1750 trusty-common tests not run, nothing
@@ -2659,6 +2670,9 @@ jobs:
 
       - name: Preflight CHECK 8 decision self-test
         run: bash scripts/preflight-check8-selftest.sh
+
+      - name: Preflight CHECK 10 crate-size self-test (an over-limit .crate must FAIL)
+        run: bash scripts/check-crate-size-selftest.sh
 
   # The website CONTENT gate (owner ruling 2026-09-18): every website suite
   # that reads real repository content runs here and nowhere else, and it is

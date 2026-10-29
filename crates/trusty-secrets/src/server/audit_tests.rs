@@ -249,7 +249,10 @@ async fn audit_list_records_only_denials_and_scopes_doctor_none() {
 /// Serve `fx` until it exits idle, after `calls` run against it.
 async fn serve_until_idle(fx: &Fixture, calls: &[(&'static str, Value)]) {
     let (_tx, rx) = oneshot::channel::<()>();
-    let task = tokio::spawn(serve(fx.settings.clone(), fx.backends(), async move {
+    // #10386: the fixture's state judges `set`/`delete` callers on a fake
+    // process table, never the host's (which may run under Claude Code).
+    let state = fx.state(fx.backends());
+    let task = tokio::spawn(crate::server::router::serve_state(state, async move {
         let _ = rx.await;
     }));
     wait_serving(&fx.settings.socket).await;

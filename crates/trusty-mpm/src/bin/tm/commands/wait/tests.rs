@@ -840,6 +840,7 @@ fn status_line_carries_remaining_budget() {
         &b,
         1_100,
         "tm wait --for check --pr 1",
+        100,
     );
     assert!(
         line.starts_with("tm-wait status=pending for=check "),
@@ -853,6 +854,23 @@ fn status_line_carries_remaining_budget() {
     );
 }
 
+/// Why (#10339): a slice-ended `pending` must not read as a timeout or failure.
+#[test]
+fn status_line_pending_note_says_the_slice_ended() {
+    let b = budget_at(1_000, 1800);
+    let out = Outcome {
+        status: Status::Pending,
+        detail: "waiting".into(),
+    };
+    let line = status_line(&out, WaitFor::File, &b, 1_100, "tm wait --for file", 100);
+    assert!(
+        line.contains(
+            r#"note="the 100s slice ended before the 1800s --timeout; this is not a timeout or a failure, 1700s of the budget remain. Re-run the command in rerun= (or pass --slice <n>, up to 500)""#
+        ),
+        "{line}"
+    );
+}
+
 /// Why: a terminal line must not invite a re-run, and a detail containing a
 /// quote or a newline must not break the line into two.
 #[test]
@@ -862,7 +880,7 @@ fn status_line_quotes_detail() {
         status: Status::Met,
         detail: "/tmp/g.txt contains \"EXIT=\"\nand more".into(),
     };
-    let line = status_line(&out, WaitFor::File, &b, 1_005, "tm wait --for file");
+    let line = status_line(&out, WaitFor::File, &b, 1_005, "tm wait --for file", 100);
     assert!(!line.contains("rerun="), "{line}");
     assert_eq!(line.lines().count(), 1, "{line}");
     assert!(

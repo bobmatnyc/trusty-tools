@@ -132,7 +132,7 @@ const CLAUDE_MPM_KEYS: &[&str] = &[
 ///
 /// This is that something. `compose_agent` concatenates the whole `extends:`
 /// chain base-first, and EVERY bundled agent's chain roots at `base-agent` —
-/// all 42 in `crates/trusty-mpm/src/assets/agents/`, and `trusty-code`'s set
+/// all 42 in `content/agents/`, and `trusty-code`'s set
 /// too. So every composed agent body opens with this line, and no file that tm
 /// did not compose carries it unless someone pasted tm's own base preamble
 /// verbatim, at which point the file IS a copy of a tm artifact.

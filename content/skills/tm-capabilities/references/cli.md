@@ -9,6 +9,19 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
+  - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
+    - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
+    - `delete` — Delete a document; its record goes to the prune log first
+    - `footer` — Print the one-line reply footer, built from `tally`
+    - `fsck` — Check the files against the change log and references; exit 1 on a problem
+    - `get` — Print one document as `{id, version, data}`
+    - `ids` — Print the next free id of a prefix, the free count and retire candidates
+    - `list` — Print a collection's documents, in id order
+    - `pruned` — Print prune-log lines, newest last
+    - `set` — Replace or create a document; an existing one needs `--if-version`
+    - `tally` — Print the open-item counts line, the only source for counts
+    - `update` — Merge keys into an existing document
+    - `validate` — Check every document against the schemas; exit 1 on an error
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
@@ -71,6 +84,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
   - `audit` — Verify a filed issue carries a project, a milestone, and a component label (#7097)
+  - `board` — Create, reconcile, check and attach to the repo's standard GitHub Projects board (#10276)
+    - `add` — Add issue N to the board the repo's `project:` block names
+    - `apply` — Reconcile the repo's board to the spec (dry run unless --apply)
+    - `check` — Report drift between the repo's board and the spec (read-only)
+    - `init` — Create a standard board for a repo from nothing (dry run unless --apply)
+    - `show` — Print the embedded board spec and its version
   - `current` — Report an issue's current state, derived from its labels
   - `epic` — File and maintain an epic tracker and its phase issues (#8447)
     - `close` — Close a tracker once every phase is closed, posting the outcome→evidence comment (#8448)
@@ -262,7 +281,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `status` — Show daemon and session status
 - `statusline` — Read Claude Code statusLine JSON from stdin and print one compact line
 - `stop` — Stop every running trusty-mpm daemon process
-- `supervisor` — Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206)
+- `supervisor` — Run the unattended fleet supervisor (24/7 observer, #1206)
 - `telegram` — Manage the Telegram remote-management bot (pair, status, start, stop)
   - `pair` — Request a one-time pairing code for the Telegram bot
   - `start` — Start the Telegram bot process

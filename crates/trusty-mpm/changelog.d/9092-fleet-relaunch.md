@@ -1,2 +1,0 @@
-Added
-- `tm fleet relaunch` restarts the Architect's `claude` in its running tmux session with the flags `tm fleet init` uses, records the new process as the Architect, removes the replaced launch record and re-registers with the daemon, so the Architect's anchor writes are allowed again. It checks every launch step before it stops the old `claude`, refuses a session with more than one pane and a run from inside the Architect, and keeps the session when a resume fails. With no session running it exits 1 and names `tm fleet init` (#9092).

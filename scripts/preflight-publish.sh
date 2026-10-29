@@ -243,6 +243,18 @@
 #     the assembler for you, or assemble directly at the version you intend to
 #     ship (`scripts/assemble-changelog.sh <crate-dir> <version>`).
 #
+#   CHECK 10 (packaged .crate fits the crates.io upload limit): delegates to
+#     `scripts/check-crate-size.sh <pkg> <version>`, which runs
+#     `cargo package -p <pkg> --no-verify`, finds the .crate under
+#     `${CARGO_TARGET_DIR:-<repo>/target}/package/` and prints [FAIL] at or
+#     above 10485760 B, [WARN] at or above 90% of that. A .crate that cannot be
+#     built, found or measured is a [FAIL].
+#
+#     WHY THIS IS NOT ALREADY COVERED: the trusty-mpm 1.9.0 publish passed
+#     checks 1-9 and then failed at upload with crates.io "413 Payload Too
+#     Large: max upload size is: 10485760". No earlier check measures the
+#     packaged archive. No override flag: shrink the package.
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -257,7 +269,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 9 checks unconditionally (never short-circuits)
+#   --check-only     run all 10 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -463,27 +475,23 @@ FAILURES=0
 # CHECK 1 — merged-main
 # ===========================================================================
 check1_merged_main() {
-  if ! git fetch origin main --quiet 2>/dev/null; then
-    echo "[FAIL] merged-main: 'git fetch origin main' failed — check network/remote access." >&2
-    return 1
-  fi
-  local head_sha origin_sha
+  # D96 (#10388): HEAD must sit AT the tip of origin/main or of a
+  # release/<crate>-<semver> branch. The rule lives in check-tag-ancestry.sh.
+  local head_sha
   head_sha="$(git rev-parse HEAD)"
-  origin_sha="$(git rev-parse origin/main)"
-  if [ "$head_sha" = "$origin_sha" ]; then
-    echo "[PASS] merged-main: HEAD (${head_sha}) == origin/main (${origin_sha})" >&2
+  if bash "${SCRIPT_DIR}/check-tag-ancestry.sh" --at-tip --crate "$CRATE_DIR" --version "$VERSION" HEAD; then
+    echo "[PASS] merged-main: HEAD (${head_sha}) is the tip of a releasable ref" >&2
     return 0
   fi
   if [ "${PREFLIGHT_ALLOW_DETACHED:-0}" = "1" ]; then
-    echo "[WARN] merged-main: HEAD (${head_sha}) != origin/main (${origin_sha}), but" >&2
+    echo "[WARN] merged-main: HEAD (${head_sha}) is not a releasable tip, but" >&2
     echo "       PREFLIGHT_ALLOW_DETACHED=1 — proceeding anyway. You are trusting that" >&2
     echo "       this checkout is genuinely validated for release. Misuse of this" >&2
     echo "       override is exactly how the 2026-07-08 incident happened." >&2
     return 0
   fi
-  echo "[FAIL] merged-main: HEAD (${head_sha}) != origin/main (${origin_sha})." >&2
-  echo "       Publishing must only happen from a checkout sitting AT merged main —" >&2
-  echo "       never an unmerged branch. Merge to main, pull, and re-run from there." >&2
+  echo "[FAIL] merged-main: HEAD (${head_sha}) is not the tip of origin/main or of a" >&2
+  echo "       release/<crate>-<semver> branch. Never publish from an unmerged branch." >&2
   echo "       Escape hatch (validated release worktrees only): PREFLIGHT_ALLOW_DETACHED=1" >&2
   return 1
 }
@@ -1831,6 +1839,20 @@ check9_changelog_assembled() {
   return 1
 }
 
+# ===========================================================================
+# CHECK 10 — the packaged .crate fits the crates.io upload limit
+# ===========================================================================
+# Delegated so scripts/check-crate-size-selftest.sh can drive every verdict
+# against a stub cargo. The gate prints its own tagged [PASS]/[WARN]/[FAIL]
+# line; this function only relays it. Fail-closed: any nonzero exit is a FAIL.
+check10_crate_size() {
+  local log="${TMP_CRATESIZE}" rc=0
+
+  bash "${REPO_ROOT}/scripts/check-crate-size.sh" "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+  cat "$log" >&2
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------
 # preflight_ok_summary — the final OK lines, printed only when no check failed.
 # A recorded break lists every entry and never reads "Safe to publish"
@@ -1842,10 +1864,10 @@ preflight_ok_summary() {
     # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
     # nothing. The same distinction the check line draws, drawn again at the line
     # an operator is most likely to read on its own.
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but the" >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but the" >&2
     echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
   elif [ -n "${SEMVER_RECORDED_BREAKS:-}" ]; then
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but it SHIPS" >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but it SHIPS" >&2
     echo "  A PUBLIC-API BREAK: ${SEMVER_RECORDED_BREAKS}." >&2
     printf '%s\n' "${SEMVER_RECORDED_LIST:-}" | sed 's/^/    /' >&2
     echo "  Land the record in the post-release PR. See the check 5 line above." >&2
@@ -1855,13 +1877,13 @@ preflight_ok_summary() {
   elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
     # The type differ blocks nothing, so without this the summary would say
     # "safe to publish" over a listed set of type changes nobody has confirmed.
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks." >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks." >&2
     echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
   else
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks. Safe to publish." >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks. Safe to publish." >&2
   fi
   if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
-    # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 9 checks"
+    # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 10 checks"
     # must not absorb a check-8 outcome that read nothing.
     echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
   fi
@@ -1877,10 +1899,11 @@ TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
 TMP_PARITY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.parity.XXXXXX")"
 TMP_UIBUNDLE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.uibundle.XXXXXX")"
 TMP_CHANGELOG="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.changelog.XXXXXX")"
-trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG"' EXIT
+TMP_CRATESIZE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.cratesize.XXXXXX")"
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG" "$TMP_CRATESIZE"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 9 checks. Always run every check (rather than short-circuiting) so
+# Run all 10 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -1896,6 +1919,7 @@ check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check9_changelog_assembled; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check10_crate_size;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then

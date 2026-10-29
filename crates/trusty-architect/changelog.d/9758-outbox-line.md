@@ -1,2 +1,0 @@
-Added
-- The PM ledger writer appends one `outbox.jsonl` line per changed record, `{seq, epoch, code, id, rev, op, at}`, in the same journalled commit and before the `state.json` replace: `seq` is gapless per store, `rev` is the commit's `v`, a record that left `state.json` is named as `archived`, and a refused, no-op or replayed batch appends none (LDG-4.4, [#9758](https://github.com/bobmatnyc/trusty-tools/issues/9758))

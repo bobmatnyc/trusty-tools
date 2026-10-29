@@ -23,9 +23,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
+use trusty_common::stdio_mcp_client::capped_line::{CappedLine, read_capped_line};
+use trusty_common::stdio_mcp_client::{MAX_LINE_BYTES, is_response_to, log_field};
 use trusty_mcp::Request;
 
 use crate::events::SessionEventEnvelope;
@@ -72,6 +74,20 @@ pub enum RpcClientError {
     /// No matching response arrived within [`DEFAULT_CALL_TIMEOUT`].
     #[error("timed out waiting for the daemon to respond")]
     Timeout,
+    /// #10360: a stdout line passed [`MAX_LINE_BYTES`]. The line is dropped,
+    /// never truncated; the next read resumes after its terminating newline.
+    #[error("daemon sent a line over the {0}-byte cap; line discarded")]
+    LineTooLong(usize),
+}
+
+/// The child-supplied `method` of `frame`, bounded for a log line.
+///
+/// Why: #10360 — the method string comes from the child; logged whole, one
+/// frame can flood the log.
+/// What: trusty-common's `log_field` cut (64 chars plus an `…(+N)` marker).
+/// Test: `logged_method_truncates_long_method`.
+fn logged_method(frame: &Value) -> String {
+    log_field(frame.get("method").and_then(Value::as_str).unwrap_or(""))
 }
 
 /// Build the outgoing JSON-RPC 2.0 request envelope for one call.
@@ -122,7 +138,12 @@ fn classify_notification(value: &Value) -> Option<SessionEventEnvelope> {
 pub struct StdioRpcClient {
     child: Child,
     stdin: ChildStdin,
-    lines: Lines<BufReader<ChildStdout>>,
+    stdout: BufReader<ChildStdout>,
+    /// #10360: bytes of a line not yet ended by `\n`, kept across a
+    /// cancelled read. A new spawn starts empty, so no state outlives a child.
+    line_buf: Vec<u8>,
+    /// #10360: set after an oversize line; bytes up to the next `\n` drop.
+    discard_line: bool,
     next_id: i64,
     pending_notifications: VecDeque<SessionEventEnvelope>,
 }
@@ -162,7 +183,9 @@ impl StdioRpcClient {
         Ok(Self {
             child,
             stdin,
-            lines: BufReader::new(stdout).lines(),
+            stdout: BufReader::new(stdout),
+            line_buf: Vec::new(),
+            discard_line: false,
             next_id: 1,
             pending_notifications: VecDeque::new(),
         })
@@ -173,13 +196,15 @@ impl StdioRpcClient {
     /// Why: the request/response half of the protocol every non-streaming
     /// subcommand (`session.list`/`status`/`cancel`/`get_transcript`,
     /// `task.run`'s initial call) uses.
-    /// What: writes one NDJSON request line, then reads lines until one
-    /// carries the SAME `id` — any `session.event` notification observed
+    /// What: writes one NDJSON request line, then reads lines until a true
+    /// response (no `method`, has `result` or `error`, #10360) carries the
+    /// SAME `id` — a server request with that id is skipped and logged; any `session.event` notification observed
     /// along the way is buffered (not dropped) for a later
     /// [`Self::next_notification`] call. A JSON-RPC error envelope becomes
     /// `Err(RpcClientError::Rpc)`; the whole call is bounded by
     /// [`DEFAULT_CALL_TIMEOUT`].
-    /// Test: covered end-to-end by `tests/cli_e2e.rs`.
+    /// Test: `tests::call_skips_server_request_with_matching_id`; end-to-end
+    /// by `tests/cli_e2e.rs`.
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, RpcClientError> {
         timeout(DEFAULT_CALL_TIMEOUT, self.call_inner(method, params))
             .await
@@ -189,6 +214,7 @@ impl StdioRpcClient {
     async fn call_inner(&mut self, method: &str, params: Value) -> Result<Value, RpcClientError> {
         let id = self.next_id;
         self.next_id += 1;
+        let id_value = Value::from(id);
         let req = build_request(id, method, params);
         let mut line = serde_json::to_string(&req)
             .map_err(|e| RpcClientError::MalformedResponse(e.to_string()))?;
@@ -204,7 +230,9 @@ impl StdioRpcClient {
             let value: Value = serde_json::from_str(&raw)
                 .map_err(|e| RpcClientError::MalformedResponse(format!("{e}: {raw}")))?;
 
-            if value.get("id").and_then(Value::as_i64) == Some(id) {
+            // #10360: only a true response (no `method`, has `result` or
+            // `error`) to this id is the call's answer.
+            if is_response_to(&value, &id_value) {
                 if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
                     return Err(RpcClientError::Rpc {
                         code: err.get("code").and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -221,10 +249,16 @@ impl StdioRpcClient {
 
             if let Some(envelope) = classify_notification(&value) {
                 self.pending_notifications.push_back(envelope);
+            } else if value.get("id") == Some(&id_value) {
+                // #10360: a server request colliding with our id is an
+                // anomaly, so warn; log id and method only, never the payload.
+                let method = logged_method(&value);
+                tracing::warn!(id, %method, "StdioRpcClient: skipping non-response frame with the awaited id");
+            } else {
+                // A response to an id we no longer care about; this client
+                // only ever has one call in flight at a time.
+                tracing::debug!(id, "StdioRpcClient: skipping non-matching frame");
             }
-            // Any other stray line (e.g. a response to an id we no longer
-            // care about) is silently ignored — this client only ever has
-            // one call in flight at a time.
         }
     }
 
@@ -258,12 +292,32 @@ impl StdioRpcClient {
         }
     }
 
+    /// Read one stdout line of at most [`MAX_LINE_BYTES`], newline stripped.
+    ///
+    /// Why: #10360 — `Lines::next_line` is not cancel-safe under the call
+    /// timeout and buffers a line of any size.
+    /// What: delegates to trusty-common's [`read_capped_line`]; an oversize
+    /// line is `Err(LineTooLong)` and its tail is skipped on the next call.
+    /// Test: `oversize_line_errors_with_line_too_long`,
+    /// `oversize_line_errors_then_next_call_resyncs`.
     async fn read_raw_line(&mut self) -> Result<String, RpcClientError> {
-        self.lines
-            .next_line()
-            .await
-            .map_err(RpcClientError::Io)?
-            .ok_or(RpcClientError::ConnectionClosed)
+        let read = read_capped_line(
+            &mut self.stdout,
+            &mut self.line_buf,
+            &mut self.discard_line,
+            MAX_LINE_BYTES,
+        )
+        .await
+        .map_err(RpcClientError::Io)?;
+        match read {
+            CappedLine::Line(bytes) => {
+                let line = String::from_utf8(bytes)
+                    .map_err(|e| RpcClientError::MalformedResponse(e.to_string()))?;
+                Ok(line.trim_end_matches(['\n', '\r']).to_string())
+            }
+            CappedLine::TooLong => Err(RpcClientError::LineTooLong(MAX_LINE_BYTES)),
+            CappedLine::Eof => Err(RpcClientError::ConnectionClosed),
+        }
     }
 
     /// Close stdin (EOF) and wait, bounded by `grace`, for the child to
@@ -334,5 +388,103 @@ mod tests {
 
         let malformed_params = json!({"method": "session.event", "params": {"not": "an envelope"}});
         assert!(classify_notification(&malformed_params).is_none());
+    }
+
+    /// Why: #10360 — `call` accepted any frame whose id matched, so a server
+    /// request carrying the awaited id became the call's result.
+    /// What: a stand-in daemon script answers request 1 with a `roots/list`
+    /// request (id 1), an `error` frame that also has `method`, then the real
+    /// response; `call` must return the real result.
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn call_skips_server_request_with_matching_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("fake-tcode");
+        let script = "#!/bin/sh\nread -r l\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"roots/list\"}\\n'\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"error\":{\"code\":-1,\"message\":\"m\"}}\\n'\n\
+printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"answer\":\"real\"}}\\n'\n\
+sleep 5\n";
+        std::fs::write(&exe, script).expect("write script");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut client = StdioRpcClient::spawn(&exe, dir.path()).expect("spawn");
+        let result = client
+            .call("session.list", json!({}))
+            .await
+            .expect("the real response");
+        assert_eq!(result, json!({ "answer": "real" }));
+    }
+
+    /// #10360: the warn log keeps a bounded prefix of a child-supplied method.
+    #[test]
+    fn logged_method_truncates_long_method() {
+        let frame = json!({"id": 1, "method": "m".repeat(10_000)});
+        let shown = logged_method(&frame);
+        assert_eq!(shown, format!("{}…(+9936)", "m".repeat(64)));
+        assert_eq!(
+            logged_method(&json!({"method": "roots/list"})),
+            "roots/list"
+        );
+    }
+
+    /// Spawn a fake `tcode` running `body` after `#!/bin/sh`.
+    #[cfg(unix)]
+    fn fake_child(body: &str) -> (tempfile::TempDir, StdioRpcClient) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("fake-tcode");
+        std::fs::write(&exe, format!("#!/bin/sh\n{body}")).expect("write script");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let client = StdioRpcClient::spawn(&exe, dir.path()).expect("spawn");
+        (dir, client)
+    }
+
+    /// Shell that prints one newline-terminated line one byte over the cap.
+    #[cfg(unix)]
+    fn oversize_line_sh() -> String {
+        format!(
+            "head -c {} /dev/zero | tr '\\000' x; printf '\\n'\n",
+            MAX_LINE_BYTES + 1
+        )
+    }
+
+    /// #10360: a line over the cap fails the call with `LineTooLong`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn oversize_line_errors_with_line_too_long() {
+        let (_dir, mut client) = fake_child(&format!("read -r l\n{}sleep 5\n", oversize_line_sh()));
+        let err = client
+            .call("session.list", json!({}))
+            .await
+            .expect_err("oversize");
+        assert!(
+            matches!(err, RpcClientError::LineTooLong(MAX_LINE_BYTES)),
+            "got {err:?}"
+        );
+    }
+
+    /// #10360: after an oversize line, the next call skips its tail and the
+    /// stale id-1 reply, and returns its own response.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn oversize_line_errors_then_next_call_resyncs() {
+        let body = format!(
+            "read -r l\n{}printf '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":1}}\\n'\n\
+read -r l\nprintf '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"ok\":true}}}}\\n'\nsleep 5\n",
+            oversize_line_sh()
+        );
+        let (_dir, mut client) = fake_child(&body);
+        let first = client.call("session.list", json!({})).await;
+        assert!(
+            matches!(first, Err(RpcClientError::LineTooLong(_))),
+            "got {first:?}"
+        );
+        let second = client
+            .call("session.list", json!({}))
+            .await
+            .expect("resynced");
+        assert_eq!(second, json!({ "ok": true }));
     }
 }

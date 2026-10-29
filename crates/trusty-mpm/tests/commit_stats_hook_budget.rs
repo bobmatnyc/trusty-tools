@@ -37,15 +37,8 @@ struct Fixture {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    let mut file = std::fs::File::create(path).expect("create script");
-    file.write_all(body.as_bytes()).expect("write script");
-    drop(file);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-    }
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, body).expect("write script");
 }
 
 impl Fixture {

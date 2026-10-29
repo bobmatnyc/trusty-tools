@@ -1,0 +1,53 @@
+{
+  "now": 1791763200,
+  "items": [
+    {"id": "T05", "data": {"kind": "task", "status": "open", "updated": "2026-10-09T00:00:00Z", "session": "alpha", "title": "Old"}},
+    {"id": "T04", "data": {"kind": "task", "status": "open", "title": "Undated"}},
+    {"id": "T03", "data": {"kind": "task", "status": "open", "updated": "2026-10-11T00:00:00Z", "title": "Exactly 24h"}},
+    {"id": "T02", "data": {"kind": "task", "status": "open", "updated": "2026-10-11T00:00:00.5Z", "title": "Fresh"}},
+    {"id": "T01", "data": {"kind": "task", "status": "open", "updated": "garbage", "title": "Bad stamp", "session": 7}},
+    {"id": "T06", "data": {"kind": "task", "status": "open", "updated": "2026-10-01", "updates": [{"at": "2026-10-11T12:00Z"}, {"at": "bad"}], "title": "Recent update"}},
+    {"id": "T07", "data": {"kind": "task", "status": "open", "created": "2026-10-02T00:00+02:00", "title": "Created only"}},
+    {"id": "T08", "data": {"kind": "task", "status": "open", "progress": {"estimated_at": "2026-10-11T20:00Z"}, "updated": "2026-01-01", "title": "Progress"}},
+    {"id": "T09", "data": {"kind": "task", "status": "open", "parked": {"choice": "later"}, "title": "Parked"}},
+    {"id": "T0a", "data": {"kind": "task", "status": "done", "title": "Done"}},
+    {"id": "T0b", "data": {"kind": "action", "status": "open", "title": "Action"}},
+    {"id": "T0c", "data": {"kind": "task", "status": "open", "parked": {}, "title": "Empty park", "updated": "2026-10-05"}},
+    {"id": "T0d", "data": {"kind": "task", "status": "open", "title": "Undated b"}},
+    {"id": "T0e", "data": {"kind": "task", "status": "open", "updated": "2026-10-09T00:00:00Z", "title": "Tie with T05"}}
+  ],
+  "goals": [
+    {"id": "G03", "data": {"sessions": ["zeta", "alpha", "ghost"]}},
+    {"id": "G01", "data": {"sessions": ["alpha", "beta"]}},
+    {"id": "G02", "data": {"lifecycle": "done", "sessions": ["alpha"]}},
+    {"id": "G04", "data": {"lifecycle": "parked", "sessions": ["beta"]}},
+    {"id": "G05", "data": {"lifecycle": "removed", "sessions": ["beta"]}},
+    {"id": "G06", "data": {"lifecycle": "active"}},
+    {"id": "G07", "data": {"sessions": ["beta"]}}
+  ],
+  "sessions": [
+    {"id": "S01", "data": {"name": "alpha"}},
+    {"id": "S02", "data": {"name": "beta"}},
+    {"id": "S03", "data": {"name": "zeta"}},
+    {"id": "S04", "data": {}}
+  ],
+  "ranked": [
+    {"id": "X05", "data": {"rank": 2}},
+    {"id": "X04", "data": {}},
+    {"id": "X03", "data": {"rank": true}},
+    {"id": "X02", "data": {"rank": 1.0}},
+    {"id": "X01", "data": {"rank": 2}},
+    {"id": "X06", "data": {"rank": -3}},
+    {"id": "X07", "data": {"rank": "1"}},
+    {"id": "X00", "data": {"rank": false}}
+  ],
+  "runs": [
+    {"id": "U01", "data": {"status": "open", "run_start": "2026-10-10", "run_end": "2026-10-14", "run_schedule": ["2026-10-13", "2026-10-12T09:00Z", "2026-10-11", "2026-10-15"], "run_log": [{"at": "2026-10-12T08:00Z"}, "x"]}},
+    {"id": "U02", "data": {"status": "open", "run_start": "2026-10-13", "run_end": "2026-10-20"}},
+    {"id": "U03", "data": {"status": "open", "run_start": "2026-10-01", "run_end": "2026-10-05", "run_schedule": ["2026-10-02"]}},
+    {"id": "U04", "data": {"status": "done", "run_start": "2026-10-01", "run_end": "2026-10-05"}},
+    {"id": "U05", "data": {"status": "open", "run_start": "2026-10-05", "run_end": "2026-10-01"}},
+    {"id": "U06", "data": {"status": "open", "run_start": "bad", "run_end": "2026-10-01"}},
+    {"id": "U07", "data": {"status": "open", "run_start": "2026-10-11T23:00Z", "run_end": "2026-10-12T00:00Z", "run_schedule": "2026-10-12"}}
+  ]
+}

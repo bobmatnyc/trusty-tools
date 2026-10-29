@@ -120,6 +120,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Whether the `[accounts]` table in `~/.trusty-mpm/config.toml` reads. It maps a GitHub org to the `gh` account that clones and spawns for it. `Ok` naming how many orgs it maps, or \"missing\" when there is no table (clones and spawns use the registry pin or the ambient identity). `Warn` when the file has a TOML syntax error and no line names `accounts` (a `[accounts]`, `[\"accounts\"]` or `[accounts.x]` header, or an `accounts = …` or `accounts.org = …` key), which is read as an empty table. `Fail` with the error when the table cannot be read — a syntax error in a file that holds the table, a value that is not a string, an invalid login, two orgs differing only in case — since clones then refuse and spawned sessions' `gh` authenticates as nobody. Read-only (issue #9091).",
     ),
     (
+        "gh_account_dir_tokens",
+        "Whether a tm per-account gh config file (`<state_root>/gh-accounts/<login>/hosts.yml`) still holds a plaintext gh token. Before issue #10037, `--account-token-stdin` and every `--account` pin wrote the proven token there; tm now keeps it in the keyring entry gh reads for that login and removes it from the file the next time the login is pinned. `Ok` when no file holds one; `Warn` naming each file that does — pin its login again to migrate it; UNKNOWN, never `Ok`, when a file or the directory cannot be read or parsed. Names paths only, never a value. Read-only (issue #10037).",
+    ),
+    (
         "instruction_fold",
         "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a daemon-log line only, so nothing an operator reads said whether the fold was doing anything (issue #7616). Named `instruction_compression` until issue #7867 reserved \"compression\" for tool-output compression; this row claims nothing about the `💸` segment, which measures that instead.",
     ),
@@ -255,6 +259,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "launchd_secrets",
         "Fails when a `com.trusty.*` LaunchAgent plist holds a plaintext credential, naming the file, the KEY and the file's mode and never the value. UNKNOWN rather than OK when a plist cannot be read, parsed, is a BINARY `bplist00` file, or is a symlink — a scan that did not run has not shown the host clean. `tm doctor --fix --yes` migrates each registered credential into the credential store, confirms a byte-equal read-back and only then strips the key; the credential still has to be rotated (issue #8236).",
+    ),
+    (
+        "claude_json_secrets",
+        "Fails when an `mcpServers.<server>.env` block in the managed `.claude.json` holds a credential value, naming the server and KEY and never the value, or when that file or any `.claude.json*` copy beside it is readable beyond its owner (wider than 0600). UNKNOWN when the file cannot be read or parsed. `tm doctor --fix --yes` moves each registered credential into the credential store, confirms a byte-equal read-back, removes it from the env block in one atomic rewrite, and tightens the files to 0600; the credential still has to be rotated (issue #10041).",
     ),
     (
         "credential_reach",

@@ -1,7 +1,7 @@
 //! The writes a `Bash` command makes, as the trust-anchor rule reads them
 //! (#8878).
 //!
-//! Why: owner ruling Q2 (#8878, 2026-09-29) — the trust-anchor floor reads the
+//! Why: #8878 (2026-09-29) — the trust-anchor floor reads the
 //! write-target classifier ([`super::write_targets`]) PLUS the destinations of
 //! `cp`, `mv`, `ln`, `install` and `sed -i`. Those destinations are argv
 //! positions, not redirects, so the classifier alone never names them. A link

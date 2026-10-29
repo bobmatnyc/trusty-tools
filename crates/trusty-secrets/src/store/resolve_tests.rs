@@ -177,14 +177,31 @@ fn resolve_miss_is_not_found() {
     }
 }
 
-/// Why: DOC-74 §15.8 — under a Claude Code parent, a key whose flag is OFF
-/// is refused, and the Keychain is never touched for it. This is the
-/// fails-on-old proof for the gate.
+/// Why: #10386 regression — agents use keys by default (Bob D69, D6a): an
+/// in-scope key no deny names resolves under a Claude Code parent. Red on
+/// the pre-#10386 opt-in flag, which refused every unflagged key.
 /// Test: itself.
 #[test]
-fn resolve_agent_gate_refuses_flag_off_before_any_read() {
+fn resolve_agent_gate_allows_an_undenied_key() {
+    let (_tmp, _backend, store) = fixture();
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    assert_eq!(
+        resolve(&store, "secret://DEPLOY_TOKEN", true).unwrap(),
+        SENTINEL
+    );
+}
+
+/// Why: DOC-74 §15.8, #10386 — under a Claude Code parent, a key the
+/// operator denied is refused, and the Keychain is never touched for it.
+/// Red when the gate skips the deny lookup.
+/// Test: itself.
+#[test]
+fn resolve_agent_gate_refuses_a_denied_key_before_any_read() {
     let (_tmp, backend, store) = fixture();
     set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    store
+        .set_agents_may_use(&project(), &key("DEPLOY_TOKEN"), false)
+        .unwrap();
 
     match resolve(&store, "secret://DEPLOY_TOKEN", true) {
         Err(SecretsError::AgentUseRefused { key, vault }) => {
@@ -206,9 +223,9 @@ fn resolve_agent_gate_refuses_flag_off_before_any_read() {
     );
 }
 
-/// Why: the flag defaults OFF, and a key with no index row has no flag to
-/// check — it must fail without the backend being read, even when the
-/// backend holds an entry the index never listed.
+/// Why: a key with no index row is not in scope — it must fail without the
+/// backend being read, even when the backend holds an entry the index never
+/// listed. A freshly set key carries no deny (#10386).
 /// Test: itself.
 #[test]
 fn resolve_agent_gate_refuses_a_key_with_no_row_without_reading() {
@@ -226,28 +243,24 @@ fn resolve_agent_gate_refuses_a_key_with_no_row_without_reading() {
     }
     assert_eq!(backend.reads(), 0, "an unindexed key is never read");
 
-    // A freshly set key has the flag OFF.
+    // A freshly set key carries no deny.
     set(&store, &owner(), "NEW_KEY", "v");
-    assert!(matches!(
-        resolve(&store, "secret://NEW_KEY", true),
-        Err(SecretsError::AgentUseRefused { .. })
-    ));
-    assert_eq!(backend.reads(), 0);
+    assert_eq!(resolve(&store, "secret://NEW_KEY", true).unwrap(), "v");
 }
 
-/// Why: a key flagged "agents may use" resolves under an agent parent, and
-/// the gate judges the vault the lookup actually chose.
+/// Why: the gate judges the deny of the vault the lookup actually chose,
+/// and removing the deny opens the key again.
 /// Test: itself.
 #[test]
-fn resolve_agent_gate_allows_a_flagged_key() {
+fn resolve_agent_gate_judges_the_vault_the_lookup_chose() {
     let (_tmp, backend, store) = fixture();
     set(&store, &owner(), "SHARED", "owner-value");
     set(&store, &project(), "SHARED", "project-value");
     store
-        .set_agents_may_use(&owner(), &key("SHARED"), true)
+        .set_agents_may_use(&project(), &key("SHARED"), false)
         .unwrap();
 
-    // The project row wins the lookup and its flag is OFF.
+    // The project row wins the lookup and it is denied.
     assert!(matches!(
         resolve(&store, "secret://SHARED", true),
         Err(SecretsError::AgentUseRefused { vault, .. }) if vault == "trusty/acme/web"
@@ -268,24 +281,35 @@ fn resolve_agent_gate_allows_a_flagged_key() {
 }
 
 /// Rewrite `vault`'s index file with std::fs so `name`'s row claims
-/// `"agents_may_use": true`, as any same-uid process can (#9070).
-fn hand_flag_on(store: &SecretStore, vault: &VaultName, name: &str) {
+/// `"agents_may_use": on`, as any same-uid process can (#9070).
+fn hand_flag(store: &SecretStore, vault: &VaultName, name: &str, on: bool) {
     let path = store.index().path_for(vault);
     let mut json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    json["keys"][name]["agents_may_use"] = serde_json::Value::Bool(true);
+    json["keys"][name]["agents_may_use"] = serde_json::Value::Bool(on);
     std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 }
 
-/// Why: #9070 — the index JSON is a 0600 file any same-uid process can
-/// edit, so a hand-set `"agents_may_use": true` must not open the agent
-/// gate. Red before the flag moved to the backend: the edit resolved.
+/// Why: #9070, #10386 — the index JSON is a 0600 file any same-uid process
+/// can edit, so a hand-edited row is neither an allow nor a deny: `true` on
+/// a denied key does not open it, `false` on an open key does not close it.
+/// Red when the gate reads the index row's field.
 /// Test: itself.
 #[test]
 fn resolve_agent_gate_ignores_a_hand_edited_index_flag() {
     let (_tmp, backend, store) = fixture();
+    set(&store, &project(), "OPEN_KEY", "open-value");
+    hand_flag(&store, &project(), "OPEN_KEY", false);
+    assert_eq!(
+        resolve(&store, "secret://OPEN_KEY", true).unwrap(),
+        "open-value"
+    );
+    let reads = backend.reads();
     set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
-    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+    store
+        .set_agents_may_use(&project(), &key("DEPLOY_TOKEN"), false)
+        .unwrap();
+    hand_flag(&store, &project(), "DEPLOY_TOKEN", true);
 
     match resolve(&store, "secret://DEPLOY_TOKEN", true) {
         Err(SecretsError::AgentUseRefused { key, vault }) => {
@@ -294,22 +318,28 @@ fn resolve_agent_gate_ignores_a_hand_edited_index_flag() {
         }
         other => panic!("expected AgentUseRefused, got {other:?}"),
     }
-    assert_eq!(backend.reads(), 0, "a refused key is never read");
+    assert_eq!(backend.reads(), reads, "a refused key is never read");
 }
 
-/// Why: #9070 — list and get report the flag the backend holds, so the same
-/// hand edit cannot make them show a key as agent-usable. Red before the
-/// fix: both reported the edited `true`.
+/// Why: #9070, #10386 — list reports the deny the backend holds, so the
+/// same hand edits cannot change what it shows; the index row alone never
+/// reports a key usable. Red when list reads the edited field.
 /// Test: itself.
 #[test]
 fn store_list_and_get_ignore_a_hand_edited_index_flag() {
     let (_tmp, _backend, store) = fixture();
     set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
-    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+    set(&store, &project(), "OPEN_KEY", "v");
+    store
+        .set_agents_may_use(&project(), &key("DEPLOY_TOKEN"), false)
+        .unwrap();
+    hand_flag(&store, &project(), "DEPLOY_TOKEN", true);
+    hand_flag(&store, &project(), "OPEN_KEY", false);
 
     let listed = store.list(&project()).unwrap();
-    assert_eq!(listed.len(), 1);
-    assert!(!listed[0].agents_may_use, "list reports the flag OFF");
+    assert_eq!(listed.len(), 2);
+    assert!(!listed[0].agents_may_use, "list reports the deny");
+    assert!(listed[1].agents_may_use, "list reports no deny");
     let row = store
         .index()
         .get(&project(), &key("DEPLOY_TOKEN"))
@@ -318,8 +348,8 @@ fn store_list_and_get_ignore_a_hand_edited_index_flag() {
     assert!(!row.agents_may_use, "get reports the flag OFF");
 }
 
-/// A [`MemoryBackend`] whose flag lookups fail, standing in for a Keychain
-/// that cannot answer for the flag item (#9070).
+/// A [`MemoryBackend`] whose deny lookups fail, standing in for a Keychain
+/// that cannot answer for the deny item (#9070, #10386).
 #[derive(Debug, Default)]
 struct FlagFaultBackend(MemoryBackend);
 
@@ -339,31 +369,42 @@ impl SecretBackend for FlagFaultBackend {
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         self.0.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+    fn holds_agent_controls(&self) -> bool {
+        true
+    }
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        if item != ControlItem::AgentDeny {
+            return self.0.control_item(item, vault, key);
+        }
         Err(SecretsError::Backend {
             backend: "memory".to_string(),
             vault: vault.to_string(),
-            key: key.to_string(),
-            reason: "flag lookup failed".to_string(),
+            key: key.map(ToString::to_string).unwrap_or_default(),
+            reason: "deny lookup failed".to_string(),
         })
     }
-    fn set_agents_may_use(
+    fn set_control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
-        allowed: bool,
+        key: Option<&SecretKey>,
+        present: bool,
     ) -> Result<(), SecretsError> {
-        self.0.set_agents_may_use(vault, key, allowed)
+        self.0.set_control_item(item, vault, key, present)
     }
 }
 
-/// Why: #9070 Fail-Open Check — a flag lookup that fails must never read as
-/// ON. With the flag item present but unreadable, the agent gate returns
-/// the backend error before the value is read, and list fails rather than
-/// reporting the key.
+/// Why: #9070, #10386 Fail-Open Check — a deny lookup that fails must
+/// never read as "not denied". The agent gate returns the backend error
+/// before the value is read, and list fails rather than reporting the key.
 /// Test: itself.
 #[test]
-fn resolve_agent_gate_fails_closed_when_the_flag_read_fails() {
+fn resolve_agent_gate_fails_closed_when_the_deny_read_fails() {
     let tmp = TempDir::new().unwrap();
     let backend = Arc::new(FlagFaultBackend::default());
     let store = SecretStore::new(
@@ -371,9 +412,6 @@ fn resolve_agent_gate_fails_closed_when_the_flag_read_fails() {
         NamesIndex::at(tmp.path().join("index")),
     );
     set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
-    store
-        .set_agents_may_use(&project(), &key("DEPLOY_TOKEN"), true)
-        .unwrap();
 
     let err = resolve(&store, "secret://DEPLOY_TOKEN", true).unwrap_err();
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
@@ -383,7 +421,7 @@ fn resolve_agent_gate_fails_closed_when_the_flag_read_fails() {
         store.list(&project()),
         Err(SecretsError::Backend { .. })
     ));
-    // Without an agent parent the flag is not consulted.
+    // Without an agent parent the deny is not consulted.
     assert_eq!(
         resolve(&store, "secret://DEPLOY_TOKEN", false).unwrap(),
         SENTINEL
@@ -432,7 +470,7 @@ fn resolve_env_fails_closed_on_one_bad_reference() {
     set(&store, &project(), "GOOD", SENTINEL);
     set(&store, &project(), "LOCKED", SENTINEL);
     store
-        .set_agents_may_use(&project(), &key("GOOD"), true)
+        .set_agents_may_use(&project(), &key("LOCKED"), false)
         .unwrap();
 
     let cases = [
@@ -609,6 +647,10 @@ fn resolve_sentinel_never_appears_in_output_types() {
     let entries = parse_dotenv(&format!("LIT={SENTINEL}\nREF=secret://TOKEN\n")).unwrap();
     let resolved = resolve_env(&store, &scopes(), &entries, false).unwrap();
     let value = resolve_reference(&store, &scopes(), &reference("secret://TOKEN"), false).unwrap();
+    // #10386: a denied key, so the agent paths below produce errors.
+    store
+        .set_agents_may_use(&project(), &key("TOKEN"), false)
+        .unwrap();
 
     let errors = [
         resolve_reference(&store, &scopes(), &reference("secret://TOKEN"), true).unwrap_err(),

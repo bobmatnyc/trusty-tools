@@ -38,7 +38,7 @@ fn guard_command(data: &Path, env: &[(&str, &str)]) -> Command {
 }
 
 /// [`guard_command`] with `HOME` at `home` (#9741: a tainted temp home).
-fn guard_command_in(home: &Path, data: &Path, env: &[(&str, &str)]) -> Command {
+pub(crate) fn guard_command_in(home: &Path, data: &Path, env: &[(&str, &str)]) -> Command {
     let mut command = common::tm_command_in(home);
     command
         .args(["--url", UNREACHABLE_DAEMON, "hook", "--egress-guard"])
@@ -89,7 +89,7 @@ fn payload(tool: &str) -> Vec<u8> {
 }
 
 /// Assert `out` is exit 0 with exactly one `deny` object on stdout.
-fn assert_denied(out: &Output, case: &str) {
+pub(crate) fn assert_denied(out: &Output, case: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -119,7 +119,7 @@ fn assert_denied(out: &Output, case: &str) {
 }
 
 /// Assert `out` is exit 0 with nothing on stdout — Claude Code's ALLOW.
-fn assert_allowed(out: &Output, case: &str) {
+pub(crate) fn assert_allowed(out: &Output, case: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

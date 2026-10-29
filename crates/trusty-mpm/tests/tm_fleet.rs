@@ -36,7 +36,8 @@ impl FleetEnv {
         // a `claude` that cannot load its conversation does. #9092: each start
         // also appends its PID, which `exec` keeps.
         let sleeper = sleeper.display().to_string();
-        std::fs::write(
+        // See #10248
+        trusty_common::exec_stub::write_executable(
             &claude,
             format!(
                 "#!/bin/sh\necho \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
@@ -48,8 +49,6 @@ impl FleetEnv {
             ),
         )
         .expect("fake claude");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         Self {
             home: tempfile::tempdir().expect("scratch home"),
             // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
@@ -209,9 +208,8 @@ impl FleetEnv {
             real = real.display().to_string(),
         );
         let tmux = self.bin.path().join("tmux");
-        std::fs::write(&tmux, script).expect("tmux wrapper");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // See #10248
+        trusty_common::exec_stub::write_executable(&tmux, script).expect("tmux wrapper");
     }
 
     /// Create the marker `name` in the fake `bin` dir.

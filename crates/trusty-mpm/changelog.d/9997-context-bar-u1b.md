@@ -1,3 +1,0 @@
-Changed
-- The seeded Architect poller alerts against one context bar, `CONTEXT_BAR_TOKENS` (default 250000). A watched pane's `ctx N%` is read against `CONTEXT_WINDOW_TOKENS` (default 1000000): `approaching` at 90% of the bar, `bar` at the bar. The Architect's own context compares tokens with the bar directly. `SELF_CTX_WINDOW` and `SELF_CTX_THRESHOLD` no longer apply; `start-fleet-poll.sh` passes the two new names through instead (#9997).
-- An invalid bar or window value falls back to its default and logs a warning, and a bar at or over the window logs a warning and alerts at 90% and 100% of the window and, for a `ctx>200k` footer, at the bar in tokens. The alert is never switched off (#9997).

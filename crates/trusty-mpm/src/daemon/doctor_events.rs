@@ -257,7 +257,7 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
 /// Why / What: see the module docs. A socket path that cannot be resolved is
 /// `Fail` — no producer can reach the bus either.
 /// Test: `an_unresolvable_socket_path_fails`; the wiring is covered by
-/// `run_doctor_produces_seventy_eight_checks`.
+/// `run_doctor_produces_eighty_checks`.
 pub(super) async fn check_events() -> DoctorCheck {
     grade_resolved(trusty_common::control_bus::events_socket_path()).await
 }

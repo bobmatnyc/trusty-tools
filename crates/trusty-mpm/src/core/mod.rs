@@ -149,6 +149,8 @@ pub mod context_usage;
 pub mod daemon_identity;
 // #9758: the `mpm.dbatg.*` bodies the daemon, the MCP tool and `tm dbatg` share.
 pub mod dbatg;
+// #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
+pub mod architect_dashboard;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
@@ -186,6 +188,8 @@ pub(crate) mod gh_account_registry;
 pub mod gh_identity;
 // #9091: asks gh about a login in the daemon's env and in tm's account dirs.
 pub(crate) mod gh_login_probe;
+// #10037: a proven gh token goes to gh's keyring entry, never `hosts.yml`.
+pub(crate) mod gh_keyring_token;
 // #9750: the launch-time keyring login check for a pinned project (D6e).
 pub mod gh_login_verify;
 // #9091: `[accounts]` org → gh account map and the one account resolver.
@@ -245,6 +249,8 @@ pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
+// #10041: credential values in a `tm mcp add -e` pair go to the store, not the file.
+pub mod mcp_credential_env;
 pub mod mcp_provenance;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).

@@ -7,7 +7,7 @@
 //! tree, appends `pr_linked` when the tree's PR is new or changed, and returns
 //! one [`TreeView`] per tree. A tree is a candidate only on an ANSWERED fact:
 //! its PR merged, or its branch is gone (the remote ref is gone AND nothing on
-//! it is unpushed — owner ruling Q4). An unresolvable git or gh answer is
+//! it is unpushed). An unresolvable git or gh answer is
 //! never a candidate. Nothing here deletes anything.
 //! Test: `core::worktree_ledger::stale::tests`.
 

@@ -903,11 +903,10 @@ fn find_claude_json_files(root: &Path) -> Vec<String> {
 /// the spawn path is actually entered on every platform.
 #[cfg(unix)]
 fn plant_fake_claude(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("claude");
-    std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake claude");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, b"#!/bin/sh\nexit 0\n")
+        .expect("write fake claude");
 }
 
 // Issue #4206 TEST 1 — THE ISOLATION INVARIANT, locked at the REAL call chain

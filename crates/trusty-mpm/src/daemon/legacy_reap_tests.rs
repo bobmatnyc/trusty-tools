@@ -11,13 +11,12 @@ use super::skip_legacy_names;
 #[serial_test::serial]
 #[tokio::test]
 async fn the_shutdown_legacy_pass_kills_no_legacy_session() {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = crate::test_support::hermetic_temp_dir();
     let log = dir.path().join("calls.log");
     let bin = dir.path().join("fake-tmux");
     let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", log.display());
-    std::fs::write(&bin, script).expect("write fake tmux");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("write fake tmux");
 
     let names = ["tm-arch", "tm-arch-poll", "tm-work"].map(String::from);
     let skipped =
@@ -36,7 +35,6 @@ async fn the_shutdown_legacy_pass_kills_no_legacy_session() {
 #[serial_test::serial]
 #[tokio::test]
 async fn the_legacy_delete_of_an_architect_named_entry_leaves_the_architect_alone() {
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
 
     use crate::core::session::{ControlModel, Session, SessionId};
@@ -49,8 +47,8 @@ async fn the_legacy_delete_of_an_architect_named_entry_leaves_the_architect_alon
         "#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n",
         dir.path().join("calls.log").display()
     );
-    std::fs::write(&bin, script).expect("write fake tmux");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&bin, script).expect("write fake tmux");
 
     let fake = FakeTmuxDriver::new();
     let mgr = crate::session_manager::SessionManager::new(&dir.path().join("sm"), fake.clone())

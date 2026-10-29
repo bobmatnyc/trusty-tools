@@ -199,15 +199,41 @@ pub struct AllowlistConfig {
     pub entries: Vec<AllowlistEntry>,
 }
 
+/// The `TRUSTY_DATA_DIR` isolation directory, when set to a usable value.
+///
+/// Why (#10366): the daemon's other per-instance paths follow this variable;
+/// the allowlist must too.
+/// What: `None` for unset, empty, or relative values (a relative dir would
+/// resolve against the daemon's cwd).
+/// Test: `default_path_honours_trusty_data_dir`,
+/// `default_path_ignores_empty_trusty_data_dir`,
+/// `default_path_ignores_relative_trusty_data_dir`.
+fn data_dir_override() -> Option<PathBuf> {
+    std::env::var_os("TRUSTY_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
 impl AllowlistConfig {
-    /// XDG-style path: `~/.config/trusty-search/allowlist.toml`.
+    /// XDG-style path: `~/.config/trusty-search/allowlist.toml`, or
+    /// `$TRUSTY_DATA_DIR/allowlist.toml` when that override is active.
     ///
     /// Why: `allowlist.toml` (not `indexes.toml`) prevents the macOS collision
     /// where `config_dir()==data_local_dir()`; daemon registry stays `indexes.toml`.
-    /// What: resolves via `dirs::config_dir()`; falls back to a relative path.
+    /// An isolated daemon (#10366) must not read or write the operator's file.
+    /// What: a non-empty, absolute `TRUSTY_DATA_DIR` wins; empty or relative
+    /// values are ignored, as in `commands/start/isolation.rs`. Otherwise
+    /// resolves via `dirs::config_dir()`, falling back to a relative path.
     /// Test: `allowlist_path_ends_with_expected_suffix`,
-    /// `allowlist_path_does_not_collide_with_daemon_registry`.
+    /// `allowlist_path_does_not_collide_with_daemon_registry`,
+    /// `default_path_honours_trusty_data_dir`,
+    /// `default_path_ignores_empty_trusty_data_dir`,
+    /// `default_path_ignores_relative_trusty_data_dir`.
     pub fn default_path() -> PathBuf {
+        if let Some(dir) = data_dir_override() {
+            return dir.join("allowlist.toml");
+        }
         match dirs::config_dir() {
             Some(base) => base.join("trusty-search").join("allowlist.toml"),
             None => PathBuf::from("trusty-search-allowlist.toml"),
@@ -226,7 +252,10 @@ impl AllowlistConfig {
     /// integration-tested by `trusty-search index list`.
     pub fn load() -> Result<Self> {
         let new_path = Self::default_path();
-        migration::try_migrate_legacy(&new_path, &migration::legacy_allowlist_path());
+        // #10366: an isolated daemon never touches the operator's legacy file.
+        if data_dir_override().is_none() {
+            migration::try_migrate_legacy(&new_path, &migration::legacy_allowlist_path());
+        }
         Self::load_from(&new_path)
     }
 
@@ -501,7 +530,19 @@ pub fn remove_from_allowlist(path: &Path, allowlist_path: Option<&Path>) -> Resu
 /// `denylist_blocks_home_toplevel`, `denylist_allows_safe_path`,
 /// `denylist_allows_path_with_sensitive_word_in_name` in `tests.rs`.
 pub fn is_denied(path: &Path) -> Option<String> {
-    is_denied_inner(path, false)
+    is_denied_inner(path, false, false)
+}
+
+/// Like [`is_denied`], but a `SENSITIVE_PATH_PREFIXES` refusal also names
+/// `--allow-sensitive-path` as the opt-in.
+///
+/// Why: #10364 — only `index add` accepts that flag. Every other caller
+/// (plain `index`, daemon start/restore, the gate helper) cannot act on the
+/// hint, so [`is_denied`] stays hint-free and this variant is for `index add`.
+/// What: delegates to [`is_denied_inner`] with the hint enabled.
+/// Test: `denial_hint_names_flag_only_where_it_can_relax` in `tests.rs`.
+pub fn is_denied_hinting_flag(path: &Path) -> Option<String> {
+    is_denied_inner(path, false, true)
 }
 
 /// Like [`is_denied`], but SKIPS check (1) — the `SENSITIVE_PATH_PREFIXES`
@@ -528,7 +569,7 @@ pub fn is_denied(path: &Path) -> Option<String> {
 /// Test: `denylist_allowing_sensitive_path_permits_tmp_and_var_folders`,
 /// `denylist_allowing_sensitive_path_still_blocks_ssh_and_home` in `tests.rs`.
 pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
-    is_denied_inner(path, true)
+    is_denied_inner(path, true, false)
 }
 
 /// Shared implementation for [`is_denied`] and [`is_denied_allowing_sensitive_path`].
@@ -537,9 +578,10 @@ pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
 /// public entry points can never drift out of sync on checks (2)-(4).
 /// What: identical to the four checks documented on [`is_denied`], except
 /// check (1) (`SENSITIVE_PATH_PREFIXES`) only runs when `allow_sensitive_path`
-/// is `false`.
-/// Test: exercised transitively via both public wrappers' tests.
-fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
+/// is `false`; `flag_hint` appends the `--allow-sensitive-path` pointer to that
+/// check's reason.
+/// Test: exercised transitively via the public wrappers' tests.
+fn is_denied_inner(path: &Path, allow_sensitive_path: bool, flag_hint: bool) -> Option<String> {
     let path_str = path.to_string_lossy();
     // Normalise separators so prefix checks work on Windows too.
     let normalised = path_str.replace('\\', "/");
@@ -550,8 +592,14 @@ fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
     if !allow_sensitive_path {
         for &prefix in SENSITIVE_PATH_PREFIXES {
             if normalised.starts_with(prefix) {
+                // #10364: the one refusal `--allow-sensitive-path` relaxes.
+                let hint = if flag_hint {
+                    " (to index it anyway, pass --allow-sensitive-path to `index add`)"
+                } else {
+                    ""
+                };
                 return Some(format!(
-                    "path '{}' is under sensitive prefix '{}'; indexing refused",
+                    "path '{}' is under sensitive prefix '{}'; indexing refused{hint}",
                     path.display(),
                     prefix
                 ));

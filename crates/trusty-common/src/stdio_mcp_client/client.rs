@@ -16,13 +16,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+use super::capped_line::{CappedLine, read_capped_line};
 use super::{
-    CALL_TIMEOUT, MCP_PROTOCOL_VERSION, McpTool, ServerInfo, StdioMcpClient,
+    CALL_TIMEOUT, MAX_LINE_BYTES, MCP_PROTOCOL_VERSION, McpTool, ServerInfo, StdioMcpClient,
     build_initialize_request, extract_result, plugin_stderr_stdio,
 };
 
@@ -97,6 +98,8 @@ impl StdioMcpClient {
             child,
             stdin: BufWriter::new(stdin),
             stdout: BufReader::new(stdout),
+            line_buf: Vec::new(),
+            discard_line: false,
             next_id: AtomicU64::new(1),
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -127,10 +130,11 @@ impl StdioMcpClient {
     /// transparently recovering the connection. Without this, every query
     /// after a server crash stalls until timeout.
     /// What: Spawns the same `binary` + `args` used at construction, swaps
-    /// in the new stdio handles, resets the request id counter, and runs
-    /// `initialize`. Returns Err if respawn or handshake fails.
+    /// in the new stdio handles, keeps the request id counter running (#10360),
+    /// and runs `initialize`. Returns Err if respawn or handshake fails.
     /// Test: `call_tool_errors_when_respawn_unavailable` exercises the
-    /// failure path (binary no longer present).
+    /// failure path (binary no longer present);
+    /// `stale_frame_after_respawn_is_not_returned_as_result` the id counter.
     async fn respawn(&mut self) -> Result<()> {
         let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
         let mut new_child = Command::new(&self.binary)
@@ -157,8 +161,13 @@ impl StdioMcpClient {
         self.child = new_child;
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
+        // #10360: a partial line belongs to the dead process's stream.
+        self.line_buf = Vec::new();
+        self.discard_line = false;
         // client_name is retained from the original spawn — no update needed.
-        self.next_id.store(1, Ordering::Relaxed);
+        // #10360: `next_id` is NOT reset. Ids stay unique across process
+        // generations, so a frame carrying an id from an earlier lifetime can
+        // never match a request of this one.
 
         self.initialize()
             .await
@@ -181,11 +190,13 @@ impl StdioMcpClient {
         Ok(())
     }
 
-    /// Allocate the next JSON-RPC request id. Monotonic, starts at 1.
+    /// Allocate the next JSON-RPC request id. Monotonic, starts at 1, and
+    /// never restarts on respawn (#10360).
     ///
     /// Why: JSON-RPC 2.0 requires each request to carry a unique id so
     /// responses can be correlated. The atomic counter provides this without
-    /// locks.
+    /// locks; one counter per client makes an id unique across every process
+    /// generation, so the id alone names the in-flight request it answers.
     /// What: Atomically increments and returns the previous value using
     /// `Relaxed` ordering (ordering across threads is not required for id
     /// uniqueness within a single connection).
@@ -373,40 +384,80 @@ impl StdioMcpClient {
     /// are expected, not warnings. (See issue #425.)
     /// What: Loops reading lines, discarding non-JSON prefix lines, until a
     /// line starting with `{` is found, then parses it as JSON.
+    ///
+    /// Cancel safety (#10360): `request` wraps this in a timeout. tokio's
+    /// `read_line` is not cancel-safe — bytes it already consumed are lost
+    /// when the future drops, and the line's tail later reads as a frame.
+    /// `read_line_bytes` keeps partial bytes in `self.line_buf`, so the next
+    /// call resumes the same line, and caps it at `MAX_LINE_BYTES`.
     /// Test: `read_line_skips_non_json_prefix_lines` feeds banner-then-JSON
-    /// through the codec and asserts the JSON object is returned.
+    /// through the codec and asserts the JSON object is returned;
+    /// `timeout_mid_line_does_not_corrupt_the_next_call` the cancel safety.
     pub(super) async fn read_line(&mut self) -> Result<Value> {
         loop {
-            let mut line = String::new();
-            let n = self.stdout.read_line(&mut line).await?;
-            if n == 0 {
-                bail!("MCP server closed stdout before responding");
-            }
+            let bytes = self.read_line_bytes().await?;
+            let line = String::from_utf8_lossy(&bytes);
             let trimmed = line.trim_start();
             if !trimmed.starts_with('{') {
                 debug!(
                     "StdioMcpClient: skipping non-JSON line from child stdout: {:?}",
-                    line.trim_end()
+                    log_field(line.trim_end())
                 );
                 continue;
             }
-            let value: Value = serde_json::from_str(line.trim_end())
-                .with_context(|| format!("parsing JSON-RPC frame: {line:?}"))?;
+            let value: Value = serde_json::from_str(line.trim_end()).with_context(|| {
+                format!("parsing JSON-RPC frame: {:?}", log_field(line.trim_end()))
+            })?;
             return Ok(value);
         }
     }
 
-    /// Send `req` and read responses until one matches the expected id.
-    /// Server-initiated notifications (no `id`) are ignored.
+    /// Read one raw stdout line, `\n` included, of at most `MAX_LINE_BYTES`.
     ///
-    /// Why: JSON-RPC allows servers to send notifications (no id) at any time.
-    /// A simple read-one-frame approach would misinterpret a notification as
-    /// a response. This loop discards notifications and out-of-order ids
-    /// (rare) until the matching response arrives.
+    /// Why: #10360 — `line_buf` persists across calls, so an unterminated
+    /// line must not grow it without bound.
+    /// What: delegates to [`read_capped_line`] (cancel-safe, capped); a line
+    /// that passes the cap errors and its tail up to the next `\n` is
+    /// dropped. Discarding keeps the child and its session alive, where a respawn would lose server state for one bad frame; a
+    /// child that never ends the line is still bounded by the call timeout.
+    /// At EOF a partial line is returned, an empty one is an error.
+    /// Test: `oversized_line_errors_and_next_call_skips_its_tail`,
+    /// `timeout_mid_line_does_not_corrupt_the_next_call`.
+    async fn read_line_bytes(&mut self) -> Result<Vec<u8>> {
+        let read = read_capped_line(
+            &mut self.stdout,
+            &mut self.line_buf,
+            &mut self.discard_line,
+            MAX_LINE_BYTES,
+        )
+        .await?;
+        match read {
+            CappedLine::Line(bytes) => Ok(bytes),
+            CappedLine::Eof => bail!("MCP server closed stdout before responding"),
+            CappedLine::TooLong => {
+                bail!("MCP server line exceeded the {MAX_LINE_BYTES}-byte cap; line discarded")
+            }
+        }
+    }
+
+    /// Send `req` and read frames until the response to it arrives.
+    ///
+    /// Why: JSON-RPC allows servers to send notifications and requests of
+    /// their own (`roots/list`, which carries an id) at any time, and a late
+    /// reply to an abandoned call can still be in the pipe. Returning the
+    /// first frame with a matching id misread such frames as this call's
+    /// result (#10360).
     /// What: Wraps the round-trip in `bound` (`CALL_TIMEOUT` for every method
-    /// but `call_tool_with_timeout`, #9979). Returns Err if the timeout fires
-    /// or if the frame cannot be parsed.
-    /// Test: Covered by every method that calls `request`.
+    /// but `call_tool_with_timeout`, #9979) and skips every frame
+    /// [`is_response_to`] rejects. Ids never repeat across respawns, so a
+    /// matching id names this generation's in-flight request. Returns Err if
+    /// the timeout fires or a frame cannot be parsed.
+    /// A fired timeout leaves any partial line in `line_buf` for the next
+    /// call (see `read_line`).
+    /// Test: `server_request_with_matching_id_is_not_returned_as_result`,
+    /// `stale_frame_after_respawn_is_not_returned_as_result`,
+    /// `late_reply_to_timed_out_call_is_skipped`,
+    /// `error_frame_with_method_is_not_returned_as_result`.
     async fn request(&mut self, req: &Value, bound: Duration) -> Result<Value> {
         let expected_id = req
             .get("id")
@@ -417,17 +468,65 @@ impl StdioMcpClient {
             self.write_line(req).await?;
             loop {
                 let frame = self.read_line().await?;
-                // Skip server-initiated notifications.
-                if frame.get("id").is_none() {
-                    continue;
-                }
-                if frame.get("id") == Some(&expected_id) {
+                if is_response_to(&frame, &expected_id) {
                     return Ok::<Value, anyhow::Error>(frame);
                 }
-                // Out-of-order id (rare). Continue reading.
+                log_skipped_frame(&frame, &expected_id);
             }
         })
         .await
         .map_err(|_| anyhow!("MCP request timed out after {bound:?}"))?
     }
+}
+
+/// Log one frame `request` skipped, naming its id and method, never its
+/// payload (#10360).
+///
+/// Why: a skipped frame that carries the awaited id is a protocol anomaly
+/// (server request colliding with our id, or a malformed reply), so it logs
+/// at `warn`; notifications and late replies to other ids are routine and
+/// stay at `debug`.
+/// What: chooses the level by whether `frame.id == expected_id`.
+/// Test: exercised by `error_frame_with_method_is_not_returned_as_result`.
+fn log_skipped_frame(frame: &Value, expected_id: &Value) {
+    let id = log_field(&frame.get("id").map(Value::to_string).unwrap_or_default());
+    let method = log_field(frame.get("method").and_then(Value::as_str).unwrap_or(""));
+    if frame.get("id") == Some(expected_id) {
+        warn!(expected = %expected_id, %method, "StdioMcpClient: skipping non-response frame with the awaited id");
+    } else {
+        debug!(expected = %expected_id, %id, %method, "StdioMcpClient: skipping non-matching frame");
+    }
+}
+
+/// Characters of a server-controlled string a log line keeps.
+const LOG_FIELD_CHARS: usize = 64;
+
+/// `s` cut to `LOG_FIELD_CHARS` characters, with `…(+N)` naming the rest.
+///
+/// Why: #10360 — `id` and `method` of a skipped frame come from the child;
+/// logged whole, one frame can flood the log.
+/// Test: `log_field_truncates_long_values`.
+pub fn log_field(s: &str) -> String {
+    match s.char_indices().nth(LOG_FIELD_CHARS) {
+        None => s.to_string(),
+        Some((cut, _)) => {
+            let rest = s[cut..].chars().count();
+            format!("{}…(+{rest})", &s[..cut])
+        }
+    }
+}
+
+/// Whether `frame` is the JSON-RPC response to the request carrying `id`.
+///
+/// Why: #10360 — an id match alone also accepts a server-initiated request
+/// (it has `method`) and a malformed frame with neither `result` nor `error`.
+/// Public so other stdio JSON-RPC clients (trusty-code's `StdioRpcClient`)
+/// apply the same rule.
+/// What: True only when the ids are equal, `method` is absent, and `result`
+/// or `error` is present.
+/// Test: `is_response_to_accepts_only_responses_with_the_id`.
+pub fn is_response_to(frame: &Value, id: &Value) -> bool {
+    frame.get("id") == Some(id)
+        && frame.get("method").is_none()
+        && (frame.get("result").is_some() || frame.get("error").is_some())
 }

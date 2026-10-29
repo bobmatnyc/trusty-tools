@@ -15,11 +15,14 @@
 //! `current`, `states`, `standard`, `seed-config`, `repair`, `audit`). Schema
 //! types live in `config.rs`, validation in `validate.rs`, the state machine in
 //! `state.rs`, the operations in `ops.rs`, the `standard` printer in
-//! `standard.rs`, the #7097 `audit` verb in `audit.rs`.
+//! `standard.rs`, the #7097 `audit` verb in `audit.rs`, the #10275 board spec
+//! and `project:` block and the #10276 `board` verbs in `board/`.
 //! Test: pure logic is unit-tested in the submodules (`config`/`validate`/
 //! `state`/`ops`); CLI parsing in `tests.rs`.
 
 pub(crate) mod audit;
+// #10275/#10276: the board spec, the `project:` block and `tm issue board`.
+pub(crate) mod board;
 pub(crate) mod config;
 pub(crate) mod epic;
 pub(crate) mod ops;
@@ -60,6 +63,11 @@ use trusty_mpm::core::trusty_tools_config::{
 /// loading + validating the model first for the verbs that need it.
 /// Test: parsing in `tests.rs`; per-verb logic in the submodule unit tests.
 pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<()> {
+    // #10276: `tm issue board` refuses a non-GitHub tracker by name (D9)
+    // before any identity or config is resolved.
+    if let IssueCmd::Board(board_cmd) = cmd {
+        return board::run_cli(board_cmd, system);
+    }
     // #1265: bind the active project's GitHub identity to every `gh` call this
     // verb makes (empty binding → ambient gh identity, no regression).
     let gh_env = crate::gh_identity::load_gh_env()?;
@@ -220,6 +228,10 @@ fn dispatch<S: TicketSystem>(
         // and `sync` also read the model's status prefix.
         IssueCmd::Epic(epic_cmd) => {
             epic::run(epic_cmd, gh_env, lifecycle)?;
+        }
+        // #10276: routed before backend construction in `issue`.
+        IssueCmd::Board(board_cmd) => {
+            return board::run_cli(board_cmd, TicketSystemKind::Gh);
         }
         IssueCmd::Repair { issue, config } => {
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;

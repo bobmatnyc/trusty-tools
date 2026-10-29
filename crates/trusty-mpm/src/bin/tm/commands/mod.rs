@@ -20,6 +20,8 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+// #10063: `tm architect dashboard <verb>`, in-process under the store lock.
+pub(crate) mod architect_dashboard;
 // #9167: the poller's wakes as trusty-events `message` events.
 pub(crate) mod architect_messages;
 pub(crate) mod auth;
@@ -52,6 +54,7 @@ pub(crate) mod egress_guard;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
+pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
 // #8454 VC: the egress guard's daemon verdict client.
@@ -155,6 +158,8 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #8782: the per-project prune-worktrees preview and its scope checks.
 pub(crate) mod prune_preview;
+// #7619: the streamed prune-worktrees reader.
+pub(crate) mod prune_stream_client;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their

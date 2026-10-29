@@ -1,6 +1,6 @@
 [package]
 name = "trusty-channels"
-version = "0.1.1"
+version = "0.2.0"
 # ADR-0029 lists this crate as an explicit opt-down to 2021.
 edition = "2021"
 rust-version.workspace = true

@@ -1487,7 +1487,9 @@ mod tests {
     /// flag was ignored.
     /// What: sets the env pin, passes `Some(dir)` and an unreachable client,
     /// and asserts the helper still queried the daemon: it returns the
-    /// diff-only notice and turns `require_search` off. The env-pinned index
+    /// diff-only notice and turns an unset `require_search` off (#10226: an
+    /// explicit `Some(true)` is kept, see
+    /// `source_root_diff_only_keeps_explicit_require_search_and_skips`). The env-pinned index
     /// is never used for retrieval, because the caller nulls both clients.
     /// Test: this test.
     #[tokio::test]
@@ -1495,7 +1497,7 @@ mod tests {
         let mut config = ReviewConfig::load(None);
         config.search_index = "ambient-env-pin".to_string();
         config.search_index_explicit = true;
-        config.context.require_search = Some(true);
+        config.context.require_search = None;
         let client = HttpSearchClient::new("http://127.0.0.1:1").expect("client init");
 
         let notice = resolve_source_root_arg(

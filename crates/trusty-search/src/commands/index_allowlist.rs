@@ -76,7 +76,8 @@ fn add_to_allowlist_checked(
     let denial = if allow_sensitive_path {
         crate::allowlist::is_denied_allowing_sensitive_path(&entry.path)
     } else {
-        crate::allowlist::is_denied(&entry.path)
+        // #10364: `index add` is the one caller that can act on the flag hint.
+        crate::allowlist::is_denied_hinting_flag(&entry.path)
     };
     if let Some(reason) = denial {
         return Err(AllowlistAddError::Denied(reason));

@@ -37,21 +37,26 @@
 //! `a_failing_audit_exits_nonzero`, `a_window_prints_the_summary_table`,
 //! `an_empty_window_is_not_a_failure`, `a_window_audit_never_loads_the_state_model`,
 //! `widen_adds_a_crate_described_label`, `widen_ignores_a_non_crate_label`,
-//! `widen_on_gh_failure_keeps_the_set`, and `cli_parses_issue_audit_*` in
-//! `tests.rs`.
+//! `widen_on_gh_failure_keeps_the_set`,
+//! `the_board_row_passes_on_the_block_board_and_fails_on_another_10276`, and
+//! `cli_parses_issue_audit_*` in `tests.rs`.
 
 use std::path::Path;
 
 use trusty_mpm::core::component_labels::ComponentLabels;
 use trusty_mpm::core::gh_identity::GhEnv;
 use trusty_mpm::core::issue_audit::{
-    AuditRow, IssueAudit, IssueFacts, audit_issue, render_audit, render_summary,
+    AuditRow, IssueAudit, IssueFacts, Verdict, audit_issue, render_audit, render_summary,
 };
 use trusty_mpm::core::issue_audit_gh::{AuditWindow, list_open_issues, view_issue};
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 use anyhow::Context as _;
 
+use crate::commands::issue::board::client::BoardClient;
+use crate::commands::issue::board::project::ProjectBlock;
+use crate::commands::issue::board::snapshot::issue_boards;
+use crate::commands::issue::board::verbs::repo_slug;
 use crate::commands::issue::epic::audit_rows::epic_rows;
 use crate::commands::issue::epic::backend::GhEpicBackend;
 use crate::commands::issue::epic::state_model;
@@ -108,10 +113,24 @@ pub(crate) fn run(
         let model = state_model(lifecycle)?;
         epic_rows(&epic_backend, number, &model).with_context(|| format!("epic rows for #{number}"))
     };
+    // #10276 (D8): with a `project:` block, the single-issue project row
+    // checks the issue is on THAT board, not merely on some board.
+    let board_runner = RealCommandRunner::with_gh_env(gh_env);
+    let board_row_for = |number: u64| -> anyhow::Result<Option<AuditRow>> {
+        let model = state_model(lifecycle)?;
+        let Some(block) = model.project else {
+            return Ok(None);
+        };
+        let client = BoardClient::new(&board_runner);
+        let repo = repo_slug(&client, None)?;
+        let boards = issue_boards(&client, &repo, number)?;
+        Ok(Some(board_row(&boards, &block)))
+    };
     let reads = AuditReads {
         view: &view,
         list: &list,
         epic_rows_for: &epic_rows_for,
+        board_row_for: &board_row_for,
     };
     let audits = collect_audits(issue, recent, since, ticketing, &components, &reads)?;
     print!("{}", render_report(&audits));
@@ -129,6 +148,44 @@ struct AuditReads<'a> {
     list: &'a dyn Fn(&AuditWindow) -> anyhow::Result<Vec<IssueFacts>>,
     /// The epic set-level rows for one issue, model load included.
     epic_rows_for: &'a dyn Fn(u64) -> anyhow::Result<Vec<AuditRow>>,
+    /// The project row checked against the repo's `project:` block (#10276);
+    /// `None` when the repo names no board.
+    board_row_for: &'a dyn Fn(u64) -> anyhow::Result<Option<AuditRow>>,
+}
+
+/// The project row against the repo's `project:` block (#10276, AC6).
+///
+/// Why: the block is the single attach target (D8), so an issue on another
+/// board does not satisfy the standard.
+/// What: PASS when `boards` holds the block's owner and number (owner compared
+/// case-insensitively), else FAIL naming the boards the issue is on and the
+/// `tm issue board add` fix.
+/// Test: `the_board_row_passes_on_the_block_board_and_fails_on_another_10276`.
+fn board_row(boards: &[(String, u64)], block: &ProjectBlock) -> AuditRow {
+    let on_block = boards
+        .iter()
+        .any(|(o, n)| *n == block.number && o.eq_ignore_ascii_case(&block.owner));
+    let target = format!("{} #{}", block.owner, block.number);
+    if on_block {
+        return AuditRow::new(
+            "project",
+            Verdict::Pass,
+            format!("{target} (project: block)"),
+        );
+    }
+    let found: Vec<String> = boards.iter().map(|(o, n)| format!("{o} #{n}")).collect();
+    let found = if found.is_empty() {
+        "no board".to_string()
+    } else {
+        found.join(", ")
+    };
+    AuditRow::new(
+        "project",
+        Verdict::Fail,
+        format!(
+            "on {found}, not on {target} named by the project: block — `tm issue board add <N>`"
+        ),
+    )
 }
 
 /// The audited set for the selected mode.
@@ -153,6 +210,12 @@ fn collect_audits(
         (Some(number), _, _) => {
             let facts = (reads.view)(number)?;
             let mut audit = audit_issue(&facts, ticketing, components);
+            // #10276: the block's board replaces the "any board" project row.
+            if let Some(row) = (reads.board_row_for)(number)?
+                && let Some(slot) = audit.rows.iter_mut().find(|r| r.requirement == "project")
+            {
+                *slot = row;
+            }
             audit.rows.extend((reads.epic_rows_for)(number)?);
             Ok(vec![audit])
         }
@@ -419,10 +482,12 @@ mod tests {
             let prefix = load()?;
             Ok(vec![AuditRow::new("phase linkage", Verdict::Info, prefix)])
         };
+        let board_row_for = |_: u64| -> anyhow::Result<Option<AuditRow>> { Ok(None) };
         let reads = AuditReads {
             view: &view,
             list: &list,
             epic_rows_for: &epic_rows_for,
+            board_row_for: &board_row_for,
         };
 
         let window = collect_audits(None, Some(5), None, &standard(), &components(), &reads)
@@ -435,6 +500,45 @@ mod tests {
             format!("{err:#}").contains("failed to read issue-state config"),
             "{err:#}"
         );
+    }
+
+    /// #10276 AC6: the project row FAILs on another board and PASSes on the
+    /// one the block names; the single-issue audit swaps it in.
+    #[test]
+    fn the_board_row_passes_on_the_block_board_and_fails_on_another_10276() {
+        let block = ProjectBlock {
+            owner: "bobmatnyc".to_string(),
+            number: 45,
+            drop_options: Vec::new(),
+            extra_fields: Vec::new(),
+        };
+        let other = board_row(&[("bobmatnyc".to_string(), 25)], &block);
+        assert_eq!(other.verdict, Verdict::Fail, "{other:?}");
+        assert!(
+            other
+                .detail
+                .contains("on bobmatnyc #25, not on bobmatnyc #45"),
+            "{other:?}"
+        );
+        let on = board_row(&[("BobMatNYC".to_string(), 45)], &block);
+        assert_eq!(on.verdict, Verdict::Pass, "{on:?}");
+
+        let view = |_: u64| Ok(facts(COMPLIANT));
+        let list = |_: &AuditWindow| Ok(Vec::new());
+        let epic_rows_for = |_: u64| -> anyhow::Result<Vec<AuditRow>> { Ok(Vec::new()) };
+        let board_row_for = |_: u64| -> anyhow::Result<Option<AuditRow>> {
+            Ok(Some(board_row(&[("bobmatnyc".to_string(), 25)], &block)))
+        };
+        let reads = AuditReads {
+            view: &view,
+            list: &list,
+            epic_rows_for: &epic_rows_for,
+            board_row_for: &board_row_for,
+        };
+        let audits = collect_audits(Some(1), None, None, &standard(), &components(), &reads)
+            .expect("audited");
+        assert!(audits[0].failed(), "{:?}", audits[0]);
+        assert!(exit_result(&audits).is_err());
     }
 
     #[test]

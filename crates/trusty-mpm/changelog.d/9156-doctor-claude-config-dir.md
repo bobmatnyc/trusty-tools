@@ -1,2 +1,0 @@
-Fixed
-- `tm doctor`'s `deployment` and `auto_memory` rows read the user tier from `CLAUDE_CONFIG_DIR` when it is set, not `~/.claude`. Run from `$HOME`, `deployment` now checks `$CLAUDE_CONFIG_DIR/settings.json` and its output style; `auto_memory` reads `autoMemoryEnabled` from `$CLAUDE_CONFIG_DIR/settings.json` and `settings.local.json`. A project-scoped run still checks the project's own `.claude/settings.json`, and with `CLAUDE_CONFIG_DIR` unset both rows behave as before. `tm validate`, the spawn/resume gate and `tm doctor --fix` are unchanged (Refs #9156).

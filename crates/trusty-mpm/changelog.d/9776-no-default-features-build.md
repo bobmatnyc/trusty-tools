@@ -1,2 +1,0 @@
-Fixed
-- `cargo check -p trusty-mpm --no-default-features` compiles again. Always-on modules no longer import from the `daemon` module: the search client comes from `trusty_common::search_rpc`, and the repos-root, `origin`-remote, per-account gh config dir and `statusLine` tier helpers moved into `core`, with re-exports at their old paths. Without `daemon`, the control plane refuses a tmux-backend session with an error instead of failing to build (#9776).
