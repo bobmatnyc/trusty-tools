@@ -23,7 +23,9 @@ use trusty_common::launchd_claim::SocketOwner;
 use trusty_search::service::daemon_client::DaemonClient;
 
 use super::daemon_guard::wait_for_socket;
-use super::service::LAUNCHD_LABEL;
+
+/// The search unit's label. Not `service::LAUNCHD_LABEL`, which is macOS-only.
+const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::SEARCH;
 
 /// Bound on each blocking launchd read and on the `kickstart` command.
 pub(crate) const LAUNCHD_CALL_BOUND: Duration = Duration::from_secs(5);
@@ -162,20 +164,15 @@ pub(crate) async fn run_bounded(program: &Path, args: &[String], bound: Duration
 /// Test: side-effecting; argv by `kickstart_argv_has_no_kill_flag`, the runner
 /// by `run_bounded_*`. Never called from a test.
 pub(crate) async fn real_kickstart() -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let uid = trusty_common::launchd::current_uid();
-        run_bounded(
-            Path::new("launchctl"),
-            &kickstart_argv(uid, LAUNCHD_LABEL),
-            LAUNCHD_CALL_BOUND,
-        )
-        .await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(anyhow!("launchd is available on macOS only"))
-    }
+    // SAFETY: getuid(2) has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    // Off macOS no state read ever yields a launchd verdict, so this is unreached.
+    run_bounded(
+        Path::new("launchctl"),
+        &kickstart_argv(uid, LAUNCHD_LABEL),
+        LAUNCHD_CALL_BOUND,
+    )
+    .await
 }
 
 /// Read launchd's claim on the search socket, bounded.
