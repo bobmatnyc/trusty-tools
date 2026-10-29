@@ -23,8 +23,8 @@ use super::agent_deny::{
     self, AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit, change_deny,
 };
 use super::{
-    Capabilities, NamesIndex, OpenedUnder, ScopeSet, SecretBackend, SecretCache, mask_secret,
-    platform,
+    Capabilities, NamesIndex, OpenedUnder, ScopeSet, SecretBackend, SecretCache, mask_length_only,
+    mask_secret, platform,
 };
 use crate::api::methods::{DeleteResponse, KeyMeta, SetOutcome, SetResponse};
 use crate::api::{SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
@@ -203,6 +203,37 @@ impl SecretStore {
         key: &SecretKey,
         value: &SecretValue,
     ) -> Result<SetResponse, SecretsError> {
+        self.set_judged(vault, key, value, false)
+    }
+
+    /// [`Self::set`] for a caller under Claude Code (#10459).
+    ///
+    /// Why: Bob 2026-10-29 — an agent may write a key the operator has not
+    /// denied; the deny check must not race an operator adding one.
+    /// What: as [`Self::set`], but under the key's index lock and before the
+    /// backend write, a deny is [`SecretsError::AgentUseRefused`] and a
+    /// failed lookup is its error (fail closed); nothing is written either
+    /// way. The confirmation is [`mask_length_only`].
+    /// Test: `set_by_agent_rechecks_the_deny_under_the_index_lock`,
+    /// `set_by_agent_fails_closed_when_the_deny_lookup_fails`,
+    /// `set_by_agent_confirmation_shows_length_only`.
+    pub fn set_for_agent(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<SetResponse, SecretsError> {
+        self.set_judged(vault, key, value, true)
+    }
+
+    /// The body of [`Self::set`] and [`Self::set_for_agent`].
+    fn set_judged(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+        agent: bool,
+    ) -> Result<SetResponse, SecretsError> {
         if value.is_empty() {
             return Err(SecretsError::InvalidValue { reason: "is empty" });
         }
@@ -216,13 +247,25 @@ impl SecretStore {
             value.char_len(),
             platform::now_unix(),
             // #10386: no deny is cleared here; a stale one keeps the key shut.
-            |_| self.backend.set(vault, key, value),
+            |_| {
+                // #10459: under the lock, so a deny added mid-call refuses.
+                if agent && !self.may_use_migrated(vault, key)? {
+                    return Err(SecretsError::AgentUseRefused {
+                        key: key.to_string(),
+                        vault: vault.to_string(),
+                    });
+                }
+                self.backend.set(vault, key, value)
+            },
             |outcome, publish| self.compensate(vault, key, outcome, publish),
         )?;
-        Ok(SetResponse {
-            outcome,
-            masked: mask_secret(value.expose()),
-        })
+        // #10459: an agent's confirmation shows the length only.
+        let masked = if agent {
+            mask_length_only(value.expose())
+        } else {
+            mask_secret(value.expose())
+        };
+        Ok(SetResponse { outcome, masked })
     }
 
     /// Undo a new key's backend write after the index publish failed.

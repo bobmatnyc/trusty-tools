@@ -81,7 +81,7 @@ pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
 // #9066: `mask_secret` moved to `api` for the console bridge; same path here.
-pub use crate::api::{MASK_HEAD_CHARS, mask_secret};
+pub use crate::api::{MASK_HEAD_CHARS, mask_length_only, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};

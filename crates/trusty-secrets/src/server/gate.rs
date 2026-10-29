@@ -219,7 +219,8 @@ impl Gate<'_> {
 
     /// Mark this call's allow records `default_policy: true` (#10386).
     ///
-    /// What: set by `grant` and `resolve` for a caller under Claude Code,
+    /// What: set by `grant`, `resolve`, and (#10459) `set` and `copy` for a
+    /// caller under Claude Code,
     /// whose only path to a key is the absence of its deny. Deny records
     /// never carry it.
     pub(crate) fn default_policy(&mut self) {

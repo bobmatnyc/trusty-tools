@@ -9,8 +9,10 @@
 //! What: [`serve_without_agent_callers`] is [`super::serve`] whose process
 //! table reads parents, start times and executables from the OS but answers
 //! "not an agent" for every pid. Grants, peer-pid and descendant checks still
-//! run on the real tree.
-//! Test: `serve_without_agent_callers_stores_a_key_for_any_caller`.
+//! run on the real tree. #10459: [`serve_with_agent_callers`] answers "an
+//! agent" for every pid, so a consumer can test the agent arm.
+//! Test: `serve_without_agent_callers_stores_a_key_for_any_caller`,
+//! `serve_with_agent_callers_refuses_a_denied_key`.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -22,11 +24,12 @@ use super::router::{BackendFactory, ServeError, ServeExit, StartEnv, State, serv
 use super::settings::ServerSettings;
 use crate::store::platform;
 
-/// The host's process table, with no process an agent.
-#[derive(Debug, Clone, Copy, Default)]
-struct NoAgentTable;
+/// The host's process table, with every process an agent (`true`) or
+/// none (`false`).
+#[derive(Debug, Clone, Copy)]
+struct FixedAgentTable(bool);
 
-impl ProcessTable for NoAgentTable {
+impl ProcessTable for FixedAgentTable {
     fn parent(&self, pid: u32) -> Result<u32, ProcessError> {
         OsProcessTable.parent(pid)
     }
@@ -36,7 +39,7 @@ impl ProcessTable for NoAgentTable {
     }
 
     fn is_agent(&self, _pid: u32) -> Result<bool, ProcessError> {
-        Ok(false)
+        Ok(self.0)
     }
 
     fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
@@ -55,6 +58,30 @@ pub async fn serve_without_agent_callers(
     backends: BackendFactory,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
+    serve_judging(settings, backends, shutdown, false).await
+}
+
+/// [`super::serve`], judging every caller as having a Claude Code ancestor.
+///
+/// Why: #10459 — a consumer tests that an agent's `set` of a key with no
+/// deny lands and a denied key is refused. Test support only.
+/// What: as [`serve_without_agent_callers`], with `is_agent` always `true`.
+/// Test: `serve_with_agent_callers_refuses_a_denied_key`.
+pub async fn serve_with_agent_callers(
+    settings: ServerSettings,
+    backends: BackendFactory,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<ServeExit, ServeError> {
+    serve_judging(settings, backends, shutdown, true).await
+}
+
+/// The production state with a [`FixedAgentTable`] of `agent`.
+async fn serve_judging(
+    settings: ServerSettings,
+    backends: BackendFactory,
+    shutdown: impl Future<Output = ()> + Send,
+    agent: bool,
+) -> Result<ServeExit, ServeError> {
     let account_home = platform::account_home_dir().ok();
     let mut state = State::with_start(
         settings,
@@ -63,7 +90,7 @@ pub async fn serve_without_agent_callers(
         account_home.as_deref(),
     );
     state.grants = Arc::new(GrantRegistry::new(
-        Arc::new(NoAgentTable),
+        Arc::new(FixedAgentTable(agent)),
         Arc::new(SystemClock),
         DEFAULT_MAX_TTL,
     ));
