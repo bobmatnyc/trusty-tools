@@ -36,12 +36,18 @@ Sections are rolled up from `content/changelog.d/` by
   - The skill no longer references repository-specific documents or an ADR-standard spec outside the skill; the layout-ADR paragraph is removed.
 - The `architect-dashboard` Architect skill: the served dashboard page, its data model, the per-pass update, the owner answer flow and the page controls; the Architect manual indexes it and rule r-181 points at it (#10161).
 - Architect skills: six more skills ship in trusty-tools form - `architect-review`, `architect-drift-check`, `architect-project-provision`, `architect-macos`, `architect-improvements` and `architect-host-admin`. The operating manual indexes them, and the improvement, resource, subsystem-health, provisioning, review, drift and mandate rules point at them (#10161).
+- The `tm-capabilities` skill's `references/workflows.md` gains section 6, the field reference for `session_context_pause` and `session_context_catchup`, moved out of their MCP descriptions (#10300).
+- `data-design` skill (0.1.0): a decision table from data type and question to chart form, encoding, colour and interaction, nine hard rules, and progressive references for chart selection, colour, encoding and labels, hierarchy, time/flow/network/geo, empty and missing data, and accessibility.
+- `data-design` ships `scripts/check_palette.py`, a stdlib-only offline palette checker (CVD simulation, OKLCH lightness band, WCAG contrast), and vendored ColorBrewer hex subsets (Apache-2.0) with provenance and the retained notice.
+- `data-designer` agent (0.1.0): extends `base-agent`, has no web tools, and returns a design spec for an engineer; chart data never leaves the host.
 
 ### Fixed
 
 - `version-control` and `tm-workflow` read the auto-merge setting with `gh api repos/<owner>/<repo> --jq .allow_auto_merge`. The previous `gh repo view` field is rejected by gh 2.98, so every read failed. An empty answer means the token cannot read the setting and counts as `false` (#9747).
 - `tm-session-management` 1.2.1 and `tm-init` 1.0.1 teach `tm session catchup --full --all-projects` for the cross-project digest, since `--all-projects` alone is now refused, and describe the lean default (the resolved snapshot plus live `git status`) (#9883).
 - The `security` agent's credential scan treats the required `Claude-Session: https://claude.ai/code/session_<id>` commit trailer as attribution, not a leak. Only that exact line, once, in a commit message's last paragraph is allowed; the same URL in a diff, a body line or a credential-shaped value still fails (#10056).
+- The `version-control` agent's fallback line now reads "Fallback without `tm` (this path has no merge gate):"; "which" wrongly referred to `tm` ([#10104](https://github.com/bobmatnyc/trusty-tools/issues/10104)).
+- The `secrets-manager` agent now checks `command -v tm` before it names `tm hook --pm-guard`, and says what to do when `tm` is absent, so the probe-then-degrade lint passes now that it reads wrapped spans ([#10104](https://github.com/bobmatnyc/trusty-tools/issues/10104)).
 
 ### Changed
 
@@ -84,6 +90,13 @@ Sections are rolled up from `content/changelog.d/` by
 - The Architect manual (`instructions/architect/architect.md`) renames the owner's "asks" to "actions" in rules r-039 and r-181, defines the D, A and Q id prefixes, sends every decision to the dashboard instead of chat, and has r-181 link a readable brief from each non-trivial dashboard item (#10161).
 - Architect skills: in `architect-operating-rules`, owner "asks" become "actions" and D/A/Q are defined. `architect-workflow` and `tm-context-refresh` name the Intent Ledger digest as the Architect's handoff, through `scripts/self-clear.sh --live`. `architect-strategy` adds the factory issue-tracking rule (#10161).
 - Architect core: the verified checkpoint for a session with an Intent Ledger is a fresh ledger digest. For any other session it is a verified `/tm-session-pause` snapshot (#10161).
+- The `tm-capabilities` skill lists 79 `tm doctor` checks; its doctor reference describes the new `gh_account_dir_tokens` row, which flags a gh token stored in a per-account `hosts.yml` (#10037).
+- The `tm-capabilities` skill lists 80 `tm doctor` checks; its doctor reference describes the new `claude_json_secrets` row, which flags a credential value in an `mcpServers.<server>.env` block of the managed `.claude.json` (#10041).
+- The tm-capabilities skill and its CLI and MCP tool references list `tm architect dashboard` and the `architect_dashboard` tool, regenerated for #10063.
+- The `architect-project-provision` skill tells the PM to write hook commands as `/bin/bash "<abs>/scripts/notify-supervisor.sh"` and `/bin/sh "<abs>/scripts/datg-hook.sh" <session>`, never a bare script path (D73).
+- The `tm-capabilities` CLI reference lists `tm issue board` and its verbs `init`, `apply`, `check`, `show` and `add` (#10276).
+- `tm-capabilities` CLI reference: `tm supervisor` is now described as a 24/7 observer only; auto-resume moved to the daemon.
+- `tm-secrets` (1.5.0) and `secrets-manager` (0.3.0) describe the #10386 rule: an agent may use every in-scope key unless the operator denied it; `set`, `delete`, `copy` and removing a deny are operator-only, and `agent_use_refused` covers both cases.
 
 ### Documentation
 
