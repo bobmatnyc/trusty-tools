@@ -204,3 +204,45 @@ async fn supervised_start_refuses_a_holder_that_does_not_answer() {
     drop(lock);
     assert_eq!(end.and_then(|s| s.code()), Some(1), "exit: {end:?}");
 }
+
+/// Why: a refused manual `start --foreground` used to reach `save_daemon_env`
+/// and replace the live holder's `daemon.env` with the caller's memory-limit
+/// variables, which the next launchd restart inherited.
+/// What: with a healthy holder up and a `daemon.env` on disk, an unsupervised
+/// start carrying `TRUSTY_MEMORY_LIMIT_MB` is refused and the file is
+/// byte-identical afterwards.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_start_leaves_the_holders_daemon_env_untouched() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    let mut holder = spawn_start(dir, "holder.log", false);
+    wait_up(dir).await;
+    let env_file = dir.join("daemon.env");
+    let original = "TRUSTY_MEMORY_LIMIT_MB=2048\n";
+    std::fs::write(&env_file, original).expect("write daemon.env");
+
+    let home = dir.join("home");
+    let log = File::create(dir.join("second.log")).expect("log");
+    let mut second = test_daemon::command()
+        .args(["start", "--foreground", "--no-auto-discover"])
+        .env("TRUSTY_DATA_DIR", dir)
+        .env("TRUSTY_DATA_DIR_OVERRIDE", dir)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("TRUSTY_EMBEDDER", "stdio")
+        .env("TRUSTY_SKIP_RAM_CHECK", "1")
+        .env("TRUSTY_MEMORY_LIMIT_MB", "999")
+        .env_remove("TRUSTY_SEARCH_SOCKET")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .expect("spawn the second start");
+    let end = wait_exit(&mut second, Duration::from_secs(15));
+    let after = std::fs::read_to_string(&env_file).expect("read daemon.env");
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(end.and_then(|s| s.code()), Some(1), "exit: {end:?}");
+    assert_eq!(after, original, "a refused start rewrote daemon.env");
+}

@@ -348,6 +348,25 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         env!("CARGO_PKG_VERSION"),
     );
 
+    // #10358: decided here, BEFORE `save_daemon_env` below. A refused manual
+    // `start --foreground` used to reach that write and replace the live
+    // holder's `daemon.env` with the caller's memory-limit variables, which the
+    // next launchd restart then inherited.
+    // Fast-path: bail before loading the 86 MB embedding model when
+    // another daemon is already running.
+    //
+    // Issue #87 (Option A): if the lockfile exists and the recorded PID is
+    // *alive*, print an actionable warning and exit 1.
+    // #6590: the bare `start` parent already ran this before forking; the
+    // foreground path reaches it here, which is what launchd and systemd take.
+    // #10358: under launchd, a healthy holder means stand by (before any heavy
+    // init) instead of exiting 1 into a 30 s KeepAlive respawn loop.
+    if super::standby::await_lock_or_refuse(socket.as_deref()).await?
+        == super::standby::LockWait::Terminated
+    {
+        return Ok(());
+    }
+
     // Translate the `--device` CLI flag into the `TRUSTY_DEVICE` env var.
     //
     // SAFETY: invoked on the main thread before tokio spawns any workers.
@@ -425,21 +444,6 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     #[cfg(unix)]
     if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
         tracing::debug!("stderr log {} is reopened after a rotation", log.display());
-    }
-
-    // Fast-path: bail before loading the 86 MB embedding model when
-    // another daemon is already running.
-    //
-    // Issue #87 (Option A): if the lockfile exists and the recorded PID is
-    // *alive*, print an actionable warning and exit 1.
-    // #6590: the bare `start` parent already ran this before forking; the
-    // foreground path reaches it here, which is what launchd and systemd take.
-    // #10358: under launchd, a healthy holder means stand by (before any heavy
-    // init) instead of exiting 1 into a 30 s KeepAlive respawn loop.
-    if super::standby::await_lock_or_refuse(socket.as_deref()).await?
-        == super::standby::LockWait::Terminated
-    {
-        return Ok(());
     }
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
