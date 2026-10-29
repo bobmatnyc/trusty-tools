@@ -233,3 +233,18 @@ fn credential_error_posts_nothing() {
     assert!(poster.0.lock().expect("lock").is_empty());
     assert!(audit.0.borrow().iter().all(|l| !l.code.contains("SECRET")));
 }
+
+#[test]
+fn debug_output_redacts_the_staged_text() {
+    let (_cfg, table, id, _now) = staged();
+    let one = format!("{:?}", table.get(id).expect("staged"));
+    let all = format!("{table:?}");
+    for out in [&one, &all] {
+        assert!(!out.contains(TEXT), "text leaked: {out}");
+        assert!(out.contains("<redacted>"), "no marker: {out}");
+        assert!(
+            out.contains(&digest_of(TEXT)[..12]),
+            "no digest prefix: {out}"
+        );
+    }
+}
