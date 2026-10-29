@@ -12,8 +12,6 @@
 
 use std::time::Duration;
 
-use axum::extract::State;
-
 use super::*;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -239,16 +237,11 @@ async fn a_cold_lazy_load_counts_in_latency_ms() {
         .unwrap_or_else(|e| e.into_inner()) = Some((id.to_string(), LOAD));
 
     let (cap, _guard) = capture(tracing::Level::INFO);
-    let reply = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(query("authenticate")),
-    )
-    .await;
+    let reply = super::search::search_report(&state, id, query("authenticate")).await;
     *super::index_resolve::TEST_COLD_LOAD_DELAY
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
-    let axum::Json(body) = reply.unwrap_or_else(|(s, axum::Json(b))| panic!("{s}: {b}"));
+    let body = reply.unwrap_or_else(|(s, b)| panic!("{s}: {b}"));
 
     let load_ms = LOAD.as_millis() as u64;
     let latency = body["latency_ms"].as_u64().expect("latency_ms");
