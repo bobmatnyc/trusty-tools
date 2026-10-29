@@ -196,6 +196,8 @@ pub(super) async fn spawn_child(
         .stdout(Stdio::null())
         .stderr(stderr)
         .kill_on_drop(!detached);
+    // #10083: the child must not inherit the supervisor's sockets.
+    crate::child_fds::seal_inherited_tokio(&mut command);
     if detached {
         // #8783: out of the caller's process group, so a group kill or Ctrl-C
         // aimed at the caller spares the child it is meant to leave running.
