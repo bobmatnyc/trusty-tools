@@ -437,3 +437,34 @@ async fn the_signal_path_logs_the_final_late_total_10412() {
     assert_eq!(totals.len(), 1, "{lines:?}");
     assert!(totals[0].contains("late_lost=5"), "{totals:?}");
 }
+
+/// #10464: a serve that ends in an error still logs the late total; the
+/// error comes back unchanged.
+#[tokio::test]
+async fn a_serve_error_still_logs_the_final_late_total_10464() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = started(&dir.path().join("absent.sock"), &dir.path().join("spool"));
+    state.action_events().shutdown().await;
+    let s = SessionId::new();
+    for i in 0..4 {
+        state.push_hook_event(hook(s, &format!("late{i}")));
+    }
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let _capture = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    ));
+
+    let served = settle_serve_exit(&state, Err(anyhow::anyhow!("accept loop died"))).await;
+
+    let err = served.expect_err("the serve error was swallowed");
+    assert_eq!(err.to_string(), "accept loop died");
+    let lines = buffer.tail(64);
+    let totals: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("lost in total"))
+        .collect();
+    assert_eq!(totals.len(), 1, "{lines:?}");
+    assert!(totals[0].contains("late_lost=5"), "{totals:?}");
+}

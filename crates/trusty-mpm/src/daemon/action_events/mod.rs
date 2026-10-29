@@ -532,27 +532,71 @@ pub fn bus_allowed(data_dir_overridden: bool, real_environment: bool) -> bool {
     data_dir_overridden || real_environment
 }
 
-/// [`start_with`] on this process's environment and `events_socket_path`.
+/// Where [`start_at`] dials and spools (#10464).
+///
+/// Why: a test drives the production start on a scratch bus and data dir
+/// without setting the process-global data-dir override.
+pub struct StartAt {
+    /// [`bus_allowed`]'s verdict.
+    pub allowed: bool,
+    /// The bus socket; called only when `allowed`.
+    pub socket: Box<dyn FnOnce() -> anyhow::Result<PathBuf>>,
+    /// The data dir the spool lives under; `Err` starts with no spool.
+    pub data_dir: anyhow::Result<PathBuf>,
+}
+
+impl StartAt {
+    /// This process's environment, `events_socket_path` and data dir.
+    pub fn from_env(state: &DaemonState) -> Self {
+        let overridden =
+            std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
+        let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
+            .is_allowed();
+        Self {
+            allowed: bus_allowed(overridden, real),
+            socket: Box::new(trusty_common::control_bus::events_socket_path),
+            data_dir: trusty_common::resolve_data_dir("trusty-mpm"),
+        }
+    }
+}
+
+/// [`start_at`] on [`StartAt::from_env`].
 pub fn start(state: &DaemonState) -> bool {
-    let overridden =
-        std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
-    let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
-        .is_allowed();
+    start_at(state, StartAt::from_env(state))
+}
+
+/// [`start_with_spool`] with the spool under `at.data_dir`.
+///
+/// Test: `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub fn start_at(state: &DaemonState, at: StartAt) -> bool {
     // #10412: the spool follows the data dir, as the bus socket does.
-    let spool = match trusty_common::resolve_data_dir("trusty-mpm") {
+    let spool = match at.data_dir {
         Ok(data_dir) => Some(spool::spool_dir(&data_dir)),
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "action events: no data dir; events undelivered at stop are lost");
             None
         }
     };
-    start_with_spool(
-        state,
-        bus_allowed(overridden, real),
-        DEFAULT_FLUSH_INTERVAL,
-        trusty_common::control_bus::events_socket_path,
-        spool,
-    )
+    start_with_spool(state, at.allowed, DEFAULT_FLUSH_INTERVAL, at.socket, spool)
+}
+
+/// The serve exit's settle: the bounded final flush, then `served` back.
+///
+/// Why: a dead accept loop returns its error without stopping the managed
+/// sessions, so no later step logs the late total on that exit.
+/// What: [`ActionEvents::shutdown`]; on `Err`, also
+/// [`ActionEvents::report_late`]. The `Ok` path logs it after the sessions stop.
+/// Test: `a_serve_error_still_logs_the_final_late_total_10464`.
+pub async fn settle_serve_exit(
+    state: &DaemonState,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    state.action_events().shutdown().await;
+    if served.is_err() {
+        // #10464: the error exit returns before the `Ok` path's late total.
+        state.action_events().report_late();
+    }
+    served
 }
 
 /// [`start_with_spool`] with no spool: what the bus does not take at stop is
