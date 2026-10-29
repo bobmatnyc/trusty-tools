@@ -572,7 +572,8 @@ pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
     is_denied_inner(path, true, false)
 }
 
-/// Shared implementation for [`is_denied`] and [`is_denied_allowing_sensitive_path`].
+/// Shared implementation for [`is_denied`], [`is_denied_hinting_flag`] and
+/// [`is_denied_allowing_sensitive_path`].
 ///
 /// Why: keeps the four-check denylist logic in exactly one place so the two
 /// public entry points can never drift out of sync on checks (2)-(4).

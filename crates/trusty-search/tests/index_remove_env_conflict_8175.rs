@@ -29,8 +29,11 @@
 //! `HOME`/`XDG_CONFIG_HOME` pointed at a per-test fake home
 //! ([`remove_command`]), and [`RealAllowlistGuard`] asserts the operator's
 //! REAL `~/Library/Application Support/trusty-search/allowlist.toml` is
-//! byte-for-byte and mtime-for-mtime unchanged across every run — see that
-//! guard's doc comment for why this file specifically was at risk. Two
+//! byte-for-byte and mtime-for-mtime unchanged across every run - see that
+//! guard's doc comment for why this file specifically was at risk. Since
+//! #10409 the allowlist lives under `TRUSTY_DATA_DIR`, which every spawn sets
+//! to a scratch dir, so that dir is what keeps the real file out of reach; the
+//! fake home is a second layer and the guard stays as the proof. Two
 //! error-arm (Fail-Open Check) tests are added: an absent-socket "daemon down"
 //! and an unavailable-during-agreement-check daemon must both refuse with NO
 //! delete ever sent, proven against the call log the proxy records, not just
@@ -102,10 +105,10 @@ async fn spawn_daemon_with_two_indexes(root_a: &Path, root_b: &Path, chaos: bool
 }
 
 /// Base `Command` for `trusty-search index remove` against the daemon on
-/// `socket`, pre-wired with `TRUSTY_DATA_DIR` and — fix-up, issue #8175 —
-/// `HOME`/`XDG_CONFIG_HOME` pointed at `fake_home`, so
-/// `AllowlistConfig::default_path()` can never resolve to the operator's real
-/// config directory even on the code path that performs a real delete. See
+/// `socket`, pre-wired with `TRUSTY_DATA_DIR` (where the allowlist resolves
+/// since #10409, so it never reaches the operator's real config directory
+/// even on the code path that performs a real delete) and, as a second layer
+/// (issue #8175), `HOME`/`XDG_CONFIG_HOME` pointed at `fake_home`. See
 /// [`RealAllowlistGuard`].
 fn remove_command(socket: &Path, data_dir: &Path, fake_home: &Path) -> Command {
     let mut cmd = test_daemon::command();
