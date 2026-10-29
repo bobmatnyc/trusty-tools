@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.3.1"
+version = "2.3.2"
 schema_major = 1
 
 [[member]]
@@ -513,6 +513,10 @@ version = "1.0.0"
 [[member]]
 path = "skills/model-context-builder.md"
 version = "1.1.0"
+
+[[member]]
+path = "skills/neon-postgres.md"
+version = "1.0.0"
 
 [[member]]
 path = "skills/requesting-code-review.md"
