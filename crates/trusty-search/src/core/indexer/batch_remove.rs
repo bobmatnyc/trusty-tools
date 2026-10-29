@@ -37,6 +37,13 @@ pub(crate) const REMOVE_SLICE_IDS: usize = 500;
 pub(crate) static TEST_FAIL_SLICE_FROM: std::sync::Mutex<Vec<(String, usize)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// #10376 test seam: for each `(index_id, chunk id)` listed, the row is
+/// deleted from redb just before the slice that holds it, so the plan names a
+/// row the delete finds already gone.
+#[cfg(test)]
+pub(crate) static TEST_VANISH_ROW: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// What one batch removal matched and removed (#10110).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct BatchRemoveCounts {
@@ -93,7 +100,6 @@ struct Plan {
 #[derive(Default)]
 struct Slice {
     ids: Vec<String>,
-    files: usize,
     entity_files: Vec<String>,
 }
 
@@ -109,7 +115,6 @@ fn file_slices(rows: &SelectedRows, slice_ids: usize) -> Vec<Slice> {
     let mut current = Slice::default();
     for (file, ids) in &by_file {
         current.ids.extend(ids.iter().cloned());
-        current.files += 1;
         if entity_files.contains(file) {
             current.entity_files.push((*file).to_string());
         }
@@ -223,12 +228,24 @@ impl CodeIndexer {
                     .map_err(|e| fail(counts, e))?,
             )
         };
+        let file_of: std::collections::HashMap<&str, &str> = plan
+            .rows
+            .chunks
+            .iter()
+            .map(|(id, file)| (id.as_str(), file.as_str()))
+            .collect();
         for (n, slice) in file_slices(&plan.rows, slice_ids).iter().enumerate() {
-            self.delete_slice_rows(n, slice)
+            let removed = self
+                .delete_slice_rows(n, slice)
                 .await
                 .map_err(|e| fail(counts, e))?;
-            counts.removed_chunks += slice.ids.len();
-            counts.removed_files += slice.files;
+            // #10376: count the rows that left redb, not the rows planned.
+            counts.removed_chunks += removed.len();
+            counts.removed_files += removed
+                .iter()
+                .filter_map(|id| file_of.get(id.as_str()))
+                .collect::<HashSet<_>>()
+                .len();
             self.drop_slice_from_memory(slice).await;
             self.try_remove_vectors(&slice.ids)
                 .await
@@ -307,7 +324,10 @@ impl CodeIndexer {
     }
 
     /// Delete one slice's chunk and entity rows in one redb transaction.
-    async fn delete_slice_rows(&self, n: usize, slice: &Slice) -> Result<()> {
+    ///
+    /// Returns the chunk ids whose rows were deleted (#10376). With no durable
+    /// corpus the memory map is the store, so every planned id counts.
+    async fn delete_slice_rows(&self, n: usize, slice: &Slice) -> Result<Vec<String>> {
         #[cfg(test)]
         if TEST_FAIL_SLICE_FROM.lock().is_ok_and(|f| {
             f.iter()
@@ -317,8 +337,14 @@ impl CodeIndexer {
         }
         #[cfg(not(test))]
         let _ = n;
+        #[cfg(test)]
+        if let (Some(corpus), Ok(vanish)) = (self.corpus.as_ref(), TEST_VANISH_ROW.lock()) {
+            for (_, id) in vanish.iter().filter(|(i, _)| *i == self.index_id) {
+                let _ = corpus.delete_chunk_and_entity_rows(std::slice::from_ref(id), &[]);
+            }
+        }
         let Some(corpus) = self.corpus.clone() else {
-            return Ok(());
+            return Ok(slice.ids.clone());
         };
         let ids = slice.ids.clone();
         let entity_files = slice.entity_files.clone();

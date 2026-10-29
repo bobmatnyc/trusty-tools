@@ -133,6 +133,8 @@ pub(crate) use files::TEST_FAIL_REMOVE;
 // #10110: batch removal by path prefix or file list.
 #[cfg(test)]
 pub(crate) use batch_remove::TEST_FAIL_SLICE_FROM;
+#[cfg(test)]
+pub(crate) use batch_remove::TEST_VANISH_ROW;
 pub(crate) use batch_remove::{BatchRemoveCounts, BatchRemoveError};
 // #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
 #[cfg(test)]
