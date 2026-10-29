@@ -14,7 +14,7 @@ orgs:
     kind: gchat
     project: agentic-crm-508715
     service_account: ai-chat-bot
-    space: AAQAee6_DV8
+    space: AAAATEST001
     credentials:
       sa_key: secret://trusty/bta/GCHAT.AI_CHAT_BOT_SA_KEY
 users:
@@ -37,7 +37,7 @@ fn initial_config_parses() {
     assert_eq!(duetto.workspace.as_deref(), Some("T0TEST001"));
     let bta = cfg.org("bta").expect("bta");
     assert_eq!(bta.kind, ChannelKind::Gchat);
-    assert_eq!(bta.space.as_deref(), Some("AAQAee6_DV8"));
+    assert_eq!(bta.space.as_deref(), Some("AAAATEST001"));
 }
 
 #[test]
