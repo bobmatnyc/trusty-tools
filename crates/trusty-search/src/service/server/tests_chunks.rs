@@ -5,14 +5,14 @@
 //! legacy `offset`/`limit` (O(offset) scan, retained for back-compat). These
 //! tests pin both modes and the `next_cursor` contract.
 //! What: register an in-memory index, plant chunks, drive
-//! `get_index_chunks_handler` directly, and assert page coverage / ordering /
+//! `index_chunks_report` directly, and assert page coverage / ordering /
 //! cursor semantics.
 //! Test: this module.
+use super::files::index_chunks_report;
 use super::*;
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use axum::extract::{Path, Query, State};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -60,14 +60,9 @@ async fn call_chunks(
     name: &str,
     params: ChunksParams,
 ) -> serde_json::Value {
-    let resp = get_index_chunks_handler(
-        State(Arc::clone(state)),
-        Path(name.to_string()),
-        Query(params),
-    )
-    .await
-    .expect("handler ok");
-    resp.0
+    index_chunks_report(state, name, &params)
+        .await
+        .expect("report ok")
 }
 
 /// Cursor mode: paging forward by `next_cursor` covers every chunk exactly
@@ -155,15 +150,15 @@ async fn chunks_endpoint_offset_back_compat() {
 #[serial_test::parallel]
 async fn chunks_endpoint_unknown_index_is_404() {
     let (state, _name) = state_with_chunks(&["a:1:1"]).await;
-    let err = get_index_chunks_handler(
-        State(state),
-        Path("does-not-exist".to_string()),
-        Query(ChunksParams {
+    let err = index_chunks_report(
+        &state,
+        "does-not-exist",
+        &ChunksParams {
             offset: 0,
             limit: 10,
             after: Some("a:1:1".to_string()),
             path_prefix: None,
-        }),
+        },
     )
     .await
     .expect_err("unknown index must 404");

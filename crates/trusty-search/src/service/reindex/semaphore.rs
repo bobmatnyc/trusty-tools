@@ -231,8 +231,8 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 ///
 /// Why: the first #3049 fix used [`INDEX_LOCKS`] as the quiescence point, on the
 /// premise that every long-running writer holds that permit. Review found the
-/// premise false — `index_file_handler`, `remove_file_handler`,
-/// `ingest_graph_handler`, the filesystem watch loop, boot reconcile, and the
+/// premise false — `index_file_report`, `remove_file_report`,
+/// `ingest_graph_report`, the filesystem watch loop, boot reconcile, and the
 /// relocate handler all write `handle.indexer` while holding NO permit. A delete
 /// racing any of them acquired the uncontended permit instantly, reported
 /// `quiesced: true`, and `remove_dir_all`'d the directory mid-write. Gating those
@@ -256,9 +256,9 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 ///
 /// | Path | Entry point | Guarded by |
 /// |---|---|---|
-/// | `POST /indexes/:id/index-file` | `server::files::index_file_handler` | read side, added #3049 rd2 |
-/// | `POST /indexes/:id/remove-file` | `server::files::remove_file_handler` | read side, added #3049 rd2 |
-/// | `POST /indexes/:id/graph` | `server::contrib_graph::ingest_graph_handler` | read side, added #3049 rd2 |
+/// | `POST /indexes/:id/index-file` | `server::files::index_file_report` | read side, added #3049 rd2 |
+/// | `POST /indexes/:id/remove-file` | `server::files::remove_file_report` | read side, added #3049 rd2 |
+/// | `POST /indexes/:id/graph` | `server::contrib_graph::ingest_graph_report` | read side, added #3049 rd2 |
 /// | `PATCH /indexes/:id` (relocate) | `server::indexes_relocate::relocate_index_handler` | read side, added #3049 rd2 |
 /// | filesystem watcher | `service::watch_loop::{handle_modified, handle_removed}` | read side, added #3049 rd2; `handle_modified` widened to cover its stale-chunk removal in rd4 |
 /// | boot reconcile | `service::reconcile` | read side, added #3049 rd2 |

@@ -4,7 +4,7 @@
 //! Why: the MCP layer reads a 404 on the index it advertised as this session's
 //! default and reports `INDEX_NOT_READY` — "never built". That is only true if
 //! the handler's 404 rules out the cold store too. `search_handler` always did;
-//! `index_status_handler`, `get_index_chunks_handler`, and `grep_handler`
+//! `index_status_handler`, `index_chunks_report`, and `grep_report`
 //! did a bare hot-registry lookup, so a cold-parked index — a real index that
 //! merely is not resident — would have been reported as one that never existed.
 //! That is the same class of lie #4715 exists to remove, pointed the other way.
@@ -115,23 +115,15 @@ async fn status_404_only_when_absent_from_every_store() {
 #[serial_test::parallel]
 async fn cold_parked_index_chunks_is_503_not_404() {
     let state = state_with_cold_index("cold-b");
-    let err = super::files::get_index_chunks_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-b".to_string()),
-        axum::extract::Query(chunks_params()),
-    )
-    .await
-    .expect_err("a non-resident index has no enumerable chunks");
+    let err = super::files::index_chunks_report(&state, "cold-b", &chunks_params())
+        .await
+        .expect_err("a non-resident index has no enumerable chunks");
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 
     let absent = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let err = super::files::get_index_chunks_handler(
-        State(absent),
-        axum::extract::Path("never-existed".to_string()),
-        axum::extract::Query(chunks_params()),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let err = super::files::index_chunks_report(&absent, "never-existed", &chunks_params())
+        .await
+        .expect_err("genuinely unknown");
     assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
@@ -140,24 +132,16 @@ async fn cold_parked_index_chunks_is_503_not_404() {
 #[serial_test::parallel]
 async fn cold_parked_index_grep_is_503_not_404() {
     let state = state_with_cold_index("cold-c");
-    let (code, axum::Json(body)) = super::files::grep_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-c".to_string()),
-        axum::Json(grep_request()),
-    )
-    .await
-    .expect_err("a non-resident index has no files to grep");
+    let (code, body) = super::files::grep_report(&state, "cold-c", grep_request())
+        .await
+        .expect_err("a non-resident index has no files to grep");
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_not_resident");
 
     let absent = Arc::new(SearchAppState::new(IndexRegistry::new()));
-    let (code, _) = super::files::grep_handler(
-        State(absent),
-        axum::extract::Path("never-existed".to_string()),
-        axum::Json(grep_request()),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, _) = super::files::grep_report(&absent, "never-existed", grep_request())
+        .await
+        .expect_err("genuinely unknown");
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
 
@@ -191,13 +175,9 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
     );
     assert!(state.cold_store.is_failed(&id), "and still a failed one");
 
-    let (code, axum::Json(body)) = super::files::grep_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("failed-c".to_string()),
-        axum::Json(grep_request()),
-    )
-    .await
-    .expect_err("a failed index cannot be grepped");
+    let (code, body) = super::files::grep_report(&state, "failed-c", grep_request())
+        .await
+        .expect_err("a failed index cannot be grepped");
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_restore_failed");
     let message = body["message"].as_str().unwrap_or_default();
@@ -225,7 +205,7 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
 /// so the MCP layer could never again report `INDEX_NOT_READY` for the
 /// delete-then-reindex case (#4715).
 /// What: parks an index cold, deletes it through the real handler, then drives
-/// `index_status_handler`, `get_index_chunks_handler`, and `grep_handler` —
+/// `index_status_handler`, `index_chunks_report`, and `grep_report` —
 /// the same three guards this file pins — asserting from each both the 404 and
 /// the `unknown index: <id>` body that names the absent-everywhere verdict.
 /// Pre-fix all three return 503.
@@ -274,13 +254,10 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
          residency miss. Body: {status_body}"
     );
 
-    let (chunks_code, axum::Json(chunks_body)) = super::files::get_index_chunks_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-deleted".to_string()),
-        axum::extract::Query(chunks_params()),
-    )
-    .await
-    .expect_err("a deleted index has no chunks");
+    let (chunks_code, chunks_body) =
+        super::files::index_chunks_report(&state, "cold-deleted", &chunks_params())
+            .await
+            .expect_err("a deleted index has no chunks");
     assert_eq!(
         chunks_code,
         StatusCode::NOT_FOUND,
@@ -292,13 +269,9 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
          residency miss. Body: {chunks_body}"
     );
 
-    let (grep_code, axum::Json(grep_body)) = super::files::grep_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-deleted".to_string()),
-        axum::Json(grep_request()),
-    )
-    .await
-    .expect_err("a deleted index has nothing to grep");
+    let (grep_code, grep_body) = super::files::grep_report(&state, "cold-deleted", grep_request())
+        .await
+        .expect_err("a deleted index has nothing to grep");
     assert_eq!(
         grep_code,
         StatusCode::NOT_FOUND,

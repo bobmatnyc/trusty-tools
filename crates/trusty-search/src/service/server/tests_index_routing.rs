@@ -281,13 +281,10 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
     )
     .await
     .expect_err("cold");
-    let (chunks_code, axum::Json(chunks_body)) = super::files::get_index_chunks_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-agree".to_string()),
-        axum::extract::Query(params),
-    )
-    .await
-    .expect_err("cold");
+    let (chunks_code, chunks_body) =
+        super::files::index_chunks_report(&state, "cold-agree", &params)
+            .await
+            .expect_err("cold");
 
     assert_eq!(status_code, chunks_code);
     assert_eq!(status_body["error"], chunks_body["error"]);
@@ -321,13 +318,9 @@ async fn write_path_cold_parked_index_reports_only_a_failed_load() {
         serde_json::json!({ "path": "src/auth.rs", "content": "fn authenticate() {}" }),
     )
     .expect("IndexFileRequest");
-    let (code, axum::Json(body)) = super::files::index_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-write".to_string()),
-        axum::Json(index_req),
-    )
-    .await
-    .expect_err("the root is gone, so the load cannot succeed");
+    let (code, body) = super::files::index_file_report(&state, "cold-write", index_req)
+        .await
+        .expect_err("the root is gone, so the load cannot succeed");
 
     assert_eq!(
         code,
@@ -347,13 +340,9 @@ async fn write_path_cold_parked_index_reports_only_a_failed_load() {
     let remove_req: super::router::RemoveFileRequest =
         serde_json::from_value(serde_json::json!({ "path": "src/auth.rs" }))
             .expect("RemoveFileRequest");
-    let (rm_code, axum::Json(rm_body)) = super::files::remove_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("cold-write".to_string()),
-        axum::Json(remove_req),
-    )
-    .await
-    .expect_err("the delete half sees the same failed load");
+    let (rm_code, rm_body) = super::files::remove_file_report(&state, "cold-write", remove_req)
+        .await
+        .expect_err("the delete half sees the same failed load");
 
     assert_eq!(
         rm_code, code,
@@ -375,13 +364,9 @@ async fn write_path_unknown_index_is_still_404() {
     let req: super::router::RemoveFileRequest =
         serde_json::from_value(serde_json::json!({ "path": "src/auth.rs" }))
             .expect("RemoveFileRequest");
-    let (code, axum::Json(body)) = super::files::remove_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-        axum::Json(req),
-    )
-    .await
-    .expect_err("genuinely unknown");
+    let (code, body) = super::files::remove_file_report(&state, "never-existed", req)
+        .await
+        .expect_err("genuinely unknown");
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown index: never-existed");
