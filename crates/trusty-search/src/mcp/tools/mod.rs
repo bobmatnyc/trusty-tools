@@ -473,3 +473,6 @@ mod tests_transport;
 // #9168: the optional `project` argument.
 #[cfg(test)]
 mod tests_project;
+// #10375: `console_metrics` reports the daemon's version.
+#[cfg(test)]
+mod tests_console_version_10375;

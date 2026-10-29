@@ -215,17 +215,27 @@ pub(super) async fn dispatch_misc_tool(
 /// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
 /// #6424: schema 1 -> 2 adds `last_used_unix` to each index entry; nothing is
 /// removed or renamed, so a console built against schema 1 reads unchanged.
+/// #10375: the report's `version` is the serving daemon's (from
+/// `search.health`), so it matches `search_health` after a restart onto a newer
+/// binary; the bridge's own compile-time version is the fallback only when the
+/// daemon cannot be asked or names none.
 /// Returns a raw `serde_json::Value` (not the MCP content envelope) —
 /// the dispatcher's `wrap_tool_result()` applies the envelope.
 /// Test: The dispatcher routes `"console_metrics"` to this arm; covered by
-/// the tool-name routing tests in `tests.rs`.
+/// the tool-name routing tests in `tests.rs`, and
+/// `console_metrics_reports_the_daemons_version` in
+/// `tests_console_version_10375.rs`.
 async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchError> {
     use trusty_common::console_metrics::{make_report, ServiceHealth};
 
     // Probe search.health — determines status and index_count.
     let health = server.call(METHOD_HEALTH, serde_json::json!({})).await;
+    let mut version = env!("CARGO_PKG_VERSION").to_string();
     let (status, index_count, warm_boot_degraded) = match health {
         Ok(health) => {
+            if let Some(v) = health.get("version").and_then(Value::as_str) {
+                version = v.to_string();
+            }
             let idx = health.get("indexes").and_then(Value::as_u64).unwrap_or(0) as usize;
             let degraded = health
                 .get("warmboot_summary")
@@ -269,7 +279,7 @@ async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchErr
     let report = make_report(
         "trusty-search",
         "Trusty Search",
-        env!("CARGO_PKG_VERSION"),
+        &version,
         status,
         metrics,
         2,
