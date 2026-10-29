@@ -2376,7 +2376,7 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
 /// Test: itself.
 #[test]
 fn a_bare_start_refuses_before_forking_when_a_daemon_is_running() {
-    let err = super::daemon::refuse_if_already_running(Some(86880))
+    let err = super::daemon::refuse_for_holder(86880, super::daemon::LockHolder::StaleImage)
         .expect_err("a live daemon must refuse a second start");
     let msg = err.to_string();
     assert!(
@@ -2410,7 +2410,12 @@ fn a_start_proceeds_when_no_daemon_is_running() {
 /// Test: itself.
 #[test]
 fn already_running_message_names_the_pid_and_the_signal() {
-    let msg = super::daemon::already_running_message(86880, 60, false);
+    let msg = super::daemon::already_running_message(
+        86880,
+        60,
+        false,
+        super::daemon::LockHolder::StaleImage,
+    );
     assert!(msg.contains("86880"), "must name the pid: {msg}");
     assert!(
         msg.contains("kill -TERM 86880"),
@@ -2437,7 +2442,12 @@ fn already_running_message_names_the_pid_and_the_signal() {
 /// Test: itself.
 #[test]
 fn already_running_message_defers_the_restart_to_launchd() {
-    let msg = super::daemon::already_running_message(86880, 60, true);
+    let msg = super::daemon::already_running_message(
+        86880,
+        60,
+        true,
+        super::daemon::LockHolder::StaleImage,
+    );
     assert!(msg.contains("kill -TERM 86880"), "{msg}");
     assert!(
         msg.contains("KeepAlive"),
@@ -2446,5 +2456,64 @@ fn already_running_message_defers_the_restart_to_launchd() {
     assert!(
         !msg.contains("re-run `trusty-search start`"),
         "a manual start races launchd's own respawn: {msg}"
+    );
+}
+
+/// Why (#10358): after a cold boot the lock holder is a healthy peer, yet the
+/// refusal called it "the OLD image" and told the operator to SIGTERM it,
+/// which sent them after a daemon that was doing its job.
+/// What: a healthy-peer refusal names the pid, says it is serving, and carries
+/// no OLD-image text and no `kill` advice, supervised or not.
+/// Test: itself.
+#[test]
+fn a_healthy_peer_refusal_carries_no_kill_advice() {
+    for supervised in [false, true] {
+        let msg = super::daemon::already_running_message(
+            4321,
+            60,
+            supervised,
+            super::daemon::LockHolder::HealthyPeer,
+        );
+        assert!(
+            msg.contains("another instance (pid 4321) is already serving"),
+            "{msg}"
+        );
+        assert!(!msg.contains("OLD image"), "{msg}");
+        assert!(!msg.contains("kill -TERM"), "{msg}");
+    }
+    let err = super::daemon::refuse_for_holder(4321, super::daemon::LockHolder::HealthyPeer)
+        .expect_err("a live peer must still refuse the second start");
+    assert!(!err.to_string().contains("OLD image"), "{err}");
+}
+
+/// Why (#10358): the stale-image text is right only when the holder predates
+/// the binary on disk; unknown timestamps must not claim it.
+/// What: the holder is stale only when both times are known and the image is
+/// newer than the holder's start.
+/// Test: itself.
+#[test]
+fn lock_holder_is_stale_only_when_the_image_postdates_its_start() {
+    use super::daemon::{classify_lock_holder, LockHolder};
+    use std::time::{Duration, SystemTime};
+    let t = |s| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+    assert_eq!(
+        classify_lock_holder(Some(t(100)), Some(t(200))),
+        LockHolder::StaleImage
+    );
+    assert_eq!(
+        classify_lock_holder(Some(t(200)), Some(t(100))),
+        LockHolder::HealthyPeer
+    );
+    assert_eq!(
+        classify_lock_holder(Some(t(100)), Some(t(100))),
+        LockHolder::HealthyPeer
+    );
+    assert_eq!(
+        classify_lock_holder(None, Some(t(100))),
+        LockHolder::HealthyPeer
+    );
+    assert_eq!(
+        classify_lock_holder(Some(t(100)), None),
+        LockHolder::HealthyPeer
     );
 }
