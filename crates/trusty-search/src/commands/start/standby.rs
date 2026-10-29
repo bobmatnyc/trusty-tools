@@ -9,7 +9,9 @@
 //! alive instead and takes over if the holder goes away.
 //! What: [`await_lock_or_refuse`] runs BEFORE any heavy init. With a live lock
 //! holder it asks [`holder_action`]; on `Standby` it retries every
-//! [`DEFAULT_RETRY`] until the lock is free or SIGTERM arrives.
+//! [`DEFAULT_RETRY`] until the lock is free or SIGTERM arrives. A holder that
+//! predates the installed binary is waited out only for [`STALE_HOLDER_GRACE`]
+//! (see [`stale_wait_over`]), then refused with the replace-it advice.
 //! Test: `standby_tests.rs` (the decision, the interval parse) and
 //! `tests/launchd_standby_10358.rs` (the loop against real daemons).
 
@@ -18,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use super::daemon::refuse_if_already_running;
+use super::daemon::{probe_lock_holder, refuse_if_already_running, LockHolder};
 use crate::service::daemon_client::DaemonClient;
 
 /// Gap between lock retries while standing by.
@@ -31,6 +33,19 @@ pub(super) const DEFAULT_RETRY: Duration = Duration::from_secs(5);
 /// holding the lock. Refusing then would restart the respawn loop at the moment
 /// of takeover. A holder silent past this bound is treated as wedged.
 pub(super) const UNHEALTHY_GRACE: Duration = Duration::from_secs(60);
+
+/// How long a standby waits behind a holder that predates the installed binary.
+///
+/// Why: a stale holder never leaves on its own, so an unbounded standby would
+/// leave an install silently not upgrading. Exiting 1 does not loop hot: launchd
+/// respawns the job, which stands by for a full grace again, so a stale holder
+/// costs one short-lived run per grace window (not one per 30 s, #10358) and one
+/// logged refusal naming how to replace it. A holder that is merely stopping
+/// (upgrade in progress) leaves well inside the window and is taken over.
+pub(super) const STALE_HOLDER_GRACE: Duration = Duration::from_secs(600);
+
+/// Test seam: stale-holder grace in milliseconds.
+pub(super) const STALE_GRACE_MS_ENV: &str = "TRUSTY_SEARCH_STANDBY_STALE_GRACE_MS";
 
 /// Test seam: retry gap in milliseconds, so a test need not wait out 5 s ticks.
 pub(super) const RETRY_MS_ENV: &str = "TRUSTY_SEARCH_STANDBY_RETRY_MS";
@@ -100,6 +115,26 @@ pub(super) fn holder_action(supervised: bool, holder_healthy: bool) -> HolderAct
     }
 }
 
+/// Whether the standby behind this holder has waited long enough.
+///
+/// Why: see [`STALE_HOLDER_GRACE`]; only an older-image holder is bounded.
+/// What: true only for `StaleImage` once `waited >= grace`.
+/// Test: `a_stale_holder_is_waited_out_only_for_the_grace`.
+pub(super) fn stale_wait_over(holder: LockHolder, waited: Duration, grace: Duration) -> bool {
+    holder == LockHolder::StaleImage && waited >= grace
+}
+
+/// Parse [`STALE_GRACE_MS_ENV`]; anything unusable gives [`STALE_HOLDER_GRACE`].
+///
+/// Why: a typo must not make the standby refuse instantly, so under 500 ms is ignored.
+/// What: `Some("1500")` is 1.5 s; `None`, junk and small values give the default.
+/// Test: `a_stale_holder_is_waited_out_only_for_the_grace`.
+pub(super) fn stale_grace(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms >= 500)
+        .map_or(STALE_HOLDER_GRACE, Duration::from_millis)
+}
+
 /// Parse [`RETRY_MS_ENV`]; anything unusable gives [`DEFAULT_RETRY`].
 ///
 /// Why: a typo must not turn the retry into a busy loop, so a value under
@@ -157,6 +192,8 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
     let mut stop = std::pin::pin!(trusty_common::shutdown_signal());
     let mut announced = false;
     let mut silent_since: Option<std::time::Instant> = None;
+    let stale_grace = stale_grace(std::env::var(STALE_GRACE_MS_ENV).ok().as_deref());
+    let mut stale_since: Option<std::time::Instant> = None;
     loop {
         let healthy = match (&client, supervised) {
             (Some(c), true) => c.is_up().await,
@@ -181,6 +218,22 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
                 );
             }
             return refuse_if_already_running(Some(pid)).map(|()| LockWait::Free);
+        }
+        // #10358: a holder older than the installed binary never leaves by
+        // itself; stop standing by after `stale_grace` and say how to replace it.
+        if healthy && probe_lock_holder() == LockHolder::StaleImage {
+            let since = *stale_since.get_or_insert_with(|| {
+                tracing::warn!(
+                    "daemon lock holder (pid {pid}) predates the installed binary; standing by \
+                     at most {stale_grace:?}, then exiting (#10358)"
+                );
+                std::time::Instant::now()
+            });
+            if stale_wait_over(LockHolder::StaleImage, since.elapsed(), stale_grace) {
+                return refuse_if_already_running(Some(pid)).map(|()| LockWait::Free);
+            }
+        } else {
+            stale_since = None;
         }
         if !announced {
             tracing::info!(

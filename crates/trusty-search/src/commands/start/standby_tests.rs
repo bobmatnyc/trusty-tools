@@ -54,3 +54,21 @@ fn the_test_seam_warns_whenever_it_is_set() {
         );
     }
 }
+
+/// Why (#10358): a standby behind an older-image holder must end, a healthy
+/// peer's must not.
+/// What: only `StaleImage` expires, and only at the grace; the env parse ignores junk.
+/// Test: itself.
+#[test]
+fn a_stale_holder_is_waited_out_only_for_the_grace() {
+    use super::daemon::LockHolder::{HealthyPeer, StaleImage};
+    use super::standby::{stale_grace, stale_wait_over, STALE_HOLDER_GRACE};
+    let g = Duration::from_secs(10);
+    assert!(!stale_wait_over(StaleImage, Duration::from_secs(9), g));
+    assert!(stale_wait_over(StaleImage, g, g));
+    assert!(!stale_wait_over(HealthyPeer, Duration::from_secs(10_000), g));
+    assert_eq!(stale_grace(Some("1500")), Duration::from_millis(1500));
+    for bad in [None, Some("x"), Some("499")] {
+        assert_eq!(stale_grace(bad), STALE_HOLDER_GRACE, "input {bad:?}");
+    }
+}
