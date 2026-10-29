@@ -308,7 +308,9 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
 /// without touching the embedder; `dry_run: false` re-embeds them through the
 /// same primitive the write path uses. Idempotent — a second run over a
 /// repaired palace reports zero missing and does no work.
-/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
+/// A live run also rebuilds the BM25 lane (`bm25`, #10377).
+/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`;
+/// `palace_reembed_rebuilds_the_lexical_lane` in `tests/palace_reembed_bm25_10377.rs`.
 pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Result<Value> {
     use crate::engine::retrieval::VectorBackfillOptions;
     let palace = resolve_palace(state, &args, "palace_reembed")?;
@@ -330,8 +332,24 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
             ..Default::default()
         })
         .await?;
+    // #10377: a restored palace has no `bm25/` (snapshots leave it out), so the
+    // re-embed must rebuild the lexical lane too or recall runs without it
+    // until the next sweep. Skipped on a dry run, which writes nothing.
+    let bm25 = if dry_run {
+        Value::Null
+    } else {
+        let r = crate::bm25_backfill::backfill_state_palace(state, &handle, &palace, false).await;
+        json!({
+            "status": format!("{:?}", r.status).to_lowercase(),
+            "indexed": r.indexed,
+            "failed": r.failed,
+            "missing_after": r.missing_after,
+            "fully_indexed": r.fully_indexed(),
+        })
+    };
     let health = handle.embed_health();
     Ok(json!({
+        "bm25": bm25,
         "palace": report.palace_id,
         "dry_run": report.dry_run,
         "drawer_count": report.drawer_count,
