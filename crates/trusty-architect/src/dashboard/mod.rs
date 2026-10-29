@@ -27,13 +27,18 @@ pub mod derive;
 mod error;
 pub mod ids;
 // #10063 PR 3: the method types and the verb bodies.
+pub mod pending;
 pub mod rpc;
 pub mod schema_check;
 pub mod store;
 pub mod tally;
 pub mod verbs;
 
+pub use derive::{GoalSessions, RunProgress, goal_sessions, ordered, run_progress};
 pub use error::DashError;
+pub use pending::{
+    Pending, PendingEvent, SkippedField, StaleTask, StaleTasks, last_activity, pending, stale_tasks,
+};
 pub use schema_check::{SchemaDir, SchemaMode, SchemaSet};
 pub use store::{
     DeleteArchive, Doc, Format, ListQuery, Op, OpResult, PruneLog, Removed, Snapshot, Store,

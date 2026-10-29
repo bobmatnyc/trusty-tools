@@ -1,0 +1,108 @@
+[
+  {"name": "answered", "now": 1791763200, "snap": {"items": [
+    {"id": "Q01", "data": {"status": "answered", "answer": "Yes, ship it", "answered_at": "2026-10-11T10:00:00Z"}},
+    {"id": "Q02", "data": {"status": "answered", "answer": "no", "answered_at": "2026-10-11T10:00:00Z", "answer_note": "  Relayed to S01"}},
+    {"id": "Q03", "data": {"status": "answered", "answer": "maybe", "answer_note": "Acknowledged"}},
+    {"id": "Q04", "data": {"status": "answered", "answer": "x", "relayed": "2026-10-11T11:00Z S01"}},
+    {"id": "Q05", "data": {"status": "answered", "answer": "x", "relayed": "   "}},
+    {"id": "Q06", "data": {"status": "answered", "answer": 42, "answered_at": null}}
+  ]}},
+  {"name": "architect_do", "now": 1791763200, "snap": {"items": [
+    {"id": "A01", "data": {"status": "answered", "answer": "Architect Do", "answered_at": "2026-10-11T09:00Z", "answer_note": "  run the sweep  "}},
+    {"id": "A02", "data": {"status": "answered", "answer": "Have Architect Do", "answered_at": "2026-10-11T09:00Z", "answer_note": "   "}},
+    {"id": "A03", "data": {"status": "answered", "answer": "Architect Do"}}
+  ]}},
+  {"name": "cancelled", "now": 1791763200, "snap": {"items": [
+    {"id": "C01", "data": {"status": "cancelled", "cancelled_at": "2026-10-11T08:00Z", "cancel_note": "dup"}},
+    {"id": "C02", "data": {"status": "cancelled", "answer_note": "Relayed"}},
+    {"id": "C03", "data": {"status": "cancelled", "answer_note": "\tAcknowledged by S02"}},
+    {"id": "C04", "data": {"status": "cancelled", "relayed": "2026-10-11 S03"}}
+  ]}},
+  {"name": "wont_do", "now": 1791763200, "snap": {"items": [
+    {"id": "W01", "data": {"status": "wont_do", "wont_do": {"at": "2026-10-10", "note": "  out of scope "}}},
+    {"id": "W02", "data": {"status": "wont_do", "wont_do": {"at": "2026-10-10", "note": "  "}}},
+    {"id": "W03", "data": {"status": "wont_do", "wont_do": "nope"}},
+    {"id": "W04", "data": {"status": "wont_do", "answer_note": "Acknowledged"}},
+    {"id": "W05", "data": {"status": "wont_do", "relayed": "x"}}
+  ]}},
+  {"name": "interactive", "now": 1791763200, "snap": {"items": [
+    {"id": "I01", "data": {"status": "interactive", "title": "Talk it through", "answered_at": "2026-10-11T07:00Z"}},
+    {"id": "I02", "data": {"status": "interactive", "title": "done", "answer_note": "Relayed"}},
+    {"id": "I03", "data": {"status": "interactive", "title": "relayed", "relayed": "yes"}}
+  ]}},
+  {"name": "owner_unpark_due", "now": 1791763200, "snap": {"items": [
+    {"id": "P01", "data": {"status": "open", "parked": {"until": "2026-10-11", "at": "2026-10-01T00:00Z"}, "updates": [{"at": "2026-10-02T00:00Z"}, {"at": "2026-09-30T00:00Z"}, "junk", {"note": "no at"}]}},
+    {"id": "P02", "data": {"status": "open", "parked": {"until": "2026-10-12T00:00:00Z", "at": "2026-10-01"}}},
+    {"id": "P03", "data": {"status": "open", "parked": {"until": "2026-10-12T00:00:01Z", "at": "2026-10-01"}}},
+    {"id": "P04", "data": {"status": "open", "parked": {"until": "2026-10-12T02:00:00+03:00"}}},
+    {"id": "P05", "data": {"status": "done", "parked": {"until": "2026-10-01"}}},
+    {"id": "P06", "data": {"status": "open", "parked": {"until": "next tuesday"}}},
+    {"id": "P07", "data": {"status": "open", "parked": {"until": ""}}}
+  ]}},
+  {"name": "clarify_request", "now": 1791763200, "snap": {"items": [
+    {"id": "K01", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z", "clarify": {"dimension": "scope", "option": "narrow"}}}},
+    {"id": "K02", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z", "clarify": {"dimension": null, "option": null}}}},
+    {"id": "K03", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z", "clarify": {"dimension": "risk"}}}},
+    {"id": "K04", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z", "relayed_at": "2026-10-11T01:00Z"}}},
+    {"id": "K05", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z"}, "updates": [{"at": "2026-10-11T02:00Z"}]}},
+    {"id": "K06", "data": {"status": "open", "parked": {"choice": "clarify", "at": "2026-10-11T00:00Z", "clarify": {"option": 3}}}}
+  ]}},
+  {"name": "status_and_resume_request", "now": 1791763200, "snap": {"items": [
+    {"id": "R01", "data": {"status": "open", "title": "Where is it?", "status_request": {"at": "2026-10-11T05:00Z"}, "resume_request": {"at": "2026-10-11T06:00Z"}}},
+    {"id": "R02", "data": {"status": "open", "title": "no at", "status_request": {"at": ""}, "resume_request": {}}},
+    {"id": "R03", "data": {"status": "done", "title": "closed", "status_request": {"at": "2026-10-11"}}}
+  ]}},
+  {"name": "brief_request", "now": 1791763200, "snap": {"items": [
+    {"id": "B01", "data": {"status": "open", "title": "Brief me", "brief_request": {"at": "2026-10-11T04:00Z"}}},
+    {"id": "B02", "data": {"status": "brief_pending", "title": "Has brief", "brief": "x/docs/briefs/b.md", "brief_request": {"at": "2026-10-11T04:00Z"}}},
+    {"id": "B03", "data": {"status": "brief_pending", "title": "Refresh", "brief": "x/docs/briefs/b.md", "brief_request": {"at": "2026-10-11T04:00Z", "refresh": true}}},
+    {"id": "B04", "data": {"status": "open", "title": "Refresh 1", "brief": "b.md", "brief_request": {"at": "2026-10-11T04:00Z", "refresh": 1}}},
+    {"id": "B05", "data": {"status": "done", "title": "closed", "brief_request": {"at": "2026-10-11T04:00Z"}}}
+  ]}},
+  {"name": "steer_and_feedback", "now": 1791763200, "snap": {"items": [
+    {"id": "S01", "data": {"status": "done", "steer_requests": [{"text": "go faster", "at": "2026-10-11T03:00Z"}, {"text": "already", "relayed_at": "x"}, {"text": ""}, "bad"], "feedback": {"status": "new", "at": "2026-10-11", "note": "wrong kind", "to": "task"}}},
+    {"id": "S02", "data": {"status": "open", "steer_requests": "nope", "feedback": {"status": "seen", "note": "old"}}},
+    {"id": "S03", "data": {"status": "answered", "answer": "ok", "relayed": "r", "feedback": {"status": "new"}}}
+  ]}},
+  {"name": "sessions_efforts_il_steers", "now": 1791763200, "snap": {
+    "sessions": [
+      {"id": "S0b", "data": {"name": "beta", "command": {"status": "new", "type": "park", "note": "pause it", "text": "ignored", "at": "2026-10-11T01:00Z", "goal": "G01"}}},
+      {"id": "S0a", "data": {"name": "alpha", "command": {"status": "new", "type": "activate", "text": "go", "at": "2026-10-11T00:00Z"}}},
+      {"id": "S0c", "data": {"command": {"status": "new", "type": "restart"}}},
+      {"id": "S0d", "data": {"name": "delta", "command": {"status": "applied", "type": "park"}}}
+    ],
+    "effort_tunes": [
+      {"id": "E02", "data": {"status": "new", "goal": "G01", "direction": "more", "bias_after": 2, "at": "2026-10-11"}},
+      {"id": "E01", "data": {"status": "new", "goal": "G02", "direction": "less", "bias_after": -1}},
+      {"id": "E03", "data": {"status": "new", "goal": "G03", "direction": "less", "bias_after": 0}},
+      {"id": "E04", "data": {"status": "new", "goal": "G04", "direction": "more", "bias_after": true}},
+      {"id": "E05", "data": {"status": "new", "goal": "G05", "direction": "more", "bias_after": 1.5}},
+      {"id": "E06", "data": {"status": "applied", "goal": "G06"}}
+    ],
+    "il_steers": [
+      {"id": "L02", "data": {"status": "new", "text": "focus on tests", "task": "T9", "session": "alpha", "at": "2026-10-11T02:00Z"}},
+      {"id": "L01", "data": {"status": "new", "text": ""}},
+      {"id": "L03", "data": {"status": "relayed", "text": "old"}}
+    ]
+  }},
+  {"name": "goals", "now": 1791763200, "snap": {"goals": [
+    {"id": "G01", "data": {"title": "Ship v1", "parked": {"until": "2026-11-01", "at": "2026-10-11T00:00Z"}}},
+    {"id": "G02", "data": {"title": "Docs", "parked": {"at": "2026-10-11T00:00Z"}}},
+    {"id": "G03", "data": {"title": "Back", "unparked_at": "2026-10-11T05:00Z"}},
+    {"id": "G04", "data": {"title": "Acked", "parked": {"until": "2026-11-01"}, "park_ack": "2026-10-11"}},
+    {"id": "G05", "data": {"title": "Finished", "lifecycle": "done", "done_at": "2026-10-11T06:00Z", "done_note": "  all green  "}},
+    {"id": "G06", "data": {"title": "Finished quiet", "lifecycle": "done", "done_at": "2026-10-11T06:00Z"}},
+    {"id": "G07", "data": {"title": "Done acked", "lifecycle": "done", "done_at": "x", "done_ack": "y"}},
+    {"id": "G08", "data": {"title": "Brief goal", "brief_request": {"at": "2026-10-11T07:00Z"}}},
+    {"id": "G09", "data": {"title": "Refresh goal", "brief": "b.md", "brief_request": {"at": "2026-10-11T07:00Z", "refresh": true}}},
+    {"id": "G0a", "data": {"title": "Has brief", "brief": "b.md", "brief_request": {"at": "2026-10-11T07:00Z"}}}
+  ]}},
+  {"name": "all_sources_order", "now": 1791763200, "snap": {
+    "goals": [{"id": "G01", "data": {"title": "g", "lifecycle": "done", "done_at": "t", "brief_request": {"at": "t"}, "unparked_at": "u"}}],
+    "il_steers": [{"id": "L01", "data": {"status": "new", "text": "il"}}],
+    "effort_tunes": [{"id": "E01", "data": {"status": "new", "bias_after": 1}}],
+    "sessions": [{"id": "S01", "data": {"name": "s", "command": {"status": "new", "type": "activate", "text": "t"}}}],
+    "items": [{"id": "Q01", "data": {"status": "answered", "answer": "a"}}]
+  }},
+  {"name": "empty_snapshot", "now": 1791763200, "snap": {}}
+]
