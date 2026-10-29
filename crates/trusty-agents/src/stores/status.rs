@@ -542,6 +542,9 @@ fn describe_palace_failure(e: &anyhow::Error, palace: &str) -> String {
     match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
         Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
         Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None if e.is::<trusty_common::memory_rpc::MemoryProtocolError>() => {
+            format!("trusty-memory refused the connection: {e:#}")
+        }
         None => format!("trusty-memory unreachable: {e:#}"),
     }
 }

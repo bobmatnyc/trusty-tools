@@ -401,3 +401,29 @@ async fn client_refuses_a_daemon_with_an_unsupported_protocol() {
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// Why (#9538): an unsupported-protocol daemon looked identical to a down one.
+/// What: `probe_health` surfaces the named refusal, and `auto_detect_at` still
+/// falls back to the local store.
+/// Test: this test.
+#[tokio::test]
+async fn health_check_names_an_unsupported_protocol_and_auto_detect_falls_back() {
+    let beyond = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
+    let daemon = uds_mock::spawn_with_protocol(beyond, |_m: &str, _p: Value| {
+        Box::pin(async { Ok(json!({})) })
+    })
+    .await;
+    let client = TrustyMemoryClient::new(daemon.socket());
+
+    let err = client.probe_health().await.expect_err("must be refused");
+    assert!(
+        err.is::<trusty_common::memory_rpc::MemoryProtocolError>(),
+        "got: {err:#}"
+    );
+    assert!(!client.health_check().await);
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(RedbUsearchStore::open(dir.path(), 4).unwrap());
+    let backend = MemoryBackend::auto_detect_at(daemon.socket(), store).await;
+    assert!(matches!(backend, MemoryBackend::Local(_)));
+}
