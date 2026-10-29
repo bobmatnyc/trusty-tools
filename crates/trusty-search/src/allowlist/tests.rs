@@ -82,12 +82,24 @@ fn denylist_blocks_tmp() {
 /// Test: this test.
 #[test]
 fn denial_hint_names_flag_only_where_it_can_relax() {
-    let tmp = super::is_denied(&PathBuf::from("/private/tmp/my-project")).unwrap();
+    let tmp = super::is_denied_hinting_flag(&PathBuf::from("/private/tmp/my-project")).unwrap();
     assert!(tmp.contains("--allow-sensitive-path"), "got: {tmp}");
 
     let ssh = PathBuf::from(format!("{}/.ssh", dirs::home_dir().unwrap().display()));
-    let ssh = super::is_denied(&ssh).unwrap();
+    let ssh = super::is_denied_hinting_flag(&ssh).unwrap();
     assert!(!ssh.contains("--allow-sensitive-path"), "got: {ssh}");
+}
+
+/// The plain `index <path>` refusal does not name `--allow-sensitive-path`.
+///
+/// Why: #10364 — plain `index` has no such flag, so a hint there contradicts
+/// the "daemon will also refuse this root" line printed next to it.
+/// What: asserts the strict `is_denied` text for a temp root omits the flag.
+/// Test: this test.
+#[test]
+fn plain_index_refusal_omits_allow_sensitive_path_hint() {
+    let reason = super::is_denied(&PathBuf::from("/private/tmp/my-project")).unwrap();
+    assert!(!reason.contains("--allow-sensitive-path"), "got: {reason}");
 }
 
 /// `is_denied_allowing_sensitive_path` permits every OS-temp / app-support
