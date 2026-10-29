@@ -196,6 +196,53 @@ fn credential_parameter_names_are_refused_by_suffix_after_9748() {
     }
 }
 
+/// Why: lowercasing the parameter name first removed the camelCase boundary,
+/// so `?clientKey=<32 hex>` was admitted; `api.key` had no boundary either.
+/// What: each camelCase or dotted `key` name carries a 32-byte value and is
+/// refused, bare and in prose. `sortKey=asc` and `keyword`-like names stay
+/// accepted.
+/// Test: itself; the refused rows are red before `normalise_param_name`.
+#[test]
+fn camel_case_and_dotted_names_are_refused_after_9748() {
+    for shape in [
+        "https://a.example.com/v1?clientKey=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+        "https://a.example.com/v1?appKey=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+        "https://a.example.com/v1?subscriptionKey=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+        "https://a.example.com/v1?apiKey=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+        "https://a.example.com/v1?api.key=3f1c0a9b8e7d6c5b4a39281706f5e4d3", // pragma: allowlist secret
+    ] {
+        assert!(refused(shape), "admitted {shape}");
+        assert!(
+            refused(&format!("Callback set to {shape} for the job.")),
+            "admitted in prose: {shape}"
+        );
+    }
+    for shape in [
+        "https://example.com/list?sortKey=asc",
+        "https://example.com/search?keyword=rust",
+        "https://example.com/zoo?monkey=banana",
+    ] {
+        assert!(accepted(shape), "refused {shape}");
+    }
+}
+
+/// Why: past `MAX_STRUCTURAL_EQUALS` the structural check gives up, so the
+/// cap must not become a way to hide a credential in a long token.
+/// What: 70 `a=b&` pairs followed by a provider-shaped key are refused.
+/// Test: itself.
+#[test]
+fn token_past_the_equals_cap_still_refuses_an_embedded_secret_after_9748() {
+    let shape = format!(
+        "{}ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        "a=b&".repeat(70)
+    );
+    assert!(refused(&shape), "admitted {shape}");
+    assert!(
+        refused(&format!("Query {shape} was logged.")),
+        "admitted in prose: {shape}"
+    );
+}
+
 /// Why: a password may hold `#` or `?`, which end the authority in a strict
 /// URL parse; cutting the authority there let the password through.
 /// What: the userinfo is the text before the last `@` that precedes the first
