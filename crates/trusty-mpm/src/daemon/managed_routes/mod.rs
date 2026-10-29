@@ -29,7 +29,12 @@ pub mod activity;
 // #9856: `POST /api/v1/channels/ask-owner` and the `ask_owner` MCP body.
 #[cfg(feature = "channels")]
 pub mod ask_owner;
+// #10423 (S1b): the staged channel send and its owner-only Approve.
 pub(crate) mod auto_relaunch;
+#[cfg(feature = "channels")]
+pub mod channel_send;
+#[cfg(all(test, feature = "channels"))]
+mod channel_send_tests;
 pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;
@@ -160,6 +165,8 @@ pub fn channels_router() -> axum::Router<Arc<DaemonState>> {
     let router = egress_verdict_router();
     #[cfg(feature = "channels")]
     let router = router.merge(ask_owner::router());
+    #[cfg(feature = "channels")]
+    let router = router.merge(channel_send::router());
     // #9873 Q1: mounted only in a daemon whose one-way sandbox latch is set.
     #[cfg(feature = "channels")]
     let router = router.merge(inbound_fake::router(crate::secret_source::sandboxed()));
