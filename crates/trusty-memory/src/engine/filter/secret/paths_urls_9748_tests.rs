@@ -247,12 +247,12 @@ fn benign_query_names_and_at_signs_stay_accepted_after_9748() {
 }
 
 /// Why: the gate slices tokens by byte offset; a multibyte character must not
-/// panic it. A 100 KB body of query pairs or `:N` groups must not stall it.
-/// What: runs every gate path over the inputs; only the multibyte rows
-/// assert a verdict, the long rows assert the run time.
+/// panic it.
+/// What: runs every gate path over the inputs; only a multibyte password
+/// asserts a verdict.
 /// Test: itself.
 #[test]
-fn multibyte_and_long_inputs_are_safe_after_9748() {
+fn multibyte_urls_and_line_suffixes_do_not_panic_after_9748() {
     for shape in [
         "https://example.com/größe/日本語?q=ünï&lang=日本語#é",
         "docs/日本語.md:12",
@@ -262,18 +262,34 @@ fn multibyte_and_long_inputs_are_safe_after_9748() {
         let _ = (check_secret(shape), find_secret_spans(shape));
         let _ = FilterConfig::default().apply(shape, false);
     }
-    let pairs = format!("https://example.com/p?{}", "&a=b".repeat(25_000));
-    let lines = format!("docs/a.md{}", ":1".repeat(50_000));
-    for content in [pairs, lines] {
-        let start = std::time::Instant::now();
-        let _ = check_secret(&content);
-        let _ = find_secret_spans(&content);
-        let _ = FilterConfig::default().apply(&content, false);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "stalled for {:?} on {} bytes",
-            start.elapsed(),
-            content.len()
-        );
-    }
+}
+
+/// Runs every gate path over `content` and fails when it takes over 5 s.
+fn assert_finishes_quickly(content: &str) {
+    let start = std::time::Instant::now();
+    let _ = check_secret(content);
+    let _ = find_secret_spans(content);
+    let _ = FilterConfig::default().apply(content, false);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "stalled for {:?} on {} bytes",
+        start.elapsed(),
+        content.len()
+    );
+}
+
+/// Why: a 100 KB body of query pairs must not stall or overflow the gate.
+/// What: one URL with 25 000 `&a=b` pairs.
+/// Test: itself.
+#[test]
+fn long_query_string_finishes_quickly_after_9748() {
+    assert_finishes_quickly(&format!("https://example.com/p?{}", "&a=b".repeat(25_000)));
+}
+
+/// Why: a 100 KB token of `:N` groups must not stall or overflow the gate.
+/// What: one file name followed by 50 000 `:1` groups.
+/// Test: itself.
+#[test]
+fn long_line_suffix_chain_finishes_quickly_after_9748() {
+    assert_finishes_quickly(&format!("docs/a.md{}", ":1".repeat(50_000)));
 }
