@@ -33,7 +33,7 @@ Always:
 1. Compare databases by endpoint id only (the `ep-xxxx-xxxx` part of the host). Never compare or quote the full host, user or password.
 2. Take a branch (or confirm the restore window) before any change to data you care about.
 3. Start with read-only commands. Say what you ran and what it returned, as counts and names, never values.
-4. Hold the API key in a secret store (`tm secrets`, or the env of the process). Pass it as `NEON_API_KEY`, never as a flag in shell history that a log captures.
+4. Check `command -v tm` first; if `tm` is absent, hold the key in the env of the process only. Otherwise hold the API key in a secret store (`tm secrets`, or the env of the process). Pass it as `NEON_API_KEY`, never as a flag in shell history that a log captures.
 5. Ask the owner when the Neon console or a Vercel setting must change. Agents do not have the owner's integration login.
 
 ## How the Vercel integration works
