@@ -64,7 +64,7 @@ name = "trusty-search"
 # touches src/** (quiet graph-refresh rebuild).
 # 0.62.0 (Refs #10110): minor — adds the search.index.files.remove verb and the
 # remove_files MCP tool; the Architect ruled the bump at 13:26Z 2026-10-22.
-version = "0.62.0"
+version = "0.62.2"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
