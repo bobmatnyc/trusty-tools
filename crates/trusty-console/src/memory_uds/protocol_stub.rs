@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -22,6 +23,20 @@ pub(crate) fn spawn(
     dir: &Path,
     protocol: Value,
     reply: impl Into<String>,
+) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
+    let line = json!({ "jsonrpc": "2.0", "id": 1, "result": protocol }).to_string();
+    spawn_raw(dir, line, reply, Duration::ZERO, Duration::ZERO)
+}
+
+/// [`spawn`] with the whole `memory.protocol` answer line given verbatim (for
+/// an error frame) and a delay before each answer: `protocol_delay` before the
+/// handshake answer, `reply_delay` before any other.
+pub(crate) fn spawn_raw(
+    dir: &Path,
+    protocol_line: String,
+    reply: impl Into<String>,
+    protocol_delay: Duration,
+    reply_delay: Duration,
 ) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
     let socket = dir.join("sockets").join("memory.sock");
     let reply = reply.into();
@@ -38,11 +53,12 @@ pub(crate) fn spawn(
             let _ = conn.read_to_end(&mut raw).await;
             let request: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
             let method = request["method"].as_str().unwrap_or_default().to_string();
-            let line = if method == "memory.protocol" {
-                json!({ "jsonrpc": "2.0", "id": 1, "result": protocol }).to_string()
+            let (line, delay) = if method == "memory.protocol" {
+                (protocol_line.clone(), protocol_delay)
             } else {
-                reply.clone()
+                (reply.clone(), reply_delay)
             };
+            tokio::time::sleep(delay).await;
             if let Ok(mut seen) = log.lock() {
                 seen.push(method);
             }

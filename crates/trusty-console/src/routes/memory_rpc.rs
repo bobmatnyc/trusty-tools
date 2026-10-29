@@ -47,6 +47,8 @@ pub(crate) async fn call_tool(
     id: &str,
 ) -> Result<Value, ActionVerdict> {
     // #9538: refuse a daemon on an unsupported protocol before any frame is sent.
+    // One ACTION_TIMEOUT covers the handshake and the frame together.
+    let started = std::time::Instant::now();
     if let Err(e) = crate::memory_uds::ensure_protocol(socket, tool, ACTION_TIMEOUT).await {
         return Err(match e {
             MemoryRpcError::ProtocolMismatch(reason) => ActionVerdict::Refused {
@@ -75,7 +77,7 @@ pub(crate) async fn call_tool(
         trusty_common::uds::send_framed_request::<_, trusty_common::uds::server::RpcResponse>(
             socket,
             &request,
-            ACTION_TIMEOUT,
+            crate::memory_uds::remaining(ACTION_TIMEOUT, started),
         )
         .await;
 

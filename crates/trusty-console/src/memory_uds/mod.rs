@@ -39,7 +39,7 @@ pub(crate) mod map;
 pub(crate) mod routes;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{StatusCode, header};
@@ -296,6 +296,16 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
         .map_err(|e| format!("could not resolve the {MEMORY_SERVICE} socket path: {e:#}"))
 }
 
+/// What is left of `budget` since `started`.
+///
+/// Why: #9538 added a handshake before the frame, and giving each the caller's
+/// whole timeout let a cold call wait twice as long as asked. One deadline,
+/// spent by the handshake first, keeps the total at `budget`.
+/// Test: `call_keeps_the_handshake_and_the_frame_inside_one_timeout`.
+pub(crate) fn remaining(budget: Duration, started: Instant) -> Duration {
+    budget.saturating_sub(started.elapsed())
+}
+
 /// Refuse a trusty-memory daemon whose wire protocol this console does not speak.
 ///
 /// Why: #9288 added `memory.protocol` and #9538 makes every first-party client
@@ -341,7 +351,9 @@ pub(crate) async fn ensure_protocol(
 /// starts reading an `error` frame as a success while another does not.
 ///
 /// What: the protocol check ([`ensure_protocol`]; nothing is sent to a daemon
-/// it refuses), then one framed request, then the envelope check. A response carrying
+/// it refuses), then one framed request, then the envelope check. `timeout` is
+/// ONE deadline across the handshake and the frame: the handshake may use all
+/// of it, and the frame gets only what is left (see [`remaining`]). A response carrying
 /// `error` is [`MemoryRpcError::Refused`] with the daemon's code and message; a
 /// response carrying neither half is [`MemoryRpcError::Malformed`], never an
 /// empty success.
@@ -352,14 +364,18 @@ pub(crate) async fn ensure_protocol(
 ///
 /// Test: `call_reports_a_dead_socket_as_unreachable`,
 /// `call_reports_a_jsonrpc_error_with_the_http_status_it_came_from`,
-/// `call_reports_an_empty_answer_as_malformed`, `call_returns_the_daemon_result`.
+/// `call_reports_an_empty_answer_as_malformed`, `call_returns_the_daemon_result`,
+/// `call_keeps_the_handshake_and_the_frame_inside_one_timeout`,
+/// `call_stays_callable_on_a_daemon_that_predates_the_handshake`.
 pub(crate) async fn call(
     socket: &Path,
     method: &str,
     params: Value,
     timeout: Duration,
 ) -> Result<Value, MemoryRpcError> {
+    let started = Instant::now();
     ensure_protocol(socket, method, timeout).await?;
+    let timeout = remaining(timeout, started);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -417,7 +433,9 @@ pub(crate) async fn open_stream(
     params: Value,
     open_timeout: Duration,
 ) -> Result<FramedStream<Value>, MemoryRpcError> {
+    let started = Instant::now();
     ensure_protocol(socket, method, open_timeout).await?;
+    let open_timeout = remaining(open_timeout, started);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,

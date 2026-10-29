@@ -51,6 +51,10 @@ fn error_status_maps_every_documented_code() {
         };
         assert_eq!(err.status(), expected, "code {code}");
     }
+    assert_eq!(
+        MemoryRpcError::ProtocolMismatch("protocol 99".to_string()).status(),
+        StatusCode::BAD_GATEWAY
+    );
 }
 
 /// Why: a daemon that is not running must never be reported as one that
@@ -570,4 +574,58 @@ async fn call_refuses_a_daemon_with_no_protocol_version() {
     );
     let seen = seen.lock().expect("recorded");
     assert_eq!(seen.as_slice(), ["memory.protocol"], "{seen:?}");
+}
+
+/// Why: the handshake and the frame once each got the caller's whole timeout,
+/// so a cold call could wait twice as long as asked (#9538 review).
+/// What: a 1s timeout, a handshake answered after 0.6s and the frame after
+/// another 0.6s. Spent separately that is 1.2s and succeeds; against one
+/// deadline the frame runs out of time, and the whole call ends near 1s.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_keeps_the_handshake_and_the_frame_inside_one_timeout() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let handshake = json!({ "jsonrpc": "2.0", "id": 1, "result": protocol_stub::supported() });
+    let (socket, _) = protocol_stub::spawn_raw(
+        tmp.path(),
+        handshake.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+        Duration::from_millis(600),
+        Duration::from_millis(600),
+    );
+    let started = std::time::Instant::now();
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(1))
+        .await
+        .expect_err("the two waits together exceed the one timeout");
+    let took = started.elapsed();
+    assert!(matches!(err, MemoryRpcError::Unreachable(_)), "{err:?}");
+    assert!(took < Duration::from_millis(1150), "waited {took:?}");
+}
+
+/// Why: a daemon that predates `memory.protocol` answers method-not-found, and
+/// must stay callable (#9538).
+/// What: the stub answers the handshake with JSON-RPC `-32601`; the next call
+/// reaches it and returns its result.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_stays_callable_on_a_daemon_that_predates_the_handshake() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn_raw(
+        tmp.path(),
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+            .to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    let out = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect("a pre-handshake daemon is still callable");
+    assert_eq!(out["status"], "ok");
+    let seen = seen.lock().expect("recorded");
+    assert_eq!(
+        seen.as_slice(),
+        ["memory.protocol", METHOD_HEALTH],
+        "{seen:?}"
+    );
 }
