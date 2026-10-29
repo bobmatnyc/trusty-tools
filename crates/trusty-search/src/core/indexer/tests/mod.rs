@@ -111,6 +111,8 @@ mod exact_match_floor;
 mod exact_match_perf;
 mod file_lifecycle_8959;
 pub(super) mod incremental_stamp_9230;
+// #10301: a sidecar ahead of the graph is reconciled on load.
+mod load_reconcile_10301;
 mod path_filter_search;
 // #9450: the persister compacts a churned graph before it saves.
 mod persist_compact_9450;
