@@ -18,9 +18,7 @@ use std::process::Command;
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
-use trusty_mpm::core::child_repo_scan::{
-    ChildRepoScan, scan_for_child_repo, scan_for_child_repo_except,
-};
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo_within};
 use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
 
 use super::user_config_path;
@@ -30,6 +28,19 @@ const PROJECTS_ROOT_DIR: &str = "trusty-mpm-projects";
 
 /// The one child repository fleet init accepts, `<dir>/local` (#8878 R1).
 pub(crate) const PRIVATE_REPO_DIR: &str = "local";
+
+/// Directories the workspace-parent scan may visit under one fleet directory.
+///
+/// Why: #10355 — the Architect's own directory (scripts, inbox, evidence,
+/// `.claude/`) outgrew the shared 256-directory budget, and the exhausted scan
+/// refused every relaunch. The scan guards a supervisor grant, so exhaustion
+/// stays a refusal; the budget is sized so an ordinary Architect directory
+/// finishes, while a tree too large to check still refuses in bounded time.
+/// What: 64x [`trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET`];
+/// each visit is one `read_dir` plus one `lstat` per child directory.
+/// Test: `an_architect_dir_wider_than_the_workspace_budget_passes`,
+/// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
+pub(crate) const FLEET_SCAN_BUDGET: usize = 16_384;
 
 /// Git variables that point a git command at a repository other than `-C <dir>`.
 const GIT_REDIRECT_VARS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
@@ -274,11 +285,12 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
     }
     // #8878 R1: a private `local/` repository is checked on its own, and the
     // scan still looks at everything beside it.
+    // #10355: fleet budget, not the shared 256; exhaustion still refuses below.
     let scan = match private_repo(target)? {
-        None => scan_for_child_repo(target),
+        None => scan_for_child_repo_within(target, None, FLEET_SCAN_BUDGET),
         Some(local) => {
             check_private_repo(target, &local)?;
-            scan_for_child_repo_except(target, &local)
+            scan_for_child_repo_within(target, Some(&local), FLEET_SCAN_BUDGET)
         }
     };
     match scan {
@@ -335,7 +347,7 @@ fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
         path: target.to_path_buf(),
         reason,
     };
-    match scan_for_child_repo(local) {
+    match scan_for_child_repo_within(local, None, FLEET_SCAN_BUDGET) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(repo) => {
             return Err(parent(format!(
