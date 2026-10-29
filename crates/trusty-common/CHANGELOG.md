@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.1] — 2026-10-29
+
+### Security
+
+- The workspace lockfile moves libz-sys from 1.1.28 to 1.1.31, fixing RUSTSEC-2026-0418 (libz-sys build script leaks environment variables in the build directory), which failed the pre-publish `cargo audit` and `cargo deny` gates.
+- 0.67.0 was tagged (`trusty-common-v0.67.0`) but never published to crates.io, and its tag cannot move. 0.67.1 carries the 0.67.0 changes and is the first published release of that line.
+
 ## [0.67.0] — 2026-10-29
 
 ### Breaking
