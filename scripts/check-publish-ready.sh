@@ -174,19 +174,21 @@ main() {
 
   local failures=0
 
-  # GUARD 1: current HEAD must be origin/main or an ancestor of it.
-  local head_sha
+  # GUARD 1: HEAD must be on origin/main or a release/<crate>-<semver> branch
+  # (D96, #10388). The rule lives in check-tag-ancestry.sh.
+  local head_sha ancestry
+  ancestry="$(dirname "${BASH_SOURCE[0]}")/check-tag-ancestry.sh"
   head_sha="$(git rev-parse HEAD)"
-  if git merge-base --is-ancestor "${head_sha}" "${origin_main_sha}"; then
-    echo "PASS: GUARD 1 (merged-main) — HEAD (${head_sha}) is on origin/main" >&2
+  if bash "${ancestry}" HEAD; then
+    echo "PASS: GUARD 1 (merged-main) — HEAD (${head_sha}) is on a releasable ref" >&2
   else
     if [[ "${override_active}" -eq 1 ]]; then
       echo "WARN: GUARD 1 (merged-main) FAILED but ALLOW_UNMERGED_PUBLISH=1 — publishing" >&2
       echo "      from an unmerged commit. This is a deliberate escape hatch; make sure" >&2
       echo "      you understand issue #2209 before relying on it in normal workflow." >&2
     else
-      echo "FAIL: GUARD 1 (merged-main) — HEAD (${head_sha}) is NOT an ancestor of" >&2
-      echo "      origin/main (${origin_main_sha}). Publishing from an unmerged commit is" >&2
+      echo "FAIL: GUARD 1 (merged-main) — HEAD (${head_sha}) is NOT on origin/main" >&2
+      echo "      (${origin_main_sha}) or a release/<crate>-<semver> branch. Publishing from an unmerged commit is" >&2
       echo "      forbidden: issue #2209 published from an unmerged branch, making a" >&2
       echo "      P0-missing build the crates.io 'latest' for every concurrent session." >&2
       echo "      Merge this branch to main first, then publish from a checkout of" >&2
@@ -222,8 +224,8 @@ main() {
   else
     git fetch origin "${tag_sha}" --quiet 2>/dev/null || true
     if git cat-file -e "${tag_sha}^{commit}" 2>/dev/null \
-      && git merge-base --is-ancestor "${tag_sha}" "${origin_main_sha}"; then
-      echo "PASS: GUARD 2 (version tag) — '${matched_tag}' (${tag_sha}) is on origin/main" >&2
+      && bash "${ancestry}" --no-fetch "${tag_sha}"; then
+      echo "PASS: GUARD 2 (version tag) — '${matched_tag}' (${tag_sha}) is on a releasable ref" >&2
     else
       if [[ "${override_active}" -eq 1 ]]; then
         echo "WARN: GUARD 2 (version tag) FAILED but ALLOW_UNMERGED_PUBLISH=1 — tag" >&2
@@ -231,8 +233,8 @@ main() {
         echo "      anyway per override." >&2
       else
         echo "FAIL: GUARD 2 (version tag) — tag '${matched_tag}' (${tag_sha}) exists but is" >&2
-        echo "      NOT an ancestor of origin/main (${origin_main_sha}). The tagged commit" >&2
-        echo "      must be merged to main before publishing." >&2
+        echo "      NOT on origin/main (${origin_main_sha}) or a release/<crate>-<semver>" >&2
+        echo "      branch (D96, #10388). Merge or cut the release branch first." >&2
         failures=$((failures + 1))
       fi
     fi

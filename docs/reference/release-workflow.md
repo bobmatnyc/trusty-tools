@@ -167,8 +167,14 @@ Owner ruling: item 47, 2026-09-30.
 
 ## Publish-Only-From-Merged-Main Guard (issue #2227)
 
-🔴 **Publish only from merged main / the pushed release tag — never an
-unmerged branch.** `scripts/check-publish-ready.sh <crate-name-or-dir>` (also
+🔴 **Publish only from `main` or a `release/<crate>-<semver>` branch — never an
+unmerged feature branch.** Owner ruling D96 on #10388 (2026-10-28) added the
+release-branch family; the #2227 intent (2026-07) is unchanged. One script,
+`scripts/check-tag-ancestry.sh`, holds the rule for `release.yml`, GUARD 1/2
+below and preflight CHECK 1. It fetches `main` and `release/*` and fails closed;
+a branch qualifies only when it matches
+`^release/[a-z0-9]+(-[a-z0-9]+)*-MAJOR.MINOR.PATCH(-pre)?$`, so `release/d66`
+and `release/2026-07-07-workspace` do not. `scripts/check-publish-ready.sh <crate-name-or-dir>` (also
 exposed as `make publish-check CRATE=<crate-name-or-dir>`) is a mandatory
 preflight gate that must pass before running `cargo publish -p <crate-name>`.
 
@@ -176,10 +182,10 @@ It re-fetches the TRUE `origin/main` tip via `git ls-remote origin
 refs/heads/main` (never trusting a possibly-stale local
 `refs/remotes/origin/main`) and enforces two guards:
 
-1. **GUARD 1 (merged-main)** — current HEAD must be `origin/main` itself or an
-   ancestor of it (`git merge-base --is-ancestor`).
+1. **GUARD 1 (merged-main)** — current HEAD must be reachable from
+   `origin/main` or a qualifying release branch (`check-tag-ancestry.sh`).
 2. **GUARD 2 (version tag on main)** — the release tag `<crate>-v<version>`
-   must be pushed to origin and its commit must be an ancestor of origin/main.
+   must be pushed to origin and its commit must pass the same rule.
    For `trusty-git-analytics`, this is `trusty-git-analytics-v<version>` only.
 
 Either guard failing aborts with an actionable message and a non-zero exit

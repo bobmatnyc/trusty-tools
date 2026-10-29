@@ -914,7 +914,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tagged commit is reachable from origin/main
+      - name: Verify tagged commit is on origin/main or a release branch (D96)
         shell: bash
         # TAG is passed via `env:` rather than interpolated directly into the
         # script (as `.claude/skills/cargo-publish/SKILL.md`-documented issue
@@ -941,21 +941,12 @@ jobs:
             exit 0
           fi
 
-          git fetch origin main --quiet
-          # `HEAD^{commit}` dereferences an annotated tag object to the commit
-          # it points at; using this instead of `${{ github.sha }}` directly
-          # avoids ever comparing/trusting a tag-object SHA as if it were a
-          # commit SHA.
-          TAGGED_SHA="$(git rev-parse 'HEAD^{commit}')"
-          MAIN_SHA="$(git rev-parse origin/main)"
-          echo "Tag:            ${TAG}"
-          echo "Tagged commit:  ${TAGGED_SHA}"
-          echo "origin/main:    ${MAIN_SHA}"
-
-          if git merge-base --is-ancestor "${TAGGED_SHA}" "${MAIN_SHA}"; then
-            echo "OK — tagged commit is reachable from origin/main."
-          else
-            echo "::error::Tag '${TAG}' points at commit ${TAGGED_SHA}, which is NOT reachable from origin/main (${MAIN_SHA}). This project publishes only from merged main / a release tag on main (see scripts/check-publish-ready.sh and .claude/skills/cargo-publish/SKILL.md). Refusing to run the release pipeline for this tag — merge to main first, then re-tag from a checkout of merged main."
+          # D96 (#10388): main OR release/<crate>-<semver>. The rule lives in
+          # ONE script, shared with check-publish-ready.sh and
+          # preflight-publish.sh; it fetches the refs and fails closed.
+          echo "Tag: ${TAG}"
+          if ! bash scripts/check-tag-ancestry.sh 'HEAD'; then
+            echo "::error::Tag '${TAG}' is not on origin/main or a release/<crate>-<semver> branch (D96, #10388). Refusing to run the release pipeline for this tag."
             exit 1
           fi
 
