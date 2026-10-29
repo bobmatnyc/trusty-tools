@@ -11,8 +11,8 @@
 //! whose `claude` it cannot locate, and a launch that cannot be prepared
 //! ([`launch::prepare_restart`], the launch path `init` uses). Then it stops
 //! the pane's `claude` ([`stop_claude`]), proves the pane holds none, and
-//! starts and records the new one. A new `claude` that is
-//! not recorded is a [`Step::Failed`]. Last it removes this session's replaced
+//! starts and records the new one. A new `claude` that is not recorded is
+//! stopped and the run fails (#10448). Last it removes this session's replaced
 //! launch records ([`prune_replaced`]); `fleet::run` then re-registers the
 //! Architect with the daemon (#8942).
 //! Test: `relaunch_tests.rs`; `tests/tm_fleet.rs` (`fleet_relaunch_*`).
@@ -121,7 +121,8 @@ impl RelaunchReport {
 /// hold no `claude`; the new `claude` is started and recorded; this
 /// session's replaced launch records are removed. Every refusal before the
 /// stop says nothing was stopped; every failure after it names the stopped
-/// PID. A failed record is a [`Step::Failed`] with no registration.
+/// PID. #10448: a failed record stops the new `claude` ([`stop_unbound`])
+/// and is `Err`.
 /// Test: `relaunch_refuses_an_absent_session_and_names_init`,
 /// `relaunch_refuses_before_any_change_when_the_pane_cannot_be_read`,
 /// `relaunch_refuses_a_session_with_more_than_one_pane`,
@@ -129,7 +130,7 @@ impl RelaunchReport {
 /// `relaunch_names_the_stopped_pid_when_the_new_claude_fails`,
 /// `relaunch_stops_the_old_claude_before_the_new_one_starts`,
 /// `relaunch_never_types_into_a_pane_that_still_holds_a_claude`,
-/// `relaunch_reports_an_unrecorded_claude_as_failed`,
+/// `relaunch_stops_an_unrecorded_claude_and_fails`,
 /// `fleet_relaunch_restarts_the_architect_and_rebinds_it`.
 pub(crate) fn relaunch(
     dir: &Path,
@@ -188,13 +189,8 @@ pub(crate) fn relaunch(
     };
     let record = match binding {
         Ok(record) => record,
-        Err(err) => {
-            report.steps.push(Step::Failed(format!(
-                "started a new `claude` in tmux session {session}, but it is NOT bound ({err}), \
-                 so its anchor writes will be denied"
-            )));
-            return Ok(report);
-        }
+        // #10448: never leave an unrecorded Architect running.
+        Err(err) => return Err(stop_unbound(session, &err.to_string(), ops)).with_context(stopped),
     };
     report.steps.push(Step::Changed(format!(
         "started a new `claude` in tmux session {session} on the `opus` alias, bound to claude \
@@ -212,6 +208,35 @@ pub(crate) fn relaunch(
     ));
     report.registration = Some(register::registration(&dir, names));
     Ok(report)
+}
+
+/// Stop the new `claude` in `session` that could not be recorded (#10448).
+///
+/// Why: an unrecorded Architect is denied every anchor write, and in #10447
+/// one ran so for hours while it looked set up.
+/// What: finds the pane's `claude` (`ops.probe.claude`), stops it
+/// (`ops.stop`) and proves the pane holds none (`ops.pane_claude`). Always
+/// returns the error to report: `why` the record failed, and whether the new
+/// `claude` is gone or may still run unbound.
+/// Test: `relaunch_stops_an_unrecorded_claude_and_fails`,
+/// `fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded`.
+fn stop_unbound(session: &str, why: &str, ops: Ops) -> anyhow::Error {
+    let head = format!("the new `claude` in tmux session {session} is NOT bound ({why})");
+    let kill = format!("stop it with `tmux kill-session -t ={session}`");
+    let outcome = match (ops.probe.claude)(session) {
+        Some(pid) => match (ops.stop)(pid) {
+            Err(err) => format!("could NOT stop claude pid {pid} ({err}); {kill}"),
+            Ok(()) if (ops.pane_claude)(session) == PaneClaude::Absent => {
+                format!("stopped claude pid {pid}, so no Architect runs unbound")
+            }
+            Ok(()) => format!("stopped claude pid {pid}, but a `claude` may still run; {kill}"),
+        },
+        None if (ops.pane_claude)(session) == PaneClaude::Absent => {
+            "no `claude` runs in its pane".to_owned()
+        }
+        None => format!("a `claude` may run unbound in its pane; {kill}"),
+    };
+    anyhow!("{head}; {outcome}")
 }
 
 /// `Ok` when `session` runs with a live pane in `dir`; else why not.
