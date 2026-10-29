@@ -1,10 +1,10 @@
 //! Assistant-owned attachment history and provider message assembly (#7370).
+use crate::memory::checked_rpc::call_with_timeout;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use trusty_common::chat_attachments::{Attachment, ImageContent, ImageRef, InputAttachment};
-use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
 use trusty_memory::engine::store::chat_sessions::ChatMessage;
 
 pub(crate) const HISTORY_UNAVAILABLE_NOTICE: &str = "Saved image history and chat persistence are unavailable for this turn. The response may lack earlier image context.";
@@ -25,7 +25,7 @@ pub(crate) fn apply_history_notice(
 }
 
 pub(crate) async fn rpc(socket: &Path, method: &str, args: Value) -> Result<Value> {
-    let value = call_memory_tool_at_with_timeout(
+    let value = call_with_timeout(
         socket,
         "tools/call",
         json!({"name":method,"arguments":args}),

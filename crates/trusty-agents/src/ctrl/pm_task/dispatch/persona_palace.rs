@@ -227,7 +227,7 @@ pub(super) async fn recall_across(
 /// `build_persona_memory_reports_unavailable_when_palace_create_fails`,
 /// `ensure_palace_does_not_recreate_an_existing_palace`.
 pub(super) async fn ensure_palace(socket: &Path, palace: &str) -> Result<(), String> {
-    match trusty_common::memory_rpc::call_memory_tool_at(
+    match crate::memory::checked_rpc::call(
         socket,
         "memory.palace_get",
         json!({ "palace_id": palace }),
@@ -268,7 +268,7 @@ pub(super) async fn memory_call(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    trusty_common::memory_rpc::call_memory_tool_at(socket, method, params)
+    crate::memory::checked_rpc::call(socket, method, params)
         .await
         .map_err(|e| format!("trusty-memory unreachable or refused: {e:#}"))
 }

@@ -372,3 +372,58 @@ async fn get_and_delete_are_clean_when_absent() {
     assert_eq!(client.get(Segment::Brief, "missing").await.unwrap(), None);
     client.delete(Segment::Brief, "missing").await.unwrap();
 }
+
+/// Why (#9538): the memory client must refuse a daemon from another protocol
+/// release by name, not proceed and misparse its replies.
+/// What: a daemon reporting a protocol past the supported range; `get` fails
+/// with the protocol refusal and sends no application call.
+/// Test: this test.
+#[tokio::test]
+async fn client_refuses_a_daemon_with_an_unsupported_protocol() {
+    let beyond = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    let daemon = uds_mock::spawn_with_protocol(beyond, move |_m: &str, _p: Value| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(json!({})) })
+    })
+    .await;
+    let client = TrustyMemoryClient::new(daemon.socket());
+
+    let err = client
+        .get(Segment::Context, "k")
+        .await
+        .expect_err("an incompatible daemon must be refused");
+
+    assert!(
+        format!("{err:#}").contains("unsupported trusty-memory protocol"),
+        "got: {err:#}"
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Why (#9538): an unsupported-protocol daemon looked identical to a down one.
+/// What: `probe_health` surfaces the named refusal, and `auto_detect_at` still
+/// falls back to the local store.
+/// Test: this test.
+#[tokio::test]
+async fn health_check_names_an_unsupported_protocol_and_auto_detect_falls_back() {
+    let beyond = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
+    let daemon = uds_mock::spawn_with_protocol(beyond, |_m: &str, _p: Value| {
+        Box::pin(async { Ok(json!({})) })
+    })
+    .await;
+    let client = TrustyMemoryClient::new(daemon.socket());
+
+    let err = client.probe_health().await.expect_err("must be refused");
+    assert!(
+        err.is::<trusty_common::memory_rpc::MemoryProtocolError>(),
+        "got: {err:#}"
+    );
+    assert!(!client.health_check().await);
+
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(RedbUsearchStore::open(dir.path(), 4).unwrap());
+    let backend = MemoryBackend::auto_detect_at(daemon.socket(), store).await;
+    assert!(matches!(backend, MemoryBackend::Local(_)));
+}
