@@ -411,12 +411,8 @@ async fn a_refused_relocate_withdraws_the_new_paths_approval() {
     std::fs::create_dir_all(&parent).expect("approvable parent");
     let dest = tempfile::tempdir_in(&parent).expect("relocate destination");
     let dest_path = std::fs::canonicalize(dest.path()).expect("canonical destination");
-    let config = if cfg!(target_os = "macos") {
-        s.home.path().join("Library").join("Application Support")
-    } else {
-        s.home.path().to_path_buf()
-    };
-    let allowlist = config.join("trusty-search").join("allowlist.toml");
+    // #10366: the CLI's `TRUSTY_DATA_DIR` holds its `allowlist.toml`.
+    let allowlist = s.data_dir.path().join("allowlist.toml");
 
     let mut cmd = s.command(
         &daemon.socket,

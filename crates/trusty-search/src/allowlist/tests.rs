@@ -459,6 +459,8 @@ fn remove_from_allowlist_noop_when_absent() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// #10366: serial — the TRUSTY_DATA_DIR tests below mutate the process env.
+#[serial_test::serial]
 #[test]
 fn allowlist_path_ends_with_expected_suffix() {
     // Why: must be allowlist.toml (not indexes.toml) to avoid macOS collision.
@@ -467,6 +469,70 @@ fn allowlist_path_ends_with_expected_suffix() {
     assert!(
         s.ends_with("trusty-search/allowlist.toml") || s.ends_with("trusty-search-allowlist.toml"),
         "must be allowlist.toml, not indexes.toml: {s}"
+    );
+}
+
+/// Restores `TRUSTY_DATA_DIR` on drop so a failing assert cannot leak it.
+struct DataDirEnv(Option<std::ffi::OsString>);
+
+impl DataDirEnv {
+    fn set(value: &std::ffi::OsStr) -> Self {
+        let prev = std::env::var_os("TRUSTY_DATA_DIR");
+        // SAFETY: callers are #[serial], so no other test reads the env.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", value) };
+        Self(prev)
+    }
+}
+
+impl Drop for DataDirEnv {
+    fn drop(&mut self) {
+        // SAFETY: see `set`.
+        unsafe {
+            match &self.0 {
+                Some(v) => std::env::set_var("TRUSTY_DATA_DIR", v),
+                None => std::env::remove_var("TRUSTY_DATA_DIR"),
+            }
+        }
+    }
+}
+
+// #10366: an isolated daemon must not read or write the operator's allowlist.
+#[serial_test::serial]
+#[test]
+fn default_path_honours_trusty_data_dir() {
+    let dir = tmp_dir("data-dir-override");
+    let _env = DataDirEnv::set(dir.as_os_str());
+    assert_eq!(AllowlistConfig::default_path(), dir.join("allowlist.toml"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// #10366: empty = unset, matching `resolve_data_dir_override`.
+#[serial_test::serial]
+#[test]
+fn default_path_ignores_empty_trusty_data_dir() {
+    let _env = DataDirEnv::set(std::ffi::OsStr::new(""));
+    let s = AllowlistConfig::default_path()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        s.ends_with("trusty-search/allowlist.toml") || s.ends_with("trusty-search-allowlist.toml"),
+        "empty override must fall back to the config dir: {s}"
+    );
+}
+
+// #10366: a relative dir would resolve against the daemon's cwd; ignore it.
+#[serial_test::serial]
+#[test]
+fn default_path_ignores_relative_trusty_data_dir() {
+    let _env = DataDirEnv::set(std::ffi::OsStr::new("relative/dir"));
+    let p = AllowlistConfig::default_path();
+    assert!(
+        p.is_absolute() || p.starts_with("trusty-search-allowlist.toml"),
+        "{p:?}"
+    );
+    assert!(
+        !p.starts_with("relative"),
+        "relative override honoured: {p:?}"
     );
 }
 
