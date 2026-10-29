@@ -47,6 +47,11 @@ pub struct OrgEntry {
     /// Google Chat space, for a Google Chat org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space: Option<String>,
+    /// The org's secret lookup order (#10423, DOC-74 §15.3): `<owner>/<repo>`
+    /// (project vault, then owner vault) or `<owner>` (owner vault only).
+    /// Required when the org has credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<String>,
     /// Credential refs by role (`bot_token`, `sa_key`, ...): `secret://` names.
     #[serde(default)]
     pub credentials: BTreeMap<String, String>,
@@ -92,13 +97,15 @@ pub enum ConfigError {
     /// The YAML did not parse into the schema.
     #[error("orgs config malformed: {0}")]
     Malformed(String),
-    /// A credential ref is not a `secret://` name.
-    #[error("org {org:?} credential {role:?} is not a secret:// name")]
+    /// A credential ref is not a `secret://` name within the org's scope.
+    #[error("org {org:?} credential {role:?} is not a usable secret:// name ({code})")]
     NotSecretRef {
         /// The org.
         org: String,
         /// The credential role.
         role: String,
+        /// The fixed refusal code from [`crate::channels::secret_ref::parse_in_scope`].
+        code: &'static str,
     },
     /// A user names an org the config does not define.
     #[error("user {user:?} names unknown org {org:?}")]
@@ -159,6 +166,8 @@ pub struct OrgRoute {
     pub kind: ChannelKind,
     /// The user's address on that channel.
     pub address: String,
+    /// The org's secret lookup order (its `secrets` field).
+    pub secrets: Option<String>,
     /// The org's credential refs (`secret://` names).
     pub credentials: BTreeMap<String, String>,
 }
@@ -195,6 +204,25 @@ impl OrgsConfig {
         Ok(cfg)
     }
 
+    /// Parse and validate the daemon's `orgs.toml` `text` (#10423).
+    ///
+    /// What: the same schema as [`OrgsConfig::parse`], in TOML; the error is
+    /// reduced to its line so no value is echoed.
+    /// Test: `toml_config_parses_like_yaml`.
+    pub fn parse_toml(text: &str) -> Result<Self, ConfigError> {
+        let cfg: Self = toml::from_str(text).map_err(|e| {
+            ConfigError::Malformed(e.span().map_or_else(
+                || "schema".to_owned(),
+                |s| {
+                    let before = text.get(..s.start).unwrap_or_default();
+                    format!("line {}", before.lines().count().max(1))
+                },
+            ))
+        })?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     /// Check refs, user orgs, address shapes and the owner org.
     ///
     /// Test: `non_secret_credential_is_refused`, `user_with_unknown_org_is_refused`,
@@ -202,10 +230,14 @@ impl OrgsConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         for (org, entry) in &self.orgs {
             for (role, r) in &entry.credentials {
-                if !is_secret_ref(r) {
+                // #10423: DOC-74 §15.3 — refs stay within the org's own vaults.
+                if let Err(code) =
+                    crate::channels::secret_ref::parse_in_scope(entry.secrets.as_deref(), r)
+                {
                     return Err(ConfigError::NotSecretRef {
                         org: org.clone(),
                         role: role.clone(),
+                        code,
                     });
                 }
             }
@@ -261,6 +293,7 @@ impl OrgsConfig {
             org: entry.org.clone(),
             kind: org.kind,
             address: entry.address.clone(),
+            secrets: org.secrets.clone(),
             credentials: org.credentials.clone(),
         })
     }
@@ -286,12 +319,6 @@ impl OrgsConfig {
     pub fn org(&self, org: &str) -> Option<&OrgEntry> {
         self.orgs.get(org)
     }
-}
-
-/// True for `secret://<name>` with a non-empty name and no whitespace.
-pub fn is_secret_ref(r: &str) -> bool {
-    r.strip_prefix(SECRET_SCHEME)
-        .is_some_and(|rest| !rest.is_empty() && !rest.chars().any(char::is_whitespace))
 }
 
 /// True when `address` has the shape `kind` addresses a user by.

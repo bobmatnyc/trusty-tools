@@ -15,10 +15,13 @@
 //! claiming each event id before its ack (#9923).
 //! #10417: [`crate::channels::orgs`] — org/user channel routing;
 //! [`crate::channels::staged_send`] — staged sends and the Approve gate.
+//! #10423: [`crate::channels::send_store`] — the table on disk and the send
+//! audit; [`crate::channels::secret_ref`] — trusty-secrets refs;
+//! [`crate::channels::approval`] — the owner's approval DM.
 //! Test: `snapshot_tests.rs`, `bin/tm/commands/egress_guard_policy_tests.rs`,
 //! `question_table_tests.rs`, `audit_log_tests.rs`, `ask_owner_tests.rs`,
 //! `inbound_tests.rs`, `deliver_tests.rs`, `socket_mode_tests.rs`,
-//! `inbound_claims_tests.rs`, `inbound_options_tests.rs`, `option_deliver_tests.rs`, `orgs_tests.rs`, `staged_send_tests.rs`.
+//! `inbound_claims_tests.rs`, `inbound_options_tests.rs`, `option_deliver_tests.rs`, `orgs_tests.rs`, `staged_send_tests.rs`, `send_store_tests.rs`.
 
 pub mod ask_owner;
 pub mod audit_log;
@@ -30,7 +33,7 @@ pub mod option_match;
 // #10417 (S1): generic org routing and the staged-send Approve gate.
 pub mod orgs;
 #[cfg(test)]
-mod orgs_tests;
+pub(crate) mod orgs_tests;
 pub mod question_table;
 pub mod readiness;
 pub mod slack_bot;
@@ -40,3 +43,9 @@ pub mod socket_mode;
 pub mod staged_send;
 #[cfg(test)]
 mod staged_send_tests;
+// #10423 (S1b): persistence, the audit sink, secret refs and the approval DM.
+pub mod approval;
+pub mod secret_ref;
+pub mod send_store;
+#[cfg(test)]
+mod send_store_tests;

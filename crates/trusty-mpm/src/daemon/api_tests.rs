@@ -1487,6 +1487,9 @@ async fn doctor_endpoint_returns_report() {
         // #8433: orphaned channel taint files; also added by
         // `run_doctor_for_manager`.
         "channel_taint",
+        // #10423: the org channel config with no orgs.toml; also added by
+        // `run_doctor_for_manager`.
+        "channel_orgs",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

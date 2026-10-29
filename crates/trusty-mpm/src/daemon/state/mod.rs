@@ -15,6 +15,9 @@
 // #8454: the channel route-policy snapshot the daemon holds.
 #[cfg(feature = "channels")]
 mod channel_policy;
+// #10423: the staged-send table the daemon holds.
+#[cfg(feature = "channels")]
+mod channel_send;
 // #8433 P2: the channel question table the daemon holds.
 mod core;
 mod inject_recorder;
