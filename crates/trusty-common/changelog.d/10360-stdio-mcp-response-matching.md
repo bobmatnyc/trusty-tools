@@ -1,2 +1,0 @@
-Fixed
-- `StdioMcpClient` returns a frame as a call's result only when it is a response (`result` or `error`, no `method`) to the in-flight request id. A server request such as `roots/list` that reused the id was returned as the result, and `respawn` restarted ids at 1, so a frame carrying an id from the earlier process lifetime matched a request of the new one. Ids now keep counting across a respawn (#10360).

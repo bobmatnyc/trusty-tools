@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.62.1] — 2026-10-29
+
+### Fixed
+
+- Default hybrid `search` no longer drops files that carry a quoted string, identifier or issue reference when one file has several overlapping chunks carrying it. Inside the exact-match floor, each carrying file's best chunk now ranks before any file's second chunk, so every file ripgrep finds fits a page sized to its matching lines. The top hit is unchanged (#7675).
+- A filename query (`session_mcp_scope.rs`) now also returns the chunks whose content names the file, as ripgrep would. They rank below every chunk of the file itself, which stays first, and are capped separately so the file's own hits are unchanged (#7675).
+- Tests that write a stub executable and then run it write it through `trusty_common::exec_stub::write_executable`, so a sibling test's fork can no longer fail the run with "Text file busy" (ETXTBSY) (#10248).
+- A deferred-embed pass now commits each embedding wave's vectors to the live store before the next wave starts, and it holds one wave of chunks in memory instead of a copy of every owed chunk. The semantic lane does not serve those vectors until the pass settles: unpinned queries stay lexical-only and a semantic-pinned query gets `stage_not_ready` until `semantic` is `ready`. The vector snapshot is written to disk every `TRUSTY_EMBED_CHECKPOINT_CHUNKS` embedded chunks (default 16384) or `TRUSTY_EMBED_CHECKPOINT_SECS` seconds (default 120), and on every exit, so a killed pass keeps every checkpointed wave and a restart does not embed them again. A snapshot that fails three times now fails the pass (`semantic: failed`, pending marker kept) instead of being logged while the pass settled `ready` (#10294).
+- A kill between the two snapshot renames no longer leaves chunks without vectors until a forced reindex. On load, `hnsw.keys.json` entries whose key the HNSW graph lacks are dropped (one WARN line reports the count), so the next deferred or catch-up embed pass re-embeds those ids. The check is read-only on an mmap view and the sidecar format is unchanged. A sidecar that cannot cover the graph after the check (the graph holds keys no entry names) discards the snapshot; semantic search is unavailable (BM25 only) until a reindex. This happens when the interrupted publish also covered removed chunks, which any incremental edit (remove + upsert) in that window can cause (#10301).
+- A start that is refused or stands by because another daemon holds the lock no longer rewrites that daemon's `daemon.env`, and a SIGTERM that arrives between a standby takeover and the daemon listening for it now drains and flushes instead of being swallowed.
+- A launchd-started `trusty-search start --foreground` that finds a healthy daemon (one answering `search.health`) holding the lock now stands by instead of exiting 1 into a 30 s `KeepAlive` respawn loop. It logs the holder pid at info, retries the lock every 5 s before any embedder or model load, takes over when the holder exits, and exits 0 on SIGTERM. A manual `start --foreground` and an unhealthy holder keep the old refusal. The post-race duplicate exit now logs at info.
+- `trusty-search start` no longer calls a healthy lock holder "the OLD image" or advises `kill -TERM` against it. It says another instance is already serving and exits; the old text stays only when the binary on disk is newer than the holder. The launchd respawn loop is a separate fix (#10358).
+- A launchd-started `trusty-search start --foreground` no longer stands by forever behind a lock holder that predates the installed binary. It waits at most 10 minutes (so launchd retries at that rate, not every 30 s), then exits 1 with a message that the holder predates the installed binary and how to replace it (#10358).
+- `AllowlistConfig::default_path` now honours `TRUSTY_DATA_DIR` (non-empty, absolute) and returns `$TRUSTY_DATA_DIR/allowlist.toml`; `load()` skips the legacy `indexes.toml` migration in that case, so an isolated daemon never touches the operator's files (#10366).
+- The MCP `console_metrics` tool reports the serving daemon's version (from `search.health`) instead of the bridge binary's compile-time version, so it matches `search_health` after a restart (#10375).
+- `remove_files` reports `removed_files` and `removed_chunks` for the chunk rows it deleted, not the rows it planned, so the counts match what `list_chunks` no longer returns (#10376).
+- A CLI command that finds the daemon socket down no longer spawns its own `start --foreground` while launchd owns `com.trusty.search`. It runs `launchctl kickstart gui/<uid>/com.trusty.search` (no `-k`) when the unit is loaded and idle, waits when the job is running, and waits then errors naming the unit when the plist exists but the unit is not loaded (for example during a bootout window): up to 60 s. An isolated socket (`TRUSTY_SEARCH_SOCKET`, `TRUSTY_DATA_DIR`, `TRUSTY_DATA_DIR_OVERRIDE`) and an unsupervised host spawn as before.
+
+### Changed
+
+- `trusty-search index add` now names `--allow-sensitive-path` in its refusal for a path under a temp or app-support prefix (for example `/private/tmp`). Plain `index`, daemon start and restore keep the unchanged refusal, because the flag does not apply there. Refusals the flag cannot relax (`.ssh`, `.env`, home top-level directories) are unchanged.
+
 ## [0.62.0] — 2026-10-26
 
 ### Added
