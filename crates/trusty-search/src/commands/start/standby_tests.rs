@@ -66,7 +66,11 @@ fn a_stale_holder_is_waited_out_only_for_the_grace() {
     let g = Duration::from_secs(10);
     assert!(!stale_wait_over(StaleImage, Duration::from_secs(9), g));
     assert!(stale_wait_over(StaleImage, g, g));
-    assert!(!stale_wait_over(HealthyPeer, Duration::from_secs(10_000), g));
+    assert!(!stale_wait_over(
+        HealthyPeer,
+        Duration::from_secs(10_000),
+        g
+    ));
     assert_eq!(stale_grace(Some("1500")), Duration::from_millis(1500));
     for bad in [None, Some("x"), Some("499")] {
         assert_eq!(stale_grace(bad), STALE_HOLDER_GRACE, "input {bad:?}");
