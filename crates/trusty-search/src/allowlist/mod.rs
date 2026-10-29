@@ -580,7 +580,9 @@ fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
         for &prefix in SENSITIVE_PATH_PREFIXES {
             if normalised.starts_with(prefix) {
                 return Some(format!(
-                    "path '{}' is under sensitive prefix '{}'; indexing refused",
+                    // #10364: this is the one refusal `--allow-sensitive-path` relaxes.
+                    "path '{}' is under sensitive prefix '{}'; indexing refused \
+                     (to index it anyway, pass --allow-sensitive-path to `index add`)",
                     path.display(),
                     prefix
                 ));
