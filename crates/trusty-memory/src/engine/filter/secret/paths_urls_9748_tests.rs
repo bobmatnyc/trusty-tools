@@ -178,14 +178,14 @@ fn credential_parameter_names_are_refused_by_suffix_after_9748() {
         "https://a.example.com/v1?secret_key=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
         "https://a.example.com/v1?auth=abcdefghijklmnopqrstuvwx",      // pragma: allowlist secret
         "https://a.example.com/v1?access-token=abcdefghijklmnopqrstuvwx", // pragma: allowlist secret
-        "https://a.example.com/v1?Client-Secret=hunter2",          // pragma: allowlist secret
-        "https://a.example.com/v1?sig=abcdef0123",                 // pragma: allowlist secret
-        "https://a.example.com/v1?password=hunter2",               // pragma: allowlist secret
-        "https://a.example.com/v1?db_passwd=x1",                   // pragma: allowlist secret
-        "https://a.example.com/v1?pwd=hunter2",                    // pragma: allowlist secret
+        "https://a.example.com/v1?Client-Secret=hunter2", // pragma: allowlist secret
+        "https://a.example.com/v1?sig=abcdef0123",        // pragma: allowlist secret
+        "https://a.example.com/v1?password=hunter2",      // pragma: allowlist secret
+        "https://a.example.com/v1?db_passwd=x1",          // pragma: allowlist secret
+        "https://a.example.com/v1?pwd=hunter2",           // pragma: allowlist secret
         "https://a.example.com/cb#refresh-token=abcdefghijklmnop", // pragma: allowlist secret
-        "https://a.example.com/v1?token=Zq7%2FRt%2BY2uWx9Kp4",     // pragma: allowlist secret
-        "https://a.example.com/v1?password=hunter%212",            // pragma: allowlist secret
+        "https://a.example.com/v1?token=Zq7%2FRt%2BY2uWx9Kp4", // pragma: allowlist secret
+        "https://a.example.com/v1?password=hunter%212",   // pragma: allowlist secret
     ];
     for shape in rows {
         assert!(refused(shape), "admitted {shape}");
