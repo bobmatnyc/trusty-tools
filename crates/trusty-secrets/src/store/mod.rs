@@ -30,6 +30,9 @@ mod dotenv;
 // #9069: the GitHub Actions sync target; spawns `gh` through `cli`.
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod github_actions;
+// #9069 PR 2: the Vercel sync target; spawns `vercel` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod vercel;
 // #9326: the 0600 value-file backend needs Unix modes and owners. #4567: the
 // audit sink reuses its mode, owner and symlink checks, so it is crate-visible.
 #[cfg(unix)]

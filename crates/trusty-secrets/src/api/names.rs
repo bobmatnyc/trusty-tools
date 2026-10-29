@@ -300,8 +300,13 @@ impl BackendId {
         Self(Self::GITHUB_ACTIONS.to_string())
     }
 
-    /// The Vercel sync target (#9069); its backend ships in a later PR.
+    /// The Vercel sync target (#9069), compiled under `cli-backends`.
     pub const VERCEL: &'static str = "vercel";
+
+    /// The `vercel` backend id.
+    pub fn vercel() -> Self {
+        Self(Self::VERCEL.to_string())
+    }
 
     /// Whether this id names a write-only sync target (#9069).
     ///

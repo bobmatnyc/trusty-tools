@@ -42,7 +42,9 @@ impl State {
     /// before anything opens. Otherwise the test opener when one is set,
     /// else `store::open_sync_target_at` on `State::file_consent_config` —
     /// the account's own file, never `--machine-config` or `$HOME`'s; with
-    /// none, [`SecretsError::BackendNotEnabled`]. Opening spawns nothing.
+    /// none, [`SecretsError::BackendNotEnabled`]. A push's working directory
+    /// goes under `ServerSettings::template_root`, which the startup sweep
+    /// clears (#9069 PR 2). Opening spawns nothing.
     /// Test: `server_sandbox_never_opens_a_sync_target`,
     /// `github_push_targets_the_remote_repo_not_the_vault_override`.
     pub(crate) fn open_sync_target(
@@ -64,7 +66,7 @@ impl State {
             .file_consent_config
             .as_deref()
             .ok_or_else(not_enabled)?;
-        open_sync_target_at(id, config, identity)
+        open_sync_target_at(id, config, identity, &self.settings.template_root)
     }
 }
 

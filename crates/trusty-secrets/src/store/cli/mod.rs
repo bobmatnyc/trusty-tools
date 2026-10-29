@@ -32,7 +32,7 @@ pub use classify::Verdict;
 pub(crate) use crate::store::program::is_executable_file;
 pub use runner::{CliCommand, CliRun, OUTPUT_CAP};
 pub use spec::CliSpec;
-pub use template::{TMP_SUBDIR, TemplateFile, default_tmp_root, sweep_stale_templates};
+pub use template::{TMP_SUBDIR, TemplateFile, WorkDir, default_tmp_root, sweep_stale_templates};
 
 #[cfg(test)]
 mod runner_tests;

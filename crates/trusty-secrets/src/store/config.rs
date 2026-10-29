@@ -67,6 +67,11 @@ pub struct MachineSecretsConfig {
     /// `program` and `config_path` are read.
     #[serde(default)]
     pub github_actions: Option<CliSettings>,
+    /// The Vercel sync target's section. Present, even as `{}`, it enables
+    /// pushes to `vercel` on this machine (#9069 PR 2); a push still needs
+    /// a `projects` entry for the checkout's `<owner>/<repo>`.
+    #[serde(default)]
+    pub vercel: Option<VercelSection>,
 }
 
 impl MachineSecretsConfig {
@@ -89,6 +94,7 @@ impl MachineSecretsConfig {
             BackendId::KEEPER => self.keeper.is_some(),
             // #9069: C6 — a sync target is never the default backend.
             BackendId::GITHUB_ACTIONS => return self.github_actions.is_some(),
+            BackendId::VERCEL => return self.vercel.is_some(),
             _ => return false,
         };
         section || self.default_backend.as_ref() == Some(id)
@@ -164,6 +170,54 @@ pub struct CliSettings {
     // #7519: a pin skips the `PATH` search; a repository must not choose it.
     #[serde(default)]
     pub program: Option<PathBuf>,
+}
+
+/// The machine config's `secrets.vercel:` section (#9069 PR 2).
+///
+/// Why: D6 — Vercel has no remote to derive a project from, so the account's
+/// own untracked file maps each checkout to its project; a tracked file may
+/// not (it is refused whole, [`ProjectSecretsConfig::vercel`]).
+/// What: parse-only; `account`, `config_path` and `program` as in
+/// [`CliSettings`], plus `projects`, keyed by the origin remote's
+/// `<owner>/<repo>`. Unknown keys are ignored.
+/// Test: `vercel_without_a_mapping_is_refused_before_any_spawn`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VercelSection {
+    /// Refused when set: the account is the one the CLI's login selects.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The Vercel CLI's global config directory (`--global-config`).
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
+    /// The Vercel CLI, by absolute path; required, `PATH` is never searched.
+    #[serde(default)]
+    pub program: Option<PathBuf>,
+    /// The Vercel project each checkout pushes to, keyed by `<owner>/<repo>`.
+    #[serde(default)]
+    pub projects: BTreeMap<String, VercelProject>,
+}
+
+impl VercelSection {
+    /// The `projects` entry for `<owner>/<repo>`, compared ASCII
+    /// case-insensitively as `project_vaults` keys are.
+    pub fn project(&self, owner: &OwnerName, repo: &RepoName) -> Option<&VercelProject> {
+        let identity = format!("{owner}/{repo}");
+        self.projects
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&identity))
+            .map(|(_, project)| project)
+    }
+}
+
+/// One Vercel project a checkout pushes to (#9069 PR 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VercelProject {
+    /// The team or user id, passed to the CLI as `VERCEL_ORG_ID`.
+    pub org_id: String,
+    /// The project id, passed to the CLI as `VERCEL_PROJECT_ID`.
+    pub project_id: String,
 }
 
 /// The resolved backend and project-vault override for one invocation.

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use tempfile::TempDir;
 
-use super::{TemplateFile, sweep_stale_templates};
+use super::{TemplateFile, WorkDir, sweep_stale_templates};
 use crate::api::{SecretValue, SecretsError};
 
 const CANARY: &str = "sk-canary-7519-template-0123456789";
@@ -177,4 +177,32 @@ fn template_sweep_goes_past_a_bad_entry_and_reports_it() {
         assert!(!dir.exists(), "{} survived the bad entry", dir.display());
     }
     assert!(first_bad.is_dir() && last_bad.is_dir());
+}
+
+/// Why: #9069 V4 — the Vercel CLI runs in a fresh, empty, owner-only
+/// directory that a symlinked root cannot redirect, and that is gone, with
+/// whatever the CLI wrote there, once the push ends.
+/// Test: itself.
+#[test]
+fn work_dir_is_an_empty_0700_dir_removed_on_drop() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("trusty-secrets").join("tmp");
+    let work = WorkDir::create(&root).unwrap();
+    let dir = work.path().to_path_buf();
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let second = WorkDir::create(&root).unwrap();
+    assert_ne!(second.path(), dir);
+    std::fs::create_dir(dir.join(".vercel")).unwrap();
+    std::fs::write(dir.join(".vercel").join("project.json"), "{}").unwrap();
+    drop(work);
+    assert!(!dir.exists() && second.path().is_dir());
+
+    let link = tmp.path().join("root-link");
+    symlink(&root, &link).unwrap();
+    let err = WorkDir::create(&link).unwrap_err();
+    assert!(
+        matches!(err, SecretsError::StorageRefused { .. }),
+        "{err:?}"
+    );
 }

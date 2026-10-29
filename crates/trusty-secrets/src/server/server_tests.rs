@@ -725,6 +725,7 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("keeper", false, String::new(), Some(cli)),
             // #9069: the sync target, listed after the stores.
             ("github-actions", false, String::new(), Some(cli)),
+            ("vercel", false, String::new(), Some(cli)),
         ]
     );
     assert!(
