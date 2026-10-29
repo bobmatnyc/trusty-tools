@@ -277,25 +277,69 @@ mod tests {
         let _ = drawers;
     }
 
-    /// A one-connection stub daemon that answers `memory_list` with `code`.
-    fn spawn_refusing_daemon(dir: &std::path::Path, code: i64) -> std::path::PathBuf {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    /// A stub daemon on a temp socket: `memory.protocol` reports `protocol`,
+    /// and `memory_list` answers `list`. It serves every connection (the
+    /// protocol check and the call are two), and stops with the test runtime.
+    fn spawn_stub_daemon(
+        dir: &std::path::Path,
+        protocol: u64,
+        list: Result<Value, crate::uds::server::RpcError>,
+    ) -> std::path::PathBuf {
+        use crate::uds::server::{RpcRouter, RpcServeOptions, serve_until};
         let sock = dir.join("sockets").join("memory.sock");
         let listener = crate::uds::bind_hardened(&sock).expect("bind stub socket");
-        let reply = format!(
-            "{}\n",
-            json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": "palace x"}})
-        );
+        let router = RpcRouter::new()
+            .typed::<Value, Value, _, _>(crate::memory_rpc::METHOD_PROTOCOL, move |_| async move {
+                Ok(json!({ "protocol_version": protocol }))
+            })
+            .typed::<Value, Value, _, _>("memory_list", move |_| {
+                let list = list.clone();
+                async move { list }
+            });
         tokio::spawn(async move {
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let _ = conn.write_all(reply.as_bytes()).await;
-            let _ = conn.flush().await;
+            serve_until(
+                &listener,
+                std::sync::Arc::new(router),
+                RpcServeOptions::default(),
+                std::future::pending::<()>(),
+            )
+            .await;
         });
         sock
+    }
+
+    /// A supported-protocol stub whose `memory_list` refuses with `code`.
+    fn spawn_refusing_daemon(dir: &std::path::Path, code: i64) -> std::path::PathBuf {
+        let supported = *crate::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
+        spawn_stub_daemon(
+            dir,
+            supported,
+            Err(crate::uds::server::RpcError::new(code, "palace x")),
+        )
+    }
+
+    /// Why (#9538): catch-up reads drawers through the shared client, so a
+    /// daemon on another wire protocol must be refused, not misread.
+    /// What: the stub answers `memory_list` with a valid empty list but reports
+    /// protocol 99. A supported twin proves the same stub is otherwise
+    /// readable; the unsupported one is unreachable (`None`).
+    #[tokio::test]
+    async fn a_daemon_on_an_unsupported_protocol_is_refused_9538() {
+        let ok_list = || Ok(json!({ "drawers": [] }));
+        let supported = *crate::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let good = spawn_stub_daemon(tmp.path(), supported, ok_list());
+        let drawers = fetch_recent_palace_drawers(&good, "p", 5, None).await;
+        assert!(drawers.as_ref().is_some_and(Vec::is_empty), "{drawers:?}");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let future = spawn_stub_daemon(tmp.path(), 99, ok_list());
+        let drawers = fetch_recent_palace_drawers(&future, "p", 5, None).await;
+        assert!(
+            drawers.is_none(),
+            "protocol 99 must be refused: {drawers:?}"
+        );
     }
 
     /// Why (#9026): the catch-up digest logged "could not reach trusty-memory"
