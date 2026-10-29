@@ -22,8 +22,9 @@
 
 // Module layout: types + helpers + Drop + JSON-RPC builders live here;
 // the `impl StdioMcpClient` request methods live in `client.rs`.
+pub mod capped_line;
 mod client;
-pub use client::is_response_to;
+pub use client::{is_response_to, log_field};
 #[cfg(test)]
 mod frame_tests;
 
@@ -175,7 +176,7 @@ pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// What: a line that would pass this size fails the call; its remaining
 /// bytes are discarded up to the next newline.
 /// Test: `oversized_line_errors_and_next_call_skips_its_tail`.
-pub(super) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Server identification returned from a successful `initialize` response.
 ///
