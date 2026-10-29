@@ -603,3 +603,44 @@ async fn a_rebuild_that_outlasts_the_rehydrate_wait_persists_nothing_and_retries
         SymbolMatch::NotFound
     );
 }
+
+/// #10376: the reported counts are the rows redb actually deleted. One
+/// planned row vanishes before its slice commits; it must not be counted.
+#[tokio::test]
+#[serial_test::serial]
+async fn removed_counts_exclude_rows_already_gone_10376() {
+    const ID: &str = "batch-10376-count";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (idx, _) = indexer(ID, &dir.path().join("index.redb"));
+    seed(&idx).await;
+    let acme = row_ids_under(&idx, "vendor/acme");
+    assert!(acme.len() >= 2, "setup: two acme files");
+    let ghost = acme[0].clone();
+    let ghost_file = idx
+        .corpus_store()
+        .expect("corpus")
+        .load_all_chunks()
+        .expect("rows")
+        .into_iter()
+        .find(|c| c.id == ghost)
+        .expect("ghost row")
+        .file;
+    TEST_VANISH_ROW
+        .lock()
+        .expect("seam")
+        .push((ID.to_string(), ghost.clone()));
+    let counts = idx.remove_files_matching(&prefix("vendor/acme")).await;
+    TEST_VANISH_ROW.lock().expect("seam").clear();
+    let counts = counts.expect("removal");
+    assert_eq!(counts.matched_chunks, acme.len());
+    assert_eq!(counts.removed_chunks, acme.len() - 1, "ghost row counted");
+    let other_in_ghost_file = acme
+        .iter()
+        .filter(|id| **id != ghost)
+        .filter(|id| id.starts_with(&ghost_file))
+        .count();
+    if other_in_ghost_file == 0 {
+        assert_eq!(counts.removed_files, counts.matched_files - 1, "ghost file");
+    }
+    assert!(row_ids_under(&idx, "vendor/acme").is_empty());
+}

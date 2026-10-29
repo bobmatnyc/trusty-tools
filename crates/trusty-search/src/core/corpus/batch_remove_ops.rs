@@ -86,22 +86,28 @@ impl CorpusStore {
     /// Delete chunk `ids` and the entity rows of `entity_files` in ONE write
     /// transaction (#10110 F3: the single-file path deletes entities in a
     /// second, warn-only transaction, so a restart could resurrect them).
-    /// Unknown keys are a no-op.
+    /// Unknown keys are a no-op. Returns the chunk ids whose rows existed and
+    /// were deleted, so a caller counts only what left redb (#10376).
     pub(crate) fn delete_chunk_and_entity_rows(
         &self,
         ids: &[String],
         entity_files: &[String],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         if ids.is_empty() && entity_files.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut removed = Vec::with_capacity(ids.len());
         let txn = self.db.begin_write().context("begin batch-remove txn")?;
         {
             let mut chunks = txn.open_table(CHUNKS_TABLE)?;
             for id in ids {
-                chunks
+                let existed = chunks
                     .remove(id.as_str())
-                    .with_context(|| format!("delete chunk {id}"))?;
+                    .with_context(|| format!("delete chunk {id}"))?
+                    .is_some();
+                if existed {
+                    removed.push(id.clone());
+                }
             }
             let mut entities = txn.open_table(ENTITIES_TABLE)?;
             for file in entity_files {
@@ -111,7 +117,7 @@ impl CorpusStore {
             }
         }
         txn.commit().context("commit batch-remove txn")?;
-        Ok(())
+        Ok(removed)
     }
 
     /// Delete every content-hash row `sel` names, in one write transaction.
