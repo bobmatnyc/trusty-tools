@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-60 bundled skills.
+61 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -22,6 +22,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `internal-comms` | agent-reference | no | Framework for writing concise 3P (Progress, Plans, Problems) team updates for executives and stakeholders |
 | `json-data-handling` | agent-reference | no | Working effectively with JSON data structures. |
 | `model-context-builder` | agent-reference | no | MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing |
+| `neon-postgres` | agent-reference | no | Neon Postgres on Vercel. Use for any Neon database, any Vercel Postgres or database env var (DATABASE_URL, DATABASE_URL_UNPOOLED, PG*, POSTGRES_*), any Neon preview-branch database, and any drizzle migration, push or baseline run against Neon. |
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs. |

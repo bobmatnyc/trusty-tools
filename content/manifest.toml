@@ -515,6 +515,10 @@ path = "skills/model-context-builder.md"
 version = "1.1.0"
 
 [[member]]
+path = "skills/neon-postgres.md"
+version = "1.0.0"
+
+[[member]]
 path = "skills/requesting-code-review.md"
 version = "1.0.0"
 
