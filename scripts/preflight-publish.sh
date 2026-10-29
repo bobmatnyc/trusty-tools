@@ -475,27 +475,23 @@ FAILURES=0
 # CHECK 1 — merged-main
 # ===========================================================================
 check1_merged_main() {
-  if ! git fetch origin main --quiet 2>/dev/null; then
-    echo "[FAIL] merged-main: 'git fetch origin main' failed — check network/remote access." >&2
-    return 1
-  fi
-  local head_sha origin_sha
+  # D96 (#10388): HEAD must sit AT the tip of origin/main or of a
+  # release/<crate>-<semver> branch. The rule lives in check-tag-ancestry.sh.
+  local head_sha
   head_sha="$(git rev-parse HEAD)"
-  origin_sha="$(git rev-parse origin/main)"
-  if [ "$head_sha" = "$origin_sha" ]; then
-    echo "[PASS] merged-main: HEAD (${head_sha}) == origin/main (${origin_sha})" >&2
+  if bash "${SCRIPT_DIR}/check-tag-ancestry.sh" --at-tip --crate "$CRATE_DIR" --version "$VERSION" HEAD; then
+    echo "[PASS] merged-main: HEAD (${head_sha}) is the tip of a releasable ref" >&2
     return 0
   fi
   if [ "${PREFLIGHT_ALLOW_DETACHED:-0}" = "1" ]; then
-    echo "[WARN] merged-main: HEAD (${head_sha}) != origin/main (${origin_sha}), but" >&2
+    echo "[WARN] merged-main: HEAD (${head_sha}) is not a releasable tip, but" >&2
     echo "       PREFLIGHT_ALLOW_DETACHED=1 — proceeding anyway. You are trusting that" >&2
     echo "       this checkout is genuinely validated for release. Misuse of this" >&2
     echo "       override is exactly how the 2026-07-08 incident happened." >&2
     return 0
   fi
-  echo "[FAIL] merged-main: HEAD (${head_sha}) != origin/main (${origin_sha})." >&2
-  echo "       Publishing must only happen from a checkout sitting AT merged main —" >&2
-  echo "       never an unmerged branch. Merge to main, pull, and re-run from there." >&2
+  echo "[FAIL] merged-main: HEAD (${head_sha}) is not the tip of origin/main or of a" >&2
+  echo "       release/<crate>-<semver> branch. Never publish from an unmerged branch." >&2
   echo "       Escape hatch (validated release worktrees only): PREFLIGHT_ALLOW_DETACHED=1" >&2
   return 1
 }
