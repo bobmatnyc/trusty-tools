@@ -14,6 +14,7 @@ use super::sync_target_tests::{push_params, with_fake_target};
 use super::*;
 use crate::server::agents_flag::set_agents_may_use;
 use crate::server::architect::{ArchitectRefusal, check_architect};
+use crate::server::bridge::BridgeVerdict;
 use crate::server::methods::{self, Caller};
 
 /// The fake Architect `claude`: the shared parent of this test process.
@@ -306,12 +307,27 @@ fn architect_refusals_each_keep_the_agent_rules() {
             None => {
                 assert!(set.is_ok(), "{name}: {set:?}");
                 assert_eq!(all[0].architect, Some(true), "{name}");
+                assert_eq!(all[0].architect_refusal, None, "{name}");
             }
-            Some(_) => {
+            Some(refused) => {
                 assert_eq!(set, Err(ErrorKind::AgentKeyDenied), "{name}");
                 assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "{name}: unchanged");
                 assert!(all.iter().all(|r| r.architect.is_none()), "{name}: {all:?}");
+                // #10459: the reason is audited once a record directory is known.
+                let audited = state.architect_records.as_ref().map(|_| refused);
+                assert!(
+                    all.iter().all(|r| r.architect_refusal == audited),
+                    "{name}: {all:?}"
+                );
             }
+        }
+        if name == "stale start" {
+            let raw = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+            assert!(
+                raw.contains("\"architect_refusal\":\"start_time_mismatch\""),
+                "{raw}"
+            );
+            assert!(!raw.contains(&arch.records.display().to_string()), "{raw}");
         }
     }
 }
@@ -369,6 +385,32 @@ fn nested_claude_under_the_architect_is_not_the_architect() {
     );
     assert_eq!(set, Err(ErrorKind::AgentKeyDenied));
     assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "unchanged");
+    let refusals: Vec<_> = records(&fx).iter().map(|r| r.architect_refusal).collect();
+    assert_eq!(refusals, [Some(ArchitectRefusal::NoLaunchRecord)]);
+}
+
+/// Why: #10459 critic LOW — the `writer_for` bridge arm itself. A verdict
+/// as the verified console states it (`mapped`, agent) over a peer that
+/// passes `check_architect` keeps the agent rules: `set` of a denied key is
+/// `agent_key_denied`. Red when the bridge arm is removed (the peer then
+/// passes as the Architect and the key is written). Over the wire a console
+/// under Claude Code is `bridge_refused` first, so the verdict is built here.
+/// Test: itself.
+#[test]
+fn verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let arch = architect(&fx);
+    let state = arch.state(&fx);
+    assert_eq!(
+        check_architect(arch.procs.as_ref(), Some(&arch.records), me()),
+        Ok(())
+    );
+    let caller = Caller::new(Some(me())).with_bridge(BridgeVerdict::mapped(true));
+    let set = methods::set(&state, caller, set_to(&fx, "API_KEY", OPEN_VALUE));
+    assert_eq!(set, Err(ErrorKind::AgentKeyDenied));
+    assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "unchanged");
+    assert!(records(&fx).iter().all(|r| r.architect.is_none()));
 }
 
 /// Why: #10459 P1 scope — `delete`, deny removal and a sync-target push stay

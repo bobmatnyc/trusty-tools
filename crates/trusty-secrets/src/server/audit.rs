@@ -235,6 +235,11 @@ pub struct AuditRecord {
     /// then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architect: Option<bool>,
+    /// Why an agent caller was not granted the Architect exemption, when a
+    /// record directory is known (#10459). Names no pid, path or value.
+    /// `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architect_refusal: Option<super::architect::ArchitectRefusal>,
 }
 
 impl AuditRecord {
@@ -260,6 +265,7 @@ impl AuditRecord {
             source: None,
             default_policy: None,
             architect: None,
+            architect_refusal: None,
         }
     }
 

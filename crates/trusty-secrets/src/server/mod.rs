@@ -80,6 +80,7 @@ pub use ancestry::{
     OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
+pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
 };

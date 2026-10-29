@@ -14,15 +14,25 @@
 //! (`crates/trusty-mpm/src/core/architect_launch.rs`,
 //! `check_launched_architect`): same fields, same `deny_unknown_fields`,
 //! same refusal of a file other users can write.
-//! Known limit: a Claude Code subagent runs inside its parent's process, so
-//! an Architect's own in-process subagent shares its `claude` and its
-//! exemption. A PM or nested session is its own `claude` and has no record.
+//! A failed check is recorded as `architect_refusal` on the call's audit
+//! records when a record directory is known; the arm names no pid or path.
+//! Known limits (#10459):
+//! - Scope: the exemption covers the whole Architect `claude` process tree —
+//!   in-process Task subagents, MCP servers (third-party ones included),
+//!   hooks and background children. The socket has no main-thread signal.
+//!   A PM or nested session is its own `claude` and has no record.
+//! - Forgery: a same-uid agent can write a record for its own `claude` pid.
+//!   That is no capability beyond the detach-to-init limit in
+//!   `ancestry.rs` (module doc), but `architect: true` in the audit is not
+//!   proof of identity. See the residual-writers note in
+//!   `crates/trusty-mpm/src/bin/tm/commands/pm_guard_trust_anchor.rs`.
+//!
 //! Test: `architect_tests.rs` beside `agent_default_tests.rs`.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::ancestry::{ProcessTable, nearest_agent};
@@ -51,10 +61,14 @@ struct LaunchRecord {
 
 /// Why a caller is not the launched Architect. Each one keeps agent rules.
 ///
-/// What: the arms carry no PID, path or file content.
+/// What: the arms carry no PID, path or file content, so the variant name
+/// goes on the audit record as `architect_refusal` (#10459). A name this
+/// build does not know decodes as [`ArchitectRefusal::Other`].
 /// Test: `architect_refusals_each_keep_the_agent_rules`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub(crate) enum ArchitectRefusal {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ArchitectRefusal {
     /// The server knows no account home, so no record directory.
     #[error("no Architect launch-record directory is known")]
     NoRecordDir,
@@ -80,6 +94,10 @@ pub(crate) enum ArchitectRefusal {
     /// The record names another directory than the live process's.
     #[error("the Architect launch record names another project directory")]
     OtherProject,
+    /// A refusal a newer server records. Never written by this build.
+    #[serde(other)]
+    #[error("an Architect check this build does not know")]
+    Other,
 }
 
 /// The record directory for `account_home`, `None` without one.

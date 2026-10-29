@@ -115,6 +115,8 @@ pub(crate) struct Gate<'a> {
     default_policy: bool,
     // #10459 P1: the caller passed the Architect launch-record check.
     architect: bool,
+    // #10459: why the Architect check refused an agent caller.
+    architect_refusal: Option<super::architect::ArchitectRefusal>,
     admitted: Option<Admitted>,
 }
 
@@ -153,6 +155,7 @@ pub(crate) fn audited(
         agent_parent: None,
         default_policy: false,
         architect: false,
+        architect_refusal: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -236,6 +239,11 @@ impl Gate<'_> {
     /// `architect::check_architect`; allow and deny records both carry it.
     pub(crate) fn architect(&mut self) {
         self.architect = true;
+    }
+
+    /// Record why the Architect check refused this agent caller (#10459).
+    pub(crate) fn architect_refusal(&mut self, refusal: super::architect::ArchitectRefusal) {
+        self.architect_refusal = Some(refusal);
     }
 
     /// A store hook that appends one write-ahead `secrets.set_agents_may_use`
@@ -361,6 +369,7 @@ impl Gate<'_> {
         }
         // #10459 P1: the Architect exemption is visible on every record.
         record.architect = self.architect.then_some(true);
+        record.architect_refusal = self.architect_refusal;
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

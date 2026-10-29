@@ -167,14 +167,17 @@ pub(crate) enum Writer {
 /// What: `agent == false` is [`Writer::Person`]. An agent through the
 /// console bridge is [`Writer::Agent`]: its peer is the console, not the
 /// client (a console under Claude Code is already `BridgeRefused`; this arm
-/// keeps the rule if that ever changes). Otherwise [`check_architect`] on the peer: `Ok` marks the gate's
-/// records `architect: true` and is [`Writer::Architect`]; any refusal is
-/// [`Writer::Agent`] (fail closed). Only `set` and a local `copy` call this;
+/// keeps the rule if that ever changes). Otherwise [`check_architect`] on
+/// the peer: `Ok` marks the gate's records `architect: true` and is
+/// [`Writer::Architect`]; any refusal is [`Writer::Agent`] (fail closed),
+/// and with a record directory known its name goes on the records as
+/// `architect_refusal`. Only `set` and a local `copy` call this;
 /// `delete`, deny removal and a sync-target push never do.
 /// Test: `architect_with_a_valid_record_sets_a_denied_key`,
 /// `architect_refusals_each_keep_the_agent_rules`,
 /// `nested_claude_under_the_architect_is_not_the_architect`,
-/// `bridge_call_from_under_the_architect_is_refused`.
+/// `bridge_call_from_under_the_architect_is_refused`,
+/// `verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules`.
 pub(crate) fn writer_for(
     state: &State,
     caller: Caller,
@@ -195,6 +198,12 @@ pub(crate) fn writer_for(
             gate.architect();
             Writer::Architect
         }
-        Err(_) => Writer::Agent,
+        Err(refusal) => {
+            // #10459: the reason is audited; no record directory, nothing to say.
+            if dir.is_some() {
+                gate.architect_refusal(refusal);
+            }
+            Writer::Agent
+        }
     }
 }
