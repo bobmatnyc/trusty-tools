@@ -1,13 +1,16 @@
-//! The three phases of a deferred-embed catch-up pass (#8600).
+//! The phases of a deferred-embed catch-up pass (#8600, #10294).
 //!
 //! Why: the pass used to run under one indexer read guard from snapshot to
 //! commit. Embedding can take minutes to hours, and tokio's `RwLock` is fair: a
 //! writer queued behind that guard blocked every later reader, so
-//! `GET /indexes/{id}/status` hung for the rest of the pass.
-//! What: [`CodeIndexer::plan_deferred_embed`] snapshots the owed chunks and the
-//! embed dependencies under the guard; [`DeferredEmbedPlan::embed`] runs with no
-//! guard; [`CodeIndexer::commit_deferred_embed`] commits the embedded prefix
-//! under a fresh guard. The caller drops the guard between the phases.
+//! `GET /indexes/{id}/status` hung for the rest of the pass. #10294: it also
+//! cloned every owed chunk up front and committed every vector once at the
+//! end, so a large corpus held the whole pass in memory and a kill lost it.
+//! What: [`CodeIndexer::plan_deferred_pass`] records the owed chunk ids;
+//! [`CodeIndexer::plan_deferred_group`] loads one wave of them under the
+//! guard; [`DeferredEmbedPlan::embed`] runs with no guard;
+//! [`CodeIndexer::commit_deferred_embed`] commits the embedded prefix under a
+//! fresh guard. `super::deferred_stream` drives the loop and its checkpoints.
 //! Test: `status_answers_during_an_embed_pass_with_a_writer_queued`, plus the
 //! #6524 pause tests through `embed_deferred_chunks_gated`.
 
@@ -21,7 +24,7 @@ use tokio::sync::RwLockReadGuard;
 use crate::core::chunker::RawChunk;
 
 use super::super::CodeIndexer;
-use super::embed::{EmbedContext, EmbedRun};
+use super::embed::{EmbedContext, EmbedPassState, EmbedRun};
 use super::EmbedCatchUp;
 
 /// How long a deferred-embed commit waits for an evicted chunk map to
@@ -36,15 +39,27 @@ use super::EmbedCatchUp;
 /// read guard, so a scan that never commits must not hold them forever.
 const BACKGROUND_REHYDRATE_CEILING: Duration = Duration::from_secs(300);
 
-/// The chunks one catch-up pass owes, snapshotted under the indexer lock.
+/// The chunk ids one catch-up pass owes, read under the indexer lock (#10294).
 ///
-/// Why/What: see the module docs. `to_embed` is empty when the corpus is
-/// empty, the index has no embedder or store, or every chunk already has a
-/// vector.
+/// Why: the pass used to clone every owed chunk for its whole run. Ids are a
+/// small fraction of that, and each wave loads its own chunks.
+/// What: `owed` is sorted, so a resumed pass works in the same order; `next`
+/// is the first id no group has taken yet. `owed` is empty when the corpus is
+/// empty, the index has no embedder or store, or every chunk has a vector.
+/// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
+pub(crate) struct DeferredEmbedPass {
+    owed: Vec<String>,
+    next: usize,
+    pub(crate) total: usize,
+    embed: EmbedContext,
+}
+
+/// The chunks of one wave of a catch-up pass, loaded under the indexer lock.
+///
+/// Why/What: see the module docs. Holds at most one wave of chunks (#10294).
 /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
 pub(crate) struct DeferredEmbedPlan {
     to_embed: Vec<RawChunk>,
-    total: usize,
     embed: EmbedContext,
 }
 
@@ -69,13 +84,16 @@ impl DeferredEmbedPlan {
     /// What: the embeddings are 1:1 with the owed chunks; a pause, drain or
     /// no-progress abort leaves the tail `None` (#6524). #8600: an abort is
     /// carried in [`EmbedRun::stalled`], not an `Err`, so the completed waves
-    /// before it still reach [`CodeIndexer::commit_deferred_embed`].
+    /// before it still reach [`CodeIndexer::commit_deferred_embed`]. #10294:
+    /// `state` is the pass's, so the CoreML tripwire outlasts the wave.
     /// Test: `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`,
-    /// `a_stalled_wave_commits_the_waves_before_it`.
+    /// `a_stalled_wave_commits_the_waves_before_it`,
+    /// `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
     pub(crate) async fn embed(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        state: &mut EmbedPassState,
     ) -> Result<EmbedRun> {
         if self.to_embed.is_empty() {
             return Ok(EmbedRun {
@@ -84,43 +102,81 @@ impl DeferredEmbedPlan {
             });
         }
         self.embed
-            .embed_chunks_keeping_prefix(&self.to_embed, progress_tx, pause)
+            .embed_chunks_in_pass(&self.to_embed, progress_tx, pause, state)
             .await
+    }
+
+    /// A fresh embed state for a pass whose waves include this one (#10294).
+    /// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
+    pub(crate) fn embed_state(&self) -> EmbedPassState {
+        self.embed.pass_state()
     }
 }
 
 impl CodeIndexer {
-    /// Snapshot the chunks the vector store does not have yet (#8600).
+    /// Record the chunk ids the vector store does not have yet (#8600, #10294).
     ///
     /// Why: issue #2984 Phase 1 HIGH finding 3 — catch-up is incremental, so
     /// chunks that already carry a vector are skipped (`contains_many`).
-    /// What: the read-only first phase; see [`DeferredEmbedPlan`].
+    /// #10294: only ids are kept, so the plan is not a second copy of the corpus.
+    /// What: the read-only first phase; see [`DeferredEmbedPass`].
     /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-    pub(crate) async fn plan_deferred_embed(&self) -> DeferredEmbedPlan {
-        let chunks: Vec<RawChunk> = {
+    pub(crate) async fn plan_deferred_pass(&self) -> DeferredEmbedPass {
+        let ids: Vec<String> = {
             self.ensure_chunks_loaded().await;
-            let map = self.chunks.read().await;
-            map.values().cloned().collect()
+            self.chunks.read().await.keys().cloned().collect()
         };
-        let total = chunks.len();
+        let total = ids.len();
         let embed = self.embed_context().await;
-        let to_embed = match (&self.store, self.embedder.is_some()) {
+        let mut owed: Vec<String> = match (&self.store, self.embedder.is_some()) {
             (Some(store), true) if total > 0 => {
-                let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
                 let already_embedded = store.contains_many(&ids).await;
-                chunks
-                    .into_iter()
+                ids.into_iter()
                     .zip(already_embedded)
-                    .filter_map(|(chunk, embedded)| (!embedded).then_some(chunk))
+                    .filter_map(|(id, embedded)| (!embedded).then_some(id))
                     .collect()
             }
             _ => Vec::new(),
         };
-        DeferredEmbedPlan {
-            to_embed,
+        owed.sort_unstable();
+        DeferredEmbedPass {
+            owed,
+            next: 0,
             total,
             embed,
         }
+    }
+
+    /// Load the next `wave` owed chunks of `pass` (#10294).
+    ///
+    /// Why: one wave of chunks in memory at a time, not the corpus.
+    /// What: takes ids from `pass` until `wave` chunks are loaded or the ids
+    /// run out, cloning each chunk from the map once it is a view of the whole
+    /// corpus. An id the corpus no longer holds is skipped. `None` when no id
+    /// is left. Errors when the map cannot be read within
+    /// [`BACKGROUND_REHYDRATE_CEILING`].
+    /// Test: `a_finished_wave_is_searchable_and_on_disk_before_the_next_wave_starts`.
+    pub(crate) async fn plan_deferred_group(
+        &self,
+        pass: &mut DeferredEmbedPass,
+        wave: usize,
+    ) -> Result<Option<DeferredEmbedPlan>> {
+        let wave = wave.max(1);
+        let corpus = self
+            .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
+            .await
+            .context("load the next wave of owed chunks")?;
+        let mut to_embed = Vec::with_capacity(wave.min(pass.owed.len() - pass.next));
+        while to_embed.len() < wave && pass.next < pass.owed.len() {
+            if let Some(chunk) = corpus.get(&pass.owed[pass.next]) {
+                to_embed.push(chunk.clone());
+            }
+            pass.next += 1;
+        }
+        Ok((!to_embed.is_empty()).then(|| DeferredEmbedPlan {
+            to_embed,
+            embed: pass.embed.clone(),
+        }))
     }
 
     /// Commit the embedded prefix of `plan` (#6524, #8600).
@@ -129,9 +185,9 @@ impl CodeIndexer {
     /// reads a `None` slot as a stale-embedding eviction, so committing the
     /// un-embedded remainder would undo work instead of deferring it.
     /// What: commits only the leading `Some` run; `paused` is true when that
-    /// run is shorter than the plan. A stalled run (#8600) commits and
-    /// snapshots its prefix too, then returns the stall as the `Err` that
-    /// settles the pass `Failed`. A DURABLE WRITE — the caller must hold the
+    /// run is shorter than the plan. A stalled run (#8600) commits its prefix
+    /// too, then returns the stall as the `Err` that settles the pass
+    /// `Failed`; the caller checkpoints it (#10294). A DURABLE WRITE — the caller must hold the
     /// per-index teardown read-guard (#3049).
     ///
     /// #8761: the plan is a snapshot and the embed phase holds no lock, so a
@@ -154,11 +210,12 @@ impl CodeIndexer {
     ) -> Result<EmbedCatchUp> {
         let DeferredEmbedPlan {
             mut to_embed,
-            total,
             embed: _,
         } = plan;
+        // #10294: `total` is this wave; the pass driver reports the corpus.
+        let total = to_embed.len();
         if to_embed.is_empty() {
-            return Ok(EmbedCatchUp::finished(0, total));
+            return Ok(EmbedCatchUp::finished(0, 0));
         }
         let EmbedRun {
             mut embeddings,
@@ -174,11 +231,8 @@ impl CodeIndexer {
         self.commit_embeddings_cache(&live, embeddings).await;
         let evicted = self.evict_vectors_removed_during_commit(&live).await?;
         if let Some(stall) = stalled {
-            // #8600: the completed waves are committed; make them durable
-            // before the pass settles `Failed`, as the paused arm does.
-            if done > 0 {
-                self.force_incremental_persist();
-            }
+            // #8600: the completed waves are committed; #10294: the pass
+            // driver checkpoints them before the pass settles `Failed`.
             return Err(stall);
         }
         Ok(EmbedCatchUp {

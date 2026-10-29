@@ -718,9 +718,8 @@ impl CodeIndexer {
 /// Why: the staging path must never fall back to the live one when the
 /// resolver refused it — a refusal means the storage directory must not be
 /// written at all (a missing colocated root, or a data dir under the root).
-/// What: `reindexing` → the staging path; a refusal logs at error and returns
-/// `None` (the caller skips the checkpoint), any other failure falls back to
-/// the live path. Otherwise the live path, `None` on any failure.
+/// What: [`checkpoint_hnsw_target_checked`], with a refusal logged at error
+/// and returned as `None` (the caller skips the checkpoint).
 /// Test: `persist_loop_never_recreates_a_root_deleted_between_iterations`.
 fn checkpoint_hnsw_target(
     layout: crate::service::storage_layout::StorageLayout,
@@ -728,15 +727,33 @@ fn checkpoint_hnsw_target(
     root_path: &std::path::Path,
     reindexing: bool,
 ) -> Option<std::path::PathBuf> {
+    checkpoint_hnsw_target_checked(layout, index_id, root_path, reindexing).unwrap_or_else(|e| {
+        tracing::error!("incremental persist: {e:#} — checkpoint skipped");
+        None
+    })
+}
+
+/// [`checkpoint_hnsw_target`] with a refusal returned as the `Err` (#10294).
+///
+/// Why: the deferred-embed pass must fail on a refused checkpoint rather than
+/// skip it while it keeps embedding.
+/// What: `reindexing` → the staging path, falling back to the live path on a
+/// failure that is not a refusal. Otherwise the live path. `Ok(None)` when no
+/// path resolves and nothing refused; `Err` on a write refusal.
+/// Test: `persist_loop_never_recreates_a_root_deleted_between_iterations`,
+/// `a_failed_checkpoint_fails_the_pass_instead_of_settling_ready`.
+pub(super) fn checkpoint_hnsw_target_checked(
+    layout: crate::service::storage_layout::StorageLayout,
+    index_id: &str,
+    root_path: &std::path::Path,
+    reindexing: bool,
+) -> Result<Option<std::path::PathBuf>> {
     use crate::service::storage_layout::{is_write_refusal, HNSW_FILE, HNSW_STAGING_FILE};
     if reindexing {
         match layout.file(index_id, root_path, HNSW_STAGING_FILE) {
-            Ok(p) => return Some(p),
+            Ok(p) => return Ok(Some(p)),
             // #8438: a refused staging path skips; it never becomes a live write.
-            Err(e) if is_write_refusal(&e) => {
-                tracing::error!("incremental persist: {e:#} — checkpoint skipped");
-                return None;
-            }
+            Err(e) if is_write_refusal(&e) => return Err(e),
             Err(e) => tracing::debug!(
                 "incremental persist: cannot resolve hnsw staging path for '{index_id}' \
                  ({e}) — falling back to the live path for this checkpoint"
@@ -744,16 +761,11 @@ fn checkpoint_hnsw_target(
         }
     }
     match layout.file(index_id, root_path, HNSW_FILE) {
-        Ok(p) => Some(p),
+        Ok(p) => Ok(Some(p)),
+        Err(e) if is_write_refusal(&e) => Err(e),
         Err(e) => {
-            if is_write_refusal(&e) {
-                tracing::error!("incremental persist: {e:#} — checkpoint skipped");
-            } else {
-                tracing::debug!(
-                    "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
-                );
-            }
-            None
+            tracing::debug!("incremental persist: cannot resolve hnsw path for '{index_id}': {e}");
+            Ok(None)
         }
     }
 }
