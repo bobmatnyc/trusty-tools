@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use crate::core::memory_checked::protocol_mismatch;
 use trusty_common::memory_rpc::MemoryHealthStatus;
 
 /// How long one reachability probe may take.
@@ -59,6 +60,9 @@ pub enum MemoryReachability {
     Refused(i64),
     /// Nothing answered: a dial failure, a transport error, or a timeout.
     Unreachable,
+    /// A daemon answered but speaks a protocol this client refuses (#9538); the
+    /// text is the named `MemoryProtocolError`.
+    ProtocolMismatch(String),
 }
 
 impl MemoryReachability {
@@ -86,6 +90,7 @@ impl MemoryReachability {
                 format!("trusty-memory refused its health call (code {code})")
             }
             Self::Unreachable => "trusty-memory is not answering (unreachable)".to_string(),
+            Self::ProtocolMismatch(reason) => format!("trusty-memory is DEGRADED: {reason}"),
         }
     }
 }
@@ -121,7 +126,7 @@ pub async fn probe_memory_reachability() -> MemoryReachability {
 /// `refused_health_call_is_not_reachable`,
 /// `unreachable_socket_answers_false`.
 pub async fn probe_socket_reachability(socket: &std::path::Path) -> MemoryReachability {
-    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    match crate::core::memory_checked::call_with_timeout(
         socket,
         HEALTH_METHOD,
         serde_json::json!({}),
@@ -134,6 +139,9 @@ pub async fn probe_socket_reachability(socket: &std::path::Path) -> MemoryReacha
             MemoryHealthStatus::Ok => MemoryReachability::Reachable,
             other => MemoryReachability::Unhealthy(other),
         },
+        Err(e) if protocol_mismatch(&e).is_some() => {
+            MemoryReachability::ProtocolMismatch(format!("{e:#}"))
+        }
         Err(e) => match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
             Some(rpc) => MemoryReachability::Refused(rpc.code),
             None => MemoryReachability::Unreachable,

@@ -21,10 +21,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::core::memory_checked::{self, protocol_mismatch};
 use serde_json::{Value, json};
 use trusty_common::catchup::git::capture_git_status;
 use trusty_common::catchup::pause::{PauseSnapshotInput, PauseSnapshotOutcome};
-use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
+use trusty_common::memory_rpc::MemoryRpcError;
 
 use crate::core::memory_verbs::{MemoryVerbOptions, REMEMBER_METHOD, resolve_palace_for};
 // #9390: the reader runs only these shapes, so the writer formats with them too.
@@ -66,7 +67,7 @@ impl ResumeSlotHost {
 /// trusty-memory kept the drawer but not its command, `no_identifiers` when
 /// there was nothing to re-read); `stored_unslotted:slot_refused` when the
 /// daemon stored an ordinary drawer instead of a slot; or `skipped:<reason>`
-/// (`invalid_session_id`, `no_palace`, `memory_unreachable`, `memory_error`,
+/// (`invalid_session_id`, `no_palace`, `memory_unreachable`, `memory_protocol`, `memory_error`,
 /// `not_stored`). Every skip is logged with its detail.
 /// Test: see the module doc.
 pub(crate) async fn record_resume_slot(
@@ -123,7 +124,7 @@ pub(crate) async fn record_resume_slot(
     if let Some(command) = &verify {
         args["verify"] = json!(command);
     }
-    match call_memory_tool_at_with_timeout(&host.socket, REMEMBER_METHOD, args, SLOT_WRITE_TIMEOUT)
+    match memory_checked::call_with_timeout(&host.socket, REMEMBER_METHOD, args, SLOT_WRITE_TIMEOUT)
         .await
     {
         Ok(result) => stored_outcome(&result, verify.is_some()),
@@ -250,6 +251,8 @@ fn error_outcome(e: &anyhow::Error) -> String {
             "stored_without_verify:verify_not_stored".to_string()
         }
         Some(_) => skipped("memory_error", &detail),
+        // #9538: a daemon outside the supported protocol is named, not "unreachable".
+        None if protocol_mismatch(e).is_some() => skipped("memory_protocol", &detail),
         None => skipped("memory_unreachable", &detail),
     }
 }

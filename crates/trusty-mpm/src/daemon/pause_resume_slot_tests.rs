@@ -161,6 +161,40 @@ async fn pause_survives_an_unreachable_memory_socket() {
     );
 }
 
+/// Why (#9538): a memory daemon from another release must be refused by name,
+/// without a single memory tool call reaching it.
+/// What: a fake reporting protocol 99 records every method; the pause still
+/// returns `Ok` and `resume_slot` is `skipped:memory_protocol`.
+#[tokio::test]
+async fn pause_skips_the_slot_on_an_incompatible_memory_protocol() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    repo_on_branch(tmp.path());
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    let daemon = crate::uds_mock::spawn_with_protocol(99, move |method: &str, params: Value| {
+        if let Ok(mut seen) = seen.lock() {
+            seen.push((method.to_string(), params));
+        }
+        Box::pin(async { Ok(json!({"status": "ok"})) })
+    })
+    .await;
+    let memory = ResumeSlotHost {
+        socket: daemon.socket().to_path_buf(),
+        palace: Some("p".to_string()),
+    };
+
+    let result = pause(tmp.path(), &memory).await;
+
+    assert!(Path::new(result["snapshot_path"].as_str().unwrap()).exists());
+    assert_eq!(
+        result["resume_slot"],
+        json!("skipped:memory_protocol"),
+        "{result}"
+    );
+    let calls = calls.lock().unwrap();
+    assert!(calls.is_empty(), "no memory call may reach it: {calls:?}");
+}
+
 /// Why (#9390): PR B stores the drawer even when its verify command fails to
 /// record, and says so with `VerifyNotStored`. The pause must report that, not
 /// call it stored and not call it skipped.

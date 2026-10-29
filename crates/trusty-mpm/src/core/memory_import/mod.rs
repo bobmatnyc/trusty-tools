@@ -497,7 +497,7 @@ async fn existing_drawer(
     palace: &str,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<Existing> {
-    let result = trusty_common::memory_rpc::call_memory_tool_at(
+    let result = crate::core::memory_checked::call(
         socket,
         "memory_list",
         json!({ "palace": palace, "tag": parsed.name, "limit": DEDUP_CANDIDATE_LIMIT }),
@@ -623,7 +623,7 @@ pub(crate) async fn remember(
     tags: &[String],
     allow_secret_like: bool,
 ) -> anyhow::Result<String> {
-    let result = trusty_common::memory_rpc::call_memory_tool_at(
+    let result = crate::core::memory_checked::call(
         socket,
         "memory_remember",
         json!({

@@ -558,7 +558,7 @@ fn import_key(path: &Path, source: &str) -> String {
 /// error rather than "none", because storing on a misread would duplicate.
 /// Test: `auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost`.
 async fn drawer_with_tag(socket: &Path, palace: &str, tag: &str) -> anyhow::Result<Option<String>> {
-    let result = trusty_common::memory_rpc::call_memory_tool_at(
+    let result = crate::core::memory_checked::call(
         socket,
         "memory_list",
         serde_json::json!({ "palace": palace, "tag": tag, "limit": 1 }),

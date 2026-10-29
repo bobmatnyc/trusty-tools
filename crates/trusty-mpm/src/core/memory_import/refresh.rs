@@ -99,7 +99,7 @@ pub async fn refresh_drawer(
 ) -> Result<String, RefreshError> {
     // #5044: forget before remember, so the file's slug tag never names two
     // drawers at once — the ambiguity `existing_drawer` refuses to guess at.
-    trusty_common::memory_rpc::call_memory_tool_at(
+    crate::core::memory_checked::call(
         socket,
         "memory_forget",
         json!({ "palace": opts.palace, "drawer_id": drawer_id }),
@@ -245,7 +245,7 @@ async fn verdict(
     wait: &mut WarmupWait,
 ) -> anyhow::Result<Option<String>> {
     loop {
-        let answer = trusty_common::memory_rpc::call_memory_tool_at(
+        let answer = crate::core::memory_checked::call(
             socket,
             "palace_verify_embedded",
             json!({ "palace": palace, "drawer_ids": [drawer_id] }),

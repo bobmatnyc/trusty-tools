@@ -73,6 +73,8 @@ impl Drop for MockUdsDaemon {
 /// The catch-all that hands every method to the test's closure.
 struct MockFallback<F> {
     handler: F,
+    /// The `protocol_version` this daemon reports to `memory.protocol` (#9538).
+    protocol: u64,
 }
 
 #[async_trait]
@@ -81,6 +83,11 @@ where
     F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
 {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        // #9538: every checked client asks first; a handler that answered
+        // `always(..)` would hand back a body the check cannot read.
+        if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
+            return Ok(serde_json::json!({ "protocol_version": self.protocol }));
+        }
         (self.handler)(method, params).await
     }
 }
@@ -118,9 +125,35 @@ pub async fn spawn_at<F>(socket: PathBuf, handler: F) -> MockUdsDaemon
 where
     F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
 {
+    spawn_at_with_protocol(socket, supported_protocol(), handler).await
+}
+
+/// The newest `memory.protocol` version this client supports (#9538).
+fn supported_protocol() -> u64 {
+    *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end()
+}
+
+/// [`spawn`] for a daemon reporting `protocol` from `memory.protocol` (#9538).
+///
+/// Why: the refusal tests need a daemon from another release.
+pub async fn spawn_with_protocol<F>(protocol: u64, handler: F) -> MockUdsDaemon
+where
+    F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
+{
+    let dir = TempDir::new().expect("tempdir for the mock socket");
+    let socket = dir.path().join("daemon.sock");
+    let mut daemon = spawn_at_with_protocol(socket, protocol, handler).await;
+    daemon._dir = Some(dir);
+    daemon
+}
+
+async fn spawn_at_with_protocol<F>(socket: PathBuf, protocol: u64, handler: F) -> MockUdsDaemon
+where
+    F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
+{
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the mock socket");
 
-    let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
+    let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler, protocol }));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         serve_until(&listener, router, RpcServeOptions::default(), async {
@@ -210,7 +243,10 @@ where
         runtime.block_on(async move {
             let listener =
                 trusty_common::uds::bind_hardened(&bind_at).expect("bind the mock socket");
-            let router = Arc::new(RpcRouter::new().fallback(MockFallback { handler }));
+            let router = Arc::new(RpcRouter::new().fallback(MockFallback {
+                handler,
+                protocol: supported_protocol(),
+            }));
             let _ = ready_tx.send(());
             serve_until(&listener, router, RpcServeOptions::default(), async {
                 let _ = stop_rx.await;
