@@ -204,3 +204,60 @@ sleep 5"#;
     let result = client.call_tool("t", json!({})).await.expect("real result");
     assert_eq!(result, json!({ "answer": "tool" }));
 }
+
+/// Why: #10360 — `line_buf` persists across calls, so a child that streams
+/// without a newline must not grow it without bound.
+/// What: after the handshake the mock writes 17 MB of `{` with no newline
+/// for a while, then ends the line and answers the next request with `fresh`.
+/// The first call must fail naming the cap and leave the buffer bounded; the
+/// second must discard the oversized line's tail and return `fresh`.
+/// Test: This test.
+#[tokio::test]
+#[cfg(unix)]
+async fn oversized_line_errors_and_next_call_skips_its_tail() {
+    let script = format!(
+        r#"read -r l
+printf '{{"jsonrpc":"2.0","id":1,"result":{{"serverInfo":{{"name":"mock","version":"1"}}}}}}\n'
+read -r l
+read -r l
+head -c 17000000 /dev/zero | tr '\0' '{{'
+sleep 1
+head -c 1000 /dev/zero | tr '\0' '{{'
+printf '\n'
+read -r l; {READ_ID}
+printf '{{"jsonrpc":"2.0","id":%s,"result":{{"fresh":true}}}}\n' "$id"
+sleep 5"#
+    );
+    let mut client = StdioMcpClient::spawn("sh", &["-c", &script], "test-client")
+        .await
+        .expect("spawn mock");
+    client.initialize().await.expect("initialize");
+    let first = client.call_tool("t", json!({})).await;
+    let err = format!(
+        "{:#}",
+        first.expect_err("an oversized line must fail the call")
+    );
+    assert!(err.contains("16777216"), "error must name the cap: {err}");
+    assert!(
+        client.line_buf.len() <= super::MAX_LINE_BYTES,
+        "buffer must stay bounded: {}",
+        client.line_buf.len()
+    );
+    let second = client
+        .call_tool("t", json!({}))
+        .await
+        .expect("the call after an oversized line");
+    assert_eq!(second, json!({ "fresh": true }));
+}
+
+/// Why: #10360 — `id` and `method` of a skipped frame are server-controlled;
+/// logging them whole lets a child flood the log.
+/// What: a 10 KB method truncates to 64 characters plus `…(+N)`.
+/// Test: This test.
+#[test]
+fn log_field_truncates_long_values() {
+    let long = "m".repeat(10_000);
+    let shown = super::client::log_field(&long);
+    assert_eq!(shown, format!("{}…(+9936)", "m".repeat(64)));
+    assert_eq!(super::client::log_field("ping"), "ping");
+}

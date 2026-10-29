@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::{
-    CALL_TIMEOUT, MCP_PROTOCOL_VERSION, McpTool, ServerInfo, StdioMcpClient,
+    CALL_TIMEOUT, MAX_LINE_BYTES, MCP_PROTOCOL_VERSION, McpTool, ServerInfo, StdioMcpClient,
     build_initialize_request, extract_result, plugin_stderr_stdio,
 };
 
@@ -98,6 +98,7 @@ impl StdioMcpClient {
             stdin: BufWriter::new(stdin),
             stdout: BufReader::new(stdout),
             line_buf: Vec::new(),
+            discard_line: false,
             next_id: AtomicU64::new(1),
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -160,7 +161,8 @@ impl StdioMcpClient {
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
         // #10360: a partial line belongs to the dead process's stream.
-        self.line_buf.clear();
+        self.line_buf = Vec::new();
+        self.discard_line = false;
         // client_name is retained from the original spawn — no update needed.
         // #10360: `next_id` is NOT reset. Ids stay unique across process
         // generations, so a frame carrying an id from an earlier lifetime can
@@ -385,31 +387,71 @@ impl StdioMcpClient {
     /// Cancel safety (#10360): `request` wraps this in a timeout. tokio's
     /// `read_line` is not cancel-safe — bytes it already consumed are lost
     /// when the future drops, and the line's tail later reads as a frame.
-    /// `read_until` is cancel-safe: partial bytes stay in `self.line_buf`,
-    /// and the next call resumes the same line.
+    /// `read_line_bytes` keeps partial bytes in `self.line_buf`, so the next
+    /// call resumes the same line, and caps it at `MAX_LINE_BYTES`.
     /// Test: `read_line_skips_non_json_prefix_lines` feeds banner-then-JSON
     /// through the codec and asserts the JSON object is returned;
     /// `timeout_mid_line_does_not_corrupt_the_next_call` the cancel safety.
     pub(super) async fn read_line(&mut self) -> Result<Value> {
         loop {
-            // #10360: append into the persistent buffer; never a local.
-            let n = self.stdout.read_until(b'\n', &mut self.line_buf).await?;
-            if n == 0 && self.line_buf.is_empty() {
-                bail!("MCP server closed stdout before responding");
-            }
-            let bytes = std::mem::take(&mut self.line_buf);
+            let bytes = self.read_line_bytes().await?;
             let line = String::from_utf8_lossy(&bytes);
             let trimmed = line.trim_start();
             if !trimmed.starts_with('{') {
                 debug!(
                     "StdioMcpClient: skipping non-JSON line from child stdout: {:?}",
-                    line.trim_end()
+                    log_field(line.trim_end())
                 );
                 continue;
             }
-            let value: Value = serde_json::from_str(line.trim_end())
-                .with_context(|| format!("parsing JSON-RPC frame: {line:?}"))?;
+            let value: Value = serde_json::from_str(line.trim_end()).with_context(|| {
+                format!("parsing JSON-RPC frame: {:?}", log_field(line.trim_end()))
+            })?;
             return Ok(value);
+        }
+    }
+
+    /// Read one raw stdout line, `\n` included, of at most `MAX_LINE_BYTES`.
+    ///
+    /// Why: #10360 — `line_buf` persists across calls, so an unterminated
+    /// line must not grow it without bound.
+    /// What: copies from the `BufReader` into `line_buf` in `fill_buf` /
+    /// `consume` steps with no await between copy and consume, so a cancel
+    /// loses nothing. A line that would pass the cap empties the buffer, sets
+    /// `discard_line`, and errors; while `discard_line` is set, bytes up to
+    /// the next `\n` are dropped. Discarding keeps the child and its session
+    /// alive, where a respawn would lose server state for one bad frame; a
+    /// child that never ends the line is still bounded by the call timeout.
+    /// At EOF a partial line is returned, an empty one is an error.
+    /// Test: `oversized_line_errors_and_next_call_skips_its_tail`,
+    /// `timeout_mid_line_does_not_corrupt_the_next_call`.
+    async fn read_line_bytes(&mut self) -> Result<Vec<u8>> {
+        loop {
+            let avail = self.stdout.fill_buf().await?;
+            if avail.is_empty() {
+                if self.line_buf.is_empty() {
+                    bail!("MCP server closed stdout before responding");
+                }
+                return Ok(std::mem::take(&mut self.line_buf));
+            }
+            let newline = avail.iter().position(|&b| b == b'\n');
+            let len = newline.map_or(avail.len(), |i| i + 1);
+            if self.discard_line {
+                self.stdout.consume(len);
+                self.discard_line = newline.is_none();
+                continue;
+            }
+            if self.line_buf.len() + len > MAX_LINE_BYTES {
+                self.stdout.consume(len);
+                self.line_buf = Vec::new();
+                self.discard_line = newline.is_none();
+                bail!("MCP server line exceeded the {MAX_LINE_BYTES}-byte cap; line discarded");
+            }
+            self.line_buf.extend_from_slice(&avail[..len]);
+            self.stdout.consume(len);
+            if newline.is_some() {
+                return Ok(std::mem::take(&mut self.line_buf));
+            }
         }
     }
 
@@ -462,12 +504,30 @@ impl StdioMcpClient {
 /// What: chooses the level by whether `frame.id == expected_id`.
 /// Test: exercised by `error_frame_with_method_is_not_returned_as_result`.
 fn log_skipped_frame(frame: &Value, expected_id: &Value) {
-    let id = frame.get("id").map(Value::to_string).unwrap_or_default();
-    let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
+    let id = log_field(&frame.get("id").map(Value::to_string).unwrap_or_default());
+    let method = log_field(frame.get("method").and_then(Value::as_str).unwrap_or(""));
     if frame.get("id") == Some(expected_id) {
         warn!(expected = %expected_id, %method, "StdioMcpClient: skipping non-response frame with the awaited id");
     } else {
         debug!(expected = %expected_id, %id, %method, "StdioMcpClient: skipping non-matching frame");
+    }
+}
+
+/// Characters of a server-controlled string a log line keeps.
+const LOG_FIELD_CHARS: usize = 64;
+
+/// `s` cut to `LOG_FIELD_CHARS` characters, with `…(+N)` naming the rest.
+///
+/// Why: #10360 — `id` and `method` of a skipped frame come from the child;
+/// logged whole, one frame can flood the log.
+/// Test: `log_field_truncates_long_values`.
+pub(super) fn log_field(s: &str) -> String {
+    match s.char_indices().nth(LOG_FIELD_CHARS) {
+        None => s.to_string(),
+        Some((cut, _)) => {
+            let rest = s[cut..].chars().count();
+            format!("{}…(+{rest})", &s[..cut])
+        }
     }
 }
 
