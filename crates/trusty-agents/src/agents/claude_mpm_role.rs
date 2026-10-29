@@ -19,7 +19,7 @@
 //!   `.claude/agents/*.md` artifacts this loader actually reads. It is the
 //!   key that carries the domain in practice.
 //! - `role:` appears in trusty-mpm's SOURCE assets
-//!   (`crates/trusty-mpm/src/assets/agents/*.md`) and in hand-authored agent
+//!   (`content/agents/*.md`) and in hand-authored agent
 //!   files. It is also the key #4495's shared-frontmatter work projects, so
 //!   reading it here means that work inherits this normalization instead of
 //!   re-deriving a second, divergent one.
@@ -59,7 +59,7 @@ pub(crate) const UNMAPPED_ROLE: &str = "agent";
 /// observed in trusty-mpm's source assets and its deployed artifacts.
 ///
 /// Why: built from data, not from guesses. Every left-hand value below was
-/// observed in `crates/trusty-mpm/src/assets/agents/*.md` (`role:`) or in a
+/// observed in `content/agents/*.md` (`role:`) or in a
 /// composer-emitted `.claude/agents/*.md` artifact (`agent_type:`). Values
 /// that were observed but are NOT here are omitted DELIBERATELY, because
 /// mapping them would be a guess about a security-relevant classification:

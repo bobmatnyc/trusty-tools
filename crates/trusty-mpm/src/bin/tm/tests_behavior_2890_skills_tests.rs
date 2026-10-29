@@ -7,7 +7,7 @@
 //!
 //! Why: code-critic's `skills:` frontmatter (#2890, DOC-42) declares
 //! `code-review-standards` and `contract-driven-testing`. Both asset files
-//! existing under `src/assets/skills/` is NOT sufficient for them to ship —
+//! existing under `content/skills/` is NOT sufficient for them to ship —
 //! `tm install`/`tm update` deploy exclusively from the `ALL` bundle table
 //! (`bundle_all.rs`), which is populated by `install_to` writing every
 //! `ALL` entry under the framework root, which `deploy_all_skill_tiers`

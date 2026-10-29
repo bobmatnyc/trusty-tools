@@ -5,7 +5,7 @@
 //! file is itself capped at 1500 SLOC as a test file).
 //!
 //! Why: mirrors `tests_behavior_2911_documentation_style_tests.rs`'s
-//! rationale — a skill asset file existing under `src/assets/skills/` is NOT
+//! rationale — a skill asset file existing under `content/skills/` is NOT
 //! sufficient for it to ship; only `ALL` (`bundle_all.rs`) registration makes
 //! `deploy_all_skill_tiers` see it. Only observing the file land in a real
 //! deployed `.claude/skills/` tree — via the exact two-step path `tm install`

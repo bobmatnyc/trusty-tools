@@ -17,7 +17,7 @@ use clap::Subcommand;
 /// only the `tm-capabilities` catalog, but scoped as its own action enum so a
 /// future generator (e.g. shell completions) doesn't need a new top-level
 /// `Command` variant.
-/// What: `Capabilities` regenerates `crates/trusty-mpm/src/assets/skills/
+/// What: `Capabilities` regenerates `content/skills/
 /// tm-capabilities/` from the in-process CLI/MCP/agent/skill/doctor surfaces;
 /// `--check` diffs the freshly generated output against the committed files
 /// instead of writing, exiting non-zero on drift (the CI gate).
@@ -32,7 +32,7 @@ pub(crate) enum GenerateAction {
     /// that re-derives the reference catalog from the harness's own in-memory
     /// data (never parses `--help` text or greps for literals).
     /// What: without `--check`, overwrites
-    /// `crates/trusty-mpm/src/assets/skills/tm-capabilities.md` and its
+    /// `content/skills/tm-capabilities.md` and its
     /// `references/{cli,mcp-tools,agents,skills,doctor}.md` siblings
     /// (`references/workflows.md` is hand-authored and never touched). With
     /// `--check`, generates to memory, diffs against the committed files, and

@@ -879,7 +879,7 @@ pub(crate) fn build_inplace_exec_command(
     for (name, value) in &resume.mcp_env {
         cmd.env(name, value);
     }
-    // #8436: auto memory is off for every session (owner ruling Q5a). This
+    // #8436: auto memory is off for every session. This
     // path bypasses `managed_env_set`, so set it here or an operator
     // `settings.local.json` `autoMemoryEnabled: true` would turn it on.
     cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");

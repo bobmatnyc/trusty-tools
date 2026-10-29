@@ -5,7 +5,7 @@
 //! removed, and the removal confirmed on disk — over EVERY tree the ledger
 //! knows, not only the tm-provisioned trees the merged-PR reclaim walks. The
 //! backlog (84 trees in one project) must not be bulk-deleted on the first
-//! run, so removal waits for the Architect: owner ruling Q2, answer (a).
+//! run, so removal waits for the Architect.
 //! What: [`run_and_log`] runs inside the merged-PR reclaim's tick, under the
 //! same maintenance permit. It links PRs and finds stale candidates (S2c),
 //! plans them ([`plan_reclaim`]), and runs the plan through

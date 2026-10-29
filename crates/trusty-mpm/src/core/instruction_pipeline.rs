@@ -608,7 +608,7 @@ cat .trusty-mpm/last-instructions.md
 // violated the standing owner constraint that trusty-mpm must NEVER modify a
 // target project's CLAUDE.md. The directive is already delivered in full via
 // the `trusty-mpm` output style's "PRIMARY DIRECTIVE" section (see
-// `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md` and its
+// `content/instructions/output-styles/trusty-mpm.md` and its
 // `-research` / `-teacher` variants), which Claude Code loads as the
 // session's system prompt through the `outputStyle` settings key — making the
 // CLAUDE.md copy redundant. No code path writes this block anymore; the

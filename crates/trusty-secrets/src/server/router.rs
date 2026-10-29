@@ -158,7 +158,7 @@ pub(crate) fn open_local(
 ///
 /// Why: A10 — the binary takes the 1Password service-account token out of
 /// its environment before any thread starts and hands it to the factory;
-/// doctor may report only that it was there (owner ruling Q1).
+/// doctor may report only that it was there (#7519).
 /// What: the token's presence, never its value, and the `PATH` doctor's
 /// tool detection searches (DOC-74 §7), so `Debug` carries no secret.
 /// Test: `doctor_reports_token_presence_and_never_the_token`,

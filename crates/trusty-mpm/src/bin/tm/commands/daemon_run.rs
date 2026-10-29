@@ -190,7 +190,7 @@ pub(crate) async fn run_daemon(
 
 /// The deprecation line for `--addr` / `TRUSTY_MPM_ADDR`, when either was set.
 ///
-/// Why (#6288 S3a, owner ruling Q1): the daemon binds no TCP port, but the host
+/// Why (#6288 S3a): the daemon binds no TCP port, but the host
 /// launchd plist still passes `--addr 127.0.0.1:7880` and restarts a failed
 /// daemon every 10 s. A hard error would crash-loop it, so the value is
 /// accepted, ignored and named once in the log. Removal is due in 2.0.0.
@@ -572,7 +572,7 @@ mod tests {
         assert!(lock_path.exists());
     }
 
-    /// #6288 S3a (owner ruling Q1): a set `--addr` is named, as ignored, in
+    /// #6288 S3a: a set `--addr` is named, as ignored, in
     /// one line; an unset one produces none.
     /// Test: this function IS the test.
     #[test]

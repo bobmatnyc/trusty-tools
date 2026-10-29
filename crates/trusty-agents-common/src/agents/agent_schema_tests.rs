@@ -1,7 +1,7 @@
 //! Tests for the #4448 frontmatter-schema discriminator.
 //!
 //! The fixtures below are trimmed from REAL files: the trusty-mpm ones from
-//! `crates/trusty-mpm/src/assets/agents/` and this crate's composer output, the
+//! `content/agents/` and this crate's composer output, the
 //! claude-mpm ones from the 2026-07-31 quarantine backup taken off this
 //! machine. The filenames deliberately COLLIDE — that collision is the whole
 //! reason a filename-keyed sweep is wrong.

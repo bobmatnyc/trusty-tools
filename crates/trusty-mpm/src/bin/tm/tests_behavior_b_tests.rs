@@ -285,7 +285,7 @@ fn cli_parses_sm_serve_stdio() {
     }
 }
 
-/// #6288 S3a (owner ruling Q1): `--addr` still parses — any value, never a
+/// #6288 S3a: `--addr` still parses — any value, never a
 /// parse error that would crash-loop a launchd plist passing it — and is only
 /// carried to `run_daemon`'s deprecation line.
 #[test]
