@@ -25,25 +25,15 @@
 //! `HarnessMode` precedence — env var > `--mode` flag > `.claude/settings.json`
 //! > default — end to end via the REAL CLI binary and its `--json` response.
 //!
-//! `session_list_on_fresh_project_reports_no_sessions`,
-//! `transcript_unknown_session_errors_cleanly`,
-//! `attach_unknown_session_errors_cleanly`, and
-//! `cancel_unknown_session_errors_cleanly` prove the remaining subcommands
-//! are wired and that daemon errors surface as clear CLI errors and a
-//! nonzero exit (per the ticket's explicit requirement) — see those
-//! subcommands' own module docs (`crate::cli::session`/`attach`/`cancel`/
-//! `transcript` in `src/cli/`) for why a MEANINGFUL cross-invocation
-//! inspection test (attach to a session a DIFFERENT process created) isn't
-//! possible yet: M1 sessions are in-memory, one per ephemeral spawned
-//! daemon, and this ticket's required path is spawn-stdio, not a shared
-//! daemon.
+//! The `session`/`attach`/`cancel`/`transcript` cases moved to
+//! `thin_clients_uds_10169` (#10169): those commands now dial the running
+//! daemon's socket, so each case needs a daemon to dial.
 //!
 //! `workstream_list_on_fresh_project_reports_no_workstreams` through
 //! `workstream_close_hides_from_default_list_but_include_closed_shows_it`
 //! (#3296, DOC-48 §5.4) prove the `tcode workstream`/`tcode ws` family end
 //! to end. UNLIKE sessions, workstreams are persisted to a flat file keyed
-//! on `--project` (`crate::workstreams::path`), so — unlike every
-//! session/attach/cancel/transcript case above — these tests spawn the CLI
+//! on `--project` (`crate::workstreams::path`), so these tests spawn the CLI
 //! TWICE against the same `--project` and prove the SECOND invocation's
 //! ephemeral daemon sees what the FIRST one persisted (create, then a
 //! separate list; close, then a separate list). Each test pins `HOME` to
@@ -276,103 +266,6 @@ fn run_task_mode_precedence_over_the_wire() {
     assert_eq!(
         run_task_resolved_mode(project.path(), Some("daily-driver"), Some("parity")),
         "parity"
-    );
-}
-
-/// `tcode session list` on a project with no prior activity must report no
-/// sessions and exit 0 — proving the `session.list` wiring even though this
-/// ephemeral-spawn CLI invocation's daemon has an empty registry.
-#[test]
-fn session_list_on_fresh_project_reports_no_sessions() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "session",
-            "list",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode session list");
-
-    assert!(output.status.success(), "must exit 0: {output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("no sessions"),
-        "expected an empty-list message: {stdout}"
-    );
-}
-
-/// `tcode transcript <unknown-id>` must surface the daemon's
-/// `session_not_found` error as a clean CLI error on stderr and exit
-/// nonzero.
-#[test]
-fn transcript_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "transcript",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode transcript");
-
-    assert!(
-        !output.status.success(),
-        "must exit nonzero on session_not_found"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
-    );
-}
-
-/// `tcode attach <unknown-id>` must likewise surface a clean error and exit
-/// nonzero rather than hanging.
-#[test]
-fn attach_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "attach",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode attach");
-
-    assert!(!output.status.success(), "must exit nonzero");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
-    );
-}
-
-/// `tcode cancel <unknown-id>` must likewise surface a clean error and exit
-/// nonzero.
-#[test]
-fn cancel_unknown_session_errors_cleanly() {
-    let project = tempfile::tempdir().expect("project tempdir");
-    let output = support::tcode_command()
-        .args([
-            "cancel",
-            "nonexistent-id",
-            "--project",
-            &project.path().display().to_string(),
-        ])
-        .output()
-        .expect("spawn tcode cancel");
-
-    assert!(!output.status.success(), "must exit nonzero");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session not found") || stderr.contains("-32007"),
-        "expected a clear session_not_found error on stderr: {stderr}"
     );
 }
 

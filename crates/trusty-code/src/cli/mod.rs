@@ -14,7 +14,9 @@
 //! re-spawn itself as `tcode serve --stdio`), [`session::list`]/
 //! [`session::status`], [`run_task::run`] (create + `task.run` + attach +
 //! stream — the M1 cut-line "replay via thin CLI" verb), [`attach::run`],
-//! [`cancel::run`], [`transcript::run`], and (#3296)
+//! [`cancel::run`], [`transcript::run`] — since #10169 the session, attach,
+//! cancel and transcript handlers dial the running daemon's socket through
+//! [`daemon_client::connect`] instead of a `serve --stdio` child — and (#3296)
 //! [`workstream::list`]/[`workstream::get`]/[`workstream::create`]/
 //! [`workstream::activate`]/[`workstream::deactivate`]/[`workstream::close`].
 //! (#4424) [`tui::run`] is one of two members that are NOT
@@ -52,6 +54,7 @@ pub mod attach;
 pub mod bakeoff;
 pub mod cancel;
 pub mod daemon_autospawn;
+pub mod daemon_client;
 pub mod legacy_run_task;
 pub mod paths;
 pub mod run_task;
