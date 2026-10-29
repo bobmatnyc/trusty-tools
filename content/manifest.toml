@@ -168,7 +168,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/ticketing.md"
-version = "0.1.2"
+version = "0.1.3"
 
 [[member]]
 path = "agents/trusty-agents/agents/assistant/persona.md"
@@ -308,7 +308,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-project-provision.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "instructions/architect/skills/architect-review.md"

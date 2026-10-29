@@ -308,7 +308,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
+            "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
         ),
         (
             "architect-macos",
