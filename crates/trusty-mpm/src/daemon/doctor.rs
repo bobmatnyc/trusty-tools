@@ -341,6 +341,13 @@ pub(crate) mod doctor_session_names;
 // #8433 P0: orphaned channel taint files and failed re-applies.
 #[path = "doctor_channel_taint.rs"]
 pub(crate) mod doctor_channel_taint;
+// #10423: per-org channel binding and credential-ref health.
+#[cfg(feature = "channels")]
+#[path = "doctor_channel_orgs.rs"]
+pub(crate) mod doctor_channel_orgs;
+#[cfg(all(test, feature = "channels"))]
+#[path = "doctor_channel_orgs_tests.rs"]
+mod doctor_channel_orgs_tests;
 // Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
 // written above real projects configures every session beneath it with nothing
 // in the project to point at. Read-only; the quarantine is opt-in.
@@ -892,6 +899,19 @@ pub async fn run_doctor_for_manager(
     let mut checks = report.checks;
     checks.push(doctor_session_names::check_session_names(mgr).await);
     checks.push(doctor_channel_taint::check_channel_taint(mgr).await);
+    // #10423: names only; the Keychain index is read, never a value.
+    #[cfg(feature = "channels")]
+    checks.extend(
+        tokio::task::spawn_blocking(doctor_channel_orgs::check_channel_orgs)
+            .await
+            .unwrap_or_else(|_| {
+                vec![crate::core::doctor::DoctorCheck::new(
+                    doctor_channel_orgs::NAME,
+                    crate::core::doctor::CheckStatus::Unknown,
+                    "the org check did not finish",
+                )]
+            }),
+    );
     DoctorReport::from_checks(checks)
 }
 

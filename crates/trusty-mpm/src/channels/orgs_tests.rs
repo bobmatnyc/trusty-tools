@@ -8,15 +8,17 @@ orgs:
   duetto:
     kind: slack
     workspace: T0TEST001
+    secrets: duettoresearch
     credentials:
-      bot_token: secret://trusty/duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
+      bot_token: secret://duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
   bta:
     kind: gchat
     project: agentic-crm-508715
     service_account: ai-chat-bot
     space: AAAATEST001
+    secrets: Travel-BTA
     credentials:
-      sa_key: secret://trusty/bta/GCHAT.AI_CHAT_BOT_SA_KEY
+      sa_key: secret://Travel-BTA/GCHAT.AI_CHAT_BOT_SA_KEY
 users:
   bob-duetto:
     org: duetto
@@ -120,4 +122,79 @@ fn approvals_go_to_the_owner_dm_for_every_org() {
     let mut no_owner = cfg.clone();
     no_owner.owner = None;
     assert_eq!(no_owner.approval_target(), ApprovalTarget::Dashboard);
+}
+
+/// The daemon's `orgs.toml` form of [`INITIAL`] (#10423).
+pub(crate) const INITIAL_TOML: &str = r#"
+[orgs.duetto]
+kind = "slack"
+workspace = "T0TEST001"
+secrets = "duettoresearch"
+credentials = { bot_token = "secret://duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN" }
+
+[orgs.bta]
+kind = "gchat"
+project = "agentic-crm-508715"
+service_account = "ai-chat-bot"
+space = "AAAATEST001"
+secrets = "Travel-BTA"
+credentials = { sa_key = "secret://Travel-BTA/GCHAT.AI_CHAT_BOT_SA_KEY" }
+
+[users.bob-duetto]
+org = "duetto"
+address = "U0OWNER01"
+
+[users."owner@example.com"]
+org = "bta"
+address = "owner@example.com"
+
+[owner]
+slack_org = "duetto"
+slack_user = "U0OWNER01"
+"#;
+
+/// #10423: `orgs.toml` holds the same schema as the YAML form.
+#[test]
+fn toml_config_parses_like_yaml() {
+    assert_eq!(
+        OrgsConfig::parse_toml(INITIAL_TOML),
+        OrgsConfig::parse(INITIAL)
+    );
+    let err = OrgsConfig::parse_toml("[orgs.x]\nkind = \"pigeon\"\n").expect_err("refused");
+    assert!(matches!(err, ConfigError::Malformed(_)), "{err}");
+    assert!(
+        !err.to_string().contains("pigeon"),
+        "no value echoed: {err}"
+    );
+}
+
+/// #10423: DOC-74 §15.3 — a ref must stay in the org's declared lookup
+/// order; `secret://KEY` resolves through it, and a foreign vault, a bad
+/// ref or a missing `secrets` declaration is refused at load.
+#[test]
+fn credential_ref_outside_the_org_scope_is_refused() {
+    let doc = |scope: &str, r: &str| {
+        format!("orgs:\n  x:\n    kind: slack\n{scope}    credentials:\n      bot_token: \"{r}\"\n")
+    };
+    let s = "    secrets: duettoresearch/mpm\n";
+    for ok in [
+        "secret://SLACK_BOT",
+        "secret://duettoresearch/SLACK_BOT",
+        "secret://duettoresearch/mpm/SLACK_BOT",
+    ] {
+        OrgsConfig::parse(&doc(s, ok)).expect(ok);
+    }
+    for (scope, bad, code) in [
+        (s, "secret://trusty/duettoresearch/X", "vault_out_of_scope"),
+        (s, "secret://victim/prod/SLACK_BOT", "vault_out_of_scope"),
+        (s, "secret://a b/KEY", "invalid_ref"),
+        (s, "secret://", "invalid_ref"),
+        ("", "secret://duettoresearch/SLACK_BOT", "no_secret_scope"),
+    ] {
+        let err = OrgsConfig::parse(&doc(scope, bad)).expect_err(bad);
+        assert!(
+            matches!(err, ConfigError::NotSecretRef { code: c, .. } if c == code),
+            "{bad}: {err}"
+        );
+    }
 }
