@@ -27,8 +27,8 @@ pub mod derive;
 mod error;
 pub mod ids;
 // #10063 PR 3: the method types and the verb bodies.
-pub mod rpc;
 pub mod pending;
+pub mod rpc;
 pub mod schema_check;
 pub mod store;
 pub mod tally;
