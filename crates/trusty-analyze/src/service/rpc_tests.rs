@@ -1401,3 +1401,40 @@ fn remove_if_present_deletes_a_stale_file_and_tolerates_an_absent_one() {
     // The common case on a fresh install: already gone, and silent.
     remove_if_present(&path);
 }
+
+/// #10365: the documented override reaches the daemon's bind path and every
+/// client that resolves through `socket_path`. This is the only lib test that
+/// sets the variable, and no other lib test resolves `service::socket_path`.
+#[test]
+fn socket_path_honours_trusty_analyze_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let want = dir.path().join("a.sock");
+    let saved = std::env::var_os("TRUSTY_ANALYZE_SOCKET");
+    // SAFETY: the only setter of this variable in the lib test binary; restored below.
+    unsafe { std::env::set_var("TRUSTY_ANALYZE_SOCKET", &want) };
+    let got = super::socket_path();
+    // SAFETY: as above.
+    unsafe {
+        match saved {
+            Some(v) => std::env::set_var("TRUSTY_ANALYZE_SOCKET", v),
+            None => std::env::remove_var("TRUSTY_ANALYZE_SOCKET"),
+        }
+    }
+    assert_eq!(got.expect("override resolves"), want);
+}
+
+/// #10365: blank falls back to the default; a missing parent or a relative
+/// path is an error, never a silent fallback.
+#[test]
+fn socket_path_from_rejects_a_bad_override() {
+    use std::ffi::OsStr;
+    let blank = super::socket_path_from(Some(OsStr::new("  ")));
+    assert_eq!(
+        blank.expect("blank falls back"),
+        trusty_common::daemon_socket_path("trusty-analyze").expect("default")
+    );
+    let missing = super::socket_path_from(Some(OsStr::new("/nonexistent-10365/d/a.sock")));
+    let msg = format!("{:#}", missing.expect_err("missing parent must fail"));
+    assert!(msg.contains("parent directory does not exist"), "{msg}");
+    assert!(super::socket_path_from(Some(OsStr::new("a.sock"))).is_err());
+}

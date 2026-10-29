@@ -599,7 +599,7 @@ cargo check --workspace
 ```bash
 TRUSTY_SEARCH_SOCKET=/path/to.sock         # trusty-search socket; the default is
                                            # <data dir>/trusty-search/trusty-search.sock
-TRUSTY_ANALYZE_SOCKET=/path/to.sock        # trusty-audit's guard override; the
+TRUSTY_ANALYZE_SOCKET=/path/to.sock        # analyzer socket (serve + clients); the
                                            # default is derived from the data dir
 RUST_LOG=debug                             # enable debug tracing
 
