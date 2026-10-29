@@ -194,6 +194,9 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
     let mut silent_since: Option<std::time::Instant> = None;
     let stale_grace = stale_grace(std::env::var(STALE_GRACE_MS_ENV).ok().as_deref());
     let mut stale_since: Option<std::time::Instant> = None;
+    // Classified once per holder pid (the lock mtime only moves when a new holder
+    // takes it), so the per-tick loop does no extra I/O for a same-image holder.
+    let mut classified: Option<(u32, LockHolder)> = None;
     loop {
         let healthy = match (&client, supervised) {
             (Some(c), true) => c.is_up().await,
@@ -221,7 +224,15 @@ pub(super) async fn await_lock_or_refuse(socket: Option<&Path>) -> Result<LockWa
         }
         // #10358: a holder older than the installed binary never leaves by
         // itself; stop standing by after `stale_grace` and say how to replace it.
-        if healthy && probe_lock_holder() == LockHolder::StaleImage {
+        let holder_kind = match classified {
+            Some((p, kind)) if p == pid => kind,
+            _ => {
+                let kind = probe_lock_holder();
+                classified = Some((pid, kind));
+                kind
+            }
+        };
+        if healthy && holder_kind == LockHolder::StaleImage {
             let since = *stale_since.get_or_insert_with(|| {
                 tracing::warn!(
                     "daemon lock holder (pid {pid}) predates the installed binary; standing by \
