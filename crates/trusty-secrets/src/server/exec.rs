@@ -80,7 +80,7 @@ fn decode_object<T: DeserializeOwned>(params: Value) -> Result<T, ErrorKind> {
 /// is [`has_agent_ancestor`] on the registrar's own ancestry, read from the
 /// registry's process table; a read error refuses. When it is true, every
 /// key must carry no deny on the project's backend, else
-/// [`ErrorKind::AgentUseRefused`] naming that key in the deny record, before
+/// [`ErrorKind::AgentKeyDenied`] (#10459) naming that key in the deny record, before
 /// anything is minted; the allow records then carry `default_policy: true`. The grant pins the project root and `agent_parent`
 /// ([`GrantScope`]). Then the audit log is opened and one allow record per
 /// key is written; if either fails, the grant is revoked and the reply is

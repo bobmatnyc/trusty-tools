@@ -369,7 +369,7 @@ fn warm_cache_still_refuses_denied_key_for_agent() {
 
     flag(&fx, &op, "API_KEY", false);
     let refused = resolve_in(&state, &token, "API_KEY");
-    assert_eq!(refused, Err(ErrorKind::AgentUseRefused));
+    assert_eq!(refused, Err(ErrorKind::AgentKeyDenied));
 }
 
 /// Why: #7520 — a hit skips only the backend read. With the cache warm, a

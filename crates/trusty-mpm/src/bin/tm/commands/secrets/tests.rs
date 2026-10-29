@@ -17,9 +17,10 @@ use clap::Parser;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use trusty_secrets::server::{
-    BackendFactory, OnDemandSecrets, ServerSettings, serve_without_agent_callers,
+    BackendFactory, OnDemandSecrets, ServerSettings, serve_with_agent_callers,
+    serve_without_agent_callers,
 };
-use trusty_secrets::store::{MemoryBackend, SecretBackend};
+use trusty_secrets::store::{ControlItem, MemoryBackend, SecretBackend};
 use trusty_secrets::{BackendId, SecretKey, SecretsError, VaultName};
 
 use super::*;
@@ -123,6 +124,16 @@ async fn harness() -> Harness {
 
 /// [`harness`], with every `keychain` write taking `set_delay` first.
 async fn harness_slowed(set_delay: Duration) -> Harness {
+    harness_with(set_delay, false).await
+}
+
+/// [`harness`] whose server judges every caller an agent (#10459).
+async fn harness_agent() -> Harness {
+    harness_with(Duration::ZERO, true).await
+}
+
+/// The harness; `agent` picks the server that judges every caller an agent.
+async fn harness_with(set_delay: Duration, agent: bool) -> Harness {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
     std::fs::create_dir(&repo).expect("mkdir repo");
@@ -171,15 +182,16 @@ async fn harness_slowed(set_delay: Duration) -> Harness {
     });
     let (tx, rx) = oneshot::channel::<()>();
     let socket = settings.socket.clone();
-    // #10386: `set` refuses a caller under Claude Code; judge callers as people
-    // so this suite runs the same in CI and in an agent session.
-    tokio::spawn(serve_without_agent_callers(
-        settings,
-        backends,
-        async move {
-            let _ = rx.await;
-        },
-    ));
+    // #10386: judge callers as people so this suite runs the same in CI and
+    // in an agent session; #10459: or all as agents, for the agent arm.
+    let shutdown = async move {
+        let _ = rx.await;
+    };
+    if agent {
+        tokio::spawn(serve_with_agent_callers(settings, backends, shutdown));
+    } else {
+        tokio::spawn(serve_without_agent_callers(settings, backends, shutdown));
+    }
     let started = Instant::now();
     while !trusty_common::uds::socket_is_serving(&socket, Duration::from_millis(200)).await {
         assert!(
@@ -618,6 +630,41 @@ async fn import_fails_by_name_on_a_refused_key_and_imports_the_rest() {
         stored(&h.keychain, PROJECT_VAULT, "API_KEY").as_deref(),
         Some(VALUE)
     );
+}
+
+/// Why: #10459 — `import` is a loop over `secrets.set`, so under an agent a
+/// key with no deny is stored and a denied key fails by name with the
+/// server's fixed text; no value reaches the output. Red on 5ca52c46ad,
+/// where every agent `set` was `agent_use_refused`.
+/// Test: itself.
+#[tokio::test]
+async fn import_by_agent_caller_stores_undenied_keys_and_fails_denied_by_name() {
+    let h = harness_agent().await;
+    let vault = VaultName::new(PROJECT_VAULT).expect("vault");
+    let denied = SecretKey::new("DENIED_KEY").expect("key");
+    h.keychain
+        .set_control_item(ControlItem::AgentDeny, &vault, Some(&denied), true)
+        .expect("deny");
+    let text = format!("API_KEY={VALUE}\nDENIED_KEY={SHORT}\n");
+    let path = env_file(&h, "app.env", &text);
+    let outcome = run(&h, "", &["import", &path]).await;
+    assert!(
+        outcome
+            .out
+            .starts_with("imported API_KEY (new)\nfailed DENIED_KEY: tm secrets: "),
+        "{}",
+        outcome.out
+    );
+    assert!(outcome.out.contains("per-key deny"), "{}", outcome.out);
+    assert!(
+        !outcome.out.contains(VALUE) && !outcome.out.contains(SHORT),
+        "no value is printed"
+    );
+    assert_eq!(
+        stored(&h.keychain, PROJECT_VAULT, "API_KEY").as_deref(),
+        Some(VALUE)
+    );
+    assert_eq!(stored(&h.keychain, PROJECT_VAULT, "DENIED_KEY"), None);
 }
 
 /// #7521: a syntax error names the line number, never the line, and stores

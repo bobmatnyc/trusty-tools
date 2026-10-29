@@ -355,16 +355,18 @@ fn live_bridge_is_judged_by_the_real_server() {
         // remove and write it.
         assert_eq!(human["flag_on"], 200, "{tag}: not refused as an agent");
         assert_eq!(human["flag_off"], 200, "{tag}: {human}");
-        // #10386 Q2: `set` and `delete` are operator-only.
-        assert_eq!(agent["set"], 403, "{tag}: an agent may not set");
+        // #10459: an agent may set a key with no deny (the person's client
+        // deleted the key first, clearing its deny); `delete` and removing a
+        // deny stay operator-only.
+        assert_eq!(agent["set"], 200, "{tag}: an agent may set an undenied key");
         assert_eq!(agent["delete"], 403, "{tag}: an agent may not delete");
         assert_eq!(
             agent["flag_on"], 403,
             "{tag}: an agent may not remove a deny"
         );
-        // Writing a deny passes the agent check; the person's client deleted
-        // the key first, so it then fails on the missing row (404).
-        assert_eq!(agent["flag_off"], 404, "{tag}: an agent may write a deny");
+        // Writing a deny passes the agent check, and the agent's own set
+        // created the row, so it lands.
+        assert_eq!(agent["flag_off"], 200, "{tag}: an agent may write a deny");
         let records = records(&audit_log);
         if audit {
             let methods: std::collections::HashSet<&str> = records

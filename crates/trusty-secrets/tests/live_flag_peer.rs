@@ -324,7 +324,7 @@ fn parent_pid() -> u32 {
 
 /// Why: DOC-74 §15.8, the `agent_parent=true` refusal on a real process
 /// tree — a registrar whose parent is named `claude` is refused a key the
-/// operator denied to agents (#10386) with `agent_use_refused` (-32065); one
+/// operator denied to agents (#10386) with `agent_key_denied` (-32085, #10459); one
 /// named `notclaude` is granted it.
 /// Test: itself.
 #[test]
@@ -387,7 +387,7 @@ fn live_claude_named_ancestor_is_refused_a_grant() {
         println!("{name}: {got}");
     }
     let claude = read_report(&out, "claude");
-    assert_eq!(claude["error"], json!([-32065, "agent_use_refused"]));
+    assert_eq!(claude["error"], json!([-32085, "agent_key_denied"]));
     assert_eq!(read_report(&out, "notclaude")["granted"], true);
 
     let grants: Vec<Value> = live
@@ -397,7 +397,7 @@ fn live_claude_named_ancestor_is_refused_a_grant() {
         .collect();
     assert_eq!(grants.len(), 2, "{grants:?}");
     assert_eq!(grants[0]["decision"], "deny");
-    assert_eq!(grants[0]["reason"], "agent_use_refused");
+    assert_eq!(grants[0]["reason"], "agent_key_denied");
     assert_eq!(grants[0]["key"], KEY);
     assert_eq!(grants[0]["agent_parent"], true);
     assert_eq!(grants[0]["caller_pid"], claude["pid"]);

@@ -99,18 +99,14 @@ pub(crate) fn set_agents_may_use(
 
 /// Refuse a caller whose ancestry has a Claude Code process (#10386).
 ///
-/// Why: Architect ruling 2026-10-28 (Q2, Q3) — agents use keys by default,
-/// but an operator-only change (removing a deny, `set`, `delete`, a copy to
-/// a sync target) stays a person's. A refusal the server cannot judge is a
-/// refusal (Fail-Open Check).
-/// What: `peer` is the socket peer's pid. On a console bridge call the
-/// console's verdict is judged (`BridgeVerdict::judged`), else
-/// [`has_agent_ancestor`] on the peer's ancestry; an unreadable chain is
-/// [`ErrorKind::GrantRefused`]. The verdict goes on the gate's records; an
-/// agent ancestor is [`ErrorKind::AgentUseRefused`].
+/// Why: Architect ruling 2026-10-28 (Q2, Q3) — an operator-only change
+/// (removing a deny, `delete`, a copy to a sync target) stays a person's.
+/// #10459: `set` and a local `copy` no longer call it; they judge the caller
+/// with [`judge_agent_caller`] and check the key's deny instead.
+/// What: [`judge_agent_caller`], then an agent ancestor is
+/// [`ErrorKind::AgentUseRefused`].
 /// Test: `set_flag_on_by_agent_ancestor_is_refused_and_audited`,
 /// `set_flag_unreadable_ancestry_refuses_on`,
-/// `set_by_agent_ancestor_is_refused_before_the_backend`,
 /// `delete_by_agent_ancestor_is_refused_before_the_backend`,
 /// `server_copy_to_sync_target_by_agent_descendant_is_refused_and_audited`.
 pub(crate) fn refuse_agent_caller(
@@ -119,6 +115,28 @@ pub(crate) fn refuse_agent_caller(
     peer: u32,
     gate: &mut Gate<'_>,
 ) -> Result<(), ErrorKind> {
+    if judge_agent_caller(state, caller, peer, gate)? {
+        return Err(ErrorKind::AgentUseRefused);
+    }
+    Ok(())
+}
+
+/// Whether the caller has a Claude Code ancestor (#10386, #10459).
+///
+/// Why: a refusal the server cannot judge is a refusal (Fail-Open Check),
+/// for both the operator-only methods and an agent's write of a key.
+/// What: `peer` is the socket peer's pid. On a console bridge call the
+/// console's verdict is judged (`BridgeVerdict::judged`), else
+/// [`has_agent_ancestor`] on the peer's ancestry; an unreadable chain is
+/// [`ErrorKind::GrantRefused`]. The verdict goes on the gate's records.
+/// Test: `set_and_delete_with_unreadable_ancestry_or_no_peer_are_refused`,
+/// `set_by_agent_ancestor_of_an_undenied_key_succeeds`.
+pub(crate) fn judge_agent_caller(
+    state: &State,
+    caller: Caller,
+    peer: u32,
+    gate: &mut Gate<'_>,
+) -> Result<bool, ErrorKind> {
     let agent_parent = match caller.bridge() {
         // #9066: the console judged the client it serves.
         Some(verdict) => verdict.judged()?,
@@ -127,8 +145,5 @@ pub(crate) fn refuse_agent_caller(
             .map_err(|_| ErrorKind::GrantRefused)?,
     };
     gate.agent_parent(agent_parent);
-    if agent_parent {
-        return Err(ErrorKind::AgentUseRefused);
-    }
-    Ok(())
+    Ok(agent_parent)
 }

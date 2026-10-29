@@ -105,7 +105,7 @@ pub use settings::{
     ServerSettings, SettingsError, template_root_beside,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use test_support::serve_without_agent_callers;
+pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};
 pub use tools::DetectedTool;
 
 #[cfg(test)]

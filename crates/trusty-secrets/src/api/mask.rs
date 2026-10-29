@@ -50,3 +50,14 @@ pub fn mask_secret(value: &str) -> String {
     let tail: String = value.chars().skip(length - MASK_TAIL_CHARS).collect();
     format!("{head}…{tail} [{length} chars]")
 }
+
+/// The `set` confirmation for a caller under Claude Code: `[n chars]` only.
+///
+/// Why: #10459 — an agent's confirmation lands in its transcript, so it
+/// shows no character of the value, not even `mask_secret`'s head or tail.
+/// What: the character count `n`, formatted `[n chars]`.
+/// Test: `mask_length_only_shows_no_value_character`,
+/// `set_by_agent_confirmation_shows_length_only`.
+pub fn mask_length_only(value: &str) -> String {
+    format!("[{} chars]", value.chars().count())
+}

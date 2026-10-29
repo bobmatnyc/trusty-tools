@@ -282,8 +282,9 @@ async fn bridge_verdict_parity_with_direct_socket_table() {
 
 /// Why: #10386 Q2 — `set` and `delete` judge the caller as a deny removal
 /// does, so a bridge call must get the direct socket's answer for each
-/// verdict: an agent (mapped or unmappable) is `agent_use_refused`, a person
-/// is allowed. The wire reply, the stored state and the shared record fields
+/// verdict: an agent's `delete` (mapped or unmappable) is
+/// `agent_use_refused`, a person is allowed. #10459: an agent's `set` of a
+/// key with no deny is allowed on both paths. The wire reply, the stored state and the shared record fields
 /// must match. Red when either method skips the bridge verdict.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -326,6 +327,12 @@ async fn bridge_set_and_delete_parity_with_direct_socket_table() {
             server.stop().await;
 
             let row = format!("{direct_method} agent={agent} source={source}");
+            // #10459: `NEW_KEY` has no deny, so an agent's `set` is allowed.
+            let expected = if direct_method == method::SET {
+                None
+            } else {
+                expected
+            };
             assert_eq!(kind(&via_bridge).as_deref(), expected, "{row}");
             assert_eq!(error_json(&via_bridge), error_json(&direct), "{row}");
             assert_eq!(via_bridge.result, direct.result, "{row}");
