@@ -99,7 +99,7 @@ fn user_with_unknown_org_is_refused() {
 
 #[test]
 fn address_must_fit_the_org_kind() {
-    let text = "orgs:\n  d: { kind: slack }\nusers:\n  u: { org: d, address: u@x.com }\n";
+    let text = "orgs:\n  d: { kind: slack }\nusers:\n  u: { org: d, address: third@example.com }\n";
     assert!(matches!(
         OrgsConfig::parse(text),
         Err(ConfigError::AddressKind { .. })
