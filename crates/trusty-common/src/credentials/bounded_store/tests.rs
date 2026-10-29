@@ -680,3 +680,103 @@ fn a_timed_out_caller_cannot_cache_behind_a_publishing_reader() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+/// An env tier for the store-first tests: answers `value` and counts its calls.
+///
+/// Why (#9936): the env tier is injected, so these tests read and mutate no
+/// process environment and need no `#[serial]`.
+fn counted_env(
+    value: &'static str,
+    calls: &Arc<AtomicUsize>,
+) -> impl FnOnce(&str) -> Option<String> {
+    let calls = Arc::clone(calls);
+    move |_name: &str| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Some(value.to_string())
+    }
+}
+
+/// Why (#9936): a value in the host owner's store must win over whatever the
+/// caller's environment holds, or a session picks the daemon's Slack app.
+/// Test: itself.
+#[test]
+fn store_first_prefers_the_store_over_the_environment() {
+    let provider = "test-store-first-a";
+    let store = crate::credentials::MemoryKeyStore::new();
+    store.set(provider, "fake-store-a").expect("memory set");
+    let env_calls = Arc::new(AtomicUsize::new(0));
+
+    let got = resolve_provider_bounded_store_first_with(
+        provider,
+        Arc::new(store),
+        Duration::from_secs(1),
+        counted_env("fake-env-b", &env_calls),
+    );
+
+    assert!(
+        got.as_deref() == Ok("fake-store-a"),
+        "the store did not win"
+    );
+    assert_eq!(env_calls.load(Ordering::SeqCst), 0, "env was read");
+}
+
+/// Why (#9936): the env tier, which reflects `.env.local`, stays the fallback
+/// when the store holds nothing; with neither, the answer is `Absent`.
+/// Test: itself.
+#[test]
+fn store_first_falls_back_to_the_environment_only_when_the_store_is_empty() {
+    let env_calls = Arc::new(AtomicUsize::new(0));
+    let got = resolve_provider_bounded_store_first_with(
+        "test-store-first-b",
+        Arc::new(crate::credentials::MemoryKeyStore::new()),
+        Duration::from_secs(1),
+        counted_env("fake-env-b", &env_calls),
+    );
+    assert!(got.as_deref() == Ok("fake-env-b"), "env did not answer");
+    assert_eq!(env_calls.load(Ordering::SeqCst), 1);
+
+    // A failed assert names the outcome, never the resolved value.
+    let Err(none) = resolve_provider_bounded_store_first_with(
+        "test-store-first-b2",
+        Arc::new(crate::credentials::MemoryKeyStore::new()),
+        Duration::from_secs(1),
+        |_| Some(String::new()),
+    ) else {
+        panic!("an empty env value is not a value, but one resolved");
+    };
+    assert!(
+        matches!(none, SecretResolveError::Absent { .. }),
+        "{none:?}"
+    );
+}
+
+/// Why (#9936, fail-open check): a store that FAILED is not a store that holds
+/// nothing. Falling through to env here would hand the session back the choice
+/// this fix takes away, under a fault the operator never sees.
+/// Test: itself.
+#[test]
+fn store_first_surfaces_a_store_failure_instead_of_the_environment() {
+    let env_calls = Arc::new(AtomicUsize::new(0));
+    // A failed assert names the outcome, never the resolved value.
+    let Err(err) = resolve_provider_bounded_store_first_with(
+        "test-store-first-c",
+        Arc::new(AlwaysFails),
+        Duration::from_secs(1),
+        counted_env("fake-env-b", &env_calls),
+    ) else {
+        panic!("a store failure is terminal, but a value resolved");
+    };
+
+    assert!(
+        matches!(
+            err,
+            SecretResolveError::Store {
+                kind: StoreErrorKind::Keyring,
+                cached: false,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(env_calls.load(Ordering::SeqCst), 0, "env was read");
+}

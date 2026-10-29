@@ -220,14 +220,17 @@ pub fn host_slack(home: Option<&Path>) -> Result<HostChannel, String> {
 /// What: refuses any key but [`SLACK_BOT_REF`] (so [`SLACK_USER_REF`]
 /// never resolves), maps the key to its registry variable, then reads it
 /// through the daemon's one credential door,
-/// `secret_source::resolve_bounded_gated` (#9121: nothing in a sandboxed
-/// daemon). Blocking (Keychain). The error names the kind, never a value.
-/// Test: `resolve_bot_token_refuses_the_user_token`.
+/// `secret_source::resolve_store_first_gated` (#9121: nothing in a sandboxed
+/// daemon; #9936: the store before env and `.env.local`, the same door as
+/// `app_ref`). Blocking (Keychain). The error names the kind, never a value.
+/// Test: `resolve_bot_token_refuses_the_user_token`,
+/// `slack_refs_resolve_the_store_before_the_environment_9936`.
 pub fn resolve_bot_token(bot_ref: &str) -> Result<Secret<String>, String> {
     check_bot_ref(bot_ref)?;
     let var = env_var_for(bot_ref)
         .ok_or_else(|| format!("bot_ref {bot_ref:?} is not in the credential registry"))?;
-    crate::secret_source::resolve_bounded_gated(var)
+    // #9936: store first, so a session's env cannot pick the daemon's Slack app.
+    crate::secret_source::resolve_store_first_gated(var)
         .map(Secret::new)
         .map_err(|e| format!("{var} could not be resolved: {}", e.kind()))
 }

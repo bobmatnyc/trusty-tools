@@ -424,3 +424,59 @@ fn outside_sandbox_mode_the_bounded_resolver_runs() {
         "the open gate did not run the resolver"
     );
 }
+
+/// Why (#9936): a daemon autostarted from a session inherits that session's env
+/// and cwd, so with env first a session chose which Slack app the daemon
+/// connects as. Both refs, through their real resolvers, must read the store
+/// first, fall back to env only when the store is empty, and surface a store
+/// read error rather than answer from env.
+/// What: the credential sandbox's `0600` file store and env, three arms in a
+/// fixed order — the store error is last because the bounded tier caches it
+/// for the rest of the process. The failure lists each wrong arm, never a value.
+/// Test: this test.
+// #9936: `channels` exists only with the `channels` feature; the daemon-only build has no resolvers to test.
+#[cfg(feature = "channels")]
+#[test]
+#[serial]
+fn slack_refs_resolve_the_store_before_the_environment_9936() {
+    use crate::channels::slack_bot::resolve_bot_token;
+    use crate::channels::socket_mode::token::resolve_app_token;
+    use trusty_common::credentials::FileKeyStore;
+    use trusty_common::credentials::test_sandbox::CredentialSandbox;
+
+    type Resolve = fn(&str) -> Result<trusty_common::credentials::Secret<String>, String>;
+    let refs: [(&str, &str, Resolve); 2] = [
+        ("slack", "SLACK_BOT_TOKEN", resolve_bot_token),
+        ("slack-app", "SLACK_APP_TOKEN", resolve_app_token),
+    ];
+    let mut sandbox = CredentialSandbox::enter();
+    let store = FileKeyStore::at(&sandbox.home());
+    let mut wrong = Vec::new();
+    for (key, var, resolve) in refs {
+        sandbox.set(var, "fake-env-b-9936");
+        let got = resolve(key);
+        if !got.as_ref().is_ok_and(|s| s.expose() == "fake-env-b-9936") {
+            wrong.push(format!("{key}: an empty store did not fall back to env"));
+        }
+        store
+            .set(key, "fake-store-a-9936")
+            .expect("sandbox store set");
+        let got = resolve(key);
+        if !got
+            .as_ref()
+            .is_ok_and(|s| s.expose() == "fake-store-a-9936")
+        {
+            wrong.push(format!("{key}: the store value did not win over env"));
+        }
+    }
+    let file = sandbox.home().join(".trusty-tools/credentials.toml");
+    std::fs::write(&file, "not = [valid").expect("corrupt the sandbox store");
+    for (key, _, resolve) in refs {
+        match resolve(key) {
+            Err(e) if e.contains("toml") => {}
+            Err(_) => wrong.push(format!("{key}: a store error lost its kind")),
+            Ok(_) => wrong.push(format!("{key}: a store error was answered from env")),
+        }
+    }
+    assert!(wrong.is_empty(), "#9936: {wrong:?}");
+}
