@@ -23,12 +23,30 @@ use trusty_console::server::{AppState, build_router};
 
 // ─── the stub daemon ─────────────────────────────────────────────────────────
 
+/// Is `request` the protocol handshake the console sends before every call (#9538)?
+fn is_handshake(request: &Value) -> bool {
+    request["method"] == json!("memory.protocol")
+}
+
+/// The handshake answer of a daemon on a protocol the console supports.
+fn handshake_frame() -> String {
+    result_frame(json!({ "protocol_version": 1 }))
+}
+
 /// Bind a socket that answers each framed request with `respond`'s frames.
 ///
 /// `respond` returns the LINES to write back, so one case can answer a single
 /// response frame and another a whole stream — the two shapes the bridge has to
 /// tell apart.
 fn stub_daemon<F>(dir: &Path, respond: F) -> PathBuf
+where
+    F: Fn(&Value) -> Vec<String> + Send + Sync + 'static,
+{
+    stub_daemon_on_protocol(dir, json!({ "protocol_version": 1 }), respond)
+}
+
+/// [`stub_daemon`] for a daemon whose `memory.protocol` answer is `protocol` (#9538).
+fn stub_daemon_on_protocol<F>(dir: &Path, protocol: Value, respond: F) -> PathBuf
 where
     F: Fn(&Value) -> Vec<String> + Send + Sync + 'static,
 {
@@ -41,12 +59,19 @@ where
                 return;
             };
             let respond = std::sync::Arc::clone(&respond);
+            let protocol = protocol.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                 let mut raw = Vec::new();
                 let _ = conn.read_to_end(&mut raw).await;
                 let request: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
-                for line in respond(&request) {
+                // #9538: the console opens every call with the protocol handshake.
+                let lines = if is_handshake(&request) {
+                    vec![result_frame(protocol)]
+                } else {
+                    respond(&request)
+                };
+                for line in lines {
                     if conn.write_all(line.as_bytes()).await.is_err() {
                         return;
                     }
@@ -480,6 +505,19 @@ async fn an_idle_stream_still_gets_its_response_head() {
     );
 }
 
+/// Answer `raw` when it is the protocol handshake; true when it was (#9538).
+async fn answer_handshake(conn: &mut tokio::net::UnixStream, raw: &[u8]) -> bool {
+    use tokio::io::AsyncWriteExt as _;
+    let request: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
+    if !is_handshake(&request) {
+        return false;
+    }
+    let _ = conn.write_all(handshake_frame().as_bytes()).await;
+    let _ = conn.write_all(b"\n").await;
+    let _ = conn.flush().await;
+    true
+}
+
 /// Bind a socket that accepts, stays silent for `quiet`, then closes.
 ///
 /// The shape an idle event feed has: the subscription succeeded and there is
@@ -488,13 +526,19 @@ fn silent_stub_daemon(dir: &Path, quiet: std::time::Duration) -> PathBuf {
     let socket = dir.join("sockets").join("memory-idle.sock");
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
     tokio::spawn(async move {
-        let Ok((mut conn, _)) = listener.accept().await else {
+        loop {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            use tokio::io::AsyncReadExt as _;
+            let mut raw = vec![0u8; 4096];
+            let n = conn.read(&mut raw).await.unwrap_or(0);
+            if answer_handshake(&mut conn, &raw[..n]).await {
+                continue;
+            }
+            tokio::time::sleep(quiet).await;
             return;
-        };
-        use tokio::io::AsyncReadExt as _;
-        let mut raw = vec![0u8; 4096];
-        let _ = conn.read(&mut raw).await;
-        tokio::time::sleep(quiet).await;
+        }
     });
     socket
 }
@@ -547,16 +591,49 @@ fn late_error_stub_daemon(dir: &Path, quiet: std::time::Duration, frame: String)
     let socket = dir.join("sockets").join("memory-late-error.sock");
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
     tokio::spawn(async move {
-        let Ok((mut conn, _)) = listener.accept().await else {
+        loop {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut raw = vec![0u8; 4096];
+            let n = conn.read(&mut raw).await.unwrap_or(0);
+            if answer_handshake(&mut conn, &raw[..n]).await {
+                continue;
+            }
+            tokio::time::sleep(quiet).await;
+            let _ = conn.write_all(frame.as_bytes()).await;
+            let _ = conn.write_all(b"\n").await;
+            let _ = conn.flush().await;
             return;
-        };
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let mut raw = vec![0u8; 4096];
-        let _ = conn.read(&mut raw).await;
-        tokio::time::sleep(quiet).await;
-        let _ = conn.write_all(frame.as_bytes()).await;
-        let _ = conn.write_all(b"\n").await;
-        let _ = conn.flush().await;
+        }
     });
     socket
+}
+
+/// Why: a daemon on an unsupported protocol must reach the SPA as a named 502,
+/// not as an empty success or a misparsed body (#9538).
+/// What: a daemon reporting protocol 99; the HTTP route must answer 502 naming
+/// the protocol, and the daemon must see only the handshake.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incompatible_daemon_is_a_bad_gateway_naming_the_protocol() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = std::sync::Arc::clone(&seen);
+    let socket = stub_daemon_on_protocol(
+        tmp.path(),
+        json!({ "protocol_version": 99 }),
+        move |request| {
+            log.lock().expect("log").push(request["method"].to_string());
+            vec![result_frame(json!({ "status": "ok" }))]
+        },
+    );
+    let (status, _, body) = through_router(socket, "GET", "/api/memory/health").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("protocol 99"), "{body}");
+    assert!(
+        seen.lock().expect("log").is_empty(),
+        "no method may reach it"
+    );
 }
