@@ -26,40 +26,39 @@ use super::isolation::{StartPlan, DATA_DIR_ENV};
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
-/// Refusal text for a start that found another daemon holding the lock.
-///
-/// Why (#6590): naming the pid was not enough to act on. When `launchctl
-/// bootout` cuts a snapshot flush short, `KeepAlive` respawns the OLD binary,
-/// and every subsequent start refuses against that orphan — the observed
-/// reinstall looped 17 times on a message whose only advice, `trusty-search
-/// stop`, reads as a no-op to an operator who has just run it. The remedy that
-/// worked was a direct SIGTERM, which is bounded by nothing launchd controls
-/// and let the flush finish in 15 s.
-///
-/// What: names the pid, the signal to send it, and the window to allow. Under
-/// launchd the message stops there, because `KeepAlive` starts the replacement
-/// on its own; unsupervised, it also names the re-run. The macOS code-signing
-/// warning is preserved from the message this replaces.
-/// Test: `already_running_message_names_the_pid_and_the_signal`,
-/// `already_running_message_defers_the_restart_to_launchd`.
 /// Refuse to start when a daemon is already live.
 ///
 /// Why (#6590): this check used to run only inside the foreground daemon, and a
 /// bare `trusty-search start` forks a detached `--foreground` child with
 /// `Stdio::null()` before reaching it. The child raised the refusal and wrote it
 /// to `/dev/null`, while the parent had already printed "Daemon starting in
-/// background" and exited 0 — so an operator saw success against a daemon that
-/// never started. The parent calls this BEFORE forking now; the foreground path
-/// still calls it for the launchd/systemd case, which never forks.
+/// background" and exited 0 - so an operator saw success against a daemon that
+/// never started. The parent calls this BEFORE forking now.
 /// What: `Ok(())` when `running_pid` is `None`, otherwise an error carrying
-/// [`already_running_message`]. Takes the pid rather than probing for it, so the
-/// refusal is testable without a live daemon on the machine.
+/// [`already_running_message`], whose text depends on the holder
+/// ([`classify_lock_holder`], #10358). The foreground path calls it through
+/// `standby::await_lock_or_refuse`, which stands by instead when launchd
+/// supervises this process and the holder answers `search.health`. Takes the
+/// pid rather than probing for it, so the refusal is testable without a live
+/// daemon.
 /// Test: `a_bare_start_refuses_before_forking_when_a_daemon_is_running`,
 /// `a_start_proceeds_when_no_daemon_is_running`.
 pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> {
     let Some(pid) = running_pid else {
         return Ok(());
     };
+    refuse_for_holder(pid, probe_lock_holder())
+}
+
+/// Build the refusal for a known live holder.
+///
+/// Why (#10358): split from the probe so the refusal text is testable for
+/// either holder kind without touching the real lockfile or executable.
+/// What: logs the refusal and returns the error `already_running_message`
+/// renders for `holder`.
+/// Test: `a_bare_start_refuses_before_forking_when_a_daemon_is_running`,
+/// `a_healthy_peer_refusal_carries_no_kill_advice`.
+pub(super) fn refuse_for_holder(pid: u32, holder: LockHolder) -> Result<()> {
     tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
     #[cfg(target_os = "macos")]
     let supervised = crate::commands::service::launchd_agent_loaded();
@@ -68,15 +67,41 @@ pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> 
     Err(anyhow::anyhow!(already_running_message(
         pid,
         trusty_common::shutdown::termination_grace().as_secs(),
-        supervised
+        supervised,
+        holder
     )))
 }
 
+/// Evidence-based kind of the process holding the daemon lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LockHolder {
+    /// Started before the on-disk binary was last replaced: the OLD image.
+    StaleImage,
+    /// Anything else, including unknown: a live daemon doing its job.
+    HealthyPeer,
+}
+
+/// Refusal text for a start that found another daemon holding the lock.
+///
+/// Why (#6590): naming the pid was not enough to act on. When `launchctl
+/// bootout` cuts a snapshot flush short, `KeepAlive` respawns the OLD binary,
+/// and every subsequent start refuses against that orphan; the remedy that
+/// worked was a direct SIGTERM, bounded by nothing launchd controls.
+/// What: a `HealthyPeer` gets one line with no kill advice (#10358). A
+/// `StaleImage` gets the pid, the signal and the flush window; under launchd
+/// the message stops there, because `KeepAlive` starts the replacement.
+/// Test: `already_running_message_names_the_pid_and_the_signal`,
+/// `already_running_message_defers_the_restart_to_launchd`,
+/// `a_healthy_peer_refusal_carries_no_kill_advice`.
 pub(super) fn already_running_message(
     pid: u32,
     grace_secs: u64,
     launchd_supervised: bool,
+    holder: LockHolder,
 ) -> String {
+    if holder == LockHolder::HealthyPeer {
+        return format!("another instance (pid {pid}) is already serving; exiting");
+    }
     let restart = if launchd_supervised {
         "launchd's KeepAlive then starts the replacement on its own.".to_string()
     } else {
@@ -85,8 +110,8 @@ pub(super) fn already_running_message(
     format!(
         "Daemon already running (pid {pid}).\n\
          \n\
-         If you just replaced the binary, this is the OLD image: a truncated \
-         shutdown leaves launchd respawning it, and it keeps the lock.\n\
+         This daemon predates the installed binary (it is the OLD image): a \
+         truncated shutdown leaves launchd respawning it, and it keeps the lock.\n\
          \n\
          Remedy:  kill -TERM {pid}\n\
          Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
@@ -95,6 +120,42 @@ pub(super) fn already_running_message(
          Replacing the binary while the daemon is running causes macOS to SIGKILL \
          the process (Code Signature Invalid)."
     )
+}
+
+/// Decide whether the lock holder is the OLD image or a healthy peer.
+///
+/// Why (#10358): after a cold boot the holder is a peer launchd started a
+/// moment earlier. Telling the operator to SIGTERM it sent them after a
+/// healthy daemon, and the refusal fed the KeepAlive respawn loop.
+/// What: the holder is `StaleImage` only when both times are known and the
+/// binary on disk was modified after the holder started; everything else,
+/// unknown included, is `HealthyPeer`.
+/// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`.
+pub(super) fn classify_lock_holder(
+    holder_started: Option<std::time::SystemTime>,
+    image_modified: Option<std::time::SystemTime>,
+) -> LockHolder {
+    match (holder_started, image_modified) {
+        (Some(started), Some(image)) if image > started => LockHolder::StaleImage,
+        _ => LockHolder::HealthyPeer,
+    }
+}
+
+/// Read the two timestamps `classify_lock_holder` needs.
+///
+/// Why: the holder rewrites the lockfile with its pid when it takes the lock,
+/// so the file's mtime is its start time; the running binary's mtime is when
+/// the image was last replaced. Both are one `stat`, with no process probe.
+/// What: a failed `stat` yields `None`, which classifies as a healthy peer.
+/// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`
+/// covers the decision; the stat itself is exercised by a live `start`.
+pub(super) fn probe_lock_holder() -> LockHolder {
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let started = crate::service::daemon_lock_path()
+        .ok()
+        .and_then(|p| mtime(&p));
+    let image = std::env::current_exe().ok().and_then(|p| mtime(&p));
+    classify_lock_holder(started, image)
 }
 
 /// Main entry point for `trusty-search start`.
@@ -194,7 +255,12 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
 
     // #6590: refuse in the PARENT, before the fork below detaches the child's
     // stdio to /dev/null and discards everything it would have said.
-    refuse_if_already_running(crate::service::running_daemon_pid())?;
+    // #10358: only the forking parent. A `--foreground` start (launchd, systemd)
+    // has no stdio to lose and reaches the standby gate below instead; running
+    // this check for it would refuse before the gate could stand by.
+    if !foreground {
+        refuse_if_already_running(crate::service::running_daemon_pid())?;
+    }
     // #9258: refuse a bad `[search]` config in the parent too, for the same
     // reason as above: the detached child's error would never be seen.
     crate::service::load_user_config()?;
@@ -282,6 +348,25 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         env!("CARGO_PKG_VERSION"),
     );
 
+    // #10358: decided here, BEFORE `save_daemon_env` below. A refused manual
+    // `start --foreground` used to reach that write and replace the live
+    // holder's `daemon.env` with the caller's memory-limit variables, which the
+    // next launchd restart then inherited.
+    // Fast-path: bail before loading the 86 MB embedding model when
+    // another daemon is already running.
+    //
+    // Issue #87 (Option A): if the lockfile exists and the recorded PID is
+    // *alive*, print an actionable warning and exit 1.
+    // #6590: the bare `start` parent already ran this before forking; the
+    // foreground path reaches it here, which is what launchd and systemd take.
+    // #10358: under launchd, a healthy holder means stand by (before any heavy
+    // init) instead of exiting 1 into a 30 s KeepAlive respawn loop.
+    if super::standby::await_lock_or_refuse(socket.as_deref()).await?
+        == super::standby::LockWait::Terminated
+    {
+        return Ok(());
+    }
+
     // Translate the `--device` CLI flag into the `TRUSTY_DEVICE` env var.
     //
     // SAFETY: invoked on the main thread before tokio spawns any workers.
@@ -360,15 +445,6 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
         tracing::debug!("stderr log {} is reopened after a rotation", log.display());
     }
-
-    // Fast-path: bail before loading the 86 MB embedding model when
-    // another daemon is already running.
-    //
-    // Issue #87 (Option A): if the lockfile exists and the recorded PID is
-    // *alive*, print an actionable warning and exit 1.
-    // #6590: the bare `start` parent already ran this before forking; the
-    // foreground path reaches it here, which is what launchd and systemd take.
-    refuse_if_already_running(crate::service::running_daemon_pid())?;
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
     // lockfile. Reap them now so we don't end up with two daemons fighting
@@ -604,17 +680,15 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     match crate::service::run_daemon(state, socket).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
-            // Issue #126: a launchd-spawned `start` that finds a daemon
-            // already holding the lock is a duplicate — refuse rather than
-            // run two. Suppress the stderr message (demote to debug) so the
-            // benign case does not spam the log.
+            // Issue #126: a `start` that loses the lock race AFTER the early
+            // standby gate (the holder took it in between) is a duplicate.
             //
-            // #4113: the exit code no longer selects a restart policy. Under
-            // the old `KeepAlive { SuccessfulExit: false }` a non-zero exit
-            // was restarted and a clean one was not; under `KeepAlive: true`
-            // launchd relaunches either way after `ThrottleInterval`, and
-            // finds the lock still held until the real daemon goes away.
-            tracing::debug!(
+            // #10358: the exit code does not select a restart policy.
+            // `KeepAlive` is `Always` (#4113), so launchd relaunches after
+            // `ThrottleInterval` either way, and the early gate then stands by
+            // behind the now-serving holder. Logged at info: this exit used to
+            // be invisible at debug while launchd respawned it 751 times.
+            tracing::info!(
                 "daemon already running (lock at {}), exiting to avoid a second instance",
                 p.display()
             );

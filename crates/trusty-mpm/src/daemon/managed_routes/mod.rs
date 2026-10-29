@@ -75,6 +75,8 @@ pub mod project_status;
 pub mod provision_status;
 pub mod proxy;
 pub mod prune;
+// #7619: the streamed form of `prune_worktrees`.
+pub mod prune_stream;
 pub mod reactivate;
 // #9313: `tm sessions rebind`.
 pub mod rebind;

@@ -1,0 +1,3 @@
+Fixed
+- Action events still buffered when the daemon stops are no longer lost. The final flush sends what the trusty-events bus takes, writes the rest to `<data dir>/action-events-spool/`, and the next start sends them once. The stop stays bounded (1 s on a normal stop, 200 ms on SIGTERM); any event neither sent nor spooled is logged with a `lost` count (#10412).
+- On SIGTERM the signal handler and the serve drain now share one settle instead of splitting the buffer, and a hook that arrives after the settle is counted and logged as lost. A spool file is taken under a file lock, so a file a live process holds is left to it and one a crashed process left is replayed; a spool temp file a stopped write left is removed after 60 s (#10412).

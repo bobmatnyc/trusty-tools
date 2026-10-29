@@ -34,6 +34,7 @@ use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
 use crate::core::session_launch::ensure_project_hooks;
 use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
+use crate::session_manager::inject_record::InjectSlot;
 
 /// Parameters for spawning a new session via `SessionRegistry::run_session`.
 ///
@@ -78,6 +79,8 @@ pub struct SessionRegistry {
     /// `Some(_)` = the daemon resolved an `OPENROUTER_API_KEY` provider AND the
     /// gate opened; spawned actors invoke it fail-open on unmatched output.
     classifier: Option<Arc<dyn ActivityClassifier>>,
+    /// Shared with every tmux backend it spawns; attached by the daemon (#9167).
+    inject: InjectSlot,
 }
 
 impl std::fmt::Debug for SessionRegistry {
@@ -131,7 +134,13 @@ impl SessionRegistry {
             })),
             config: Arc::new(config),
             classifier: None,
+            inject: InjectSlot::default(),
         }
+    }
+
+    /// The slot the daemon attaches its inject recorder to (#9167 AC5).
+    pub fn inject_slot(&self) -> &InjectSlot {
+        &self.inject
     }
 
     /// Wire an OpenRouter activity classifier (§8.3, #1648) onto the registry.
@@ -399,7 +408,8 @@ impl SessionRegistry {
                     claude_cmd,
                     100, // default capture_lines
                 )
-                .with_context(|| format!("tmux backend spawn failed for session {session_id}"))?;
+                .with_context(|| format!("tmux backend spawn failed for session {session_id}"))?
+                .with_inject_slot(self.inject.clone());
                 spawn_actor(
                     session_id.clone(),
                     params.project_id,

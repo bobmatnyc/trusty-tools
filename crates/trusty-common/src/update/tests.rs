@@ -624,13 +624,9 @@ fn candidate_bin_dirs_empty_without_home_or_cargo_home() {
 /// successfully to `--version`, standing in for a real installed binary.
 #[cfg(unix)]
 fn write_fake_binary(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, b"#!/bin/sh\necho fake 1.0.0\nexit 0\n").expect("write fake binary");
-    let mut perms = std::fs::metadata(path)
-        .expect("stat fake binary")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("chmod fake binary");
+    // See #10248
+    crate::exec_stub::write_executable(path, b"#!/bin/sh\necho fake 1.0.0\nexit 0\n")
+        .expect("write fake binary");
 }
 
 /// Snapshot of the env vars mutated by the `verify_installed_binary_*`
@@ -863,14 +859,9 @@ fn is_launchd_supervised_is_not_fooled_by_inherited_env() {
 /// `version_line` on `--version` and exits 0.
 #[cfg(unix)]
 fn write_versioned_binary(path: &std::path::Path, version_line: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
+    // See #10248
+    crate::exec_stub::write_executable(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
         .expect("write versioned fake binary");
-    let mut perms = std::fs::metadata(path)
-        .expect("stat fake binary")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("chmod fake binary");
 }
 
 /// THE #3554 regression shape: an isolated `$HOME`/`$CARGO_HOME` that ALSO

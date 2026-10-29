@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_seventy_eight_checks() {
+async fn run_doctor_produces_eighty_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -481,6 +481,8 @@ async fn run_doctor_produces_seventy_eight_checks() {
     // #10042 adds events (seventy-five → seventy-six).
     // #8390 adds content_requires (seventy-six → seventy-seven).
     // #8928 step 3 adds sccache_socket (seventy-seven → seventy-eight).
+    // #10037 adds gh_account_dir_tokens (seventy-eight → seventy-nine).
+    // #10041 adds claude_json_secrets (seventy-nine → eighty).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -518,6 +520,8 @@ async fn run_doctor_produces_seventy_eight_checks() {
         // #9018: whether `[pm_guard] enabled = false` turned the guard off.
         "pm_guard",
         "org_accounts",
+        // #10037: a plaintext gh token left in a tm account dir.
+        "gh_account_dir_tokens",
         // #7616: whether the instruction fold saved this project anything, or
         // is inactive — the state a daemon-log line used to be the only
         // evidence of. Named `instruction_fold` since #7867.
@@ -565,6 +569,8 @@ async fn run_doctor_produces_seventy_eight_checks() {
         "issue_audit_recent",
         "oauth_token",
         "launchd_secrets",
+        // #10041: the managed `.claude.json` env blocks and mode.
+        "claude_json_secrets",
         "credential_reach",
         "hooks_contamination",
         "hooks_foreign_conflict",
@@ -1129,4 +1135,19 @@ async fn memory_stalled_palace_lock_is_not_ok() {
             check.message
         );
     }
+}
+
+#[tokio::test]
+async fn memory_protocol_mismatch_is_warn_with_the_reason() {
+    // #9538: a daemon from another release answers health fine; the row must
+    // say the protocol is the problem, not read as healthy or as "down".
+    let daemon = crate::uds_mock::spawn_with_protocol(
+        99,
+        crate::uds_mock::always(serde_json::json!({"status": "ok"})),
+    )
+    .await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
+    assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+    assert!(check.message.contains("protocol"), "{check:?}");
 }

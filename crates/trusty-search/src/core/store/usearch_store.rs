@@ -819,6 +819,10 @@ impl UsearchStore {
     /// `tests::test_load_missing_returns_none` covers the absent-file branch;
     /// `tests::test_view_promotes_to_mutable_on_write` exercises the
     /// view → mutable promotion when a load is followed by an upsert.
+    /// #10301: sidecar entries whose key the graph lacks are dropped before
+    /// the maps are rehydrated; a reconcile that cannot cover the graph
+    /// discards the snapshot (`Ok(None)`). Test:
+    /// `usearch_reconcile::tests::a_view_load_reconciles_without_promoting_or_writing`.
     pub async fn load_from(hnsw_path: &Path) -> Result<Option<Self>> {
         // #2936: reap staging files a SIGKILLed process abandoned beside this
         // snapshot. Runs FIRST, before the existence checks below, because an
@@ -841,7 +845,7 @@ impl UsearchStore {
                 return Ok(None);
             }
         };
-        let key_map: StoreKeyMap = match serde_json::from_slice(&json) {
+        let mut key_map: StoreKeyMap = match serde_json::from_slice(&json) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
@@ -980,6 +984,32 @@ impl UsearchStore {
                     expected_chunks,
                 );
                 return Ok(None);
+            }
+
+            // #10301: a kill between the publish renames leaves the sidecar
+            // ahead of the graph; drop the entries the graph lacks so the
+            // catch-up pass owes them. Read-only on the view.
+            match super::usearch_reconcile::drop_keys_missing_from_graph(
+                &mut key_map.id_to_key,
+                |key| index.contains(key),
+                restored_size,
+            ) {
+                Ok(0) => {}
+                Ok(dropped) => tracing::warn!(
+                    snapshot = %hnsw_path.display(),
+                    dropped,
+                    kept = key_map.id_to_key.len(),
+                    "usearch: sidecar names keys its graph lacks (#10301); dropped them so \
+                     the next embed pass re-embeds those ids"
+                ),
+                Err(e) => {
+                    tracing::error!(
+                        "usearch: snapshot {} failed the sidecar reconcile ({e}) (#10301) — \
+                         discarding and falling back to a fresh (BM25-only until reindex) store",
+                        hnsw_path.display(),
+                    );
+                    return Ok(None);
+                }
             }
         }
         store.is_view.store(true, Ordering::Release);

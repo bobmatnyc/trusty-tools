@@ -85,6 +85,41 @@ const PYTHON: Style = Style {
     sort_keys: true,
 };
 
+/// A reply as `dashboard-db.py`'s `emit` prints it: an [`Emit::Object`]
+/// keeps the key order given (the prototype's dict order), an
+/// [`Emit::Value`] sorts its keys as the stored files do (#10063 PR 3).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Emit {
+    /// Keys in this order.
+    Object(Vec<(String, Emit)>),
+    /// Items in this order.
+    List(Vec<Emit>),
+    /// A stored value: keys sorted at every depth.
+    Value(Value),
+}
+
+/// `json.dump(obj, indent=2, ensure_ascii=False)` and a newline.
+pub fn emit(e: &Emit) -> String {
+    let mut out = String::new();
+    write_emit(&mut out, e, 0);
+    out.push('\n');
+    out
+}
+
+fn write_emit(out: &mut String, e: &Emit, depth: usize) {
+    match e {
+        Emit::Value(v) => write_value(out, v, PRETTY, depth),
+        Emit::List(items) => write_seq(out, '[', ']', items.len(), PRETTY, depth, |out, i| {
+            write_emit(out, &items[i], depth + 1);
+        }),
+        Emit::Object(fields) => write_seq(out, '{', '}', fields.len(), PRETTY, depth, |out, i| {
+            write_str(out, &fields[i].0, false);
+            out.push_str(PRETTY.key_sep);
+            write_emit(out, &fields[i].1, depth + 1);
+        }),
+    }
+}
+
 fn render(value: &Value, style: Style) -> String {
     let mut out = String::new();
     write_value(&mut out, value, style, 0);

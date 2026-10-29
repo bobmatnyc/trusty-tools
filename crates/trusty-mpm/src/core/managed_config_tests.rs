@@ -237,8 +237,8 @@ fn ensure_managed_config_dir_deploys_user_tier_skill() {
     );
 }
 
-/// Static verification against the REAL bundled roster (`src/assets/agents`,
-/// `src/assets/skills`). Ignored by default because it composes and writes the
+/// Static verification against the REAL bundled roster (`content/agents`,
+/// `content/skills`). Ignored by default because it composes and writes the
 /// full ~40-agent set; run explicitly to prove the complete specialist roster
 /// deploys and that every deployed agent is spawnable (carries a `description`):
 ///

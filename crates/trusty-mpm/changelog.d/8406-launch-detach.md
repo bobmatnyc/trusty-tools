@@ -1,2 +1,0 @@
-Added
-- `tm launch --detach [DIR]` provisions and starts the project session in its own tmux session and returns without attaching this terminal. It prints one line, `session=<name> pane=<pane id>`, on stdout, even when the worktree is unclean (asset notices go to stderr). A session already running for the project is reported the same way, not restarted, and the full-screen banner is skipped. A supervisor in its own tmux pane can now start a watched project without its client being switched into the new session (#8406).

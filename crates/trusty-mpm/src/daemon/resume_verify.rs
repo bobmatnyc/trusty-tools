@@ -21,10 +21,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::core::memory_checked::{self, protocol_mismatch};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use trusty_common::catchup::session_log;
-use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
+use trusty_common::memory_rpc::MemoryRpcError;
 
 use crate::core::memory_forget::{FACT_KEY_LIST_LIMIT, LIST_METHOD, match_fact_key_drawer};
 use crate::core::memory_verbs::{MemoryVerbOptions, resolve_palace_for};
@@ -87,7 +88,7 @@ impl ResumeVerifyHost {
 /// `fact_key` (the slot read, or `null` when none could be named), `status`
 /// (`ran`, or `unverified:<reason>` when no command could be read: one of
 /// `no_session_owner`, `invalid_session_id`, `no_palace`,
-/// `memory_unreachable`, `memory_error`, `slot_unresolved`,
+/// `memory_unreachable`, `memory_protocol`, `memory_error`, `slot_unresolved`,
 /// `no_verify_command`, `pass_timeout`), `detail` on an unverified status, and
 /// `checks`: one entry per `verify` line with `command`, `claimed`, `returned`
 /// and `verdict`, for at most [`MAX_LINES`] lines, then one `over_line_cap`
@@ -211,10 +212,12 @@ async fn read_slot_verify(
     };
     let params = json!({ "palace": palace, "limit": FACT_KEY_LIST_LIMIT, "full": true });
     let budget = SLOT_READ_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
-    let listing = call_memory_tool_at_with_timeout(socket, LIST_METHOD, params, budget)
+    let listing = memory_checked::call_with_timeout(socket, LIST_METHOD, params, budget)
         .await
         .map_err(|e| match e.downcast_ref::<MemoryRpcError>() {
             Some(_) => ("memory_error", format!("{e:#}")),
+            // #9538: a daemon outside the supported protocol is named, not "unreachable".
+            None if protocol_mismatch(&e).is_some() => ("memory_protocol", format!("{e:#}")),
             None => ("memory_unreachable", format!("{e:#}")),
         })?;
     let now = chrono::Utc::now();

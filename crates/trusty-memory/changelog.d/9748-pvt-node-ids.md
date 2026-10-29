@@ -1,2 +1,0 @@
-Fixed
-- `memory_remember` and `memory_note` accept content naming a GitHub Projects v2 project id (`PVT_` + 16 characters) or project item id (`PVTI_` + 23 characters). Only those exact shapes, with their measured tail headers, are exempt; every other token keeps its verdict. `SECRET_FILTER_VERSION` is now 2, so a kuzu-import review verdict recorded under version 1 refuses its row until the row is exported and reviewed again ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))

@@ -1,3 +1,0 @@
-Changed
-- `tm secrets exec` hands the grant token to the command as a read-only fd on an unlinked file instead of a pipe, so siblings resolve too: in `sh -c 'a && b'`, `b` no longer finds the token gone after `a` read it. The helper makes the file in a fresh 0700 `tm-grant-*` directory under the temp dir, names it only while it is empty, and removes the directory before exec; any failed step stops the helper before the command runs (Refs #9071, #9072).
-- `tm secrets exec` removes this user's `tm-grant-*` directories in the temp dir that are mode 0700 and older than the 3600 s grant TTL before it starts the helper, by `lstat`, never following a link (Refs #9071, #9072).

@@ -848,7 +848,8 @@ fn granted_docs_drop_the_pipe_limit() {
         crate_dir.join("README.md"),
         crate_dir.join("src/granted/token.rs"),
         crate_dir.join("src/granted/mod.rs"),
-        crate_dir.join("changelog.d/9071-granted-client.md"),
+        // See #10327: fragment consumed by 1.9.0 changelog assembly
+        crate_dir.join("CHANGELOG.md"),
         crate_dir.join("../../docs/specs/DOC-74-secrets-integration.md"),
     ];
     for file in files {

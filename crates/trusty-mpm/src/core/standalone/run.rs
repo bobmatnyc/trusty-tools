@@ -96,7 +96,7 @@ pub fn build_launch_command_configured(
     // #6495/#8405: the config-decided renderer, whatever this shell exports.
     crate::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
-    // #8436: auto memory is off here (owner ruling Q5a); managed sessions follow in PR D.
+    // #8436: auto memory is off here; managed sessions follow in PR D.
     cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    /// #8436 (owner ruling Q5a): auto memory is off for every session, so the
+    /// #8436: auto memory is off for every session, so the
     /// interactive `tm run` session gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
     #[test]
     fn test_build_launch_command_disables_auto_memory() {

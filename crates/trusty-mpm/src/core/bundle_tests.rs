@@ -15,6 +15,10 @@ use crate::core::framework_content::tests::skill_with_references;
 mod rule_markers;
 use rule_markers::{has_rule, plain, rule_section, rule_sentence};
 
+// #10401: data-design skill and data-designer agent registration and import safety.
+#[path = "bundle_data_design_tests.rs"]
+mod data_design;
+
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
 fn skill_text(path: &str) -> &'static str {
@@ -329,6 +333,31 @@ fn tm_capabilities_constants_are_non_empty() {
             .trim()
             .is_empty()
     );
+}
+
+#[test]
+fn tm_capabilities_workflows_carries_the_context_tool_field_reference() {
+    // #10300: the session_context_* MCP descriptions point here for the
+    // field reference they no longer carry; losing it strands every caller.
+    let workflows = skill_text("skills/tm-capabilities/references/workflows.md");
+    assert!(
+        workflows.contains("## 6. PM Pause and Resume"),
+        "section 6 missing"
+    );
+    for field in [
+        "snapshot_publish",
+        "ref_error",
+        "resume_slot",
+        "skipped_dirty_worktrees",
+        "resolved_via",
+        "resolved_snapshot_superseded",
+        "resume_verify",
+        "own_ref_found",
+        "sessions_next_offset",
+        "over_budget",
+    ] {
+        assert!(workflows.contains(field), "workflows.md lost `{field}`");
+    }
 }
 
 /// The rule id of the labels/project/milestone standard (#7274, #10058).
@@ -1260,7 +1289,7 @@ fn tm_doctor_skill_is_wired_into_bundle() {
 fn code_critic_declared_skills_are_in_bundle() {
     // Issue #2890: code-critic's `skills:` frontmatter declares
     // `code-review-standards` and `contract-driven-testing`. Both asset files
-    // existed under `src/assets/skills/` but were not wired into a const or
+    // existed under `content/skills/` but were not wired into a const or
     // the `ALL` table on first cut — the exact historical tm-doctor.md bug
     // (see `tm_doctor_skill_is_wired_into_bundle` above and
     // `bundle_tm_skills.rs`'s module doc): a file existing on disk is not
@@ -1356,7 +1385,7 @@ fn skill_port_batch1_skills_are_in_bundle() {
     // Issue #2903 (epic #2902): all 25 batch-1 universal/ skill entry points
     // must be present in `ALL` — mirrors `tm_doctor_skill_is_wired_into_bundle`
     // and `code_critic_declared_skills_are_in_bundle` above: a source file
-    // existing under `src/assets/skills/` is not sufficient, only `ALL`
+    // existing under `content/skills/` is not sufficient, only `ALL`
     // registration makes `deploy_all_skill_tiers` ship it.
     const BATCH1_ENTRIES: &[&str] = &[
         "skills/systematic-debugging.md",
@@ -1632,7 +1661,7 @@ fn documentation_style_skill_is_in_bundle() {
     // Issue #2911: the documentation-style entry SKILL.md must be present in
     // `ALL` — mirrors `tm_doctor_skill_is_wired_into_bundle` and
     // `skill_port_batch1_skills_are_in_bundle` above: a source file existing
-    // under `src/assets/skills/` is not sufficient, only `ALL` registration
+    // under `content/skills/` is not sufficient, only `ALL` registration
     // makes `deploy_all_skill_tiers` ship it.
     assert!(
         deployed()
@@ -1700,7 +1729,7 @@ fn documentation_style_unions_into_engineer_family_via_base_engineer() {
 fn rust_build_performance_skill_is_in_bundle() {
     // Per Bob directive 2026-07-17: the rust-build-performance entry SKILL.md
     // must be present in `ALL` — mirrors `documentation_style_skill_is_in_bundle`:
-    // a source file existing under `src/assets/skills/` is not sufficient,
+    // a source file existing under `content/skills/` is not sufficient,
     // only `ALL` registration makes `deploy_all_skill_tiers` ship it.
     assert!(
         deployed()
@@ -1717,7 +1746,7 @@ fn rust_build_performance_skill_is_in_bundle() {
 #[test]
 fn rust_delivery_workflow_skill_is_in_bundle() {
     // Issue #8192: same reachability contract as the sibling above — the asset
-    // file under `src/assets/skills/` only ships once `ALL` names it.
+    // file under `content/skills/` only ships once `ALL` names it.
     assert!(
         deployed()
             .into_iter()
@@ -1793,7 +1822,7 @@ fn rust_delivery_workflow_states_each_delivery_rule() {
 #[test]
 fn self_improvement_loop_skill_is_in_bundle() {
     // Issue #7723: the self-improvement-loop entry SKILL.md must be present
-    // in `ALL` — a source file existing under `src/assets/skills/` is not
+    // in `ALL` — a source file existing under `content/skills/` is not
     // sufficient, only `ALL` registration makes `deploy_all_skill_tiers`
     // ship it (the historical orphaned-tm-doctor.md bug).
     assert!(

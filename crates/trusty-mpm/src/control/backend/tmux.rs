@@ -24,6 +24,7 @@ use crate::control::event::SessionEvent;
 use crate::control::id::ControlSessionId;
 use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::TmuxDriver;
+use crate::session_manager::inject_record::InjectSlot;
 
 use super::{SessionBackend, SessionInput};
 
@@ -137,9 +138,17 @@ pub struct TmuxBackend {
     /// Last pane content seen; used to suppress duplicate Output events and
     /// to detect idle (unchanged) pane so we park instead of spin.
     last_pane_content: String,
+    /// Where each delivered text is reported (#9167 AC5); empty until attached.
+    inject: InjectSlot,
 }
 
 impl TmuxBackend {
+    /// This backend reporting each delivered text through `slot` (#9167 AC5).
+    pub fn with_inject_slot(mut self, slot: InjectSlot) -> Self {
+        self.inject = slot;
+        self
+    }
+
     /// Create and register a new tmux session for the given session ID.
     ///
     /// Why: session creation is kept in `new()` so the `SessionActor` can
@@ -203,6 +212,7 @@ impl TmuxBackend {
             spawned: true,
             capture_lines,
             last_pane_content: String::new(),
+            inject: InjectSlot::default(),
         })
     }
 }
@@ -216,12 +226,17 @@ impl SessionBackend for TmuxBackend {
     /// send-keys (NOT via stdin/stdout pipes, to preserve the interactive TUI).
     /// What: calls `TmuxDriver::send_line` to inject `msg.text + Enter` into
     /// the tmux pane.
-    /// Test: integration test (`#[ignore]`); constructor-path covered inline.
+    /// A delivered text is one `message` event (#9167 AC5); a failed send, none.
+    /// Test: `a_delivered_send_is_one_message_event_9167`,
+    /// `a_failed_send_records_nothing_9167`; the live path is an integration
+    /// test (`#[ignore]`).
     async fn send(&mut self, msg: SessionInput) -> Result<()> {
         let target = TmuxTarget::session(&self.tmux_name);
         self.driver
             .send_line(&target, &msg.text)
-            .with_context(|| format!("send-keys to tmux session {} failed", self.tmux_name))
+            .with_context(|| format!("send-keys to tmux session {} failed", self.tmux_name))?;
+        self.inject.record(&self.tmux_name, &msg.text);
+        Ok(())
     }
 
     /// Capture the tmux pane and return new output as `SessionEvent::Output`.
@@ -477,3 +492,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tmux_inject_tests.rs"]
+mod inject_tests;

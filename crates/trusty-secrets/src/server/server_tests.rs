@@ -21,7 +21,9 @@ use trusty_common::uds::{UdsSecurityError, send_framed_request, socket_is_servin
 use super::*;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
-use crate::store::{MemoryBackend, NamesIndex, SecretBackend, SecretStore, mask_secret};
+use crate::store::{
+    ControlItem, MemoryBackend, NamesIndex, SecretBackend, SecretStore, mask_secret,
+};
 
 const VALUE: &str = "sk-fake-server-0123456789abcdef";
 const SENTINEL: &str = "SENTINEL-c0ffee-9065";
@@ -47,6 +49,21 @@ fn git(dir: &Path, args: &[&str]) {
 
 fn fixture() -> Fixture {
     fixture_with_idle(Duration::from_secs(60))
+}
+
+/// A grant registry whose process table holds this test process under
+/// `1 -> 10`, neither a Claude Code process (#10386).
+fn person_grants() -> Arc<GrantRegistry> {
+    let procs = crate::server::grant_fakes::FakeProcs::default();
+    procs
+        .add(1, 0, 1)
+        .add(10, 1, 100)
+        .add(std::process::id(), 10, 4242);
+    Arc::new(GrantRegistry::new(
+        Arc::new(procs),
+        Arc::new(SystemClock),
+        DEFAULT_MAX_TTL,
+    ))
 }
 
 fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
@@ -135,6 +152,10 @@ impl Fixture {
     fn state(&self, backends: BackendFactory) -> State {
         let mut state = State::new(self.settings.clone(), backends);
         state.file_consent_config = Some(self.settings.machine_config.clone());
+        // #10386: `set` and `delete` judge the caller's ancestry. The host's
+        // own table may run this test under Claude Code, so the caller is
+        // placed under plain parents in a fake one.
+        state.grants = person_grants();
         state
     }
 
@@ -212,7 +233,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 37] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 38] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -296,11 +317,17 @@ async fn server_set_list_delete_round_trip_over_a_real_socket() {
     assert_eq!(list["vault"], "trusty/acme/web");
     assert_eq!(list["keys"][0]["name"], "API_KEY");
     assert_eq!(list["keys"][0]["length"], VALUE.chars().count());
-    assert_eq!(list["keys"][0]["agents_may_use"], false);
+    // #10386: a new key carries no deny.
+    assert_eq!(list["keys"][0]["agents_may_use"], true);
     assert!(list["keys"][0]["updated_at"].as_u64().unwrap() > 0);
-    // #9070: list reports the flag the backend holds, not an index field.
+    // #9070: list reports the deny the backend holds, not an index field.
     fx.keychain
-        .set_agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"), true)
+        .set_control_item(
+            ControlItem::AgentDeny,
+            &vault("trusty/acme/web"),
+            Some(&key("API_KEY")),
+            true,
+        )
         .unwrap();
     let list = ok(call(
         socket,
@@ -308,16 +335,20 @@ async fn server_set_list_delete_round_trip_over_a_real_socket() {
         json!({"project": fx.project(), "vault": "trusty/acme/web"}),
     )
     .await);
-    assert_eq!(list["keys"][0]["agents_may_use"], true);
+    assert_eq!(list["keys"][0]["agents_may_use"], false);
 
     let deleted = ok(call(socket, method::DELETE, target).await);
     assert_eq!(deleted, json!({"removed": true}));
     assert!(fx.keychain.is_empty());
     assert!(
         !fx.keychain
-            .agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"))
+            .control_item(
+                ControlItem::AgentDeny,
+                &vault("trusty/acme/web"),
+                Some(&key("API_KEY"))
+            )
             .unwrap(),
-        "the flag goes with the key"
+        "the deny goes with the key"
     );
     let list = ok(call(
         socket,
@@ -694,6 +725,7 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("keeper", false, String::new(), Some(cli)),
             // #9069: the sync target, listed after the stores.
             ("github-actions", false, String::new(), Some(cli)),
+            ("vercel", false, String::new(), Some(cli)),
         ]
     );
     assert!(
@@ -1223,7 +1255,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 37;
+    const ARMS: usize = 38;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1271,6 +1303,8 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::GrantLimitReached => 35,
             // #9066: after `GrantLimitReached`.
             ErrorKind::BridgeRefused => 36,
+            // #10459: after `BridgeRefused`.
+            ErrorKind::AgentKeyDenied => 37,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1284,12 +1318,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 37 variants, and the
+/// What: `kind as i32` equals its pinned value for all 38 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 37] = [
+    const PINNED: [(ErrorKind, i32); 38] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1327,6 +1361,7 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::GrantRefused, 34),
         (ErrorKind::GrantLimitReached, 35),
         (ErrorKind::BridgeRefused, 36),
+        (ErrorKind::AgentKeyDenied, 37),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
@@ -1476,8 +1511,9 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
         reason: SENTINEL,
     };
     let cases = [
-        (refused(), ErrorKind::AgentUseRefused),
-        (wrapped(refused()), ErrorKind::AgentUseRefused),
+        // #10459: a store refusal is always a per-key deny.
+        (refused(), ErrorKind::AgentKeyDenied),
+        (wrapped(refused()), ErrorKind::AgentKeyDenied),
         (wrapped(missing), ErrorKind::EnvResolutionFailed),
         (
             SecretsError::InvalidEnvEntry {
@@ -1966,18 +2002,27 @@ impl SecretBackend for StuckBackend {
         self.wait();
         self.inner.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.wait();
-        self.inner.agents_may_use(vault, key)
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
     }
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.wait();
+        self.inner.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
         allowed: bool,
     ) -> Result<(), SecretsError> {
         self.wait();
-        self.inner.set_agents_may_use(vault, key, allowed)
+        self.inner.set_control_item(item, vault, key, allowed)
     }
 }
 

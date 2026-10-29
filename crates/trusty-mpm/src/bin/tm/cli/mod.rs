@@ -43,7 +43,7 @@ pub(crate) use crate::cli_manager::ManagerAction;
 pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 
 // #6288 S3a: `DEFAULT_ADDR`, the `daemon --addr` bind default, went with the
-// bind; the flag is accepted and ignored (owner ruling Q1).
+// bind; the flag is accepted and ignored (#6288).
 
 /// trusty-mpm command-line interface.
 ///
@@ -148,10 +148,11 @@ pub(crate) struct Cli {
     /// Read a token for `--account` from stdin (#8914).
     ///
     /// Why: when this machine's own gh cannot yield the account's token, a
-    /// token on stdin is the setup that touches no keyring. `gh auth login`
-    /// activates the account in the machine-wide keyring slot.
-    /// What: tm proves the token with `GET /user` and stores it in its 0600
-    /// per-account `hosts.yml` before any session starts.
+    /// token on stdin is the setup that never activates the account in the
+    /// machine-wide keyring slot, as `gh auth login` does.
+    /// What: tm proves the token with `GET /user` and stores it in gh's
+    /// keyring entry for the account before any session starts. #10037: its
+    /// per-account `hosts.yml` names the account and holds no token.
     /// Test: `cli_account_token_stdin_requires_an_account`.
     #[arg(long, global = true, requires = "account")]
     pub(crate) account_token_stdin: bool,
@@ -764,14 +765,14 @@ pub(crate) enum Command {
         #[arg(long)]
         sandbox: bool,
     },
-    /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
+    /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
     /// Why: for overnight / unattended operation the fleet needs an always-on
-    /// process that auto-resumes `stopped` sessions, observes session health
-    /// without a live caller, surfaces pending decisions, and exposes fleet
-    /// metrics — all while making NO autonomy decisions itself.
+    /// process that observes session health without a live caller, surfaces
+    /// pending decisions, and exposes fleet metrics — all while making NO
+    /// autonomy decisions itself.
     /// What: runs the supervisor loop, polling the managed-session store on an
-    /// interval. Auto-resume is gated by `TRUSTY_MPM_AUTO_RESUME=1`; the poll
+    /// interval. #10356: it no longer auto-resumes; the daemon does. The poll
     /// cadence and classification toggle are read from env
     /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. #6288:
     /// it binds no listener — each sweep's snapshot is published to
@@ -781,9 +782,9 @@ pub(crate) enum Command {
         /// Poll interval in seconds (overrides `TRUSTY_MPM_SUPERVISOR_INTERVAL`).
         #[arg(long)]
         interval: Option<u64>,
-        /// Force auto-resume of `stopped` sessions on (overrides
-        /// `TRUSTY_MPM_AUTO_RESUME`). Without this flag (and without the env
-        /// var) the supervisor runs observe-only.
+        /// Ignored since #10356: the daemon owns auto-resume. Set
+        /// `TRUSTY_MPM_AUTO_RESUME` on the daemon or use the console toggle.
+        /// Still accepted so an existing launchd plist keeps starting.
         #[arg(long)]
         auto_resume: bool,
         /// Disable idle-session activity classification (no LLM calls).

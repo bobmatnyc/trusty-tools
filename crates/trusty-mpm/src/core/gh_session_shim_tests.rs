@@ -53,26 +53,14 @@ fn assert_no_token_value(vars: &[(String, String)]) {
 
 /// Write an executable script.
 ///
-/// A child `cp` writes the executable, so no thread of this process ever holds
-/// it open for writing.
+/// #10176, #10248: the shared writer has a child write the file, so no thread
+/// of this process ever holds it open for writing.
 #[cfg(unix)]
 fn write_script(path: &Path, body: &str) {
     let parent = path.parent().expect("parent");
     std::fs::create_dir_all(parent).expect("dir");
-    let name = path.file_name().expect("file name").to_string_lossy();
-    let staged = parent.join(format!(".{name}.src"));
-    std::fs::write(&staged, body).expect("stage the script");
-    // #10176: a sibling test thread's fork inherits any write fd this process
-    // holds and keeps it until that child execs, so exec'ing a script written
-    // here can fail with ETXTBSY. Same pattern as #9718.
-    let installed = std::process::Command::new("/bin/sh")
-        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
-        .arg(&staged)
-        .arg(path)
-        .status()
-        .expect("install the script");
-    assert!(installed.success(), "install the script: {installed}");
-    std::fs::remove_file(&staged).expect("remove the staged script");
+    // See #10248
+    trusty_common::exec_stub::write_executable(path, body).expect("install the script");
 }
 
 /// `cmd.output()`, retried while the exec fails with ETXTBSY: every 20 ms, at

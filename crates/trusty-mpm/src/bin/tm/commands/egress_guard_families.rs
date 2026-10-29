@@ -4,7 +4,10 @@
 //! path from a tm-launched session, so every MCP tool that can reach Slack,
 //! Gmail, Notion or Google Chat is denied — read, search and list tools too
 //! (Bob ruling 4). The table is built into the code (Architect Q6): a config
-//! file the session can write must never be able to drop a family.
+//! file the session can write must never be able to drop a family. The one
+//! narrowing is per call, not per family: `egress_guard_slack_read` (#10387)
+//! lifts two exact Slack read tools for a project the host `config.yaml`
+//! names, and that file is a trust anchor no session may write.
 //! What: [`FamilyTable`] holds the server-segment patterns;
 //! [`FamilyTable::classify`] maps a tool name to a [`Classification`]. Claude
 //! Code names an MCP tool `mcp__<server>__<tool>`. The server segment is

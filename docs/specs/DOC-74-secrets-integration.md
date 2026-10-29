@@ -173,7 +173,7 @@ behave.
 | `Debug`/`Display` of any in-memory type holding a value | Every type in this module implements `Debug` the way `Secret<T>` and `KeyringStore` do: either a constant redacted string or (for `KeyringStore`, stateless) nothing to leak | `secret.rs:105-126`, `keyring_store.rs:48` (`derive(Debug)` is safe only because the struct is stateless) |
 | A `tm` log line | Never logs a resolved value; logs only the reference and the backend name | Same posture as `resolve_key`'s existing "never logs the (absent) value" contract (`mod.rs:163`) |
 | argv of a spawned process | `tm secrets exec` never places a resolved value in argv — only in the child's environment (`--env NAME=KEY`) or its stdin (`--stdin KEY`) | New; see §10.5 and the negative test in §12 |
-| A console response (amended 2026-10-01) | `secrets.list` returns names, length and `updated_at` only; `secrets.set` returns the first 8 characters and the length once, through `mask_secret` (§15.6) | New; ruling 2026-10-01 |
+| A console response (amended 2026-10-01) | `secrets.list` returns names, length and `updated_at` only; `secrets.set` returns, once, through `mask_secret` (§15.6): the first 4 and last 5 characters and the length for 16 characters or more, the last 5 and the length for 10 to 15, the length alone under 10 | New; ruling 2026-10-01, mask amended 2026-10-28 (#10394) |
 | A UDS decode error on a `secrets.*` method (amended 2026-10-01) | Fixed error text; the generic router's `params do not decode: {e}` text is not used for `secrets.*` (§15.6) | The generic echo at [`router.rs:144`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/uds/server/router.rs#L144) |
 | A file on disk | The session cache is in-memory only (§9.3); nothing this document adds writes a decrypted value to disk. `FileKeyStore`'s existing `0600` file remains a distinct, pre-existing tier (DOC-45 §11), untouched by this document except as a migration source (§11) |
 
@@ -717,8 +717,8 @@ tm secrets set KEY [group] [--value -]         # upsert one key; value from the 
                                                # an empty clipboard is an error: non-zero exit, nothing stored
                                                # the paste tool runs from fixed system directories, never PATH; past 5 s
                                                # it and its process group are killed, and text over 1 MiB is refused (#7524)
-                                               # confirms "(new)" or "(updated)", KEY, the first 8 characters and the length;
-                                               # a value of 8 characters or fewer shows only its length (mask_secret, §15.6)
+                                               # confirms "(new)" or "(updated)", KEY and mask_secret (§15.6, #10394): first 4 + last 5
+                                               # characters and the length at 16+; last 5 and the length at 10-15; length only under 10
 tm secrets list                                # key NAMES, length and updated_at per scope — never values (mirrors KeyStore::list, mod.rs:171)
 tm secrets remove KEY [group]                  # delete one project-scope key; a key the scope does not hold is named and exits non-zero
 tm secrets copy --from <backend> --to <backend> [KEY...]
@@ -789,8 +789,8 @@ programmatically (a workflow step, an MCP tool). Amended 2026-10-10
 not resolve in-process. It is grant-by-pid: tm spawns a helper, calls
 `secrets.grant` for the helper's pid, and the helper reads each value with
 `secrets.resolve` and then execs the command in place (§10.5, §15.8). Under a
-Claude Code parent the server grants only keys flagged "agents may use"
-(§15.8).
+Claude Code parent the server grants any in-scope key not denied to agents
+(§15.8, #10386).
 
 ### 9.5 Daemon-side: `secret://` in a subprocess env map
 
@@ -877,7 +877,7 @@ value.
   `crates/trusty-mpm/src/secrets_client/get_ref.rs:66`).
 
 Both tools call `secrets.test` with `agent_caller: true`, so the
-"agents may use" gate applies on the stdio and the loopback `POST /rpc` paths
+agent deny gate (#10386) applies on the stdio and the loopback `POST /rpc` paths
 alike (§15.11.5, "Agent gate").
 
 ### 10.3 Where session state lives
@@ -1045,7 +1045,7 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
 | `copy` never observes the destination write partially applied | Interrupt (simulated backend error) mid-copy of N keys; assert already-written keys are reported and no value appears in the error text. Exception: a destination entry whose index publish and compensating delete both fail aborts the copy with `orphaned_backend_entry` and no copied list; keys copied before it stay visible through `secrets.list`. See [#9065](https://github.com/bobmatnyc/trusty-tools/issues/9065) | New — DOC-45-style honesty about partial-failure states |
 | No value reaches the console (2026-10-01) | Drive every `secrets.*` method through the `secrets_uds` bridge with a specimen value; assert no response body, error body or log line contains it | New — PRD-SECRETS-10 |
 | Fixed error text (2026-10-01) | Send a malformed `secrets.set` whose bad field holds a specimen value; assert the error text is the fixed string and omits the specimen | New — the echo at `router.rs:144` |
-| `mask_secret` (2026-10-01) | Table test: a value of ≤8 characters yields its length only; a longer value yields the first 8 characters and the length; `redact_secret`'s 4-character output is unchanged | New; `redact_secret_short_inputs_table` stays green |
+| `mask_secret` (2026-10-28, #10394) | Table test at lengths 0, 9, 10, 15, 16 and a multi-byte value: under 10 characters yields the length only; 10 to 15 yields the last 5 and the length; 16 or more yields the first 4, the last 5 and the length; `redact_secret`'s 4-character output is unchanged | New; `redact_secret_short_inputs_table` stays green |
 | Browser hardening (2026-10-01) | Requests with a foreign Origin, no Origin, a foreign Host, or a missing/stale anti-CSRF header get 403 on every secrets route | New — S3a |
 | Tailnet gate (2026-10-01) | A `tailscale whois` stub returns another login, a tagged node, and the same login; only the same login passes. A loopback request carrying a `Tailscale-*` header gets 403 | New — S3b, [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) |
 | Exec grant (2026-10-01) | `secrets.resolve` refuses an unknown token, an expired token, a key outside the grant, and a caller pid outside the granted tree; accepts the child and a grandchild | New — S8 |
@@ -1209,7 +1209,7 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | Method | Does | Returns |
 |---|---|---|
 | `secrets.scopes` | Lists the owner and project scopes a caller can pick | Scope names |
-| `secrets.list` | Lists keys in one scope | Name, length, `updated_at`, the "agents may use" flag — never a value |
+| `secrets.list` | Lists keys in one scope | Name, length, `updated_at`, `agents_may_use` (no agent deny, #10386) — never a value |
 | `secrets.set` | Upserts one key | `new` or `updated`, plus `mask_secret` output, once |
 | `secrets.delete` | Removes one key | Confirmation |
 | `secrets.copy` | Copies keys between backends inside one project (§13 Q6) | Names copied, names failed |
@@ -1217,7 +1217,7 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.grant` | Registers an exec grant for a child process (§15.8, S8) | The grant token, its expiry and TTL |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
 | `secrets.revoke` | Removes an exec grant (§15.8, S8) | Whether a live grant matched |
-| `secrets.set_agents_may_use` | Turns one key's "agents may use" flag on or off (§15.8, S8) | The vault, the key and the flag as set |
+| `secrets.set_agents_may_use` | Writes (`allowed: false`) or removes (`allowed: true`) one key's agent deny (§15.8, S8, #10386) | The vault, the key and `allowed` as set |
 | `secrets.bridge.list`, `.set`, `.delete`, `.copy`, `.set_agents_may_use` | The direct method, run under the console's verdict on its HTTP client; verified console peer only (§15.6, S3a) | What the direct method returns |
 
 **Request deadline and client wait (#7524 P2-M1).** The server gives each
@@ -1343,9 +1343,10 @@ reached only through `secrets.copy` with `to_backend` set to
 
 - The key list is required; an empty list is `invalid_params`.
 - A caller with a Claude Code ancestor is refused with `agent_use_refused`,
-  whatever the key's "agents may use" flag says; a bridge call is judged on
-  the console's verdict. A pushed value is readable by any workflow or
-  deployment a repository writer adds, a wider release than §15.8's flag.
+  whether or not the key is denied to agents (#10386 Q3); a bridge call is
+  judged on the console's verdict. A pushed value is readable by any workflow
+  or deployment a repository writer adds, a wider release than §15.8's
+  agent use.
 - The destination comes from the checkout's `origin` remote
   (`github.com/<owner>/<repo>`), never from a vault name. A Vercel project
   mapping lives only in the account's machine config, keyed by
@@ -1354,8 +1355,18 @@ reached only through `secrets.copy` with `to_backend` set to
 - Each CLI uses its own stored login. Every inherited `GH_*` and `VERCEL_*`
   variable, and `GITHUB_TOKEN`, is removed from the child's environment.
 - The value goes on the CLI's stdin. A key counts as copied only after a
-  post-write metadata read shows the write (GitHub: `updated_at` advanced);
-  exit 0 alone never counts.
+  post-write metadata read shows the write (GitHub: `updated_at` advanced;
+  Vercel: `vercel env ls` names the key on every target); exit 0 alone never
+  counts.
+- Vercel (#9069 PR 2): the CLI runs in an empty 0700 directory passed as
+  `--cwd`, with `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the mapping. It
+  also loses every inherited `NODE_*`, `NOW_*`, `npm_config_*`,
+  `NPM_CONFIG_*`, proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY`, either case), `SSL_CERT_FILE` and `SSL_CERT_DIR` variable,
+  always (D3, D4). It pushes `production` then `preview`; a failing target
+  fails the key. An existing variable is overwritten in place with `--force`, never removed
+  and re-added; because a listing is presence only, such a key is reported
+  failed until the live check shows how to prove an update (D9).
 - A sync target is never a configured backend, never read back, never swept
   by `delete`, and never written to the names-only index. A sandboxed server
   opens none.
@@ -1410,13 +1421,14 @@ console makes the ancestry judgment and the server checks who made it.
   console found the client's pid and read its chain. `unmappable` means it
   found no pid, which includes every client on a platform other than macOS
   and Linux: the client is treated as an agent, and `agent_parent` must be
-  `true` (#9067, Architect Q5: fail closed), so `set_agents_may_use` ON is
-  `agent_use_refused` and OFF is allowed.
+  `true` (#9067, Architect Q5: fail closed), so removing a deny
+  (`set_agents_may_use` with `allowed: true`), `set` and `delete` are
+  `agent_use_refused`, and writing a deny is allowed (#10386).
   `unreadable` means it found a pid but could not read the chain:
   `agent_parent` must be `true`, and the server treats the call as the
-  direct socket treats an unreadable chain, so `set_agents_may_use` ON is
-  `grant_refused` and OFF is allowed. The server never takes a pid as a
-  parameter.
+  direct socket treats an unreadable chain, so removing a deny, `set` and
+  `delete` are `grant_refused`, and writing a deny is allowed. The server
+  never takes a pid as a parameter.
 - **Verified console.** The server reads the socket peer's pid from the
   kernel, as for every call, then reads that pid's executable from the
   process table (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS). The
@@ -1453,9 +1465,10 @@ console makes the ancestry judgment and the server checks who made it.
 `api` feature. The bridge links `api` and `ancestry` only (#9066):
 
 - `secrets.list` shows length and `updated_at` only.
-- `secrets.set` shows the first 8 characters and the length, once.
-- A value of 8 characters or fewer shows only its length (owner ruling
-  2026-10-01).
+- `secrets.set` shows, once, the first 4 and last 5 characters and the
+  length for a value of 16 characters or more, the last 5 and the length
+  for 10 to 15, and only the length under 10 (owner ruling 2026-10-28,
+  #10394; replaces the 2026-10-01 first-8 format).
 
 `mask_secret` is a new function, not a change to `redact_secret`.
 [`redact_secret`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/credentials/redact.rs#L92)
@@ -1463,8 +1476,8 @@ shows a 4-character head
 ([`DEFAULT_HEAD_LEN`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-common/src/credentials/redact.rs#L34)),
 and `memory_core::filter` depends on that format.
 
-**Page (S4).** Scope picker, key list, set, delete and copy. Each key shows an
-**"agents may use"** toggle, default OFF (§15.8). Vercel's per-key
+**Page (S4).** Scope picker, key list, set, delete and copy. Each key shows a
+**"Denied to agents"** toggle, default OFF (§15.8, #10386). Vercel's per-key
 `development` opt-in appears with the Vercel integration.
 
 **Hardening (S3a).** These ship before any secret goes through the console:
@@ -1505,7 +1518,7 @@ The gate:
 closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for
 secrets routes and is the planned fix for every console route.
 
-### 15.8 Language integrations and the "agents may use" flag
+### 15.8 Language integrations and the per-key agent deny
 
 Owner ruling 2026-10-01: *"It should also have integrations with programming
 languages."* All three tiers are in scope.
@@ -1546,15 +1559,38 @@ same-uid process may call `secrets.grant`. While any grant is unexpired, the
 
 `secrets.resolve` has no console route (501) and no MCP tool.
 
-**"Agents may use" flag.** Each key carries the flag, default OFF (owner
-answer 2026-10-01). `secrets.set_agents_may_use` sets it (S8 slice 3,
+**Agent deny (amendment 2026-10-28, #10386).** Owner ruling (Bob D69/Af9,
+D6a): *"Security model is exactly like .env.local. If it's in the scope
+(user/owner/project), then it's usable by the agent."* This replaces the
+pre-#10386 opt-in "agents may use" flag (owner answer 2026-10-01). A key
+carries no deny by default, and an agent may use every in-scope key without
+one. `secrets.set_agents_may_use` writes the deny (`allowed: false`) or
+removes it (`allowed: true`) (S8 slice 3,
 [#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)), and the
 console toggle that calls it is
 [#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). A caller
-whose own parent chain includes Claude Code may turn the flag off but not on
-(`agent_use_refused`); an unreadable chain refuses. The allow record is
+whose own parent chain includes Claude Code may write a deny but not remove
+one (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
-record with its kind, so no flag change exists without a record. The
+record with its kind, so no deny change exists without a record.
+`secrets.delete`, removing a deny and `secrets.copy` to a sync target are
+operator-only: the server refuses a caller with a Claude Code ancestor
+(`agent_use_refused`, Architect Q2, Q3). Amendment 2026-10-29 (#10459, Bob:
+"fix the guard, it is too restrictive"; reverses Q2 for `set`): such a
+caller may `secrets.set` (so `tm secrets import`) and locally `secrets.copy`
+a key with no deny in its project or owner scope. The deny is checked under
+the key's index lock, so a deny added mid-call refuses; a denied key is
+`agent_key_denied` (split from `agent_use_refused`, reversing Q6); a failed
+lookup refuses. The agent's `set` confirmation is `[N chars]` only, and its
+allow record carries `default_policy: true`, the caller pid and the project. A copy carries the key's deny into the
+destination before the value; a denied key is refused (`unsupported`) for a
+destination that cannot hold a deny. `delete` removes a deny only after
+every value delete succeeded, and `set` never clears one. Every deny written
+or removed, including the migration's, has a write-ahead
+`secrets.set_agents_may_use` record; without it the deny is unchanged
+(`audit_unavailable`). An agent's `grant` and `resolve` allow records carry
+`default_policy: true`. Printing a value (`exec -- printenv`) stays
+rule-guarded only; see "What it does not protect" in the security guide. The
 console process has no agent ancestor even when it serves an agent's
 `curl`, so its route has its own gate: the bridge verdict (§15.6, #9066).
 The console judges its HTTP client's chain and sends the answer with the
@@ -1562,20 +1598,30 @@ call; the server applies this rule to that answer, and takes it only from
 the verified console. The console toggle is
 [#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). `exec` never
 injects a key into a process whose parent chain includes Claude Code unless
-that key carries the flag. The rule covers env injection (tiers 1 and 2) and
+that key is denied. The rule covers env injection (tiers 1 and 2) and
 grant contents (tier 3). It is enforced from the day each `exec` path ships.
 For tier 3, `secrets.grant` judges the registrar's own parent chain, from its
-socket peer pid, and refuses an unflagged key with `agent_use_refused`;
-`secrets.resolve` checks the flag again before each read, when either the
+socket peer pid, and refuses a denied key with `agent_key_denied` (#10459);
+`secrets.resolve` checks the deny again before each read, when either the
 registrar or the resolving caller has an agent ancestor. The backend
-holds the flag as its own item per key (on the Keychain, service
-`trusty-secrets.agents`, account `<vault>/<key>`), never the names-only index,
-which any same-uid process can edit
-([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)). Known
-limit (owner ruling 2026-10-09): a process running as the same uid can create
-the `trusty-secrets.agents` Keychain item with `security
-add-generic-password` and gets no prompt. This closes the index-file edit
-only; checking which program created the item is out of scope.
+holds the deny as its own item per key (on the Keychain, service
+`trusty-secrets.agents-deny`, account `<vault>/<key>`; on the file backend, a
+0600 file under `<values root>/.agent-controls/`), never the names-only
+index, which any same-uid process can edit
+([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)). A backend
+that cannot store a deny (1Password, Keeper) refuses one (`unsupported`).
+A failed deny lookup refuses. Known limit (owner ruling 2026-10-09, still
+true for the deny): a same-uid process can delete or create a Keychain item
+it can reach; this closes the index-file edit only.
+
+**Migration (#10386 Q1).** A vault written under the opt-in flag is migrated
+once, before its first deny lookup or write, and the migration is recorded
+per vault (Keychain service `trusty-secrets.agents-deny-migrated`, account
+`<vault>`). `store::DEFAULT_AGENT_DENY_MIGRATION` is the switch. `OpenAll`,
+the default (D6a), writes no deny, so every existing key becomes usable by
+agents. `KeepClosed` writes a deny for each indexed key whose old flag
+(service `trusty-secrets.agents`) was off. Both remove the old flag items. A
+marker that cannot be read refuses; a rerun after the marker is a no-op.
 
 Claude Code's env markers — `CLAUDECODE`, `CLAUDE_PID`,
 `CLAUDE_CODE_CHILD_SESSION`
@@ -1618,7 +1664,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client (socket and spawn contract per ruling 31, 2026-10-05) | 5 | S1 |
 | S3a | Console `secrets_uds` bridge and hardening (§15.6) | 5 | S2 |
 | S3b | Tailnet gate (§15.7); closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for secrets routes | 5 | S3a |
-| S4 | `/tools/secrets/` page, including the "agents may use" toggle | 6 | S3a; tailnet access waits on S3b |
+| S4 | `/tools/secrets/` page, including the per-key agent toggle ("Denied to agents" since #10386) | 6 | S3a; tailnet access waits on S3b |
 | S5 | `secrets-manager` agent and `tm-secrets` skill text: `set`, console path | 3 | S4 |
 | S6+ | One PR per integration: 1Password, GitHub Actions, Vercel, Keeper | 4 each; 5 for GitHub Actions and Vercel (values leave the machine, #9069) | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
@@ -1672,7 +1718,7 @@ section does not reopen them.
 |---|---|---|
 | Q1 | Adapter model | In-process Rust adapters inside the trusty-secrets server, behind an `adapters` cargo feature. No out-of-process adapter executables, no Python. |
 | Q2 | Postgres client | `tokio-postgres` with a rustls connector. No `psql` child, no `PG*` environment. |
-| Q3 | Who may probe | An agent caller only when the key's "agents may use" flag is on (§15.8). A human caller always. |
+| Q3 | Who may probe | An agent caller unless the key is denied to agents (§15.8, #10386). A human caller always. |
 | Q4 | `query` rows | Capped rows (200 rows and a byte cap) go to agents in v1. A per-key `query` flag follows only if the security review asks for it. |
 | Q5 | Type inference | Propose a type and confirm on a TTY; without a TTY the key stays untyped. Never auto-assign. |
 | Q6 | v1 types | `postgres_url`, `github_token`, `openai_api_key`. |
@@ -1861,9 +1907,9 @@ a setting cannot exceed them. The probe clock starts after the backend read.
 That read can wait on an unlock prompt, so `secrets.test` joins the 120 s
 deadline group in `deadline.rs`, not the 15 s default.
 
-**Agent gate (Q3).** When the caller has an agent ancestor, the key must carry
-the "agents may use" flag. Otherwise the reply is `agent_use_refused`, and the
-backend is not read. A human caller is not gated. The server judges the socket
+**Agent gate (Q3).** When the caller has an agent ancestor, the key must not
+carry an agent deny (#10386). Otherwise the reply is `agent_use_refused`, and
+the backend is not read. A human caller is not gated. The server judges the socket
 peer's ancestry as `secrets.grant` does (`exec.rs:75-92`). Every call from an
 MCP tool (§10.2) also carries `agent_caller: true`, because the daemon's
 loopback `POST /rpc` path makes the long-running daemon the socket peer, and
@@ -1875,7 +1921,7 @@ rests on the bridge verdict (§15.6).
 **Result and exit contract.** A failed credential is a normal reply with
 `ok: false` and a status, never a transport error. Transport errors use the
 existing kinds: `invalid_params`, `vault_out_of_scope`, `not_found`,
-`agent_use_refused`, `deadline_exceeded`, `audit_unavailable`, `internal`,
+`agent_key_denied`, `deadline_exceeded`, `audit_unavailable`, `internal`,
 and the existing backend kinds for the value read (`backend_locked`,
 `backend_timeout`, `backend_failed`).
 This design adds no `ErrorKind`. `tm secrets test` and `query` exit `0` when
@@ -1899,7 +1945,7 @@ Each property is a test in the slice that ships it.
 | P2 | No value enters argv or an environment variable, the CLI's or a child's. The adapter spawns no child. |
 | P3 | An echoing upstream — an HTTP stub that reflects the `Authorization` header, a postgres whose error text, `current_user` or row cell holds the password — yields `[REDACTED]` or a dropped field on every channel. |
 | P4 | Postgres refuses writes at each of the five layers on its own (§15.11.3); a guard refusal opens zero connections. |
-| P5 | An agent caller on an unflagged key gets `agent_use_refused` and zero backend reads. |
+| P5 | An agent caller on a denied key gets `agent_key_denied` (#10459) and zero backend reads. |
 | P6 | A value that fails its type's shape check opens no connection. |
 | P7 | Removing the output scrubber turns the echo tests red (mutation check, run once and recorded in the S13 PR). |
 
@@ -2000,4 +2046,5 @@ on [#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517):
   §15.7.
 - "It should also have integrations with programming languages."
   (2026-10-01); all three tiers in scope; per-key "agents may use" flag,
-  default OFF → §15.8.
+  default OFF → §15.8. Superseded 2026-10-28 (#10386, Bob D69/Af9, D6a): a
+  per-key agent deny, default none, the `.env.local` model → §15.8.

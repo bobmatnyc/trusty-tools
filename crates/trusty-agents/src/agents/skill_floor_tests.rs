@@ -106,6 +106,12 @@ const PENDING_OWNER_RULING: &[&str] = &[
     // #8625 (Architect Q4): it drives a kuzu import that writes palaces, so it
     // stays off the floor until the owner widens it.
     "tm-memory-import",
+    // #10401: non-coding chart-design reference like `documentation-style`
+    // (on the floor), but it ships a runnable checker; off until the owner rules.
+    "data-design",
+    // Neon/Vercel database operations reference; touches production data
+    // guidance, so off the floor until the owner rules.
+    "neon-postgres",
 ];
 
 /// Skills trusty-mpm ships for the Architect's project only (#8436 rulings D

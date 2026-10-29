@@ -303,10 +303,10 @@ fn a_git_failure_is_a_diff_error_not_an_empty_diff() {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let hang = tmp.path().join("hang-git.sh");
-        std::fs::write(&hang, "#!/bin/sh\nsleep 30\n").expect("fake git");
-        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // See #10248
+        trusty_common::exec_stub::write_executable(&hang, "#!/bin/sh\nsleep 30\n")
+            .expect("fake git");
         let hung = Limits {
             git_bin: hang.to_string_lossy().into_owned(),
             git_timeout: Duration::from_millis(200),

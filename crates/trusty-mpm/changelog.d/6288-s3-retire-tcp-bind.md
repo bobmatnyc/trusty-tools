@@ -1,4 +1,0 @@
-Removed
-- `tm daemon` no longer binds any TCP port. It serves its Unix socket only (`<data dir>/trusty-mpm/trusty-mpm.sock`), so `127.0.0.1:7880` and the ephemeral-port fallback are gone, along with the two TCP `/health` probes that guarded against a duplicate daemon; the socket bind is now the one duplicate guard, and a second daemon on the same socket exits non-zero having published nothing (ADR-0032, #6288).
-- Library API: `daemon::run_http` is removed, `daemon::serve_http` is renamed `daemon::serve`, and `daemon::serve` / `daemon::serve_with_shutdown` no longer take a `TcpListener`. `core::DEFAULT_DAEMON_ADDR` and `core::default_daemon_addr` are removed; `core::DEFAULT_DAEMON_URL` stays for reading an older daemon's lock (#6288).
-- If the socket's accept loop dies or returns without a shutdown signal, the daemon now removes its lock and exits non-zero rather than logging a warning and running on with no reachable listener (#6288).

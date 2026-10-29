@@ -19,7 +19,7 @@ use super::{
     ensure_git_repo_with, initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete};
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, WORKSPACE_SCAN_BUDGET};
 
 use crate::test_support::hermetic_temp_dir;
 
@@ -260,7 +260,9 @@ fn refusal_message_names_the_child_repository() {
 #[test]
 fn refusal_message_says_what_stopped_the_scan() {
     let msg = refusal_message(
-        &AutoInitRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted),
+        &AutoInitRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted {
+            budget: WORKSPACE_SCAN_BUDGET,
+        }),
         Path::new("/Users/someone/ws"),
     );
     assert!(msg.contains("could not rule out git repositories"), "{msg}");
@@ -515,31 +517,19 @@ const INIT_MARKER: &str = "fake-git-init-ran";
 ///
 /// Why: real git's no-repository wording depends on the host's mounts, so a
 /// test that pins one wording needs a fake, and a fake `init` keeps a real
-/// `git init` out of the fixture. #9034: exec'ing a file this process just
-/// wrote can race a sibling test's fork (ETXTBSY), so the shim is probed until
-/// it runs before the code under test sees it.
+/// `git init` out of the fixture. #9034, #10248: the shared writer keeps the
+/// shim's write fd out of this process, so a sibling test's fork cannot make
+/// the exec fail with ETXTBSY.
 #[cfg(unix)]
 fn fake_git(dir: &Path, stderr: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    // ETXTBSY is 26 on both Linux and macOS.
-    const ETXTBSY: i32 = 26;
     let shim = dir.join("fake-git");
     let script = format!(
         "#!/bin/sh\ncase \"$3\" in\n  rev-parse) printf '%s\\n' '{stderr}' >&2; exit 128 ;;\n  \
          init) : > \"$2/{INIT_MARKER}\"; exit 0 ;;\nesac\nexit 0\n"
     );
-    std::fs::write(&shim, script).unwrap();
-    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for _ in 0..100 {
-        match Command::new(&shim).arg("probe").output() {
-            Ok(_) => return shim.to_string_lossy().into_owned(),
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => panic!("fake git at {} did not run: {e}", shim.display()),
-        }
-    }
-    panic!("fake git at {} stayed busy (ETXTBSY)", shim.display());
+    // See #10248
+    trusty_common::exec_stub::write_executable(&shim, script).unwrap();
+    shim.to_string_lossy().into_owned()
 }
 
 /// Fail-Open Check (#9495): git's classic "no repository" wording under a real
@@ -658,7 +648,6 @@ fn classify_keeps_every_other_failure_an_error() {
 #[test]
 fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
     use crate::commands::origin_plan::{OriginPlan, plan_for_origin};
-    use trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET;
 
     let tmp = hermetic_temp_dir();
     let ws = tmp.path().join("wide-workspace");
@@ -673,7 +662,9 @@ fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
     assert_eq!(
         outcome,
         AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(
-            ScanIncomplete::BudgetExhausted
+            ScanIncomplete::BudgetExhausted {
+                budget: WORKSPACE_SCAN_BUDGET
+            }
         ))
     );
     assert!(!ws.join(".git").exists(), "nothing may be initialized");

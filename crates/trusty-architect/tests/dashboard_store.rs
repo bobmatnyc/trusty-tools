@@ -115,6 +115,37 @@ fn stale_if_version_conflicts_and_leaves_bytes() -> R {
     Ok(())
 }
 
+/// #10063: a typo'd guard key fails the whole batch before any write.
+#[test]
+fn batch_op_with_unknown_key_is_refused_and_writes_nothing() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let store = seeded(tmp.path(), format)?;
+        let before = snapshot(tmp.path());
+        let typos = [
+            json!({"op": "update", "collection": "items", "id": "D01",
+                   "data": {"answer": "y"}, "if_verison": 1}),
+            json!({"op": "set", "collection": "items", "id": "D01",
+                   "data": {}, "if_verison": 0}),
+            json!({"op": "delete", "collection": "goals", "id": "G01", "ifversion": 3}),
+        ];
+        for typo in typos {
+            let batch = [
+                json!({"op": "set", "collection": "goals", "id": "G02", "data": {}}),
+                typo.clone(),
+            ];
+            let parsed: Result<Vec<Op>, DashError> = batch.iter().map(Op::from_json).collect();
+            let got = parsed.and_then(|ops| store.batch(&ops));
+            match &got {
+                Err(DashError::Invalid(m)) => assert!(m.contains("unknown op key"), "{m}"),
+                other => panic!("{format}: {typo}: {other:?}"),
+            }
+            assert_eq!(snapshot(tmp.path()), before, "{format}: {typo} wrote bytes");
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn body_with_version_refused() -> R {
     for format in FORMATS {

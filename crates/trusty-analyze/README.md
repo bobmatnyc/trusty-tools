@@ -398,7 +398,7 @@ The MCP equivalent is `tr_report`, with the same options as `manifest_path`,
 | `TRUSTY_SEARCH_SOCKET` | `<data dir>/trusty-search/trusty-search.sock` | trusty-search daemon socket path. |
 | `TRUSTY_AUDIT_REPORT_TEMPLATE` | unset | Lowest-precedence template selection for `report` / `tr_report`, set by `trusty-audit` from an engagement's `[report] template`. |
 | `TRUSTY_AUDIT_REPORT_CODE_ONLY` | unset | Same, for `code_only`. `1`/`true`/`yes`/`on` enable it; anything else reads as absent. |
-| `TRUSTY_ANALYZE_SOCKET` | derived from the data dir | Analyzer socket path, honoured by `trusty-audit`'s guard. `TRUSTY_ANALYZER_PORT` was removed with the listener (#6287). |
+| `TRUSTY_ANALYZE_SOCKET` | derived from the data dir | Analyzer socket path: `serve` binds it and every client dials it; a `--socket` flag wins (#10365). `TRUSTY_ANALYZER_PORT` was removed with the listener (#6287). |
 | `RUST_LOG` | `warn` | Tracing filter |
 
 ## Feature Flags

@@ -10,7 +10,6 @@
 //! Test: this module is the test.
 
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -76,21 +75,13 @@ impl Blocked {
             real_git().display()
         );
         let wrapper = bin.join("git");
-        std::fs::write(&wrapper, script).expect("write git wrapper");
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        // A sibling test's fork can briefly hold the new script's write fd
-        // (ETXTBSY), so wait until the wrapper runs before any load uses it.
-        let runs = (0..50).any(|_| {
-            let ok = Command::new(&wrapper)
-                .arg("--version")
-                .current_dir(&bin)
-                .output()
-                .is_ok_and(|o| o.status.success());
-            if !ok {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            ok
-        });
+        // See #10248: written by a child, so no fork can make it busy.
+        trusty_common::exec_stub::write_executable(&wrapper, script).expect("write git wrapper");
+        let runs = Command::new(&wrapper)
+            .arg("--version")
+            .current_dir(&bin)
+            .output()
+            .is_ok_and(|o| o.status.success());
         assert!(runs, "the git wrapper never ran");
         Self {
             repos,

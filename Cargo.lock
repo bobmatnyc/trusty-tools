@@ -2099,9 +2099,9 @@ checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -5451,9 +5451,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.28"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "libc",
@@ -11047,7 +11047,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11150,7 +11150,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -11163,7 +11163,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-channels"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11262,7 +11262,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.65.1"
+version = "0.67.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11433,7 +11433,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -11564,7 +11564,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.36.0"
+version = "0.36.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11834,7 +11834,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

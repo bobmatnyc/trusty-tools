@@ -52,11 +52,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::memory::checked_rpc::call_with_timeout;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
+use trusty_common::memory_rpc::MemoryRpcError;
 use uuid::Uuid;
 
 use crate::memory::redb_usearch::RedbUsearchStore;
@@ -145,7 +146,7 @@ impl TrustyMemoryClient {
 
     /// One RPC call on this client's socket.
     async fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
-        call_memory_tool_at_with_timeout(&self.socket, method, params, timeout).await
+        call_with_timeout(&self.socket, method, params, timeout).await
     }
 
     /// Probe `memory.health`. Returns true when the daemon answers.
@@ -157,9 +158,32 @@ impl TrustyMemoryClient {
     /// moved it onto the method `trusty-console` and `tctl` dial, so all three
     /// now agree by construction.
     pub async fn health_check(&self) -> bool {
+        match self.probe_health().await {
+            Ok(()) => true,
+            Err(e) => {
+                // #9538: a protocol refusal is not "daemon down". Name it, so an
+                // operator is not told the daemon is unreachable while it runs.
+                if e.downcast_ref::<trusty_common::memory_rpc::MemoryProtocolError>()
+                    .is_some()
+                {
+                    tracing::warn!(
+                        socket = %self.socket.display(),
+                        "trusty-memory daemon refused: {e:#}; falling back to the embedded local backend"
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    /// The `memory.health` call behind [`Self::health_check`], error intact.
+    ///
+    /// Why (#9538): lets a caller tell a protocol refusal from a transport failure.
+    /// Test: `health_check_names_an_unsupported_protocol_and_auto_detect_falls_back`.
+    async fn probe_health(&self) -> Result<()> {
         self.call("memory.health", json!({}), HEALTH_TIMEOUT)
             .await
-            .is_ok()
+            .map(|_| ())
     }
 
     /// Build the namespaced id used to address a record on the daemon.

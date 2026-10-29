@@ -365,3 +365,74 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnLog {
         self.0.lock().expect("warn log").push(text);
     }
 }
+
+/// A router answering `memory.protocol` with `version` and counting every
+/// `memory.status` that reaches its handler.
+fn counting_status(version: u64, hits: Arc<AtomicU64>) -> RpcRouter {
+    answering(json!({ "protocol_version": version })).typed::<Value, Value, _, _>(
+        "memory.status",
+        move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            async { Ok(json!({ "ok": true })) }
+        },
+    )
+}
+
+/// Why (#9538): every caller of the shared client must refuse an unsupported
+/// daemon, not only the ones that remembered a wrapper.
+/// What: a daemon on protocol 99 answers `memory.status`; the checked call
+/// returns a downcastable `MemoryProtocolError::Unsupported`, the method never
+/// reaches the handler, and the context still names the method. The raw call
+/// is the only way past it.
+/// Test: itself.
+#[tokio::test]
+async fn a_memory_call_is_refused_when_the_daemon_speaks_an_unsupported_protocol() {
+    let hits = Arc::new(AtomicU64::new(0));
+    let fake = serve(counting_status(99, Arc::clone(&hits)));
+
+    for err in [
+        call_memory_tool_at(&fake.socket, "memory.status", json!({}))
+            .await
+            .expect_err("protocol 99 is refused"),
+        call_memory_tool_at_with_timeout(&fake.socket, "memory.status", json!({}), BUDGET)
+            .await
+            .expect_err("protocol 99 is refused"),
+    ] {
+        assert!(
+            matches!(
+                err.downcast_ref::<MemoryProtocolError>(),
+                Some(MemoryProtocolError::Unsupported { daemon: 99, .. })
+            ),
+            "{err:?}"
+        );
+        assert!(format!("{err:#}").contains("call memory.status"), "{err:#}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the call must not be sent");
+
+    call_memory_tool_at_raw_with_timeout(&fake.socket, "memory.status", json!({}), BUDGET)
+        .await
+        .expect("the raw call skips the check");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// Why (#9538): the door must not break a supported daemon, and the handshake
+/// must not recurse into the door.
+/// What: a supported daemon is called through the checked path; asking for
+/// `memory.protocol` itself answers the body even when it reports protocol 99.
+/// Test: itself.
+#[tokio::test]
+async fn a_supported_daemon_is_called_and_the_handshake_method_is_not_checked() {
+    let hits = Arc::new(AtomicU64::new(0));
+    let supported = *SUPPORTED_MEMORY_PROTOCOLS.end();
+    let fake = serve(counting_status(supported, Arc::clone(&hits)));
+    call_memory_tool_at(&fake.socket, "memory.status", json!({}))
+        .await
+        .expect("a supported daemon is called");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let future = serve(answering(json!({ "protocol_version": 99 })));
+    let body = call_memory_tool_at(&future.socket, METHOD_PROTOCOL, json!({}))
+        .await
+        .expect("the handshake method itself is never checked");
+    assert_eq!(body["protocol_version"], 99);
+}

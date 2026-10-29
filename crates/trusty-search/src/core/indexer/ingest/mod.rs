@@ -17,6 +17,7 @@ pub(crate) mod commit;
 // #9230: an incremental commit stamps the corpus's reindex stamp.
 pub(crate) mod commit_stamp;
 pub(crate) mod deferred;
+pub(crate) mod deferred_stream;
 pub(crate) mod embed;
 // #8976: what one `index_file` write did, so zero chunks never read as success.
 pub(crate) mod outcome;
@@ -857,6 +858,8 @@ impl CodeIndexer {
     /// What: threads `pause` into `embed_chunks_in_batches`, which stops at the
     /// next wave and leaves the tail `None`. Only the embedded PREFIX is
     /// committed, so those vectors are durable and the next pass skips them.
+    /// #10294: each wave is committed before the next starts, and the vector
+    /// snapshot is written on a cadence and on exit (`deferred_stream`).
     /// `paused` in the returned [`EmbedCatchUp`] tells the caller the pass owes
     /// more work — it must not be reported as a completed stage. `pause: None`
     /// is the un-pausable form every caller used before #6524.
@@ -873,11 +876,9 @@ impl CodeIndexer {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> anyhow::Result<EmbedCatchUp> {
-        // #8600: the three phases `run_embed_catch_up` runs with the indexer
-        // guard dropped between them, here under one borrow.
-        let plan = self.plan_deferred_embed().await;
-        let run = plan.embed(progress_tx, pause).await?;
-        self.commit_deferred_embed(plan, run).await
+        // #10294: the per-wave driver `run_embed_catch_up` uses, here under
+        // one borrow instead of a read guard per phase.
+        deferred_stream::run_deferred_embed(|| std::future::ready(self), progress_tx, pause).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

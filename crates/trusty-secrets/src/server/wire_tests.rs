@@ -22,6 +22,10 @@ use crate::server::router::serving_ends;
 #[path = "flag_tests.rs"]
 mod flag_tests;
 
+// #10386: agents use keys by default; operator-only methods stay refused.
+#[path = "agent_default_tests.rs"]
+mod agent_default_tests;
+
 // #9066: S3a, the console bridge's verdict; it shares this module's helpers.
 #[path = "bridge_tests.rs"]
 mod bridge_tests;
@@ -50,17 +54,17 @@ fn me() -> u32 {
     std::process::id()
 }
 
-/// Seed `name` = `value` in the project vault, flagged "agents may use"
-/// when `flagged`.
-fn seed(fx: &Fixture, name: &str, value: &str, flagged: bool) {
+/// Seed `name` = `value` in the project vault; when `open` is false the
+/// key is denied to agents (#10386).
+fn seed(fx: &Fixture, name: &str, value: &str, open: bool) {
     let store = SecretStore::new(
         Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
         NamesIndex::at(&fx.settings.index_root),
     );
     let (web, name) = (vault(PROJECT_VAULT), key(name));
     store.set(&web, &name, &SecretValue::new(value)).unwrap();
-    if flagged {
-        store.set_agents_may_use(&web, &name, true).unwrap();
+    if !open {
+        store.set_agents_may_use(&web, &name, false).unwrap();
     }
 }
 
@@ -211,7 +215,7 @@ async fn resolve_without_grant_returns_no_value_and_one_deny_record() {
 /// minted and the refusal is audited with the key.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grant_by_agent_ancestor_cannot_name_unflagged_key() {
+async fn grant_by_agent_ancestor_cannot_name_denied_key() {
     let fx = fixture();
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
@@ -229,7 +233,7 @@ async fn grant_by_agent_ancestor_cannot_name_unflagged_key() {
 
     assert_eq!(
         fixed_error(&refused, method::GRANT),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert!(refused.result.is_none());
     assert_eq!(grants.has_unexpired(), Ok(false), "nothing was minted");
@@ -240,7 +244,7 @@ async fn grant_by_agent_ancestor_cannot_name_unflagged_key() {
         (
             AuditMethod::Grant,
             AuditDecision::Deny,
-            Some("agent_use_refused"),
+            Some("agent_key_denied"),
             Some("API_KEY")
         )
     );
@@ -251,7 +255,7 @@ async fn grant_by_agent_ancestor_cannot_name_unflagged_key() {
 /// its own process then resolves it.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grant_by_agent_ancestor_may_name_a_flagged_key() {
+async fn grant_by_agent_ancestor_may_name_an_open_key() {
     let fx = fixture();
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
     let procs = procs_with_me();
@@ -457,7 +461,7 @@ async fn resolve_sentinel_never_reaches_the_audit_file_or_logs() {
 /// Red when `resolve` uses only the grant's `agent_parent`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resolve_by_agent_descendant_of_unflagged_grant_is_refused() {
+async fn resolve_by_agent_descendant_of_denied_key_is_refused() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
     let procs = procs_with_me();
@@ -475,7 +479,7 @@ async fn resolve_by_agent_descendant_of_unflagged_grant_is_refused() {
 
     assert_eq!(
         fixed_error(&response, method::RESOLVE),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert_no_value(&response);
     let resolves: Vec<_> = records(&fx)
@@ -496,7 +500,7 @@ async fn resolve_by_agent_descendant_of_unflagged_grant_is_refused() {
             (
                 AuditMethod::Resolve,
                 AuditDecision::Deny,
-                Some("agent_use_refused"),
+                Some("agent_key_denied"),
                 Some("API_KEY")
             ),
         ]
@@ -749,17 +753,26 @@ impl SecretBackend for RacingGet {
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         self.inner.delete(vault, key)
     }
-    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        self.inner.agents_may_use(vault, key)
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
     }
-    fn set_agents_may_use(
+    fn control_item(
         &self,
+        item: ControlItem,
         vault: &VaultName,
-        key: &SecretKey,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
         allowed: bool,
     ) -> Result<(), SecretsError> {
-        self.inner.set_agents_may_use(vault, key, allowed)
+        self.inner.set_control_item(item, vault, key, allowed)
     }
 }
 

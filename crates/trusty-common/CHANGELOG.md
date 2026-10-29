@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.67.1] — 2026-10-29
+
+### Security
+
+- The workspace lockfile moves libz-sys from 1.1.28 to 1.1.31, fixing RUSTSEC-2026-0418 (libz-sys build script leaks environment variables in the build directory), which failed the pre-publish `cargo audit` and `cargo deny` gates.
+- 0.67.0 was tagged (`trusty-common-v0.67.0`) but never published to crates.io, and its tag cannot move. 0.67.1 carries the 0.67.0 changes and is the first published release of that line.
+
+## [0.67.0] — 2026-10-29
+
+### Breaking
+
+- The `memory-core` feature, a no-op since the Memory Palace engine moved to trusty-memory in 0.64.0, is removed. A manifest that still names `trusty-common/memory-core` no longer resolves: drop it, depend on `trusty-memory` for the engine, and name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly for what it used to imply ([#9272](https://github.com/bobmatnyc/trusty-tools/issues/9272))
+
+### Added
+
+- `credentials::resolve_env_var_bounded_store_first` and its hermetic core `resolve_provider_bounded_store_first_with` resolve a credential from the bounded store first, then the process environment (which reflects `.env.local`). A store read failure is returned as `Timeout` or `Store`, never answered from the environment. `resolve_env_var_bounded` keeps its env-first order (#9936).
+- `exec_stub::write_executable(path, contents)` writes a mode-0755 executable through a `/bin/cp` child, so this process never holds a write fd to it and a sibling fork cannot make the later exec fail with ETXTBSY. Every test that writes and then execs a stub uses it (#10248).
+- `stdio_mcp_client::capped_line::read_capped_line`, the cancel-safe 16 MiB-capped line reader, is public, with `MAX_LINE_BYTES` and `log_field`, so other stdio JSON-RPC clients share the same framing rules (#10360).
+
+### Fixed
+
+- `memory_rpc::call_memory_tool_at_with_timeout` (and so `call_memory_tool`, `call_memory_tool_at`, the monitor memory client and catch-up `fetch_recent_palace_drawers`) now runs the cached `memory.protocol` check before every call and refuses a daemon from another release with a downcastable `MemoryProtocolError` instead of misreading its replies. The check costs at most one extra round trip per socket per ten seconds; on a cache miss the handshake and the call each get the full timeout, so the worst case is twice the budget. Added `call_memory_tool_at_raw_with_timeout`, the explicit unchecked call for the handshake itself and for a probe that must report rather than refuse (#9538).
+- `claude_config::write_json_atomic` keeps an existing file's permission bits, creates a new file at 0600, and creates its staging file at 0600 before any byte is written. It used to publish every rewrite at the umask default, so a `.claude.json` tightened to 0600 went back to 0644 on the next write (#10041).
+- `StdioMcpClient` keeps the partial bytes of a stdout line when a call times out mid-line, so the next call resumes that line instead of failing with "parsing JSON-RPC frame" on its tail. A skipped frame that carries the awaited id now logs at `warn` with its id and method (#10360).
+- `stdio_mcp_client::is_response_to` is now public, so other stdio JSON-RPC clients apply the same response rule (#10360).
+- `StdioMcpClient` caps a buffered stdout line at 16 MiB. A longer line fails the call with an error naming the cap, and its remaining bytes are discarded up to the next newline. Logged frame ids, methods and unparsable lines are cut to 64 characters (#10360).
+- `StdioMcpClient` returns a frame as a call's result only when it is a response (`result` or `error`, no `method`) to the in-flight request id. A server request such as `roots/list` that reused the id was returned as the result, and `respawn` restarted ids at 1, so a frame carrying an id from the earlier process lifetime matched a request of the new one. Ids now keep counting across a respawn (#10360).
+
+## [0.66.0] — 2026-10-26
+
+### Breaking
+
+- `embedder_client::RecycleTrigger` gains the `HardFootprint` variant and `RecycleSnapshot` gains the `hard_footprint_kills` field (#10207); an exhaustive `match` on the enum or a struct literal of the snapshot outside this crate no longer compiles. `RecycleConfig` gains `hard_footprint_mb` and `startup_load_scale_max` (it is `#[non_exhaustive]`, so no caller breaks).
+
+### Added
+
+- `uds::send_framed_stream_request_with(path, request, open_timeout, frame_timeout)` takes separate budgets for the dial and request write and for each frame read. `send_framed_stream_request` and `send_framed_stream_request_capped` keep their signatures and pass their one figure to both (#7216).
+- `uds::test_support::bind_hardened_stub(dir)`, behind the new `uds-test-support` feature, binds a test stub at `dir/stub.sock` with `dir` at `0700` and the socket at `0600`, so `connect_hardened` accepts it. It returns `Result<(UnixListener, PathBuf), UdsSecurityError>` (#7215).
+- `embedder_client::SupervisorConfig::first_spawn_probe_timeout(load_per_cpu)` returns the load-scaled first-spawn startup-probe timeout, for a caller that wraps the first spawn in its own timeout (#10207).
+- `claude_config::discover_claude_settings_with(home, depth, on_home_device)` runs the settings walk with the device check supplied as a predicate; `HOME_SKIP_DIRS` and `same_device` are public alongside it ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Fixed
+
+- `EmbedderSupervisor` bounds the sidecar footprint when a footprint recycle cannot start its replacement (#10207). A hard limit, `TRUSTY_EMBEDDERD_RECYCLE_HARD_FOOTPRINT_MB` (default twice the recycle ceiling, `0` disables, a value not above the ceiling is ignored with a WARN), is checked on every recycle tick, during a recycle back-off hold, and while a replacement is starting. Over it, the sidecar is killed through the crash path and respawned with no back-off delay; the kill counts toward `TRUSTY_EMBEDDERD_MAX_RESTARTS` (not as a wedge restart), and `/health` `embedder_recycle.hard_footprint_kills` counts it.
+- The sidecar startup probe scales with host load: the timeout is multiplied by `1 + load1/ncpu`, capped by `TRUSTY_EMBEDDERD_STARTUP_LOAD_SCALE_MAX` (default 4), and a recycle replacement or crash respawn gets at least 120 s before scaling (#10207).
+- New `sys_metrics::load_per_cpu()` returns the one-minute load average per CPU.
+- Every failed sidecar footprint read counts in `/health` `embedder_recycle.footprint_read_errors`, including reads during a recycle back-off hold, on a generation's first tick, and while a replacement is starting, so a hard limit that cannot read the sidecar is visible (#10207). A startup timeout too large to scale (for example a huge `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`) is used unscaled instead of panicking.
+- `discover_claude_settings` and `discover_claude_projects` no longer enter `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Pictures`, `~/Movies` or `~/Music`, and never cross onto another device; a directory whose device cannot be read is skipped. A read in an iCloud-synced folder could freeze the walk ([#10267](https://github.com/bobmatnyc/trusty-tools/issues/10267))
+
+### Documentation
+
+- `daemon_token`'s module docs describe `trusty-code serve --http` as retired rather than as a running listener ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+
 ## [0.65.0] — 2026-10-22
 
 ### Breaking

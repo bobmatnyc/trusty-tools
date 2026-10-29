@@ -1,7 +1,7 @@
 //! #8761 regression tests: a deferred-embed commit must not give a removed or
 //! edited chunk its snapshot vector.
 //!
-//! Why: `plan_deferred_embed` snapshots the owed chunks and the embed phase
+//! Why: `plan_deferred_group` snapshots the owed chunks and the embed phase
 //! holds no lock (#8600), so `remove_file` can run between snapshot and commit.
 //! The commit upserted every snapshot vector, re-inserting orphans for deleted
 //! files that no removal path reclaims.
@@ -139,6 +139,15 @@ async fn has_vector(idx: &CodeIndexer, id: &str) -> bool {
     idx.store.as_ref().expect("store").contains(id).await
 }
 
+/// One wave holding every owed chunk — these fixtures stage a handful.
+async fn plan_all(idx: &CodeIndexer) -> DeferredEmbedPlan {
+    let mut pass = idx.plan_deferred_pass().await;
+    idx.plan_deferred_group(&mut pass, usize::MAX)
+        .await
+        .expect("load the owed chunks")
+        .expect("chunks are owed")
+}
+
 const A: (&str, &str, &str) = ("a", "src/a.rs", "fn removed() {}");
 const C: (&str, &str, &str) = ("c", "src/c.rs", "fn kept() {}");
 
@@ -148,8 +157,11 @@ const C: (&str, &str, &str) = ("c", "src/c.rs", "fn kept() {}");
 async fn a_file_removed_or_edited_during_the_embed_phase_gets_no_vector() {
     let idx = make_indexer();
     stage(&idx, &[A, ("b", "src/b.rs", "fn edited() {}"), C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     idx.remove_file("src/a.rs").await.expect("remove a");
     stage(&idx, &[("b", "src/b.rs", "fn edited_again() {}")]).await;
@@ -189,8 +201,11 @@ async fn a_file_removed_or_edited_during_the_embed_phase_gets_no_vector() {
 async fn a_file_removed_during_the_upsert_has_its_vector_evicted() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
     let (committed, ()) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
@@ -215,8 +230,11 @@ async fn a_file_removed_during_the_upsert_has_its_vector_evicted() {
 async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.after_remove.arm();
     let (removed, committed) = tokio::join!(idx.remove_file("src/a.rs"), async {
@@ -241,8 +259,11 @@ async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
 async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.after_remove.arm();
     let ids = ["a".to_string()];
@@ -267,8 +288,11 @@ async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
 async fn a_failed_eviction_after_the_upsert_is_an_error() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
     let (committed, ()) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
@@ -287,8 +311,11 @@ async fn a_failed_eviction_after_the_upsert_is_an_error() {
 async fn one_failed_eviction_does_not_stop_the_others() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, ("b", "src/b.rs", "fn also_removed() {}"), C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
     let (committed, ()) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
@@ -339,8 +366,11 @@ async fn commit_refuses_when_the_chunk_map_cannot_be_rehydrated() {
     let dir = tempfile::tempdir().unwrap();
     let (idx, _gated) = gated_indexer(Some(&dir.path().join("index.redb")));
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let _unreadable = make_corpus_unreadable(&idx).await;
     // #8761: a regression that records no fault would otherwise wait 300 s.
@@ -366,8 +396,11 @@ async fn post_upsert_check_refuses_when_the_chunk_map_cannot_be_rehydrated() {
     let dir = tempfile::tempdir().unwrap();
     let (idx, gated) = gated_indexer(Some(&dir.path().join("index.redb")));
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
     // #8761: a regression that records no fault would otherwise wait 300 s.
@@ -413,8 +446,11 @@ impl Drop for SlowRehydrate {
 async fn embedded_pass(dir: &std::path::Path) -> (CodeIndexer, DeferredEmbedPlan, EmbedRun) {
     let (idx, _gated) = gated_indexer(Some(&dir.join("index.redb")));
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
     (idx, plan, run)
 }
 
@@ -425,10 +461,13 @@ async fn an_embed_pass_keeps_the_chunk_map_from_idle_eviction() {
     let dir = tempfile::tempdir().unwrap();
     let (idx, _gated) = gated_indexer(Some(&dir.path().join("index.redb")));
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
+    let plan = plan_all(&idx).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let _run = plan.embed(None, None).await.expect("embed");
+    let _run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     assert_eq!(
         idx.evict_chunks_if_idle(Duration::from_millis(250)).await,
@@ -614,8 +653,11 @@ async fn a_reclaim_between_the_wait_and_the_post_upsert_read_is_waited_out() {
     let (idx, gated) = gated_indexer(Some(&dir.path().join("index.redb")));
     let idx = Arc::new(idx);
     stage(&idx, &[A, C]).await;
-    let plan = idx.plan_deferred_embed().await;
-    let run = plan.embed(None, None).await.expect("embed");
+    let plan = plan_all(&idx).await;
+    let run = plan
+        .embed(None, None, &mut plan.embed_state())
+        .await
+        .expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
     let commit = tokio::time::timeout(

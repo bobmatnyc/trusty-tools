@@ -1,2 +1,0 @@
-Changed
-- The `tm-memory-import` skill states what the pm-guard allows under #9794 and owner ruling D61: the dry runs of steps 1, 2 and 4, the `review record|status|finish` forms and the step-5 `--review-ledger` import, as one-line plain-word commands with an optional `2>&1 | tee` into the review root or the session scratchpad. GO, not the guard, holds the step-5 import back. `--python`, `--help` and a `--from` store path stay denied.

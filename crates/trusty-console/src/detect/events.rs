@@ -258,13 +258,17 @@ mod tests {
 
     /// Why (#10042): a socket file a crashed daemon left behind must not read as
     /// a live bus.
-    /// What: a socket whose listener is gone observes `Stale`.
+    /// What: a socket file with nothing listening on it observes `Stale`.
     /// Test: this is the test.
     #[test]
     fn a_stale_socket_is_observed_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("trusty-events.sock");
-        drop(std::os::unix::net::UnixListener::bind(&path).expect("bind"));
+        // #10323: bind but never listen. A dropped listener stayed open in any
+        // child a sibling test forked before its exec, so the probe connected.
+        let socket = tokio::net::UnixSocket::new_stream().expect("socket");
+        socket.bind(&path).expect("bind");
+        drop(socket);
         assert_eq!(observe_socket(&path), SocketState::Stale);
     }
 

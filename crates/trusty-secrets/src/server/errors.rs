@@ -70,8 +70,9 @@ pub enum ErrorKind {
     HomeUnavailable = 14,
     /// `copy` named the same backend twice.
     SameBackend = 15,
-    /// An agent-parent process asked for a key not flagged "agents may use".
+    /// An agent-parent process called an operator-only method (#10386).
     // #7525: its own kind so a refusal never reads as a miss or a failure.
+    // #10459: a denied key is `AgentKeyDenied` now.
     AgentUseRefused = 16,
     /// An env-map entry broke a rule before any resolution started.
     InvalidEnvEntry = 17,
@@ -135,11 +136,16 @@ pub enum ErrorKind {
     // #9066: the next unused value; its own kind, so it never reads as a
     // grant or agent refusal.
     BridgeRefused = 36,
+    /// An agent-parent process asked to read or write a key the operator
+    /// denied to agents.
+    // #10459: split from `AgentUseRefused` (reverses #10386 Q6), so a
+    // refusal names which rule applied.
+    AgentKeyDenied = 37,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -177,6 +183,7 @@ impl ErrorKind {
         Self::GrantRefused,
         Self::GrantLimitReached,
         Self::BridgeRefused,
+        Self::AgentKeyDenied,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -225,6 +232,7 @@ impl ErrorKind {
             Self::GrantRefused => "grant_refused",
             Self::GrantLimitReached => "grant_limit_reached",
             Self::BridgeRefused => "bridge_refused",
+            Self::AgentKeyDenied => "agent_key_denied",
             Self::Internal => "internal",
         }
     }
@@ -252,8 +260,12 @@ impl ErrorKind {
             Self::ConfigInvalid => "a `secrets:` config section is invalid",
             Self::HomeUnavailable => "the home directory is unavailable",
             Self::SameBackend => "the source and destination backends are the same",
+            // #10459: a denied key has its own kind, `AgentKeyDenied`.
             Self::AgentUseRefused => {
-                "the key is not flagged \"agents may use\"; refused under a Claude Code parent"
+                "this operation is operator-only; a process under Claude Code may not call it"
+            }
+            Self::AgentKeyDenied => {
+                "the operator denied this key to agents (per-key deny); a process under Claude Code may not read or write it"
             }
             Self::InvalidEnvEntry => "an env-map entry is invalid",
             Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",
@@ -374,6 +386,8 @@ impl ErrorKind {
             Self::GrantLimitReached => -32083,
             // #9066: the next unused code.
             Self::BridgeRefused => -32084,
+            // #10459: the next unused code.
+            Self::AgentKeyDenied => -32085,
         }
     }
 
@@ -424,13 +438,14 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
             SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
             SecretsError::Timeout { .. } => Self::BackendTimeout,
-            SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
+            // #10459: the store raises it only for a per-key deny.
+            SecretsError::AgentUseRefused { .. } => Self::AgentKeyDenied,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.
             SecretsError::EnvResolution { source, .. }
                 if matches!(*source, SecretsError::AgentUseRefused { .. }) =>
             {
-                Self::AgentUseRefused
+                Self::AgentKeyDenied
             }
             // #9328: likewise an out-of-scope pinned reference.
             SecretsError::EnvResolution { source, .. }
@@ -445,6 +460,8 @@ impl From<SecretsError> for ErrorKind {
             // not apply, so a new `SecretsError` variant fails the build here
             // until it is given a kind.
             SecretsError::HomeUnavailable => Self::HomeUnavailable,
+            // #10386: a deny change whose write-ahead record failed.
+            SecretsError::AuditUnavailable => Self::AuditUnavailable,
         }
     }
 }

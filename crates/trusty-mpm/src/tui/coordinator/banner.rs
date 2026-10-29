@@ -270,8 +270,14 @@ pub async fn probe_memory(socket: Option<&Path>) -> ProbeOutcome {
             resolved.as_path()
         }
     };
-    if !health_ok_at(socket).await {
-        return ProbeOutcome::unreachable(Some("memory daemon down".to_string()));
+    if let Err(e) = health_ok_at(socket).await {
+        // #9538: a protocol mismatch is reported with its reason, not as "down".
+        return ProbeOutcome::unreachable(Some(
+            match crate::core::memory_checked::protocol_mismatch(&e) {
+                Some(_) => format!("memory protocol mismatch: {e:#}"),
+                None => "memory daemon down".to_string(),
+            },
+        ));
     }
     if ensure_user_palace_at(socket).await {
         ProbeOutcome::active(Some(format!("palace: {USER_PALACE}")))
@@ -281,15 +287,15 @@ pub async fn probe_memory(socket: Option<&Path>) -> ProbeOutcome {
 }
 
 /// Does the trusty-memory daemon answer at all?
-async fn health_ok_at(socket: &Path) -> bool {
-    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+async fn health_ok_at(socket: &Path) -> anyhow::Result<()> {
+    crate::core::memory_checked::call_with_timeout(
         socket,
         "memory.health",
         serde_json::json!({}),
         PROBE_TIMEOUT,
     )
     .await
-    .is_ok()
+    .map(|_| ())
 }
 
 /// Ensure the fixed `user` palace exists, creating it ONLY when the daemon says
@@ -308,7 +314,7 @@ async fn health_ok_at(socket: &Path) -> bool {
 /// that succeeded; any other error → `false` without creating.
 /// Test: `ensure_user_palace_creates_only_on_not_found`.
 pub(super) async fn ensure_user_palace_at(socket: &Path) -> bool {
-    let err = match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    let err = match crate::core::memory_checked::call_with_timeout(
         socket,
         "memory.palace_get",
         serde_json::json!({ "palace_id": USER_PALACE }),
@@ -327,7 +333,7 @@ pub(super) async fn ensure_user_palace_at(socket: &Path) -> bool {
         return false;
     }
 
-    trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    crate::core::memory_checked::call_with_timeout(
         socket,
         "palace_create",
         serde_json::json!({ "name": USER_PALACE, "force": true }),

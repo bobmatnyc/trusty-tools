@@ -5,7 +5,8 @@
 //! and any `safe.directory` config still apply.
 //! What: `list_branches` (libgit2); `create_branch` and `checkout`
 //! (`git -C root ...`).
-//! Test: List against trusty-agents's repo asserts `main` is present.
+//! Test: `list_branches_includes_current` lists a temporary repo and asserts
+//! `main` is the current branch.
 
 use std::path::Path;
 
@@ -137,16 +138,29 @@ mod tests {
 
     #[test]
     fn list_branches_includes_current() {
-        let cwd = std::env::current_dir().unwrap();
-        let repo = GitRepo::open(&cwd).unwrap();
+        // #9619: build a private repo with a local `main` so the test does
+        // not depend on the ambient checkout (detached HEAD, no `.git`).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw = git2::Repository::init(dir.path()).expect("init repo");
+        raw.set_head("refs/heads/main").expect("point HEAD at main");
+        let sig = git2::Signature::now("test", "test@example.com").expect("signature");
+        let tree_id = raw
+            .index()
+            .expect("index")
+            .write_tree()
+            .expect("write tree");
+        let tree = raw.find_tree(tree_id).expect("find tree");
+        raw.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .expect("initial commit");
+
+        let repo = GitRepo::open(dir.path()).expect("open temp repo");
         let branches = list_branches(&repo, false).expect("list local branches");
-        assert!(!branches.is_empty());
-        // trusty-agents has `main` as one of its branches.
-        assert!(
-            branches.iter().any(|b| b.name == "main"),
-            "expected `main` branch in {:?}",
-            branches.iter().map(|b| &b.name).collect::<Vec<_>>()
-        );
+        let current: Vec<&str> = branches
+            .iter()
+            .filter(|b| b.is_current)
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(current, vec!["main"], "all branches: {branches:?}");
     }
 
     #[tokio::test]

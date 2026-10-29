@@ -1,10 +1,11 @@
 /*
  * Why: #9067 — a refusal must never render blank. The console relays a
- * server refusal as `{"error": <fixed text>, "kind": <kind>}` only for the 37
+ * server refusal as `{"error": <fixed text>, "kind": <kind>}` only for the 38
  * kinds in its closed table (crates/trusty-console/src/secrets_uds/errors.rs
  * `UPSTREAM_KINDS`); its own refusals carry `error` and no `kind`.
  * What: `KIND_TEXT`, one sentence per upstream kind; `AGENT_HINT`, the one
- * extra line an `agent_use_refused` gets (Architect P4); `errorLines(err)`,
+ * extra line an `agent_use_refused` or `agent_key_denied` gets (Architect P4,
+ * #10459); `errorLines(err)`,
  * the lines to show for an error, never empty.
  * Test: `src/lib/kinds.test.js`; `page_kind_texts_cover_every_upstream_kind`
  * in secrets_uds/tests.rs pins the key set to `UPSTREAM_KINDS`.
@@ -27,7 +28,7 @@ export const KIND_TEXT = {
   config_invalid: 'The secrets configuration is not valid.',
   home_unavailable: 'The secrets server cannot find its home directory.',
   same_backend: 'Copy needs two different backends.',
-  agent_use_refused: 'The secrets server refused to let agents use this key for this caller.',
+  agent_use_refused: 'This operation is operator-only for agents.',
   invalid_env_entry: 'An environment entry is not valid.',
   env_resolution_failed: 'An environment entry could not be resolved.',
   dotenv_syntax: 'A .env file has a syntax error.',
@@ -47,10 +48,11 @@ export const KIND_TEXT = {
   grant_refused: 'The secrets server refused the grant.',
   grant_limit_reached: 'The grant limit was reached.',
   bridge_refused: 'The secrets server refused the console bridge.',
+  agent_key_denied: 'The operator denied this key to agents (per-key deny).',
   internal: 'The secrets server failed.',
 };
 
-/** The hint an `agent_use_refused` adds (Architect P4): no pid, no path. */
+/** The hint an agent refusal adds (Architect P4): no pid, no path. */
 export const AGENT_HINT =
   'The console could not map the caller to a person and treated it as an agent.';
 
@@ -68,7 +70,8 @@ function statusText(status) {
 export function errorLines(err) {
   const kind = typeof err?.kind === 'string' ? err.kind : null;
   if (kind && Object.hasOwn(KIND_TEXT, kind)) {
-    return kind === 'agent_use_refused' ? [KIND_TEXT[kind], AGENT_HINT] : [KIND_TEXT[kind]];
+    const agent = kind === 'agent_use_refused' || kind === 'agent_key_denied';
+    return agent ? [KIND_TEXT[kind], AGENT_HINT] : [KIND_TEXT[kind]];
   }
   const fixed = typeof err?.error === 'string' && err.error.trim() !== '' ? err.error : null;
   if (fixed) return [kind ? `${fixed} (${kind})` : fixed];

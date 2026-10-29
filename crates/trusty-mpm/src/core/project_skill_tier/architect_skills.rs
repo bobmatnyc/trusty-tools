@@ -125,7 +125,11 @@ const STRATEGY: ShippedSkill = ShippedSkill {
 const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
     stem: "architect-project-provision",
     // #10263: the D2 text, before hook commands named an interpreter (D73).
-    previous: &["102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8"],
+    // #10277: the D73 text, before the board step moved to `tm issue board add`.
+    previous: &[
+        "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
+        "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
+    ],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.

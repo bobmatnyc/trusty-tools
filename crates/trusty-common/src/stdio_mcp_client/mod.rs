@@ -22,7 +22,11 @@
 
 // Module layout: types + helpers + Drop + JSON-RPC builders live here;
 // the `impl StdioMcpClient` request methods live in `client.rs`.
+pub mod capped_line;
 mod client;
+pub use client::{is_response_to, log_field};
+#[cfg(test)]
+mod frame_tests;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -164,6 +168,16 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// fast (< 5s) rather than blocking the full timeout when respawn fails.
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Largest stdout line `read_line` buffers, in bytes (16 MiB).
+///
+/// Why: #10360 — `line_buf` persists across calls, so a child that streams
+/// without a newline would otherwise grow it until memory runs out. 16 MiB
+/// is far above any real MCP frame and small enough to hold per client.
+/// What: a line that would pass this size fails the call; its remaining
+/// bytes are discarded up to the next newline.
+/// Test: `oversized_line_errors_and_next_call_skips_its_tail`.
+pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Server identification returned from a successful `initialize` response.
 ///
 /// Why: Callers want to log which server they connected to and verify the
@@ -204,6 +218,12 @@ pub struct StdioMcpClient {
     pub(super) child: Child,
     pub(super) stdin: BufWriter<ChildStdin>,
     pub(super) stdout: BufReader<ChildStdout>,
+    /// #10360: bytes of a stdout line not yet terminated by `\n`. Kept across
+    /// calls so a timeout that cancels a read mid-line loses nothing.
+    pub(super) line_buf: Vec<u8>,
+    /// #10360: set after a line passed `MAX_LINE_BYTES`; `read_line` drops
+    /// bytes up to the next `\n` before reading a frame.
+    pub(super) discard_line: bool,
     pub(super) next_id: AtomicU64,
     /// Original binary path used at spawn time, retained for respawn.
     pub(super) binary: String,

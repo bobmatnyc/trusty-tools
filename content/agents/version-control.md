@@ -180,7 +180,7 @@ leaves the remote ref stranded too.
 Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
 
-Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
+Fallback without `tm` (this path has no merge gate): (1) once `statusCheckRollup`
 lists a check (or the brief says the repo has no CI) and none failed or running
 that the brief does not waive, `gh pr merge <n> --squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`

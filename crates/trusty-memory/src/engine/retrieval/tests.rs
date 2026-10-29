@@ -21,7 +21,7 @@ use super::types::L1_CAP;
 /// Pre-seed the process-wide shared embedder with `MockEmbedder` so no
 /// HuggingFace download is attempted. Safe to call multiple times (no-op
 /// after the first invocation — `OnceCell` semantics). Issue #850.
-fn init_embedder() {
+pub(super) fn init_embedder() {
     seed_shared_embedder_with_mock();
 }
 
@@ -249,7 +249,7 @@ async fn cli_forget_removes_drawer() {
 /// not the in-memory `make_handle`, because the reopen assertion is the point.
 /// What: creates `<dir>/<id>` and opens a handle over it.
 /// Test: used by the `forget_*` tests below.
-fn open_disk_palace(dir: &std::path::Path, id: &str) -> (Palace, Arc<PalaceHandle>) {
+pub(super) fn open_disk_palace(dir: &std::path::Path, id: &str) -> (Palace, Arc<PalaceHandle>) {
     let palace = Palace {
         id: PalaceId::new(id),
         name: id.to_string(),

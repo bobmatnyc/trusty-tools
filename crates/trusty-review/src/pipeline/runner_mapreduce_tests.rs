@@ -330,10 +330,13 @@ async fn run_review_oversized_diff_mapreduce_reviews_tail_signature() {
         Verdict::Unknown,
         "over-cap diff must be REVIEWED via map-reduce, not failed-closed to UNKNOWN"
     );
+    // #10226 cond2: this diff's over-cap hunk makes the run partial, so it is
+    // Degraded and its APPROVE is capped at APPROVE_WITH_RESERVATIONS.
+    assert_eq!(result.status, ReviewStatus::Degraded);
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
-        "all chunks APPROVE → overall APPROVE"
+        Verdict::ApproveWithReservations,
+        "all chunks APPROVE on a partial run → APPROVE_WITH_RESERVATIONS"
     );
 }
 
@@ -1214,6 +1217,40 @@ async fn run_review_mapreduce_both_degraded_triggers_partial_coverage_reason_win
     );
 }
 
+/// #10226 cond2 (owner ruling D06): a Degraded map-reduce run whose chunks and
+/// synthesis all APPROVE emits APPROVE_WITH_RESERVATIONS, keeps its grade and
+/// keeps the NOT AUTHORITATIVE banner. The diff is fully covered, so the
+/// opted-out search is the only Degraded trigger; the healthy run stays APPROVE.
+#[tokio::test]
+async fn run_review_mapreduce_degraded_approve_is_capped_at_approve_with_reservations() {
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(false); // explicit opt-out (#590)
+    let run = |review_deps: fn(Arc<dyn LlmProvider>) -> ReviewDeps| {
+        let config = config.clone();
+        async move {
+            let (source, _tmp) = local_source(&chunked_diff());
+            let llm: Arc<dyn LlmProvider> = Arc::new(RecordingReviewer::approving());
+            run_review(&config, input(source), review_deps(llm)).await
+        }
+    };
+
+    let result = run(deps_with_failing_search).await;
+    assert_eq!(result.status, ReviewStatus::Degraded);
+    let err = result.error.clone().unwrap_or_default();
+    assert!(err.contains("degraded (non-authoritative)"), "{err}");
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
+    assert!(result.grade.is_some(), "grade must be kept: {result:?}");
+    assert!(
+        result.review_body.contains("NOT AUTHORITATIVE"),
+        "banner must be kept: {:?}",
+        result.review_body
+    );
+
+    let healthy = run(deps).await;
+    assert_eq!(healthy.status, ReviewStatus::Completed, "{healthy:?}");
+    assert_eq!(healthy.verdict, Verdict::Approve);
+}
+
 // ── #8904: every chunk's findings are verified ─────────────────────────────
 
 /// Files in [`chunked_diff`]; together they exceed the unified-path cap.
@@ -1583,7 +1620,14 @@ async fn run_review_mapreduce_synthesis_two_mediums_not_refloored() {
     let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
     assert_eq!(result.findings.len(), 1, "{result:?}");
     assert_eq!(result.withheld_findings.len(), 1, "{result:?}");
-    assert_eq!(result.verdict, Verdict::Approve, "{result:?}");
+    // #10226 cond2: the run is partial (Degraded), so APPROVE is capped; a
+    // re-floored REQUEST_CHANGES would still fail this assertion.
+    assert_eq!(result.status, ReviewStatus::Degraded, "{result:?}");
+    assert_eq!(
+        result.verdict,
+        Verdict::ApproveWithReservations,
+        "{result:?}"
+    );
 }
 
 /// #9310: with synthesis not answering (the mechanical path), a chunk reply

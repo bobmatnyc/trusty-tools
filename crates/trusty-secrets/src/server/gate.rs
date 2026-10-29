@@ -25,6 +25,7 @@
 //! Test: `audit_tests.rs`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -33,7 +34,8 @@ use super::errors::ErrorKind;
 use super::methods::Caller;
 use super::project::ProjectContext;
 use super::router::State;
-use crate::api::{BackendId, SecretKey, VaultName};
+use crate::api::{BackendId, SecretKey, SecretsError, VaultName};
+use crate::store::agent_deny::DenyAudit;
 use crate::store::config::{ProjectSecretsConfig, load_machine_at};
 use crate::store::platform::now_unix;
 
@@ -109,6 +111,8 @@ pub(crate) struct Gate<'a> {
     // #9070 slice 3: the requested flag value and the ancestry verdict.
     agents_allowed: Option<bool>,
     agent_parent: Option<bool>,
+    // #10386: an agent allowed by the absence of a deny.
+    default_policy: bool,
     admitted: Option<Admitted>,
 }
 
@@ -145,6 +149,7 @@ pub(crate) fn audited(
         project_root: None,
         agents_allowed: None,
         agent_parent: None,
+        default_policy: false,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -210,6 +215,58 @@ impl Gate<'_> {
     /// Whether the caller has a Claude Code ancestor, once judged (#9070).
     pub(crate) fn agent_parent(&mut self, agent_parent: bool) {
         self.agent_parent = Some(agent_parent);
+    }
+
+    /// Mark this call's allow records `default_policy: true` (#10386).
+    ///
+    /// What: set by `grant`, `resolve`, and (#10459) `set` and `copy` for a
+    /// caller under Claude Code,
+    /// whose only path to a key is the absence of its deny. Deny records
+    /// never carry it.
+    pub(crate) fn default_policy(&mut self) {
+        self.default_policy = true;
+    }
+
+    /// A store hook that appends one write-ahead `secrets.set_agents_may_use`
+    /// record per deny the store writes or removes on its own (#10386).
+    ///
+    /// Why: Architect acceptance criterion — every deny change has its record
+    /// before it is made: the migration's denies, a deny `delete` removes, a
+    /// deny `copy` carries.
+    /// What: each record is this call's subject so far (caller pid, backend,
+    /// project, verdict, bridge source) with the vault and key named and
+    /// `agents_allowed` the state after the change. A log that cannot be
+    /// opened or appended to is [`SecretsError::AuditUnavailable`] under
+    /// [`FAIL_CLOSED_ON_ALLOW`], and the store then makes no change. A
+    /// machine config that turns the audit off writes nothing.
+    /// Test: `migration_keep_closed_records_each_deny_before_writing_it`,
+    /// `server_delete_records_the_deny_it_removes`,
+    /// `server_copy_of_a_denied_key_carries_the_deny`.
+    pub(crate) fn deny_audit(&self) -> DenyAudit {
+        let sink = Arc::clone(&self.state.audit);
+        let suppressed = self.suppressed;
+        let template = self.record(None);
+        Arc::new(move |vault: &VaultName, key: &SecretKey, denied: bool| {
+            if suppressed {
+                return Ok(());
+            }
+            let mut record = template.clone();
+            record.ts = now_unix();
+            record.method = AuditMethod::SetAgentsMayUse;
+            record.vault = Some(vault.clone());
+            record.key = Some(key.clone());
+            record.agents_allowed = Some(!denied);
+            record.default_policy = None;
+            let appended = sink
+                .open()
+                .ok()
+                .and_then(|mut file| file.append(&record).ok());
+            match appended {
+                Some(()) => Ok(()),
+                // #10386: no record, no deny change.
+                None => unaudited_allow().map_err(|_| SecretsError::AuditUnavailable),
+            }
+        })
     }
 
     /// Open the audit log and append this call's allow record, before the
@@ -288,6 +345,9 @@ impl Gate<'_> {
         record.project_root = self.project_root.clone();
         record.agents_allowed = self.agents_allowed;
         record.agent_parent = self.agent_parent;
+        if denied.is_none() && self.default_policy {
+            record.default_policy = Some(true);
+        }
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

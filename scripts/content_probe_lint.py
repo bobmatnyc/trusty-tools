@@ -9,7 +9,8 @@ What: `lint(content_dir)` returns one error per shared asset whose first
   command of a harness comes before any probe-then-degrade for that harness.
   - A command is any fenced code line naming the harness binary followed by a
     subcommand or flag, wherever it sits on the line (after `&&`, `;`, `$(`),
-    or any inline code span `<bin> <sub>…`. A span is a prohibition, not a
+    or any inline code span `<bin> <sub>…`, including one wrapped over lines
+    (matched on the paragraph joined with spaces, #10104). A span is a prohibition, not a
     command, only when a negation governs it directly: "never", "not", "do
     not" or "n't", optionally followed by one verb, right before the span in
     its own sentence (sentences split on `.`, `!`, `?` and `;`).
@@ -69,22 +70,41 @@ def owner_of(rel):
     return None
 
 
+def inline_commands(para):
+    """Yield `(line_no, binary, text)` for each inline span in `para`, a list of
+    `(line_no, line)` joined with spaces so a span wrapped over lines still
+    matches (#10104). A span reports the line of its opening backtick."""
+    text = " ".join(line for _, line in para)
+    starts, pos = [], 0
+    for num, line in para:
+        starts.append((pos, num))
+        pos += len(line) + 1
+    for m in INLINE_CMD_RE.finditer(text):
+        sentence = SENTENCE_BREAK_RE.split(text[: m.start()])[-1]
+        if not GOVERNING_NEGATION_RE.search(sentence):
+            num = [n for start, n in starts if start <= m.start()][-1]
+            yield num, m.group(2), " ".join(m.group(1).split())
+
+
 def commands(lines):
     """Yield `(line_no, binary, text)` for each harness command in `lines`."""
     in_fence = False
+    para = []  # (line_no, line) of the open non-fenced paragraph
     for num, line in enumerate(lines, 1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
+        fence = FENCE_RE.match(line)
+        if fence or (not in_fence and not line.strip()):
+            yield from inline_commands(para)
+            para = []
+            if fence:
+                in_fence = not in_fence
             continue
         if in_fence:
             m = FENCED_CMD_RE.search(line)
             if m:
                 yield num, m.group(1), m.group(0).strip()
             continue
-        for m in INLINE_CMD_RE.finditer(line):
-            sentence = SENTENCE_BREAK_RE.split(line[: m.start()])[-1]
-            if not GOVERNING_NEGATION_RE.search(sentence):
-                yield num, m.group(2), m.group(1)
+        para.append((num, line))
+    yield from inline_commands(para)
 
 
 def blocks(lines):

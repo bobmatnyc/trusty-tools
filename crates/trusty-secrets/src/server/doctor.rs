@@ -210,7 +210,7 @@ impl StoragePosture {
 /// What a headless run of this server can use (#7519 P4, DOC-74 §13 Q4).
 ///
 /// Why: A4 — headless 1Password works only with a service-account token,
-/// and owner ruling Q1 lets doctor say only whether one was present.
+/// and doctor says only whether one was present.
 /// What: presence at server start, yes or no; never the value, its length
 /// or a prefix. Keeper's device approval is not detected (ruling 6).
 /// Test: `doctor_reports_token_presence_and_never_the_token`.
@@ -387,7 +387,9 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
 /// [`Unavailable::NotEnabled`]; otherwise the account file's section and the
 /// program are checked as a push would open them, and a refusal is folded
 /// to its [`Unavailable`] kind with a fixed detail or the error's text.
-/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+/// `vercel` is ready only when its section maps at least one checkout.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`,
+/// `server_doctor_lists_the_vercel_target_without_spawning`.
 fn judge_sync_target(state: &State, id: BackendId) -> BackendStatus {
     if !sync_targets().contains(&id) {
         return BackendStatus::unavailable(id, Unavailable::NotCompiled, NO_CLI_BACKENDS.into());
@@ -406,8 +408,14 @@ fn judge_sync_target(state: &State, id: BackendId) -> BackendStatus {
     match sync_target_ready(&id, config) {
         Ok(caps) => BackendStatus::available(id, caps),
         Err(SecretsError::BackendNotEnabled { .. }) => {
+            // #9069 PR 2: V1 — Vercel also needs a project mapping.
+            let mapping = if id.as_str() == BackendId::VERCEL {
+                ", or it maps no checkout under `secrets.vercel.projects`"
+            } else {
+                ""
+            };
             let detail = format!(
-                "the account machine config {} has no `secrets.{section}:` section",
+                "the account machine config {} has no `secrets.{section}:` section{mapping}",
                 config.display()
             );
             BackendStatus::unavailable(id, Unavailable::NotEnabled, detail)
@@ -440,6 +448,7 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
     let mut backends = rows(state, &target.selected, target.refused);
     // #9069: D15 — doctor lists sync targets; the console's copy dialog does not.
     backends.push(judge_sync_target(state, BackendId::github_actions()));
+    backends.push(judge_sync_target(state, BackendId::vercel()));
     to_json(&DoctorResponse {
         socket: state.settings.socket.clone(),
         index_root: state.settings.index_root.clone(),

@@ -78,6 +78,8 @@ mod warm;
 pub(crate) use warm::warm_corpus;
 
 pub(crate) use ingest::deferred::VectorCoverage;
+/// #10294: the per-wave deferred-embed driver `service::reindex` runs.
+pub(crate) use ingest::deferred_stream::run_deferred_embed;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
@@ -133,6 +135,8 @@ pub(crate) use files::TEST_FAIL_REMOVE;
 // #10110: batch removal by path prefix or file list.
 #[cfg(test)]
 pub(crate) use batch_remove::TEST_FAIL_SLICE_FROM;
+#[cfg(test)]
+pub(crate) use batch_remove::TEST_VANISH_ROW;
 pub(crate) use batch_remove::{BatchRemoveCounts, BatchRemoveError};
 // #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
 #[cfg(test)]

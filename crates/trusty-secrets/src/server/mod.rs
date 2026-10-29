@@ -67,6 +67,9 @@ mod router;
 // #9793: the sandbox consent override and backend refusal.
 mod sandbox;
 pub mod settings;
+// #10386: a server that judges every caller a person, for consumer tests.
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 // #9069: `copy` to a write-only sync target.
 mod sync_target;
 mod tools;
@@ -94,12 +97,15 @@ pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
     default_backends, run_to_exit, serve, serve_with,
 };
+// #10386: consumer tests store keys through a real server whatever the host.
 pub use sandbox::SandboxEnv;
 pub use settings::{
     AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
     DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
     ServerSettings, SettingsError, template_root_beside,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};
 pub use tools::DetectedTool;
 
 #[cfg(test)]

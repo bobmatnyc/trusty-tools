@@ -4,7 +4,7 @@
 //! 500-SLOC production cap.
 
 use super::*;
-use crate::core::child_repo_scan::ScanIncomplete;
+use crate::core::child_repo_scan::{ScanIncomplete, WORKSPACE_SCAN_BUDGET};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -122,7 +122,11 @@ fn an_exhausted_scan_refuses_to_seed() {
 
     assert_eq!(
         offer_git_init(&parent, Some(&home), None),
-        Err(SeedRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted))
+        Err(SeedRefusal::ScanIncomplete(
+            ScanIncomplete::BudgetExhausted {
+                budget: WORKSPACE_SCAN_BUDGET
+            }
+        ))
     );
 }
 
@@ -644,8 +648,10 @@ fn the_scan_incomplete_refusal_tells_the_operator_how_to_proceed() {
         "{msg}"
     );
 
-    let exhausted =
-        SeedRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted).message(Path::new("/ws"));
+    let exhausted = SeedRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted {
+        budget: WORKSPACE_SCAN_BUDGET,
+    })
+    .message(Path::new("/ws"));
     assert!(
         exhausted.contains("stopped after checking 256 directories"),
         "{exhausted}"

@@ -30,6 +30,7 @@
 
 use serde::Deserialize;
 
+use crate::commands::issue::board::client::BoardClient;
 use crate::commands::ticket::runner::CommandRunner;
 
 /// The `git` ref a plan document must be reachable from before an epic is filed.
@@ -617,25 +618,14 @@ impl<R: CommandRunner> EpicBackend for GhEpicBackend<R> {
     }
 
     fn attach_project(&self, repo: &str, issue: u64, number: u64) -> anyhow::Result<()> {
-        // #7952: `gh issue edit --add-project "<title>"` exits 0 and attaches
-        // nothing when the title does not resolve in the scope gh derives from
-        // the repository. The owner-and-number form names exactly one project.
+        // #10276: the attach lives in the one Projects module (epic #10274,
+        // D2), which keeps #7952's owner-and-number form.
         // #8447: `repo` is resolved ONCE by the caller. Resolving it here put a
         // transient `gh repo view` failure inside the arm that degrades to a
         // `no-project:` waiver, which would launder a retryable outage into a
         // permanent comment on the record.
-        let slug = repo.to_string();
-        let owner = slug.split('/').next().unwrap_or(&slug).to_string();
-        let project = number.to_string();
-        let url = format!("https://github.com/{slug}/issues/{issue}");
-        self.runner
-            .run(
-                "gh",
-                &[
-                    "project", "item-add", &project, "--owner", &owner, "--url", &url,
-                ],
-            )?
-            .ok_or_stderr("gh project item-add")?;
+        let owner = repo.split('/').next().unwrap_or(repo);
+        BoardClient::new(&self.runner).item_add(repo, issue, owner, number)?;
         Ok(())
     }
 

@@ -74,19 +74,19 @@ fn decode_object<T: DeserializeOwned>(params: Value) -> Result<T, ErrorKind> {
 ///
 /// Why: ruling 34 and the Architect's 2026-10-10 ruling — the server mints;
 /// any same-uid caller may grant. DOC-74 §15.8 — a registrar under Claude
-/// Code may grant only keys flagged "agents may use".
+/// Code may grant any key in scope that no deny names (#10386).
 /// What: params are `project` beside [`ExecGrantRequest`]. The registrar is
 /// the socket peer; with none, [`ErrorKind::GrantRefused`]. `agent_parent`
 /// is [`has_agent_ancestor`] on the registrar's own ancestry, read from the
 /// registry's process table; a read error refuses. When it is true, every
-/// key must be flagged on the project's backend, else
-/// [`ErrorKind::AgentUseRefused`] naming that key in the deny record, before
-/// anything is minted. The grant pins the project root and `agent_parent`
+/// key must carry no deny on the project's backend, else
+/// [`ErrorKind::AgentKeyDenied`] (#10459) naming that key in the deny record, before
+/// anything is minted; the allow records then carry `default_policy: true`. The grant pins the project root and `agent_parent`
 /// ([`GrantScope`]). Then the audit log is opened and one allow record per
 /// key is written; if either fails, the grant is revoked and the reply is
 /// [`ErrorKind::AuditUnavailable`], so no token leaves unaudited.
-/// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`,
-/// `grant_by_agent_ancestor_may_name_a_flagged_key`,
+/// Test: `grant_by_agent_ancestor_cannot_name_denied_key`,
+/// `grant_by_agent_ancestor_may_name_an_open_key`,
 /// `grant_records_carry_the_agent_parent_verdict`,
 /// `grant_with_unwritable_audit_returns_no_token`.
 pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
@@ -109,7 +109,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
             // #9070 slice 3: every grant record says what was judged.
             gate.agent_parent(agent_parent);
             if agent_parent {
-                let store = SecretStore::new(project.backend(state)?, state.index.clone());
+                let store = SecretStore::new(project.backend(state)?, state.index.clone())
+                    .with_deny_audit(gate.deny_audit());
                 for key in &request.keys {
                     let reference = SecretRef::Unscoped { key: key.clone() };
                     if let Err(e) = require_agent_use(&store, project.scopes(), &reference) {
@@ -117,6 +118,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
                         return Err(ErrorKind::from(e));
                     }
                 }
+                // #10386: every key passed because no deny names it.
+                gate.default_policy();
             }
             let ttl = Duration::from_secs(request.ttl_secs);
             let mut wanted = GrantRequest::new(request.keys.clone(), request.child_pid, ttl)
@@ -174,7 +177,7 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// [`GrantRegistry::check_scoped`]: super::grant::GrantRegistry::check_scoped
 /// [`GrantRegistry::spend`]: super::grant::GrantRegistry::spend
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
-/// `resolve_by_agent_descendant_of_unflagged_grant_is_refused`,
+/// `resolve_by_agent_descendant_of_denied_key_is_refused`,
 /// `resolve_with_unreadable_caller_ancestry_is_refused`,
 /// `resolve_from_sibling_with_valid_token_is_refused`,
 /// `resolve_allow_with_unwritable_audit_returns_no_value`,
@@ -205,12 +208,17 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
                 .check_scoped(&token, slice::from_ref(&request.key), peer)
                 .map_err(grant_kind)?;
             // #9070 slice 3: the caller's own ancestry counts too, so a grant
-            // a non-agent registered for an agent's pid opens no unflagged
+            // a non-agent registered for an agent's pid opens no denied
             // key to it. An unreadable ancestor refuses.
             let agent_parent = scope.agent_parent
                 || has_agent_ancestor(state.grants.processes(), peer)
                     .map_err(|_| ErrorKind::GrantRefused)?;
             gate.agent_parent(agent_parent);
+            // #10386: an agent reaches a key only through the absence of its
+            // deny, checked below; a denied key ends in a deny record.
+            if agent_parent {
+                gate.default_policy();
+            }
             let project = ProjectContext::resolve(state, &scope.project)?;
             gate.project(&project);
             // #9621: the allow record before the backend is opened or read,
@@ -229,6 +237,7 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             let opened_under =
                 before.filter(|before| OpenedUnder::read(account, &id).as_ref() == Some(before));
             let store = SecretStore::new(backend, state.index.clone())
+                .with_deny_audit(gate.deny_audit())
                 .with_cache(Arc::clone(&state.cache), opened_under);
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),

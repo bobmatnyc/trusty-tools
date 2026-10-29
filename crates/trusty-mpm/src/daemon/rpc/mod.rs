@@ -55,3 +55,6 @@ pub mod coordinator;
 
 /// #9758: the PM ledger writer, `mpm.dbatg.init`, `batch` and `show`.
 pub mod dbatg;
+
+/// #10063: the Architect dashboard store, `mpm.architect.dashboard.*`.
+pub mod architect_dashboard;

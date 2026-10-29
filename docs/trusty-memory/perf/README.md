@@ -39,7 +39,7 @@ Run each suite from a committed clean linked worktree through `mpm-utils/scripts
 
 | Test | File | Profile | Runs | Measures |
 |---|---|---|---|---|
-| `recall_eval_holds_the_recorded_baseline` and its red arm `recall_eval_goes_red_with_demotion_or_retirement_off` | `crates/trusty-memory/tests/recall_eval.rs` | debug (ranks are deterministic) | x2 at baseline | hit@1 and superseded-above-current over 32 queries; per-query ranks give MRR and hit@k |
+| `recall_eval_holds_the_recorded_baseline` and its red arm `recall_eval_goes_red_with_demotion_or_retirement_off` | `crates/trusty-memory/tests/recall_eval.rs` | debug (ranks are deterministic) | x1 | hit@1 and superseded-above-current over 32 queries; per-query ranks give MRR and hit@k |
 | `recall_supersession_latency_profile` | `crates/trusty-memory/tests/recall_supersession.rs` | release | x5 | end-to-end `memory_recall` p50/p95 at 20,000 drawers, rulings leg off and on, plus `seeded_in` |
 | `concurrent_perf` (all `#[ignore]` tests) | `crates/trusty-memory/tests/concurrent_perf.rs` | release | x3 | latency distribution under concurrent reads, read/write mix, burst and sustained load |
 | `engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured` | `crates/trusty-memory/src/engine/retrieval/chunk_backfill_measure_tests.rs` | release | x3 | ONNX embed time per chunk, slice wall time, query-embed p50/p95/max idle and under a running slice |
@@ -69,16 +69,84 @@ Record the toolchain (`rustc -V` and the `+toolchain` used) and the exact comman
 Each report names its threshold in `threshold`.
 
 - Eval: hit@1 below 27/32, or any superseded-above-current, fails the build. That is a test failure, not an analysis finding.
-- Latency: p95 up more than 10% over the pinned baseline, in the median of 5 runs, same host and toolchain.
-- Latency, HIGH: p95 up more than 2x, a breach of a ruled budget (E12 +5 ms at 20k rows; [#9141](https://github.com/bobmatnyc/trusty-tools/issues/9141) AC1 1 s resident), or an error rate above zero in `concurrent_perf`.
+- Latency and indexing: p95, `seeded_in` or an embed time at +25% or more over the pinned baseline is a warn; +50% or more is an alert. Use the median of the runs, same host and toolchain. These levels come from the Architect ruling of 2026-10-23 on [#10210](https://github.com/bobmatnyc/trusty-tools/issues/10210) (Q5). They replace the earlier 10% latency and 25% indexing lines. `scripts/perf_compare.sh` applies them (see Compare and status file).
 - Storage: weekly growth more than 2x the trailing 4-week median, a single palace over 500 MB, or `reclaimable_bytes` above 25% of `kg.redb`.
 - Storage, HIGH: missing vectors above 0 with a clean alias audit (findable-data loss).
-- Indexing: embed time per chunk or build time up more than 25%.
 - Freshness above 1 s: no threshold until a baseline exists.
+
+### Ruled budgets (not graded by perf_compare.sh)
+
+A breach of a ruled budget is HIGH:
+
+- E12: +5 ms at 20k rows.
+- [#9141](https://github.com/bobmatnyc/trusty-tools/issues/9141) AC1: 1 s resident.
+- An error rate above 0 in `concurrent_perf` is HIGH.
 
 A crossing goes to the Architect. The analysis files no issues and posts no comments.
 
-EVO p95 is noisy under fleet load, so the 10% latency threshold can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
+EVO p95 is noisy under fleet load, so a latency crossing can fire on noise. One run on 2026-10-17 reached p95 28 ms against a 16.4 ms median. Check `load` in the envelope before reading a crossing.
+
+## Compare and status file
+
+`scripts/perf_compare.sh BASELINE CURRENT` compares two schema-1 envelopes of the same `tool` and `label`. It grades `p95` where the baseline row has one, and `value` for `indexing` rows with no p95 (`seeded_in`, embed times). Effectiveness rows are not graded; the eval gate is a test. The delta is `(current - baseline) / baseline` in percent, rounded to 0.01. Both levels include their boundary: exactly +25.00% is a warn and exactly +50.00% is an alert. The comparison fails closed. A baseline row missing from the current envelope is listed under `missing`, and a current figure that is null or not a number is listed under `unparsed`; either makes the verdict at least a warn, and an alert still outranks it. A baseline figure that is zero, negative, NaN or infinite, a current figure that is negative, NaN or infinite, and a comparison with no graded row are errors. The report is JSON on stdout. Exit codes: 0 ok, 10 warn, 11 alert, 12 error (missing or malformed file, schema other than 1, tool or label mismatch, or one of the errors above).
+
+`scripts/perf_status_write.sh` records the latest run per tool in the gitignored `.trusty-mpm/perf/status.json` that the Architect poller reads. Pass `--compare <report>` for a compared run, or `--verdict failed|skipped --reason <text>` for a run that produced no comparison. Each entry carries `ts`, `verdict` (ok, warn, alert, failed or skipped), the graded metrics with their baseline deltas, and `skipped_streak`. The reader warns on the first skipped run and alerts on the second in a row. The writer refuses a path inside the repository that git does not ignore.
+
+`scripts/perf_compare_selftest.sh` runs both scripts against fixtures in `scripts/test-data/perf-compare/`, cut from the two committed EVO files. Compared the same way, the 2026-10-23 file is an alert against 2026-10-17: `seeded_in` is +56.48%.
+
+## Weekly runner
+
+`scripts/perf_weekly_memory.sh` runs the four suites above on EVO, builds one envelope from the medians, compares it with the committed baseline and writes the status file. Run it from a committed, clean linked worktree; `evo-gate-log` refuses a dirty tree. Each run of each suite is one `evo-gate-log --tag perf-weekly --gate perf-<suite>` gate through `mpm-utils/scripts/evo`, with toolchain `+1.99.0`.
+
+```
+scripts/perf_weekly_memory.sh [--baseline FILE] [--out-dir DIR] [--status-file PATH]
+  [--runs-eval N] [--runs-profile N] [--runs-concurrent N] [--runs-slice N]
+  [--suite-timeout S] [--settle-s S] [--toolchain V]
+```
+
+Defaults: eval x1, profile x5, `concurrent_perf` x3, slice measure x3; 2400 s per run; baseline `2026-10-17-0.36.0-evo.json`.
+
+It fails closed:
+
+- Idle gate. Before each run it reads the EVO 1-minute load over ssh. A load of 2 or more that does not fall below 2 within `--settle-s` (default 300 s), or no reading, ends the whole run as `skipped`. No later suite runs and nothing is compared. The load after each run is recorded in `load.after`, not gated, because the run's own cargo job raises it. A load reading that fails after a run is recorded there as `unreachable` and does not end the run.
+- A run that exits non-zero, times out, or prints no parseable figure ends the whole run as `failed`. A suite with fewer parsed runs than it ran is a failure, never a shorter median. A `concurrent_perf` block whose fields are missing or repeated (interleaved output) is a missing figure.
+- A `perf_compare.sh` error is `failed`.
+- A TERM or INT ends the run as `failed`. The runner stops the running suite's local processes, stops its EVO job the same way as a timeout, and records the interruption in the status reason, so the previous verdict never stays in place. A timed-out or interrupted run's EVO reap matches jobs no older than the run plus 120 s.
+
+The runner changes to the repository root before it runs anything, so `evo` keys this worktree wherever the runner is started. Relative `--baseline`, `--out-dir` and `--status-file` paths still mean the caller's directory.
+
+Exit codes: 0 ok, 10 warn, 11 alert (the compare verdict), 20 failed, 30 skipped, 2 bad usage. Every exit but 2 writes the `trusty-memory` entry of `.trusty-mpm/perf/status.json`.
+
+Output goes to the gitignored `.trusty-mpm/perf/memory/weekly/<UTC stamp>/` (or `--out-dir`, which must be ignored if it is inside the repository): one log per run (`eval1.log`, `profile1.log`, ...), `load.tsv`, `runs.jsonl` (parsed figures per run), `envelope.json`, `compare.json` and `runner.log`. The envelope records the toolchain and every command in `notes`. A run never writes a committed baseline; promotion is a PR the Architect clears.
+
+`scripts/perf_weekly_memory_selftest.sh` drives the runner with stubbed suite, load and host commands (the `PERF_RUN_CMD`, `PERF_LOAD_CMD` and `PERF_HOST_CMD` hooks) and the logs in `scripts/test-data/perf-weekly/`. It needs no EVO and no cargo. CI runs it and `perf_compare_selftest.sh` in the `changes` job of `ci.yml`.
+
+## Daily sampler (read-only, under load)
+
+`scripts/perf_sampler.sh --tool memory|search` samples a running daemon for 30 minutes (`--duration-s 1800`) every 10 s plus 0 to 5 s of jitter (`--interval-s`, minimum 10; `--jitter-s`). It serves trusty-memory and trusty-search with one envelope shape. It is the daily Mac sampler of [#10210](https://github.com/bobmatnyc/trusty-tools/issues/10210); scheduling it is phase 5.
+
+```
+scripts/perf_sampler.sh --tool memory|search [--socket PATH] [--pid PID]
+  [--duration-s S] [--interval-s S] [--jitter-s S] [--max-samples N]
+  [--load-stop L] [--out-dir DIR] [--label mac|evo]
+```
+
+Each sample records the 1- and 15-minute load and sets `under_load` when the 1-minute load is 2 or more. The sample is labelled, not dropped. memory sends `memory.status` and `tools/call console_metrics`. search sends `search.health` and `search.indexes.list` and reads the daemon RSS with `ps`. The script refuses any other method, so no recall, search query or write is ever sent.
+
+Public output. Only listed numbers are kept. Palaces and indexes appear as rank labels (`p01`, `i01`, ...), largest disk bytes first, fixed when first seen. The id-to-label map stays in a temp dir that is removed on exit. No data root, palace or index name, socket, host path or daemon error text reaches the output. A JSON-RPC error keeps its numeric code only.
+
+Output goes to the gitignored `.trusty-mpm/perf/<tool>/sampler/<UTC stamp>/` (or `--out-dir`, which must be ignored if it is inside the repository): `samples.ndjson`, one row per sample, and `envelope.json`. Both tools write the same top-level keys: `schema`, `kind` (`perf_sampler`), `tool`, `version`, `commit`, `label`, `host`, `date`, `utc_start`, `utc_end`, `corpus`, `load`, `outcome`, `reason`, `sampling`, `residency` and `results`. `results` uses the row shape above, with nearest-rank `p50`, `p95` and `max` over the good samples, and `rank_label` on per-palace and per-index rows.
+
+It fails closed. The outcome is one of:
+
+- `ok`, exit 0: every sample was good and the run reached `--duration-s` or `--max-samples`.
+- `stopped`, exit 31: the 1-minute load went above 8 (`--load-stop`) after at least one good sample. `reason` names the load. `results` covers the good samples only.
+- `skipped`, exit 30: the load was above 8 at the first sample. No call is made and `results` is empty.
+- `failed`, exit 20: an unreadable load, no daemon socket, no reply, a reply that is not JSON, a JSON-RPC error, or a required figure that is missing, not a number, or zero where zero is impossible (RAM, disk, RSS). The first failed sample ends the run and `results` is empty, even after good samples.
+
+The sampler writes no status file and no committed file.
+
+`scripts/perf_sampler_selftest.sh` runs the stub cases through the `PERF_SAMPLER_LOAD_CMD`, `PERF_SAMPLER_RPC_CMD`, `PERF_SAMPLER_RSS_CMD` and `PERF_SAMPLER_SLEEP_CMD` hooks. It needs no daemon and no cargo, and CI runs it beside the other perf selftests. `--live` starts one sandbox daemon per tool with `scripts/sandbox_memory_daemon.sh` and `scripts/sandbox_search_daemon.sh`. The search sandbox runs with `TRUSTY_EMBEDDER=stdio`, so no python venv is downloaded. It creates a palace and an index with private names, runs the real sampler for two samples each, greps both outputs for the names and the sandbox paths, compares the envelope keys, and stops both daemons.
 
 ## Live collector (read-only)
 

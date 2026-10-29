@@ -187,6 +187,7 @@ pub(crate) struct EmbedRun {
 /// store (BM25-only), matching the old early return. `created_at` and
 /// `last_activity_ms` are the indexer's idle clock (#8761).
 /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+#[derive(Clone)]
 pub(crate) struct EmbedContext {
     index_id: String,
     embedder: Option<Arc<dyn crate::core::embed::Embedder>>,
@@ -195,6 +196,31 @@ pub(crate) struct EmbedContext {
     last_activity_ms: Arc<std::sync::atomic::AtomicU64>,
     /// #9284: the index's embed-window counters.
     embed_window: Arc<super::super::EmbedWindowStats>,
+}
+
+/// The embed state one pass carries across its calls (#10294).
+///
+/// Why: a deferred pass embeds one wave per call. Kept per call, the CoreML
+/// tripwire's halved batch size reset every wave, and the truncation summary
+/// WARN fired once per wave.
+/// What: the halved batch size and tripwire flag hold for the whole pass;
+/// [`Self::finish`] logs the pass's truncation summary once.
+/// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
+pub(crate) struct EmbedPassState {
+    index_id: String,
+    probe: Option<WindowProbe>,
+    tally: PassTally,
+    is_coreml: bool,
+    batch_size: usize,
+    tripwire_mb: usize,
+    tripwire_fired: bool,
+}
+
+impl EmbedPassState {
+    /// Log the pass's truncation summary (#9284). Call once, at the pass's end.
+    pub(crate) fn finish(&self) {
+        self.tally.finish(&self.index_id);
+    }
 }
 
 impl CodeIndexer {
@@ -289,11 +315,68 @@ impl EmbedContext {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> Result<EmbedRun> {
+        let mut state = self.pass_state();
+        let run = self
+            .embed_chunks_in_pass(chunks, progress_tx, pause, &mut state)
+            .await;
+        state.finish();
+        run
+    }
+
+    /// Start the per-pass embed state for a pass over this context (#10294).
+    /// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
+    pub(crate) fn pass_state(&self) -> EmbedPassState {
+        let probe = self
+            .embedder
+            .as_ref()
+            .map(|e| WindowProbe::from_embedder(e.as_ref()));
+        let window = probe.as_ref().and_then(WindowProbe::window);
+        // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
+        // kills the daemon.
+        let is_coreml = self.embedder.as_ref().is_some_and(|e| {
+            matches!(
+                e.provider(),
+                trusty_common::embedder::ExecutionProvider::CoreML
+                    | trusty_common::embedder::ExecutionProvider::CoreMLAne
+            )
+        });
+        let batch_size = if is_coreml {
+            let bs = crate::core::resolve_coreml_batch_size();
+            tracing::debug!("embed_chunks_in_batches: CoreML — TRUSTY_COREML_BATCH_SIZE={bs}");
+            bs
+        } else {
+            embed_batch_size()
+        };
+        EmbedPassState {
+            index_id: self.index_id.clone(),
+            probe,
+            tally: PassTally::new(window),
+            is_coreml,
+            batch_size,
+            tripwire_mb: if is_coreml {
+                crate::core::resolve_coreml_tripwire_mb()
+            } else {
+                0
+            },
+            tripwire_fired: false,
+        }
+    }
+
+    /// [`Self::embed_chunks_keeping_prefix`] as one call of a longer pass:
+    /// the tripwire, batch size and tally carry over in `state` (#10294).
+    /// Test: `a_tripped_coreml_batch_size_holds_for_the_rest_of_the_pass`.
+    pub(crate) async fn embed_chunks_in_pass(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+        state: &mut EmbedPassState,
+    ) -> Result<EmbedRun> {
         use futures::StreamExt as _;
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
         let mut stalled = None;
-        let Some(embedder) = &self.embedder else {
+        let (Some(embedder), Some(probe)) = (&self.embedder, &state.probe) else {
             return Ok(EmbedRun {
                 embeddings,
                 stalled,
@@ -301,33 +384,9 @@ impl EmbedContext {
         };
         let chunk_total = chunks.len();
         // #9284: count each embedded chunk against the embedder's window.
-        let probe = WindowProbe::from_embedder(embedder.as_ref());
         self.embed_window.set_window(probe.window());
-        let mut tally = PassTally::new(probe.window());
-        // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
-        // kills the daemon.
-        let is_coreml = matches!(
-            embedder.provider(),
-            trusty_common::embedder::ExecutionProvider::CoreML
-                | trusty_common::embedder::ExecutionProvider::CoreMLAne
-        );
-        let mut batch_size = if is_coreml {
-            let bs = crate::core::resolve_coreml_batch_size();
-            tracing::debug!(
-                "embed_chunks_in_batches: CoreML ({:?}) — TRUSTY_COREML_BATCH_SIZE={bs}",
-                embedder.provider()
-            );
-            bs
-        } else {
-            embed_batch_size()
-        };
-
-        let tripwire_mb = if is_coreml {
-            crate::core::resolve_coreml_tripwire_mb()
-        } else {
-            0
-        };
-        let mut tripwire_fired = false;
+        let is_coreml = state.is_coreml;
+        let tripwire_mb = state.tripwire_mb;
         let inflight = resolve_embed_inflight();
         // Issue #3748 slice B PR 1: route each sub-batch through the
         // Background lane of the priority pool when one is installed, so a
@@ -338,7 +397,12 @@ impl EmbedContext {
         // before. Resolved ONCE in `CodeIndexer::embed_context` (self-healing
         // boot-race fix, PR #3784 review) rather than per-wave.
         let embed_pool = self.embed_pool.clone();
-        tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
+        tracing::debug!(
+            chunk_total,
+            batch_size = state.batch_size,
+            inflight,
+            "embed_chunks_in_batches"
+        );
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
             // #8761: a pass is activity, so idle eviction does not empty the
@@ -360,7 +424,7 @@ impl EmbedContext {
             let mut wave_sub_batches: Vec<(usize, Vec<String>)> = Vec::with_capacity(inflight);
             let mut wave_pos = batch_start;
             while wave_sub_batches.len() < inflight && wave_pos < chunk_total {
-                let end = (wave_pos + batch_size).min(chunk_total);
+                let end = (wave_pos + state.batch_size).min(chunk_total);
                 let sub: Vec<String> = chunks[wave_pos..end]
                     .iter()
                     .map(|c| c.content.clone())
@@ -456,7 +520,7 @@ impl EmbedContext {
                     .iter()
                     .take_while(|e| e.is_some())
                     .count();
-                tally.record(
+                state.tally.record(
                     &self.index_id,
                     &self.embed_window,
                     &chunks[wave_start..wave_start + filled],
@@ -478,12 +542,12 @@ impl EmbedContext {
             }
 
             // CoreML RSS tripwire: halve batch_size if spike detected.
-            if is_coreml && !tripwire_fired && rss_before > 0 {
+            if is_coreml && !state.tripwire_fired && rss_before > 0 {
                 let rss_after = current_rss_mb();
                 let delta_mb = rss_after.saturating_sub(rss_before);
                 if delta_mb > tripwire_mb {
-                    let new_size =
-                        (batch_size / 2).max(crate::core::memory_policy::COREML_BATCH_SIZE_MIN);
+                    let new_size = (state.batch_size / 2)
+                        .max(crate::core::memory_policy::COREML_BATCH_SIZE_MIN);
                     tracing::warn!(
                         "embed_chunks_in_batches: CoreML RSS delta {}MB exceeds tripwire \
                          {}MB after wave of {} chunks (inflight={}) — halving batch size \
@@ -492,11 +556,12 @@ impl EmbedContext {
                         tripwire_mb,
                         wave_pos - wave_start,
                         inflight,
-                        batch_size,
+                        state.batch_size,
                         new_size,
                     );
-                    batch_size = new_size;
-                    tripwire_fired = true;
+                    // #10294: held in `state`, so it lasts the whole pass.
+                    state.batch_size = new_size;
+                    state.tripwire_fired = true;
                 }
             }
 
@@ -504,7 +569,6 @@ impl EmbedContext {
         }
         // #8761: the last wave's duration must not count as idle either.
         self.touch_activity();
-        tally.finish(&self.index_id);
         Ok(EmbedRun {
             embeddings,
             stalled,

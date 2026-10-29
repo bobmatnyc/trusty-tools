@@ -493,6 +493,37 @@ async fn an_unreachable_memory_daemon_is_unverified_and_catchup_still_answers() 
     assert_eq!(verify["checks"], json!([]), "{body}");
 }
 
+/// Why (#9538): the resume verify must name an incompatible memory daemon and
+/// send it no tool call.
+/// What: a fake on protocol 99 records methods; the verify pass reports
+/// `unverified:memory_protocol` and the fake saw nothing. The pass is driven
+/// directly: the catch-up digest's own palace read lives in trusty-common.
+#[tokio::test]
+async fn an_incompatible_memory_protocol_is_unverified_and_never_called() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let snapshot = snapshot_of(tmp.path(), "s-proto", "main", "abc1234");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rec = Arc::clone(&seen);
+    let daemon = crate::uds_mock::spawn_with_protocol(99, move |method: &str, _params| {
+        if let Ok(mut rec) = rec.lock() {
+            rec.push(method.to_string());
+        }
+        Box::pin(async { Ok(json!({"status": "ok"})) })
+    })
+    .await;
+    let host = host_on(
+        Arc::new(FakeRunner::never()),
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+    );
+
+    let report = resume_verify(&host, daemon.socket(), tmp.path(), Some(&snapshot)).await;
+
+    assert_eq!(report["status"], "unverified:memory_protocol", "{report}");
+    let seen = seen.lock().unwrap();
+    assert!(seen.is_empty(), "no memory call may reach it: {seen:?}");
+}
+
 /// Why (#9390): the catch-up response carries the report, and carries `null`
 /// when nothing resolved, so a caller can tell "no snapshot" from "not run".
 #[tokio::test]
@@ -583,14 +614,14 @@ async fn one_gh_slot(project: &Path, session: &str) -> (crate::uds_mock::MockUds
 #[cfg(unix)]
 #[tokio::test]
 async fn the_system_runner_kills_a_child_that_outlives_its_bound() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let (daemon, snapshot) = one_gh_slot(&project, "s-kill").await;
     let marks = tmp.path().join("marks");
     let script = tmp.path().join("fake-gh");
-    std::fs::write(
+    // See #10248
+    trusty_common::exec_stub::write_executable(
         &script,
         format!(
             "#!/bin/sh\npwd -P > '{m}.cwd'\necho \"$@\" > '{m}.args'\necho $$ > '{m}.pid'\n\
@@ -599,7 +630,6 @@ async fn the_system_runner_kills_a_child_that_outlives_its_bound() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runner = SystemRunner {
         programs: vec![("gh".to_string(), script)],
     };

@@ -1,2 +1,0 @@
-Fixed
-- A `prune-worktrees` pass stops deleting once its HTTP request is dropped. The orphan sweep and the merged-PR reclaim check a cancel signal before each worktree, finish the removal already in progress, and list the worktrees they never started under `cancelled_unstarted`, untouched. A cancel state that cannot be read stops the pass. The maintenance lane is released when the pass stops. `tm session prune-worktrees` uses the unary socket method, which still runs to completion after the CLI is killed; the streaming method that cancels that path follows (#7619).

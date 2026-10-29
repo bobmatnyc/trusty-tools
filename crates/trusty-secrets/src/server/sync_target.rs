@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::ancestry::has_agent_ancestor;
+use super::agents_flag::refuse_agent_caller;
 use super::errors::ErrorKind;
 use super::gate::Gate;
 use super::methods::{Caller, to_json};
@@ -42,7 +42,9 @@ impl State {
     /// before anything opens. Otherwise the test opener when one is set,
     /// else `store::open_sync_target_at` on `State::file_consent_config` —
     /// the account's own file, never `--machine-config` or `$HOME`'s; with
-    /// none, [`SecretsError::BackendNotEnabled`]. Opening spawns nothing.
+    /// none, [`SecretsError::BackendNotEnabled`]. A push's working directory
+    /// goes under `ServerSettings::template_root`, which the startup sweep
+    /// clears (#9069 PR 2). Opening spawns nothing.
     /// Test: `server_sandbox_never_opens_a_sync_target`,
     /// `github_push_targets_the_remote_repo_not_the_vault_override`.
     pub(crate) fn open_sync_target(
@@ -64,7 +66,7 @@ impl State {
             .file_consent_config
             .as_deref()
             .ok_or_else(not_enabled)?;
-        open_sync_target_at(id, config, identity)
+        open_sync_target_at(id, config, identity, &self.settings.template_root)
     }
 }
 
@@ -104,17 +106,8 @@ pub(crate) fn push(
     }
     // #9069: D3 — the caller is the kernel's peer, never a param.
     let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
-    let agent_parent = match caller.bridge() {
-        // #9066: the console judged the client it serves.
-        Some(verdict) => verdict.judged()?,
-        // An unreadable ancestor refuses; never skipped.
-        None => has_agent_ancestor(state.grants.processes(), peer)
-            .map_err(|_| ErrorKind::GrantRefused)?,
-    };
-    gate.agent_parent(agent_parent);
-    if agent_parent {
-        return Err(ErrorKind::AgentUseRefused);
-    }
+    // #10386 Q3: a copy off the machine stays operator-only.
+    refuse_agent_caller(state, caller, peer, gate)?;
     let source = state.open(&request.from_backend)?;
     let target = state.open_sync_target(&request.to_backend, project.identity())?;
     if !source.capabilities().contains(Capabilities::READ)

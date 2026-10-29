@@ -25,6 +25,8 @@ use std::path::Path;
 use std::time::Duration;
 use trusty_search::service::daemon_client::DaemonClient;
 
+use super::daemon_guard_launchd as launchd;
+
 /// Total wall-clock budget for the daemon to become ready after we spawn it.
 ///
 /// Why 60s: with the v0.3.12 deferred-embedder-init fix the daemon binds
@@ -130,15 +132,33 @@ pub async fn ensure_daemon_up_with_device(
             "◉".cyan()
         );
     } else {
-        match device {
-            Some(dev) => eprintln!(
-                "{} Starting trusty-search daemon (--device {dev})…",
-                "◉".cyan()
-            ),
-            None => eprintln!("{} Starting trusty-search daemon…", "◉".cyan()),
+        // #10413: when launchd owns the socket, kickstart or wait for its unit
+        // instead of racing it with a spawn of our own.
+        let state = launchd::current_state(client.socket()).await;
+        let plan = launchd::decide(&state.owner, state.loaded, state.pid);
+        if let Some(note) = launchd::device_note(device, plan) {
+            eprintln!("{note}");
         }
-        // #9214: the daemon binds the socket this client polls below.
-        spawn_daemon_on(client.socket(), device)?;
+        let spawn = || {
+            match device {
+                Some(dev) => eprintln!(
+                    "{} Starting trusty-search daemon (--device {dev})…",
+                    "◉".cyan()
+                ),
+                None => eprintln!("{} Starting trusty-search daemon…", "◉".cyan()),
+            }
+            // #9214: the daemon binds the socket this client polls below.
+            spawn_daemon_on(client.socket(), device)
+        };
+        return launchd::ensure_with(
+            client,
+            READY_TIMEOUT,
+            state,
+            launchd::real_kickstart,
+            || launchd::current_state(client.socket()),
+            spawn,
+        )
+        .await;
     }
     wait_for_socket(client, READY_TIMEOUT).await
 }
@@ -150,7 +170,7 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 ///
 /// What: redraws a one-line stderr spinner each poll, then prints
 /// "✓ trusty-search ready (Ns)" — the lines the HTTP guard printed (#9214).
-async fn wait_for_socket(client: &DaemonClient, budget: Duration) -> Result<()> {
+pub(super) async fn wait_for_socket(client: &DaemonClient, budget: Duration) -> Result<()> {
     let start = tokio::time::Instant::now();
     let deadline = start + budget;
     let mut frame = 0usize;
