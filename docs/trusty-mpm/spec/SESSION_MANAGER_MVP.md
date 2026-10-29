@@ -736,7 +736,9 @@ tm sessions stop <id>
 > **Superseded (issue #1955, historical record kept for context):** the
 > `tmpm-<repo-slug>-<8hex>` scheme added by #1789/#1791 was itself replaced by
 > `tm-<project-leaf>-NN` (a per-project two-digit serial that reuses gaps left
-> by decommissioned sessions). The examples below reflect the ORIGINAL MVP
+> by decommissioned sessions). Since #10478 the first session is bare
+> `tm-<project-leaf>` and a `-02`, `-03`, … counter is added only on a
+> duplicate. The examples below reflect the ORIGINAL MVP
 > design (pre-#1789); current behavior lives in `src/core/names.rs`'s
 > Why/What/Test doc comments — `is_managed_session_name` recognizes the
 > current `tm-` prefix AND both historical prefixes (`tmpm-`, `trusty-mpm-`)

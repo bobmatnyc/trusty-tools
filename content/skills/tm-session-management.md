@@ -232,7 +232,8 @@ than a dead end.
 semantic naming, and per-worktree search-index lifecycle, see
 `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 2 (session↔worktree model)
 and § 3 (search index pinning). Managed sessions isolate work via git worktrees
-with semantic names (e.g., `tm-trusty-tools-01`); decommission removes the
+with semantic names (e.g., `tm-trusty-tools`, or `tm-trusty-tools-02` for a
+second session); decommission removes the
 worktree, its branch, and its associated search index atomically.
 
 ## Task-List Integration

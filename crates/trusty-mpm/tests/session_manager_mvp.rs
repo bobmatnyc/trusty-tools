@@ -2469,14 +2469,15 @@ async fn session_manager_github_repo_url_produces_project_name() {
         .await
         .expect("create");
 
-    assert!(
-        record.tmux_name.starts_with("tm-trusty-tools-"),
-        "a GitHub repo_url must produce tm-<repo>-NN, got: {}",
+    // #10478: the first session for the repo is the bare `tm-<repo>`.
+    assert_eq!(
+        record.tmux_name, "tm-trusty-tools",
+        "a GitHub repo_url must produce tm-<repo>, got: {}",
         record.tmux_name
     );
     assert!(
         !record.tmux_name.starts_with("tm-local-"),
-        "must not fall through to tm-local-NN when repo_url is a GitHub URL: {}",
+        "must not fall through to tm-local when repo_url is a GitHub URL: {}",
         record.tmux_name
     );
 }

@@ -210,7 +210,8 @@ impl TmManager {
     }
 
     /// Spawn a new session using the canonical lifecycle-managed
-    /// `tm-<project>-<harness>-NN` naming convention (SPEC-ONESM-01).
+    /// `tm-<project>-<harness>[-NN]` naming convention (SPEC-ONESM-01;
+    /// the counter appears only on a duplicate, #10478).
     ///
     /// Why: The REPL's `/connect <path> <adapter> [name]` command and the
     /// HTTP API need an identical naming policy so a session created on the

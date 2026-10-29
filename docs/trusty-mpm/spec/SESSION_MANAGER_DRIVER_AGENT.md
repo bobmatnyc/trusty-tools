@@ -8,7 +8,8 @@
 >
 > **Naming note (issue #1955):** example session names below (`tmpm-ticket-1234`,
 > `tmpm-<slug>`) reflect the naming scheme in effect when this doc was written.
-> Sessions are now named `tm-<project-leaf>-NN` (e.g. `tm-ticket-1234-01`); the
+> Sessions are now named `tm-<project-leaf>` (e.g. `tm-ticket-1234`), with a
+> `-02`, `-03`, … counter only on a duplicate (#10478); the
 > daemon still recognizes the historical `tmpm-`/`trusty-mpm-` prefixes for
 > already-running sessions. See `src/core/names.rs` for current behavior.
 
