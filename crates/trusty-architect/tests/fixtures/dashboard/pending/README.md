@@ -8,7 +8,7 @@ Outputs (captured, do not edit): `goldens.json` (Python's `json.dumps` of each
 result, so the Rust side compares bytes) and `isotime.json` (`[string,
 microseconds or null]` from `datetime.fromisoformat`, naive read as UTC).
 
-Source: the live prototype at `/Users/masa/trusty-mpm-projects/architect`,
+Source: the live prototype at `<architect-checkout>`,
 commit `240965496ae5fab4c9d7ae12f07d7dfad1b0308e`, scripts clean:
 
 - `scripts/dashboard_derive.py` sha256 `130782545c2a60585b2713b1a54df2e0fd649cd42c71ca13fb17f525eb407f14`
@@ -20,7 +20,7 @@ Capture (read-only toward the scripts):
 
 ```bash
 cd crates/trusty-architect/tests/fixtures/dashboard/pending
-python3 -I capture.py /Users/masa/trusty-mpm-projects/architect/scripts
+python3 -I capture.py <architect-checkout>/scripts
 ```
 
 Read by `tests/dashboard_pending.rs` and the `isotime` unit test.
