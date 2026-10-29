@@ -606,15 +606,22 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 // multi-flight path for the entire connection lifetime,
                 // including unconditionally on the Rust ort transport, which
                 // never carries the field at all.
-                if !device_capture_attempted.swap(true, Ordering::AcqRel) {
-                    if let Some(device) = extract_response_device(line.trim()) {
-                        *last_device.lock().unwrap() = Some(device);
-                    }
-                    // #9284: the window is a model property, so the same
-                    // first-frame rule holds.
-                    if let Some(window) = extract_response_window(line.trim()) {
-                        last_window.store(window, Ordering::Release);
-                    }
+                if !device_capture_attempted.swap(true, Ordering::AcqRel)
+                    && let Some(device) = extract_response_device(line.trim())
+                {
+                    *last_device.lock().unwrap() = Some(device);
+                }
+                // #9284: the window is a model property, learned from the
+                // first success frame that carries it. It is not tied to the
+                // device's first-frame flag: an error or orphan first frame
+                // would burn that flag and the window would never be
+                // learned. The substring test keeps a sidecar that omits the
+                // field from paying a JSON parse on every frame.
+                if last_window.load(Ordering::Acquire) == 0
+                    && line.contains("\"window\"")
+                    && let Some(window) = extract_response_window(line.trim())
+                {
+                    last_window.store(window, Ordering::Release);
                 }
             }
         }

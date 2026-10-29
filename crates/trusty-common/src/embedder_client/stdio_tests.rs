@@ -204,6 +204,72 @@ async fn reader_task_captures_wire_window() {
     let _ = handle.await;
 }
 
+/// An error frame arriving first must not stop the window being learned
+/// from a later success frame (#9284).
+///
+/// Why: the first-frame device flag was also gating the window, so an error
+/// first frame left `last_reported_window()` at `None` for the generation.
+/// What: sends an error frame for id 1, then a success frame with
+/// `window: 256` for id 2; asserts the stored window is 256.
+/// Test: this test.
+#[tokio::test]
+async fn reader_task_learns_window_after_an_error_first_frame() {
+    use tokio::io::{AsyncWriteExt, duplex};
+
+    let (mut writer, reader_end) = duplex(4096);
+    let reader = tokio::io::BufReader::new(reader_end);
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
+    let last_window = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        Arc::new(TimeoutTracker::new()),
+        unhealthy_tx,
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::clone(&last_window),
+    ));
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    {
+        let mut guard = pending.lock().await;
+        guard.insert(
+            1,
+            PendingRequest {
+                sent: 1,
+                reply: tx1,
+            },
+        );
+        guard.insert(
+            2,
+            PendingRequest {
+                sent: 1,
+                reply: tx2,
+            },
+        );
+    }
+    let err = b"{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"boom\"},\"id\":1}\n";
+    let ok = b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1]],\"window\":256},\"id\":2}\n";
+    writer.write_all(err).await.unwrap();
+    writer.write_all(ok).await.unwrap();
+    writer.flush().await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), rx1)
+        .await
+        .expect("rx1 timed out")
+        .expect("channel 1 closed");
+    assert!(first.is_err());
+    let second = tokio::time::timeout(Duration::from_secs(2), rx2)
+        .await
+        .expect("rx2 timed out")
+        .expect("channel 2 closed");
+    assert!(second.is_ok());
+    assert_eq!(last_window.load(std::sync::atomic::Ordering::Acquire), 256);
+    drop(writer);
+    let _ = handle.await;
+}
+
 /// End-to-end: `reader_task` captures the real device from a live response
 /// frame into the shared `last_device` slot (epic #3524 slice 5, issue #3493
 /// P1) — this is what `StdioEmbedderClient::last_reported_device()` reads.
