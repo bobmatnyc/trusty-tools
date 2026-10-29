@@ -60,7 +60,7 @@ pub use dreamer::{AfterCycle, Dreamer};
 pub use fading::FadingParams;
 #[cfg(feature = "server")]
 pub(crate) use fading::{FadingMemory, detect_fading};
-pub(crate) use helpers::extract_keywords;
+pub(crate) use helpers::{build_closet_index, extract_keywords};
 // #9279: recall's id-token match normalizes words the way closets do.
 pub(crate) use helpers::{MIN_KEYWORD_CHARS, normalize_keyword};
 pub use kg_compact::KgCompactReport;
