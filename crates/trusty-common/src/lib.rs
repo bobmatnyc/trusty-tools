@@ -392,7 +392,7 @@ pub mod exec_stub;
 ///
 /// Why: macOS sets `FD_CLOEXEC` on a new socket in a second step, so a child
 /// forked in between holds a dropped connection open.
-/// What: [`child_fds::seal_inherited`] installs a `pre_exec` hook that marks
+/// What: `child_fds::seal_inherited` installs a `pre_exec` hook that marks
 /// every inherited descriptor close-on-exec. macOS only; a no-op elsewhere.
 /// Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
 pub mod child_fds;
