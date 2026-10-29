@@ -14,6 +14,7 @@ mod corpus_reopen_tests;
 pub mod daemon;
 pub mod daemon_client;
 pub(crate) mod data_dir;
+pub mod early_stop;
 pub mod embed_pool;
 pub mod embedder_supervisor;
 // #9059: hold an index whose exclude globs do not parse.

@@ -169,6 +169,10 @@ name = "index_remove_residency_8687"
 path = "tests/index_remove_residency_8687.rs"
 
 [[test]]
+name = "launchd_standby_10358"
+path = "tests/launchd_standby_10358.rs"
+
+[[test]]
 name = "log_reopen_8270"
 path = "tests/log_reopen_8270.rs"
 
