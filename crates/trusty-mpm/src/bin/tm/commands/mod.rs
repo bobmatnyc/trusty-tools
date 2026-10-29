@@ -51,6 +51,8 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
+// #10447: the Architect main-thread allow arm.
+pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;

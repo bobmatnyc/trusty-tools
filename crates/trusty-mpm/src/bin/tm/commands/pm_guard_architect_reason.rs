@@ -122,16 +122,61 @@ pub(crate) fn session_binding(
     session_binding_checks(env, config)
 }
 
+/// Whether the call is the Architect's main thread, without the launch record.
+///
+/// Why: #10447 — the egress guard's Architect allow must survive a relaunch
+/// or self-clear in the registered Architect project, where the current
+/// `claude` may have no `tm fleet init` launch record. The coordinator's
+/// design note keeps it one helper so the pm-guard can adopt it later; today
+/// only `egress_guard_architect` calls it.
+/// What: [`thread_kind`] must be [`ThreadKind::Main`] (no `agent_id`, no
+/// `CLAUDE_MPM_SUB_AGENT`, a `session_id`), then [`profile_checks`]: the
+/// supervisor stamp, a set `CLAUDE_PROJECT_DIR` whose `.trusty-mpm.toml`
+/// requests the supervisor and that the user-level `[supervisor] projects`
+/// allowlist names after canonicalization. No launch record, home or
+/// process table is read. Every failure is the same [`NotArchitect`] arm
+/// [`architect_main_thread`] would name.
+/// Test: `architect_main_thread_after_a_relaunch_has_no_launch_record`,
+/// `architect_subagent_stays_denied`, `pm_project_with_supervisor_env_stays_denied`.
+pub(crate) fn architect_main_thread_relaunch_safe(
+    payload: &Value,
+    env: &HookEnv,
+    config: impl FnOnce() -> MpmConfig,
+) -> Result<(), NotArchitect> {
+    match thread_kind(payload, env.sub_agent) {
+        ThreadKind::Main => {}
+        ThreadKind::Subagent => return Err(NotArchitect::Subagent),
+        ThreadKind::Unknown => return Err(NotArchitect::UnknownThread),
+    }
+    profile_checks(env, config).map(|_| ())
+}
+
 /// The profile, location and process checks, cheapest first.
 ///
-/// What: the steps of `session_profile::hook_profile` one at a time — the
-/// stamp, `CLAUDE_PROJECT_DIR`, then `config()` and the project's request
-/// and allowlist, logging a refused request as `session_profile::resolve`
-/// does — then the home, then [`architect_launch::check_launched_architect`].
+/// What: [`profile_checks`], then the home, then
+/// [`architect_launch::check_launched_architect`].
 fn session_binding_checks(
     env: &HookEnv,
     config: impl FnOnce() -> MpmConfig,
 ) -> Result<(), NotArchitect> {
+    let project = profile_checks(env, config)?;
+    let home = env.home.as_deref().ok_or(NotArchitect::UnknownHome)?;
+    architect_launch::check_launched_architect(&home.join(ANCHOR_ROOT), &project, || {
+        env.claude.get()
+    })
+    .map_err(NotArchitect::Launch)
+}
+
+/// The profile and location checks; `Ok` carries the launch directory.
+///
+/// What: the steps of `session_profile::hook_profile` one at a time — the
+/// stamp, `CLAUDE_PROJECT_DIR`, then `config()` and the project's request
+/// and allowlist, logging a refused request as `session_profile::resolve`
+/// does.
+fn profile_checks(
+    env: &HookEnv,
+    config: impl FnOnce() -> MpmConfig,
+) -> Result<std::path::PathBuf, NotArchitect> {
     // #9755: either stamp value is the Architect.
     if !trusty_mpm::core::architect_compat::is_architect_stamp(env.stamp.as_deref()) {
         return Err(NotArchitect::NoArchitectStamp);
@@ -146,11 +191,7 @@ fn session_binding_checks(
         tracing::warn!(project = %project.display(), "{NOT_ALLOW_LISTED}");
         return Err(NotArchitect::NotAllowListed);
     }
-    let home = env.home.as_deref().ok_or(NotArchitect::UnknownHome)?;
-    architect_launch::check_launched_architect(&home.join(ANCHOR_ROOT), &project, || {
-        env.claude.get()
-    })
-    .map_err(NotArchitect::Launch)
+    Ok(project)
 }
 
 #[cfg(test)]
