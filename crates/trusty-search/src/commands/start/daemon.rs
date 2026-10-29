@@ -60,6 +60,18 @@ pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> 
     let Some(pid) = running_pid else {
         return Ok(());
     };
+    refuse_for_holder(pid, probe_lock_holder())
+}
+
+/// Build the refusal for a known live holder.
+///
+/// Why (#10358): split from the probe so the refusal text is testable for
+/// either holder kind without touching the real lockfile or executable.
+/// What: logs the refusal and returns the error `already_running_message`
+/// renders for `holder`.
+/// Test: `a_bare_start_refuses_before_forking_when_a_daemon_is_running`,
+/// `a_healthy_peer_refusal_carries_no_kill_advice`.
+pub(super) fn refuse_for_holder(pid: u32, holder: LockHolder) -> Result<()> {
     tracing::warn!("daemon already running (pid {pid}); refusing to start a second instance");
     #[cfg(target_os = "macos")]
     let supervised = crate::commands::service::launchd_agent_loaded();
@@ -68,15 +80,29 @@ pub(super) fn refuse_if_already_running(running_pid: Option<u32>) -> Result<()> 
     Err(anyhow::anyhow!(already_running_message(
         pid,
         trusty_common::shutdown::termination_grace().as_secs(),
-        supervised
+        supervised,
+        holder
     )))
+}
+
+/// Evidence-based kind of the process holding the daemon lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LockHolder {
+    /// Started before the on-disk binary was last replaced: the OLD image.
+    StaleImage,
+    /// Anything else, including unknown: a live daemon doing its job.
+    HealthyPeer,
 }
 
 pub(super) fn already_running_message(
     pid: u32,
     grace_secs: u64,
     launchd_supervised: bool,
+    holder: LockHolder,
 ) -> String {
+    if holder == LockHolder::HealthyPeer {
+        return format!("another instance (pid {pid}) is already serving; exiting");
+    }
     let restart = if launchd_supervised {
         "launchd's KeepAlive then starts the replacement on its own.".to_string()
     } else {
@@ -95,6 +121,42 @@ pub(super) fn already_running_message(
          Replacing the binary while the daemon is running causes macOS to SIGKILL \
          the process (Code Signature Invalid)."
     )
+}
+
+/// Decide whether the lock holder is the OLD image or a healthy peer.
+///
+/// Why (#10358): after a cold boot the holder is a peer launchd started a
+/// moment earlier. Telling the operator to SIGTERM it sent them after a
+/// healthy daemon, and the refusal fed the KeepAlive respawn loop.
+/// What: the holder is `StaleImage` only when both times are known and the
+/// binary on disk was modified after the holder started; everything else,
+/// unknown included, is `HealthyPeer`.
+/// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`.
+pub(super) fn classify_lock_holder(
+    holder_started: Option<std::time::SystemTime>,
+    image_modified: Option<std::time::SystemTime>,
+) -> LockHolder {
+    match (holder_started, image_modified) {
+        (Some(started), Some(image)) if image > started => LockHolder::StaleImage,
+        _ => LockHolder::HealthyPeer,
+    }
+}
+
+/// Read the two timestamps `classify_lock_holder` needs.
+///
+/// Why: the holder rewrites the lockfile with its pid when it takes the lock,
+/// so the file's mtime is its start time; the running binary's mtime is when
+/// the image was last replaced. Both are one `stat`, with no process probe.
+/// What: a failed `stat` yields `None`, which classifies as a healthy peer.
+/// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`
+/// covers the decision; the stat itself is exercised by a live `start`.
+fn probe_lock_holder() -> LockHolder {
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let started = crate::service::daemon_lock_path()
+        .ok()
+        .and_then(|p| mtime(&p));
+    let image = std::env::current_exe().ok().and_then(|p| mtime(&p));
+    classify_lock_holder(started, image)
 }
 
 /// Main entry point for `trusty-search start`.
