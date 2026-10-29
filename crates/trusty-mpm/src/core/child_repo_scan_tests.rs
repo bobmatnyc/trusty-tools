@@ -59,7 +59,9 @@ fn a_directory_wider_than_the_budget_is_incomplete() {
 
     assert_eq!(
         scan_for_child_repo(&ws),
-        ChildRepoScan::Incomplete(ScanIncomplete::BudgetExhausted)
+        ChildRepoScan::Incomplete(ScanIncomplete::BudgetExhausted {
+            budget: WORKSPACE_SCAN_BUDGET
+        })
     );
 }
 
@@ -98,7 +100,9 @@ fn a_deep_single_chain_beyond_the_budget_is_incomplete() {
 
     assert_eq!(
         scan_for_child_repo(&ws),
-        ChildRepoScan::Incomplete(ScanIncomplete::BudgetExhausted)
+        ChildRepoScan::Incomplete(ScanIncomplete::BudgetExhausted {
+            budget: WORKSPACE_SCAN_BUDGET
+        })
     );
 }
 

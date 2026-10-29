@@ -94,8 +94,11 @@ pub enum ChildRepoScan {
 /// Test: `the_scan_incomplete_refusal_tells_the_operator_how_to_proceed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanIncomplete {
-    /// More than [`WORKSPACE_SCAN_BUDGET`] directories needed checking.
-    BudgetExhausted,
+    /// More than `budget` directories needed checking.
+    BudgetExhausted {
+        /// The visit budget the scan ran with (#10355: callers differ).
+        budget: usize,
+    },
     /// A skip-listed directory held more than [`SKIP_DIR_CHECK_CAP`]
     /// directories or symlinks to check.
     SkipDirTooWide {
@@ -115,10 +118,9 @@ pub enum ScanIncomplete {
 impl std::fmt::Display for ScanIncomplete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BudgetExhausted => write!(
-                f,
-                "the scan stopped after checking {WORKSPACE_SCAN_BUDGET} directories"
-            ),
+            Self::BudgetExhausted { budget } => {
+                write!(f, "the scan stopped after checking {budget} directories")
+            }
             Self::SkipDirTooWide { path } => write!(
                 f,
                 "{} holds more than {SKIP_DIR_CHECK_CAP} directories to check",
@@ -154,7 +156,7 @@ impl std::fmt::Display for ScanIncomplete {
 /// `a_skip_listed_directory_wider_than_its_check_cap_is_incomplete`,
 /// `clear_is_constructed_in_one_place`.
 pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
-    scan(dir, None)
+    scan(dir, None, WORKSPACE_SCAN_BUDGET)
 }
 
 /// [`scan_for_child_repo`], with one entry of the tree left out.
@@ -167,14 +169,36 @@ pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
 /// [`scan_for_child_repo`].
 /// Test: `an_excepted_entry_is_skipped_and_its_siblings_are_still_found`.
 pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
-    scan(dir, Some(except))
+    scan(dir, Some(except), WORKSPACE_SCAN_BUDGET)
 }
 
-fn scan(dir: &Path, except: Option<&Path>) -> ChildRepoScan {
+/// [`scan_for_child_repo`] or [`scan_for_child_repo_except`] with the visit
+/// budget named by the caller.
+///
+/// Why: #10355 — `tm fleet init` re-checks the Architect's own directory on
+/// every relaunch, and that directory outgrows the 256-directory
+/// [`WORKSPACE_SCAN_BUDGET`] in normal use. A wider budget lets the scan finish
+/// there; an exhausted budget is still [`ChildRepoScan::Incomplete`], so a
+/// caller that refuses on `Incomplete` stays fail-closed.
+/// What: identical to the other two entry points except that `budget`
+/// replaces [`WORKSPACE_SCAN_BUDGET`]; exhaustion reports it in
+/// [`ScanIncomplete::BudgetExhausted`].
+/// Test: `an_architect_dir_wider_than_the_workspace_budget_passes`,
+/// `a_repository_past_the_workspace_budget_is_still_refused`,
+/// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
+pub fn scan_for_child_repo_within(
+    dir: &Path,
+    except: Option<&Path>,
+    budget: usize,
+) -> ChildRepoScan {
+    scan(dir, except, budget)
+}
+
+fn scan(dir: &Path, except: Option<&Path>, budget: usize) -> ChildRepoScan {
     let mut queue = VecDeque::from([dir.to_path_buf()]);
     let mut visited = 0usize;
     while let Some(current) = queue.pop_front() {
-        match scan_level(dir, &current, except, &mut visited, &mut queue) {
+        match scan_level(dir, &current, except, &mut visited, budget, &mut queue) {
             Ok(None) => {}
             Ok(Some(found)) => return ChildRepoScan::Found(found),
             Err(stop) => return ChildRepoScan::Incomplete(stop),
@@ -193,6 +217,7 @@ fn scan_level(
     current: &Path,
     except: Option<&Path>,
     visited: &mut usize,
+    budget: usize,
     queue: &mut VecDeque<PathBuf>,
 ) -> Result<Option<PathBuf>, ScanIncomplete> {
     let children = match std::fs::read_dir(current) {
@@ -214,9 +239,10 @@ fn scan_level(
         let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
         let skip_listed = kind.is_dir() && SCAN_SKIP_DIRS.iter().any(|s| entry.file_name() == *s);
         if kind.is_dir() && !skip_listed {
+            // #10355: the caller names the budget; exhaustion is never `Clear`.
             *visited += 1;
-            if *visited > WORKSPACE_SCAN_BUDGET {
-                return Err(ScanIncomplete::BudgetExhausted);
+            if *visited > budget {
+                return Err(ScanIncomplete::BudgetExhausted { budget });
             }
         }
         match probe(&path, kind)? {

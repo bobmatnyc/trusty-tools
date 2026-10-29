@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use super::super::tests::NO_TMUX;
 use super::super::{init, resolve_dir, user_config_path};
-use super::{DirRefusal, check};
+use super::{DirRefusal, FLEET_SCAN_BUDGET, check};
 
 /// `<outer>/home`, so a test can name a real ancestor of the home directory.
 struct Scratch {
@@ -543,4 +543,67 @@ fn a_private_local_repository_changes_no_other_refusal() {
             remotes: "origin".to_owned()
         }
     );
+}
+
+/// `count` empty directories `<parent>/d0000…`, each charged to the scan budget.
+fn wide(parent: &Path, count: usize) {
+    for i in 0..count {
+        std::fs::create_dir_all(parent.join(format!("d{i:04}"))).unwrap();
+    }
+}
+
+/// An Architect directory as a relaunch finds it: the remote-less repository
+/// the first run created, a private `local/` repository, and more plain
+/// directories than the shared 256-directory workspace budget.
+fn wide_architect(s: &Scratch) -> PathBuf {
+    let dir = s.repo(&s.outer().join("architect"), false);
+    s.repo(&dir.join("local"), false);
+    wide(&dir.join("scripts"), 300);
+    wide(&dir.join("local/evidence"), 300);
+    dir
+}
+
+/// #10355: FAILS BEFORE THE FIX — the 256-directory scan budget ran out and
+/// the relaunch was refused as "cannot check it".
+#[test]
+fn an_architect_dir_wider_than_the_workspace_budget_passes() {
+    let s = Scratch::new();
+    let dir = wide_architect(&s);
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+}
+
+/// #10355: a repository the old budget never reached is still refused, both
+/// beside the private repository and nested inside it. FAILS BEFORE THE FIX:
+/// both were "cannot check it", not "contains the repository".
+#[test]
+fn a_repository_past_the_workspace_budget_is_still_refused() {
+    let s = Scratch::new();
+    let dir = wide_architect(&s);
+    s.repo(&dir.join("zz/deep/project"), false);
+    assert_workspace_parent(s.refused(&dir), &dir, "contains the repository");
+
+    let s = Scratch::new();
+    let dir = wide_architect(&s);
+    s.repo(&dir.join("local/zz/deep/project"), false);
+    assert_workspace_parent(s.refused(&dir), &dir, "nested in its private repository");
+}
+
+/// #10355: exhausting the wider budget is still a refusal (fail closed), names
+/// the budget it hit, and returns promptly instead of walking the whole tree.
+#[test]
+fn a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time() {
+    let s = Scratch::new();
+    let dir = s.outer().join("huge");
+    let per_dir = 128;
+    for i in 0..=(FLEET_SCAN_BUDGET / per_dir) {
+        wide(&dir.join(format!("g{i:04}")), per_dir);
+    }
+    let started = std::time::Instant::now();
+    let refusal = s.refused(&dir);
+    let elapsed = started.elapsed();
+    assert_unresolvable(
+        refusal,
+        &format!("stopped after checking {FLEET_SCAN_BUDGET} directories"),
+    );
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
 }

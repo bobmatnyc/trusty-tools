@@ -19,7 +19,7 @@ use super::{
     ensure_git_repo_with, initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete};
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, WORKSPACE_SCAN_BUDGET};
 
 use crate::test_support::hermetic_temp_dir;
 
@@ -260,7 +260,9 @@ fn refusal_message_names_the_child_repository() {
 #[test]
 fn refusal_message_says_what_stopped_the_scan() {
     let msg = refusal_message(
-        &AutoInitRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted),
+        &AutoInitRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted {
+            budget: WORKSPACE_SCAN_BUDGET,
+        }),
         Path::new("/Users/someone/ws"),
     );
     assert!(msg.contains("could not rule out git repositories"), "{msg}");
@@ -646,7 +648,6 @@ fn classify_keeps_every_other_failure_an_error() {
 #[test]
 fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
     use crate::commands::origin_plan::{OriginPlan, plan_for_origin};
-    use trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET;
 
     let tmp = hermetic_temp_dir();
     let ws = tmp.path().join("wide-workspace");
@@ -661,7 +662,9 @@ fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
     assert_eq!(
         outcome,
         AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(
-            ScanIncomplete::BudgetExhausted
+            ScanIncomplete::BudgetExhausted {
+                budget: WORKSPACE_SCAN_BUDGET
+            }
         ))
     );
     assert!(!ws.join(".git").exists(), "nothing may be initialized");
