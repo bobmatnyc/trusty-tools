@@ -6,7 +6,7 @@
 //! sites; routing them through here means a new one cannot forget the check.
 //! What: [`call`] and [`call_with_timeout`] run
 //! `trusty_common::memory_rpc::ensure_memory_protocol_at` (cached per socket for
-//! a few seconds; a pre-handshake daemon stays callable) and then
+//! a few seconds; a daemon with no `memory.protocol` is refused) and then
 //! `call_memory_tool_at_with_timeout`. A refusal is an `anyhow::Error` wrapping
 //! `MemoryProtocolError`: `{e:#}` shows the named cause, [`protocol_mismatch`]
 //! recovers it.
@@ -53,13 +53,14 @@ pub async fn call_with_timeout(
 /// reason, which it can only do after telling it from "nothing answered". A
 /// `HandshakeFailed` check is a dead or broken transport, not a mismatch, so it
 /// is not returned and the caller's existing unreachable handling applies.
-/// What: `Some` for `Unsupported` and `MalformedHandshake` only.
+/// What: `Some` for `Unsupported`, `NoHandshake` and `MalformedHandshake` only.
 /// Test: `core::memory_protocol_gate_tests`, `unreachable_socket_answers_false`.
 pub fn protocol_mismatch(e: &anyhow::Error) -> Option<&MemoryProtocolError> {
     e.downcast_ref::<MemoryProtocolError>().filter(|p| {
         matches!(
             p,
             MemoryProtocolError::Unsupported { .. }
+                | MemoryProtocolError::NoHandshake { .. }
                 | MemoryProtocolError::MalformedHandshake { .. }
         )
     })

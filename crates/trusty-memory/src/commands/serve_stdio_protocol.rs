@@ -8,8 +8,8 @@
 //! and answers a refused check with an error that names it. Notifications and
 //! the methods [`super::serve_stdio_local`] answers in process never reach the
 //! daemon, so they are never checked — the MCP handshake still survives a down
-//! daemon (#8351). A daemon that predates the handshake is forwarded to, by
-//! the rule `check_memory_protocol_at` documents.
+//! daemon (#8351). A daemon with no `memory.protocol` (a release older than
+//! 0.31.0) is refused (#9537), as `check_memory_protocol_at` documents.
 //! Test: `a_tool_call_to_an_unsupported_daemon_is_refused_by_name`,
 //! `local_and_notification_methods_are_never_checked`.
 

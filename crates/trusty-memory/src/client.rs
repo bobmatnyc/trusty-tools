@@ -72,8 +72,8 @@ pub async fn call_with_timeout(method: &str, params: Value, timeout: Duration) -
 /// test of the hook.
 ///
 /// #9288: runs the shared protocol check first, so a daemon from another
-/// release is refused with `MemoryProtocolError` instead of misparsed. A daemon
-/// that predates the handshake is called, per
+/// release is refused with `MemoryProtocolError` instead of misparsed. So is a
+/// daemon with no `memory.protocol` (#9537), per
 /// `trusty_common::memory_rpc::check_memory_protocol_at`.
 ///
 /// # Errors
@@ -82,7 +82,7 @@ pub async fn call_with_timeout(method: &str, params: Value, timeout: Duration) -
 /// talk to or whose protocol check failed.
 ///
 /// Test: `client_refuses_an_unsupported_daemon_before_calling_it`,
-/// `client_calls_a_daemon_that_predates_the_handshake`.
+/// `client_refuses_a_daemon_that_predates_the_handshake`.
 pub async fn call_at(
     socket: &Path,
     method: &str,
@@ -341,25 +341,33 @@ mod tests {
         assert_eq!(fake.status_calls(), 0, "the call must not be sent");
     }
 
-    /// Why (#9288): during a rolling upgrade the installed client meets a
-    /// daemon that predates the handshake; every call must not fail.
+    /// Why (#9537): a daemon older than 0.31.0 has no `memory.protocol`; it is
+    /// refused like an incompatible one, and no call reaches it.
     /// Test: itself.
     #[tokio::test]
-    async fn client_calls_a_daemon_that_predates_the_handshake() {
+    async fn client_refuses_a_daemon_that_predates_the_handshake() {
+        use trusty_common::memory_rpc::MemoryProtocolError;
+
         type NoProtocol =
             fn() -> std::future::Ready<Result<Value, trusty_common::uds::server::RpcError>>;
         let fake = serve_fake::<NoProtocol, _>(None);
 
-        let answer = call_at(
+        let err = call_at(
             &fake.socket,
             "memory.status",
             json!({}),
             Duration::from_secs(10),
         )
         .await
-        .expect("a pre-handshake daemon is still called");
+        .expect_err("a daemon with no handshake is refused");
 
-        assert_eq!(answer, json!({ "ok": true }));
-        assert_eq!(fake.status_calls(), 1);
+        assert!(
+            matches!(
+                err.downcast_ref::<MemoryProtocolError>(),
+                Some(MemoryProtocolError::NoHandshake { .. })
+            ),
+            "expected NoHandshake, got {err:#}"
+        );
+        assert_eq!(fake.status_calls(), 0, "the call must not be sent");
     }
 }

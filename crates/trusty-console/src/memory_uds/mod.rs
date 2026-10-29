@@ -313,7 +313,7 @@ pub(crate) fn remaining(budget: Duration, started: Instant) -> Duration {
 /// name instead of having its replies misparsed. This crate frames its own
 /// requests, so it does not pass through the shared checked call path.
 /// What: `trusty_common::memory_rpc::ensure_memory_protocol_at` (cached per
-/// socket for a few seconds; a pre-handshake daemon stays callable). An
+/// socket for a few seconds; a daemon with no `memory.protocol` is refused). An
 /// unsupported or unreadable handshake is [`MemoryRpcError::ProtocolMismatch`]
 /// and is logged; a handshake that could not run is
 /// [`MemoryRpcError::Unreachable`], as any other transport failure, naming

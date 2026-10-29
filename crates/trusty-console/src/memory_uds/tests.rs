@@ -602,13 +602,14 @@ async fn call_keeps_the_handshake_and_the_frame_inside_one_timeout() {
     assert!(took < Duration::from_millis(1150), "waited {took:?}");
 }
 
-/// Why: a daemon that predates `memory.protocol` answers method-not-found, and
-/// must stay callable (#9538).
-/// What: the stub answers the handshake with JSON-RPC `-32601`; the next call
-/// reaches it and returns its result.
+/// Why: a daemon that predates `memory.protocol` answers method-not-found; it
+/// is refused like an incompatible one, with nothing sent to it (#9537).
+/// What: the stub answers the handshake with JSON-RPC `-32601`; `call` fails
+/// with `ProtocolMismatch` naming the restart, and the stub saw only the
+/// handshake.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
-async fn call_stays_callable_on_a_daemon_that_predates_the_handshake() {
+async fn call_refuses_a_daemon_that_predates_the_handshake() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (socket, seen) = protocol_stub::spawn_raw(
         tmp.path(),
@@ -618,16 +619,17 @@ async fn call_stays_callable_on_a_daemon_that_predates_the_handshake() {
         Duration::ZERO,
         Duration::ZERO,
     );
-    let out = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
         .await
-        .expect("a pre-handshake daemon is still callable");
-    assert_eq!(out["status"], "ok");
+        .expect_err("a daemon with no handshake is not callable");
+    assert!(
+        matches!(err, MemoryRpcError::ProtocolMismatch(_)),
+        "{err:?}"
+    );
+    assert!(err.message().contains("restart the daemon"), "{err:?}");
     let seen = seen.lock().expect("recorded");
-    // The shared check probes a pre-handshake daemon with a health call first.
-    assert_eq!(seen.first().map(String::as_str), Some("memory.protocol"));
-    assert_eq!(
-        seen.last().map(String::as_str),
-        Some(METHOD_HEALTH),
-        "{seen:?}"
+    assert!(
+        seen.iter().all(|m| m == "memory.protocol"),
+        "no memory method may reach a refused daemon: {seen:?}"
     );
 }

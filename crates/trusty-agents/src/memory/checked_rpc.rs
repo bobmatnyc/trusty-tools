@@ -7,7 +7,7 @@
 //! forgotten at a new one.
 //! What: [`call`] and [`call_with_timeout`] run
 //! `trusty_common::memory_rpc::ensure_memory_protocol_at` (cached per socket
-//! for a few seconds, pre-handshake daemons stay callable) and then
+//! for a few seconds; a daemon with no `memory.protocol` is refused) and then
 //! `call_memory_tool_at_with_timeout`. A refusal comes back as an
 //! `anyhow::Error` wrapping `MemoryProtocolError`, so a caller that formats
 //! with `{e:#}` shows the named cause and one that downcasts can match it.

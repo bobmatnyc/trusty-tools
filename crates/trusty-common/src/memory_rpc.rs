@@ -302,7 +302,7 @@ pub async fn call_memory_tool_at_with_timeout(
 
 /// One call with NO protocol check — the explicit escape hatch (#9538).
 ///
-/// Why: the handshake and the pre-handshake health lookup are themselves calls,
+/// Why: the handshake is itself a call,
 /// so they cannot go through the checked path without recursing. A probe that
 /// must report what a daemon says rather than refuse it may also use this.
 /// Everything else uses [`call_memory_tool_at_with_timeout`].
@@ -415,42 +415,12 @@ impl MemoryProtocolInfo {
     }
 }
 
-/// The protocol a daemon that predates the handshake speaks (#9288).
-const PRE_HANDSHAKE_PROTOCOL: u64 = 1;
-
-/// The verdict for a daemon that answered [`METHOD_PROTOCOL`] with
-/// method-not-found, given the versions this client supports (#9288).
-///
-/// Why: such a daemon speaks protocol 1. It is callable only while this
-/// client still supports protocol 1; once the range moves past it, the daemon
-/// is refused like any other out-of-range one.
-/// Test: `a_pre_handshake_daemon_is_refused_once_protocol_1_is_unsupported`.
-fn pre_handshake_verdict(
-    socket: &Path,
-    supported: &std::ops::RangeInclusive<u64>,
-) -> Result<MemoryProtocol, MemoryProtocolError> {
-    if supported.contains(&PRE_HANDSHAKE_PROTOCOL) {
-        return Ok(MemoryProtocol::PreHandshake);
-    }
-    Err(MemoryProtocolError::Unsupported {
-        socket: socket.to_path_buf(),
-        daemon: PRE_HANDSHAKE_PROTOCOL,
-        daemon_version: "older than protocol 1".to_string(),
-        min: *supported.start(),
-        max: *supported.end(),
-    })
-}
-
 /// What a protocol check concluded about a daemon that may be called (#9288).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemoryProtocol {
     /// The daemon reported a version inside [`SUPPORTED_MEMORY_PROTOCOLS`].
     Supported(MemoryProtocolInfo),
-    /// The daemon predates the handshake: it answered [`METHOD_PROTOCOL`] with
-    /// method-not-found. See [`check_memory_protocol_at`] for why this is
-    /// callable.
-    PreHandshake,
 }
 
 /// Why a protocol check refused the daemon (#9288).
@@ -481,6 +451,17 @@ pub enum MemoryProtocolError {
         /// The newest version this client supports.
         max: u64,
     },
+    /// The daemon answered [`METHOD_PROTOCOL`] with method-not-found: it is a
+    /// trusty-memory older than 0.31.0, the first release with the handshake
+    /// (#9537).
+    #[error(
+        "the trusty-memory daemon at {socket} does not serve {METHOD_PROTOCOL} (a release older \
+         than 0.31.0); restart the daemon so it runs the installed release"
+    )]
+    NoHandshake {
+        /// The socket that was checked.
+        socket: PathBuf,
+    },
     /// The daemon answered the handshake with a body this client cannot read.
     #[error("the trusty-memory daemon at {socket} answered {METHOD_PROTOCOL} unreadably: {reason}")]
     MalformedHandshake {
@@ -509,13 +490,11 @@ pub enum MemoryProtocolError {
 /// other version is [`MemoryProtocolError::Unsupported`]; an unreadable body is
 /// `MalformedHandshake`; every other failure is `HandshakeFailed`.
 ///
-/// **A daemon that predates the handshake is callable, by explicit rule.** It
-/// answers method-not-found (`-32601`), and that one answer maps to
-/// [`MemoryProtocol::PreHandshake`] rather than an error. Why: clients install
-/// before the running daemon restarts, so refusing here would fail every call
-/// for the whole rolling-upgrade window. Protocol 1 is the wire such a daemon
-/// already speaks, so the arm holds only while [`SUPPORTED_MEMORY_PROTOCOLS`]
-/// contains 1; past that it is `Unsupported`. No other error code takes it.
+/// **A daemon without the handshake is refused (#9537).** It answers
+/// method-not-found (`-32601`), and that one answer maps to
+/// [`MemoryProtocolError::NoHandshake`]. The support floor is trusty-memory
+/// 0.31.0, the first release serving [`METHOD_PROTOCOL`]; an older daemon must
+/// be restarted into the installed release.
 ///
 /// # Errors
 ///
@@ -523,9 +502,8 @@ pub enum MemoryProtocolError {
 ///
 /// Test: `protocol_check_accepts_a_daemon_in_the_supported_range`,
 /// `protocol_check_refuses_an_out_of_range_daemon_with_a_named_error`,
-/// `protocol_check_reads_a_pre_handshake_daemon_as_pre_handshake`,
-/// `protocol_check_fails_closed_when_the_query_fails`,
-/// `a_pre_handshake_daemon_is_refused_once_protocol_1_is_unsupported`.
+/// `protocol_check_refuses_a_daemon_without_the_handshake`,
+/// `protocol_check_fails_closed_when_the_query_fails`.
 pub async fn check_memory_protocol_at(
     socket: &Path,
     timeout: Duration,
@@ -536,13 +514,15 @@ pub async fn check_memory_protocol_at(
         {
             Ok(body) => body,
             Err(e) => {
-                // #9288: method-not-found, and only it, means "predates the
-                // handshake". Every other failure is refused below.
-                let pre_handshake = e
+                // #9537: method-not-found, and only it, means the daemon has no
+                // handshake; it is refused like any other incompatible one.
+                let no_handshake = e
                     .downcast_ref::<MemoryRpcError>()
                     .is_some_and(|rpc| rpc.code == crate::uds::server::CODE_METHOD_NOT_FOUND);
-                if pre_handshake {
-                    return pre_handshake_verdict(socket, &SUPPORTED_MEMORY_PROTOCOLS);
+                if no_handshake {
+                    return Err(MemoryProtocolError::NoHandshake {
+                        socket: socket.to_path_buf(),
+                    });
                 }
                 return Err(MemoryProtocolError::HandshakeFailed {
                     socket: socket.to_path_buf(),
@@ -582,16 +562,13 @@ fn protocol_cache() -> &'static std::sync::Mutex<ProtocolCache> {
 /// restarted into another release.
 /// What: returns a callable verdict younger than [`PROTOCOL_RECHECK_INTERVAL`]
 /// for this socket; otherwise checks, and caches only a callable verdict. A
-/// refusal is never cached, so a restarted daemon heals on the next call. A
-/// pre-handshake daemon is reported once per process — see
-/// [`warn_pre_handshake_once`].
+/// refusal is never cached, so a restarted daemon heals on the next call.
 ///
 /// # Errors
 ///
 /// As [`check_memory_protocol_at`].
 ///
-/// Test: `an_unsupported_verdict_is_not_cached`,
-/// `a_pre_handshake_daemon_is_called_and_warned_about_once_per_process`.
+/// Test: `an_unsupported_verdict_is_not_cached`.
 pub async fn ensure_memory_protocol_at(
     socket: &Path,
     timeout: Duration,
@@ -606,9 +583,6 @@ pub async fn ensure_memory_protocol_at(
         return Ok(verdict);
     }
     let verdict = check_memory_protocol_at(socket, timeout).await?;
-    if verdict == MemoryProtocol::PreHandshake {
-        warn_pre_handshake_once(socket, timeout).await;
-    }
     protocol_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -617,48 +591,6 @@ pub async fn ensure_memory_protocol_at(
             (std::time::Instant::now(), verdict.clone()),
         );
     Ok(verdict)
-}
-
-/// How many pre-handshake warnings this process has emitted: 0 or 1.
-static PRE_HANDSHAKE_WARNINGS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// Report a daemon that predates the handshake, once per process (#9288).
-///
-/// Why: the call goes ahead, so the operator needs to learn the daemon wants a
-/// restart — once, not on every call of a long-lived client.
-/// What: the first caller in the process asks `memory.health` for the
-/// daemon's crate version (a pre-handshake daemon cannot report it through
-/// [`METHOD_PROTOCOL`]) and writes one warning to stderr and to the log. Later
-/// callers do nothing.
-/// Test: `a_pre_handshake_daemon_is_called_and_warned_about_once_per_process`.
-async fn warn_pre_handshake_once(socket: &Path, timeout: Duration) {
-    use std::sync::atomic::Ordering;
-    if PRE_HANDSHAKE_WARNINGS
-        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    let version = call_memory_tool_at_raw_with_timeout(socket, "memory.health", json!({}), timeout)
-        .await
-        .ok()
-        .and_then(|body| {
-            body.get("version")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    let daemon = match version {
-        Some(v) => format!("the trusty-memory daemon {v}"),
-        None => "a trusty-memory daemon older than protocol 1".to_string(),
-    };
-    let warning = format!(
-        "{daemon} at {} predates the protocol handshake (#9288); calling it as protocol 1. \
-         Restart the trusty-memory daemon to pick up the protocol handshake.",
-        socket.display()
-    );
-    eprintln!("trusty-memory: {warning}");
-    tracing::warn!("{warning}");
 }
 
 #[cfg(test)]
