@@ -11,12 +11,12 @@
 //! lock every sender takes, so a later event is counted and logged as late.
 //! Test: `spool_tests.rs`.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use trusty_common::control_bus::{HarnessEvent, PushFlushOutcome};
 
-use super::{ActionPublisher, FINAL_FLUSH_BUDGET, spool};
+use super::{ActionEvents, ActionPublisher, FINAL_FLUSH_BUDGET, SIGNAL_FLUSH_BUDGET, spool};
 
 /// Kept back from a settle's own budget so its result lands before the
 /// caller's outer timeout does.
@@ -42,6 +42,8 @@ pub(super) struct SettleState {
     result: tokio::sync::OnceCell<Settled>,
     /// Events drained and not yet sent or spooled.
     in_flight: AtomicUsize,
+    /// The settle is at the bus, which may hold one popped frame.
+    at_bus: AtomicBool,
     /// Events offered after the drain.
     late: AtomicU64,
 }
@@ -74,7 +76,30 @@ impl ActionPublisher {
     pub fn late_lost(&self) -> u64 {
         self.settle.late.load(Ordering::Relaxed)
     }
+}
 
+impl ActionEvents {
+    /// Log the final late-event total once; returns it (#10412).
+    ///
+    /// Why: [`ActionPublisher::buffer`] logs late events only at powers of
+    /// two, and the sessions a normal stop ends after the settle send hooks.
+    /// What: one warn line with `late_lost` when it is above zero. Each stop
+    /// path calls it last: serve after `mgr.shutdown()`, the signal path
+    /// before `process::exit`.
+    /// Test: `the_signal_path_logs_the_final_late_total_10412`.
+    pub fn report_late(&self) -> u64 {
+        let late = self.publisher().map_or(0, |p| p.late_lost());
+        if late > 0 {
+            tracing::warn!(
+                late_lost = late,
+                "action events: events after the stop settled the buffer; lost in total"
+            );
+        }
+        late
+    }
+}
+
+impl ActionPublisher {
     /// The exit-path flush, bounded by [`FINAL_FLUSH_BUDGET`].
     ///
     /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
@@ -90,8 +115,12 @@ impl ActionPublisher {
     /// caller whose `budget` ends first returns the drained-but-unwritten
     /// plus still-buffered count as `lost`, and logs it, since its process
     /// may exit before the settle ends.
+    /// #10412: the count is read under the lock the drain holds, so it never
+    /// falls between the drain and its count, and it adds the one frame a
+    /// flush at the bus may have popped. It is an upper bound.
     /// Test: `concurrent_settles_account_for_every_event_once_10412`,
-    /// `a_settle_waiter_out_of_budget_counts_what_is_at_risk_10412`.
+    /// `a_signal_waiter_gets_the_spool_when_a_slower_caller_settles_10412`,
+    /// `a_waiter_out_of_budget_counts_the_frame_at_the_bus_10412`.
     pub async fn final_flush_within(&self, budget: Duration) -> Settled {
         let once = self
             .settle
@@ -100,8 +129,12 @@ impl ActionPublisher {
         match tokio::time::timeout(budget, once).await {
             Ok(settled) => *settled,
             Err(_) => {
-                let at_risk =
-                    self.settle.in_flight.load(Ordering::Relaxed) + self.client.buffered_len();
+                let at_risk = {
+                    let _closed = self.settle.closed.lock();
+                    self.settle.in_flight.load(Ordering::Relaxed)
+                        + self.client.buffered_len()
+                        + usize::from(self.settle.at_bus.load(Ordering::Relaxed))
+                };
                 tracing::warn!(
                     lost = at_risk,
                     "action events: stop budget ended before the settle did; counted lost"
@@ -116,8 +149,11 @@ impl ActionPublisher {
 
     /// The settle itself: deliver, then spool the rest.
     ///
-    /// What: the bus gets half of `budget` (a cut-off write re-queues its
-    /// frame). The buffer is then closed and drained in one step; the drained
+    /// What: the bus gets half of `budget`, and never more than half of
+    /// [`SIGNAL_FLUSH_BUDGET`] (a cut-off write re-queues its frame).
+    /// #10412: the first caller's budget sets the settle's, and on SIGTERM
+    /// that may be the serve drain's 1 s; the cap gets the rest to the spool
+    /// inside the signal handler's 200 ms whichever caller won. The buffer is then closed and drained in one step; the drained
     /// events go to the spool on the blocking pool, cut off at `budget`.
     /// Every event neither sent nor spooled is counted in [`Settled::lost`]
     /// and logged with that count.
@@ -126,8 +162,13 @@ impl ActionPublisher {
     async fn settle_within(&self, budget: Duration) -> Settled {
         let deadline = tokio::time::Instant::now() + budget;
         let mut settled = Settled::default();
-        let buffered = self.client.buffered_len();
-        match tokio::time::timeout(budget / 2, self.client.flush()).await {
+        let buffered = {
+            let _closed = self.settle.closed.lock();
+            self.settle.at_bus.store(true, Ordering::Relaxed);
+            self.client.buffered_len()
+        };
+        let at_bus = budget.min(SIGNAL_FLUSH_BUDGET) / 2;
+        match tokio::time::timeout(at_bus, self.client.flush()).await {
             Ok(PushFlushOutcome { error: None, sent }) => settled.sent = sent,
             Ok(PushFlushOutcome {
                 error: Some(e),
@@ -148,6 +189,7 @@ impl ActionPublisher {
         let left = {
             let mut closed = self.settle.closed.lock();
             *closed = true;
+            self.settle.at_bus.store(false, Ordering::Relaxed);
             let left = self.client.drain_buffered();
             self.settle.in_flight.store(left.len(), Ordering::Relaxed);
             left

@@ -243,11 +243,14 @@ async fn concurrent_settles_account_for_every_event_once_10412() {
     assert_eq!(spooled(&spool).len(), 51, "each event spooled once");
 }
 
-/// A caller whose budget ends while another settle is still at the bus
-/// returns on time and counts every event still at risk as lost.
-#[tokio::test]
-async fn a_settle_waiter_out_of_budget_counts_what_is_at_risk_10412() {
-    let dir = tempfile::tempdir().expect("tempdir");
+/// A hung bus and 3,000 events stuck at it, with a caller already settling.
+fn settling_on_a_hung_bus(
+    dir: &tempfile::TempDir,
+) -> (
+    DaemonState,
+    Arc<ActionPublisher>,
+    tokio::task::JoinHandle<()>,
+) {
     let sock = dir.path().join("bus.sock");
     let state = started(&sock, &dir.path().join("spool"));
     let s = SessionId::new();
@@ -261,6 +264,15 @@ async fn a_settle_waiter_out_of_budget_counts_what_is_at_risk_10412() {
         drop(conn);
     });
     let publisher = Arc::clone(state.action_events().publisher().expect("attached"));
+    (state, publisher, hold)
+}
+
+/// #10412: on SIGTERM the serve drain (1 s) may win the settle; the signal
+/// handler's caller (200 ms) still gets the events to the spool in time.
+#[tokio::test]
+async fn a_signal_waiter_gets_the_spool_when_a_slower_caller_settles_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_state, publisher, hold) = settling_on_a_hung_bus(&dir);
     let first = Arc::clone(&publisher);
     let settling = tokio::spawn(async move { first.final_flush_within(FINAL_FLUSH_BUDGET).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -273,18 +285,35 @@ async fn a_settle_waiter_out_of_budget_counts_what_is_at_risk_10412() {
         "{took:?}"
     );
     assert_eq!(
-        waiter.spooled, 0,
-        "the waiter settled on its own: {waiter:?}"
+        waiter.lost, 0,
+        "the signal caller ran out first: {waiter:?}"
     );
-    assert!(waiter.lost > 0, "nothing counted at risk: {waiter:?}");
-
+    assert!(waiter.spooled > 0, "{waiter:?}");
+    assert_eq!(waiter.sent + waiter.spooled, 3_001, "{waiter:?}");
     let settled = settling.await.expect("join");
     hold.abort();
-    assert_eq!(
-        settled.sent + settled.spooled + settled.lost,
-        3_001,
-        "{settled:?}"
-    );
+    assert_eq!(settled, waiter, "one settle, one result");
+}
+
+/// #10412: a caller that runs out while the settle is at the bus counts
+/// the frame the stuck write popped, as well as what is still buffered.
+#[tokio::test]
+async fn a_waiter_out_of_budget_counts_the_frame_at_the_bus_10412() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_state, publisher, hold) = settling_on_a_hung_bus(&dir);
+    let first = Arc::clone(&publisher);
+    let settling = tokio::spawn(async move { first.final_flush_within(FINAL_FLUSH_BUDGET).await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Out of budget well inside the settle's 100 ms at the bus.
+    let waiter = publisher
+        .final_flush_within(Duration::from_millis(20))
+        .await;
+    let buffered = publisher.buffered_len();
+    assert_eq!(waiter.spooled, 0, "{waiter:?}");
+    assert_eq!(waiter.lost, buffered + 1, "the popped frame went uncounted");
+    settling.await.expect("join");
+    hold.abort();
 }
 
 /// A hook after the stop drained the buffer is counted, not stranded.
@@ -359,4 +388,52 @@ fn a_stale_unlocked_temp_file_is_swept_and_a_live_one_kept_10412() {
     assert!(!abandoned.exists(), "the abandoned temp file stayed");
     assert!(writing.exists(), "removed a file a live writer holds");
     drop(writer);
+}
+
+/// #10412: an inject the session manager delivers after the settle is
+/// counted, like a hook.
+#[tokio::test]
+async fn an_inject_after_the_settle_is_counted_lost_10412() {
+    use crate::session_manager::inject_record::{Delivery, InjectRecorder};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = started(&dir.path().join("absent.sock"), &dir.path().join("spool"));
+    state.action_events().shutdown().await;
+    let publisher = state.action_events().publisher().expect("attached");
+    publisher.delivered(&Delivery {
+        at: chrono::Utc::now(),
+        tmux_name: "tm-proj-01",
+        claude_session_id: None,
+        text: "late",
+    });
+    assert_eq!(publisher.buffered_len(), 0, "stranded in a settled buffer");
+    assert_eq!(publisher.late_lost(), 1);
+}
+
+/// #10412: the signal path logs the late total once, after the lock goes,
+/// so events that arrive during its settle are in it.
+#[tokio::test]
+async fn the_signal_path_logs_the_final_late_total_10412() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = started(&dir.path().join("absent.sock"), &dir.path().join("spool"));
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let _capture = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    ));
+    let s = SessionId::new();
+    // Root and four starts: five late events; the power-of-two lines stop at 4.
+    before_signal_exit(&state, || {
+        for i in 0..4 {
+            state.push_hook_event(hook(s, &format!("late{i}")));
+        }
+    })
+    .await;
+    let lines = buffer.tail(64);
+    let totals: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("lost in total"))
+        .collect();
+    assert_eq!(totals.len(), 1, "{lines:?}");
+    assert!(totals[0].contains("late_lost=5"), "{totals:?}");
 }

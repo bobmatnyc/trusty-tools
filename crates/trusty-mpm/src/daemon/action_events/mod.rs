@@ -506,15 +506,18 @@ impl FlushHealth {
 /// lock file names a live daemon until the flush ends, so a spawner never
 /// sees "no daemon" while this one still serves its socket.
 /// What: [`ActionEvents::shutdown_within`] with [`SIGNAL_FLUSH_BUDGET`], then
-/// `remove_lock`.
+/// `remove_lock`, then [`ActionEvents::report_late`].
 /// Test: `the_signal_path_flush_returns_within_its_budget_6849`,
-/// `the_signal_path_flushes_before_removing_the_lock_6849`.
+/// `the_signal_path_flushes_before_removing_the_lock_6849`,
+/// `the_signal_path_logs_the_final_late_total_10412`.
 pub async fn before_signal_exit(state: &DaemonState, remove_lock: impl FnOnce()) {
     state
         .action_events()
         .shutdown_within(SIGNAL_FLUSH_BUDGET)
         .await;
     remove_lock();
+    // #10412: the late total, once, before `process::exit`.
+    state.action_events().report_late();
 }
 
 /// Whether this daemon may dial a bus at all.
