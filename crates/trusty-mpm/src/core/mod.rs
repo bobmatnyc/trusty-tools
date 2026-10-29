@@ -271,6 +271,10 @@ pub mod memory_verbs;
 pub mod memory_forget;
 // #9544: `tm memory rename` — trusty-memory's `palace_rename` over the socket.
 pub mod memory_rename;
+// #9538: the protocol-checked door to the memory socket.
+pub mod memory_checked;
+#[cfg(test)]
+mod memory_protocol_gate_tests;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;

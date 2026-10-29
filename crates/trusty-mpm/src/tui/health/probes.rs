@@ -125,7 +125,7 @@ impl HealthClient {
     /// Why: this client's `base` is a socket path when `daemon` is
     /// `Daemon::Memory`, and every memory leg below goes through here.
     async fn memory_call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<Value> {
-        trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+        crate::core::memory_checked::call_with_timeout(
             std::path::Path::new(&self.base),
             method,
             params,

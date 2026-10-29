@@ -1136,3 +1136,18 @@ async fn memory_stalled_palace_lock_is_not_ok() {
         );
     }
 }
+
+#[tokio::test]
+async fn memory_protocol_mismatch_is_warn_with_the_reason() {
+    // #9538: a daemon from another release answers health fine; the row must
+    // say the protocol is the problem, not read as healthy or as "down".
+    let daemon = crate::uds_mock::spawn_with_protocol(
+        99,
+        crate::uds_mock::always(serde_json::json!({"status": "ok"})),
+    )
+    .await;
+    let addr = daemon.socket().display().to_string();
+    let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
+    assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+    assert!(check.message.contains("protocol"), "{check:?}");
+}

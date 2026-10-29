@@ -92,6 +92,8 @@ enum ProbeOutcome {
     TimedOut,
     /// Connection refused / DNS / other transport failure — nothing is there.
     Unreachable(String),
+    /// The daemon speaks a protocol this client refuses (#9538); the named reason.
+    ProtocolMismatch(String),
 }
 
 /// Issue one `memory.health` call and classify the outcome (#6286).
@@ -108,7 +110,7 @@ enum ProbeOutcome {
 /// transport error; `TimedOut` is the budget overrun.
 async fn probe_health_once(socket: &Path) -> ProbeOutcome {
     let started = std::time::Instant::now();
-    match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
+    match crate::core::memory_checked::call_with_timeout(
         socket,
         "memory.health",
         serde_json::json!({}),
@@ -118,6 +120,9 @@ async fn probe_health_once(socket: &Path) -> ProbeOutcome {
     {
         Ok(body) => ProbeOutcome::Success(Some(body)),
         Err(e) => {
+            if crate::core::memory_checked::protocol_error(&e).is_some() {
+                return ProbeOutcome::ProtocolMismatch(format!("{e:#}"));
+            }
             if let Some(rpc) = e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
                 return ProbeOutcome::NonSuccess(rpc.code.unsigned_abs() as u16);
             }
@@ -165,6 +170,14 @@ pub(super) async fn probe_health(
             ProbeOutcome::NonSuccess(code) => {
                 last_status = Some(code);
                 last_timeout = false;
+            }
+            // #9538: retrying cannot change a protocol; report it as degraded.
+            ProbeOutcome::ProtocolMismatch(reason) => {
+                return DoctorCheck::new(
+                    check,
+                    CheckStatus::Warn,
+                    format!("{service} at {addr} is degraded: {reason}"),
+                );
             }
             ProbeOutcome::TimedOut => {
                 last_timeout = true;
