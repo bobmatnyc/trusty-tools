@@ -23,6 +23,7 @@
 // Module layout: types + helpers + Drop + JSON-RPC builders live here;
 // the `impl StdioMcpClient` request methods live in `client.rs`.
 mod client;
+pub use client::is_response_to;
 #[cfg(test)]
 mod frame_tests;
 
@@ -206,6 +207,9 @@ pub struct StdioMcpClient {
     pub(super) child: Child,
     pub(super) stdin: BufWriter<ChildStdin>,
     pub(super) stdout: BufReader<ChildStdout>,
+    /// #10360: bytes of a stdout line not yet terminated by `\n`. Kept across
+    /// calls so a timeout that cancels a read mid-line loses nothing.
+    pub(super) line_buf: Vec<u8>,
     pub(super) next_id: AtomicU64,
     /// Original binary path used at spawn time, retained for respawn.
     pub(super) binary: String,

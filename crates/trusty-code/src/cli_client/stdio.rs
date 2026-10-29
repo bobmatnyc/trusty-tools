@@ -26,6 +26,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
+use trusty_common::stdio_mcp_client::is_response_to;
 use trusty_mcp::Request;
 
 use crate::events::SessionEventEnvelope;
@@ -173,13 +174,15 @@ impl StdioRpcClient {
     /// Why: the request/response half of the protocol every non-streaming
     /// subcommand (`session.list`/`status`/`cancel`/`get_transcript`,
     /// `task.run`'s initial call) uses.
-    /// What: writes one NDJSON request line, then reads lines until one
-    /// carries the SAME `id` — any `session.event` notification observed
+    /// What: writes one NDJSON request line, then reads lines until a true
+    /// response (no `method`, has `result` or `error`, #10360) carries the
+    /// SAME `id` — a server request with that id is skipped and logged; any `session.event` notification observed
     /// along the way is buffered (not dropped) for a later
     /// [`Self::next_notification`] call. A JSON-RPC error envelope becomes
     /// `Err(RpcClientError::Rpc)`; the whole call is bounded by
     /// [`DEFAULT_CALL_TIMEOUT`].
-    /// Test: covered end-to-end by `tests/cli_e2e.rs`.
+    /// Test: `tests::call_skips_server_request_with_matching_id`; end-to-end
+    /// by `tests/cli_e2e.rs`.
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, RpcClientError> {
         timeout(DEFAULT_CALL_TIMEOUT, self.call_inner(method, params))
             .await
@@ -189,6 +192,7 @@ impl StdioRpcClient {
     async fn call_inner(&mut self, method: &str, params: Value) -> Result<Value, RpcClientError> {
         let id = self.next_id;
         self.next_id += 1;
+        let id_value = Value::from(id);
         let req = build_request(id, method, params);
         let mut line = serde_json::to_string(&req)
             .map_err(|e| RpcClientError::MalformedResponse(e.to_string()))?;
@@ -204,7 +208,9 @@ impl StdioRpcClient {
             let value: Value = serde_json::from_str(&raw)
                 .map_err(|e| RpcClientError::MalformedResponse(format!("{e}: {raw}")))?;
 
-            if value.get("id").and_then(Value::as_i64) == Some(id) {
+            // #10360: only a true response (no `method`, has `result` or
+            // `error`) to this id is the call's answer.
+            if is_response_to(&value, &id_value) {
                 if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
                     return Err(RpcClientError::Rpc {
                         code: err.get("code").and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -221,10 +227,16 @@ impl StdioRpcClient {
 
             if let Some(envelope) = classify_notification(&value) {
                 self.pending_notifications.push_back(envelope);
+            } else if value.get("id") == Some(&id_value) {
+                // #10360: a server request colliding with our id is an
+                // anomaly, so warn; log id and method only, never the payload.
+                let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+                tracing::warn!(id, %method, "StdioRpcClient: skipping non-response frame with the awaited id");
+            } else {
+                // A response to an id we no longer care about; this client
+                // only ever has one call in flight at a time.
+                tracing::debug!(id, "StdioRpcClient: skipping non-matching frame");
             }
-            // Any other stray line (e.g. a response to an id we no longer
-            // care about) is silently ignored — this client only ever has
-            // one call in flight at a time.
         }
     }
 

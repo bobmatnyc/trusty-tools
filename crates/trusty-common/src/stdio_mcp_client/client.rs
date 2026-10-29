@@ -97,6 +97,7 @@ impl StdioMcpClient {
             child,
             stdin: BufWriter::new(stdin),
             stdout: BufReader::new(stdout),
+            line_buf: Vec::new(),
             next_id: AtomicU64::new(1),
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -158,6 +159,8 @@ impl StdioMcpClient {
         self.child = new_child;
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
+        // #10360: a partial line belongs to the dead process's stream.
+        self.line_buf.clear();
         // client_name is retained from the original spawn — no update needed.
         // #10360: `next_id` is NOT reset. Ids stay unique across process
         // generations, so a frame carrying an id from an earlier lifetime can
@@ -378,15 +381,24 @@ impl StdioMcpClient {
     /// are expected, not warnings. (See issue #425.)
     /// What: Loops reading lines, discarding non-JSON prefix lines, until a
     /// line starting with `{` is found, then parses it as JSON.
+    ///
+    /// Cancel safety (#10360): `request` wraps this in a timeout. tokio's
+    /// `read_line` is not cancel-safe — bytes it already consumed are lost
+    /// when the future drops, and the line's tail later reads as a frame.
+    /// `read_until` is cancel-safe: partial bytes stay in `self.line_buf`,
+    /// and the next call resumes the same line.
     /// Test: `read_line_skips_non_json_prefix_lines` feeds banner-then-JSON
-    /// through the codec and asserts the JSON object is returned.
+    /// through the codec and asserts the JSON object is returned;
+    /// `timeout_mid_line_does_not_corrupt_the_next_call` the cancel safety.
     pub(super) async fn read_line(&mut self) -> Result<Value> {
         loop {
-            let mut line = String::new();
-            let n = self.stdout.read_line(&mut line).await?;
-            if n == 0 {
+            // #10360: append into the persistent buffer; never a local.
+            let n = self.stdout.read_until(b'\n', &mut self.line_buf).await?;
+            if n == 0 && self.line_buf.is_empty() {
                 bail!("MCP server closed stdout before responding");
             }
+            let bytes = std::mem::take(&mut self.line_buf);
+            let line = String::from_utf8_lossy(&bytes);
             let trimmed = line.trim_start();
             if !trimmed.starts_with('{') {
                 debug!(
@@ -413,8 +425,12 @@ impl StdioMcpClient {
     /// [`is_response_to`] rejects. Ids never repeat across respawns, so a
     /// matching id names this generation's in-flight request. Returns Err if
     /// the timeout fires or a frame cannot be parsed.
+    /// A fired timeout leaves any partial line in `line_buf` for the next
+    /// call (see `read_line`).
     /// Test: `server_request_with_matching_id_is_not_returned_as_result`,
-    /// `stale_frame_after_respawn_is_not_returned_as_result`.
+    /// `stale_frame_after_respawn_is_not_returned_as_result`,
+    /// `late_reply_to_timed_out_call_is_skipped`,
+    /// `error_frame_with_method_is_not_returned_as_result`.
     async fn request(&mut self, req: &Value, bound: Duration) -> Result<Value> {
         let expected_id = req
             .get("id")
@@ -428,8 +444,7 @@ impl StdioMcpClient {
                 if is_response_to(&frame, &expected_id) {
                     return Ok::<Value, anyhow::Error>(frame);
                 }
-                // Notification, server request, or a reply to another id.
-                debug!(expected = %expected_id, "StdioMcpClient: skipping non-matching frame");
+                log_skipped_frame(&frame, &expected_id);
             }
         })
         .await
@@ -437,14 +452,35 @@ impl StdioMcpClient {
     }
 }
 
+/// Log one frame `request` skipped, naming its id and method, never its
+/// payload (#10360).
+///
+/// Why: a skipped frame that carries the awaited id is a protocol anomaly
+/// (server request colliding with our id, or a malformed reply), so it logs
+/// at `warn`; notifications and late replies to other ids are routine and
+/// stay at `debug`.
+/// What: chooses the level by whether `frame.id == expected_id`.
+/// Test: exercised by `error_frame_with_method_is_not_returned_as_result`.
+fn log_skipped_frame(frame: &Value, expected_id: &Value) {
+    let id = frame.get("id").map(Value::to_string).unwrap_or_default();
+    let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
+    if frame.get("id") == Some(expected_id) {
+        warn!(expected = %expected_id, %method, "StdioMcpClient: skipping non-response frame with the awaited id");
+    } else {
+        debug!(expected = %expected_id, %id, %method, "StdioMcpClient: skipping non-matching frame");
+    }
+}
+
 /// Whether `frame` is the JSON-RPC response to the request carrying `id`.
 ///
 /// Why: #10360 — an id match alone also accepts a server-initiated request
 /// (it has `method`) and a malformed frame with neither `result` nor `error`.
+/// Public so other stdio JSON-RPC clients (trusty-code's `StdioRpcClient`)
+/// apply the same rule.
 /// What: True only when the ids are equal, `method` is absent, and `result`
 /// or `error` is present.
 /// Test: `is_response_to_accepts_only_responses_with_the_id`.
-pub(super) fn is_response_to(frame: &Value, id: &Value) -> bool {
+pub fn is_response_to(frame: &Value, id: &Value) -> bool {
     frame.get("id") == Some(id)
         && frame.get("method").is_none()
         && (frame.get("result").is_some() || frame.get("error").is_some())
