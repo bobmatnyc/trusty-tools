@@ -94,3 +94,22 @@ async fn serve(router: RpcRouter) -> MockDaemon {
         _stop: stop,
     }
 }
+
+/// Serve an always-healthy daemon on `socket`; dropping the sender stops it.
+///
+/// Why: #10413 — the launchd-guard tests need a daemon that appears on a
+/// socket path chosen BEFORE it exists (as a kickstarted unit would).
+pub(crate) fn serve_ok_at(socket: &std::path::Path) -> tokio::sync::oneshot::Sender<()> {
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the scratch socket");
+    let router = Arc::new(RpcRouter::new().fallback(Fallback(Arc::new(|_, _| {
+        Ok(serde_json::json!({"status": "ok"}))
+    }))));
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        serve_until(&listener, router, RpcServeOptions::default(), async {
+            let _ = stopped.await;
+        })
+        .await;
+    });
+    stop
+}
