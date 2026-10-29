@@ -196,7 +196,8 @@ fn daemon_env_cannot_redirect_the_data_dir() {
 
     let (_code, output) = run_to_completion(&mut daemon_command(scratch.path()));
     assert!(
-        output.contains("already running"),
+        // #10358: a healthy-peer refusal reads "already serving".
+        output.contains("already running") || output.contains("already serving"),
         "the scratch dir's lockfile must still be the one consulted — a \
          daemon.env TRUSTY_DATA_DIR must not repoint the run; got:\n{output}"
     );
