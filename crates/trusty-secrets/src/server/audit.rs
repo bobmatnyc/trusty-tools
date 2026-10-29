@@ -229,6 +229,12 @@ pub struct AuditRecord {
     /// `None` otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_policy: Option<bool>,
+    /// `true` on a `set` or `copy` record (and the deny changes it made) of a
+    /// caller that passed the Architect launch-record check, so an agent's
+    /// write of a denied key is told apart (#10459 P1). `None` otherwise, and
+    /// then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architect: Option<bool>,
 }
 
 impl AuditRecord {
@@ -253,6 +259,7 @@ impl AuditRecord {
             agent_parent: None,
             source: None,
             default_policy: None,
+            architect: None,
         }
     }
 

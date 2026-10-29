@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use super::agents_flag::judge_agent_caller;
+use super::agents_flag::{Writer, judge_agent_caller, writer_for};
 use super::audit::AuditMethod;
 use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
@@ -215,7 +215,12 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// [`SecretStore::set_for_agent`] (a denied key is
 /// [`ErrorKind::AgentKeyDenied`], checked under the index lock), its allow
 /// record carries `default_policy`, and its confirmation is length only.
+/// #10459 P1: a caller under the `claude` tm launched as the Architect
+/// ([`writer_for`]) writes any key through [`SecretStore::set_for_architect`]
+/// (no deny check, length-only confirmation), its record `architect: true`.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `architect_with_a_valid_record_sets_a_denied_key`,
+/// `architect_refusals_each_keep_the_agent_rules`,
 /// `set_by_agent_ancestor_of_an_undenied_key_succeeds`,
 /// `set_by_agent_of_a_denied_key_is_refused`,
 /// `set_delete_copy_evict_cached_value`,
@@ -234,7 +239,10 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         // #10459: an agent may write a key with no deny; judged before any backend.
         let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
         let agent = judge_agent_caller(state, caller, peer, gate)?;
-        if agent {
+        // #10459 P1: the launched Architect writes any key; every other
+        // agent, or a failed Architect check, keeps the agent rules.
+        let writer = writer_for(state, caller, peer, gate, agent);
+        if writer == Writer::Agent {
             gate.default_policy();
         }
         // #7524: the `file` posture check every value write passes.
@@ -242,10 +250,12 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let store =
             SecretStore::new(backend, state.index.clone()).with_deny_audit(gate.deny_audit());
         gate.admit()?;
-        let response = if agent {
-            store.set_for_agent(&request.vault, &request.key, &request.value)
-        } else {
-            store.set(&request.vault, &request.key, &request.value)
+        let response = match writer {
+            Writer::Agent => store.set_for_agent(&request.vault, &request.key, &request.value),
+            Writer::Architect => {
+                store.set_for_architect(&request.vault, &request.key, &request.value)
+            }
+            Writer::Person => store.set(&request.vault, &request.key, &request.value),
         };
         // #7520: after the write, success or not, so no read that raced it
         // keeps the old value.
@@ -428,6 +438,10 @@ impl CopySelection {
 /// and a sync-target push stays refused. Each key's deny in the source is
 /// carried before its value: into a backend that cannot hold a deny the key
 /// fails with [`ErrorKind::Unsupported`] and nothing is written.
+/// #10459 P1: after the sync-target branch, the launched Architect
+/// ([`writer_for`]) copies as a person, every record `architect: true`
+/// (`architect_copies_a_denied_key_locally`); a push stays refused
+/// (`architect_delete_deny_removal_and_sync_push_stay_operator_only`).
 /// #9069: a sync-target destination goes to `sync_target::push` after the
 /// project resolves; a sync-target source is [`ErrorKind::Unsupported`]
 /// (`server_copy_from_a_sync_target_is_unsupported`).
@@ -449,9 +463,6 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             // #10459: a local copy by an agent moves only keys with no deny.
             let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
             let agent = judge_agent_caller(state, caller, peer, gate)?;
-            if agent {
-                gate.default_policy();
-            }
             let vault = project.scopes().project().clone();
             gate.name(&vault, None);
             // #9069: a sync target is never read back, so never a source.
@@ -461,6 +472,12 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             // #9069: a push has its own refusals and no index row.
             if request.to_backend.is_sync_target() {
                 return super::sync_target::push(state, caller, gate, &request, &project);
+            }
+            // #10459 P1: judged after the sync-target branch, so a push stays
+            // operator-only and never carries the Architect mark.
+            let writer = writer_for(state, caller, peer, gate, agent);
+            if writer == Writer::Agent {
+                gate.default_policy();
             }
             // #7524 H1: the destination's posture check runs before any backend
             // opens; `tm secrets copy --to file` moved Keychain values to files.
@@ -500,7 +517,7 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                 } else {
                     // #10459: a denied source key is a denied read; no deny is
                     // carried for it. A failed lookup fails the key.
-                    let admitted = match agent {
+                    let admitted = match writer == Writer::Agent {
                         true => match source_store.agents_may_use(&vault, &key) {
                             Ok(true) => Ok(()),
                             Ok(false) => Err(SecretsError::AgentUseRefused {
@@ -515,9 +532,9 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                     let carried =
                         admitted.and_then(|()| store.carry_deny_from(&source_store, &vault, &key));
                     let written = match carried.and_then(|()| source.get(&vault, &key)) {
-                        Ok(Some(value)) => match agent {
-                            true => store.set_for_agent(&vault, &key, &value),
-                            false => store.set(&vault, &key, &value),
+                        Ok(Some(value)) => match writer {
+                            Writer::Agent => store.set_for_agent(&vault, &key, &value),
+                            Writer::Architect | Writer::Person => store.set(&vault, &key, &value),
                         }
                         .map(drop)
                         .map_err(ErrorKind::from),

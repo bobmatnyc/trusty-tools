@@ -156,6 +156,8 @@ impl Fixture {
         // own table may run this test under Claude Code, so the caller is
         // placed under plain parents in a fake one.
         state.grants = person_grants();
+        // #10459 P1: never the account home's Architect launch records.
+        state.architect_records = None;
         state
     }
 

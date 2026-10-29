@@ -113,6 +113,8 @@ pub(crate) struct Gate<'a> {
     agent_parent: Option<bool>,
     // #10386: an agent allowed by the absence of a deny.
     default_policy: bool,
+    // #10459 P1: the caller passed the Architect launch-record check.
+    architect: bool,
     admitted: Option<Admitted>,
 }
 
@@ -150,6 +152,7 @@ pub(crate) fn audited(
         agents_allowed: None,
         agent_parent: None,
         default_policy: false,
+        architect: false,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -225,6 +228,14 @@ impl Gate<'_> {
     /// never carry it.
     pub(crate) fn default_policy(&mut self) {
         self.default_policy = true;
+    }
+
+    /// Mark every record of this call `architect: true` (#10459 P1).
+    ///
+    /// What: set by `set` and a local `copy` once the caller passed
+    /// `architect::check_architect`; allow and deny records both carry it.
+    pub(crate) fn architect(&mut self) {
+        self.architect = true;
     }
 
     /// A store hook that appends one write-ahead `secrets.set_agents_may_use`
@@ -348,6 +359,8 @@ impl Gate<'_> {
         if denied.is_none() && self.default_policy {
             record.default_policy = Some(true);
         }
+        // #10459 P1: the Architect exemption is visible on every record.
+        record.architect = self.architect.then_some(true);
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

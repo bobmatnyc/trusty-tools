@@ -19,6 +19,7 @@
 use serde_json::Value;
 
 use super::ancestry::has_agent_ancestor;
+use super::architect::check_architect;
 use super::audit::AuditMethod;
 use super::errors::ErrorKind;
 use super::gate::{Gate, Recording, audited};
@@ -146,4 +147,54 @@ pub(crate) fn judge_agent_caller(
     };
     gate.agent_parent(agent_parent);
     Ok(agent_parent)
+}
+
+/// Who a `set` or a local `copy` writes as (#10459).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Writer {
+    /// No Claude Code ancestor: the operator's rules.
+    Person,
+    /// Under Claude Code: keys with no deny only.
+    Agent,
+    /// Under the `claude` tm launched as the Architect: any key.
+    Architect,
+}
+
+/// The [`Writer`] for a caller [`judge_agent_caller`] already judged.
+///
+/// Why: #10459 P1 (Architect clearance 2026-10-29 22:58Z) — the Architect
+/// may write keys denied to agents; every other agent may not.
+/// What: `agent == false` is [`Writer::Person`]. An agent through the
+/// console bridge is [`Writer::Agent`]: its peer is the console, not the
+/// client (a console under Claude Code is already `BridgeRefused`; this arm
+/// keeps the rule if that ever changes). Otherwise [`check_architect`] on the peer: `Ok` marks the gate's
+/// records `architect: true` and is [`Writer::Architect`]; any refusal is
+/// [`Writer::Agent`] (fail closed). Only `set` and a local `copy` call this;
+/// `delete`, deny removal and a sync-target push never do.
+/// Test: `architect_with_a_valid_record_sets_a_denied_key`,
+/// `architect_refusals_each_keep_the_agent_rules`,
+/// `nested_claude_under_the_architect_is_not_the_architect`,
+/// `bridge_call_from_under_the_architect_is_refused`.
+pub(crate) fn writer_for(
+    state: &State,
+    caller: Caller,
+    peer: u32,
+    gate: &mut Gate<'_>,
+    agent: bool,
+) -> Writer {
+    if !agent {
+        return Writer::Person;
+    }
+    // #10459: the bridge's peer is the console; its client is never judged here.
+    if caller.bridge().is_some() {
+        return Writer::Agent;
+    }
+    let dir = state.architect_records.as_deref();
+    match check_architect(state.grants.processes(), dir, peer) {
+        Ok(()) => {
+            gate.architect();
+            Writer::Architect
+        }
+        Err(_) => Writer::Agent,
+    }
 }

@@ -1,0 +1,3 @@
+Changed
+- `secrets.set` and a local `secrets.copy` accept any key, including one the operator denied to agents, from a caller whose nearest Claude Code process is the `claude` that `tm fleet init` or `tm fleet relaunch` launched as the Architect. The check reads that process's `~/.trusty-mpm/architect-launch/<pid>.architect` record and requires its PID, start time and project directory to match the live process. A missing, unreadable, stale or mismatched record keeps the agent rules (#10459).
+- Audit records of a write the Architect exemption allowed carry `architect: true`. `delete`, removing a deny and a sync-target copy stay operator-only (#10459).

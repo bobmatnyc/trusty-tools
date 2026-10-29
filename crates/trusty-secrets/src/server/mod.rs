@@ -45,6 +45,8 @@ mod agents_flag;
 // #9070: S8 — exec grants; #9066: the walk moved to the `ancestry` feature,
 // re-exported here so every `server::ancestry` path holds.
 pub use crate::ancestry;
+// #10459 P1: the Architect launch-record check for `set` and a local `copy`.
+mod architect;
 pub mod audit;
 // #9066: S3a, the console bridge's verdict.
 mod bridge;
