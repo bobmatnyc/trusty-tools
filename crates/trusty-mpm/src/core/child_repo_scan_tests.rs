@@ -356,3 +356,186 @@ fn an_excepted_entry_is_skipped_and_its_siblings_are_still_found() {
         ChildRepoScan::Found(deeper)
     );
 }
+
+/// The exhaustive rule with a roomy budget.
+fn exhaustive(dir: &Path) -> ChildRepoScan {
+    scan_for_child_repo_exhaustive(dir, None, 4096)
+}
+
+/// #10457: a repository two or more levels inside a skip-listed directory is
+/// found, at any depth of the tree, which the shallow rule never read.
+#[test]
+fn exhaustive_finds_a_repository_deep_in_a_skip_listed_dir() {
+    for rel in [
+        "node_modules/a/b",
+        "build/x/proj",
+        "packages/app/node_modules/@scope/pkg/nested",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let ws = workspace(&tmp);
+        let repo = ws.join(rel);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert_eq!(exhaustive(&ws), ChildRepoScan::Found(repo), "{rel}");
+    }
+}
+
+/// #10457: a directory symlink out of the root refuses, with or without a
+/// repository behind it; a link to a file outside does not.
+#[cfg(unix)]
+#[test]
+fn exhaustive_reports_an_escaping_symlink() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let outside = ws.parent().unwrap().join("outside");
+    std::fs::create_dir_all(outside.join("sub")).unwrap();
+    std::fs::write(outside.join("notes.md"), "x").unwrap();
+    symlink(outside.join("notes.md"), ws.join("AGENTS.md")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
+
+    let link = ws.join("deep/elsewhere");
+    std::fs::create_dir_all(ws.join("deep")).unwrap();
+    symlink(&outside, &link).unwrap();
+    let escape = ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+        link: link.clone(),
+        target: outside.clone(),
+    });
+    assert_eq!(exhaustive(&ws), escape);
+    std::fs::create_dir_all(outside.join("sub/.git")).unwrap();
+    assert_eq!(exhaustive(&ws), escape);
+    assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Clear);
+}
+
+/// #10457: links that stay inside the root (a pnpm store, a cycle to the
+/// root) are already walked, so they are skipped and cannot loop; a link
+/// into the unwalked `.git` tree refuses.
+#[cfg(unix)]
+#[test]
+fn exhaustive_skips_a_symlink_inside_the_root_and_cannot_cycle() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let store = ws.join("node_modules/.pnpm/pkg@1/node_modules/pkg");
+    std::fs::create_dir_all(&store).unwrap();
+    symlink(&store, ws.join("node_modules/pkg")).unwrap();
+    symlink(&ws, ws.join("loop")).unwrap();
+    symlink(Path::new(".."), store.join("up")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
+
+    std::fs::create_dir_all(store.join("inner/.git")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Found(store.join("inner")));
+
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join(".git/modules/x")).unwrap();
+    let link = ws.join("hidden");
+    symlink(ws.join(".git/modules"), &link).unwrap();
+    assert!(matches!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes { link: l, .. }) if l == link
+    ));
+}
+
+/// #10457: skip-listed directories cost budget under the exhaustive rule, and
+/// exhaustion names the budget and the next unchecked directory.
+#[test]
+fn exhaustive_charges_skip_listed_dirs_to_the_budget() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let node_modules = ws.join("node_modules");
+    fill(&node_modules, 10);
+    assert_eq!(
+        scan_for_child_repo_within_shallow(&ws, 5),
+        ChildRepoScan::Clear
+    );
+    match scan_for_child_repo_exhaustive(&ws, None, 5) {
+        ChildRepoScan::Incomplete(stop @ ScanIncomplete::BudgetExhaustedAt { budget: 5, .. }) => {
+            let text = stop.to_string();
+            assert!(
+                text.contains("stopped after checking 5 directories"),
+                "{text}"
+            );
+            assert!(text.contains(&node_modules.display().to_string()), "{text}");
+        }
+        other => panic!("expected exhaustion, got {other:?}"),
+    }
+    assert_eq!(
+        scan_for_child_repo_exhaustive(&ws, None, 11),
+        ChildRepoScan::Clear
+    );
+}
+
+/// The shallow rule with a named budget, to compare against the exhaustive one.
+fn scan_for_child_repo_within_shallow(dir: &Path, budget: usize) -> ChildRepoScan {
+    scan(dir, None, budget, None)
+}
+
+/// #10457: the probe still runs before the escape check, so a symlink whose
+/// target is a repository is `Found`, not an escape.
+#[cfg(unix)]
+#[test]
+fn exhaustive_still_finds_a_symlink_to_a_repository() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let repo = ws.parent().unwrap().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let linked = ws.join("linked");
+    symlink(&repo, &linked).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Found(linked));
+}
+
+/// A fake `st_dev` reader: `mnt` is another filesystem, `bad` cannot be read.
+fn fake_device(path: &Path) -> io::Result<u64> {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some("mnt") => Ok(2),
+        Some("bad") => Err(io::Error::new(io::ErrorKind::PermissionDenied, "no stat")),
+        _ => Ok(1),
+    }
+}
+
+/// #10457: a directory on another device refuses, and so does one whose
+/// `st_dev` cannot be read. A test cannot mount a filesystem without
+/// privileges, so the reader is injected; `device_of` is the real one.
+#[test]
+fn exhaustive_refuses_a_mount_point_and_an_unreadable_device() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("a/b")).unwrap();
+    assert_eq!(scan(&ws, None, 64, Some(fake_device)), ChildRepoScan::Clear);
+
+    let mnt = ws.join("a/b/mnt");
+    std::fs::create_dir_all(&mnt).unwrap();
+    assert_eq!(
+        scan(&ws, None, 64, Some(fake_device)),
+        ChildRepoScan::Incomplete(ScanIncomplete::MountPoint { path: mnt.clone() })
+    );
+    std::fs::remove_dir(&mnt).unwrap();
+
+    let bad = ws.join("a/bad");
+    std::fs::create_dir_all(&bad).unwrap();
+    assert!(matches!(
+        scan(&ws, None, 64, Some(fake_device)),
+        ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) if path == bad
+    ));
+    // The real reader sees one filesystem across the scratch tree.
+    std::fs::remove_dir(&bad).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
+    assert_eq!(device_of(&ws).unwrap(), device_of(&ws.join("a")).unwrap());
+}
+
+/// #10457: the seed guard and `auto_git_init` keep the shallow rule, so a
+/// repository deep in `node_modules` is still `Clear` for them. Pins the
+/// caller decision recorded on the issue.
+#[test]
+fn the_shallow_rule_is_unchanged_for_the_seed_guard_and_auto_init() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("node_modules/a/b/.git")).unwrap();
+    assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Clear);
+    assert_eq!(
+        scan_for_child_repo_except(&ws, &ws.join("local")),
+        ChildRepoScan::Clear
+    );
+    assert!(matches!(exhaustive(&ws), ChildRepoScan::Found(_)));
+}

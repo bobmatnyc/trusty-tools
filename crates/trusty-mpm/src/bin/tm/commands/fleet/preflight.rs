@@ -18,7 +18,7 @@ use std::process::Command;
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo_within};
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo_exhaustive};
 use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
 
 use super::user_config_path;
@@ -37,7 +37,9 @@ pub(crate) const PRIVATE_REPO_DIR: &str = "local";
 /// stays a refusal; the budget is sized so an ordinary Architect directory
 /// finishes, while a tree too large to check still refuses in bounded time.
 /// What: 64x [`trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET`];
-/// each visit is one `read_dir` plus one `lstat` per child directory.
+/// each visit is one `read_dir`, one `stat` for `st_dev` and one `lstat` per
+/// child directory. Since #10457 skip-listed trees such as `node_modules`
+/// count against it too.
 /// Test: `an_architect_dir_wider_than_the_workspace_budget_passes`,
 /// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
 pub(crate) const FLEET_SCAN_BUDGET: usize = 16_384;
@@ -269,6 +271,15 @@ fn projects_roots(target: &Path, home: &Path) -> Result<Vec<PathBuf>, DirRefusal
 
 /// Refuse any projects root or an ancestor of one, or a directory with a
 /// repository in its subtree (the #7673 workspace-parent scan).
+///
+/// What: the scan is the exhaustive rule (#10457): skip-listed trees are
+/// walked, and an escaping symlink, a mount point or an exhausted budget is
+/// [`DirRefusal::Unresolvable`].
+/// Test: `a_repository_deep_in_a_skip_listed_dir_is_refused`,
+/// `a_repository_behind_a_symlinked_dir_is_refused`,
+/// `a_symlink_escaping_the_dir_refuses_without_a_repository`,
+/// `a_large_node_modules_refuses_in_bounded_time`,
+/// `a_pnpm_style_node_modules_inside_the_dir_passes`.
 fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
@@ -286,11 +297,12 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
     // #8878 R1: a private `local/` repository is checked on its own, and the
     // scan still looks at everything beside it.
     // #10355: fleet budget, not the shared 256; exhaustion still refuses below.
+    // #10457: exhaustive rule; the shallow one missed deep and symlinked repos.
     let scan = match private_repo(target)? {
-        None => scan_for_child_repo_within(target, None, FLEET_SCAN_BUDGET),
+        None => scan_for_child_repo_exhaustive(target, None, FLEET_SCAN_BUDGET),
         Some(local) => {
             check_private_repo(target, &local)?;
-            scan_for_child_repo_within(target, Some(&local), FLEET_SCAN_BUDGET)
+            scan_for_child_repo_exhaustive(target, Some(&local), FLEET_SCAN_BUDGET)
         }
     };
     match scan {
@@ -347,7 +359,7 @@ fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
         path: target.to_path_buf(),
         reason,
     };
-    match scan_for_child_repo_within(local, None, FLEET_SCAN_BUDGET) {
+    match scan_for_child_repo_exhaustive(local, None, FLEET_SCAN_BUDGET) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(repo) => {
             return Err(parent(format!(

@@ -9,6 +9,8 @@
 //! [`ChildRepoScan`]. It is `pub` rather than `pub(crate)` because its natural
 //! second consumer, `commands::auto_git_init::ensure_git_repo` (#6274), lives
 //! in the `tm` bin target, which sees this library only through its public API.
+//! [`scan_for_child_repo_exhaustive`] is the stricter rule the fleet preflight
+//! uses before a supervisor grant (#10457).
 //! Test: `child_repo_scan_tests.rs`.
 
 use std::collections::VecDeque;
@@ -79,9 +81,12 @@ pub const SKIP_DIR_CHECK_CAP: usize = 1024;
 pub enum ChildRepoScan {
     /// A directory beneath the root contains a `.git` entry.
     Found(PathBuf),
-    /// Every directory beneath the root outside a skip-listed tree was checked,
-    /// as was every skip-listed directory and its immediate children; none is a
-    /// repository. Symlinks are checked but never descended.
+    /// Shallow rule: every directory beneath the root outside a skip-listed
+    /// tree was checked, as was every skip-listed directory and its immediate
+    /// children; none is a repository. Symlinks are checked but never
+    /// descended. Exhaustive rule ([`scan_for_child_repo_exhaustive`]): every
+    /// physical directory beneath the root, outside `.git`, was checked, no
+    /// directory symlink leaves the walked tree, and no mount point was met.
     Clear,
     /// The scan stopped before checking everything.
     Incomplete(ScanIncomplete),
@@ -113,6 +118,28 @@ pub enum ScanIncomplete {
         /// The I/O error, rendered.
         error: String,
     },
+    /// Exhaustive rule: checking `next` would have exceeded `budget`.
+    // #10457: names where the walk stopped, so the operator sees which tree is too large.
+    BudgetExhaustedAt {
+        /// The visit budget the scan ran with.
+        budget: usize,
+        /// The first directory left unchecked.
+        next: PathBuf,
+    },
+    /// Exhaustive rule: a directory symlink resolves outside the walked tree
+    /// (outside the root, or into a `.git` directory, which is not walked).
+    SymlinkEscapes {
+        /// The symlink.
+        link: PathBuf,
+        /// Its canonical target.
+        target: PathBuf,
+    },
+    /// Exhaustive rule: a directory beneath the root is on another
+    /// filesystem (its `st_dev` differs from the root's).
+    MountPoint {
+        /// The mounted directory.
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for ScanIncomplete {
@@ -129,6 +156,23 @@ impl std::fmt::Display for ScanIncomplete {
             Self::Unreadable { path, error } => {
                 write!(f, "{} could not be read: {error}", path.display())
             }
+            Self::BudgetExhaustedAt { budget, next } => write!(
+                f,
+                "the scan stopped after checking {budget} directories, before {}; the tree is \
+                 too large to check",
+                next.display()
+            ),
+            Self::SymlinkEscapes { link, target } => write!(
+                f,
+                "the symlink {} points to {}, outside the directories the scan walks",
+                link.display(),
+                target.display()
+            ),
+            Self::MountPoint { path } => write!(
+                f,
+                "{} is a mount point on another filesystem, which the scan does not enter",
+                path.display()
+            ),
         }
     }
 }
@@ -156,7 +200,7 @@ impl std::fmt::Display for ScanIncomplete {
 /// `a_skip_listed_directory_wider_than_its_check_cap_is_incomplete`,
 /// `clear_is_constructed_in_one_place`.
 pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
-    scan(dir, None, WORKSPACE_SCAN_BUDGET)
+    scan(dir, None, WORKSPACE_SCAN_BUDGET, None)
 }
 
 /// [`scan_for_child_repo`], with one entry of the tree left out.
@@ -169,36 +213,132 @@ pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
 /// [`scan_for_child_repo`].
 /// Test: `an_excepted_entry_is_skipped_and_its_siblings_are_still_found`.
 pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
-    scan(dir, Some(except), WORKSPACE_SCAN_BUDGET)
+    scan(dir, Some(except), WORKSPACE_SCAN_BUDGET, None)
 }
 
-/// [`scan_for_child_repo`] or [`scan_for_child_repo_except`] with the visit
-/// budget named by the caller.
+/// The fleet preflight's scan: no skip list, every directory charged to
+/// `budget`, and no exit from the tree through a symlink or a mount.
 ///
-/// Why: #10355 — `tm fleet init` re-checks the Architect's own directory on
-/// every relaunch, and that directory outgrows the 256-directory
-/// [`WORKSPACE_SCAN_BUDGET`] in normal use. A wider budget lets the scan finish
-/// there; an exhausted budget is still [`ChildRepoScan::Incomplete`], so a
-/// caller that refuses on `Incomplete` stays fail-closed.
-/// What: identical to the other two entry points except that `budget`
-/// replaces [`WORKSPACE_SCAN_BUDGET`]; exhaustion reports it in
-/// [`ScanIncomplete::BudgetExhausted`].
-/// Test: `an_architect_dir_wider_than_the_workspace_budget_passes`,
-/// `a_repository_past_the_workspace_budget_is_still_refused`,
+/// Why: #10457 — `tm fleet init` grants the supervisor profile over `dir`, so
+/// a repository the shallow rule never reads (`node_modules/a/b/.git`, or one
+/// behind a symlinked directory) must refuse, not pass. The seed guard and
+/// `auto_git_init` keep [`scan_for_child_repo`]: their harm is smaller and the
+/// wider walk would raise their false refusals.
+/// What: each real directory beneath `dir` is charged to `budget` and
+/// descended, skip-listed names included; only `.git` keeps the shallow check
+/// of [`SCAN_SKIP_DIRS`]. A directory whose `st_dev` differs from the root's
+/// is [`ScanIncomplete::MountPoint`] (a bind mount of the same filesystem
+/// shares `st_dev` and is not detected). A directory symlink is probed for
+/// `.git` as before, then canonicalized: a target inside the canonical root
+/// and outside every `.git` is already walked, so it is skipped and cannot
+/// cycle; any other target is [`ScanIncomplete::SymlinkEscapes`]. Exhaustion
+/// is [`ScanIncomplete::BudgetExhaustedAt`]. `except` is left out as in
+/// [`scan_for_child_repo_except`]; the caller checks it. Every I/O error,
+/// including a canonicalize or `st_dev` read failure, is
+/// [`ScanIncomplete::Unreadable`]. Scaffold limit: a future tm scaffold that
+/// symlinks `.claude/*` to a path outside `dir` makes every relaunch refuse.
+/// Test: `exhaustive_finds_a_repository_deep_in_a_skip_listed_dir`,
+/// `exhaustive_reports_an_escaping_symlink`,
+/// `exhaustive_skips_a_symlink_inside_the_root_and_cannot_cycle`,
+/// `exhaustive_charges_skip_listed_dirs_to_the_budget`,
+/// `exhaustive_still_finds_a_symlink_to_a_repository`,
+/// `exhaustive_refuses_a_mount_point_and_an_unreadable_device`,
 /// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
-pub fn scan_for_child_repo_within(
+pub fn scan_for_child_repo_exhaustive(
     dir: &Path,
     except: Option<&Path>,
     budget: usize,
 ) -> ChildRepoScan {
-    scan(dir, except, budget)
+    scan(dir, except, budget, Some(device_of))
 }
 
-fn scan(dir: &Path, except: Option<&Path>, budget: usize) -> ChildRepoScan {
+/// Reads a directory's `st_dev`; a parameter so a test can fake a mount.
+type DeviceOf = fn(&Path) -> io::Result<u64>;
+
+/// The `st_dev` of `path`, following a symlink.
+fn device_of(path: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|meta| meta.dev())
+}
+
+/// What the exhaustive rule compares each entry against.
+struct Fence {
+    /// The canonical root: a symlink target under it is already walked.
+    real_root: PathBuf,
+    /// The root's `st_dev`.
+    device: u64,
+    device_of: DeviceOf,
+}
+
+impl Fence {
+    /// `Ok(None)` when `root` does not exist yet: there is nothing to walk.
+    fn new(root: &Path, device_of: DeviceOf) -> Result<Option<Self>, ScanIncomplete> {
+        let real_root = match std::fs::canonicalize(root) {
+            Ok(real) => real,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(unreadable(root, e)),
+        };
+        let device = device_of(&real_root).map_err(|e| unreadable(root, e))?;
+        Ok(Some(Self {
+            real_root,
+            device,
+            device_of,
+        }))
+    }
+
+    /// Refuse a directory on another filesystem; an unreadable `st_dev` refuses too.
+    fn check_mount(&self, dir: &Path) -> Result<(), ScanIncomplete> {
+        match (self.device_of)(dir) {
+            Ok(device) if device == self.device => Ok(()),
+            Ok(_) => Err(ScanIncomplete::MountPoint {
+                path: dir.to_path_buf(),
+            }),
+            Err(e) => Err(unreadable(dir, e)),
+        }
+    }
+
+    /// Refuse a directory symlink whose target the walk does not reach.
+    fn check_link(&self, link: &Path) -> Result<(), ScanIncomplete> {
+        let target = std::fs::canonicalize(link).map_err(|e| unreadable(link, e))?;
+        let walked = target
+            .strip_prefix(&self.real_root)
+            .is_ok_and(|rel| !rel.components().any(|c| c.as_os_str() == ".git"));
+        if walked {
+            return Ok(());
+        }
+        Err(ScanIncomplete::SymlinkEscapes {
+            link: link.to_path_buf(),
+            target,
+        })
+    }
+}
+
+fn scan(
+    dir: &Path,
+    except: Option<&Path>,
+    budget: usize,
+    exhaustive: Option<DeviceOf>,
+) -> ChildRepoScan {
     let mut queue = VecDeque::from([dir.to_path_buf()]);
-    let mut visited = 0usize;
+    let fence = match exhaustive.map(|device_of| Fence::new(dir, device_of)) {
+        None => None,
+        Some(Ok(Some(fence))) => Some(fence),
+        // #10457: a root that does not exist yet holds nothing to walk.
+        Some(Ok(None)) => {
+            queue.clear();
+            None
+        }
+        Some(Err(stop)) => return ChildRepoScan::Incomplete(stop),
+    };
+    let mut walk = Walk {
+        root: dir,
+        except,
+        budget,
+        visited: 0,
+        fence: fence.as_ref(),
+    };
     while let Some(current) = queue.pop_front() {
-        match scan_level(dir, &current, except, &mut visited, budget, &mut queue) {
+        match walk.level(&current, &mut queue) {
             Ok(None) => {}
             Ok(Some(found)) => return ChildRepoScan::Found(found),
             Err(stop) => return ChildRepoScan::Incomplete(stop),
@@ -208,58 +348,101 @@ fn scan(dir: &Path, except: Option<&Path>, budget: usize) -> ChildRepoScan {
     ChildRepoScan::Clear
 }
 
-/// Check every entry of `current`, queueing the real directories to descend.
-///
-/// What: `Ok(None)` means every entry was checked, not that the scan is clear;
-/// `Ok(Some)` is a repository; `Err` is "could not finish".
-fn scan_level(
-    root: &Path,
-    current: &Path,
-    except: Option<&Path>,
-    visited: &mut usize,
+/// The state one scan carries from level to level.
+struct Walk<'a> {
+    root: &'a Path,
+    except: Option<&'a Path>,
     budget: usize,
-    queue: &mut VecDeque<PathBuf>,
-) -> Result<Option<PathBuf>, ScanIncomplete> {
-    let children = match std::fs::read_dir(current) {
-        Ok(children) => children,
-        // #7673: a root that does not exist yet (a first-touch seed site the
-        // pipeline creates) queues nothing. A CHILD that vanished mid-walk is
-        // still incomplete.
-        Err(e) if e.kind() == io::ErrorKind::NotFound && current == root => return Ok(None),
-        Err(e) => return Err(unreadable(current, e)),
-    };
-    for entry in children {
-        let entry = entry.map_err(|e| unreadable(current, e))?;
-        let path = entry.path();
-        // #8878 R1: the caller checks the excepted entry itself.
-        if except == Some(path.as_path()) {
-            continue;
+    visited: usize,
+    /// `Some` under the exhaustive rule (#10457).
+    fence: Option<&'a Fence>,
+}
+
+impl Walk<'_> {
+    /// Charge one directory to the budget; exhaustion is never `Clear`.
+    fn charge(&mut self, next: &Path) -> Result<(), ScanIncomplete> {
+        // #10355: the caller names the budget.
+        self.visited += 1;
+        if self.visited <= self.budget {
+            return Ok(());
         }
-        // `DirEntry::file_type` does not follow symlinks.
-        let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
-        let skip_listed = kind.is_dir() && SCAN_SKIP_DIRS.iter().any(|s| entry.file_name() == *s);
-        if kind.is_dir() && !skip_listed {
-            // #10355: the caller names the budget; exhaustion is never `Clear`.
-            *visited += 1;
-            if *visited > budget {
-                return Err(ScanIncomplete::BudgetExhausted { budget });
-            }
-        }
-        match probe(&path, kind)? {
-            Probe::Repository => return Ok(Some(path)),
-            Probe::NotDirectory => {}
-            // #7673: never descend a symlink; `probe` already checked its `.git`.
-            Probe::Directory if kind.is_symlink() => {}
-            // #7673: a skip-listed name is still checked, just not descended.
-            Probe::Directory if skip_listed => {
-                if let Some(found) = check_skip_listed(&path)? {
-                    return Ok(Some(found));
-                }
-            }
-            Probe::Directory => queue.push_back(path),
+        Err(match self.fence {
+            None => ScanIncomplete::BudgetExhausted {
+                budget: self.budget,
+            },
+            Some(_) => ScanIncomplete::BudgetExhaustedAt {
+                budget: self.budget,
+                next: next.to_path_buf(),
+            },
+        })
+    }
+
+    /// Whether `name` is checked shallowly: [`SCAN_SKIP_DIRS`] under the
+    /// shallow rule, `.git` alone under the exhaustive one (#10457).
+    fn skip_listed(&self, name: &std::ffi::OsStr) -> bool {
+        match self.fence {
+            None => SCAN_SKIP_DIRS.iter().any(|s| name == *s),
+            Some(_) => name == ".git",
         }
     }
-    Ok(None)
+
+    /// Check every entry of `current`, queueing the real directories to descend.
+    ///
+    /// What: `Ok(None)` means every entry was checked, not that the scan is
+    /// clear; `Ok(Some)` is a repository; `Err` is "could not finish".
+    fn level(
+        &mut self,
+        current: &Path,
+        queue: &mut VecDeque<PathBuf>,
+    ) -> Result<Option<PathBuf>, ScanIncomplete> {
+        let children = match std::fs::read_dir(current) {
+            Ok(children) => children,
+            // #7673: a root that does not exist yet (a first-touch seed site the
+            // pipeline creates) queues nothing. A CHILD that vanished mid-walk is
+            // still incomplete.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && current == self.root => {
+                return Ok(None);
+            }
+            Err(e) => return Err(unreadable(current, e)),
+        };
+        for entry in children {
+            let entry = entry.map_err(|e| unreadable(current, e))?;
+            let path = entry.path();
+            // #8878 R1: the caller checks the excepted entry itself.
+            if self.except == Some(path.as_path()) {
+                continue;
+            }
+            // `DirEntry::file_type` does not follow symlinks.
+            let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
+            let skip_listed = kind.is_dir() && self.skip_listed(&entry.file_name());
+            if kind.is_dir() && !skip_listed {
+                self.charge(&path)?;
+                // #10457: never cross into another filesystem.
+                if let Some(fence) = self.fence {
+                    fence.check_mount(&path)?;
+                }
+            }
+            match probe(&path, kind)? {
+                Probe::Repository => return Ok(Some(path)),
+                Probe::NotDirectory => {}
+                // #7673: never descend a symlink; `probe` already checked its `.git`.
+                // #10457: the exhaustive rule refuses one the walk does not cover.
+                Probe::Directory if kind.is_symlink() => {
+                    if let Some(fence) = self.fence {
+                        fence.check_link(&path)?;
+                    }
+                }
+                // #7673: a skip-listed name is still checked, just not descended.
+                Probe::Directory if skip_listed => {
+                    if let Some(found) = check_skip_listed(&path)? {
+                        return Ok(Some(found));
+                    }
+                }
+                Probe::Directory => queue.push_back(path),
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Check a skip-listed directory's immediate children without descending them.
