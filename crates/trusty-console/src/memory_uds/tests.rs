@@ -14,26 +14,17 @@ use axum::http::Method;
 
 // ─── the RPC client ──────────────────────────────────────────────────────────
 
-/// Bind a socket that answers exactly one framed request with `reply`.
+/// Bind a socket that answers every request with `reply` and the protocol handshake with a supported version.
 ///
 /// The same stub shape `routes::memory_rpc`'s tests use, so the console's two
 /// trusty-memory clients are exercised against the same kind of daemon.
 fn stub_daemon(dir: &Path, reply: impl Into<String>) -> PathBuf {
-    let socket = dir.join("sockets").join("memory.sock");
-    let reply = reply.into();
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-    tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let Ok((mut conn, _)) = listener.accept().await else {
-            return;
-        };
-        let mut sink = Vec::new();
-        let _ = conn.read_to_end(&mut sink).await;
-        let _ = conn.write_all(reply.as_bytes()).await;
-        let _ = conn.write_all(b"\n").await;
-        let _ = conn.flush().await;
-    });
-    socket
+    crate::memory_uds::protocol_stub::spawn(
+        dir,
+        crate::memory_uds::protocol_stub::supported(),
+        reply,
+    )
+    .0
 }
 
 /// Why: the SPA branches on HTTP status, so every code trusty-memory's
@@ -60,6 +51,10 @@ fn error_status_maps_every_documented_code() {
         };
         assert_eq!(err.status(), expected, "code {code}");
     }
+    assert_eq!(
+        MemoryRpcError::ProtocolMismatch("protocol 99".to_string()).status(),
+        StatusCode::BAD_GATEWAY
+    );
 }
 
 /// Why: a daemon that is not running must never be reported as one that
@@ -509,4 +504,130 @@ fn query_json_is_an_empty_object_for_no_query() {
     };
     assert_eq!(params, json!({}));
     assert!(params.is_object(), "never null");
+}
+
+// ─── the protocol check (#9538) ──────────────────────────────────────────────
+
+/// Why: a daemon from another release must be refused by name, and nothing may
+/// be sent to it — the fail-open branch is a call that goes ahead anyway.
+/// What: a fake daemon reporting protocol 99 and answering anything else with
+/// success. `call` and `open_stream` must both fail with `ProtocolMismatch`
+/// (502), and the daemon must have seen only the handshake.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_refuses_an_incompatible_daemon_without_sending_the_frame() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn(
+        tmp.path(),
+        json!({ "protocol_version": 99, "daemon_version": "9.9.9" }),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+    );
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect_err("an unsupported protocol is not callable");
+    assert!(
+        matches!(err, MemoryRpcError::ProtocolMismatch(_)),
+        "{err:?}"
+    );
+    assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+    assert!(err.message().contains("protocol 99"), "{err:?}");
+
+    let Err(stream) = open_stream(
+        &socket,
+        METHOD_ACTIVITY_STREAM,
+        json!({}),
+        STREAM_OPEN_TIMEOUT,
+    )
+    .await
+    else {
+        panic!("an unsupported protocol cannot open a stream");
+    };
+    assert!(
+        matches!(stream, MemoryRpcError::ProtocolMismatch(_)),
+        "{stream:?}"
+    );
+
+    let seen = seen.lock().expect("recorded");
+    assert!(
+        seen.iter().all(|m| m == "memory.protocol"),
+        "no memory method may reach a refused daemon: {seen:?}"
+    );
+}
+
+/// Why: a handshake answer without a `protocol_version` is unreadable, and an
+/// unreadable answer must never read as compatible.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_refuses_a_daemon_with_no_protocol_version() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn(
+        tmp.path(),
+        json!({}),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+    );
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect_err("a handshake with no version is not callable");
+    assert!(
+        matches!(err, MemoryRpcError::ProtocolMismatch(_)),
+        "{err:?}"
+    );
+    let seen = seen.lock().expect("recorded");
+    assert_eq!(seen.as_slice(), ["memory.protocol"], "{seen:?}");
+}
+
+/// Why: the handshake and the frame once each got the caller's whole timeout,
+/// so a cold call could wait twice as long as asked (#9538 review).
+/// What: a 1s timeout, a handshake answered after 0.6s and the frame after
+/// another 0.6s. Spent separately that is 1.2s and succeeds; against one
+/// deadline the frame runs out of time, and the whole call ends near 1s.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_keeps_the_handshake_and_the_frame_inside_one_timeout() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let handshake = json!({ "jsonrpc": "2.0", "id": 1, "result": protocol_stub::supported() });
+    let (socket, _) = protocol_stub::spawn_raw(
+        tmp.path(),
+        handshake.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+        Duration::from_millis(600),
+        Duration::from_millis(600),
+    );
+    let started = std::time::Instant::now();
+    let err = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(1))
+        .await
+        .expect_err("the two waits together exceed the one timeout");
+    let took = started.elapsed();
+    assert!(matches!(err, MemoryRpcError::Unreachable(_)), "{err:?}");
+    assert!(took < Duration::from_millis(1150), "waited {took:?}");
+}
+
+/// Why: a daemon that predates `memory.protocol` answers method-not-found, and
+/// must stay callable (#9538).
+/// What: the stub answers the handshake with JSON-RPC `-32601`; the next call
+/// reaches it and returns its result.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_stays_callable_on_a_daemon_that_predates_the_handshake() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = protocol_stub::spawn_raw(
+        tmp.path(),
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+            .to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#,
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    let out = call(&socket, METHOD_HEALTH, json!({}), Duration::from_secs(5))
+        .await
+        .expect("a pre-handshake daemon is still callable");
+    assert_eq!(out["status"], "ok");
+    let seen = seen.lock().expect("recorded");
+    // The shared check probes a pre-handshake daemon with a health call first.
+    assert_eq!(seen.first().map(String::as_str), Some("memory.protocol"));
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some(METHOD_HEALTH),
+        "{seen:?}"
+    );
 }
