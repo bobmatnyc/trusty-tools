@@ -259,12 +259,60 @@ pub async fn call_memory_tool_at(socket: &Path, method: &str, params: Value) -> 
     call_memory_tool_at_with_timeout(socket, method, params, DEFAULT_TIMEOUT).await
 }
 
-/// [`call_memory_tool_at`] with an explicit budget.
+/// [`call_memory_tool_at`] with an explicit budget, behind the protocol check
+/// (#9538).
+///
+/// Why: every first-party client must refuse a daemon speaking a protocol it
+/// cannot read, by name. Checking here, in the one function every caller
+/// reaches, covers them all instead of leaving each to remember a wrapper.
+/// What: runs [`ensure_memory_protocol_at`] on `socket` with the same
+/// `timeout`, then the call. The verdict is cached per socket, so the cost is
+/// at most one extra round trip per socket per ten seconds. The handshake method
+/// itself, and [`call_memory_tool_at_raw_with_timeout`], skip the check.
+///
+/// # Errors
+///
+/// [`MemoryProtocolError`] (reach it with `anyhow::Error::downcast_ref`) when
+/// the daemon is refused or the check could not run; otherwise as
+/// [`call_memory_tool`].
+///
+/// Test: `a_memory_call_is_refused_when_the_daemon_speaks_an_unsupported_protocol`,
+/// `a_supported_daemon_is_called_and_the_handshake_method_is_not_checked`.
+pub async fn call_memory_tool_at_with_timeout(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    if method != METHOD_PROTOCOL {
+        // The context keeps the "call <method> on the daemon" prefix callers
+        // log; `downcast_ref::<MemoryProtocolError>` still reaches the cause.
+        ensure_memory_protocol_at(socket, timeout)
+            .await
+            .map_err(|e| {
+                anyhow::Error::new(e).context(format!(
+                    "call {method} on the trusty-memory daemon at {}",
+                    socket.display()
+                ))
+            })?;
+    }
+    call_memory_tool_at_raw_with_timeout(socket, method, params, timeout).await
+}
+
+/// One call with NO protocol check — the explicit escape hatch (#9538).
+///
+/// Why: the handshake and the pre-handshake health lookup are themselves calls,
+/// so they cannot go through the checked path without recursing. A probe that
+/// must report what a daemon says rather than refuse it may also use this.
+/// Everything else uses [`call_memory_tool_at_with_timeout`].
 ///
 /// # Errors
 ///
 /// As [`call_memory_tool`].
-pub async fn call_memory_tool_at_with_timeout(
+///
+/// Test: `a_memory_call_is_refused_when_the_daemon_speaks_an_unsupported_protocol`
+/// (its last step takes the raw call past a protocol-99 daemon).
+pub async fn call_memory_tool_at_raw_with_timeout(
     socket: &Path,
     method: &str,
     params: Value,
@@ -482,7 +530,9 @@ pub async fn check_memory_protocol_at(
     timeout: Duration,
 ) -> Result<MemoryProtocol, MemoryProtocolError> {
     let body =
-        match call_memory_tool_at_with_timeout(socket, METHOD_PROTOCOL, json!({}), timeout).await {
+        match call_memory_tool_at_raw_with_timeout(socket, METHOD_PROTOCOL, json!({}), timeout)
+            .await
+        {
             Ok(body) => body,
             Err(e) => {
                 // #9288: method-not-found, and only it, means "predates the
@@ -589,7 +639,7 @@ async fn warn_pre_handshake_once(socket: &Path, timeout: Duration) {
     {
         return;
     }
-    let version = call_memory_tool_at_with_timeout(socket, "memory.health", json!({}), timeout)
+    let version = call_memory_tool_at_raw_with_timeout(socket, "memory.health", json!({}), timeout)
         .await
         .ok()
         .and_then(|body| {
