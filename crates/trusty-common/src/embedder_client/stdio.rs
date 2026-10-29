@@ -54,6 +54,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, Semaphore, oneshot, watch};
 use tokio::time::Duration;
 
+use super::stdio_readback::{extract_response_device, extract_response_window};
 use super::{EmbedderClient, EmbedderError};
 use crate::embedder::{ExecutionProvider, resolve_expected_provider};
 
@@ -268,6 +269,9 @@ pub struct StdioEmbedderClient {
     /// `None` until the first response carrying it arrives (the reference
     /// `trusty-embedderd` never sends it — this stays `None` for that path).
     last_device: Arc<std::sync::Mutex<Option<String>>>,
+    /// Input window, in tokens, from the first response frame's optional
+    /// `window` field (#9284); `0` until a frame carrying it arrives.
+    last_window: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl StdioEmbedderClient {
@@ -293,6 +297,7 @@ impl StdioEmbedderClient {
         // the device-field parse after the first successful frame. See
         // `reader_task`'s `Ok(Ok(_))` arm for the full rationale.
         let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let last_window = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let (unhealthy_tx, unhealthy_rx_keepalive) = spawn_reader_with_monitor(
             BufReader::new(stdout),
@@ -300,6 +305,7 @@ impl StdioEmbedderClient {
             timeout,
             Arc::clone(&last_device),
             device_capture_attempted,
+            Arc::clone(&last_window),
         );
 
         Self {
@@ -310,6 +316,7 @@ impl StdioEmbedderClient {
             unhealthy_tx,
             _unhealthy_rx_keepalive: unhealthy_rx_keepalive,
             last_device,
+            last_window,
         }
     }
 
@@ -354,6 +361,7 @@ fn spawn_reader_with_monitor<R>(
     timeout: Duration,
     last_device: Arc<std::sync::Mutex<Option<String>>>,
     device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
+    last_window: Arc<std::sync::atomic::AtomicUsize>,
 ) -> (watch::Sender<bool>, watch::Receiver<bool>)
 where
     R: AsyncBufRead + Unpin + Send + 'static,
@@ -369,6 +377,7 @@ where
         unhealthy_tx.clone(),
         last_device,
         device_capture_attempted,
+        last_window,
     ));
 
     let monitor_pending = pending;
@@ -443,6 +452,8 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
 /// `orphan_frames_do_not_extend_a_pending_request_deadline`,
 /// `replies_to_later_requests_do_not_mask_a_stuck_head`,
 /// `a_single_stuck_request_times_out_once_without_a_restart` in stdio_tests.
+// #9284: the 8th argument is the window readback beside the device one.
+#[allow(clippy::too_many_arguments)]
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,
@@ -451,6 +462,7 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     unhealthy_tx: watch::Sender<bool>,
     last_device: Arc<std::sync::Mutex<Option<String>>>,
     device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
+    last_window: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let mut line = String::new();
     // #8600: the deadline is anchored to the moment the current head-of-line
@@ -594,10 +606,15 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 // multi-flight path for the entire connection lifetime,
                 // including unconditionally on the Rust ort transport, which
                 // never carries the field at all.
-                if !device_capture_attempted.swap(true, Ordering::AcqRel)
-                    && let Some(device) = extract_response_device(line.trim())
-                {
-                    *last_device.lock().unwrap() = Some(device);
+                if !device_capture_attempted.swap(true, Ordering::AcqRel) {
+                    if let Some(device) = extract_response_device(line.trim()) {
+                        *last_device.lock().unwrap() = Some(device);
+                    }
+                    // #9284: the window is a model property, so the same
+                    // first-frame rule holds.
+                    if let Some(window) = extract_response_window(line.trim()) {
+                        last_window.store(window, Ordering::Release);
+                    }
                 }
             }
         }
@@ -674,32 +691,6 @@ fn extract_response_id(line: &str) -> Option<u64> {
         serde_json::Value::Number(n) => n.as_u64(),
         _ => None,
     }
-}
-
-/// Extract the optional real backend `device` from a response frame's
-/// `result` object, without touching the (possibly large) `embeddings` array
-/// (epic #3524 slice 5, issue #3493 P1).
-///
-/// Why: only the Python/MPS sidecar's `protocol.py` emits this field —
-/// `result: {"embeddings": [...], "device": "mps"}`. The reference Rust
-/// `trusty-embedderd` omits it entirely, so this returns `None` on that path
-/// and callers keep using the predicted `ExecutionProvider`.
-/// What: a minimal, torch/embeddings-free deserialize; `None` on any parse
-/// failure, an error frame, or a missing/absent `device` field.
-/// Test: `extract_response_device_*` in `stdio_tests.rs`.
-fn extract_response_device(line: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct DeviceOnly {
-        #[serde(default)]
-        result: Option<DeviceField>,
-    }
-    #[derive(serde::Deserialize)]
-    struct DeviceField {
-        #[serde(default)]
-        device: Option<String>,
-    }
-    let parsed: DeviceOnly = serde_json::from_str(line).ok()?;
-    parsed.result?.device
 }
 
 /// Decode one JSON-RPC response frame. Extracted for unit-testing.
@@ -908,6 +899,14 @@ impl EmbedderClient for StdioEmbedderClient {
     /// trait default's doc comment.
     fn last_reported_device(&self) -> Option<String> {
         self.last_device.lock().unwrap().clone()
+    }
+
+    /// Window the sidecar reported on its first response frame (#9284).
+    fn last_reported_window(&self) -> Option<usize> {
+        match self.last_window.load(Ordering::Acquire) {
+            0 => None,
+            n => Some(n),
+        }
     }
 }
 
