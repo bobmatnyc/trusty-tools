@@ -35,6 +35,7 @@ mod roster_deploy_e2e;
 mod search_hits_e2e;
 mod session_e2e;
 mod task_e2e;
+mod thin_clients_uds_10169;
 mod tui_client_engine;
 
 /// Why: `autotests = false` (#9302) means a new `tests/*.rs` file compiles
