@@ -13,7 +13,22 @@
 //! it would report a failed `exec` as a successful spawn. Active on macOS
 //! only; elsewhere the kernel creates sockets close-on-exec atomically and
 //! the helpers do nothing. A `pre_exec` hook takes std off `posix_spawn`
-//! onto the fork path, so a spawn costs slightly more.
+//! onto the fork path, so a spawn costs more (see Cost).
+//!
+//! Adopted spawn paths: `git::command`, `command_in`, `tokio_command`,
+//! `tokio_command_in`; both `gh` runners (`gh.rs`); `daemon_guard`'s daemon
+//! spawn; the `uds::supervisor` child; and `trusty-mpm`'s `bounded_proc`
+//! probe. Deferred: every other `Command::new` in the workspace (tmux and
+//! session launch, hook runners, the other crates' own git/gh calls). Each
+//! moves over by one `seal_inherited(&mut cmd)` line when its owner opts in.
+//!
+//! Cost (macOS, Apple Silicon, 2,000 spawns of `/usr/bin/true` per arm,
+//! plain and sealed interleaved; `per_spawn_cost_of_the_seal`): about
+//! +0.9 ms per spawn at an fd limit of 256 (1.29 ms to 2.18 ms) and
+//! +1.8 ms at 10,240 (1.03 ms to 2.81 ms). The hook makes two `fcntl`
+//! calls per open fd up to the limit, and the hook also moves std off
+//! `posix_spawn` onto fork. Negligible for git/gh; do not seal a hot loop
+//! of sub-millisecond spawns without a reason.
 //! Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
 
 #[cfg(all(unix, any(target_os = "macos", test)))]

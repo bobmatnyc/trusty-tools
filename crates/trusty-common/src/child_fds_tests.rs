@@ -156,3 +156,68 @@ async fn dropped_connections_reach_eof_while_sealed_children_spawn() {
     }
     assert_eq!(leaked, 0, "{leaked} of {CYCLES} connections stayed open");
 }
+
+/// Adoption proof (#10083): the sealing is wired into `git::command`, not only
+/// available as a helper. A git alias runs `ls /dev/fd` as a grandchild, so a
+/// descriptor git itself inherited would show there.
+///
+/// Test: this test; the control is `a_plain_child_inherits_a_leaked_socket`.
+#[cfg(target_os = "macos")]
+#[test]
+fn git_command_does_not_pass_a_leaked_socket_to_git() {
+    let sock = leaked_socket();
+    let mut cmd = crate::git::command();
+    cmd.args(["-c", "alias.lsfd=!ls /dev/fd", "lsfd"]);
+    assert!(
+        !child_sees(&mut cmd, sock.as_raw_fd()),
+        "git still holds fd {}",
+        sock.as_raw_fd()
+    );
+    // The control through the same alias: an unsealed git does inherit it.
+    let mut plain = std::process::Command::new("git");
+    plain.args(["-c", "alias.lsfd=!ls /dev/fd", "lsfd"]);
+    assert!(
+        child_sees(&mut plain, sock.as_raw_fd()),
+        "control: an unsealed git should inherit fd {}",
+        sock.as_raw_fd()
+    );
+}
+
+/// Measurement behind the cost note in the module doc: 2,000 spawns of
+/// `/usr/bin/true`, plain then sealed, interleaved in rounds to cancel drift.
+/// Run: `ulimit -n <N>; cargo test -p trusty-common --features
+/// unconditional-only per_spawn_cost -- --ignored --nocapture`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "measurement, not a check; prints the per-spawn cost of the seal"]
+fn per_spawn_cost_of_the_seal() {
+    use std::time::{Duration, Instant};
+    const ROUNDS: u32 = 10;
+    const PER_ROUND: u32 = 200;
+    let run = |sealed: bool| -> Duration {
+        let t = Instant::now();
+        for _ in 0..PER_ROUND {
+            let mut cmd = Command::new("/usr/bin/true");
+            if sealed {
+                seal_inherited(&mut cmd);
+            }
+            assert!(cmd.status().expect("spawn true").success());
+        }
+        t.elapsed()
+    };
+    let (mut plain, mut sealed) = (Duration::ZERO, Duration::ZERO);
+    run(false); // warm the exec cache
+    for _ in 0..ROUNDS {
+        plain += run(false);
+        sealed += run(true);
+    }
+    let n = ROUNDS * PER_ROUND;
+    // SAFETY: `getdtablesize` takes no arguments.
+    let limit = unsafe { libc::getdtablesize() };
+    println!(
+        "fd limit {limit}: plain {:?}/spawn, sealed {:?}/spawn, delta {:?}",
+        plain / n,
+        sealed / n,
+        (sealed.saturating_sub(plain)) / n
+    );
+}
