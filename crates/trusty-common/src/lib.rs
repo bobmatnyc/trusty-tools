@@ -388,6 +388,15 @@ pub mod spawn_retry;
 #[cfg(unix)]
 pub mod exec_stub;
 
+/// Keep a spawned child from inheriting the parent's sockets (#10083).
+///
+/// Why: macOS sets `FD_CLOEXEC` on a new socket in a second step, so a child
+/// forked in between holds a dropped connection open.
+/// What: [`child_fds::seal_inherited`] installs a `pre_exec` hook that marks
+/// every inherited descriptor close-on-exec. macOS only; a no-op elsewhere.
+/// Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
+pub mod child_fds;
+
 /// Parent-death linkage for spawned processes (#7085, #3734).
 ///
 /// Why: a `Child` handle reaps only in `Drop`, which a SIGKILL of the parent

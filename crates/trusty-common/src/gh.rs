@@ -333,7 +333,10 @@ impl GhCommand {
     /// removals to a fresh `std::process::Command`.
     /// Test: `to_std_command_carries_argv_and_env`.
     pub fn to_std_command(&self) -> std::process::Command {
-        self.configure(std::process::Command::new(GH_BIN))
+        let mut cmd = std::process::Command::new(GH_BIN);
+        // #10083: no inherited socket reaches `gh`.
+        crate::child_fds::seal_inherited(&mut cmd);
+        self.configure(cmd)
     }
 
     /// Run `gh` to completion on the current thread.
@@ -341,7 +344,7 @@ impl GhCommand {
     /// A non-zero exit is NOT an error here — see [`GhOutput::ok`].
     pub fn output_blocking(&self) -> Result<GhOutput, GhError> {
         let out = self
-            .configure(std::process::Command::new(GH_BIN))
+            .to_std_command()
             .output()
             .map_err(|e| self.classify(e))?;
         Ok(GhOutput::from_output(self.argv_display(), out))
@@ -351,8 +354,11 @@ impl GhCommand {
     ///
     /// A non-zero exit is NOT an error here — see [`GhOutput::ok`].
     pub async fn output(&self) -> Result<GhOutput, GhError> {
+        let mut cmd = tokio::process::Command::new(GH_BIN);
+        // #10083: no inherited socket reaches `gh`.
+        crate::child_fds::seal_inherited_tokio(&mut cmd);
         let out = self
-            .configure(tokio::process::Command::new(GH_BIN))
+            .configure(cmd)
             .output()
             .await
             .map_err(|e| self.classify(e))?;
