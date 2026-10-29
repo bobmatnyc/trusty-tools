@@ -767,16 +767,59 @@ fn remove_if_present(path: &Path) {
     }
 }
 
+/// The environment variable that overrides the analyzer socket (#10365).
+pub const TRUSTY_ANALYZE_SOCKET_ENV: &str = "TRUSTY_ANALYZE_SOCKET";
+
 /// The socket this daemon binds, as both it and its consumers resolve it.
 ///
-/// A thin re-export of the shared entry point so a reader of this module does
-/// not have to know that the layout lives in `trusty_common::daemon_addr`.
+/// Why: #10365 — `TRUSTY_ANALYZE_SOCKET` was documented but never read, so an
+/// isolated caller's `serve` bound the operator's default socket.
+/// What: [`TRUSTY_ANALYZE_SOCKET_ENV`] when set and non-blank, else
+/// `trusty_common::daemon_socket_path("trusty-analyze")`. A `--socket` flag,
+/// where a subcommand has one, wins over both.
 ///
 /// # Errors
 ///
-/// When the data directory cannot be resolved or created.
+/// When the override is relative or its parent directory does not exist, or
+/// when the data directory cannot be resolved or created.
+///
+/// Test: `socket_path_honours_trusty_analyze_socket`,
+/// `socket_path_from_rejects_a_bad_override`.
 pub fn socket_path() -> Result<PathBuf> {
-    trusty_common::daemon_socket_path("trusty-analyze")
+    socket_path_from(std::env::var_os(TRUSTY_ANALYZE_SOCKET_ENV).as_deref())
+}
+
+/// [`socket_path`] with the override supplied rather than read, so a test can
+/// pin it without touching process-global env.
+///
+/// # Errors
+///
+/// As [`socket_path`].
+///
+/// Test: `socket_path_from_rejects_a_bad_override`.
+pub fn socket_path_from(override_path: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    // #10365: same trim-and-ignore-blank rule as `TRUSTY_SEARCH_SOCKET`.
+    let Some(raw) = override_path
+        .map(|v| v.to_string_lossy().trim().to_owned())
+        .filter(|v| !v.is_empty())
+    else {
+        return trusty_common::daemon_socket_path("trusty-analyze");
+    };
+    let path = PathBuf::from(raw);
+    // #10365: fail loudly rather than bind a cwd-relative or unbindable path.
+    anyhow::ensure!(
+        path.is_absolute(),
+        "{TRUSTY_ANALYZE_SOCKET_ENV} must be an absolute path (got: {})",
+        path.display()
+    );
+    if let Some(parent) = path.parent() {
+        anyhow::ensure!(
+            parent.is_dir(),
+            "{TRUSTY_ANALYZE_SOCKET_ENV} parent directory does not exist: {}",
+            parent.display()
+        );
+    }
+    Ok(path)
 }
 
 #[cfg(test)]

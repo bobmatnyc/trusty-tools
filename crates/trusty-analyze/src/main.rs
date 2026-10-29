@@ -73,10 +73,11 @@ enum Cmd {
         foreground: bool,
         /// Unix socket to bind.
         ///
-        /// Defaults to `<data dir>/trusty-analyze.sock` — the same path
-        /// `trusty_common::daemon_socket_path("trusty-analyze")` hands every
-        /// consumer. Override it and nothing will find this daemon; the flag
-        /// exists for tests and for running a second instance deliberately.
+        /// Defaults to `TRUSTY_ANALYZE_SOCKET` when set (#10365), else
+        /// `<data dir>/trusty-analyze.sock` — the path
+        /// `trusty_analyze::service::socket_path` hands every consumer. Override
+        /// it and nothing will find this daemon; the flag exists for tests and
+        /// for running a second instance deliberately.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
         /// Retired with the TCP listener (#6287). Accepted and ignored.
