@@ -401,6 +401,8 @@ pub async fn serve_with_shutdown(
     // name, which proves no ownership.
     let mgr = state.session_manager().await;
     mgr.shutdown().await;
+    // #10412: hooks from the sessions just stopped arrive after the settle.
+    state.action_events().report_late();
     reap_all_live_sessions(state).await;
     Ok(())
 }

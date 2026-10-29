@@ -45,7 +45,8 @@ impl InjectRecorder for ActionPublisher {
     /// What: builds [`inject_event`] under the projection lock, as
     /// `publish` does, so `seq` follows buffer order. No I/O.
     /// Test: `an_inject_is_one_tmux_message_event_with_its_digest_9167`,
-    /// `an_unreachable_bus_keeps_the_inject_event_buffered_9167`.
+    /// `an_unreachable_bus_keeps_the_inject_event_buffered_9167`,
+    /// `an_inject_after_the_settle_is_counted_lost_10412`.
     fn delivered(&self, delivery: &Delivery<'_>) {
         let threader = self.threader.lock();
         let root = delivery
@@ -54,7 +55,8 @@ impl InjectRecorder for ActionPublisher {
             .and_then(|u| threader.root_of(&SessionId(u)));
         let mut event = inject_event(delivery, threader.message_bodies(), root);
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.client.send(event);
+        // #10412: through the settle lock, so a late inject is counted.
+        self.buffer(event);
     }
 }
 
