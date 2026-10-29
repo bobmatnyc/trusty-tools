@@ -11,7 +11,6 @@
 //! Test: this file.
 
 use super::*;
-use axum::Json;
 
 /// Measures how many chunks a cold, one-file grep materializes in memory:
 /// zero, while still returning exactly the matches in the selected file.
@@ -65,13 +64,9 @@ async fn a_cold_narrow_grep_does_not_materialize_the_corpus() {
         serde_json::json!({ "pattern": "authenticate_user", "glob": "src/a.rs" }),
     )
     .expect("grep request");
-    let Json(resp) = super::files::grep_handler(
-        axum::extract::State(Arc::clone(&state)),
-        axum::extract::Path("grep-cold-8266".to_string()),
-        axum::extract::Json(req),
-    )
-    .await
-    .expect("a cold grep answers");
+    let resp = super::files::grep_report(&state, "grep-cold-8266", req)
+        .await
+        .expect("a cold grep answers");
 
     assert!(!resp.matches.is_empty(), "the pattern is found in src/a.rs");
     assert!(

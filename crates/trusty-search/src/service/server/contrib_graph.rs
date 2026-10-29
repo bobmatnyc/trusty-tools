@@ -4,7 +4,7 @@
 //! (proc/table data flow, host-language → database bridges) that the
 //! chunk-derived pipeline cannot see. They need a durable ingest surface and
 //! a direction-aware traversal primitive to be useful.
-//! What: two handlers —
+//! What: two cores —
 //! - `POST /indexes/{id}/graph`: replace-per-producer ingest of a contributed
 //!   graph document into the `kg_contrib` redb table, followed by a serving-
 //!   graph rebuild so the contribution is immediately queryable. "Queryable"
@@ -16,11 +16,6 @@
 //! Test: `tests_contrib_graph.rs` (sibling module).
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::extract::{Path, Query, State};
-#[cfg(test)]
-use axum::Json;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -90,18 +85,6 @@ pub(crate) struct IngestGraphResponse {
 /// `ingest_empty_producer_400`,
 /// `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged` in
 /// `tests_contrib_graph`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn ingest_graph_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<IngestGraphRequest>,
-) -> Result<Json<IngestGraphResponse>, (StatusCode, Json<serde_json::Value>)> {
-    ingest_graph_report(&state, &id, req)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `POST /indexes/{id}/graph` serves, without the transport
 /// (#6285 slice 4).
 ///
@@ -111,7 +94,7 @@ pub(super) async fn ingest_graph_handler(
 /// than a `200` whose totals exclude it — durable-but-unqueryable reported as
 /// ingested is the fail-open shape this whole family is reviewed for. That
 /// verdict has to be one decision, not one per transport.
-/// What: [`ingest_graph_handler`]'s whole former body. The success arm stays a
+/// What: The former `ingest_graph_handler`'s whole body (removed #9939). The success arm stays a
 /// typed [`IngestGraphResponse`]; the socket re-encodes it the way axum writes
 /// it — see [`crate::service::rpc::as_http_body`].
 /// Test: `graph_ingest_over_the_socket_matches_the_http_body`,
@@ -274,25 +257,13 @@ pub(super) struct NeighborEntry {
 /// What: resolves the index, snapshots the graph (lock-free reads after the
 /// Arc clone), and runs the direction-aware, kind-filtered BFS.
 /// Test: `ingest_then_neighbors_round_trip`, `neighbors_unknown_node_is_empty`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn graph_neighbors_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<NeighborsParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    graph_neighbors_report(&state, &id, &params)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
 /// The body `GET /indexes/{id}/graph/neighbors` serves, without the transport
 /// (#6285 slice 2).
 ///
 /// Why: `search.graph.neighbors` runs the same BFS over the socket. The
 /// direction and edge-kind vocabularies are parsed here, so one body is what
 /// keeps the two transports accepting and refusing the same tokens.
-/// What: [`graph_neighbors_handler`]'s whole former body.
+/// What: The former `graph_neighbors_handler`'s whole body (removed #9939).
 /// Test: `graph_neighbors_over_the_socket_matches_the_http_body`.
 pub(crate) async fn graph_neighbors_report(
     state: &Arc<SearchAppState>,
