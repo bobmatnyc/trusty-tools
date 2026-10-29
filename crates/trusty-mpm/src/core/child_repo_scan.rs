@@ -233,8 +233,9 @@ pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
 /// `.git` as before, then canonicalized: a target inside the canonical root
 /// and outside every `.git` is already walked, so it is skipped and cannot
 /// cycle; any other target is [`ScanIncomplete::SymlinkEscapes`]. A file or
-/// dangling symlink is fenced the same way on its lexically resolved target
-/// (#10457 ruling (b)), so one inside the root passes. Exhaustion
+/// dangling symlink is fenced the same way on its target as the kernel would
+/// resolve it (#10457 ruling (b)), so one inside the root passes; a `.git`
+/// component matches in any case. Exhaustion
 /// is [`ScanIncomplete::BudgetExhaustedAt`]. `except` is left out as in
 /// [`scan_for_child_repo_except`]; the caller checks it, but its `st_dev` is
 /// compared here, because only this walk knows the root's. Every I/O error,
@@ -253,6 +254,9 @@ pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
 /// `exhaustive_refuses_a_file_link_outside_the_root`,
 /// `exhaustive_passes_a_dangling_link_inside_the_root`,
 /// `exhaustive_passes_a_file_link_inside_the_root`,
+/// `exhaustive_resolves_dotdot_after_a_link_like_the_kernel`,
+/// `exhaustive_fences_a_git_component_in_any_case`,
+/// `exhaustive_refuses_an_excepted_entry_swapped_for_a_symlink`,
 /// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
 pub fn scan_for_child_repo_exhaustive(
     dir: &Path,
@@ -285,8 +289,6 @@ pub fn device_of(path: &Path) -> io::Result<u64> {
 
 /// What the exhaustive rule compares each entry against.
 struct Fence {
-    /// The root as the walk spells it: every entry path starts with it.
-    root: PathBuf,
     /// The canonical root: a symlink target under it is already walked.
     real_root: PathBuf,
     /// The root's `st_dev`.
@@ -304,7 +306,6 @@ impl Fence {
         };
         let device = device_of(&real_root).map_err(|e| unreadable(root, e))?;
         Ok(Some(Self {
-            root: root.to_path_buf(),
             real_root,
             device,
             device_of,
@@ -328,40 +329,66 @@ impl Fence {
         self.fence(link, target)
     }
 
-    /// Refuse a file or dangling symlink whose target, resolved lexically
-    /// against the link's parent, the walk does not reach.
+    /// Refuse a file or dangling symlink whose target the walk does not reach,
+    /// resolving it through the kernel wherever the kernel has an answer.
     ///
-    /// Why: #10457 ruling (b) — a dangling link cannot be canonicalized, and
-    /// one pointing outside `dir` still lets a write through it leave the tree.
-    /// What: `read_link`, joined to the link's parent re-rooted on the
-    /// canonical root, with `.` and `..` folded without touching the disk. A
-    /// link whose own path is not under the root cannot be placed and is
-    /// [`ScanIncomplete::Unreadable`]. An intermediate symlink in the target
-    /// is itself an entry the walk fences, so lexical folding stays sound.
-    fn check_lexical(&self, link: &Path) -> Result<(), ScanIncomplete> {
+    /// Why: #10457 ruling (b) — a link to a file or to nothing outside `dir`
+    /// still lets a read or a write through it leave the tree. Folding `..`
+    /// by text is wrong after a symlinked component (the kernel takes the
+    /// parent of the link's target), so only the missing tail is folded.
+    /// What: a target that exists is canonicalized, as a directory link is.
+    /// A dangling one is `read_link` joined to the canonical link parent; its
+    /// longest existing prefix is canonicalized and the missing remainder is
+    /// appended with `.` and `..` folded. A missing component that is itself
+    /// a dangling link inside the root is an entry the walk fences on its own.
+    /// Every other stat or canonicalize error is [`ScanIncomplete::Unreadable`].
+    fn check_target(&self, link: &Path) -> Result<(), ScanIncomplete> {
+        match std::fs::metadata(link) {
+            Ok(_) => return self.check_link(link),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(unreadable(link, e)),
+        }
         let raw = std::fs::read_link(link).map_err(|e| unreadable(link, e))?;
         let parent = link
             .parent()
-            .and_then(|p| p.strip_prefix(&self.root).ok())
-            .ok_or_else(|| unreadable(link, io::Error::other("not under the scanned root")))?;
-        let mut target = PathBuf::new();
-        for part in self.real_root.join(parent).join(raw).components() {
-            match part {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    target.pop();
+            .ok_or_else(|| unreadable(link, io::Error::other("a symlink with no parent")))?;
+        let parent = std::fs::canonicalize(parent).map_err(|e| unreadable(link, e))?;
+        let full = parent.join(&raw);
+        let parts: Vec<Component<'_>> = full.components().collect();
+        for split in (1..=parts.len()).rev() {
+            let prefix: PathBuf = parts[..split].iter().collect();
+            match std::fs::canonicalize(&prefix) {
+                Ok(mut target) => {
+                    for part in &parts[split..] {
+                        match part {
+                            Component::ParentDir => {
+                                target.pop();
+                            }
+                            Component::CurDir => {}
+                            other => target.push(other),
+                        }
+                    }
+                    return self.fence(link, target);
                 }
-                other => target.push(other),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(unreadable(link, e)),
             }
         }
-        self.fence(link, target)
+        Err(unreadable(
+            link,
+            io::Error::other("no part of the target exists"),
+        ))
     }
 
     /// `target` is walked when it is under the canonical root and outside `.git`.
     fn fence(&self, link: &Path, target: PathBuf) -> Result<(), ScanIncomplete> {
         let walked = target
             .strip_prefix(&self.real_root)
-            .is_ok_and(|rel| !rel.components().any(|c| c.as_os_str() == ".git"));
+            // #10457: case-insensitive, as APFS resolves `.GIT` to `.git`.
+            .is_ok_and(|rel| {
+                !rel.components()
+                    .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
+            });
         if walked {
             return Ok(());
         }
@@ -478,9 +505,13 @@ impl Walk<'_> {
                 // #10457: its device is compared here; its own scan cannot.
                 if let Some(fence) = self.fence {
                     let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
-                    if kind.is_dir() {
-                        fence.check_mount(&path)?;
+                    // #10457: the caller saw a real directory; one swapped
+                    // since (a symlink, a file) is not what it checked.
+                    if !kind.is_dir() {
+                        let swapped = io::Error::other("no longer a real directory");
+                        return Err(unreadable(&path, swapped));
                     }
+                    fence.check_mount(&path)?;
                 }
                 continue;
             }
@@ -499,7 +530,7 @@ impl Walk<'_> {
                 // #10457 ruling (b): a file or dangling link is fenced too.
                 Probe::NotDirectory if kind.is_symlink() => {
                     if let Some(fence) = self.fence {
-                        fence.check_lexical(&path)?;
+                        fence.check_target(&path)?;
                     }
                 }
                 Probe::NotDirectory => {}

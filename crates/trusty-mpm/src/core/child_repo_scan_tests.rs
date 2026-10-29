@@ -660,3 +660,85 @@ fn exhaustive_passes_a_file_link_inside_the_root() {
     symlink(Path::new("./../CLAUDE.md"), ws.join("docs/rules.md")).unwrap();
     assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
 }
+
+/// #10457 delta critic HIGH 1: `..` after a symlinked component is the parent
+/// of the link's TARGET. With pnpm's own `.pnpm/back -> ..` (= `node_modules`),
+/// `back/../../x` is `parent(ws)/x` to the kernel but `node_modules/x` by text.
+/// Covers a target that exists and a dangling one.
+#[cfg(unix)]
+#[test]
+fn exhaustive_resolves_dotdot_after_a_link_like_the_kernel() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let pnpm = ws.join("node_modules/.pnpm");
+    std::fs::create_dir_all(&pnpm).unwrap();
+    symlink(Path::new(".."), pnpm.join("back")).unwrap();
+    assert_eq!(exhaustive(&ws), ChildRepoScan::Clear);
+
+    let outside = ws.parent().unwrap().join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    let link = pnpm.join("f");
+    symlink(Path::new("back/../../outside.txt"), &link).unwrap();
+    assert_eq!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+            link: link.clone(),
+            target: outside,
+        })
+    );
+
+    std::fs::remove_file(&link).unwrap();
+    symlink(Path::new("back/../../nowhere.txt"), &link).unwrap();
+    assert_eq!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+            link,
+            target: ws.parent().unwrap().join("nowhere.txt"),
+        })
+    );
+}
+
+/// #10457 delta critic HIGH 2: APFS resolves `.GIT` to `.git`, so a link into
+/// any case of `.git` refuses. The `.GIT` tail is dangling here, so the fence
+/// decides it on a case-sensitive filesystem too.
+#[cfg(unix)]
+#[test]
+fn exhaustive_fences_a_git_component_in_any_case() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("local")).unwrap();
+    let link = ws.join("AGENTS.md");
+    symlink(Path::new("local/.GIT/config"), &link).unwrap();
+    assert_eq!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes {
+            link,
+            target: ws.join("local/.GIT/config"),
+        })
+    );
+}
+
+/// #10457 delta critic LOW 3: the caller checked a real directory at the
+/// excepted path; one swapped for a symlink before the walk refuses.
+#[cfg(unix)]
+#[test]
+fn exhaustive_refuses_an_excepted_entry_swapped_for_a_symlink() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let outside = ws.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let local = ws.join("local");
+    symlink(&outside, &local).unwrap();
+    assert!(matches!(
+        exhaustive_except(&ws, &local),
+        ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) if path == local
+    ));
+}
+
+/// The exhaustive rule with `except`, under the real device reader.
+fn exhaustive_except(dir: &Path, except: &Path) -> ChildRepoScan {
+    scan_for_child_repo_exhaustive(dir, Some(except), 4096)
+}
