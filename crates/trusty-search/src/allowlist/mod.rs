@@ -530,7 +530,19 @@ pub fn remove_from_allowlist(path: &Path, allowlist_path: Option<&Path>) -> Resu
 /// `denylist_blocks_home_toplevel`, `denylist_allows_safe_path`,
 /// `denylist_allows_path_with_sensitive_word_in_name` in `tests.rs`.
 pub fn is_denied(path: &Path) -> Option<String> {
-    is_denied_inner(path, false)
+    is_denied_inner(path, false, false)
+}
+
+/// Like [`is_denied`], but a `SENSITIVE_PATH_PREFIXES` refusal also names
+/// `--allow-sensitive-path` as the opt-in.
+///
+/// Why: #10364 — only `index add` accepts that flag. Every other caller
+/// (plain `index`, daemon start/restore, the gate helper) cannot act on the
+/// hint, so [`is_denied`] stays hint-free and this variant is for `index add`.
+/// What: delegates to [`is_denied_inner`] with the hint enabled.
+/// Test: `denial_hint_names_flag_only_where_it_can_relax` in `tests.rs`.
+pub fn is_denied_hinting_flag(path: &Path) -> Option<String> {
+    is_denied_inner(path, false, true)
 }
 
 /// Like [`is_denied`], but SKIPS check (1) — the `SENSITIVE_PATH_PREFIXES`
@@ -557,7 +569,7 @@ pub fn is_denied(path: &Path) -> Option<String> {
 /// Test: `denylist_allowing_sensitive_path_permits_tmp_and_var_folders`,
 /// `denylist_allowing_sensitive_path_still_blocks_ssh_and_home` in `tests.rs`.
 pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
-    is_denied_inner(path, true)
+    is_denied_inner(path, true, false)
 }
 
 /// Shared implementation for [`is_denied`] and [`is_denied_allowing_sensitive_path`].
@@ -566,9 +578,10 @@ pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
 /// public entry points can never drift out of sync on checks (2)-(4).
 /// What: identical to the four checks documented on [`is_denied`], except
 /// check (1) (`SENSITIVE_PATH_PREFIXES`) only runs when `allow_sensitive_path`
-/// is `false`.
-/// Test: exercised transitively via both public wrappers' tests.
-fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
+/// is `false`; `flag_hint` appends the `--allow-sensitive-path` pointer to that
+/// check's reason.
+/// Test: exercised transitively via the public wrappers' tests.
+fn is_denied_inner(path: &Path, allow_sensitive_path: bool, flag_hint: bool) -> Option<String> {
     let path_str = path.to_string_lossy();
     // Normalise separators so prefix checks work on Windows too.
     let normalised = path_str.replace('\\', "/");
@@ -579,8 +592,14 @@ fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
     if !allow_sensitive_path {
         for &prefix in SENSITIVE_PATH_PREFIXES {
             if normalised.starts_with(prefix) {
+                // #10364: the one refusal `--allow-sensitive-path` relaxes.
+                let hint = if flag_hint {
+                    " (to index it anyway, pass --allow-sensitive-path to `index add`)"
+                } else {
+                    ""
+                };
                 return Some(format!(
-                    "path '{}' is under sensitive prefix '{}'; indexing refused",
+                    "path '{}' is under sensitive prefix '{}'; indexing refused{hint}",
                     path.display(),
                     prefix
                 ));
