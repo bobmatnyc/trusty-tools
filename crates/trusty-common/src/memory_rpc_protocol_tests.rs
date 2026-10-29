@@ -1,7 +1,7 @@
 //! The protocol handshake's client half, against fake daemons (#9288).
 //!
 //! Why: the real daemon only ever answers its own version, so the refusal arms
-//! — a newer or older daemon, a broken answer, a daemon that predates the
+//! — a newer or older daemon, a broken answer, a daemon without the
 //! handshake — need a socket that answers what the test chooses.
 //! What: each test serves an [`RpcRouter`] on a temp socket and drives the
 //! shared client against it.
@@ -131,28 +131,41 @@ async fn protocol_check_refuses_an_out_of_range_daemon_with_a_named_error() {
     }
 }
 
-/// Why (#9288): a daemon that predates the handshake answers method-not-found.
-/// That one answer reads as `PreHandshake` — callable during a rolling upgrade,
-/// and distinct from `Supported` so no caller mistakes it for a checked daemon.
+/// Why (#9537): a daemon without the handshake answers method-not-found. That
+/// answer is a refusal, the same as an out-of-range daemon, and the message
+/// tells the operator to restart it.
+/// What: the check and the cached gate both refuse; the refusal is not cached.
 /// Test: itself.
 #[tokio::test]
-async fn protocol_check_reads_a_pre_handshake_daemon_as_pre_handshake() {
+async fn protocol_check_refuses_a_daemon_without_the_handshake() {
     let fake = serve(
         RpcRouter::new().typed::<Value, Value, _, _>("memory.health", |_| async {
             Ok(json!({ "status": "ok" }))
         }),
     );
 
-    let verdict = check_memory_protocol_at(&fake.socket, BUDGET)
+    let checked = check_memory_protocol_at(&fake.socket, BUDGET)
         .await
-        .expect("a pre-handshake daemon is callable by rule");
+        .expect_err("a daemon with no memory.protocol is refused");
+    let ensured = ensure_memory_protocol_at(&fake.socket, BUDGET)
+        .await
+        .expect_err("the cached gate refuses it too");
 
-    assert_eq!(verdict, MemoryProtocol::PreHandshake);
+    for err in [checked, ensured] {
+        assert!(
+            matches!(err, MemoryProtocolError::NoHandshake { .. }),
+            "expected NoHandshake, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("restart the daemon"),
+            "the refusal is actionable: {err}"
+        );
+    }
 }
 
 /// Why (#9288, Fail-Open Check): a version query that fails must never fall
-/// through to a callable verdict. Only method-not-found reads as
-/// pre-handshake; every other refusal, an unreadable body, and a dead socket
+/// through to a callable verdict. Method-not-found is `NoHandshake`;
+/// every other refusal, an unreadable body, and a dead socket
 /// are errors.
 /// Test: itself.
 #[tokio::test]
@@ -254,116 +267,6 @@ async fn memory_rpc_error_keeps_the_data_member() {
         .expect("a typed refusal");
 
     assert_eq!(typed.data.as_ref(), Some(&detail));
-}
-
-/// Why (#9288): a daemon that predates the handshake speaks protocol 1, so it
-/// is callable only while this client supports protocol 1.
-/// Test: itself.
-#[test]
-fn a_pre_handshake_daemon_is_refused_once_protocol_1_is_unsupported() {
-    let socket = Path::new("/tmp/pre-handshake.sock");
-
-    assert_eq!(
-        pre_handshake_verdict(socket, &(1..=2)).expect("protocol 1 is supported"),
-        MemoryProtocol::PreHandshake
-    );
-    let err = pre_handshake_verdict(socket, &(2..=3)).expect_err("protocol 1 is dropped");
-    assert!(
-        matches!(
-            err,
-            MemoryProtocolError::Unsupported {
-                daemon: 1,
-                min: 2,
-                max: 3,
-                ..
-            }
-        ),
-        "{err:?}"
-    );
-}
-
-/// Why (#9288, supervisor ruling): a daemon that predates the handshake is
-/// called, and the operator is told to restart it — once per process, not on
-/// every call of a long-lived client.
-/// What: two such daemons on two sockets (so the verdict cache cannot hide the
-/// second check); both are called, and the process logs exactly one warning
-/// that names the daemon version and the restart, and asks `memory.health`
-/// for a version at most once.
-/// Test: itself.
-#[tokio::test]
-async fn a_pre_handshake_daemon_is_called_and_warned_about_once_per_process() {
-    use tracing_subscriber::layer::SubscriberExt as _;
-
-    // The current-thread runtime runs this body on one thread, so a
-    // thread-default subscriber sees every event `ensure_memory_protocol_at`
-    // emits.
-    let warns = WarnLog::default();
-    let logged = Arc::clone(&warns.0);
-    let _log = tracing::subscriber::set_default(tracing_subscriber::registry().with(warns));
-
-    let health_calls = Arc::new(AtomicU64::new(0));
-    let mut fakes = Vec::new();
-    let mut status_calls = Vec::new();
-    for _ in 0..2 {
-        let health = Arc::clone(&health_calls);
-        let status = Arc::new(AtomicU64::new(0));
-        let counted = Arc::clone(&status);
-        let router = RpcRouter::new()
-            .typed::<Value, Value, _, _>("memory.health", move |_| {
-                health.fetch_add(1, Ordering::SeqCst);
-                async { Ok(json!({ "status": "ok", "version": "0.29.0" })) }
-            })
-            .typed::<Value, Value, _, _>("memory.status", move |_| {
-                counted.fetch_add(1, Ordering::SeqCst);
-                async { Ok(json!({ "ok": true })) }
-            });
-        fakes.push(serve(router));
-        status_calls.push(status);
-    }
-
-    for fake in &fakes {
-        let verdict = ensure_memory_protocol_at(&fake.socket, BUDGET)
-            .await
-            .expect("a pre-handshake daemon is callable");
-        assert_eq!(verdict, MemoryProtocol::PreHandshake);
-        call_memory_tool_at(&fake.socket, "memory.status", json!({}))
-            .await
-            .expect("the call proceeds");
-    }
-
-    for status in &status_calls {
-        assert_eq!(status.load(Ordering::SeqCst), 1, "each daemon is called");
-    }
-    assert_eq!(
-        PRE_HANDSHAKE_WARNINGS.load(Ordering::SeqCst),
-        1,
-        "exactly one warning per process"
-    );
-    assert!(health_calls.load(Ordering::SeqCst) <= 1);
-    let logged = logged.lock().expect("warn log");
-    assert_eq!(logged.len(), 1, "one logged warning: {logged:?}");
-    assert!(
-        logged[0].contains("0.29.0") && logged[0].contains("Restart the trusty-memory daemon"),
-        "the warning names the daemon version and the restart: {logged:?}"
-    );
-}
-
-/// Collects the WARN events `memory_rpc` logs, for the once-per-process test.
-#[derive(Clone, Default)]
-struct WarnLog(Arc<std::sync::Mutex<Vec<String>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnLog {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let meta = event.metadata();
-        if *meta.level() != tracing::Level::WARN || meta.target() != "trusty_common::memory_rpc" {
-            return;
-        }
-        let mut text = String::new();
-        event.record(&mut |_: &tracing::field::Field, v: &dyn std::fmt::Debug| {
-            text.push_str(&format!("{v:?} "));
-        });
-        self.0.lock().expect("warn log").push(text);
-    }
 }
 
 /// A router answering `memory.protocol` with `version` and counting every
