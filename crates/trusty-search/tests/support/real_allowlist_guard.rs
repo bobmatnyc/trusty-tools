@@ -2,8 +2,8 @@
 //! `allowlist.toml` (issues #8175, #8737).
 //!
 //! Why: `AllowlistConfig::default_path()` resolves via `dirs::config_dir()`,
-//! which reads `$HOME` (macOS) or `$XDG_CONFIG_HOME`/`$HOME` (Linux) — NOT
-//! `TRUSTY_DATA_DIR`. `index remove` and `index relocate` both write the
+//! which reads `$HOME` (macOS) or `$XDG_CONFIG_HOME`/`$HOME` (Linux); since
+//! #10366 a non-empty absolute `TRUSTY_DATA_DIR` overrides it. `index remove` and `index relocate` both write the
 //! allowlist, so a spawned `trusty-search` that inherits the operator's real
 //! `HOME` can rewrite the real file even though every HTTP call targets a fake
 //! router. Tests pin `HOME`/`XDG_CONFIG_HOME` to a tempdir; this guard proves
@@ -15,7 +15,13 @@
 //! `reindex_quantize_env_conflict_8737.rs`, capture before each subprocess and
 //! `assert_unchanged` after.
 
-use trusty_search::allowlist::AllowlistConfig;
+/// The operator's real `allowlist.toml`, ignoring any `TRUSTY_DATA_DIR`.
+pub fn operator_allowlist_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .expect("config dir")
+        .join("trusty-search")
+        .join("allowlist.toml")
+}
 
 pub struct RealAllowlistGuard {
     exists: bool,
@@ -25,7 +31,9 @@ pub struct RealAllowlistGuard {
 
 impl RealAllowlistGuard {
     pub fn capture() -> Self {
-        let path = AllowlistConfig::default_path();
+        // #10366: `default_path()` follows `TRUSTY_DATA_DIR`, which a test
+        // process may set; the operator's file is always the config-dir one.
+        let path = operator_allowlist_path();
         match std::fs::metadata(&path) {
             Ok(meta) => Self {
                 exists: true,
