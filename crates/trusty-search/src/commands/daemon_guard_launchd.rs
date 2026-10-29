@@ -116,6 +116,23 @@ pub(crate) fn is_production_socket(
         && canonical == Some(client_socket)
 }
 
+/// A stderr note when `--device` cannot reach a launchd-managed daemon.
+///
+/// Why: under launchd the unit starts the daemon, so the CLI's `--device cpu`
+/// (the #24 fallback) is not passed to it; staying silent would hide that.
+/// What: `Some(note)` when `device` is set and the plan does not spawn.
+/// Test: `device_note_only_for_a_non_spawn_plan`.
+pub(crate) fn device_note(device: Option<&str>, plan: Plan) -> Option<String> {
+    let dev = device?;
+    (plan != Plan::Spawn).then(|| {
+        format!(
+            "note: --device {dev} is ignored; the launchd-managed daemon starts with the unit's \
+             own settings. Set TRUSTY_DEVICE={dev} in the plist's EnvironmentVariables or in \
+             daemon.env, then restart the unit"
+        )
+    })
+}
+
 /// `launchctl kickstart` arguments for the search unit, without `-k`.
 ///
 /// Why: `-k` kills a running job first; the guard only starts an idle one.
@@ -159,13 +176,25 @@ pub(crate) async fn run_bounded(program: &Path, args: &[String], bound: Duration
     ))
 }
 
+/// The real user id; `trusty_common::launchd` exists on macOS only.
+fn current_uid() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        trusty_common::launchd::current_uid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: getuid(2) has no preconditions and cannot fail.
+        unsafe { libc::getuid() }
+    }
+}
+
 /// The real `launchctl kickstart gui/<uid>/com.trusty.search`.
 ///
 /// Test: side-effecting; argv by `kickstart_argv_has_no_kill_flag`, the runner
 /// by `run_bounded_*`. Never called from a test.
 pub(crate) async fn real_kickstart() -> Result<()> {
-    // SAFETY: getuid(2) has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
+    let uid = current_uid();
     // Off macOS no state read ever yields a launchd verdict, so this is unreached.
     run_bounded(
         Path::new("launchctl"),
@@ -201,20 +230,61 @@ pub(crate) async fn current_state(client_socket: &Path) -> LaunchdState {
     if !is_production_socket(&env, client_socket, canonical.as_deref()) {
         return LaunchdState::on_demand();
     }
-    match tokio::time::timeout(
-        LAUNCHD_CALL_BOUND,
-        tokio::task::spawn_blocking(read_state_blocking),
-    )
-    .await
+    state_with(read_state_blocking, LAUNCHD_CALL_BOUND, plist_present()).await
+}
+
+/// Whether the search unit's plist is installed (a cheap stat, off the blocking pool).
+fn plist_present() -> bool {
+    #[cfg(target_os = "macos")]
     {
+        trusty_common::launchd::plist_path_for_label(LAUNCHD_LABEL).is_some_and(|p| p.exists())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// The state to assume when the launchd read did not answer.
+///
+/// Why: a plist survives a bootout, so "could not read" with a plist present
+/// must not read as "unsupervised" — that would spawn into the boot race.
+/// What: plist present: a launchd verdict, not loaded (the guard waits, never
+/// spawns). No plist: `OnDemand`.
+/// Test: `unanswered_read_with_a_plist_waits_instead_of_spawning`.
+pub(crate) fn unanswered_state(plist_present: bool) -> LaunchdState {
+    if plist_present {
+        LaunchdState {
+            owner: SocketOwner::Launchd {
+                label: LAUNCHD_LABEL.to_owned(),
+            },
+            loaded: false,
+            pid: None,
+        }
+    } else {
+        LaunchdState::on_demand()
+    }
+}
+
+/// Run `read` on the blocking pool under `bound`; a timeout or panic yields
+/// [`unanswered_state`].
+///
+/// Test: `a_timed_out_read_with_a_plist_is_not_loaded_launchd`,
+/// `a_panicked_read_with_a_plist_is_not_loaded_launchd`,
+/// `an_unanswered_read_without_a_plist_is_on_demand`.
+pub(crate) async fn state_with<R>(read: R, bound: Duration, plist_present: bool) -> LaunchdState
+where
+    R: FnOnce() -> LaunchdState + Send + 'static,
+{
+    match tokio::time::timeout(bound, tokio::task::spawn_blocking(read)).await {
         Ok(Ok(state)) => state,
         Ok(Err(e)) => {
-            eprintln!("launchd state read failed ({e}); treating the socket as unsupervised");
-            LaunchdState::on_demand()
+            eprintln!("launchd state read failed ({e}); assuming plist presence decides");
+            unanswered_state(plist_present)
         }
         Err(_) => {
-            eprintln!("launchd state read timed out; treating the socket as unsupervised");
-            LaunchdState::on_demand()
+            eprintln!("launchd state read timed out; assuming plist presence decides");
+            unanswered_state(plist_present)
         }
     }
 }
@@ -272,9 +342,10 @@ where
     S: FnOnce() -> Result<u32>,
 {
     let label = state.owner.label().map(str::to_owned);
-    match (decide(&state.owner, state.loaded, state.pid), label) {
+    let plan = decide(&state.owner, state.loaded, state.pid);
+    match (plan, label) {
         (Plan::Wait | Plan::WaitUnloaded, Some(label)) => {
-            wait_for_unit(client, budget, &label).await
+            wait_for_unit(client, budget, &label, plan == Plan::Wait).await
         }
         (Plan::Kickstart, Some(label)) => {
             eprintln!("{} Starting launchd unit {label}…", "◉".cyan());
@@ -286,7 +357,7 @@ where
                     return spawn_and_wait(client, budget, spawn).await;
                 }
             }
-            wait_for_unit(client, budget, &label).await
+            wait_for_unit(client, budget, &label, true).await
         }
         // `Spawn`, or a plan with no label (unreachable: only a launchd owner has one).
         _ => spawn_and_wait(client, budget, spawn).await,
@@ -304,18 +375,37 @@ async fn spawn_and_wait(
 }
 
 /// Wait for the unit to serve the socket; the error names the unit.
-async fn wait_for_unit(client: &DaemonClient, budget: Duration, label: &str) -> Result<()> {
+///
+/// What: `loaded` picks the error text. An unloaded unit says so and names the
+/// command that loads it.
+/// Test: `ensure_with_errors_for_an_unloaded_unit_without_spawning`,
+/// `ensure_with_never_spawns_when_kickstart_fails_and_unit_remains`.
+async fn wait_for_unit(
+    client: &DaemonClient,
+    budget: Duration,
+    label: &str,
+    loaded: bool,
+) -> Result<()> {
     eprintln!(
         "{} Waiting for launchd unit {label} to serve trusty-search…",
         "◉".cyan()
     );
     wait_for_socket(client, budget).await.map_err(|_| {
-        anyhow!(
-            "launchd unit {label} owns {} but nothing answered within {}s. Not \
-             spawning a daemon onto that path — it would race the unit. Check \
-             `launchctl print gui/$(id -u)/{label}` and the daemon's launchd log",
-            client.socket().display(),
-            budget.as_secs()
-        )
+        let socket = client.socket().display();
+        let secs = budget.as_secs();
+        if loaded {
+            anyhow!(
+                "launchd unit {label} owns {socket} but nothing answered within {secs}s. Not \
+                 spawning a daemon onto that path — it would race the unit. Check \
+                 `launchctl print gui/$(id -u)/{label}` and the daemon's launchd log"
+            )
+        } else {
+            anyhow!(
+                "launchd unit {label} has an installed plist but is not loaded, so nothing \
+                 answered {socket} within {secs}s. Not spawning a daemon onto that path. Load \
+                 it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist` \
+                 or `trusty-search service install` (inspect: `launchctl print gui/$(id -u)/{label}`)"
+            )
+        }
     })
 }

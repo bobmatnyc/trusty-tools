@@ -135,6 +135,10 @@ pub async fn ensure_daemon_up_with_device(
         // #10413: when launchd owns the socket, kickstart or wait for its unit
         // instead of racing it with a spawn of our own.
         let state = launchd::current_state(client.socket()).await;
+        let plan = launchd::decide(&state.owner, state.loaded, state.pid);
+        if let Some(note) = launchd::device_note(device, plan) {
+            eprintln!("{note}");
+        }
         let spawn = || {
             match device {
                 Some(dev) => eprintln!(

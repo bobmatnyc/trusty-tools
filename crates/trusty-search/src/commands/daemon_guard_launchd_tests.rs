@@ -299,3 +299,82 @@ async fn ensure_with_spawns_when_nothing_supervises_the_socket() {
     .expect("spawned daemon serves");
     assert_eq!(spawned.load(Ordering::SeqCst), 1);
 }
+
+fn plist_wait_state() -> LaunchdState {
+    state(false, None)
+}
+
+/// #10413 round 1: a read that times out with a plist installed must wait, not
+/// spawn. The reader sleeps past the bound; no real launchctl runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_read_with_a_plist_is_not_loaded_launchd() {
+    let got = state_with(
+        || {
+            std::thread::sleep(Duration::from_secs(2));
+            LaunchdState::on_demand()
+        },
+        Duration::from_millis(100),
+        true,
+    )
+    .await;
+    assert_eq!(got, plist_wait_state());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicked_read_with_a_plist_is_not_loaded_launchd() {
+    let got = state_with(|| panic!("reader exploded"), Duration::from_secs(5), true).await;
+    assert_eq!(got, plist_wait_state());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_read_without_a_plist_is_on_demand() {
+    let got = state_with(|| panic!("reader exploded"), Duration::from_secs(5), false).await;
+    assert_eq!(got, LaunchdState::on_demand());
+}
+
+#[test]
+fn unanswered_read_with_a_plist_waits_instead_of_spawning() {
+    let s = unanswered_state(true);
+    assert_eq!(decide(&s.owner, s.loaded, s.pid), Plan::WaitUnloaded);
+    let s = unanswered_state(false);
+    assert_eq!(decide(&s.owner, s.loaded, s.pid), Plan::Spawn);
+}
+
+/// The recheck after a failed kickstart times out: the guard must not spawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recheck_that_times_out_with_a_plist_never_spawns() {
+    let (_dir, client, _sock) = scratch();
+    let err = ensure_with(
+        &client,
+        BUDGET,
+        state(true, None),
+        || async { Err(anyhow::anyhow!("kickstart refused")) },
+        || {
+            state_with(
+                || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    LaunchdState::on_demand()
+                },
+                Duration::from_millis(100),
+                true,
+            )
+        },
+        no_spawn,
+    )
+    .await
+    .expect_err("nothing serves");
+    assert!(err.to_string().contains(LABEL), "{err}");
+}
+
+#[test]
+fn device_note_only_for_a_non_spawn_plan() {
+    assert!(device_note(None, Plan::Kickstart).is_none());
+    assert!(device_note(Some("cpu"), Plan::Spawn).is_none());
+    for plan in [Plan::Kickstart, Plan::Wait, Plan::WaitUnloaded] {
+        let note = device_note(Some("cpu"), plan).expect("note");
+        assert!(
+            note.contains("--device cpu") && note.contains("daemon.env"),
+            "{note}"
+        );
+    }
+}
