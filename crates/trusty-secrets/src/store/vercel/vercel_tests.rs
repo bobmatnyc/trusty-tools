@@ -508,6 +508,50 @@ fn vercel_hostile_env_child() {
     assert_eq!(shim.cwd_log().lines().count(), 6);
 }
 
+/// Why: the #9927 hold — `vercel env ls` prints the header `name value type
+/// environments created`, with a `type` column the parser once refused, and
+/// an empty target prints its notice on stderr only (stdout stays empty).
+/// What: a synthetic listing in the real column layout (names, project and
+/// team are invented; the CLI lists names and never values), plus the empty
+/// and wrapped-environments shapes.
+/// Test: itself.
+#[test]
+fn vercel_listing_parser_real_cli_table() {
+    let listing = "\
+ name                 value               type          environments                     created\n \
+ API_TOKEN            Encrypted           encrypted     Production                       3d ago\n \
+ DATABASE_URL         Encrypted           sensitive     Production, Preview              12d ago\n \
+ FEATURE_FLAG_X       Encrypted           encrypted     Production, Preview, Development 2mo ago\n \
+ _PRIVATE_NAME        Encrypted           encrypted     Preview (feature/demo-branch)    1y ago\n";
+    let names = listing::names(listing).unwrap();
+    assert_eq!(
+        names.into_iter().collect::<Vec<_>>(),
+        [
+            "API_TOKEN",
+            "DATABASE_URL",
+            "FEATURE_FLAG_X",
+            "_PRIVATE_NAME"
+        ]
+    );
+    // The CLI's own banner lines precede the table when both streams merge.
+    let banner = format!(
+        "Vercel CLI 99.0.0\n> Environment Variables found for acme-demo/web-demo [412ms]\n\n{listing}"
+    );
+    assert_eq!(listing::names(&banner).unwrap().len(), 4);
+    // The header alone is an empty table.
+    assert_eq!(
+        listing::names(" name value type environments created\n"),
+        Some(Default::default())
+    );
+    // An empty target: stdout is empty and the notice is on stderr, so the
+    // parser sees nothing it can call a listing and fails closed.
+    assert_eq!(listing::names(""), None);
+    assert_eq!(
+        listing::names("> No Environment Variables found for acme-demo/web-demo [9ms]\n"),
+        Some(Default::default())
+    );
+}
+
 /// Why: V6 — the parser recognises a table and the empty notice, and
 /// anything else is `None`, never a listing.
 /// Test: itself.

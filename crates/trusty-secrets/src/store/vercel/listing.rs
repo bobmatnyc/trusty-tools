@@ -5,16 +5,19 @@
 //! as "listed" or as a clean "empty".
 //! What: [`names`], the variable names a listing's table shows.
 //!
-//! UNCONFIRMED: the table shape (a `name  value  environments …` header,
-//! then one row per variable whose first column is its name) and the
-//! "No Environment Variables found" notice follow the CLI's documented
-//! output; the #9069 live check pins them, and which stream each goes to.
-//! Test: `vercel_listing_parser_table`.
+//! The table shape is the live CLI's: a `name  value  type  environments
+//! created` header, then one row per variable whose first column is its
+//! name. An empty target prints its "No Environment Variables found" notice
+//! on stderr only, so empty stdout is not a listing (#9927).
+//! Test: `vercel_listing_parser_table`, `vercel_listing_parser_real_cli_table`.
 
 use std::collections::BTreeSet;
 
-/// The first header columns of the listing's table, lowercased.
-const HEADER: [&str; 3] = ["name", "value", "environments"];
+/// The header columns every listing carries, lowercased: it starts with
+/// `name value` and names an `environments` column after them (a `type`
+/// column may sit between, #9927).
+const HEADER_START: [&str; 2] = ["name", "value"];
+const HEADER_ENVIRONMENTS: &str = "environments";
 
 /// The notice a target with no variables prints instead of a table.
 const NONE_FOUND: &str = "no environment variables found";
@@ -26,7 +29,7 @@ const NONE_FOUND: &str = "no environment variables found";
 /// header, every non-blank line is a row whose first column must be a
 /// variable name (`[A-Za-z_][A-Za-z0-9_]*`); any other row, or no header
 /// and no notice, is `None`.
-/// Test: `vercel_listing_parser_table`.
+/// Test: `vercel_listing_parser_table`, `vercel_listing_parser_real_cli_table`.
 pub(super) fn names(stdout: &str) -> Option<BTreeSet<String>> {
     let mut rows = stdout
         .lines()
@@ -35,7 +38,7 @@ pub(super) fn names(stdout: &str) -> Option<BTreeSet<String>> {
     loop {
         let line = rows.next()?.to_ascii_lowercase();
         let columns: Vec<&str> = line.split_whitespace().collect();
-        if columns.starts_with(&HEADER) {
+        if columns.starts_with(&HEADER_START) && columns.contains(&HEADER_ENVIRONMENTS) {
             break;
         }
         if line.contains(NONE_FOUND) {
