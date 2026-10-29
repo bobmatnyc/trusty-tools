@@ -89,7 +89,14 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
 /// Why: the daemon and `tm sm serve --stdio` both inject; each records on
 /// its own producer, under the same `bus_allowed` rule.
 pub fn start_with_injects(state: &DaemonState) -> bool {
-    super::start(state);
+    start_with_injects_at(state, super::StartAt::from_env(state))
+}
+
+/// [`start_with_injects`] on a given bus and data dir (#10464).
+///
+/// Test: `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub fn start_with_injects_at(state: &DaemonState, at: super::StartAt) -> bool {
+    super::start_at(state, at);
     install(state)
 }
 

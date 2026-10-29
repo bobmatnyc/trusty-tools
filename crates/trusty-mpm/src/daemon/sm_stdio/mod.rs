@@ -147,22 +147,71 @@ impl SmDispatcher {
 /// it records each delivered inject on its own bus producer, flushed at EOF
 /// and, on SIGTERM or SIGINT, within the daemon's signal budget before exit.
 /// Test: the dispatch logic is covered by `tests.rs`; the signal flush by
-/// `signal_tests.rs::a_signal_flushes_the_buffered_inject_event_9167`.
+/// `signal_tests.rs::a_signal_flushes_the_buffered_inject_event_9167`; the
+/// EOF and setup-error stops by `stop_tests.rs`.
 pub async fn run_sm_stdio(state: Arc<crate::daemon::state::DaemonState>) -> anyhow::Result<()> {
     crate::daemon::action_events::inject::start_with_injects(&state);
-    let dispatcher = Arc::new(build_dispatcher(Arc::clone(&state)).await?);
-    let serve = run_stdio_loop(move |req| {
-        let dispatcher = dispatcher.clone();
-        async move { dispatcher.dispatch(req).await }
-    });
-    match signal::serve_until(&state, signal::shutdown_signal(), serve).await {
-        signal::Ended::Served(served) => {
-            state.action_events().shutdown().await;
-            served
-        }
+    let build = build_dispatcher(Arc::clone(&state));
+    let serve = |dispatcher: SmDispatcher| {
+        let dispatcher = Arc::new(dispatcher);
+        run_stdio_loop(move |req| {
+            let dispatcher = dispatcher.clone();
+            async move { dispatcher.dispatch(req).await }
+        })
+    };
+    match run_sm_stdio_with(&state, build, serve, signal::shutdown_signal()).await {
+        signal::Ended::Served(served) => served,
         // The stdin read is a blocking task a normal return would wait on.
         signal::Ended::Signalled => std::process::exit(0),
     }
+}
+
+/// [`run_sm_stdio`] after the bus start, with the builder, the served loop
+/// and the stop signal given (#10464).
+///
+/// Why: a test drives the real EOF and setup-error arms with no stdin.
+/// What: awaits `build`; on `Err`, [`finish`]es and returns it, since the
+/// start already took the spool's events into the buffer. Otherwise races
+/// `serve(dispatcher)` against `stop`; an ended serve is [`finish`]ed. The
+/// signal arm settles in [`signal::serve_until`].
+/// Test: `sm_stdio_eof_logs_the_final_late_total_10464`,
+/// `sm_stdio_setup_error_still_settles_replayed_events_10464`.
+async fn run_sm_stdio_with<D, S>(
+    state: &crate::daemon::state::DaemonState,
+    build: impl std::future::Future<Output = anyhow::Result<D>>,
+    serve: impl FnOnce(D) -> S,
+    stop: impl std::future::Future<Output = ()>,
+) -> signal::Ended<anyhow::Result<()>>
+where
+    S: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let dispatcher = match build.await {
+        Ok(dispatcher) => dispatcher,
+        Err(e) => {
+            // #10464: settle the replayed events before the early return.
+            finish(state).await;
+            return signal::Ended::Served(Err(e));
+        }
+    };
+    match signal::serve_until(state, stop, serve(dispatcher)).await {
+        signal::Ended::Served(served) => {
+            finish(state).await;
+            signal::Ended::Served(served)
+        }
+        signal::Ended::Signalled => signal::Ended::Signalled,
+    }
+}
+
+/// The non-signal stop: the bounded final flush, then the late total once.
+///
+/// Test: `sm_stdio_eof_logs_the_final_late_total_10464`.
+async fn finish(
+    state: &crate::daemon::state::DaemonState,
+) -> crate::daemon::action_events::Settled {
+    let settled = state.action_events().shutdown().await;
+    // #10464: the EOF stop logged no late total; the signal stop does.
+    state.action_events().report_late();
+    settled
 }
 
 /// Build the production [`SmDispatcher`] from the daemon state.
@@ -264,3 +313,7 @@ fn empty_goal_store(data_root: &std::path::Path) -> SmGoalStore {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stop_tests.rs"]
+mod stop_tests;
