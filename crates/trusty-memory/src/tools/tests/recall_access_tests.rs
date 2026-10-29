@@ -9,6 +9,7 @@
 //! Test: this IS the test module.
 
 use super::*;
+use crate::engine::decay::DecayConfig;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -317,6 +318,61 @@ async fn recall_and_list_responses_expose_access_count_and_boost() {
         assert!(
             row["last_accessed_at"].as_str().is_some(),
             "{name} last_accessed_at: {row:#}"
+        );
+    }
+}
+
+/// Why (#9881): the view test above only proves `> 0`. A recall row is
+/// projected before its own access is recorded, and the boost must track the
+/// count exactly; a loose check would pass a stale or double-counted value.
+/// What: a fresh drawer is recalled twice, then listed. Recall 1 reads count 0
+/// with a null `last_accessed_at` (its own access lands after the snapshot);
+/// recall 2 reads 1 (recall 1's access); `memory_list` reads 2 (recall 2's
+/// access, bumped in memory before the call returns). Every row's
+/// `accumulated_boost` equals `count * DecayConfig::default().access_boost`;
+/// two accesses stay under the boost cap, so the cap never clips.
+/// Test: this function.
+#[tokio::test]
+async fn access_count_and_boost_follow_the_exact_recall_sequence() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "acc-seq"}))
+        .await
+        .expect("palace_create");
+    let text = "The first recall of a fresh drawer reports zero prior accesses";
+    let id = remember(&state, "acc-seq", text).await;
+    let args = json!({"palace": "acc-seq", "query": text, "top_k": 3});
+    let first = dispatch_tool(&state, "memory_recall", args.clone())
+        .await
+        .expect("first recall");
+    let second = dispatch_tool(&state, "memory_recall", args)
+        .await
+        .expect("second recall");
+    let list = dispatch_tool(&state, "memory_list", json!({"palace": "acc-seq"}))
+        .await
+        .expect("memory_list");
+
+    let per_access = DecayConfig::default().access_boost;
+    for (name, out, key, count, stamped) in [
+        ("first recall", &first, "results", 0u64, false),
+        ("second recall", &second, "results", 1, true),
+        ("memory_list", &list, "drawers", 2, true),
+    ] {
+        let row = out[key]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["drawer_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{name} omits the drawer: {out:#}"));
+        assert_eq!(row["access_count"].as_u64(), Some(count), "{name}: {row:#}");
+        assert_eq!(
+            row["last_accessed_at"].as_str().is_some(),
+            stamped,
+            "{name}: {row:#}"
+        );
+        let boost = row["accumulated_boost"].as_f64().expect("boost") as f32;
+        assert!(
+            (boost - count as f32 * per_access).abs() < 1e-5,
+            "{name} boost {boost} != {count} x {per_access}"
         );
     }
 }
