@@ -19,8 +19,10 @@
 //! [`start`] attaches a publisher and its flush task at serve start;
 //! [`ActionEvents::shutdown`], called from both exit paths, ends the task,
 //! reads every tracked transcript once more, and runs one final flush, all within
-//! [`FINAL_FLUSH_BUDGET`].
-//! Test: `tests.rs` (socket level), `projection_tests.rs` (pure).
+//! [`FINAL_FLUSH_BUDGET`]. #10412: what the bus does not take is written to
+//! the [`spool`], and the next start buffers it again.
+//! Test: `tests.rs` (socket level), `projection_tests.rs` (pure),
+//! `spool_tests.rs` (stop and restart).
 //!
 //! # Spec References
 //! - [`SPEC-UNIDASH-04~draft`](docs/specs/DOC-73-unified-mpm-code-agents-dashboard.md#SPEC-UNIDASH-04~draft)
@@ -43,6 +45,8 @@ pub mod message;
 pub mod projection;
 // #9167 PR2: the receiving side of a cross-session message.
 pub mod received;
+// #10412: what the bus did not take at stop, replayed on the next start.
+pub mod spool;
 pub mod tmux_send;
 
 /// How often the flush task drains the buffer (as #9078's producer).
@@ -117,8 +121,8 @@ impl ActionEvents {
     /// [`FINAL_FLUSH_BUDGET`]. Idempotent; the serve drain's call.
     ///
     /// Test: `shutdown_runs_the_final_flush_once_6849`.
-    pub async fn shutdown(&self) {
-        self.shutdown_within(FINAL_FLUSH_BUDGET).await;
+    pub async fn shutdown(&self) -> Settled {
+        self.shutdown_within(FINAL_FLUSH_BUDGET).await
     }
 
     /// End the flush task, then run the final flush within `budget`.
@@ -132,14 +136,17 @@ impl ActionEvents {
     /// [`ActionPublisher::final_flush_within`] in what is left. The whole
     /// call is cut off at `budget`. A second call finds no task, and its
     /// scan finds reading closed.
+    /// #10412: returns where the buffered events went; the final flush
+    /// spools what the bus did not take, and logs any loss with a count.
     /// Test: `shutdown_runs_the_final_flush_once_6849`,
     /// `the_signal_path_flush_returns_within_its_budget_6849`,
-    /// `an_arrival_unread_at_shutdown_is_sent_exactly_once_9167`.
-    pub async fn shutdown_within(&self, budget: Duration) {
+    /// `an_arrival_unread_at_shutdown_is_sent_exactly_once_9167`,
+    /// `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`.
+    pub async fn shutdown_within(&self, budget: Duration) -> Settled {
         let deadline = tokio::time::Instant::now() + budget;
         let task = self.flush_task.lock().take();
         let publisher = self.publisher.get();
-        let work = async {
+        let before = async {
             if let Some(task) = task {
                 task.abort();
                 let _ = task.await;
@@ -147,12 +154,20 @@ impl ActionEvents {
             if let Some(publisher) = publisher {
                 // #9167: arrivals pending at shutdown; the flush keeps half.
                 publisher.last_scan_within(budget / 2).await;
-                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                publisher.final_flush_within(left).await;
             }
         };
-        // `final_flush_within` logs its own cut-off; this bounds the join too.
-        let _ = tokio::time::timeout(budget, work).await;
+        // The scan keeps half; a hung join must still leave the spool time.
+        if tokio::time::timeout(budget * 3 / 4, before).await.is_err() {
+            tracing::warn!("action events: shutdown's flush-task join outlived its budget");
+        }
+        // #10412: bounded on its own, so its loss count is always logged.
+        match publisher {
+            Some(publisher) => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                publisher.final_flush_within(left).await
+            }
+            None => Settled::default(),
+        }
     }
 }
 
@@ -172,6 +187,19 @@ pub struct ActionPublisher {
     received: parking_lot::Mutex<received::Tails>,
     /// Held across one transcript scan, so two scans never race an offset.
     scanning: parking_lot::Mutex<()>,
+    /// #10412: where the final flush puts what the bus did not take.
+    spool: Option<PathBuf>,
+}
+
+/// Where the final flush left the buffered events (#10412).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Settled {
+    /// Written to the bus.
+    pub sent: usize,
+    /// Written to the spool, for replay on the next start.
+    pub spooled: usize,
+    /// Neither; each loss is also logged with this count.
+    pub lost: usize,
 }
 
 impl ActionPublisher {
@@ -184,7 +212,54 @@ impl ActionPublisher {
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             received: parking_lot::Mutex::default(),
             scanning: parking_lot::Mutex::new(()),
+            spool: None,
         }
+    }
+
+    /// Spool undelivered events in `dir` at shutdown (#10412).
+    pub fn with_spool(mut self, dir: Option<PathBuf>) -> Self {
+        self.spool = dir;
+        self
+    }
+
+    /// Buffer every event a previous run spooled; returns how many.
+    ///
+    /// Why: events spooled at shutdown reach the bus only if a later start
+    /// sends them (#10412).
+    /// What: [`spool::take_all`] claims and deletes each file, so a file is
+    /// replayed once; its events join the buffer ahead of any new hook.
+    /// Overflow is counted in [`Self::dropped`], and logged here too.
+    /// Test: `spooled_events_replay_on_the_next_start_exactly_once_10412`.
+    pub fn replay_spool(&self) -> usize {
+        let Some(dir) = &self.spool else { return 0 };
+        let replay = match spool::take_all(dir) {
+            Ok(replay) => replay,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "action events: spool unreadable; nothing replayed");
+                return 0;
+            }
+        };
+        if replay.skipped > 0 || replay.failed_files > 0 {
+            tracing::warn!(
+                skipped = replay.skipped,
+                failed_files = replay.failed_files,
+                "action events: part of the spool was unreadable"
+            );
+        }
+        let dropped_before = self.client.dropped();
+        let count = replay.events.len();
+        for event in replay.events {
+            self.client.send(event);
+        }
+        let overflowed = self.client.dropped().saturating_sub(dropped_before);
+        if count > 0 {
+            tracing::info!(
+                replayed = count,
+                overflowed,
+                "action events: replayed the spool from the last stop"
+            );
+        }
+        count
     }
 
     /// Show paths outside a session's `cwd` relative to `home`.
@@ -365,31 +440,83 @@ impl ActionPublisher {
     ///
     /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
     /// `shutdown_runs_the_final_flush_once_6849`.
-    pub async fn final_flush(&self) {
-        self.final_flush_within(FINAL_FLUSH_BUDGET).await;
+    pub async fn final_flush(&self) -> Settled {
+        self.final_flush_within(FINAL_FLUSH_BUDGET).await
     }
 
-    /// The exit-path flush, bounded by `budget`; logs what it left behind.
-    pub async fn final_flush_within(&self, budget: Duration) {
-        match tokio::time::timeout(budget, self.client.flush()).await {
-            Ok(PushFlushOutcome { error: None, sent }) => {
-                tracing::debug!(sent, "action events: final flush delivered");
-            }
+    /// The exit-path flush, bounded by `budget`: deliver, then spool the rest.
+    ///
+    /// Why: a bus that is down or stalled at stop lost the whole buffer
+    /// (#10412); a slow bus or disk must still not hold the stop.
+    /// What: the bus gets half of `budget` (a cut-off write re-queues its
+    /// frame). What is left is taken from the buffer and written to the spool
+    /// on the blocking pool, cut off at `budget`. Every event not sent or
+    /// spooled is counted in [`Settled::lost`] and logged with that count.
+    /// Test: `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`,
+    /// `a_hung_bus_and_an_unwritable_spool_stop_in_bound_and_count_the_loss_10412`.
+    pub async fn final_flush_within(&self, budget: Duration) -> Settled {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut settled = Settled::default();
+        let buffered = self.client.buffered_len();
+        match tokio::time::timeout(budget / 2, self.client.flush()).await {
+            Ok(PushFlushOutcome { error: None, sent }) => settled.sent = sent,
             Ok(PushFlushOutcome {
                 error: Some(e),
                 sent,
-            }) => tracing::warn!(
-                sent,
-                undelivered = self.client.buffered_len(),
-                error = %e,
-                "action events: final flush stopped; the rest are lost"
-            ),
-            // The cut-off write re-queued its frame, so `undelivered` counts it.
-            Err(_) => tracing::warn!(
-                undelivered = self.client.buffered_len(),
-                "action events: final flush outlived its budget; the rest are lost"
-            ),
+            }) => {
+                tracing::info!(sent, error = %e, "action events: final flush stopped; spooling the rest");
+                settled.sent = sent;
+            }
+            Err(_) => {
+                // The cut-off flush reports nothing; the buffer shows what it wrote.
+                settled.sent = buffered.saturating_sub(self.client.buffered_len());
+                tracing::info!(
+                    sent = settled.sent,
+                    "action events: final flush outlived its budget; spooling the rest"
+                );
+            }
         }
+        let left = self.client.drain_buffered();
+        if left.is_empty() {
+            tracing::debug!(sent = settled.sent, "action events: final flush delivered");
+            return settled;
+        }
+        let count = left.len();
+        let Some(dir) = self.spool.clone() else {
+            tracing::warn!(
+                lost = count,
+                "action events: undelivered at stop and no spool; lost"
+            );
+            settled.lost = count;
+            return settled;
+        };
+        let write = tokio::task::spawn_blocking(move || spool::persist(&dir, &left));
+        match tokio::time::timeout_at(deadline, write).await {
+            Ok(Ok(Ok(written))) => {
+                tracing::info!(
+                    spooled = written,
+                    "action events: undelivered at stop; spooled for the next start"
+                );
+                settled.spooled = written;
+            }
+            Ok(Ok(Err(e))) => {
+                tracing::warn!(lost = count, error = %e, "action events: spool write failed; lost");
+                settled.lost = count;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(lost = count, error = %e, "action events: spool write did not finish; lost");
+                settled.lost = count;
+            }
+            Err(_) => {
+                // The write may still land; it is not counted as spooled.
+                tracing::warn!(
+                    lost = count,
+                    "action events: spool write outlived the stop budget; counted lost"
+                );
+                settled.lost = count;
+            }
+        }
+        settled
     }
 }
 
@@ -490,12 +617,32 @@ pub fn start(state: &DaemonState) -> bool {
         std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
     let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
         .is_allowed();
-    start_with(
+    // #10412: the spool follows the data dir, as the bus socket does.
+    let spool = match trusty_common::resolve_data_dir("trusty-mpm") {
+        Ok(data_dir) => Some(spool::spool_dir(&data_dir)),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "action events: no data dir; events undelivered at stop are lost");
+            None
+        }
+    };
+    start_with_spool(
         state,
         bus_allowed(overridden, real),
         DEFAULT_FLUSH_INTERVAL,
         trusty_common::control_bus::events_socket_path,
+        spool,
     )
+}
+
+/// [`start_with_spool`] with no spool: what the bus does not take at stop is
+/// lost, and logged with a count.
+pub fn start_with(
+    state: &DaemonState,
+    allowed: bool,
+    flush_every: Duration,
+    resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> bool {
+    start_with_spool(state, allowed, flush_every, resolve, None)
 }
 
 /// Attach a publisher on `resolve`'s socket when `allowed`, and start its
@@ -507,14 +654,18 @@ pub fn start(state: &DaemonState) -> bool {
 /// (without calling `resolve`), when `resolve` fails, or when a publisher is
 /// already attached; otherwise attaches one, keeps its flush task on
 /// [`ActionEvents`] for [`ActionEvents::shutdown`], and returns `true`.
+/// #10412: the publisher spools to `spool` at stop, and first buffers what
+/// the last stop spooled there, before any hook can publish.
 /// Test: `an_unresolvable_bus_still_ingests_hooks_6849`,
 /// `a_scratch_daemon_dials_no_host_bus_6849`,
-/// `shutdown_runs_the_final_flush_once_6849`.
-pub fn start_with(
+/// `shutdown_runs_the_final_flush_once_6849`,
+/// `spooled_events_replay_on_the_next_start_exactly_once_10412`.
+pub fn start_with_spool(
     state: &DaemonState,
     allowed: bool,
     flush_every: Duration,
     resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
+    spool: Option<PathBuf>,
 ) -> bool {
     if !allowed {
         tracing::debug!("action events: isolated daemon on the host data dir; no bus");
@@ -526,9 +677,15 @@ pub fn start_with(
             let publisher = Arc::new(
                 ActionPublisher::new(socket)
                     .with_flush_interval(flush_every)
-                    .with_message_bodies(message::bodies_from_env()),
+                    .with_message_bodies(message::bodies_from_env())
+                    .with_spool(spool),
             );
             let events = state.action_events();
+            // #10412: a second publisher must not claim the spool it never uses.
+            if events.publisher().is_some() {
+                return false;
+            }
+            publisher.replay_spool();
             if !events.attach(Arc::clone(&publisher)) {
                 return false;
             }
@@ -546,5 +703,7 @@ pub fn start_with(
 mod message_tests;
 #[cfg(test)]
 mod received_tests;
+#[cfg(test)]
+mod spool_tests;
 #[cfg(test)]
 mod tests;
