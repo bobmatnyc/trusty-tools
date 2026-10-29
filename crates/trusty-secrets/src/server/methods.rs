@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use super::agents_flag::refuse_agent_caller;
+use super::agents_flag::judge_agent_caller;
 use super::audit::AuditMethod;
 use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
@@ -208,12 +208,16 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// logged or formatted here. #4567: one audit record per call; the audit log
 /// is opened before the backend is touched (see `gate`). #7524 H1: the
 /// backend opens through [`ProjectContext::open_for_write`]. #7520: after
-/// the write, the key is evicted from the session cache. #10386 Q2: after
-/// the scope check and before any backend opens, a caller under Claude Code
-/// is refused ([`refuse_agent_caller`]); no peer pid is
-/// [`ErrorKind::GrantRefused`].
+/// the write, the key is evicted from the session cache. #10459 (reverses
+/// #10386 Q2 for `set`): after the scope check the caller is judged
+/// ([`judge_agent_caller`]); no peer pid or an unreadable ancestry is
+/// [`ErrorKind::GrantRefused`]. A caller under Claude Code writes through
+/// [`SecretStore::set_for_agent`] (a denied key is
+/// [`ErrorKind::AgentKeyDenied`], checked under the index lock), its allow
+/// record carries `default_policy`, and its confirmation is length only.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
-/// `set_by_agent_ancestor_is_refused_before_the_backend`,
+/// `set_by_agent_ancestor_of_an_undenied_key_succeeds`,
+/// `set_by_agent_of_a_denied_key_is_refused`,
 /// `set_delete_copy_evict_cached_value`,
 /// `server_malformed_set_never_echoes_its_value`,
 /// `audit_set_and_delete_write_one_record_per_call`,
@@ -227,15 +231,22 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
-        // #10386 Q2: a value write is operator-only, judged before any backend.
+        // #10459: an agent may write a key with no deny; judged before any backend.
         let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
-        refuse_agent_caller(state, caller, peer, gate)?;
+        let agent = judge_agent_caller(state, caller, peer, gate)?;
+        if agent {
+            gate.default_policy();
+        }
         // #7524: the `file` posture check every value write passes.
         let backend = project.open_for_write(state, &project.resolved_config().backend)?;
         let store =
             SecretStore::new(backend, state.index.clone()).with_deny_audit(gate.deny_audit());
         gate.admit()?;
-        let response = store.set(&request.vault, &request.key, &request.value);
+        let response = if agent {
+            store.set_for_agent(&request.vault, &request.key, &request.value)
+        } else {
+            store.set(&request.vault, &request.key, &request.value)
+        };
         // #7520: after the write, success or not, so no read that raced it
         // keeps the old value.
         state.cache.evict(&request.vault, &request.key);
@@ -251,8 +262,9 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
 /// (#7519). The key is then deleted from the configured backend and from
 /// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
 /// #4567 — audited like [`set`]. #7520: evicts the key like [`set`].
-/// #10386 Q2: refuses a caller under Claude Code like [`set`], before the
-/// account config is read.
+/// #10386 Q2: refuses a caller under Claude Code
+/// ([`super::agents_flag::refuse_agent_caller`]) before the account config
+/// is read; #10459 keeps `delete` operator-only.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `delete_by_agent_ancestor_is_refused_before_the_backend`,
 /// `set_delete_copy_evict_cached_value`,
@@ -276,7 +288,7 @@ pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Val
             project.require_in_scope(&request.vault)?;
             // #10386 Q2: an irreversible loss is operator-only.
             let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
-            refuse_agent_caller(state, caller, peer, gate)?;
+            super::agents_flag::refuse_agent_caller(state, caller, peer, gate)?;
             // #7519: a missing account file skips 1Password; an unreadable one
             // refuses, since a 1Password copy from when it was readable may remain.
             let account = sweep_machine(state)?;
@@ -405,11 +417,15 @@ impl CopySelection {
 /// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
 /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
-/// `server_copy_by_agent_ancestor_is_refused_and_writes_nothing`,
+/// `copy_by_agent_of_undenied_keys_copies_them`,
+/// `copy_by_agent_of_a_denied_source_or_destination_key_writes_nothing`,
 /// `server_copy_of_a_denied_key_into_a_no_controls_backend_is_refused`,
 /// `server_copy_of_a_denied_key_carries_the_deny`.
-/// #10386: after the project resolves, a caller under Claude Code is
-/// refused ([`refuse_agent_caller`]). Each key's deny in the source is
+/// #10459: after the project resolves the caller is judged
+/// ([`judge_agent_caller`]). For a caller under Claude Code a key denied in
+/// the source fails with [`ErrorKind::AgentKeyDenied`] before its value is
+/// read, the destination write goes through [`SecretStore::set_for_agent`],
+/// and a sync-target push stays refused. Each key's deny in the source is
 /// carried before its value: into a backend that cannot hold a deny the key
 /// fails with [`ErrorKind::Unsupported`] and nothing is written.
 /// #9069: a sync-target destination goes to `sync_target::push` after the
@@ -430,9 +446,12 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             }
             let project = ProjectContext::resolve(state, &dir)?;
             gate.project(&project);
-            // #10386: a copy moves keys between stores; operator-only, as `set`.
+            // #10459: a local copy by an agent moves only keys with no deny.
             let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
-            refuse_agent_caller(state, caller, peer, gate)?;
+            let agent = judge_agent_caller(state, caller, peer, gate)?;
+            if agent {
+                gate.default_policy();
+            }
             let vault = project.scopes().project().clone();
             gate.name(&vault, None);
             // #9069: a sync target is never read back, so never a source.
@@ -479,13 +498,29 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                 let outcome = if crate::store::deadline::passed() {
                     Err(ErrorKind::DeadlineExceeded)
                 } else {
+                    // #10459: a denied source key is a denied read; no deny is
+                    // carried for it. A failed lookup fails the key.
+                    let admitted = match agent {
+                        true => match source_store.agents_may_use(&vault, &key) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(SecretsError::AgentUseRefused {
+                                key: key.to_string(),
+                                vault: vault.to_string(),
+                            }),
+                            Err(e) => Err(e),
+                        },
+                        false => Ok(()),
+                    };
                     // #10386: the deny lands before the value, or nothing does.
-                    let carried = store.carry_deny_from(&source_store, &vault, &key);
+                    let carried =
+                        admitted.and_then(|()| store.carry_deny_from(&source_store, &vault, &key));
                     let written = match carried.and_then(|()| source.get(&vault, &key)) {
-                        Ok(Some(value)) => store
-                            .set(&vault, &key, &value)
-                            .map(drop)
-                            .map_err(ErrorKind::from),
+                        Ok(Some(value)) => match agent {
+                            true => store.set_for_agent(&vault, &key, &value),
+                            false => store.set(&vault, &key, &value),
+                        }
+                        .map(drop)
+                        .map_err(ErrorKind::from),
                         Ok(None) => Err(ErrorKind::NotFound),
                         Err(e) => Err(ErrorKind::from(e)),
                     };

@@ -74,9 +74,11 @@ another name. The tm-secrets skill covers the other kinds.
   and do not edit the machine config; cross-project access does not ship.
 - `remote_host_unsupported`: `origin` is not a github.com https, ssh or scp
   URL. Do not change the remote to get past it.
-- `agent_use_refused`: the operator denied the key to agents, or the method
-  is operator-only (`set`, `delete`, `copy`, removing a deny). An agent may use every other in-scope key (#10386). Only a person
-  removes a deny.
+- `agent_key_denied`: the operator denied the key to agents. An agent may
+  use, `set` and locally `copy` every other in-scope key (#10386, #10459).
+  Only a person removes a deny.
+- `agent_use_refused`: the method is operator-only (`delete`, removing a
+  deny, a copy to a sync target).
 
 ## Leaks
 

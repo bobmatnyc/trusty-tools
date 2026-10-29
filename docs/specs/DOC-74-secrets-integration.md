@@ -1573,9 +1573,16 @@ whose own parent chain includes Claude Code may write a deny but not remove
 one (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
 record with its kind, so no deny change exists without a record.
-`secrets.set`, `secrets.delete` and `secrets.copy` (to a backend or a sync
-target) are operator-only: the server refuses a caller with a Claude Code
-ancestor (Architect Q2, Q3). A copy carries the key's deny into the
+`secrets.delete`, removing a deny and `secrets.copy` to a sync target are
+operator-only: the server refuses a caller with a Claude Code ancestor
+(`agent_use_refused`, Architect Q2, Q3). Amendment 2026-10-29 (#10459, Bob:
+"fix the guard, it is too restrictive"; reverses Q2 for `set`): such a
+caller may `secrets.set` (so `tm secrets import`) and locally `secrets.copy`
+a key with no deny in its project or owner scope. The deny is checked under
+the key's index lock, so a deny added mid-call refuses; a denied key is
+`agent_key_denied` (split from `agent_use_refused`, reversing Q6); a failed
+lookup refuses. The agent's `set` confirmation is `[N chars]` only, and its
+allow record carries `default_policy: true`, the caller pid and the project. A copy carries the key's deny into the
 destination before the value; a denied key is refused (`unsupported`) for a
 destination that cannot hold a deny. `delete` removes a deny only after
 every value delete succeeded, and `set` never clears one. Every deny written
@@ -1594,7 +1601,7 @@ injects a key into a process whose parent chain includes Claude Code unless
 that key is denied. The rule covers env injection (tiers 1 and 2) and
 grant contents (tier 3). It is enforced from the day each `exec` path ships.
 For tier 3, `secrets.grant` judges the registrar's own parent chain, from its
-socket peer pid, and refuses a denied key with `agent_use_refused`;
+socket peer pid, and refuses a denied key with `agent_key_denied` (#10459);
 `secrets.resolve` checks the deny again before each read, when either the
 registrar or the resolving caller has an agent ancestor. The backend
 holds the deny as its own item per key (on the Keychain, service
@@ -1914,7 +1921,7 @@ rests on the bridge verdict (§15.6).
 **Result and exit contract.** A failed credential is a normal reply with
 `ok: false` and a status, never a transport error. Transport errors use the
 existing kinds: `invalid_params`, `vault_out_of_scope`, `not_found`,
-`agent_use_refused`, `deadline_exceeded`, `audit_unavailable`, `internal`,
+`agent_key_denied`, `deadline_exceeded`, `audit_unavailable`, `internal`,
 and the existing backend kinds for the value read (`backend_locked`,
 `backend_timeout`, `backend_failed`).
 This design adds no `ErrorKind`. `tm secrets test` and `query` exit `0` when
@@ -1938,7 +1945,7 @@ Each property is a test in the slice that ships it.
 | P2 | No value enters argv or an environment variable, the CLI's or a child's. The adapter spawns no child. |
 | P3 | An echoing upstream — an HTTP stub that reflects the `Authorization` header, a postgres whose error text, `current_user` or row cell holds the password — yields `[REDACTED]` or a dropped field on every channel. |
 | P4 | Postgres refuses writes at each of the five layers on its own (§15.11.3); a guard refusal opens zero connections. |
-| P5 | An agent caller on a denied key gets `agent_use_refused` and zero backend reads. |
+| P5 | An agent caller on a denied key gets `agent_key_denied` (#10459) and zero backend reads. |
 | P6 | A value that fails its type's shape check opens no connection. |
 | P7 | Removing the output scrubber turns the echo tests red (mutation check, run once and recorded in the S13 PR). |
 
