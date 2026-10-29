@@ -6,7 +6,7 @@
 //! kept 511 of 20,000 dropped connections open with four spawner threads.
 //! std's spawn does not use `POSIX_SPAWN_CLOEXEC_DEFAULT`, and no code we own
 //! creates every socket, so the fix has to act on the child.
-//! What: [`seal_inherited`] (and the `_except` / `_tokio` forms) install a
+//! What: `seal_inherited` (and the `_except` / `_tokio` forms) install a
 //! `pre_exec` hook that sets `FD_CLOEXEC` on every descriptor from 3 up to
 //! the process fd limit, so `exec` closes them. Setting the flag rather than
 //! calling `close` keeps std's own close-on-exec error pipe working: closing
