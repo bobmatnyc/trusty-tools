@@ -29,6 +29,7 @@ fn make_project(name: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
@@ -150,6 +151,8 @@ async fn json_round_trip_preserves_all_fields() {
         commit_name: Some("Full Bot".into()),
         commit_email: Some("full-bot@example.com".into()),
         worktree: None,
+        // #10530: a key the record already carries is kept as-is.
+        project_key: Some("owner/full-project".into()),
     };
     store.upsert(full.clone()).await.expect("upsert full");
 
@@ -384,4 +387,82 @@ async fn store_survives_stale_temp_files() {
     let mut verify = ProjectStore::load(dir.path()).await.expect("verify load");
     let all = verify.all().await.expect("all");
     assert_eq!(all.len(), 2, "stale temp files disturbed the registry");
+}
+
+// ── project_key (#10530) ─────────────────────────────────────────────────────
+
+/// Why: the key is minted once at register and then fixed, so a repo rename
+/// (a different `repo_url` on re-register) cannot move the index id.
+/// Test: this test.
+#[tokio::test]
+async fn upsert_assigns_a_key_once_and_keeps_it() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+
+    store.upsert(make_project("Widget")).await.expect("first");
+    let first = store.get("Widget").await.expect("get").project_key;
+    assert_eq!(first.as_deref(), Some("owner/widget"));
+
+    let mut renamed = make_project("Widget");
+    renamed.repo_url = "https://github.com/owner/widget-renamed".into();
+    store.upsert(renamed).await.expect("re-register");
+    assert_eq!(store.get("Widget").await.expect("get").project_key, first);
+
+    let mut edited = store
+        .update_with("Widget", |mut p| {
+            p.project_key = Some("hijack/key".into());
+            p
+        })
+        .await
+        .expect("update_with");
+    assert_eq!(
+        edited.project_key, first,
+        "an edit closure cannot move the key"
+    );
+    edited.project_key = Some("other/key".into());
+    store.upsert(edited).await.expect("upsert with another key");
+    assert_eq!(store.get("Widget").await.expect("get").project_key, first);
+}
+
+/// Why: a project with no origin still gets a stable key.
+/// Test: this test.
+#[tokio::test]
+async fn upsert_mints_a_local_key_without_an_origin() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+    let mut p = make_project("scratch");
+    p.repo_url = "just-a-name".into();
+    store.upsert(p.clone()).await.expect("upsert");
+    let key = store
+        .get("scratch")
+        .await
+        .expect("get")
+        .project_key
+        .expect("key");
+    assert!(key.starts_with("local:"), "{key}");
+    store.upsert(p).await.expect("re-upsert");
+    assert_eq!(
+        store.get("scratch").await.expect("get").project_key,
+        Some(key)
+    );
+}
+
+/// Why: two registry projects must not share one index.
+/// Test: this test.
+#[tokio::test]
+async fn upsert_refuses_a_second_project_with_the_same_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = ProjectStore::load(dir.path()).await.expect("load");
+    store.upsert(make_project("one")).await.expect("one");
+    let mut dup = make_project("two");
+    dup.repo_url = "https://github.com/owner/one".into();
+    let err = store.upsert(dup).await.expect_err("duplicate key");
+    assert!(
+        matches!(err, ProjectStoreError::DuplicateProjectKey { ref existing, .. } if existing == "one"),
+        "{err:?}"
+    );
+    assert!(matches!(
+        store.get("two").await,
+        Err(ProjectStoreError::NotFound(_))
+    ));
 }

@@ -79,6 +79,13 @@ pub enum ProjectStoreError {
     /// remedy (stale sidecar, permissions) is distinguishable from a data fault.
     #[error("project store lock error: {0}")]
     Lock(String),
+
+    #[error("project key {key} already belongs to project {existing}; refusing to register {name}")]
+    DuplicateProjectKey {
+        key: String,
+        existing: String,
+        name: String,
+    },
 }
 
 /// Map the shared locked-RMW failure modes onto the store's own error type.
@@ -292,13 +299,43 @@ impl ProjectStore {
     /// Insert or update a project record, keyed by `project.name`.
     ///
     /// Why: registration is idempotent — re-registering a project with the same
-    /// name updates its fields rather than creating a duplicate.
+    /// name updates its fields rather than creating a duplicate. #10530: it is
+    /// also the one place a `project_key` is minted, so the key is stored once
+    /// and the trusty-search index id derived from it never moves.
     /// What: inserts or replaces the record keyed by `name` inside a single
-    /// [`Self::mutate`] critical section, so a concurrent writer in another
-    /// process can neither be lost nor lose this one.
-    /// Test: `store_upsert_idempotent`.
-    pub async fn upsert(&mut self, project: Project) -> Result<(), ProjectStoreError> {
+    /// [`Self::mutate`] critical section. The stored record's key always wins
+    /// over the incoming one; a record with none gets the incoming key or a
+    /// freshly minted one. Another record already holding the key refuses the
+    /// write with [`ProjectStoreError::DuplicateProjectKey`].
+    /// Test: `store_upsert_idempotent`, `upsert_assigns_a_key_once_and_keeps_it`,
+    /// `upsert_refuses_a_second_project_with_the_same_key`.
+    pub async fn upsert(&mut self, mut project: Project) -> Result<(), ProjectStoreError> {
+        // Minted before the lock: an absolute-path `repo_url` shells out to git.
+        let url = project.repo_url.clone();
+        let minted =
+            tokio::task::spawn_blocking(move || super::project_key::assign_project_key(&url))
+                .await
+                .map_err(|e| {
+                    ProjectStoreError::Io(std::io::Error::other(format!(
+                        "project key task failed: {e}"
+                    )))
+                })?;
         self.mutate(move |projects| {
+            let stored = projects
+                .get(&project.name)
+                .and_then(|p| p.project_key.clone());
+            let key = stored.or(project.project_key.take()).unwrap_or(minted);
+            if let Some(other) = projects
+                .values()
+                .find(|p| p.name != project.name && p.project_key.as_deref() == Some(key.as_str()))
+            {
+                return Err(ProjectStoreError::DuplicateProjectKey {
+                    key,
+                    existing: other.name.clone(),
+                    name: project.name.clone(),
+                });
+            }
+            project.project_key = Some(key);
             projects.insert(project.name.clone(), project);
             Ok(())
         })
@@ -327,7 +364,10 @@ impl ProjectStore {
                 .get(&name)
                 .cloned()
                 .ok_or(ProjectStoreError::NotFound(name))?;
-            let updated = f(current);
+            // #10530: the key is stored once; an edit closure cannot move it.
+            let key = current.project_key.clone();
+            let mut updated = f(current);
+            updated.project_key = key;
             projects.insert(updated.name.clone(), updated.clone());
             Ok(updated)
         })
@@ -359,6 +399,20 @@ impl ProjectStore {
         self.reload_if_changed().await?;
         Ok(self.data.projects.values().cloned().collect())
     }
+}
+
+/// Read the registry's projects without a lock or a runtime (#10530).
+///
+/// Why: session launch and `tm doctor` derive an index id from a sync context
+/// and need the owning project's stored key. Reads are safe unlocked because
+/// every publish is an atomic rename (see the module `Concurrency` note).
+/// What: parses `<data_dir>/projects.json`; `None` when absent or unparseable,
+/// so a caller falls back to the legacy id rather than failing.
+/// Test: `index_id_matches_between_registration_and_publication`.
+pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
+    let bytes = std::fs::read(data_dir.join("projects.json")).ok()?;
+    let data: StoredData = serde_json::from_slice(&bytes).ok()?;
+    Some(data.projects.into_values().collect())
 }
 
 #[cfg(test)]

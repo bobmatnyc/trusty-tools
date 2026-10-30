@@ -111,6 +111,7 @@ async fn registry_register_idempotent() {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     };
     registry.register(p.clone()).await.expect("register once");
     registry
@@ -140,6 +141,7 @@ async fn registry_get() {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     };
     registry.register(p.clone()).await.expect("register");
 
@@ -167,6 +169,7 @@ fn make_project(name: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 
@@ -318,6 +321,7 @@ async fn registry_list() {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         };
         registry.register(p).await.expect("register");
     }
@@ -511,6 +515,7 @@ async fn registry_register_from_session_does_not_overwrite_existing() {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     };
     registry
         .register(manual.clone())
@@ -554,6 +559,7 @@ async fn registry_auto_register_skips_already_registered() {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     };
     registry.register(existing).await.expect("pre-register");
 

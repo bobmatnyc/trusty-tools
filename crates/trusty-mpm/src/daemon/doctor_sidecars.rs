@@ -464,8 +464,8 @@ pub(super) fn expected_search_index_id(project_dir: Option<&Path>) -> String {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    let root = trusty_common::resolve_project_root(&start);
-    trusty_common::derive_index_id(&root)
+    // #10530: registry-derived when the project is registered.
+    crate::project::index_id_for_registered_root(&start)
 }
 
 /// True when `body` mentions an index named `name`.

@@ -1,0 +1,2 @@
+Changed
+- The project registry record stores a `project_key` (`owner/repo` or `local:<uuid>`) minted once at register and never recomputed; a second project with the same key is refused. Session launch, the base-facet index, the active-project set and `tm doctor` derive the trusty-search index id from it, so the id tm publishes equals the id registration creates and survives `mv`, a repo rename and `git remote remove` (#10530)

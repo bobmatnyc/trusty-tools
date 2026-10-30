@@ -2418,6 +2418,7 @@ async fn fleet_route_marks_dead_session_unresumable() {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         })
         .await
         .expect("register project");

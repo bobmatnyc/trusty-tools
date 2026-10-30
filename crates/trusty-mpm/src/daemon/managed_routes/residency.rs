@@ -106,9 +106,10 @@ pub(crate) async fn active_projects_core(state: &Arc<DaemonState>) -> RouteOutco
         };
     }
 
+    let registry_dir = crate::project::registry_data_dir_under(state.framework_root());
     let mut projects = Vec::with_capacity(groups.len());
     for accum in groups.into_values() {
-        let (palace_id, index_ids) = derive_for_group(&mgr, &accum).await;
+        let (palace_id, index_ids) = derive_for_group(&mgr, &accum, &registry_dir).await;
         // `ActiveProject` is `#[non_exhaustive]`: struct-literal syntax (even
         // with `..Default::default()`) is refused outside its defining crate,
         // so build the default and assign fields.
@@ -142,6 +143,7 @@ pub(crate) async fn active_projects_core(state: &Arc<DaemonState>) -> RouteOutco
 async fn derive_for_group(
     mgr: &crate::session_manager::SessionManager,
     accum: &ProjectAccum,
+    registry_dir: &std::path::Path,
 ) -> (Option<String>, Vec<String>) {
     let representative = accum.session_ids[0];
     if let Some(cached) = mgr
@@ -154,15 +156,20 @@ async fn derive_for_group(
     let palace_id =
         crate::core::session_launch::resolve_palace_slug(&accum.root, accum.repo_url.as_deref());
 
-    let mut index_ids = vec![trusty_common::project_index_id::derive_project_index_id(
+    // #10530: the same function registration uses, so the published id is the
+    // registered id (it used to be `derive_project_index_id`, which matched no
+    // registered index).
+    let mut index_ids = vec![crate::project::index_id_for_root_in(
+        registry_dir,
         &accum.root,
     )];
     if crate::core::worktree_index::is_git_worktree(&accum.root)
         && let Some(base) = crate::core::base_facet_index::base_checkout_of(&accum.root)
     {
-        index_ids.push(trusty_common::project_index_id::derive_project_index_id(
-            &base,
-        ));
+        let base_id = crate::project::index_id_for_root_in(registry_dir, &base);
+        if !index_ids.contains(&base_id) {
+            index_ids.push(base_id);
+        }
     }
 
     for &id in &accum.session_ids {
