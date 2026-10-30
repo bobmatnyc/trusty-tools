@@ -138,7 +138,8 @@ impl std::error::Error for DirRefusal {}
 /// (`<home>/trusty-mpm-projects`, the configured root, the
 /// `TRUSTY_MPM_WORKSPACE_ROOT` value) or an ancestor of one, or a directory
 /// whose subtree holds a repository or cannot be scanned — except one private
-/// repository at `<dir>/local` (see [`check_private_repo`]); (7) a path with
+/// repository at `<dir>/local` (see [`check_private_repo`]) and the
+/// directory's own linked worktrees (see [`own_worktrees`]); (7) a path with
 /// a `.git` entry in any strict ancestor; (8) a repository whose `git remote`
 /// lists a remote or fails. A trusty-mpm config that exists but will not
 /// load is a refusal; a missing one is the default. A fresh directory, and a
@@ -310,27 +311,125 @@ fn refuse_workspace_parent(target: &Path, home: &Path, device: DeviceOf) -> Resu
     // #10355: fleet budget, not the shared 256; exhaustion still refuses below.
     // #10457: exhaustive rule; the shallow one missed deep and symlinked repos.
     let local = private_repo(target)?;
-    match scan_for_child_repo_exhaustive_with(target, local.as_deref(), FLEET_SCAN_BUDGET, device) {
-        ChildRepoScan::Clear => {}
-        ChildRepoScan::Found(repo) => {
-            return Err(parent(format!(
-                "it contains the repository {}",
-                repo.display()
-            )));
-        }
-        ChildRepoScan::Incomplete(why) => {
-            return Err(DirRefusal::Unresolvable {
-                path: target.to_path_buf(),
-                reason: format!("the scan for repositories inside it did not finish: {why}"),
-            });
-        }
-    }
+    // #10262: the target's own linked worktrees are left out like `local/`,
+    // and each is scanned on its own below.
+    let worktrees = own_worktrees(target);
+    let except: Vec<&Path> = local
+        .iter()
+        .chain(&worktrees)
+        .map(PathBuf::as_path)
+        .collect();
+    refuse_child_repo(target, target, &except, device, String::new())?;
     // #10457: after the outer scan, which compares `local`'s device with the
     // target's, so no `git` command runs inside a foreign mount.
-    match local {
-        Some(local) => check_private_repo(target, &local, device),
-        None => Ok(()),
+    if let Some(local) = &local {
+        check_private_repo(target, local, device)?;
     }
+    for worktree in &worktrees {
+        let within = format!(", nested in its linked worktree {}", worktree.display());
+        refuse_child_repo(target, worktree, &except, device, within)?;
+    }
+    Ok(())
+}
+
+/// Refuse `target` when the exhaustive scan of `root`, leaving out `except`,
+/// finds a repository or does not finish.
+///
+/// What: a found repository is [`DirRefusal::WorkspaceParent`] whose reason
+/// ends in `within`, plus the `git worktree` fix when the repository is a
+/// linked worktree; an unfinished scan is [`DirRefusal::Unresolvable`] of `root`.
+fn refuse_child_repo(
+    target: &Path,
+    root: &Path,
+    except: &[&Path],
+    device: DeviceOf,
+    within: String,
+) -> Result<(), DirRefusal> {
+    match scan_for_child_repo_exhaustive_with(root, except, FLEET_SCAN_BUDGET, device) {
+        ChildRepoScan::Clear => Ok(()),
+        ChildRepoScan::Found(repo) => Err(DirRefusal::WorkspaceParent {
+            path: target.to_path_buf(),
+            reason: format!(
+                "it contains the repository {}{within}{}",
+                repo.display(),
+                worktree_fix(&repo)
+            ),
+        }),
+        ChildRepoScan::Incomplete(why) => Err(DirRefusal::Unresolvable {
+            path: root.to_path_buf(),
+            reason: format!("the scan for repositories inside it did not finish: {why}"),
+        }),
+    }
+}
+
+/// The fix for a refused repository that is a linked worktree (its `.git` is
+/// a file); empty for any other repository.
+// #10262: the removal keeps the branch; `--force` would drop uncommitted work.
+fn worktree_fix(repo: &Path) -> String {
+    match std::fs::symlink_metadata(repo.join(".git")) {
+        Ok(meta) if meta.is_file() => format!(
+            "; it is a linked git worktree: find it with `git worktree list` in its repository \
+             and remove it with `git worktree remove {}` (no --force; its branch is kept)",
+            repo.display()
+        ),
+        _ => String::new(),
+    }
+}
+
+/// Linked worktrees of `target`'s own repository that sit inside `target`.
+///
+/// Why: #10262 — Claude Code agent worktrees of the Architect's own repository
+/// (`.claude/worktrees/agent-*`) are that project, not a child one, yet the
+/// scan refused them, so a stopped Architect could not relaunch. The grant
+/// guard is about other projects, so only a worktree that is provably the
+/// target's own is left out of the scan.
+/// What: for each record `<target>/.git/worktrees/<name>` (a real `.git`
+/// directory only), reads its `gitdir` back pointer. The worktree counts when
+/// it resolves to a directory strictly inside `target` other than `local/`,
+/// and its `.git` is a regular file whose `gitdir:` resolves to that same
+/// record. Anything unreadable or unmatched is left out, so the scan still
+/// sees it and refuses: the check fails closed.
+/// Test: `a_linked_worktree_of_the_dirs_own_repository_passes`,
+/// `a_worktree_that_is_not_the_dirs_own_still_refuses`.
+fn own_worktrees(target: &Path) -> Vec<PathBuf> {
+    let git_dir = target.join(".git");
+    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
+        return Vec::new();
+    }
+    let records = git_dir.join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&records) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| own_worktree(target, &records, &entry.path()))
+        .collect()
+}
+
+/// The worktree `record` describes, when it passes [`own_worktrees`]' test.
+fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf> {
+    let record = std::fs::canonicalize(record).ok()?;
+    // A `.git/worktrees` symlinked elsewhere holds no record of this repository.
+    if record.parent() != Some(records) {
+        return None;
+    }
+    let back = std::fs::read_to_string(record.join("gitdir")).ok()?;
+    let back = record.join(back.trim());
+    if back.file_name()? != ".git" {
+        return None;
+    }
+    let worktree = std::fs::canonicalize(back.parent()?).ok()?;
+    let inside = worktree.strip_prefix(target).ok()?;
+    if inside.as_os_str().is_empty() || inside == Path::new(PRIVATE_REPO_DIR) {
+        return None;
+    }
+    let git = worktree.join(".git");
+    if !std::fs::symlink_metadata(&git).ok()?.is_file() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&git).ok()?;
+    let pointer = pointer.trim().strip_prefix("gitdir:")?.trim();
+    (std::fs::canonicalize(worktree.join(pointer)).ok()? == record).then_some(worktree)
 }
 
 /// `<target>/local` when it is a real directory whose `.git` is a real
@@ -374,7 +473,7 @@ fn check_private_repo(target: &Path, local: &Path, device: DeviceOf) -> Result<(
         path: target.to_path_buf(),
         reason,
     };
-    match scan_for_child_repo_exhaustive_with(local, None, FLEET_SCAN_BUDGET, device) {
+    match scan_for_child_repo_exhaustive_with(local, &[], FLEET_SCAN_BUDGET, device) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(repo) => {
             return Err(parent(format!(

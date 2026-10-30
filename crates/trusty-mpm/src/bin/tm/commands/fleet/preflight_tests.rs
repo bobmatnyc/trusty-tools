@@ -730,3 +730,93 @@ fn a_mount_point_at_local_is_refused() {
     );
     assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
 }
+
+/// A repository at `path` with one empty commit, so `git worktree add` works.
+fn committed_repo(s: &Scratch, path: &Path) -> PathBuf {
+    let repo = s.repo(path, false);
+    let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+    let commit = ["commit", "--allow-empty", "--quiet", "-m", "seed"];
+    let args: Vec<&str> = identity
+        .iter()
+        .chain(&["-c", "commit.gpgsign=false"])
+        .chain(&commit)
+        .copied()
+        .collect();
+    git(&repo, &args);
+    repo
+}
+
+/// A detached linked worktree of `repo` at `at`, so no branch is made.
+fn add_worktree(repo: &Path, at: &Path) -> PathBuf {
+    let at_str = at.to_str().expect("utf-8 path");
+    let args = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "--detach",
+        "--quiet",
+    ];
+    let mut args = args.to_vec();
+    args.push(at_str);
+    git(repo, &args);
+    at.to_path_buf()
+}
+
+/// #10262, FAILS BEFORE THE FIX: the scan took a linked worktree of the
+/// directory's own repository for a child project, so a stopped Architect
+/// with leftover agent worktrees could not relaunch.
+#[test]
+fn a_linked_worktree_of_the_dirs_own_repository_passes() {
+    let s = Scratch::new();
+    let dir = committed_repo(&s, &s.outer().join("architect"));
+    s.repo(&dir.join("local"), false);
+    let trees = dir.join(".claude/worktrees");
+    add_worktree(&dir, &trees.join("agent-a"));
+    // One nested in another is still a worktree of the same repository.
+    add_worktree(&dir, &trees.join("agent-a/.claude/worktrees/agent-b"));
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+    init(&dir, &s.home(), false, NO_TMUX).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// #10262: only the directory's own worktrees are excepted. A worktree of
+/// another repository, a forged `.git` file that points into the directory's
+/// own worktree records, and a repository inside an own worktree all refuse,
+/// and a worktree refusal names the `git worktree` fix.
+#[test]
+fn a_worktree_that_is_not_the_dirs_own_still_refuses() {
+    let s = Scratch::new();
+    let other = committed_repo(&s, &s.outer().join("other"));
+    let foreign = s.repo(&s.outer().join("foreign"), false);
+    let wt = add_worktree(&other, &foreign.join(".claude/worktrees/x"));
+    let refusal = s.refused(&foreign);
+    assert!(
+        refusal.to_string().contains("`git worktree list`"),
+        "{refusal}"
+    );
+    assert_workspace_parent(
+        refusal,
+        &foreign,
+        &format!("`git worktree remove {}`", wt.display()),
+    );
+
+    let forged = committed_repo(&s, &s.outer().join("forged"));
+    let real = add_worktree(&forged, &forged.join(".claude/worktrees/real"));
+    let fake = forged.join(".claude/worktrees/fake");
+    std::fs::create_dir_all(&fake).unwrap();
+    std::fs::copy(real.join(".git"), fake.join(".git")).unwrap();
+    assert_workspace_parent(
+        s.refused(&forged),
+        &forged,
+        &format!("contains the repository {}", fake.display()),
+    );
+
+    let nested = committed_repo(&s, &s.outer().join("nested"));
+    let own = add_worktree(&nested, &nested.join(".claude/worktrees/own"));
+    let inner = s.repo(&own.join("project"), false);
+    assert_workspace_parent(
+        s.refused(&nested),
+        &nested,
+        &format!("contains the repository {}", inner.display()),
+    );
+}
