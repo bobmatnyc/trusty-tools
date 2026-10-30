@@ -164,6 +164,59 @@ async fn umask_000_child_scenario() {
     );
 }
 
+/// Prefixes of the random-named temp directories the code under test makes.
+const RANDOM_NAME_PREFIXES: [&str; 2] = ["trusty-kuzu-import-", "trusty-kuzu-dry-run-"];
+
+/// `seen` with the uncontrolled random characters of temp-dir names removed.
+///
+/// Why (#10549): a 4-char window of a token matched the random suffix of a
+/// temp-dir name (`Pe2R`) in a path the run printed. That is chance, not a
+/// leak, and a strict window scan cannot tell them apart.
+/// What: replaces each `roots` path with `<root>`, then drops the alphanumeric
+/// run after each [`RANDOM_NAME_PREFIXES`] entry. Everything else the run
+/// produced stays in the scan, so a real leak is still caught.
+/// Test: `scrub_removes_random_names_but_keeps_real_content`.
+fn scrub_random_names(seen: &str, roots: &[&Path]) -> String {
+    let mut out = seen.to_string();
+    for r in roots {
+        let canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.to_path_buf());
+        for form in [r.to_string_lossy(), canon.to_string_lossy()] {
+            out = out.replace(form.as_ref(), "<root>");
+        }
+    }
+    for prefix in RANDOM_NAME_PREFIXES {
+        let mut kept = String::new();
+        let mut rest = out.as_str();
+        while let Some(at) = rest.find(prefix) {
+            let end = at + prefix.len();
+            kept.push_str(&rest[..end]);
+            rest = rest[end..].trim_start_matches(|c: char| c.is_ascii_alphanumeric());
+        }
+        kept.push_str(rest);
+        out = kept;
+    }
+    out
+}
+
+/// Why (#10549): the scrub must drop random names yet keep any token text.
+/// Test: itself.
+#[test]
+fn scrub_removes_random_names_but_keeps_real_content() {
+    let tmp = Path::new("/tmp/.tmpPe2Rxy");
+    let seen = format!(
+        "run directory: {}/home/x\n/var/tmp/trusty-kuzu-import-Pe2Rxy/out.json\n\
+         /var/tmp/trusty-kuzu-dry-run-Xq7WAb/db",
+        tmp.display()
+    );
+    let scrubbed = scrub_random_names(&seen, &[tmp]);
+    for tok in [mixed_token(), provider_token()] {
+        assert!(leaked_windows(&tok, &seen).len() >= 1, "raw scan trips");
+        assert!(leaked_windows(&tok, &scrubbed).is_empty(), "{scrubbed}");
+    }
+    let real = scrub_random_names(&format!("{seen} leak {}", mixed_token()), &[tmp]);
+    assert!(!leaked_windows(&mixed_token(), &real).is_empty());
+}
+
 /// Why (#8624 rules 1, 3, 5, 6, 9): under umask 000 the run directory comes
 /// out 0700 and `masked.jsonl` 0600 at creation; only the exportable row is
 /// written; and no 4-char window of any token reaches a byte under the run
@@ -171,7 +224,13 @@ async fn umask_000_child_scenario() {
 /// Test: itself, through `umask_000_child_scenario`.
 #[test]
 fn umask_000_end_to_end_export_is_owner_only_and_leaks_nothing() {
-    let tmp = tempfile::tempdir().expect("tmp");
+    // #10549: a root named with token windows makes the unscrubbed scan fail
+    // every run, so the scrub is exercised, not left to chance.
+    let (m, p) = (mixed_token(), provider_token());
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("w-{}-{}-", &m[..4], &p[4..8]))
+        .tempdir()
+        .expect("tmp");
     let exe = std::env::current_exe().expect("test binary");
     let out = std::process::Command::new(exe)
         .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
@@ -200,6 +259,8 @@ fn umask_000_end_to_end_export_is_owner_only_and_leaks_nothing() {
             seen.push_str(&String::from_utf8_lossy(&std::fs::read(&p).expect("read")));
         }
     }
+    // #10549: temp-dir names are random; scrub them before the window scan.
+    let seen = scrub_random_names(&seen, &[tmp.path()]);
     for tok in [mixed_token(), provider_token(), id_token()] {
         assert_eq!(leaked_windows(&tok, &seen), Vec::<String>::new());
     }
