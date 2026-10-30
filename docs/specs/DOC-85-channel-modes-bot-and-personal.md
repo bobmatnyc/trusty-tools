@@ -135,6 +135,6 @@ Not yet ruled (OPEN, no decision):
 - Per-channel format: a Slack context block or a plain trailing line; the other channels.
 - Edits and threads: whether an edited message, or each reply in a thread, carries the footer.
 - Opt-out: whether any route or user may turn the footer off.
-- For Bob: section 6 notes that where a service shows only the owner as author, only the audit line tells proxy from owner. Whether that needs a visible marker on `personal` posts is not decided; Dda stands.
+- Decided (Bob D5c, 2026-10-30): section 6 notes that where a service shows only the owner as author, only the audit line tells proxy from owner. `personal` mode shows no visible marker; the audit line only, as specced (Dda).
 
 Tests: one per channel adapter, asserting a bot-mode post ends with `Sent using @Trusty` and a personal-mode post does not. Refs #10499.
