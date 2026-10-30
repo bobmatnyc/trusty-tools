@@ -71,7 +71,9 @@
 #                        it existed at the cut (the parent, outside <ref>, of
 #                        one of the branch's own non-merge commits); it is
 #                        absent from <ref> or differs from <ref>'s copy (the
-#                        branch added or edited it); or one of its `- `
+#                        branch added or edited it); one of the branch's own
+#                        non-merge commits touched it (a cherry-pick or
+#                        backport of a <ref> commit); or one of its `- `
 #                        bullets already sits in the `## [<version>]` section
 #                        (consumed, not deleted). On <ref>'s own tip the
 #                        branch has no own commits, so nothing is excluded.
@@ -246,6 +248,10 @@ if [ -n "$BASE_ARG" ]; then
       done
       base_blob="$(git rev-parse -q --verify "${BASE_SHA}:${rel}" || true)"
       [ "$base_blob" = "$(git hash-object "$frag")" ] || keep=1
+      # A fragment one of the branch's own non-merge commits touched (a
+      # cherry-pick or backport) is the release's to consume. Commits merged in
+      # from the base are reachable from BASE_SHA, so they never count here.
+      [ -n "$(git rev-list --no-merges "${BASE_SHA}..HEAD" -- "$rel")" ] && keep=1
       while IFS= read -r bullet; do
         [ -z "$bullet" ] && continue
         if printf '%s\n' "$SECTION" | grep -qxF -- "$bullet"; then keep=1; fi

@@ -270,6 +270,18 @@ printf 'Added\n\n- post-cut feature, reworded on the release branch\n' \
 commit_pr "$repo"
 run_case "post-cut fragment edited on the release branch" 1 "changelog.d/200-post.md" "$repo" main
 
+# 10b. A main commit the release branch CHERRY-PICKS (a non-merge commit of its
+#     own) brings its fragment in; the release ships that fix, so the fragment
+#     is the release's to fold in, even though main holds the same bytes.
+repo="$(mkrelease rel-cherry-pick)"
+gitc "$repo" checkout -q main
+printf 'Fixed\n\n- backported fix\n' > "${repo}/crates/rel-crate/changelog.d/400-pick.md"
+gitc "$repo" add -A
+gitc "$repo" commit -qm "fix 400"
+gitc "$repo" checkout -q release
+gitc "$repo" cherry-pick main >/dev/null
+run_case "fragment cherry-picked from main, not folded in" 1 "STRANDED-FRAGMENTS" "$repo" main
+
 # 11. Empty changelog.d/ (removed entirely) and README-only, after a merge.
 repo="$(mkrelease rel-no-dir)"
 gitc "$repo" rm -q -r crates/rel-crate/changelog.d
