@@ -7,7 +7,8 @@
 //! What: [`snapshot`] copies the lane's scores before the entity-exact-match
 //! injection overwrites one with a synthetic value; [`log_top`] writes one
 //! bounded debug line per query. Nothing here feeds back into ranking.
-//! Test: `core::indexer::tests::bm25_raw_10498`.
+//! Test: `a_bm25_hit_carries_the_engines_raw_score`,
+//! `the_debug_log_names_raw_bm25_scores_without_the_query_text`.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -27,7 +28,11 @@ pub(super) fn snapshot(bm25_results: &[(String, f32)]) -> HashMap<String, f32> {
         .collect()
 }
 
-/// A stable id for the query that does not reveal its text.
+/// A pseudonym for correlating one query's log lines.
+///
+/// It is an unkeyed, deterministic 64-bit hash, stable across restarts. It is
+/// not a privacy control: anyone who can read the debug log can reverse it for
+/// a short or dictionary query by hashing candidates.
 fn query_id(text: &str) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     text.hash(&mut h);
@@ -39,7 +44,9 @@ fn query_id(text: &str) -> u64 {
 ///
 /// Why: the A/B needs raw scores beside both ranks, per query, without a
 /// request-side change.
-/// What: no-op unless debug is enabled; bounded to [`LOG_TOP`] hits.
+/// What: no-op unless debug is enabled; bounded to [`LOG_TOP`] hits. The fused
+/// rank is the position before MMR, KG expansion and the empty-result
+/// fallback; a row past `want` shows `-`.
 /// Test: `the_debug_log_names_raw_bm25_scores_without_the_query_text`.
 pub(super) fn log_top(
     index_id: &str,
