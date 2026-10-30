@@ -148,7 +148,8 @@ impl ActionPublisher {
             );
         }
         if replay.held > 0 || replay.deferred > 0 {
-            tracing::info!(
+            // #10467: warn, since deferred files wait a whole restart.
+            tracing::warn!(
                 held = replay.held,
                 deferred = replay.deferred,
                 "action events: spool files left on disk (held by a live process, or past the buffer's room)"

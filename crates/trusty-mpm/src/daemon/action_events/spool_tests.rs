@@ -722,3 +722,60 @@ async fn hooks_that_evict_replayed_events_keep_their_file_10467() {
         "a file whose events were evicted was retired at stop: {settled:?}"
     );
 }
+
+/// The one `.ndjson` file in `spool_dir`.
+fn only_file(spool_dir: &Path) -> PathBuf {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(spool_dir)
+        .expect("dir")
+        .map(|e| e.expect("entry").path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    files.remove(0)
+}
+
+/// #10467: a spool file at the buffer's capacity, one event, then a
+/// delivered flush: that file retires, and a later start takes the file
+/// that was deferred behind it.
+///
+/// What: the bus is up from the start. The first flush runs right after the
+/// replay, so the event that follows evicts nothing.
+#[tokio::test]
+async fn a_capacity_spool_file_retires_after_a_hook_and_the_deferred_file_follows_10467() {
+    use trusty_common::control_bus::DEFAULT_PUSH_BUFFER_CAPACITY;
+    let _fds = SPOOL_FDS.lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spool_dir = dir.path().join("spool");
+    let sock = dir.path().join("bus.sock");
+    spool::persist(&spool_dir, &fresh_events(DEFAULT_PUSH_BUFFER_CAPACITY)).expect("full file");
+    let full = only_file(&spool_dir);
+    let later = fresh_events(3);
+    spool::persist(&spool_dir, &later).expect("deferred file");
+
+    let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+    let bus = tokio::spawn(async move {
+        loop {
+            let (mut conn, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).await.expect("read");
+        }
+    });
+    let first = started(&sock, &spool_dir);
+    let begun = Instant::now();
+    while full.exists() && begun.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let publisher = first.action_events().publisher().expect("attached");
+    publisher.publish_event(fresh_events(1).remove(0));
+    let settled = first.action_events().shutdown().await;
+    assert!(!full.exists(), "the full file was kept: {settled:?}");
+
+    let second = started(&sock, &spool_dir);
+    let publisher = second.action_events().publisher().expect("attached");
+    assert_eq!(
+        publisher.buffered_len(),
+        later.len(),
+        "the deferred file was not taken"
+    );
+    second.action_events().shutdown().await;
+    bus.abort();
+}

@@ -215,7 +215,7 @@ impl ActionPublisher {
 
     /// A publisher whose buffer holds `events` frames and `bytes` bytes.
     ///
-    /// #10467: the replay budget follows the same two limits.
+    /// #10467: the replay budget is half of each limit.
     pub fn with_buffer(socket: impl Into<PathBuf>, events: usize, bytes: u64) -> Self {
         Self {
             client: PushClient::with_limits(socket, events, bytes),
@@ -227,9 +227,11 @@ impl ActionPublisher {
             spool: None,
             settle: settle::SettleState::default(),
             replayed: replayed::Replayed::default(),
+            // #10467: half the buffer, so hooks before the first flush
+            // fit beside the replay instead of evicting it.
             budget: spool::Budget {
-                events: events.max(1),
-                bytes,
+                events: (events / 2).max(1),
+                bytes: (bytes / 2).max(1),
             },
         }
     }
@@ -398,13 +400,18 @@ impl ActionPublisher {
         self.client.dropped()
     }
 
-    /// Drain once per interval until aborted. A slow flush delays the next
-    /// tick rather than stacking; no connection is held between flushes.
+    /// Drain at once, then once per interval until aborted. A slow flush
+    /// delays the next tick rather than stacking; no connection is held
+    /// between flushes.
+    ///
+    /// Test: `a_capacity_spool_file_retires_after_a_hook_and_the_deferred_file_follows_10467`.
     pub fn spawn_flush_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let every = me.flush_interval;
-            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // #10467: the first tick is immediate, so a replay goes out
+            // before hooks can evict it from the buffer.
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now(), every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut health = FlushHealth::default();
             loop {
