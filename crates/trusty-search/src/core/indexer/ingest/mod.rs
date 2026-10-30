@@ -27,6 +27,8 @@ pub(crate) mod refusals;
 pub(crate) mod supersede;
 // #9284: count and warn on chunks cut at the embedder's input window.
 pub(crate) mod truncation;
+// #10481: split new chunks at the embedder window; header on the embedded text.
+pub(crate) mod window_split;
 
 use anyhow::{Context, Result};
 
@@ -472,6 +474,10 @@ impl CodeIndexer {
         populate_virtual_terms(&mut chunks, &entities);
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        // #10481: replace over-window chunks with windows before they embed. Ahead
+        // of the superseded-id snapshot, so the ids kept are the windows' own.
+        let (windowed, headers) = self.split_for_embed(chunks).await?;
+        let chunks = windowed;
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
         // left them searchable beside the new content.
@@ -487,7 +493,10 @@ impl CodeIndexer {
         } else if self.skip_vector {
             Some(vec![None; chunks.len()])
         } else {
-            Some(self.embed_chunks_in_batches(&chunks, None, None).await?)
+            Some(
+                self.embed_chunks_in_batches(&chunks, None, None, headers.as_deref())
+                    .await?,
+            )
         };
         // #8959: durable stale mark before anything below mutates the corpus;
         // the guard sets the in-memory mark when the write ends.
@@ -741,8 +750,18 @@ impl CodeIndexer {
 
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
+            // #10481: replace over-window chunks with windows before they embed.
+            let (windowed, headers) = self
+                .split_for_embed(std::mem::take(&mut all_chunks))
+                .await?;
+            all_chunks = windowed;
             let embeddings = self
-                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None)
+                .embed_chunks_in_batches(
+                    &all_chunks,
+                    progress_tx.as_ref(),
+                    None,
+                    headers.as_deref(),
+                )
                 .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();
