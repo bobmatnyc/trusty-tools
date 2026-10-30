@@ -1,0 +1,10 @@
+crate   trusty-mpm
+version 1.11.1
+reason  Owner ruling df-D54 (a), under the 2026-09-26 versioning ruling (a public-API break never forces a major version): #10538 added parent_session_id to three session structs and a parameter to session_new; #10543 added a parameter to fleet_by_project_route. #10332 and #10540 add no break. Refs #10507.
+accept  constructible_struct_adds_field        field SessionSummary.parent_session_id
+accept  constructible_struct_adds_field        field ManagedSessionSummary.parent_session_id
+accept  constructible_struct_adds_field        field SessionRecord.parent_session_id
+accept  function_parameter_count_changed       trusty_mpm::daemon::mcp_session::session_new
+accept  function_parameter_count_changed       trusty_mpm::daemon::managed_routes::fleet::fleet_by_project_route
+accept  function_parameter_count_changed       trusty_mpm::daemon::managed_routes::fleet_by_project_route
+accept  trait_method_parameter_count_changed   OrchestratorBackend::session_new
