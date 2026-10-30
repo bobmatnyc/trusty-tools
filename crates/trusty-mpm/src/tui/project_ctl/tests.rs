@@ -372,26 +372,23 @@ async fn project_ctl_decommission_prunes_stale_worktree_bookkeeping() {
 }
 
 // ---- #10476: the poll runs off the UI loop ----
+//
+// These tests run on a paused tokio clock with turn-scripted events, so no
+// assertion depends on real time (the first version bounded wall-clock and
+// missed on a loaded CI runner). On a current-thread runtime the spawned poll
+// gets no turn until `drive` yields, and an inline `.await` of the poll would
+// auto-advance the paused clock past its delay: so "the key was drawn before
+// the poll completed" is an ordering fact, not a race.
 
-/// Replays scripted events, each at a fixed offset from `start`.
+/// Replays one scripted entry per `next_event` call, then sends `q`.
 struct ScriptedEvents {
-    start: std::time::Instant,
-    script: std::collections::VecDeque<(std::time::Duration, crossterm::event::Event)>,
+    script: std::collections::VecDeque<Option<KeyCode>>,
 }
 
 impl ScriptedEvents {
-    fn new(script: Vec<(u64, KeyCode)>) -> Self {
+    fn new(script: Vec<Option<KeyCode>>) -> Self {
         Self {
-            start: std::time::Instant::now(),
-            script: script
-                .into_iter()
-                .map(|(ms, code)| {
-                    (
-                        std::time::Duration::from_millis(ms),
-                        crossterm::event::Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
-                    )
-                })
-                .collect(),
+            script: script.into(),
         }
     }
 }
@@ -399,28 +396,26 @@ impl ScriptedEvents {
 impl super::drive::EventSource for ScriptedEvents {
     fn next_event(
         &mut self,
-        timeout: std::time::Duration,
+        _timeout: std::time::Duration,
     ) -> std::io::Result<Option<crossterm::event::Event>> {
-        let now = self.start.elapsed();
-        match self.script.front() {
-            Some((at, _)) if *at <= now => Ok(self.script.pop_front().map(|(_, ev)| ev)),
-            Some((at, _)) => {
-                std::thread::sleep(timeout.min(*at - now));
-                Ok(None)
-            }
-            None => {
-                std::thread::sleep(timeout);
-                Ok(None)
-            }
-        }
+        let code = self.script.pop_front().unwrap_or(Some(KeyCode::Char('q')));
+        Ok(code.map(|c| crossterm::event::Event::Key(KeyEvent::new(c, KeyModifiers::NONE))))
     }
 }
 
-/// A poller that takes `delay` and then returns the seeded fleet unchanged,
-/// counting how many polls were started.
+/// Poll counters: `started` when `drive` calls the poller, `completed` when
+/// its future finishes.
+#[derive(Default)]
+struct PollCounts {
+    started: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
+}
+
+/// A poller whose future sleeps `delay` on the tokio clock and then returns
+/// the seeded fleet unchanged.
 fn slow_poller(
     delay: std::time::Duration,
-    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    counts: std::sync::Arc<PollCounts>,
 ) -> impl Fn(
     DaemonClient,
     super::poll::tick::PollRequest,
@@ -428,10 +423,16 @@ fn slow_poller(
     Box<dyn std::future::Future<Output = super::poll::tick::PollOutcome> + Send>,
 > {
     move |client, _req| {
-        started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        counts
+            .started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let counts = counts.clone();
         let seed = seeded_state();
         Box::pin(async move {
             tokio::time::sleep(delay).await;
+            counts
+                .completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             super::poll::tick::PollOutcome {
                 client,
                 result: super::poll::tick::PollResult {
@@ -451,31 +452,38 @@ fn slow_poller(
     }
 }
 
-/// Run [`super::drive::drive`] over `script` with a 2 s poller; returns each
-/// draw's offset from the start with the selected project, the elapsed run
-/// time, and how many polls started.
-async fn drive_with_slow_poller(
-    script: Vec<(u64, KeyCode)>,
-) -> (
-    Vec<(std::time::Duration, Option<String>)>,
-    std::time::Duration,
-    usize,
-) {
-    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let start = std::time::Instant::now();
+/// The 2 s delay of the scripted poll.
+const SLOW_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What one scripted [`super::drive::drive`] run observed.
+struct SlowRun {
+    /// Per draw: the selected project and how many polls had completed.
+    frames: Vec<(Option<String>, usize)>,
+    /// Paused-clock time the run took.
+    virtual_elapsed: std::time::Duration,
+    counts: std::sync::Arc<PollCounts>,
+}
+
+/// Run [`super::drive::drive`] over `script` with a [`SLOW_POLL`] poller.
+/// Call it on a paused clock.
+async fn drive_with_slow_poller(script: Vec<Option<KeyCode>>) -> SlowRun {
+    let counts = std::sync::Arc::new(PollCounts::default());
+    let start = tokio::time::Instant::now();
     let mut frames = Vec::new();
     let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
         frames.push((
-            start.elapsed(),
             state.selected_project().map(|p| p.name.clone()),
+            counts.completed.load(std::sync::atomic::Ordering::SeqCst),
         ));
         Ok(())
     };
-    let mut client = DaemonClient::new(dead_loopback_url());
+    // Never dialled: the poller is fake and the scripted keys dispatch no
+    // action, so this skips `dead_loopback_url`'s blocking connect probe.
+    let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());
     super::drive::drive(
         &mut draw,
         &mut ScriptedEvents::new(script),
-        slow_poller(std::time::Duration::from_secs(2), started.clone()),
+        slow_poller(SLOW_POLL, counts.clone()),
         &mut client,
         seeded_state(),
         std::time::Duration::ZERO,
@@ -483,45 +491,51 @@ async fn drive_with_slow_poller(
     )
     .await
     .expect("drive returns Ok on q");
-    let ran = start.elapsed();
-    (
+    SlowRun {
         frames,
-        ran,
-        started.load(std::sync::atomic::Ordering::SeqCst),
-    )
+        virtual_elapsed: start.elapsed(),
+        counts,
+    }
 }
 
-/// #10476: a key pressed while a 2 s poll is in flight is drawn within one
-/// frame budget (100 ms), and `q` exits without waiting for the poll.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// #10476: a key pressed while a poll is in flight is drawn before that poll
+/// completes, and `q` exits without waiting for it.
+#[tokio::test(start_paused = true)]
 async fn keypress_redraws_while_poll_in_flight_10476() {
-    let pressed = std::time::Duration::from_millis(150);
-    let (frames, ran, polls) =
-        drive_with_slow_poller(vec![(150, KeyCode::Down), (500, KeyCode::Char('q'))]).await;
+    // Turn 0 starts the poll (zero interval); turn 1 presses Down.
+    let run = drive_with_slow_poller(vec![None, Some(KeyCode::Down), None]).await;
 
-    let drawn = frames
+    let (_, completed_at_draw) = run
+        .frames
         .iter()
-        .find(|(_, project)| project.as_deref() == Some("genealogy"))
-        .map(|(at, _)| *at)
+        .find(|(project, _)| project.as_deref() == Some("genealogy"))
         .expect("the Down key must reach a drawn frame");
-    assert!(
-        drawn < pressed + std::time::Duration::from_millis(100),
-        "Down pressed at {pressed:?} was first drawn at {drawn:?}: the frame waited on the poll"
+    assert_eq!(
+        *completed_at_draw, 0,
+        "the Down frame was drawn after the poll completed: the frame waited on the poll"
     );
+    let completed = run
+        .counts
+        .completed
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(completed, 0, "q must exit without waiting for the poll");
     assert!(
-        ran < std::time::Duration::from_millis(1500),
-        "q must exit without waiting for the 2 s poll; the loop ran {ran:?}"
+        run.virtual_elapsed < SLOW_POLL,
+        "the loop ran {:?} of tokio time: it slept through the {SLOW_POLL:?} poll",
+        run.virtual_elapsed
     );
-    assert_eq!(polls, 1, "one poll, started on the first turn");
+    let started = run.counts.started.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(started, 1, "one poll, started on the first turn");
 }
 
 /// #10476: while one poll is in flight no second poll starts, even though a
 /// zero interval makes every loop turn due.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn only_one_poll_in_flight_10476() {
-    let (_, _, polls) = drive_with_slow_poller(vec![(400, KeyCode::Char('q'))]).await;
+    let run = drive_with_slow_poller(vec![None; 8]).await;
+    let started = run.counts.started.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        polls, 1,
+        started, 1,
         "a second poll started while the first was in flight"
     );
 }
