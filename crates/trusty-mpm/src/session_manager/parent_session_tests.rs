@@ -119,3 +119,39 @@ async fn set_parent_session_id_missing_session_errors() {
         "expected SessionNotFound, got {result:?}"
     );
 }
+
+/// Why: setters that read the record without the store guard and upsert it
+/// later can carry a `None` parent read before `link_parent` wrote it (#10476).
+/// What: read a copy, link the parent, upsert the stale copy; the link stays.
+/// A different `Some` parent still replaces the stored one.
+/// Test: itself.
+#[tokio::test]
+async fn a_stale_upsert_keeps_the_stored_parent_link() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = SessionStore::load(dir.path()).await.expect("store");
+    let record: SessionRecord = serde_json::from_str(OLD_RECORD).expect("old record loads");
+    store.upsert(record.clone()).await.expect("seed");
+
+    let mut stale = store.get(&record.id).await.expect("stale read");
+    let parent = ManagedSessionId::new();
+    let mut linked = store.get(&record.id).await.expect("read");
+    linked.parent_session_id = Some(parent);
+    store.upsert(linked).await.expect("link parent");
+
+    stale.task = "edited by a stale writer".into();
+    store.upsert(stale).await.expect("stale upsert");
+    let after = store.get(&record.id).await.expect("after");
+    assert_eq!(
+        after.parent_session_id,
+        Some(parent),
+        "stale copy erased the link"
+    );
+    assert_eq!(after.task, "edited by a stale writer");
+
+    let other = ManagedSessionId::new();
+    let mut relinked = after;
+    relinked.parent_session_id = Some(other);
+    store.upsert(relinked).await.expect("relink");
+    let after = store.get(&record.id).await.expect("after relink");
+    assert_eq!(after.parent_session_id, Some(other));
+}

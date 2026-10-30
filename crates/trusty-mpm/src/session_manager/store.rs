@@ -20,6 +20,19 @@ use super::json_file;
 use super::record::{ManagedSessionId, SessionRecord};
 use super::store_integrity::{StoreIntegrity, validate};
 
+/// Keep a stored parent link against a copy that carries none (#10476).
+///
+/// Why: several setters read a record without the store guard and upsert it
+/// later; a copy read before `link_parent` wrote the parent would erase it.
+/// The link is set once and never cleared on purpose, so `None` over `Some`
+/// is always a stale copy. A different `Some` is a deliberate write and wins.
+/// Test: `a_stale_upsert_keeps_the_stored_parent_link`.
+fn keep_parent_link(incoming: &mut SessionRecord, stored: Option<&SessionRecord>) {
+    if incoming.parent_session_id.is_none() {
+        incoming.parent_session_id = stored.and_then(|s| s.parent_session_id);
+    }
+}
+
 /// Errors that can arise from store I/O or serialization.
 ///
 /// Why: callers need structured error information to distinguish transient I/O
@@ -386,12 +399,16 @@ impl SessionStore {
     /// keeps the stored ones ([`super::decision::keep_newer_decision`]), so a
     /// whole-record writer cannot restore a claimed decision or erase a newer
     /// one. Decision writers use [`Self::upsert_decision`] instead.
+    /// #10476: a copy with no parent keeps the stored parent link
+    /// ([`keep_parent_link`]).
     /// Test: `store_upsert_and_get`, `store_upsert_preserves_concurrent_write`,
-    /// `a_send_in_flight_cannot_restore_a_claimed_decision`.
+    /// `a_send_in_flight_cannot_restore_a_claimed_decision`,
+    /// `a_stale_upsert_keeps_the_stored_parent_link`.
     pub async fn upsert(&mut self, mut record: SessionRecord) -> Result<(), StoreError> {
         self.reload_if_changed().await?;
         let key = record.id.to_string();
         keep_newer_decision(&mut record, self.data.sessions.get(&key));
+        keep_parent_link(&mut record, self.data.sessions.get(&key));
         self.data.sessions.insert(key, record);
         self.save().await
     }
@@ -444,6 +461,7 @@ impl SessionStore {
         for mut record in records {
             let key = record.id.to_string();
             keep_newer_decision(&mut record, self.data.sessions.get(&key)); // #9841
+            keep_parent_link(&mut record, self.data.sessions.get(&key));
             self.data.sessions.insert(key, record);
         }
         self.save().await
