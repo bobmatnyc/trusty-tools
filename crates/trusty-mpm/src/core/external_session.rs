@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// differently — only external sessions need an explicit "adopt" step before
 /// oversight applies.
 /// What: [`TrustyMpm`](SessionOrigin::TrustyMpm) for `tm-*` / `tmpm-*` /
-/// `trusty-mpm-*` names (the current `tm-<leaf>-NN` scheme from #1955, the
+/// `trusty-mpm-*` names (the current `tm-<leaf>[-NN]` scheme from #1955, the
 /// #1789-era `tmpm-<repo>-<8hex>`/`tmpm-<folder>`/`tmpm-<adjective>-<noun>`
 /// forms, and the pre-#1789 `trusty-mpm-<uuid>` form), else
 /// [`External`](SessionOrigin::External).

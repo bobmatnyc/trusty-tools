@@ -110,7 +110,7 @@ pub struct EventSummary {
 /// Derive a short routing prefix from a tmux session name.
 ///
 /// Why: operators address a session by a short word (e.g. `aipowerranking-01`
-/// under the current `tm-<leaf>-NN` scheme, #1955), not its full
+/// under the current `tm-<leaf>[-NN]` scheme, #1955), not its full
 /// `tm-aipowerranking-01` tmux name; the prefix is that name with ONLY the
 /// managed prefix dropped — the `-NN` serial is intentionally KEPT (not
 /// stripped further) because it is what disambiguates multiple concurrent

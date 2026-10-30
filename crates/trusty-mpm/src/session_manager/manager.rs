@@ -169,7 +169,7 @@ pub enum ManagedError {
     #[error("tmux session already adopted/registered: {0}")]
     AlreadyAdopted(String),
 
-    /// A session-name derivation failure (currently: all 99 `tm-<leaf>-NN`
+    /// A session-name derivation failure (currently: all 99 `tm-<leaf>[-NN]`
     /// serials for a project are in use).
     ///
     /// Why (#1955, renamed in the #1966 review follow-up): the serial-numbered
@@ -431,7 +431,7 @@ impl SessionManager {
     /// Why: `POST /api/v1/sessions/managed` needs the full create-name-record-spawn
     /// flow in one operation so the HTTP handler stays thin.
     /// What: derives the tmux name via [`Self::resolve_session_name`]
-    /// (`tm-<project-leaf>-NN`, #1955), creates the tmux session via the driver,
+    /// (`tm-<project-leaf>[-NN]`, #1955), creates the tmux session via the driver,
     /// persists a [`SessionRecord`] in state `Provisioning`, and returns it.
     /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
     /// so callers that do not care about the backend keep the pre-#1203 behavior.
@@ -1186,7 +1186,7 @@ impl SessionManager {
     /// allocation (issue #1955).
     ///
     /// Why: [`crate::core::names::build_session_name`] must know which
-    /// `tm-<leaf>-NN` serials are taken so it can pick the lowest free one. A
+    /// `tm-<leaf>[-NN]` serials are taken so it can pick the lowest free one. A
     /// DECOMMISSIONED record's serial must be free for immediate reuse (the
     /// ticket's gap-reuse requirement — "sessions 01,02,03 exist, 02 gets
     /// decommissioned, next new session reuses 02"), so this deliberately
