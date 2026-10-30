@@ -535,7 +535,10 @@ pdf-extract = "0.12"
 # Pinned to >=0.36 (issue #3367): 0.26 pulled quick-xml 0.31.0, vulnerable to
 # RUSTSEC-2026-0194/0195 (DoS, CVSS 7.5 each); 0.36 pulls patched
 # quick-xml >=0.41.
-calamine = "0.36"
+# Pinned to >=0.37 (GHSA-m665-v7pm-7grj): 0.36 pulled zip 8.6.0, inside the
+# advisory's `zip <= 9.0.4` range; 0.37 requires zip ^9.0, which resolves to
+# the same patched 9.0.5 as the direct `zip` entry below.
+calamine = "0.37"
 # zip + quick-xml: OOXML (.docx) is a zip container around XML parts. Parsing
 # `word/document.xml` ourselves (rather than pulling in docx-rs) matches this
 # repo's own-the-parsing style and avoids a much larger dependency surface for
