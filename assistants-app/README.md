@@ -50,3 +50,25 @@ Input tokens: X, Output tokens: Y, Estimated cost: $Z
 Cost uses Sonnet 5.5 pricing: $3 per million input tokens, $15 per million
 output tokens. A non-zero exit means the Bedrock call failed; the error is on
 stderr.
+
+## Database
+
+Assistants and messages live in SQLite (`schema.sql`, accessed through
+`db.py`). The database file defaults to `assistants-app/assistants.db`; set
+`ASSISTANTS_DB_PATH` to use another file.
+
+```bash
+assistants-app/.venv/bin/python assistants-app/seed.py
+sqlite3 assistants-app/assistants.db "SELECT * FROM assistants"
+```
+
+`seed.py` creates the "General" and "Code Helper" assistants. A re-run adds
+no duplicates.
+
+## Tests
+
+```bash
+assistants-app/.venv/bin/python -m pip install -r assistants-app/requirements-dev.txt
+assistants-app/.venv/bin/black --check assistants-app/
+assistants-app/.venv/bin/python -m pytest assistants-app/tests/
+```
