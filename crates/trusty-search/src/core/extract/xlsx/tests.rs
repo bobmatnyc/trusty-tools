@@ -7,7 +7,7 @@
 //! (3000-SLOC cap), so the split costs no production churn — a child module
 //! still sees the parent's private items, so nothing needed widening.
 //!
-//! What: sheet-section rendering, the calamine 0.36 cell-text behaviours this
+//! What: sheet-section rendering, the calamine 0.36+ cell-text behaviours this
 //! crate deliberately locks in, the guard's refusals (declared size, forged
 //! size, entry count, over-cap document) and the things it must NOT refuse (a
 //! non-zip container, a package at the entry cap, a document exactly at the
@@ -783,7 +783,8 @@ fn test_non_zip_container_passes_preflight() {
 /// REFUSED, not waved through to calamine.
 ///
 /// Why it earns its place: the guard reads with `zip` 9.x and calamine parses
-/// the same bytes with its own `zip` 8.x, so an open failure here says nothing
+/// the same bytes with its own `zip` copy (shared today, free to diverge on a
+/// future calamine), so an open failure here says nothing
 /// about whether calamine will open it. Passing that case through was a
 /// fail-open — every byte cap in this module is skipped and the package reaches
 /// calamine unbounded, which is the vector the module exists to close. No other
