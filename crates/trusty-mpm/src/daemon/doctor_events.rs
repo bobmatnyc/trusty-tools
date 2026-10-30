@@ -21,7 +21,11 @@
 //! tm, and they ship in lockstep with no fallback. A missing socket, a stale
 //! one (the file exists, nothing accepts), a path that is not a socket, a path
 //! that cannot be read, or a subscription that ends without a frame is `Fail`;
-//! a connect that neither completes nor is refused is `Warn`. Read-only.
+//! a connect that neither completes nor is refused is `Warn`. #10151: a host
+//! without the bus is supported (Architect ruling 2026-10-26), so a missing
+//! socket with no trusty-events LaunchAgent plist is `NotInstalled`, a `Warn`
+//! that names no command. Only that pair is downgraded: every other state, and
+//! a missing socket beside an installed plist, grades as above. Read-only.
 //!
 //! Test: `doctor_events_tests.rs`.
 
@@ -67,8 +71,11 @@ pub(crate) enum SocketState {
     /// A connect completed but the subscription ended without a frame (a
     /// hang-up, an error, or a frame that does not decode); carries the error.
     Unanswered(String),
-    /// No file at the path: the daemon is not running.
+    /// No file at the path, and the bus is installed: the daemon is not running.
     Absent,
+    /// #10151: no file at the path and no trusty-events LaunchAgent plist: the
+    /// host runs without the bus, a supported setup.
+    NotInstalled,
     /// The file exists and a connect is refused: a stale socket.
     Stale,
     /// Something other than a socket sits at the path.
@@ -163,8 +170,12 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// Grade one observation of the socket at `socket` as a doctor row.
 ///
 /// Why: a pure function, so every verdict is testable without a daemon.
-/// What: `Serving` is `Ok`; `VersionSkew` and `Undetermined` are `Warn`; every
-/// other state is `Fail` with its remedy. #10042: the not-running remedy
+/// What: `Serving` is `Ok`; `VersionSkew`, `Undetermined` and `NotInstalled`
+/// are `Warn`; every other state is `Fail` with its remedy. #10151: the
+/// not-running remedy no longer names `tctl install trusty-events`, which exits
+/// 3 since the bus is internal (#10130); `NotInstalled` names no command,
+/// because every `tctl` verb on the bus exits non-zero on a host without its
+/// plist. #10042: the not-running remedy
 /// `tctl start trusty-events` works because the LaunchAgent restarts the bus
 /// after any exit, so a loaded job is never left stopped. #10071: a hung bus
 /// has not exited, so launchd leaves it alone and `tctl start` answers
@@ -174,7 +185,8 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// `tctl restart` too.
 /// Test: `serving_is_ok_and_says_the_bus_answered`,
 /// `every_non_serving_state_is_never_ok`, `the_not_running_remedy_is_tctl_start`,
-/// `a_silent_bus_is_hung_within_the_bound`, `the_stale_remedy_restarts_a_hung_bus`.
+/// `a_silent_bus_is_hung_within_the_bound`, `the_stale_remedy_restarts_a_hung_bus`,
+/// `a_host_without_the_bus_warns_and_names_no_failing_remedy`.
 pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
     let at = socket.display();
     let (status, message) = match state {
@@ -215,8 +227,17 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
             CheckStatus::Fail,
             format!(
                 "trusty-events is not running: no socket at {at}. Producers buffer, then \
-                 drop, events until it runs. Install it with `tctl install trusty-events`, or start it \
-                 with `tctl start trusty-events`."
+                 drop, events until it runs. Its LaunchAgent is installed; start it with \
+                 `tctl start trusty-events`."
+            ),
+        ),
+        // #10151: a host without the bus is supported; nothing to run.
+        SocketState::NotInstalled => (
+            CheckStatus::Warn,
+            format!(
+                "trusty-events is not installed on this host: no socket at {at} and no \
+                 trusty-events LaunchAgent. The bus is optional and internal, so this is a \
+                 supported setup and needs no action; producers drop their events."
             ),
         ),
         SocketState::Stale => (
@@ -255,24 +276,58 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
 /// The `events` row: resolve the bus socket, look at it once, grade it.
 ///
 /// Why / What: see the module docs. A socket path that cannot be resolved is
-/// `Fail` — no producer can reach the bus either.
+/// `Fail` — no producer can reach the bus either. #10151: `home` locates the
+/// LaunchAgents directory that tells a host without the bus from a stopped one.
 /// Test: `an_unresolvable_socket_path_fails`; the wiring is covered by
 /// `run_doctor_produces_eighty_checks`.
-pub(super) async fn check_events() -> DoctorCheck {
-    grade_resolved(trusty_common::control_bus::events_socket_path()).await
+pub(super) async fn check_events(home: &Path) -> DoctorCheck {
+    let agents = super::doctor_launchd_process_type::launch_agents_dir(home).path;
+    grade_resolved(trusty_common::control_bus::events_socket_path(), &agents).await
 }
 
-/// [`check_events`] over an already-resolved path, so the resolution failure is
-/// testable without process-global environment.
-async fn grade_resolved(socket: anyhow::Result<std::path::PathBuf>) -> DoctorCheck {
+/// [`check_events`] over an already-resolved path and LaunchAgents directory,
+/// so the resolution failure and the no-bus host are testable without
+/// process-global environment.
+///
+/// What: observes the socket and grades it. #10151: only an `Absent` socket
+/// with no trusty-events plist in `agents_dir` becomes `NotInstalled`.
+/// Test: `a_host_without_the_bus_warns_and_names_no_failing_remedy`,
+/// `a_host_with_the_bus_still_fails_on_every_fault`.
+async fn grade_resolved(
+    socket: anyhow::Result<std::path::PathBuf>,
+    agents_dir: &Path,
+) -> DoctorCheck {
     match socket {
-        Ok(path) => grade(&path, &observe_socket(&path, CONNECT_TIMEOUT).await),
+        Ok(path) => {
+            let state = match observe_socket(&path, CONNECT_TIMEOUT).await {
+                // #10151: no socket and no plist is a host without the bus.
+                SocketState::Absent if !bus_installed(agents_dir) => SocketState::NotInstalled,
+                state => state,
+            };
+            grade(&path, &state)
+        }
         Err(e) => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Fail,
             format!("cannot resolve the trusty-events socket path: {e:#}"),
         ),
     }
+}
+
+/// Whether the trusty-events LaunchAgent plist sits in `agents_dir`.
+///
+/// Why (#10151): `tctl` installs the bus by writing this plist, and the socket's
+/// directory is no signal — resolving the socket path creates it. A plist that
+/// cannot be inspected counts as installed, so the row stays fail-closed.
+/// What: `<agents_dir>/<canonical label>.plist` exists, or its lookup errors.
+/// Test: `a_host_with_the_bus_still_fails_on_every_fault`.
+fn bus_installed(agents_dir: &Path) -> bool {
+    let label =
+        trusty_common::launchd_labels::canonical_label(trusty_common::control_bus::EVENTS_SERVICE);
+    agents_dir
+        .join(format!("{label}.plist"))
+        .try_exists()
+        .unwrap_or(true)
 }
 
 #[cfg(test)]

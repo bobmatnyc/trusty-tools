@@ -59,9 +59,10 @@ async fn doctor_events_reports_a_dead_socket() {
     assert!(row.message.contains("stale"), "{}", row.message);
 }
 
-/// Why: no socket is the not-running case and must read as a failure.
-/// What: a missing path observes `Absent` and grades `Fail` with the install
-/// and start remedies.
+/// Why: no socket on a host with the bus installed is the not-running case
+/// and must read as a failure.
+/// What: a missing path observes `Absent` and grades `Fail` with the start
+/// remedy. #10151: never `tctl install trusty-events`, which exits 3.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_missing_socket_is_absent() {
@@ -73,10 +74,12 @@ async fn a_missing_socket_is_absent() {
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("not running"), "{}", row.message);
     assert!(
-        row.message.contains("tctl install trusty-events"),
+        row.message
+            .contains("Its LaunchAgent is installed; start it with `tctl start trusty-events`."),
         "{}",
         row.message
     );
+    assert!(!row.message.contains("tctl install"), "{}", row.message);
 }
 
 /// Why (#10042): the row's remedy must actually bring the bus back. `tctl
@@ -85,8 +88,9 @@ async fn a_missing_socket_is_absent() {
 /// bus after ANY exit (`KeepAlive` `<true/>`, pinned on the installer side by
 /// `events_plist_restarts_the_bus_after_any_exit`). With `SuccessfulExit:
 /// false` a stray exit 0 left a loaded, stopped job that `tctl start` skipped.
-/// What: the not-running remedy names `tctl start trusty-events` and
-/// `tctl install trusty-events`; the stale remedy says launchd restarts it.
+/// What: the not-running remedy names `tctl start trusty-events` and, since
+/// #10151, not `tctl install trusty-events` (it exits 3, #10130); the stale
+/// remedy says launchd restarts it.
 /// Test: This is the test.
 #[test]
 fn the_not_running_remedy_is_tctl_start() {
@@ -98,7 +102,7 @@ fn the_not_running_remedy_is_tctl_start() {
         absent.message
     );
     assert!(
-        absent.message.contains("`tctl install trusty-events`"),
+        !absent.message.contains("tctl install"),
         "{}",
         absent.message
     );
@@ -148,7 +152,7 @@ async fn a_listener_that_never_accepts_is_hung() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = hardened_sock_in(&dir);
     let _listener = trusty_common::uds::bind_hardened(&path).expect("bind");
-    let row = grade_resolved(Ok(path)).await;
+    let row = grade_resolved(Ok(path), dir.path()).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("hung"), "{}", row.message);
 }
@@ -218,14 +222,16 @@ async fn an_unreadable_parent_is_unreadable() {
 /// Why (fail-closed): every observation other than `Serving` is a fault or an
 /// unknown, never health — a refactor that defaulted an arm to `Ok` would ship
 /// a green row for a dead bus.
-/// What: each non-serving state grades `Fail`, except `Undetermined` and `VersionSkew`,
-/// which are `Warn`; none is `Ok`.
+/// What: each non-serving state grades `Fail`, except `Undetermined`,
+/// `VersionSkew` and `NotInstalled`, which are `Warn`; none is `Ok`.
 /// Test: This is the test.
 #[test]
 fn every_non_serving_state_is_never_ok() {
     let p = Path::new("/x/trusty-events.sock");
     for (state, want) in [
         (SocketState::Absent, CheckStatus::Fail),
+        // #10151: a host without the bus is supported.
+        (SocketState::NotInstalled, CheckStatus::Warn),
         (SocketState::Stale, CheckStatus::Fail),
         (SocketState::NotASocket, CheckStatus::Fail),
         (
@@ -257,10 +263,87 @@ fn every_non_serving_state_is_never_ok() {
 /// Test: This is the test.
 #[tokio::test]
 async fn an_unresolvable_socket_path_fails() {
-    let row = grade_resolved(Err(anyhow::anyhow!("no data dir"))).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let row = grade_resolved(Err(anyhow::anyhow!("no data dir")), dir.path()).await;
     assert_eq!(row.name, CHECK_NAME);
     assert_eq!(row.status, CheckStatus::Fail);
     assert!(row.message.contains("no data dir"), "{}", row.message);
+}
+
+/// A LaunchAgents directory in `dir`, holding the trusty-events plist when
+/// `installed`.
+fn agents_in(dir: &tempfile::TempDir, installed: bool) -> std::path::PathBuf {
+    let agents = dir.path().join("LaunchAgents");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    if installed {
+        std::fs::write(agents.join("com.trusty.events.plist"), "<plist/>").expect("plist");
+    }
+    agents
+}
+
+/// Why (#10151, Architect ruling 2026-10-26): a host without the bus is a
+/// supported setup. It read `Fail` and named `tctl install trusty-events`,
+/// which exits 3 because the bus is internal (#10130).
+/// What: no socket and no trusty-events plist grades `Warn`, says no action is
+/// needed, and names no `tctl` command — every `tctl` verb on the bus exits
+/// non-zero on a host without its plist, so the only remedy that exits 0 is
+/// none.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_host_without_the_bus_warns_and_names_no_failing_remedy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = agents_in(&dir, false);
+    let row = grade_resolved(Ok(sock_in(&dir)), &agents).await;
+    assert_eq!(row.name, CHECK_NAME);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(row.message.contains("not installed"), "{}", row.message);
+    assert!(row.message.contains("needs no action"), "{}", row.message);
+    assert!(!row.message.contains("tctl"), "{}", row.message);
+}
+
+/// Why (#10151 fail-open check): only "no socket and no plist" may be
+/// downgraded. A host that HAS the bus must still fail when the bus is down,
+/// refuses the dial, or answers without a frame; a blanket "any error is
+/// `Warn`" would hide a dead bus.
+/// What: with the plist installed, a missing socket is `Fail` naming `tctl
+/// start`. A dead socket is `Fail` with or without the plist (the file proves a
+/// bus ran here), as is a bus that hangs up without a frame. A LaunchAgents
+/// path that cannot be inspected counts as installed, so it stays `Fail`.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_host_with_the_bus_still_fails_on_every_fault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let installed = agents_in(&dir, true);
+    let missing = grade_resolved(Ok(sock_in(&dir)), &installed).await;
+    assert_eq!(missing.status, CheckStatus::Fail, "{}", missing.message);
+    assert!(
+        missing.message.contains("`tctl start trusty-events`"),
+        "{}",
+        missing.message
+    );
+
+    // A file where the directory should be: the plist lookup errors.
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, "").expect("blocker file");
+    let unknown = grade_resolved(Ok(sock_in(&dir)), &blocker).await;
+    assert_eq!(unknown.status, CheckStatus::Fail, "{}", unknown.message);
+
+    // See #7215: bind in a 0700 directory and wait out an inherited fd.
+    let stale_dir = tempfile::tempdir().expect("tempdir");
+    let path = hardened_sock_in(&stale_dir);
+    drop(trusty_common::uds::bind_hardened(&path).expect("bind"));
+    await_listener_gone(&path).await;
+    let not_installed = agents_in(&stale_dir, false);
+    for agents in [&installed, &not_installed] {
+        let row = grade_resolved(Ok(path.clone()), agents).await;
+        assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+        assert!(row.message.contains("stale"), "{}", row.message);
+    }
+
+    let bus_dir = tempfile::tempdir().expect("tempdir");
+    let bus = spawn_stub(&bus_dir, Stub::HangUp);
+    let row = grade_resolved(Ok(bus.path.clone()), &installed).await;
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
 }
 
 // #10071: stub buses. Each binds a hardened socket, as `trusty-events` does,
@@ -432,7 +515,7 @@ async fn a_silent_bus_is_hung_within_the_bound() {
         .metrics()
         .num_alive_tasks();
     let started = std::time::Instant::now();
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), dir.path()).await;
     let took = started.elapsed();
 
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
@@ -469,7 +552,7 @@ async fn a_bus_that_sends_a_heartbeat_is_ok() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut bus = spawn_stub(&dir, Stub::Heartbeat);
     let started = std::time::Instant::now();
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), dir.path()).await;
 
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
     assert!(
@@ -492,7 +575,7 @@ async fn a_bus_that_sends_a_heartbeat_is_ok() {
 async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::PreHeartbeat);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), dir.path()).await;
 
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     assert!(
@@ -516,7 +599,7 @@ async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
 async fn a_bus_that_hangs_up_without_a_frame_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::HangUp);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), dir.path()).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
 }
 
@@ -530,7 +613,7 @@ async fn a_bus_that_hangs_up_without_a_frame_fails() {
 async fn a_refusal_not_naming_heartbeat_ms_is_a_fault_not_skew() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::Refuse);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), dir.path()).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(
         !row.message.contains("older than this tm"),
