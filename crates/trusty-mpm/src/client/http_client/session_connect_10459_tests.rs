@@ -7,6 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Sets `HOME` and `TMPDIR` for one `#[serial]` test, restoring both on drop.
+///
+/// `#[serial]` orders this test only against other `#[serial]` tests. The
+/// non-serial lib tests in the same binary keep running, and they read and
+/// write the overridden `TMPDIR` too, so the test asserts only on files that
+/// carry its own sentinel, never on the directory being empty.
 struct EnvOverride(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl EnvOverride {
@@ -15,7 +20,8 @@ impl EnvOverride {
             .iter()
             .map(|(key, value)| {
                 let old = std::env::var_os(key);
-                // SAFETY: the only caller is `#[serial]`.
+                // SAFETY: `#[serial]` keeps other serial env writers out; see
+                // the type doc for what it does not cover.
                 unsafe { std::env::set_var(key, value) };
                 (*key, old)
             })
@@ -27,7 +33,7 @@ impl EnvOverride {
 impl Drop for EnvOverride {
     fn drop(&mut self) {
         for (key, old) in self.0.drain(..) {
-            // SAFETY: the only caller is `#[serial]`.
+            // SAFETY: as in `set`.
             match old {
                 Some(v) => unsafe { std::env::set_var(key, v) },
                 None => unsafe { std::env::remove_var(key) },
@@ -58,6 +64,10 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
         "profile = \"supervisor\"\n",
     )
     .expect("profile");
+    // #10459: the Architect prompt embeds the project's AGENTS.md, so a prompt
+    // file this connect wrote carries the sentinel and no sibling's file does.
+    let sentinel = "10459-connect-refusal-sentinel";
+    std::fs::write(project.join("AGENTS.md"), sentinel).expect("agents");
 
     // A daemon stand-in that only counts connections: any POST would connect.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -85,7 +95,18 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
         0,
         "the refusal reached the daemon"
     );
-    let written: Vec<_> = std::fs::read_dir(&tmp).expect("tmp").collect();
+    // #10459: parallel non-serial tests also write under this TMPDIR, so only
+    // a prompt file carrying this test's sentinel counts.
+    let written: Vec<_> = std::fs::read_dir(&tmp)
+        .expect("tmp")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("trusty-mpm-system-prompt-"))
+                && std::fs::read_to_string(path).is_ok_and(|text| text.contains(sentinel))
+        })
+        .collect();
     assert!(written.is_empty(), "a prompt file was written: {written:?}");
     assert!(
         !project.join(".claude").exists(),
