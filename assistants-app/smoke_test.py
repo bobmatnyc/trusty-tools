@@ -15,23 +15,14 @@ import sys
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from pricing import estimate_cost
+
 # Sonnet 5.5 has no on-demand throughput under its bare model ID
 # (`anthropic.claude-sonnet-5-5`); Bedrock requires the US inference profile.
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5-5")
 PROFILE = os.environ.get("AWS_PROFILE", "cto")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 PROMPT = "Hello, how can you help me today?"
-
-# USD per million tokens (Sonnet 5.5).
-INPUT_PRICE_PER_MTOK = 3.0
-OUTPUT_PRICE_PER_MTOK = 15.0
-
-
-def estimate_cost(input_tokens: int, output_tokens: int) -> float:
-    """Returns the estimated USD cost of one call at Sonnet 5.5 pricing."""
-    return (
-        input_tokens * INPUT_PRICE_PER_MTOK + output_tokens * OUTPUT_PRICE_PER_MTOK
-    ) / 1_000_000
 
 
 def main() -> int:

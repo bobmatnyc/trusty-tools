@@ -111,3 +111,40 @@ def delete_assistant(
     with closing(connect(db_path)) as conn, conn:
         cur = conn.execute("DELETE FROM assistants WHERE id = ?", (assistant_id,))
         return cur.rowcount == 1
+
+
+def add_message(
+    assistant_id: int,
+    role: str,
+    content: str,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    db_path: str | os.PathLike[str] | None = None,
+) -> int:
+    """Appends a message to an assistant's log and returns its id.
+
+    Raises `sqlite3.IntegrityError` for an unknown assistant or a role other
+    than "user" or "assistant".
+    """
+    with closing(connect(db_path)) as conn, conn:
+        cur = conn.execute(
+            "INSERT INTO messages"
+            " (assistant_id, role, content, tokens_in, tokens_out, cost_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (assistant_id, role, content, tokens_in, tokens_out, cost_usd),
+        )
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+
+def list_messages(
+    assistant_id: int, db_path: str | os.PathLike[str] | None = None
+) -> list[dict[str, Any]]:
+    """Returns an assistant's messages, oldest first."""
+    with closing(connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE assistant_id = ? ORDER BY id",
+            (assistant_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
