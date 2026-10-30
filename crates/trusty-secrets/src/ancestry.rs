@@ -133,6 +133,18 @@ pub trait ProcessTable: Send + Sync {
     fn cwd(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
+
+    /// The argv of `pid` (#10459 PR1).
+    ///
+    /// Why: a main-thread ticket is minted only by the registered hook argv
+    /// and redeemed only by the argv the hook hashed.
+    /// What: Linux `/proc/<pid>/cmdline`; macOS `KERN_PROCARGS2` (same uid
+    /// only). The default refuses, so a table that does not read it never
+    /// mints or redeems a ticket.
+    /// Test: `os_table_reads_its_own_argv`.
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
 }
 
 /// Whether `pid`, or any process above it, is a Claude Code process.
@@ -439,6 +451,10 @@ impl ProcessTable for OsProcessTable {
 
     fn cwd(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         launch::cwd(pid)
+    }
+
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        os::argv(pid)
     }
 }
 
@@ -788,6 +804,10 @@ mod os {
     }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    pub(super) fn argv(pid: u32) -> Result<Vec<String>, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 }

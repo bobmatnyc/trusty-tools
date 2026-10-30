@@ -51,7 +51,7 @@ const FAIL_CLOSED_ON_ALLOW: bool = true;
 /// `post_success_append_failure_is_audit_unavailable_and_the_change_stands`,
 /// `copy_stops_after_a_key_whose_record_cannot_be_appended`,
 /// `copy_stops_before_the_next_key_after_a_failed_deny_append`.
-fn unaudited_allow() -> Result<(), ErrorKind> {
+pub(crate) fn unaudited_allow() -> Result<(), ErrorKind> {
     if FAIL_CLOSED_ON_ALLOW {
         Err(ErrorKind::AuditUnavailable)
     } else {
@@ -444,7 +444,7 @@ fn allow_recorded(recording: Recording, admitted: Option<&Admitted>) -> bool {
 /// What: only `secrets.audit: false` suppresses. A machine config that is
 /// missing or does not parse leaves the audit on.
 /// Test: `audit_machine_suppression_lets_set_succeed_with_an_unwritable_sink`.
-fn suppressed_by_machine(state: &State) -> bool {
+pub(crate) fn suppressed_by_machine(state: &State) -> bool {
     matches!(
         load_machine_at(&state.settings.machine_config),
         Ok(Some(machine)) if machine.audit == Some(false)

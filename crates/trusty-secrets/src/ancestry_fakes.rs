@@ -5,7 +5,8 @@
 //! `ancestry`-only test run builds it with no `server` code.
 //! What: [`FakeProcs`] maps pid to (parent, start time) and can fail every
 //! read, fail one pid's start time, panic on one pid, mark a pid as
-//! Claude Code, or give a pid an executable path (#9066).
+//! Claude Code, or give a pid an executable path (#9066), launch facts or
+//! an argv (#10459).
 //! Test: used by `ancestry_tests.rs`, `grant_tests.rs` and `wire_tests.rs`.
 
 use std::collections::{HashMap, HashSet};
@@ -27,6 +28,8 @@ struct ProcState {
     // #10459: whole-second start time and working directory per pid.
     unix_starts: HashMap<u32, u64>,
     cwds: HashMap<u32, PathBuf>,
+    // #10459 PR1: the argv per pid; a pid with none is unreadable.
+    argvs: HashMap<u32, Vec<String>>,
     parent_delay: Option<Duration>,
 }
 
@@ -94,6 +97,12 @@ impl FakeProcs {
             s.unix_starts.insert(pid, secs);
             s.cwds.insert(pid, cwd.to_path_buf());
         });
+    }
+
+    /// Give `pid` the argv `args` (#10459 PR1).
+    pub(crate) fn set_argv(&self, pid: u32, args: &[&str]) {
+        let args = args.iter().map(|a| (*a).to_owned()).collect();
+        self.with(|s| s.argvs.insert(pid, args));
     }
 
     /// Panic when `pid`'s start time is read.
@@ -180,6 +189,17 @@ impl ProcessTable for FakeProcs {
             true => Err(ProcessError::Unreadable { pid }),
             false => s
                 .cwds
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid }),
+        })
+    }
+
+    fn argv(&self, pid: u32) -> Result<Vec<String>, ProcessError> {
+        self.with(|s| match s.unreadable {
+            true => Err(ProcessError::Unreadable { pid }),
+            false => s
+                .argvs
                 .get(&pid)
                 .cloned()
                 .ok_or(ProcessError::Unreadable { pid }),

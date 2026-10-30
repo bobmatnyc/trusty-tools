@@ -74,6 +74,10 @@ pub mod settings;
 mod test_support;
 // #9069: `copy` to a write-only sync target.
 mod sync_target;
+// #10459 PR1: main-thread tickets for the Architect (DOC-86 §2).
+mod ticket;
+mod ticket_checks;
+mod ticket_methods;
 mod tools;
 
 pub use ancestry::{
@@ -109,6 +113,10 @@ pub use settings::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};
+pub use ticket::{
+    TICKET_TTL, TicketAudit, TicketEvent, TicketKind, TicketOp, TicketRefusal, TicketStore,
+    VoidCause,
+};
 pub use tools::DetectedTool;
 
 #[cfg(test)]

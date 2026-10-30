@@ -86,6 +86,18 @@ pub enum AuditMethod {
     /// per call (#9067 P1). It has no direct method.
     #[serde(rename = "secrets.backends")]
     Backends,
+    /// `secrets.ticket.mint`: one record per mint or refusal, written
+    /// before the ticket is stored (#10459 PR1).
+    #[serde(rename = "secrets.ticket.mint")]
+    TicketMint,
+    /// A ticket voided unredeemed, by `secrets.ticket.void` or by the
+    /// server (#10459 PR1). A void that found nothing writes none.
+    #[serde(rename = "secrets.ticket.void")]
+    TicketVoid,
+    /// A ticket a `set` or local `copy` consumed, written before the
+    /// write it allows (#10459 PR1). It has no wire method.
+    #[serde(rename = "secrets.ticket.redeem")]
+    TicketRedeem,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -240,6 +252,10 @@ pub struct AuditRecord {
     /// `None` otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architect_refusal: Option<super::architect::ArchitectRefusal>,
+    /// The main-thread ticket a `secrets.ticket.*` record is about
+    /// (#10459 PR1). `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<super::ticket::TicketAudit>,
 }
 
 impl AuditRecord {
@@ -266,6 +282,7 @@ impl AuditRecord {
             default_policy: None,
             architect: None,
             architect_refusal: None,
+            ticket: None,
         }
     }
 

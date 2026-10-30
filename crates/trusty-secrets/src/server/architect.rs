@@ -16,11 +16,15 @@
 //! same refusal of a file other users can write.
 //! A failed check is recorded as `architect_refusal` on the call's audit
 //! records when a record directory is known; the arm names no pid or path.
+//! #10459 PR1: the record is necessary, never sufficient. `writer_for`
+//! grants the exemption only when the caller also redeems a main-thread
+//! ticket (`ticket.rs`, DOC-86 §2, Q4), so the record alone no longer opens
+//! a denied key to the whole `claude` tree.
 //! Known limits (#10459):
-//! - Scope: the exemption covers the whole Architect `claude` process tree —
-//!   in-process Task subagents, MCP servers (third-party ones included),
-//!   hooks and background children. The socket has no main-thread signal.
-//!   A PM or nested session is its own `claude` and has no record.
+//! - Scope: with a ticket, one call the main thread's hook announced. The
+//!   redemption window is still open to unhooked same-uid code under that
+//!   `claude` (DOC-86 §1). A PM or nested session is its own `claude` and
+//!   has no record.
 //! - Forgery: a same-uid agent can write a record for its own `claude` pid.
 //!   That is no capability beyond the detach-to-init limit in
 //!   `ancestry.rs` (module doc), but `architect: true` in the audit is not
@@ -94,6 +98,22 @@ pub enum ArchitectRefusal {
     /// The record names another directory than the live process's.
     #[error("the Architect launch record names another project directory")]
     OtherProject,
+    /// The record holds, but no main-thread ticket is pending for this
+    /// `claude` (#10459 PR1): never minted, voided, expired or spent.
+    #[error("no main-thread ticket is pending for the Architect")]
+    NoTicket,
+    /// The caller's argv is not the one the ticket was minted for.
+    #[error("the caller's argv is not the ticket's")]
+    TicketArgvMismatch,
+    /// The caller started before, or in the same second as, the mint.
+    #[error("the caller started before the ticket was minted")]
+    TicketPeerStartedBeforeMint,
+    /// The op, project or key is not the ticket's.
+    #[error("the call is not the one the ticket was minted for")]
+    TicketOtherCall,
+    /// The ticket store could not be read: a poisoned lock or the clock.
+    #[error("the ticket store could not be read")]
+    TicketUnavailable,
     /// A refusal a newer server records. Never written by this build.
     #[serde(other)]
     #[error("an Architect check this build does not know")]
@@ -108,7 +128,8 @@ pub(crate) fn records_dir(account_home: Option<&Path>) -> Option<PathBuf> {
 /// Whether `peer` runs under the `claude` tm launched as the Architect.
 ///
 /// Why: #10459 P1 — the exemption must bind one live process, never a name.
-/// What: `Ok` only when `dir` is known, [`nearest_agent`] finds a Claude Code
+/// What: `Ok(pid)` of that `claude` (#10459 PR1: the ticket is bound to it)
+/// only when `dir` is known, [`nearest_agent`] finds a Claude Code
 /// process at or above `peer`, `<dir>/<pid>.architect` reads, and its PID,
 /// start time ([`ProcessTable::start_unix_secs`]) and project directory
 /// (canonically equal to [`ProcessTable::cwd`]) match. Otherwise the first
@@ -120,7 +141,7 @@ pub(crate) fn check_architect(
     table: &dyn ProcessTable,
     dir: Option<&Path>,
     peer: u32,
-) -> Result<(), ArchitectRefusal> {
+) -> Result<u32, ArchitectRefusal> {
     let dir = dir.ok_or(ArchitectRefusal::NoRecordDir)?;
     let claude = nearest_agent(table, peer)
         .map_err(|_| ArchitectRefusal::ProcessLookup)?
@@ -141,7 +162,7 @@ pub(crate) fn check_architect(
     if !same_dir(&record.project_dir, &cwd) {
         return Err(ArchitectRefusal::OtherProject);
     }
-    Ok(())
+    Ok(claude)
 }
 
 /// Read `<dir>/<pid>.architect`; absent is `Ok(None)`.
@@ -201,7 +222,7 @@ fn owner_only_writable(_meta: &std::fs::Metadata) -> bool {
 }
 
 /// Whether `a` and `b` canonicalize to one directory; `false` if either fails.
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,

@@ -388,6 +388,18 @@ mod os_table {
         assert!(OsProcessTable.cwd(gone).is_err());
     }
 
+    /// Why: #10459 PR1 — a ticket binds the redeemer's argv, so the host
+    /// table must read a live process's argv exactly and refuse a gone pid.
+    /// What: this process's own argv, so no child can exit mid-read.
+    /// Test: itself.
+    #[test]
+    fn os_table_reads_its_own_argv() {
+        let argv = OsProcessTable.argv(std::process::id()).expect("own argv");
+        let expected: Vec<String> = std::env::args().collect();
+        assert_eq!(argv, expected);
+        assert!(OsProcessTable.argv(u32::MAX - 1).is_err());
+    }
+
     #[test]
     fn os_table_reads_this_process() {
         let me = std::process::id();

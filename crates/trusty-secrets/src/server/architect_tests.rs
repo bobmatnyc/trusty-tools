@@ -1,10 +1,12 @@
-//! The Architect exemption for `set` and a local `copy` (#10459 P1).
+//! The Architect exemption for `set` and a local `copy` (#10459 P1), and
+//! the main-thread ticket it needs (#10459 PR1, DOC-86 §2).
 //!
 //! A child of `wire_tests`, so it shares that module's fixture and helpers.
-//! Every record directory and project directory is under the fixture's
-//! `TempDir`; the account's real `~/.trusty-mpm` is never read. The socket
-//! peer is this test process, placed under the fake `claude` 10, whose launch
-//! facts and record each test controls.
+//! Every record directory, project directory and cargo bin directory is
+//! under the fixture's `TempDir`; the account's real `~/.trusty-mpm` and
+//! `~/.cargo/bin` are never read. The socket peer is this test process,
+//! placed under the fake `claude` 10, whose launch facts and record each
+//! test controls; the minting hook is the fake process 15 beside it.
 //!
 //! Test: itself.
 
@@ -15,18 +17,36 @@ use super::*;
 use crate::server::agents_flag::set_agents_may_use;
 use crate::server::architect::{ArchitectRefusal, check_architect};
 use crate::server::bridge::BridgeVerdict;
+use crate::server::grant::Clock;
 use crate::server::methods::{self, Caller};
+use crate::server::ticket::TicketStore;
+use crate::server::ticket_checks::argv_sha256;
+use crate::server::ticket_methods;
+
+// #10459 PR1: mint, void, redeem and every fail-closed arm.
+#[path = "ticket_tests.rs"]
+mod ticket_tests;
 
 /// The fake Architect `claude`: the shared parent of this test process.
 const ARCHITECT: u32 = 10;
 /// Its start time in whole Unix seconds, as tm records it.
 const LAUNCHED: u64 = 1_790_000_000;
+/// The fake `tm hook --pm-guard` process, a fresh child of `claude` 10.
+const HOOK: u32 = 15;
+/// The fake clock's time at mint, in Unix seconds.
+const MINT_AT: u64 = LAUNCHED + 100;
+/// The session the fake hook mints in.
+const SESSION: &str = "5c1f0e0e-session-10459";
+/// This process's argv in the fake table: the call the hook hashed.
+const CALL_ARGV: [&str; 4] = ["tm", "secrets", "set", "API_KEY"];
 
-/// A launched Architect: its record directory, its project directory, and
-/// a process table where it is `claude` 10 with matching launch facts.
+/// A launched Architect: its record directory, its project directory, the
+/// cargo bin directory holding the fake `tm`, and a process table where it
+/// is `claude` 10 with matching launch facts.
 struct Architect {
     records: PathBuf,
     project: PathBuf,
+    bin: PathBuf,
     procs: Arc<FakeProcs>,
 }
 
@@ -50,12 +70,68 @@ impl Architect {
         );
     }
 
-    /// The fixture's state over this table, reading these records.
+    /// The fixture's state over this table, reading these records. Minting
+    /// stays off, its shipped default (#10459 PR1).
     fn state(&self, fx: &Fixture) -> State {
         let (mut state, _grants) = state_with(fx, Arc::clone(&self.procs));
         state.architect_records = Some(self.records.clone());
+        state.tm_bin_dir = Some(self.bin.clone());
         state
     }
+
+    /// [`Self::state`] with minting on and a ticket store on a fake clock
+    /// at [`MINT_AT`].
+    fn minting(&self, fx: &Fixture) -> (State, Arc<FakeClock>) {
+        let mut state = self.state(fx);
+        state.settings.mint_enabled = true;
+        let clock = Arc::new(FakeClock::at(MINT_AT));
+        state.tickets = Arc::new(TicketStore::new(Arc::clone(&clock) as Arc<dyn Clock>));
+        (state, clock)
+    }
+
+    /// [`Self::minting`] holding a ticket for `op` on `name`.
+    fn ticketed(&self, fx: &Fixture, op: &str, name: &str) -> (State, Arc<FakeClock>) {
+        let (state, clock) = self.minting(fx);
+        let minted = mint(&state, fx, op, name, &CALL_ARGV);
+        assert!(minted.is_ok(), "{minted:?}");
+        (state, clock)
+    }
+
+    /// The fake `tm` the hook runs.
+    fn tm(&self) -> PathBuf {
+        self.bin.join("tm")
+    }
+}
+
+/// `secrets.ticket.mint` params for `op` on `name`, hashing `argv`.
+fn mint_params(fx: &Fixture, op: &str, name: &str, argv: &[&str]) -> Value {
+    let argv: Vec<String> = argv.iter().map(|a| (*a).to_owned()).collect();
+    json!({"project": fx.project(), "session_id": SESSION, "prompt_id": "prompt-7",
+        "tool_use_id": "toolu_01AbC", "kind": "secrets_op",
+        "argv_sha256": argv_sha256(&argv), "op": op, "key": name})
+}
+
+/// Mint from the fake hook, directly through the method body.
+fn mint(
+    state: &State,
+    fx: &Fixture,
+    op: &str,
+    name: &str,
+    argv: &[&str],
+) -> Result<Value, ErrorKind> {
+    ticket_methods::mint(
+        state,
+        Caller::new(Some(HOOK)),
+        mint_params(fx, op, name, argv),
+    )
+}
+
+/// Every record of `method`.
+fn records_of(fx: &Fixture, method: AuditMethod) -> Vec<AuditRecord> {
+    records(fx)
+        .into_iter()
+        .filter(|r| r.method == method)
+        .collect()
 }
 
 fn write_owner_only(path: &Path, bytes: &[u8]) {
@@ -69,12 +145,26 @@ fn architect(fx: &Fixture) -> Architect {
     std::fs::create_dir_all(&records).unwrap();
     let project = fx.tmp.path().join("architect-project");
     std::fs::create_dir_all(&project).unwrap();
+    let bin = fx.tmp.path().join("home/.cargo/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("tm"), b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(bin.join("tm"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let procs = procs_with_me();
     procs.set_agent(ARCHITECT);
     procs.set_launch_facts(ARCHITECT, LAUNCHED, &project);
+    // #10459 PR1: the hook, fresh at mint; this process, started after it.
+    let tm = bin.join("tm");
+    procs.add(HOOK, ARCHITECT, 150);
+    procs.set_executable(HOOK, tm.to_str().unwrap());
+    procs.set_argv(HOOK, &[tm.to_str().unwrap(), "hook", "--pm-guard"]);
+    procs.set_launch_facts(HOOK, MINT_AT, &project);
+    procs.set_launch_facts(me(), MINT_AT + 1, &project);
+    procs.set_argv(me(), &CALL_ARGV);
     let architect = Architect {
         records,
         project,
+        bin,
         procs,
     };
     architect.write(&Architect::body(ARCHITECT, LAUNCHED, &architect.project));
@@ -107,13 +197,16 @@ fn denied_in(backend: &MemoryBackend, name: &str) -> bool {
 /// Why: #10459 P1 regression — the launched Architect stores a new value
 /// for a key the operator denied to agents. The deny stays, the reply shows
 /// the length only, and the one allow record says `architect: true` and
-/// holds no value. Red on c1c8e9a36a: `agent_key_denied`.
+/// holds no value. Red on c1c8e9a36a: `agent_key_denied`. #10459 PR1: only
+/// with a ticket minted for this call; its mint and redeem records precede
+/// the write.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn architect_with_a_valid_record_sets_a_denied_key() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
-    let state = architect(&fx).state(&fx);
+    let (state, _clock) = architect(&fx).ticketed(&fx, "set", "API_KEY");
+    let tickets = Arc::clone(&state.tickets);
     let server = fx.start_state(state).await;
     let answer = call(
         &fx.settings.socket,
@@ -132,7 +225,17 @@ async fn architect_with_a_valid_record_sets_a_denied_key() {
         "the new value was stored"
     );
     assert!(denied_in(&fx.keychain, "API_KEY"), "the deny stays");
-    let all = records(&fx);
+    let order: Vec<_> = records(&fx).iter().map(|r| r.method).collect();
+    assert_eq!(
+        order,
+        [
+            AuditMethod::TicketMint,
+            AuditMethod::TicketRedeem,
+            AuditMethod::Set
+        ]
+    );
+    assert!(!tickets.locked(|t| t.pending(None)).unwrap(), "spent");
+    let all = records_of(&fx, AuditMethod::Set);
     assert_eq!(all.len(), 1, "{all:?}");
     assert_eq!(
         shape(&all[0]),
@@ -155,12 +258,13 @@ async fn architect_with_a_valid_record_sets_a_denied_key() {
 /// Why: #10459 P1 — the Architect's local copy moves a denied key, and its
 /// deny travels with it; the copy record and the carried deny's record both
 /// say `architect: true`. Red on c1c8e9a36a: the key lands in `failed`.
+/// #10459 PR1: with a ticket minted for this one-key copy.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn architect_copies_a_denied_key_locally() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
-    let state = architect(&fx).state(&fx);
+    let (state, _clock) = architect(&fx).ticketed(&fx, "copy", "API_KEY");
     let server = fx.start_state(state).await;
     let params = json!({"project": fx.project(), "from_backend": "keychain",
         "to_backend": "spare", "keys": ["API_KEY"]});
@@ -171,6 +275,7 @@ async fn architect_copies_a_denied_key_locally() {
     assert!(denied_in(&fx.spare, "API_KEY"), "the deny was carried");
     let marks: Vec<_> = records(&fx)
         .into_iter()
+        .filter(|r| r.ticket.is_none())
         .map(|r| (r.method, r.decision, r.architect))
         .collect();
     assert_eq!(
@@ -195,7 +300,8 @@ type Break = fn(&Fixture, &mut Architect, &mut State);
 /// rules: the denied key is `agent_key_denied`, its value unchanged, and no
 /// record says `architect`. The control row (no break) proves each refusal
 /// comes from the broken fact: it sets the key, so the test is red on
-/// c1c8e9a36a, which has no exemption.
+/// c1c8e9a36a, which has no exemption. #10459 PR1: every row holds a
+/// ticket, so the record check alone decides.
 /// Test: itself.
 #[test]
 fn architect_refusals_each_keep_the_agent_rules() {
@@ -287,7 +393,7 @@ fn architect_refusals_each_keep_the_agent_rules() {
         let fx = fixture();
         seed(&fx, "API_KEY", SENTINEL_VALUE, false);
         let mut arch = architect(&fx);
-        let mut state = arch.state(&fx);
+        let (mut state, _clock) = arch.ticketed(&fx, "set", "API_KEY");
         apply(&fx, &mut arch, &mut state);
         // A swapped table must reach the state too.
         state.grants = state_with(&fx, Arc::clone(&arch.procs)).1;
@@ -302,7 +408,7 @@ fn architect_refusals_each_keep_the_agent_rules() {
             Caller::new(Some(me())),
             set_to(&fx, "API_KEY", OPEN_VALUE),
         );
-        let all = records(&fx);
+        let all = records_of(&fx, AuditMethod::Set);
         match refusal {
             None => {
                 assert!(set.is_ok(), "{name}: {set:?}");
@@ -395,16 +501,17 @@ fn nested_claude_under_the_architect_is_not_the_architect() {
 /// `agent_key_denied`. Red when the bridge arm is removed (the peer then
 /// passes as the Architect and the key is written). Over the wire a console
 /// under Claude Code is `bridge_refused` first, so the verdict is built here.
+/// #10459 PR1: a ticket is pending, so only the bridge arm refuses.
 /// Test: itself.
 #[test]
 fn verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
     let arch = architect(&fx);
-    let state = arch.state(&fx);
+    let (state, _clock) = arch.ticketed(&fx, "set", "API_KEY");
     assert_eq!(
         check_architect(arch.procs.as_ref(), Some(&arch.records), me()),
-        Ok(())
+        Ok(ARCHITECT)
     );
     let caller = Caller::new(Some(me())).with_bridge(BridgeVerdict::mapped(true));
     let set = methods::set(&state, caller, set_to(&fx, "API_KEY", OPEN_VALUE));
@@ -415,14 +522,15 @@ fn verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules() {
 
 /// Why: #10459 P1 scope — `delete`, deny removal and a sync-target push stay
 /// operator-only for the Architect too (a separate follow-up covers them),
-/// and none of their records says `architect`.
+/// and none of their records says `architect`. #10459 PR1: a pending
+/// ticket changes none of them.
 /// Test: itself.
 #[test]
 fn architect_delete_deny_removal_and_sync_push_stay_operator_only() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
     let arch = architect(&fx);
-    let (state, _target, opens) = with_fake_target(arch.state(&fx));
+    let (state, _target, opens) = with_fake_target(arch.ticketed(&fx, "set", "API_KEY").0);
     let caller = Caller::new(Some(me()));
     let target = json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": "API_KEY"});
     let deleted = methods::delete(&state, caller, target.clone());
@@ -441,7 +549,10 @@ fn architect_delete_deny_removal_and_sync_push_stay_operator_only() {
     assert_eq!(opens.load(Ordering::SeqCst), 0, "no target opened");
     assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "the value stays");
     assert!(denied_in(&fx.keychain, "API_KEY"), "the deny stays");
-    let all = records(&fx);
+    let all: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|r| r.ticket.is_none())
+        .collect();
     assert_eq!(all.len(), 3, "{all:?}");
     assert!(all.iter().all(|r| r.architect.is_none()), "{all:?}");
 }
@@ -461,9 +572,9 @@ async fn bridge_call_from_under_the_architect_is_refused() {
         .set_executable(me(), "/opt/trusty/bin/trusty-console");
     assert_eq!(
         check_architect(arch.procs.as_ref(), Some(&arch.records), me()),
-        Ok(())
+        Ok(ARCHITECT)
     );
-    let server = fx.start_state(arch.state(&fx)).await;
+    let server = fx.start_state(arch.ticketed(&fx, "set", "API_KEY").0).await;
     let mut params = set_to(&fx, "API_KEY", OPEN_VALUE);
     params["bridge"] = json!({"agent_parent": true, "source": "mapped"});
     let refused = call(&fx.settings.socket, "secrets.bridge.set", params).await;

@@ -32,6 +32,8 @@ use super::gate::{Gate, Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
 use super::sandbox;
+use super::ticket::TicketOp;
+use super::ticket_checks::TicketCall;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
@@ -216,7 +218,8 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// [`ErrorKind::AgentKeyDenied`], checked under the index lock), its allow
 /// record carries `default_policy`, and its confirmation is length only.
 /// #10459 P1: a caller under the `claude` tm launched as the Architect
-/// ([`writer_for`]) writes any key through [`SecretStore::set_for_architect`]
+/// that redeems a main-thread ticket for this call (#10459 PR1,
+/// [`writer_for`]) writes any key through [`SecretStore::set_for_architect`]
 /// (no deny check, length-only confirmation), its record `architect: true`.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `architect_with_a_valid_record_sets_a_denied_key`,
@@ -241,7 +244,13 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let agent = judge_agent_caller(state, caller, peer, gate)?;
         // #10459 P1: the launched Architect writes any key; every other
         // agent, or a failed Architect check, keeps the agent rules.
-        let writer = writer_for(state, caller, peer, gate, agent);
+        // #10459 PR1: and only for the one call a main-thread ticket names.
+        let call = TicketCall {
+            op: TicketOp::Set,
+            project: project.root(),
+            key: Some(&request.key),
+        };
+        let writer = writer_for(state, caller, peer, gate, agent, &call)?;
         if writer == Writer::Agent {
             gate.default_policy();
         }
@@ -438,8 +447,9 @@ impl CopySelection {
 /// and a sync-target push stays refused. Each key's deny in the source is
 /// carried before its value: into a backend that cannot hold a deny the key
 /// fails with [`ErrorKind::Unsupported`] and nothing is written.
-/// #10459 P1: after the sync-target branch, the launched Architect
-/// ([`writer_for`]) copies as a person, every record `architect: true`
+/// #10459 P1: after the sync-target branch, the launched Architect holding
+/// a ticket for this one-key copy (#10459 PR1, [`writer_for`]) copies as a
+/// person, every record `architect: true`
 /// (`architect_copies_a_denied_key_locally`); a push stays refused
 /// (`architect_delete_deny_removal_and_sync_push_stay_operator_only`).
 /// #9069: a sync-target destination goes to `sync_target::push` after the
@@ -475,7 +485,18 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             }
             // #10459 P1: judged after the sync-target branch, so a push stays
             // operator-only and never carries the Architect mark.
-            let writer = writer_for(state, caller, peer, gate, agent);
+            // #10459 PR1: a ticket names one key, so a copy of several or
+            // of all keys never redeems one.
+            let single = match CopySelection::of(&request) {
+                CopySelection::Keys(keys) if keys.len() == 1 => keys.into_iter().next(),
+                _ => None,
+            };
+            let call = TicketCall {
+                op: TicketOp::Copy,
+                project: project.root(),
+                key: single.as_ref(),
+            };
+            let writer = writer_for(state, caller, peer, gate, agent, &call)?;
             if writer == Writer::Agent {
                 gate.default_policy();
             }
