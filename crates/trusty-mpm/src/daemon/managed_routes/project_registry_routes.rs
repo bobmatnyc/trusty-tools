@@ -274,13 +274,21 @@ pub async fn register_project_registry_op(
         worktree: body
             .worktree
             .or_else(|| existing.as_ref().and_then(|p| p.worktree)),
+        // #10530: carried forward; the store assigns it on first register.
+        project_key: existing.as_ref().and_then(|p| p.project_key.clone()),
     };
     if let Err(e) = registry.register(project.clone()).await {
         warn!(error = %e, project = %project.name, "register_project_registry_route: register failed");
+        // #10530: a duplicate project key is the caller's conflict, not a fault.
+        if matches!(e, ProjectStoreError::DuplicateProjectKey { .. }) {
+            return Err(DaemonError::InvalidRequest(e.to_string()));
+        }
         return Err(DaemonError::Internal(
             "project registry write failed".to_string(),
         ));
     }
+    // #10530: answer with the stored record, which carries the minted key.
+    let project = registry.get(&project.name).await.unwrap_or(project);
     // #7357: the CLI transport (`tm projects register` → this body) used to
     // persist the record and adopt nothing, so the fix reached only the MCP
     // tool. Both now call the one shared function.
@@ -917,6 +925,7 @@ mod tests {
                 commit_name: None,
                 commit_email: None,
                 worktree: None,
+                project_key: None,
             })
             .await
             .expect("seed register");
