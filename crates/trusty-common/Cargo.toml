@@ -635,7 +635,9 @@ memory-rpc = ["uds"]
 # `index-file` path has not migrated yet. That also makes the feature UNIX-ONLY:
 # `lib.rs` gates the three modules on `all(unix, feature = "search-index")` and
 # emits a `compile_error!` naming the reason on any other target.
-search-index = ["blocking-http", "uds"]
+# #10530: the registry-derived index id (`registry_index_id`); needs `sha2` only.
+registry-index-id = ["dep:sha2"]
+search-index = ["blocking-http", "uds", "registry-index-id"]
 # Enables `http_client::blocking_loopback_client_builder`, the synchronous
 # counterpart of the #4392 proxy-free loopback entry point, by turning on
 # `reqwest/blocking`. Named for what it provides rather than for one consumer:

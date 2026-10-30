@@ -323,6 +323,7 @@ fn record(gh_account: Option<&str>, github: Option<GithubConfig>) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
     }
 }
 

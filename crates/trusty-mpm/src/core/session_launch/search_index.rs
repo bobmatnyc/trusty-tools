@@ -75,10 +75,30 @@ pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
             trusty_common::resolve_project_root(project_root),
         );
     }
-    trusty_common::search_index::ensure_project_indexed_with(
+    // #10530: pass the registry project; the id is the legacy basename until
+    // `REGISTRY_IDS_ADOPTED` flips, so this names the index trusty-code names.
+    let registered = registered_project_for(project_root, &crate::project::registry_data_dir());
+    trusty_common::search_index::ensure_project_indexed_with_as(
         project_root,
+        registered.as_ref(),
         trusty_common::search_index::IndexOptions::default().with_skip_vector(skip_vector),
     )
+}
+
+/// The registry project whose checkout is `project_root`'s project root (#10530).
+///
+/// Why: registration and the published active set must derive from the same
+/// stored key; both resolve the root first, so this does too.
+/// What: [`crate::project::registered_project_for_root_in`] over
+/// [`trusty_common::resolve_project_root`]; `None` for an unregistered root.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code` in
+/// `project/project_key_tests.rs`.
+pub(crate) fn registered_project_for(
+    project_root: &Path,
+    registry_dir: &Path,
+) -> Option<trusty_common::RegisteredProject> {
+    let root = trusty_common::resolve_project_root(project_root);
+    crate::project::registered_project_for_root_in(registry_dir, &root)
 }
 
 /// Should the index for `project_root` be registered BM25+KG-only (#5065 review)?

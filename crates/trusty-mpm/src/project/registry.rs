@@ -167,6 +167,8 @@ impl ProjectRegistry {
                 // seeded with the setting already in effect, no separate
                 // `tm projects config` call required.
                 worktree: entry.worktree,
+                // #10530: the store assigns the key at first register and keeps it.
+                project_key: None,
             };
             let name = project.name.clone();
             if let Err(e) = self.register(project).await {
@@ -300,6 +302,7 @@ impl ProjectRegistry {
             commit_email: None,
             // #3455: no declared preference; defaults to worktree-ON.
             worktree: None,
+            project_key: None,
         };
         if let Err(e) = self.register(project).await {
             warn!(name = %name, "{log_prefix}: failed to register: {e}");

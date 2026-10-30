@@ -306,6 +306,24 @@ pub fn ensure_project_indexed_with(project_root: &Path, opts: IndexOptions) -> O
     pinnable_index_id(ensure_project_indexed_reporting(project_root, opts))
 }
 
+/// [`ensure_project_indexed_with`] for a root a tm registry project owns
+/// (#10530).
+///
+/// Why: session launch pins the id this returns; it must be the registry id.
+/// What: [`pinnable_index_id`] over [`ensure_project_indexed_reporting_as`].
+/// Test: `registered_and_plain_entry_points_register_the_same_id`.
+pub fn ensure_project_indexed_with_as(
+    project_root: &Path,
+    registered: Option<&crate::RegisteredProject>,
+    opts: IndexOptions,
+) -> Option<String> {
+    pinnable_index_id(ensure_project_indexed_reporting_as(
+        project_root,
+        registered,
+        opts,
+    ))
+}
+
 /// The id a caller may PIN, or `None` when nothing observed the index (#5091).
 ///
 /// Why: the create can fail — a refusal, a transport error, a daemon that
@@ -369,6 +387,27 @@ pub fn ensure_project_indexed_reporting(
     project_root: &Path,
     opts: IndexOptions,
 ) -> EnsureIndexReport {
+    ensure_project_indexed_reporting_as(project_root, None, opts)
+}
+
+/// [`ensure_project_indexed_reporting`] for a root a tm registry project owns
+/// (#10530).
+///
+/// Why: the index id must come from the key tm stored at register, so the id
+/// registration creates is the id tm publishes and survives `mv` and a repo
+/// rename. `trusty-common` cannot read tm's registry, so the caller passes the
+/// project it resolved.
+/// What: identical to [`ensure_project_indexed_reporting`] except the id is
+/// [`crate::index_id_for_root`]`(root, registered)`, which is the legacy
+/// basename until the registry id is adopted (`REGISTRY_IDS_ADOPTED`), so tm and
+/// trusty-code name one index.
+/// Test: `registered_and_plain_entry_points_register_the_same_id`,
+/// `unregistered_root_keeps_the_legacy_basename_id` in `search_index_tests.rs`.
+pub fn ensure_project_indexed_reporting_as(
+    project_root: &Path,
+    registered: Option<&crate::RegisteredProject>,
+    opts: IndexOptions,
+) -> EnsureIndexReport {
     let root = crate::resolve_project_root(project_root);
     // #6550: a basename is a plausible id for a directory that names no
     // project, so refuse before deriving one rather than registering it.
@@ -383,7 +422,7 @@ pub fn ensure_project_indexed_reporting(
             registration: IndexRegistration::RefusedUnindexableRoot(refusal),
         };
     }
-    let mut index_id = crate::derive_index_id(&root);
+    let mut index_id = crate::index_id_for_root(&root, registered);
     if index_id.trim().is_empty() {
         tracing::warn!(
             "skipping trusty-search index registration: empty index id for {}",

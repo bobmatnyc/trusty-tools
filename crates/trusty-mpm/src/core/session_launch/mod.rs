@@ -77,6 +77,7 @@ pub use sandbox_settings::{
     verify_sandbox_settings, write_sandbox_settings,
 };
 mod search_index;
+pub(crate) use search_index::registered_project_for;
 mod settings;
 mod skills;
 // #7617: the launch-time `statusLine` guarantee, both tiers.

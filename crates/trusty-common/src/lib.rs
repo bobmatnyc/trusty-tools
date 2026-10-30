@@ -951,6 +951,25 @@ pub mod redb_cache;
 pub mod slug;
 pub use slug::slugify_string;
 
+/// The one index id derived from a tm registry project's stored key (#10530).
+///
+/// Why: registration, tm's published active set and `tm doctor` derived three
+/// different ids for one project, and two of them moved on `mv` or a repo
+/// rename. One function over a key stored once removes the drift.
+/// What: exposes [`registry_index_id::derive_registry_index_id`],
+/// [`registry_index_id::index_id_for_root`] and
+/// [`registry_index_id::RegisteredProject`]. Gated behind `registry-index-id`
+/// (implied by `search-index`) because the digest is SHA-256.
+/// Test: `cargo test -p trusty-common --features registry-index-id --
+/// registry_index_id`.
+#[cfg(feature = "registry-index-id")]
+pub mod registry_index_id;
+#[cfg(feature = "registry-index-id")]
+pub use registry_index_id::{
+    REGISTRY_IDS_ADOPTED, RegisteredProject, derive_registry_index_id, index_id_for_root,
+    registry_id_for_root,
+};
+
 /// Canonical trusty-search index-id derivation from a project path (issue #1373).
 ///
 /// Why: trusty-mpm (register-and-pin at session launch) and trusty-search

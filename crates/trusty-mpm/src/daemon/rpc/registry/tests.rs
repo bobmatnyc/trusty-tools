@@ -477,6 +477,7 @@ async fn seed_project(state: &Arc<DaemonState>, name: &str) {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         })
         .await
         .expect("seed the project registry");
@@ -540,7 +541,8 @@ async fn parity_projects_registry_register_agrees_across_transports() {
         "mpm.projects.registry.register",
         http_body,
         rpc_body,
-        &["name"],
+        // #10530: a non-GitHub `repo_url` mints a random `local:<uuid>` key per record.
+        &["name", "project_key"],
     );
 
     // Both writes must be in the ONE registry file.
@@ -629,7 +631,8 @@ async fn parity_projects_registry_patch_agrees_across_transports() {
         "mpm.projects.registry.patch",
         http_body,
         rpc_body,
-        &["name", "repo_url"],
+        // #10530: a non-GitHub `repo_url` mints a random `local:<uuid>` key per record.
+        &["name", "repo_url", "project_key"],
     );
 
     let registry = state.project_registry().await;

@@ -169,6 +169,22 @@ pub struct Project {
     /// `worktree_enabled_defaults_true`, `worktree_enabled_honors_false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+
+    /// Stable project key, assigned once at register (#10530).
+    ///
+    /// Why: the registry-derived trusty-search index id must survive `mv`, a repo
+    /// rename and `git remote remove`, so it derives from a value that never
+    /// recomputes instead of the checkout path or live git state. Index NAMING
+    /// still uses the legacy basename until `REGISTRY_IDS_ADOPTED` flips (D7).
+    /// What: canonical lowercase `owner/repo` when an origin exists, else
+    /// `local:<uuid>`. `None` only on a legacy record not yet registered since
+    /// this field landed; [`ProjectStore::upsert`](super::store::ProjectStore::upsert)
+    /// fills it, keeps an existing value, and refuses a second record with the
+    /// same key under a NEW name. Callers build records with `None` and never set it.
+    /// Test: `upsert_assigns_a_key_once_and_keeps_it` and the key-stability
+    /// tests in `store_tests.rs`; `project_serde_round_trip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
 }
 
 impl Project {
@@ -284,6 +300,7 @@ mod tests {
             commit_name: Some("Bob".into()),
             commit_email: Some("bob@example.com".into()),
             worktree: Some(false),
+            project_key: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("gh_user"), "json: {json}");
@@ -312,6 +329,7 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
@@ -458,6 +476,7 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
         }
     }
 
