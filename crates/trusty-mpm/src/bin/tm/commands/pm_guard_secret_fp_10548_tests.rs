@@ -221,17 +221,19 @@ fn a_rewritten_gh_api_pair_in_command_position_still_denies_10548() {
     }
 }
 
-/// 🔴 REGRESSION (#10548 P1, P2, P3, P4, P10): this repository's scripts the
+/// 🔴 REGRESSION (#10548 P1, P2, P4, P10): this repository's scripts the
 /// incident log names allow from the repo root.
+///
+/// Reverted for safety in round 2: `select-test-crates.sh` and its selftest
+/// (the raw-body scan cuts a quoted `sed` expression into a missing "script"
+/// on a code line) and `package_content.sh` (a comment names a real
+/// non-executable file, which is judged now that no execute-bit arm exists).
 #[test]
 fn the_incident_repo_scripts_allow_10548() {
     let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     // Bare names, joined below, so no script-path literal sits in crate source.
     let rows = [
-        ("select-test-crates.sh", ""),
-        ("select-test-crates_selftest.sh", ""),
         ("detect-docs-only.sh", " < /dev/null"),
-        ("package_content.sh", " --version 0.0.0 --out-dir dist"),
         ("check_adr.sh", ""),
         ("check_rustdoc_links.sh", ""),
     ]
@@ -368,4 +370,146 @@ fn a_method_call_on_a_token_value_is_no_file_10548() {
             "`{command}` must deny"
         );
     }
+}
+
+/// An AWS credentials read — refused inline (#7266).
+const AWS_READ: &str = "cat ~/.aws/credentials\n";
+
+/// Assert `command` refuses from `cwd` with a reason carrying `marker`.
+fn refuses(command: &str, cwd: &Path, marker: &str) {
+    all_refuse(&[command.to_string()], cwd, marker);
+}
+
+/// Every row of `commands` refuses from `cwd` with a reason carrying
+/// `marker`; the rows that do not are reported together.
+fn all_refuse(commands: &[String], cwd: &Path, marker: &str) {
+    let allowed: Vec<(&String, Option<String>)> = commands
+        .iter()
+        .map(|c| (c, verdict(c, cwd)))
+        .filter(|(_, r)| !r.as_deref().is_some_and(|r| r.contains(marker)))
+        .collect();
+    assert!(allowed.is_empty(), "must refuse ({marker}): {allowed:#?}");
+}
+
+/// 🔴 REGRESSION (#10548 round 2, bypass 1): `case` and `in` as plain
+/// arguments open no arm list, so the line after them is still a run.
+#[test]
+fn a_case_word_in_argument_position_opens_no_pattern_list_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "steal.sh", AWS_READ, true);
+    // No `case WORD in` header, and a `case` word not in command position.
+    let rows = [
+        "(echo case in\n./steal.sh | cat)\n",
+        "(echo case x in\n./steal.sh | cat)\n",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(n, body)| {
+        assert_eq!(blank_case_patterns(body), *body, "must keep: {body}");
+        file(dir.path(), &format!("t{n}.sh"), body, true);
+        format!("bash t{n}.sh")
+    })
+    .collect::<Vec<_>>();
+    all_refuse(&rows, dir.path(), "#7266");
+}
+
+/// 🔴 REGRESSION (#10548 round 2, bypass 2): a `#` line inside an open quote
+/// is no comment; the command after the closing quote runs and is judged.
+#[test]
+fn a_hash_line_inside_an_open_quote_still_runs_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "steal.sh", AWS_READ, true);
+    file(dir.path(), "t.sh", "echo \"a\n#\"; ./steal.sh\n", true);
+    // The same shape in the inline judge of the body itself.
+    file(
+        dir.path(),
+        "inline.sh",
+        &format!("echo \"a\n#\"; {KEYCHAIN_READ}"),
+        true,
+    );
+    refuses("bash inline.sh", dir.path(), "#8596");
+    refuses("bash t.sh", dir.path(), "#7266");
+    // Inside a substitution a `'` opens a quote that a `"` cannot close, so
+    // the `#` line is code; an unbalanced body blanks nothing.
+    let sub = "x=\"$(echo '\"\n#'; y)\"\n";
+    assert_eq!(without_true_comments(sub).as_deref(), Some(sub));
+    assert_eq!(without_true_comments("echo \"a\n# b\n"), None);
+}
+
+/// 🔴 REGRESSION (#10548 round 2, bypass 3): a non-executable file run by its
+/// path is judged, whatever spelling makes it executable first.
+#[test]
+fn a_non_executable_script_made_runnable_by_any_spelling_is_judged_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "steal.sh", AWS_READ, false);
+    let rows = [
+        ("quoted.sh", "ch''mod +x ./steal.sh; ./steal.sh\n"),
+        ("printf.sh", "$(printf chm)od +x ./steal.sh; ./steal.sh\n"),
+        (
+            "install.sh",
+            "install -m 755 ./steal.sh ./steal.sh; ./steal.sh\n",
+        ),
+    ]
+    .map(|(name, body)| {
+        file(dir.path(), name, body, true);
+        format!("bash {name}")
+    });
+    all_refuse(&rows, dir.path(), "#7266");
+}
+
+/// 🔴 REGRESSION (#10548 round 2, bypass 4): a command that can make a
+/// listed program run something else trusts no operand list. (A `"$G"` word
+/// with `-X` is refused by the `curl` arm already; `--method` and a literal
+/// `gh` are not.)
+#[test]
+fn a_command_that_may_redefine_a_listed_program_trusts_no_operands_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "defs.sh", "true\n", true);
+    let call = "gh api -X DELETE repos/o/r/actions/secrets/K";
+    let method = "\"$G\" api --method DELETE repos/o/r/actions/secrets/K";
+    let rows = [
+        format!("hash -p /usr/bin/env cp; cp {call}"),
+        format!("hash -p /usr/bin/env cp; G=gh; cp {method}"),
+        format!("PATH=./shim:$PATH cp {call}"),
+        format!("source defs.sh; cp {call}"),
+        format!(". defs.sh; cp {call}"),
+        format!("eval \"c\"\"p(){{ env \\\"\\$@\\\"; }}\"; cp {call}"),
+    ];
+    all_refuse(&rows, dir.path(), "#8875");
+}
+
+/// 🔴 REGRESSION (#10548 round 2, LOW): a method-call spelling in shell argv
+/// is a file name the shell opens; only program text is masked.
+#[test]
+fn a_method_call_spelling_in_shell_argv_still_denies_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(dir.path(), "t.sh", "cat 'token.get(1)'\n", true);
+    file(dir.path(), "u.sh", "cat \"my token.get(1)\"\n", true);
+    all_refuse(
+        &["bash t.sh".into(), "bash u.sh".into()],
+        dir.path(),
+        "#7266",
+    );
+}
+
+/// 🔴 REGRESSION (#10548 round 2, Missing gate): a script named only on a
+/// true comment line runs nothing, so its absence refuses nothing; one named
+/// on a `#` line inside an open quote runs, so its absence still refuses.
+#[test]
+fn a_missing_script_named_only_in_a_comment_is_waived_10548() {
+    let dir = tempfile::tempdir().expect("dir");
+    file(
+        dir.path(),
+        "t.sh",
+        "#!/usr/bin/env bash\n# usage: make | ./not-built-yet.sh\necho ok\n",
+        true,
+    );
+    allows("bash t.sh", dir.path());
+    file(
+        dir.path(),
+        "q.sh",
+        "echo \"a\n#\"; ./not-built-yet.sh\n",
+        true,
+    );
+    refuses("bash q.sh", dir.path(), "does not exist");
 }

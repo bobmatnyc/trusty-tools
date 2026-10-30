@@ -250,6 +250,7 @@ pub(crate) mod pm_guard_secret_handling;
 // #8879: the credential rules over the body of a script a command runs.
 pub(crate) mod pm_guard_secret_script;
 pub(crate) mod pm_guard_secret_script_case;
+pub(crate) mod pm_guard_secret_script_comments;
 pub(crate) mod pm_guard_secret_script_read;
 pub(crate) mod pm_guard_secret_script_self;
 pub(crate) mod pm_guard_secret_substitution_read;

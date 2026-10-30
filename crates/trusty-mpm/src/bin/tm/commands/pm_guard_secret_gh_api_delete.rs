@@ -235,34 +235,54 @@ const LEADING_KEYWORDS: &[&str] = &["do", "then", "else", "elif", "!", "{", "("]
 /// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
 /// as a rewritten `gh api` call and refused it as a secret DELETE. Those
 /// operands reach cargo as arguments; nothing runs them.
-/// What: skips leading `NAME=value` assignments and [`LEADING_KEYWORDS`]; a
-/// command word the shell rewrites, or any other program (a wrapper such as
-/// `xargs`, `env` or `sudo` that runs its operands), answers `None`, so every
-/// pair is still judged.
+/// What: skips leading [`LEADING_KEYWORDS`]; a `NAME=value` prefix
+/// (`PATH=./shim cp …`, #10548 round 2), a command word the shell rewrites,
+/// or any other program (a wrapper such as `xargs`, `env` or `sudo` that runs
+/// its operands) answers `None`, so every pair is still judged.
 /// Test: `adjacent_expansions_are_no_gh_api_call_10548`,
-/// `a_rewritten_gh_api_pair_in_command_position_still_denies_10548`.
+/// `a_rewritten_gh_api_pair_in_command_position_still_denies_10548`,
+/// `a_command_that_may_redefine_a_listed_program_trusts_no_operands_10548`.
 fn operands_never_run_from(argv: &[String]) -> Option<usize> {
-    let at = argv.iter().position(|w| {
-        let assignment = w.split_once('=').is_some_and(|(name, _)| {
-            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        });
-        !assignment && !LEADING_KEYWORDS.contains(&w.as_str())
-    })?;
+    let at = argv
+        .iter()
+        .position(|w| !LEADING_KEYWORDS.contains(&w.as_str()))?;
     let program = argv.get(at)?;
     (!is_rewritten(program) && NEVER_RUNS_OPERANDS.contains(&program.as_str())).then_some(at + 1)
 }
 
-/// Whether `command` may define a function or alias named for one of
-/// [`NEVER_RUNS_OPERANDS`] (`cargo() { gh "$@"; }`, `alias cp=gh`): the word
-/// then runs something else, so its operands are judged as before.
+/// Text that can make a word run another program: a function or alias
+/// definition, a hashed or searched path, a sourced or evaluated file, an
+/// inherited function, or a changed directory (#10548 round 2).
+const REDEFINERS: &[&str] = &[
+    "(",
+    "`",
+    "alias",
+    "function",
+    "hash",
+    "PATH",
+    "source",
+    "eval",
+    "enable",
+    "BASH_FUNC",
+    "BASH_ENV",
+    "ENV=",
+    "cd",
+    "pushd",
+];
+
+/// Whether `command` may make a [`NEVER_RUNS_OPERANDS`] word run something
+/// else (`cargo() { gh "$@"; }`, `alias cp=gh`, `hash -p /usr/bin/env cp`,
+/// `source defs.sh`, `. defs.sh`): its operand lists are then judged as before.
+/// Matched as raw text, so a stray match only keeps a refusal.
 fn redefines_a_never_run_program(command: &str) -> bool {
-    NEVER_RUNS_OPERANDS.iter().any(|name| {
-        command.contains(&format!("alias {name}"))
-            || command.contains(&format!("function {name}"))
-            || command
-                .match_indices(name)
-                .any(|(at, _)| command[at + name.len()..].trim_start().starts_with('('))
-    })
+    REDEFINERS.iter().any(|text| command.contains(text))
+        || split_shell_segments(command).iter().any(|segment| {
+            tokenize(segment).is_ok_and(|argv| {
+                argv.iter()
+                    .find(|w| !LEADING_KEYWORDS.contains(&w.as_str()))
+                    .is_some_and(|w| w == ".")
+            })
+        })
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell
