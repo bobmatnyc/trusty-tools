@@ -6,12 +6,12 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Sets `HOME` and `TMPDIR` for one `#[serial]` test, restoring both on drop.
+/// Sets process-global env vars for one `#[serial]` test, restoring them on drop.
 ///
-/// `#[serial]` orders this test only against other `#[serial]` tests. The
-/// non-serial lib tests in the same binary keep running, and they read and
-/// write the overridden `TMPDIR` too, so the test asserts only on files that
-/// carry its own sentinel, never on the directory being empty.
+/// `#[serial]` orders this test only against other `#[serial]` tests; the
+/// non-serial lib tests in the same binary keep running and see the override.
+// #10459: never override `TMPDIR` here. A parallel test's `tempfile::tempdir()`
+// landed under it and lost its directory when this test's scratch was dropped.
 struct EnvOverride(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl EnvOverride {
@@ -47,8 +47,8 @@ impl Drop for EnvOverride {
 async fn connect_session_refuses_an_old_claude_code_before_any_write() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path().canonicalize().expect("canonical");
-    let (home, project, tmp) = (root.join("home"), root.join("project"), root.join("tmp"));
-    for dir in [home.join(".trusty-mpm"), project.clone(), tmp.clone()] {
+    let (home, project) = (root.join("home"), root.join("project"));
+    for dir in [home.join(".trusty-mpm"), project.clone()] {
         std::fs::create_dir_all(dir).expect("mkdir");
     }
     std::fs::write(
@@ -65,9 +65,10 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
     )
     .expect("profile");
     // #10459: the Architect prompt embeds the project's AGENTS.md, so a prompt
-    // file this connect wrote carries the sentinel and no sibling's file does.
-    let sentinel = "10459-connect-refusal-sentinel";
-    std::fs::write(project.join("AGENTS.md"), sentinel).expect("agents");
+    // file this connect wrote carries the sentinel and no other file does. The
+    // scratch path makes it unique to this run in the shared temp dir.
+    let sentinel = format!("10459-connect-refusal-sentinel {}", root.display());
+    std::fs::write(project.join("AGENTS.md"), &sentinel).expect("agents");
 
     // A daemon stand-in that only counts connections: any POST would connect.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -83,7 +84,7 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
 
     let probe = &crate::core::architect_claude_version::TEST_PROBE;
     probe.with(|p| *p.borrow_mut() = Ok("2.1.294 (Claude Code)".to_owned()));
-    let _env = EnvOverride::set(&[("HOME", &home), ("TMPDIR", &tmp)]);
+    let _env = EnvOverride::set(&[("HOME", &home)]);
     let client = super::super::DaemonClient::new(url);
     let result = client.connect_session(&project.to_string_lossy()).await;
     probe.with(|p| *p.borrow_mut() = Ok("2.1.312 (Claude Code)".to_owned()));
@@ -95,16 +96,16 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
         0,
         "the refusal reached the daemon"
     );
-    // #10459: parallel non-serial tests also write under this TMPDIR, so only
-    // a prompt file carrying this test's sentinel counts.
-    let written: Vec<_> = std::fs::read_dir(&tmp)
-        .expect("tmp")
+    // #10459: the connect writes its prompt file to the real temp dir, which
+    // other tests share, so only a file carrying this run's sentinel counts.
+    let written: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        .expect("temp dir")
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("trusty-mpm-system-prompt-"))
-                && std::fs::read_to_string(path).is_ok_and(|text| text.contains(sentinel))
+                && std::fs::read_to_string(path).is_ok_and(|text| text.contains(&sentinel))
         })
         .collect();
     assert!(written.is_empty(), "a prompt file was written: {written:?}");
